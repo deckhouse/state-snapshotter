@@ -21,7 +21,7 @@ import (
 
 	tlscertificate "github.com/deckhouse/module-sdk/common-hooks/tls-certificate"
 
-	"hook/consts"
+	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 )
 
 // Register hook that generates self-signed TLS certificates for APIService and ValidatingWebhook

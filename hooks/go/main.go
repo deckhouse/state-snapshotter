@@ -19,7 +19,7 @@ package main
 import (
 	"github.com/deckhouse/module-sdk/pkg/app"
 
-	_ "hook/020-apiserver-certs"
+	_ "github.com/deckhouse/state-snapshotter/hooks/go/020-apiserver-certs"
 	// Front-proxy CA is read directly by controller from extension-apiserver-authentication ConfigMap
 	// No hook needed - controller handles mTLS client certificate verification internally
 )
