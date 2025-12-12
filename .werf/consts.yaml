@@ -1,0 +1,3 @@
+# component versions
+{{- $versions := dict }}
+{{- $_ := set $ "VERSIONS" $versions }}

@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d8:{{ .Chart.Name }}:controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+rules:
+# ManifestCaptureRequest (namespaced)
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcapturerequests"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# ManifestCaptureRequest status
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcapturerequests/status"]
+  verbs: ["get", "update", "patch"]
+
+# ManifestCheckpoint (cluster-scoped)
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcheckpoints"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# ManifestCheckpoint status
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcheckpoints/status"]
+  verbs: ["get", "update", "patch"]
+
+# ManifestCheckpointContentChunk (cluster-scoped)
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcheckpointcontentchunks"]
+  verbs: ["create", "get", "delete"]
+
+# IRetainer (cluster-scoped)
+- apiGroups: ["deckhouse.io"]
+  resources: ["iretainers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# IRetainer status
+- apiGroups: ["deckhouse.io"]
+  resources: ["iretainers/status"]
+  verbs: ["get", "update", "patch"]
+
+# Allow controller-runtime to watch namespaces
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch"]
+# Allow controller-runtime to watch configmaps (needed for informer cache)
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+# Core Kubernetes resources (temporary wide permissions)
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["get", "list"]
+
+# API Server permissions (for /manifests subresource)
+# Only 'get' permission needed - no list/watch (no informer cache)
+# TODO: Remove access to manifestcheckpointcontentchunks - move archive assembly to controller
+# Currently API server assembles JSON from chunks directly (archive_service.go:257)
+# This requires 'get' permission. According to ADR, API server should NOT have access to chunks.
+# Future: Move archive assembly logic to ManifestCheckpointController, store assembled archive
+# in checkpoint.Status or as a separate resource, so API server only needs to read the final result.
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcheckpointcontentchunks"]
+  verbs: ["get"]  # Only 'get' by name - no list/watch needed (no informer cache)
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: controller-leader-election
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Allow controller to create Events in its namespace
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: controller-leader-election
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: controller-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: d8:{{ .Chart.Name }}:controller
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}

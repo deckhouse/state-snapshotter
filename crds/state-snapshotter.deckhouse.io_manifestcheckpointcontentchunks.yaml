@@ -1,0 +1,87 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: (devel)
+  name: manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+spec:
+  group: state-snapshotter.deckhouse.io
+  names:
+    kind: ManifestCheckpointContentChunk
+    listKind: ManifestCheckpointContentChunkList
+    plural: manifestcheckpointcontentchunks
+    shortNames:
+    - mcpchunk
+    singular: manifestcheckpointcontentchunk
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.checkpointName
+      name: Checkpoint
+      type: string
+    - jsonPath: .spec.index
+      name: Index
+      type: integer
+    - jsonPath: .spec.objectsCount
+      name: Objects
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              checkpointName:
+                description: CheckpointName is the name of the ManifestCheckpoint
+                  this chunk belongs to
+                type: string
+              checksum:
+                description: |-
+                  Checksum is the SHA256 hash of the compressed chunk data (base64 encoded)
+                  Used for integrity validation and debugging
+                type: string
+              data:
+                description: |-
+                  Data contains the gzipped JSON array of objects, base64 encoded
+                  Format: base64(gzip(json[]))
+                maxLength: 1048576
+                type: string
+              index:
+                description: Index is the 0-based index of this chunk
+                type: integer
+              objectsCount:
+                description: ObjectsCount is the number of objects in this chunk
+                type: integer
+            required:
+            - checkpointName
+            - data
+            - index
+            - objectsCount
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

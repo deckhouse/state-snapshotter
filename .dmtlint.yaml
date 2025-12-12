@@ -1,0 +1,11 @@
+linters-settings:
+  module:
+    oss:
+      disable: true
+  rbac:
+    exclude-rules:
+      wildcards:
+        - kind: ClusterRole
+          name: d8:state-snapshotter:controller
+        - kind: ClusterRole
+          name: d8:state-snapshotter:webhooks

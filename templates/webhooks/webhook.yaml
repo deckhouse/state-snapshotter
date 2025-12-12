@@ -1,0 +1,27 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: d8-{{ .Chart.Name }}-mcr-validation
+  labels:
+    heritage: deckhouse
+    module: "{{ .Chart.Name }}"
+webhooks:
+  - name: d8-{{ .Chart.Name }}-mcr-validation.deckhouse.io
+    rules:
+      - apiGroups: ["state-snapshotter.deckhouse.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["manifestcapturerequests"]
+        scope: "Namespaced"
+    clientConfig:
+      service:
+        namespace: "d8-{{ .Chart.Name }}"
+        name: "webhooks"
+        path: "/validate"
+      caBundle: {{ .Values.stateSnapshotter.internal.apiServerCert.ca | b64enc | quote }}
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+

@@ -1,0 +1,31 @@
+{{- if .Values.stateSnapshotter.internal.apiServerCert.ca }}
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.subresources.state-snapshotter.deckhouse.io
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+spec:
+  caBundle: {{ .Values.stateSnapshotter.internal.apiServerCert.ca | b64enc | quote }}
+  group: subresources.state-snapshotter.deckhouse.io
+  {{/*
+    Sets a lower group priority for the subresources API group to ensure the main group is preferred.
+    The default groupPriorityMinimum in CRD is 1000.
+    We have ManifestCheckpoint resources in different API groups:
+    - subresources.state-snapshotter.deckhouse.io (APIService for /manifests subresource)
+    - state-snapshotter.deckhouse.io (CRD for main resource)
+    We need requests to default to the state-snapshotter.deckhouse.io group.
+    By setting a lower priority (999) for the subresources group,
+    we ensure the main group takes precedence.
+    If both groups had the same priority, subresources.state-snapshotter.deckhouse.io
+    would be preferred due to alphabetical ordering.
+  */}}
+  groupPriorityMinimum: 999
+  service:
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+    port: 443
+  version: v1alpha1
+  versionPriority: 15
+{{- end }}
+

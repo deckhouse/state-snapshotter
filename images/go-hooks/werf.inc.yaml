@@ -1,0 +1,52 @@
+---
+# 1. Source artifact: копируем go-hooks и api в /src
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+fromImage: builder/src
+final: false
+git:
+  - add: {{ .ModuleDir }}/hooks/go
+    to: /src/hooks/go
+    stageDependencies:
+      install:
+        - '**/*.go'
+        - '**/go.mod'
+        - '**/go.sum'
+  - add: {{ .ModuleDir }}/api
+    to: /src/api
+    stageDependencies:
+      install:
+        - '**/*.go'
+        - '**/go.mod'
+        - '**/go.sum'
+
+shell:
+  install:
+    - echo "src artifact for go hooks"
+
+---
+# 2. Build hooks into /go-hooks
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-artifact
+fromImage: builder/golang-alpine
+final: false
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+    add: /src
+    to: /usr/src/app
+    before: install
+
+mount:
+{{ include "mount points for golang builds" . }}
+
+secrets:
+- id: GOPROXY
+  value: {{ .GOPROXY }}
+
+shell:
+  install:
+    - cd /usr/src/app/hooks/go
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+    - |
+      {{- include "image-build.build" (set $ "BuildCommand" `go build -a -gcflags=all="-l -B" -ldflags="-w -s" -o /go-hooks *.go;`) | nindent 6 }}
+

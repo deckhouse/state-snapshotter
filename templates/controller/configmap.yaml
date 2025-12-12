@@ -1,0 +1,26 @@
+{{- /* ConfigMap is created only if user provides custom values via Helm */}}
+{{- /* If ConfigMap doesn't exist, controller uses defaults from Go code */}}
+{{- if or (and .Values.controller .Values.controller.config .Values.controller.config.maxChunkSizeBytes) (and .Values.controller .Values.controller.config .Values.controller.config.defaultTTL) (and .Values.controller .Values.controller.config .Values.controller.config.excludeKinds) (and .Values.controller .Values.controller.config .Values.controller.config.excludeAnnotations) (and .Values.controller .Values.controller.config .Values.controller.config.enableFiltering) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: state-snapshotter-config
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+data:
+  {{- if and .Values.controller .Values.controller.config .Values.controller.config.maxChunkSizeBytes }}
+  maxChunkSizeBytes: {{ .Values.controller.config.maxChunkSizeBytes | quote }}
+  {{- end }}
+  {{- if and .Values.controller .Values.controller.config .Values.controller.config.defaultTTL }}
+  defaultTTL: {{ .Values.controller.config.defaultTTL | quote }}
+  {{- end }}
+  {{- if and .Values.controller .Values.controller.config .Values.controller.config.excludeKinds }}
+  excludeKinds: {{ .Values.controller.config.excludeKinds | join "," | quote }}
+  {{- end }}
+  {{- if and .Values.controller .Values.controller.config .Values.controller.config.excludeAnnotations }}
+  excludeAnnotations: {{ .Values.controller.config.excludeAnnotations | join "," | quote }}
+  {{- end }}
+  {{- if and .Values.controller .Values.controller.config .Values.controller.config.enableFiltering }}
+  enableFiltering: {{ .Values.controller.config.enableFiltering | quote }}
+  {{- end }}
+{{- end }}
