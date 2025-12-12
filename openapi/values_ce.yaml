@@ -1,0 +1,31 @@
+x-extend:
+  schema: config-values.yaml
+type: object
+
+properties:
+  internal:
+    type: object
+    default: {}
+    description: "System internal values populated by hooks. Do not set manually."
+    properties:
+      apiServerCert:
+        type: object
+        default: {}
+        description: "Self-generated TLS certificate for APIService and ValidatingWebhook. Populated by tls-certificate hook. Certificate includes SANs for both controller and webhooks services."
+        x-required-for-helm:
+          - crt
+          - key
+          - ca
+        properties:
+          crt:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+          key:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+          ca:
+            type: string
+            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+  registry:
+    type: object
+    description: "System field, overwritten by Deckhouse. Don't use."
