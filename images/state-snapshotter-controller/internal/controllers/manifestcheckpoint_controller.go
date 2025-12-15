@@ -66,9 +66,10 @@ func setSingleCondition(conds *[]metav1.Condition, cond metav1.Condition) {
 // ManifestCheckpointController reconciles ManifestCaptureRequest objects
 type ManifestCheckpointController struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Logger logger.LoggerInterface
-	Config *config.Options
+	APIReader client.Reader // Direct API reader (bypasses cache) for read-after-write scenarios
+	Scheme    *runtime.Scheme
+	Logger    logger.LoggerInterface
+	Config    *config.Options
 }
 
 func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -357,9 +358,20 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			return ctrl.Result{}, err
 		}
 		r.Logger.Info("Created ObjectKeeper", "name", retainerName)
-		// Re-read to get UID
-		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to get created ObjectKeeper: %w", err)
+		// After Create(), controller-runtime populates objectKeeper.UID automatically
+		// Use it directly if available, otherwise read via APIReader (bypasses cache)
+		if objectKeeper.UID == "" {
+			// UID not populated (shouldn't happen, but handle gracefully)
+			// Use APIReader to read directly from API server (bypasses informer cache)
+			if r.APIReader != nil {
+				if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+					// If still not found, requeue - object will be available on next reconcile
+					return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+				}
+			} else {
+				// APIReader not available, requeue instead of blocking
+				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
 		}
 		r.Logger.Info("✅ Step 1 complete: Created ObjectKeeper",
 			"objectKeeper", retainerName,
@@ -560,7 +572,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"totalObjects", totalObjects)
 
 	// Update MCR status
-	base := mcr.DeepCopy()
+	// Set all status fields first
 	mcr.Status.CheckpointName = checkpointName
 	mcr.Status.ObservedGeneration = mcr.Generation
 	completionTime := metav1.Now()
@@ -588,6 +600,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
 			return err
 		}
+		// Create base AFTER getting current (for proper diff calculation)
+		base := current.DeepCopy()
 		// Apply status changes
 		current.Status = mcr.Status
 		// Set TTL annotation

@@ -30,10 +30,11 @@ func AddManifestCheckpointControllerToManager(
 	cfg *config.Options,
 ) error {
 	reconciler := &ManifestCheckpointController{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Logger: log,
-		Config: cfg,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(), // Direct API reader for read-after-write scenarios
+		Scheme:    mgr.GetScheme(),
+		Logger:    log,
+		Config:    cfg,
 	}
 	return reconciler.SetupWithManager(mgr)
 }
