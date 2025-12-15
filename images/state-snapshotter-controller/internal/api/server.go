@@ -213,8 +213,10 @@ func loggingMiddleware(next http.Handler, logger logger.LoggerInterface) http.Ha
 		// Call the next handler
 		next.ServeHTTP(wrapped, r)
 
-		// Skip logging for health check endpoints
-		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/livez" {
+		// Skip logging for health check endpoints and API discovery endpoints
+		// /openapi/v2, /openapi/v3, /apis are normal discovery requests from kube-apiserver
+		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/livez" ||
+			r.URL.Path == "/openapi/v2" || r.URL.Path == "/openapi/v3" || r.URL.Path == "/apis" {
 			return
 		}
 

@@ -38,9 +38,9 @@ const (
 	DefaultRequeueStorageClassInterval   = 10
 	DefaultRequeueNodeSelectorInterval   = 10
 	// Manifest capture defaults (TZ section 7)
-	DefaultMaxChunkSizeBytes = 800000          // 800KB (TZ: maxChunkSizeBytes)
-	DefaultTTL               = 168 * time.Hour // 7 days (TZ: defaultTTL)
-	DefaultTTLStr            = "168h"          // String representation for annotation
+	DefaultMaxChunkSizeBytes = 800000           // 800KB (TZ: maxChunkSizeBytes)
+	DefaultTTL               = 10 * time.Minute // 10 minutes (TZ: defaultTTL)
+	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
 )
 
