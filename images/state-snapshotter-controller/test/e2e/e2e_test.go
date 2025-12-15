@@ -578,29 +578,21 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(mcp.OwnerReferences[0].Controller).NotTo(BeNil())
 			Expect(*mcp.OwnerReferences[0].Controller).To(BeTrue())
 
-			// Delete MCR - ObjectKeeper should be automatically deleted (follows object)
-			err := k8sClient.Delete(ctx, mcr)
-			Expect(err).NotTo(HaveOccurred())
-
-			// Wait for MCR to be deleted
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: TestFixtures.TestMCRName}, &storagev1alpha1.ManifestCaptureRequest{})
-				return errors.IsNotFound(err)
-			}, testTimeout, pollInterval).Should(BeTrue(), "MCR should be deleted")
-
-			// Wait for ObjectKeeper to be deleted (it follows MCR)
-			// ObjectKeeperController should delete ObjectKeeper when MCR is deleted
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: retainerName}, &deckhousev1alpha1.ObjectKeeper{})
-				return errors.IsNotFound(err)
-			}, testTimeout, pollInterval).Should(BeTrue(), "ObjectKeeper should be deleted when MCR is deleted")
-
-			// Note: In envtest, kube-controller-manager is not running, so actual GC won't work.
+			// Verify ownerRef structure is correct for GC
 			// This test verifies that:
 			// 1. ObjectKeeper correctly follows MCR (FollowObject mode)
-			// 2. ObjectKeeper is deleted when MCR is deleted
-			// 3. Checkpoint has correct ownerReference for GC
-			// In a real cluster with kube-controller-manager, when ObjectKeeper is deleted, checkpoint would be deleted automatically via GC.
+			// 2. Checkpoint has correct ownerReference structure for GC
+			// 3. OwnerRef points to ObjectKeeper (not MCR or Namespace)
+			//
+			// Note: In envtest:
+			// - ObjectKeeperController (from deckhouse-controller) is not running, so ObjectKeeper won't be deleted
+			// - kube-controller-manager is not running, so actual GC won't work
+			// In a real cluster:
+			// - When MCR is deleted, ObjectKeeperController deletes ObjectKeeper (FollowObject mode)
+			// - When ObjectKeeper is deleted, GC deletes checkpoint automatically (via ownerRef)
+			//
+			// This test focuses on verifying the ownerRef structure is correct, which is what our controller
+			// is responsible for. Actual GC behavior is verified in real cluster deployments.
 		})
 
 		// TestObjectKeeperDeletionAffectsCheckpoint verifies that MCR ObjectKeeper deletion
@@ -796,34 +788,46 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 				return ns.DeletionTimestamp != nil
 			}, testTimeout, pollInterval).Should(BeTrue(), "Namespace should be deleted or in Terminating state")
 
-			// Wait a bit for any cascading operations to complete
-			time.Sleep(1 * time.Second)
-
-			// Verify ObjectKeeper is deleted (it follows MCR, so when MCR is deleted, ObjectKeeper is deleted)
-			// ObjectKeeperController should delete ObjectKeeper when MCR is deleted (FollowObject mode)
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, client.ObjectKey{Name: retainerName}, &deckhousev1alpha1.ObjectKeeper{})
-				return errors.IsNotFound(err)
-			}, testTimeout, pollInterval).Should(BeTrue(), "MCR ObjectKeeper should be deleted when MCR is deleted")
-
-			// Note: In envtest, kube-controller-manager is not running, so actual GC won't work.
+			// Verify checkpoint ownerRef structure is correct for GC
+			// This test verifies that:
+			// 1. Checkpoint has NO ownerRef to MCR or Namespace (critical for namespace deletion scenario)
+			// 2. Checkpoint has ownerRef ONLY to ObjectKeeper
+			// 3. OwnerRef structure is correct (Controller=true, correct Kind/Name/UID)
+			//
+			// Note: In envtest:
+			// - ObjectKeeperController (from deckhouse-controller) is not running, so ObjectKeeper won't be deleted
+			// - kube-controller-manager is not running, so actual GC won't work
 			// In a real cluster:
 			// 1. When namespace is deleted, MCR is deleted (cascading)
-			// 2. When MCR is deleted, ObjectKeeper is deleted (follows object)
-			// 3. When ObjectKeeper is deleted, checkpoint is deleted via GC (ownerRef)
-			// This test verifies that checkpoint has correct ownerRef setup for GC to work in real cluster.
-			// For now, we just verify that checkpoint still exists (GC doesn't work in envtest)
-			// but the ownerRef is correctly set for GC to work in real cluster.
-			Eventually(func() bool {
-				var err error
-				mcp, err = func() (*storagev1alpha1.ManifestCheckpoint, error) {
-					mcp := &storagev1alpha1.ManifestCheckpoint{}
-					key := types.NamespacedName{Name: checkpointName}
-					err := k8sClient.Get(ctx, key, mcp)
-					return mcp, err
-				}()
-				return err == nil && mcp != nil
-			}, testTimeout, pollInterval).Should(BeTrue(), "Checkpoint still exists (GC doesn't work in envtest, but ownerRef is correct for real cluster)")
+			// 2. When MCR is deleted, ObjectKeeperController deletes ObjectKeeper (FollowObject mode)
+			// 3. When ObjectKeeper is deleted, GC deletes checkpoint automatically (via ownerRef)
+			//
+			// This test focuses on verifying the ownerRef structure is correct, which ensures GC will work
+			// correctly in real cluster. Actual GC behavior is verified in real cluster deployments.
+			//
+			// Verify checkpoint still exists (GC doesn't work in envtest, but ownerRef structure is correct)
+			mcpAfterDeletion := &storagev1alpha1.ManifestCheckpoint{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: checkpointName}, mcpAfterDeletion)
+			Expect(err).NotTo(HaveOccurred(), "Checkpoint should still exist (GC doesn't work in envtest)")
+
+			// Re-verify ownerRef structure after deletion operations
+			hasMCRRefAfter := false
+			hasNamespaceRefAfter := false
+			hasObjectKeeperRefAfter := false
+			for _, ref := range mcpAfterDeletion.OwnerReferences {
+				if ref.Kind == "ManifestCaptureRequest" {
+					hasMCRRefAfter = true
+				}
+				if ref.Kind == "Namespace" {
+					hasNamespaceRefAfter = true
+				}
+				if ref.Kind == "ObjectKeeper" {
+					hasObjectKeeperRefAfter = true
+				}
+			}
+			Expect(hasMCRRefAfter).To(BeFalse(), "Checkpoint must NOT have ownerRef to ManifestCaptureRequest after deletion")
+			Expect(hasNamespaceRefAfter).To(BeFalse(), "Checkpoint must NOT have ownerRef to Namespace after deletion")
+			Expect(hasObjectKeeperRefAfter).To(BeTrue(), "Checkpoint must have ownerRef to ObjectKeeper after deletion")
 
 			// Verify chunks remain (cluster-scoped, not affected by namespace deletion)
 			chunks := listManifestCheckpointContentChunks(ctx, checkpointName)
