@@ -36,8 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 )
 
 // createNamespace creates a test namespace
@@ -151,34 +151,38 @@ func getManifestCheckpointContentChunk(ctx context.Context, name string) *storag
 	return chunk
 }
 
-// getRetainer gets a Retainer
-func getRetainer(ctx context.Context, name string) *iretainer.IRetainer {
-	ret := &iretainer.IRetainer{}
+// getObjectKeeper gets an ObjectKeeper
+func getObjectKeeper(ctx context.Context, name string) *deckhousev1alpha1.ObjectKeeper {
+	ok := &deckhousev1alpha1.ObjectKeeper{}
 	key := types.NamespacedName{Name: name}
-	err := k8sClient.Get(ctx, key, ret)
+	err := k8sClient.Get(ctx, key, ok)
 	Expect(err).NotTo(HaveOccurred())
-	return ret
+	return ok
 }
 
-// createRetainer creates a Retainer manually (for testing migration scenarios)
-func createRetainer(ctx context.Context, name string, mode string, ttl *metav1.Duration, followObjectRef *iretainer.FollowObjectRef) *iretainer.IRetainer {
-	ret := &iretainer.IRetainer{
+// getRetainer is an alias for getObjectKeeper (for backward compatibility in tests)
+func getRetainer(ctx context.Context, name string) *deckhousev1alpha1.ObjectKeeper {
+	return getObjectKeeper(ctx, name)
+}
+
+// createObjectKeeper creates an ObjectKeeper manually (for testing migration scenarios)
+func createObjectKeeper(ctx context.Context, name string, mode string, followObjectRef *deckhousev1alpha1.FollowObjectRef) *deckhousev1alpha1.ObjectKeeper {
+	ok := &deckhousev1alpha1.ObjectKeeper{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "deckhouse.io/v1alpha1",
-			Kind:       "IRetainer",
+			Kind:       "ObjectKeeper",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
-		Spec: iretainer.IRetainerSpec{
+		Spec: deckhousev1alpha1.ObjectKeeperSpec{
 			Mode:            mode,
-			TTL:             ttl,
 			FollowObjectRef: followObjectRef,
 		},
 	}
-	err := k8sClient.Create(ctx, ret)
+	err := k8sClient.Create(ctx, ok)
 	Expect(err).NotTo(HaveOccurred())
-	return ret
+	return ok
 }
 
 // listManifestCheckpointContentChunks lists all chunks for a checkpoint
@@ -265,12 +269,17 @@ func waitForDeletion(ctx context.Context, obj client.Object, timeout time.Durati
 	}, timeout, 100*time.Millisecond).Should(BeTrue())
 }
 
-// countRetainers counts all Retainers
-func countRetainers(ctx context.Context) int {
-	retainers := &iretainer.IRetainerList{}
-	err := k8sClient.List(ctx, retainers)
+// countObjectKeepers counts all ObjectKeepers
+func countObjectKeepers(ctx context.Context) int {
+	objectKeepers := &deckhousev1alpha1.ObjectKeeperList{}
+	err := k8sClient.List(ctx, objectKeepers)
 	Expect(err).NotTo(HaveOccurred())
-	return len(retainers.Items)
+	return len(objectKeepers.Items)
+}
+
+// countRetainers is an alias for countObjectKeepers (for backward compatibility in tests)
+func countRetainers(ctx context.Context) int {
+	return countObjectKeepers(ctx)
 }
 
 // makeTarget creates a ManifestTarget
