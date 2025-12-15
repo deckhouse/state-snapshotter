@@ -105,10 +105,14 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 			// Object was deleted, return
 			return ctrl.Result{}, nil
 		} else if requeueAfter > 0 {
-			// TTL not expired yet, requeue
-			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+			// TTL not expired yet, requeue with longer interval to avoid reconcile flood
+			// For terminal objects, we use a longer requeue interval (5 minutes) instead of
+			// the short interval (30-60s) returned by checkAndHandleTTL, since there's no
+			// active processing happening - we're just waiting for TTL expiration.
+			// This reduces unnecessary reconcile calls while still ensuring TTL cleanup happens.
+			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 		}
-		r.Logger.Info("MCR is already Ready - skipping reconcile", "namespace", req.Namespace, "name", req.Name)
+		r.Logger.Debug("MCR is already Ready - skipping reconcile", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, nil
 	}
 
@@ -124,8 +128,11 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 				// Object was deleted, return
 				return ctrl.Result{}, nil
 			} else if requeueAfter > 0 {
-				// TTL not expired yet, requeue
-				return ctrl.Result{RequeueAfter: requeueAfter}, nil
+				// TTL not expired yet, requeue with longer interval to avoid reconcile flood
+				// For terminal objects, we use a longer requeue interval (5 minutes) instead of
+				// the short interval (30-60s) returned by checkAndHandleTTL, since there's no
+				// active processing happening - we're just waiting for TTL expiration.
+				return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 			}
 			return ctrl.Result{}, nil
 		}
@@ -148,6 +155,9 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 			if mcr.Status.CompletionTimestamp == nil {
 				mcr.Status.CompletionTimestamp = &now
 			}
+			// Remove Failed condition if exists (successful completion clears any previous errors)
+			meta.RemoveStatusCondition(&mcr.Status.Conditions, ConditionTypeFailed)
+			mcr.Status.ErrorReason = "" // Clear error reason on success
 			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
 				Type:               ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
@@ -648,6 +658,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	mcr.Status.ObservedGeneration = mcr.Generation
 	completionTime := metav1.Now()
 	mcr.Status.CompletionTimestamp = &completionTime
+	// Remove Failed condition if exists (successful completion clears any previous errors)
+	meta.RemoveStatusCondition(&mcr.Status.Conditions, ConditionTypeFailed)
+	mcr.Status.ErrorReason = "" // Clear error reason on success
 	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
 		Type:               ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
@@ -1298,7 +1311,7 @@ func (r *ManifestCheckpointController) generateCheckpointNameFromUID(mcrUID stri
 
 // generateCheckpointName generates a random checkpoint name.
 //
-// DEPRECATED: This function generates non-deterministic checkpoint names, which can lead to
+// Deprecated: This function generates non-deterministic checkpoint names, which can lead to
 // duplicate checkpoints if reconciliation happens multiple times before status is updated.
 // Use generateCheckpointNameFromUID() instead for deterministic, idempotent checkpoint names.
 //
@@ -1361,7 +1374,7 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 		// This is expected and normal if user didn't provide custom configuration via Helm values
 		// ConfigMap is only created when user sets controller.config.* values in Helm chart
 		if errors.IsNotFound(err) {
-			r.Logger.Info("Optional controller ConfigMap not found, using defaults from code",
+			r.Logger.Debug("Optional controller ConfigMap not found, using defaults from code",
 				"configMap", configMapName,
 				"namespace", namespace,
 				"note", "ConfigMap is optional - create it via Helm values (controller.config.*) to override defaults",
