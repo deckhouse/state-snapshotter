@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientpatch "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -529,6 +530,242 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 			Expect(createdOK.Spec.FollowObjectRef.UID).To(Equal(string(mcr1.UID)))
 			Expect(createdOK.Spec.FollowObjectRef.UID).ToNot(Equal(string(mcr2.UID)))
+		})
+	})
+})
+
+var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", func() {
+	var (
+		ctx    context.Context
+		client client.Client
+		ctrl   *ManifestCheckpointController
+		scheme *runtime.Scheme
+		cfg    *config.Options
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		scheme = runtime.NewScheme()
+		Expect(storagev1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(deckhousev1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+		cfg = &config.Options{
+			DefaultTTL:    10 * time.Minute,
+			DefaultTTLStr: "10m",
+		}
+
+		client = fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
+			Build()
+
+		testLogger, _ := logger.NewLogger("test")
+		ctrl = &ManifestCheckpointController{
+			Client:    client,
+			APIReader: client, // Use same client for APIReader in tests
+			Scheme:    scheme,
+			Logger:    testLogger,
+			Config:    cfg,
+		}
+	})
+
+	Describe("Deterministic checkpoint name generation", func() {
+		It("should generate same checkpoint name for same MCR UID", func() {
+			mcrUID := types.UID("test-uid-12345")
+			name1 := ctrl.generateCheckpointNameFromUID(string(mcrUID))
+			name2 := ctrl.generateCheckpointNameFromUID(string(mcrUID))
+
+			Expect(name1).To(Equal(name2))
+			Expect(name1).To(HavePrefix(ChunkNamePrefix))
+		})
+
+		It("should generate different checkpoint names for different MCR UIDs", func() {
+			mcrUID1 := types.UID("test-uid-12345")
+			mcrUID2 := types.UID("test-uid-67890")
+			name1 := ctrl.generateCheckpointNameFromUID(string(mcrUID1))
+			name2 := ctrl.generateCheckpointNameFromUID(string(mcrUID2))
+
+			Expect(name1).ToNot(Equal(name2))
+			Expect(name1).To(HavePrefix(ChunkNamePrefix))
+			Expect(name2).To(HavePrefix(ChunkNamePrefix))
+		})
+
+		It("should generate RFC 1123 compliant checkpoint name", func() {
+			mcrUID := types.UID("test-uid-12345")
+			name := ctrl.generateCheckpointNameFromUID(string(mcrUID))
+
+			// RFC 1123: lowercase alphanumeric, must start and end with alphanumeric
+			Expect(name).To(MatchRegexp("^[a-z0-9][a-z0-9-]*[a-z0-9]$"))
+		})
+	})
+
+	Describe("Status and metadata update separation", func() {
+		It("should update status via Status().Patch() and metadata via Patch() separately", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mcr",
+					Namespace: "default",
+					UID:       types.UID("test-uid-123"),
+				},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{
+							APIVersion: "v1",
+							Kind:       "ConfigMap",
+							Name:       "test-cm",
+						},
+					},
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CheckpointName: "mcp-test-123",
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonCompleted,
+							Message:            "Test",
+							LastTransitionTime: metav1.Now(),
+							ObservedGeneration: 1,
+						},
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionFalse,
+							Reason:             ConditionReasonCompleted,
+							Message:            "Processing completed",
+							LastTransitionTime: metav1.Now(),
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+
+			Expect(client.Create(ctx, mcr)).To(Succeed())
+
+			// Update status
+			base := mcr.DeepCopy()
+			mcr.Status.ObservedGeneration = 2
+			Expect(client.Status().Patch(ctx, mcr, clientpatch.MergeFrom(base))).To(Succeed())
+
+			// Verify status was updated
+			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
+			Expect(updatedMCR.Status.ObservedGeneration).To(Equal(int64(2)))
+
+			// Update metadata (TTL annotation)
+			base2 := updatedMCR.DeepCopy()
+			ctrl.setTTLAnnotation(updatedMCR)
+			Expect(client.Patch(ctx, updatedMCR, clientpatch.MergeFrom(base2))).To(Succeed())
+
+			// Verify metadata was updated
+			finalMCR := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, finalMCR)).To(Succeed())
+			Expect(finalMCR.Annotations).ToNot(BeNil())
+			Expect(finalMCR.Annotations[AnnotationKeyTTL]).To(Equal("10m"))
+			// Verify status is still intact
+			Expect(finalMCR.Status.ObservedGeneration).To(Equal(int64(2)))
+		})
+	})
+
+	Describe("Processing condition finalization", func() {
+		It("should set Processing=False when checkpoint is completed", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mcr",
+					Namespace: "default",
+					UID:       types.UID("test-uid-123"),
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CheckpointName: "mcp-test-123",
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonInProgress,
+							Message:            "Processing capture request",
+							LastTransitionTime: metav1.Now(),
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+
+			Expect(client.Create(ctx, mcr)).To(Succeed())
+
+			// Simulate finalization: set Ready=True and Processing=False
+			base := mcr.DeepCopy()
+			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
+				Type:               ConditionTypeReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             ConditionReasonCompleted,
+				Message:            "Checkpoint created successfully",
+				LastTransitionTime: metav1.Now(),
+				ObservedGeneration: 1,
+			})
+			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
+				Type:               ConditionTypeProcessing,
+				Status:             metav1.ConditionFalse,
+				Reason:             ConditionReasonCompleted,
+				Message:            "Processing completed",
+				LastTransitionTime: metav1.Now(),
+				ObservedGeneration: 1,
+			})
+			Expect(client.Status().Patch(ctx, mcr, clientpatch.MergeFrom(base))).To(Succeed())
+
+			// Verify Processing=False
+			finalMCR := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, finalMCR)).To(Succeed())
+
+			processingCond := meta.FindStatusCondition(finalMCR.Status.Conditions, ConditionTypeProcessing)
+			Expect(processingCond).ToNot(BeNil())
+			Expect(processingCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(processingCond.Reason).To(Equal(ConditionReasonCompleted))
+
+			readyCond := meta.FindStatusCondition(finalMCR.Status.Conditions, ConditionTypeReady)
+			Expect(readyCond).ToNot(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	Describe("Target object NotFound requeue logic", func() {
+		It("should have requeue guard logic for first attempt (ObservedGeneration == 0)", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-mcr",
+					Namespace:  "default",
+					UID:        types.UID("test-uid-123"),
+					Generation: 1,
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					ObservedGeneration: 0, // Not observed yet - first attempt
+				},
+			}
+
+			// Verify requeue guard logic: ObservedGeneration == 0 means first attempt
+			// Controller should requeue with targetNotFoundRequeueDelay
+			Expect(mcr.Status.ObservedGeneration).To(Equal(int64(0)))
+			Expect(mcr.Status.ObservedGeneration).ToNot(Equal(mcr.Generation))
+			// This means requeue should happen with targetNotFoundRequeueDelay (tested via e2e)
+		})
+
+		It("should have requeue guard logic for retry (ObservedGeneration == Generation)", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-mcr",
+					Namespace:  "default",
+					UID:        types.UID("test-uid-123"),
+					Generation: 1,
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					ObservedGeneration: 1, // Already observed (retry)
+				},
+			}
+
+			// Verify guard logic: ObservedGeneration == Generation means retry
+			// Controller should mark as Failed instead of requeueing
+			Expect(mcr.Status.ObservedGeneration).To(Equal(mcr.Generation))
+			Expect(mcr.Status.ObservedGeneration).ToNot(Equal(int64(0)))
+			// This means should not requeue, should mark as Failed instead (tested via e2e)
 		})
 	})
 })

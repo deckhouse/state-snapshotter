@@ -114,8 +114,14 @@ func NewConfig() *Options {
 	return &opts
 }
 
-// LoadFromConfigMap loads configuration from ConfigMap and updates Options
+// LoadFromConfigMap loads controller configuration from ConfigMap data and updates Options
 // This allows runtime configuration updates without restart
+// ConfigMap fields:
+//   - maxChunkSizeBytes: maximum chunk size in bytes (e.g., "800000")
+//   - defaultTTL: default TTL duration (e.g., "10m", "1h", "168h")
+//   - excludeKinds: comma-separated list of kinds to exclude (e.g., "Pod,Event")
+//   - excludeAnnotations: comma-separated list of annotation patterns to exclude
+//   - enableFiltering: enable object filtering/cleaning ("true"/"false"/"1"/"yes")
 func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 	// maxChunkSizeBytes
 	if val, ok := configMapData["maxChunkSizeBytes"]; ok {
