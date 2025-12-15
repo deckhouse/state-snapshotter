@@ -28,7 +28,5 @@ if ! command -v "${CONTROLLER_GEN}" &>/dev/null; then
 fi
 
 ${CONTROLLER_GEN} object:headerFile="${HEADER}" paths=./api/v1alpha1
-${CONTROLLER_GEN} object:headerFile="${HEADER}" paths=./api/v1alpha1/iretainer
 
 ${CONTROLLER_GEN} crd:crdVersions=v1 output:crd:dir=./crds paths=./api/v1alpha1
-${CONTROLLER_GEN} crd:crdVersions=v1 output:crd:dir=./crds paths=./api/v1alpha1/iretainer

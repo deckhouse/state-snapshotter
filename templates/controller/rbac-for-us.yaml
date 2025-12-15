@@ -37,15 +37,8 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["create", "get", "delete"]
 
-# IRetainer (cluster-scoped)
-- apiGroups: ["deckhouse.io"]
-  resources: ["iretainers"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-# IRetainer status
-- apiGroups: ["deckhouse.io"]
-  resources: ["iretainers/status"]
-  verbs: ["get", "update", "patch"]
+# ObjectKeeper (cluster-scoped) - managed by deckhouse-controller, not this controller
+# No RBAC needed here - ObjectKeeper is created/managed by deckhouse-controller
 
 # Allow controller-runtime to watch namespaces
 - apiGroups: [""]

@@ -46,7 +46,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ManifestCheckpointList{},
 		&ManifestCheckpointContentChunk{},
 		&ManifestCheckpointContentChunkList{},
-		// IRetainer is registered separately in deckhouse.io group (see api/v1alpha1/iretainer/register.go)
+		// NOTE: IRetainer has been removed. ObjectKeeper is now used instead (managed by deckhouse-controller).
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

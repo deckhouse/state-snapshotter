@@ -26,7 +26,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -42,7 +41,6 @@ import (
 func TestCollectTargetObjects_RejectsClusterScopedResources(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = storagev1alpha1.AddToScheme(scheme)
-	_ = iretainer.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 

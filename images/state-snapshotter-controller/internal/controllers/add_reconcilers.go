@@ -17,12 +17,6 @@ limitations under the License.
 package controllers
 
 import (
-	"fmt"
-
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/restmapper"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -44,35 +38,5 @@ func AddManifestCheckpointControllerToManager(
 	return reconciler.SetupWithManager(mgr)
 }
 
-// AddRetainerControllerToManager adds the Retainer controller to the manager.
-// This is a system controller that requires privileged access to GET any namespaced objects.
-func AddRetainerControllerToManager(
-	mgr ctrl.Manager,
-	log logger.LoggerInterface,
-) error {
-	// Build dynamic client for accessing arbitrary API resources
-	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
-	if err != nil {
-		return fmt.Errorf("failed to create dynamic client: %w", err)
-	}
-
-	// Build RESTMapper for efficient Kind-to-resource mapping
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
-	if err != nil {
-		return fmt.Errorf("failed to create discovery client: %w", err)
-	}
-
-	// Create RESTMapper with caching
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(
-		memory.NewMemCacheClient(discoveryClient),
-	)
-
-	reconciler := &RetainerController{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Logger:     log,
-		dyn:        dyn,
-		restMapper: restMapper,
-	}
-	return reconciler.SetupWithManager(mgr)
-}
+// NOTE: AddRetainerControllerToManager has been removed.
+// IRetainer has been replaced with ObjectKeeper, which is managed by deckhouse-controller.

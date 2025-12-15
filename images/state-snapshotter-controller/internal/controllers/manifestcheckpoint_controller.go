@@ -306,7 +306,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
-	if errors.IsNotFound(err) {
+	switch {
+	case errors.IsNotFound(err):
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: DeckhouseAPIVersion,
@@ -365,9 +366,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"uid", objectKeeper.UID,
 			"checkpoint", checkpointName,
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
-	} else if err != nil {
+	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	} else {
+	default:
 		// ObjectKeeper exists - validate it belongs to this MCR
 		// This protects against race conditions where MCR was deleted and recreated with same name
 		if objectKeeper.Spec.FollowObjectRef == nil {
@@ -1414,7 +1415,7 @@ func (r *ManifestCheckpointController) checkAndHandleTTL(ctx context.Context, mc
 	// This follows the pattern used by JobController, DeploymentController, etc.
 	jitterRange := requeueAfter / 10 // 10% jitter
 	jitter := time.Duration(mathrand.Int63n(int64(2*jitterRange))) - jitterRange
-	requeueAfter = requeueAfter + jitter
+	requeueAfter += jitter
 	if requeueAfter < 30*time.Second {
 		requeueAfter = 30 * time.Second // Ensure minimum after jitter
 	}

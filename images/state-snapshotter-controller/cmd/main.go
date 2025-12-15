@@ -165,12 +165,8 @@ func main() {
 	}
 	log.Info("ManifestCheckpointController added to manager")
 
-	if err := controllers.AddRetainerControllerToManager(mgr, log); err != nil {
-		log.Error(err, "Failed to add RetainerController to manager")
-		cancel() // Ensure cleanup before exit
-		os.Exit(1)
-	}
-	log.Info("RetainerController added to manager")
+	// NOTE: RetainerController (IRetainer) has been removed.
+	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
 
 	// Add health checks
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
