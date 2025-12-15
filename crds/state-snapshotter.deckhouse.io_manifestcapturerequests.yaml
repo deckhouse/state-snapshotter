@@ -4,6 +4,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: (devel)
+  labels:
+    module: state-snapshotter
   name: manifestcapturerequests.state-snapshotter.deckhouse.io
 spec:
   group: state-snapshotter.deckhouse.io
