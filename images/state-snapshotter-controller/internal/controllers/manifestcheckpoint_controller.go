@@ -54,6 +54,10 @@ import (
 const (
 	// ChunkNamePrefix is the prefix for chunk names
 	ChunkNamePrefix = "mcp-"
+
+	// targetNotFoundRequeueDelay is the delay before requeuing when a target object is not found
+	// This handles race conditions where MCR is created before target objects exist (Helm/GitOps/CI scenarios)
+	targetNotFoundRequeueDelay = 2 * time.Second
 )
 
 // setSingleCondition sets a condition, removing any existing condition of the same type first
@@ -130,10 +134,15 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 	// Check if already has checkpoint
 	if mcr.Status.CheckpointName != "" {
 		// Verify checkpoint exists
+		// Note: If checkpoint was manually deleted or is being deleted, err != nil will cause
+		// us to proceed to processCaptureRequest(), which will create a new checkpoint with
+		// the same deterministic name (based on MCR UID). This is expected behavior.
 		var checkpoint storagev1alpha1.ManifestCheckpoint
 		if err := r.Get(ctx, client.ObjectKey{Name: mcr.Status.CheckpointName}, &checkpoint); err == nil {
 			// Checkpoint exists, mark as ready
-			base := mcr.DeepCopy()
+			// TODO: Consider extracting finalization logic (Ready=True, Processing=False, status/metadata updates)
+			// into a helper function to avoid code duplication with processCaptureRequest() finalization.
+			// This would improve maintainability and reduce risk of logic divergence.
 			mcr.Status.ObservedGeneration = mcr.Generation
 			now := metav1.Now()
 			if mcr.Status.CompletionTimestamp == nil {
@@ -147,21 +156,55 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 				LastTransitionTime: now,
 				ObservedGeneration: mcr.Generation,
 			})
-			// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-			// Use retry on conflict to handle concurrent updates
+			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
+				Type:               ConditionTypeProcessing,
+				Status:             metav1.ConditionFalse,
+				Reason:             ConditionReasonCompleted,
+				Message:            "Processing completed",
+				LastTransitionTime: now,
+				ObservedGeneration: mcr.Generation,
+			})
+
+			// Update status and metadata separately (same as in processCaptureRequest):
+			// 1. Status must be updated via Status().Patch() (subresource endpoint)
+			// 2. Metadata (TTL annotation) must be updated via Patch() (main resource endpoint)
+
+			// Step 1: Update status via Status().Patch()
 			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 				current := &storagev1alpha1.ManifestCaptureRequest{}
 				if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
 					return err
 				}
-				// Apply status changes
+				base := current.DeepCopy()
 				current.Status = mcr.Status
-				// Set TTL annotation
-				r.setTTLAnnotation(current)
-				// Patch both metadata (annotations) and status in the same operation
-				return r.Patch(ctx, current, client.MergeFrom(base))
+				if err := r.Status().Patch(ctx, current, client.MergeFrom(base)); err != nil {
+					r.Logger.Error(err, "Failed to patch MCR status (checkpoint exists)",
+						"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
+						"checkpoint", mcr.Status.CheckpointName)
+					return err
+				}
+				return nil
 			}); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to update MCR with Ready condition and TTL annotation: %w", err)
+				return ctrl.Result{}, fmt.Errorf("failed to update MCR status: %w", err)
+			}
+
+			// Step 2: Update TTL annotation via Patch() (metadata only)
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				current := &storagev1alpha1.ManifestCaptureRequest{}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+					return err
+				}
+				base := current.DeepCopy()
+				r.setTTLAnnotation(current)
+				if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+					r.Logger.Error(err, "Failed to patch MCR TTL annotation (checkpoint exists)",
+						"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
+						"checkpoint", mcr.Status.CheckpointName)
+					return err
+				}
+				return nil
+			}); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to update MCR TTL annotation: %w", err)
 			}
 			return ctrl.Result{}, nil
 		}
@@ -240,7 +283,28 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	// Collect all target objects
 	objects, err := r.collectTargetObjects(ctx, mcr)
 	if err != nil {
-		r.Logger.Error(err, "Failed to collect target objects", "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		// If target object not found, requeue instead of failing immediately
+		// This handles race conditions where MCR is created before target objects exist (Helm/GitOps/CI scenarios)
+		// Note: errors.IsNotFound works with wrapped errors (fmt.Errorf with %w preserves error type)
+		// Important: NotFound errors from collectTargetObjects are always from target objects, not related objects.
+		// Related objects (ConfigMaps, Secrets from volumes) are collected in collectRelatedObjects,
+		// which silently ignores NotFound errors (checks err == nil). So if we get NotFound here, it's a target.
+		if errors.IsNotFound(err) {
+			// Guard: if we've already tried once for this generation, don't requeue indefinitely
+			// This prevents infinite requeue loops if the target object truly doesn't exist
+			if mcr.Status.ObservedGeneration == mcr.Generation && mcr.Status.ObservedGeneration != 0 {
+				// We've already tried once for this generation - target likely doesn't exist
+				r.Logger.Error(err, "Target object not found after retry, marking as failed", "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+				// Fall through to mark as failed
+			} else {
+				// First attempt for this generation - requeue to handle eventual consistency
+				r.Logger.Info("Target object not found, requeuing", "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name), "error", err)
+				return ctrl.Result{RequeueAfter: targetNotFoundRequeueDelay}, nil
+			}
+		}
+		// For other errors (RBAC, etc.), mark as failed
+		// Log error type for debugging if IsNotFound check fails unexpectedly
+		r.Logger.Error(err, "Failed to collect target objects", "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name), "errorType", fmt.Sprintf("%T", err))
 		base := mcr.DeepCopy()
 		message := fmt.Sprintf("Failed to collect objects: %v", err)
 		mcr.Status.ErrorReason = r.determineErrorReason(err)
@@ -278,7 +342,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		// Still create checkpoint with empty chunks
 	}
 
-	// Determine checkpoint name: use existing if available, otherwise generate new
+	// Determine checkpoint name: use existing if available, otherwise generate deterministic name
+	// Checkpoint name is deterministic based on MCR UID to prevent duplicate checkpoints
+	// if reconciliation happens multiple times before status is updated
 	var checkpointName string
 	if mcr.Status.CheckpointName != "" {
 		// Checkpoint already exists - use existing name (e.g., for retainer migration)
@@ -287,8 +353,10 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
 			"checkpoint", checkpointName)
 	} else {
-		// Generate new checkpoint name
-		checkpointName = r.generateCheckpointName()
+		// Generate deterministic checkpoint name based on MCR UID
+		// This prevents creating multiple checkpoints if reconciliation happens multiple times
+		// before status is successfully updated
+		checkpointName = r.generateCheckpointNameFromUID(string(mcr.UID))
 		r.Logger.Info("Starting checkpoint creation",
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
 			"checkpoint", checkpointName,
@@ -572,6 +640,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"totalObjects", totalObjects)
 
 	// Update MCR status
+	// TODO: Consider extracting finalization logic (Ready=True, Processing=False, status/metadata updates)
+	// into a helper function to avoid code duplication with Reconcile() early-path finalization.
+	// This would improve maintainability and reduce risk of logic divergence.
 	// Set all status fields first
 	mcr.Status.CheckpointName = checkpointName
 	mcr.Status.ObservedGeneration = mcr.Generation
@@ -593,26 +664,49 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		LastTransitionTime: completionTime,
 		ObservedGeneration: mcr.Generation,
 	})
-	// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-	// Use retry on conflict to handle concurrent updates
+
+	// Update status and metadata separately:
+	// 1. Status must be updated via Status().Patch() (subresource endpoint)
+	// 2. Metadata (TTL annotation) must be updated via Patch() (main resource endpoint)
+	// This is required because CRD has status subresource enabled, and regular Patch()
+	// cannot update .status field - it will be silently ignored or return an error.
+
+	// Step 1: Update status via Status().Patch()
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &storagev1alpha1.ManifestCaptureRequest{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
 			return err
 		}
-		// Create base AFTER getting current (for proper diff calculation)
 		base := current.DeepCopy()
-		// Apply status changes
 		current.Status = mcr.Status
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch both metadata (annotations) and status in the same operation.
-		// This is intentional: status updates and annotation changes should be atomic.
-		// Using Patch (not Status().Patch) ensures both are updated together, preventing
-		// race conditions where status and annotations get out of sync.
-		return r.Patch(ctx, current, client.MergeFrom(base))
+		if err := r.Status().Patch(ctx, current, client.MergeFrom(base)); err != nil {
+			r.Logger.Error(err, "Failed to patch MCR status",
+				"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
+				"checkpoint", checkpointName)
+			return err
+		}
+		return nil
 	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update MCR with Ready condition and TTL annotation: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to update MCR status: %w", err)
+	}
+
+	// Step 2: Update TTL annotation via Patch() (metadata only)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.ManifestCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+			return err
+		}
+		base := current.DeepCopy()
+		r.setTTLAnnotation(current)
+		if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+			r.Logger.Error(err, "Failed to patch MCR TTL annotation",
+				"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
+				"checkpoint", checkpointName)
+			return err
+		}
+		return nil
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update MCR TTL annotation: %w", err)
 	}
 
 	// NOTE: ObjectKeeper uses FollowObject mode (no TTL)
@@ -720,6 +814,9 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			Namespace: mcr.Namespace,
 			Name:      target.Name,
 		}, obj); err != nil {
+			// Preserve original error for IsNotFound check in caller
+			// errors.IsNotFound works with wrapped errors (fmt.Errorf with %w preserves error type via errors.Unwrap)
+			// This allows requeue logic to handle race conditions where target object doesn't exist yet
 			return nil, fmt.Errorf("failed to get %s %s/%s: %w", target.Kind, mcr.Namespace, target.Name, err)
 		}
 
@@ -1187,6 +1284,26 @@ func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData str
 	return hex.EncodeToString(hash[:])
 }
 
+// generateCheckpointNameFromUID generates a deterministic checkpoint name from MCR UID
+// This prevents creating multiple checkpoints if reconciliation happens multiple times
+// before status is successfully updated (e.g., due to status update failures)
+func (r *ManifestCheckpointController) generateCheckpointNameFromUID(mcrUID string) string {
+	// Use SHA256 hash of MCR UID to get deterministic, RFC 1123 compliant name
+	// Take first 16 hex chars (8 bytes) for checkpoint ID
+	hash := sha256.Sum256([]byte(mcrUID))
+	id := hex.EncodeToString(hash[:8]) // 8 bytes = 16 hex chars
+
+	return fmt.Sprintf("%s%s", ChunkNamePrefix, id)
+}
+
+// generateCheckpointName generates a random checkpoint name.
+//
+// DEPRECATED: This function generates non-deterministic checkpoint names, which can lead to
+// duplicate checkpoints if reconciliation happens multiple times before status is updated.
+// Use generateCheckpointNameFromUID() instead for deterministic, idempotent checkpoint names.
+//
+// This function is kept for backward compatibility and potential migration scenarios.
+// It is not used in the current implementation.
 func (r *ManifestCheckpointController) generateCheckpointName() string {
 	// Generate random ID using only RFC 1123 compliant characters (a-z0-9)
 	// Use hex encoding to guarantee only 0-9a-f characters (all valid for RFC 1123)
@@ -1216,7 +1333,17 @@ func (r *ManifestCheckpointController) determineErrorReason(err error) string {
 	return ConditionReasonInternalError
 }
 
-// loadConfigFromConfigMap loads configuration from ConfigMap (TZ section 7)
+// loadConfigFromConfigMap loads controller configuration from optional ConfigMap
+// ConfigMap name: state-snapshotter-config (in controller namespace)
+// This ConfigMap is optional - if not found, controller uses defaults from Go code
+// ConfigMap allows runtime configuration without restart:
+//   - maxChunkSizeBytes: maximum chunk size for checkpoint content (default: 800000)
+//   - defaultTTL: default TTL for ManifestCaptureRequest (default: 10m)
+//   - excludeKinds: comma-separated list of kinds to exclude from snapshots
+//   - excludeAnnotations: comma-separated list of annotations to exclude
+//   - enableFiltering: enable object filtering/cleaning (default: false)
+//
+// See templates/controller/configmap.yaml for ConfigMap structure
 func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Context) error {
 	if r.Config == nil {
 		return fmt.Errorf("config is nil")
@@ -1231,21 +1358,24 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 		Name:      configMapName,
 	}, configMap); err != nil {
 		// ConfigMap not found - use defaults from Go code
-		// This is expected if ConfigMap is not created (user didn't override defaults)
+		// This is expected and normal if user didn't provide custom configuration via Helm values
+		// ConfigMap is only created when user sets controller.config.* values in Helm chart
 		if errors.IsNotFound(err) {
-			r.Logger.Info("ConfigMap not found, using defaults from code",
+			r.Logger.Info("Optional controller ConfigMap not found, using defaults from code",
 				"configMap", configMapName,
 				"namespace", namespace,
-				"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
+				"note", "ConfigMap is optional - create it via Helm values (controller.config.*) to override defaults",
+				"defaultMaxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
 				"defaultTTL", r.Config.DefaultTTL)
 			return nil
 		}
-		return fmt.Errorf("failed to get configmap: %w", err)
+		return fmt.Errorf("failed to get controller ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
-	// Load config from ConfigMap data
+	// Load config from ConfigMap data (overrides defaults)
 	r.Config.LoadFromConfigMap(configMap.Data)
-	r.Logger.Info("Loaded config from ConfigMap",
+	r.Logger.Info("Loaded controller configuration from ConfigMap",
+		"configMap", fmt.Sprintf("%s/%s", namespace, configMapName),
 		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
 		"defaultTTL", r.Config.DefaultTTL,
 		"excludeKinds", len(r.Config.ExcludeKinds),

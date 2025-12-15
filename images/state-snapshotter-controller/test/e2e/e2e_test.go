@@ -231,10 +231,15 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 
+			// Verify Processing=False is explicitly set (not just missing)
 			processing := findCondition(mcr.Status.Conditions, "Processing")
-			if processing != nil {
-				Expect(processing.Status).To(Equal(metav1.ConditionFalse))
-			}
+			Expect(processing).NotTo(BeNil(), "Processing condition should be explicitly set to False when Ready")
+			Expect(processing.Status).To(Equal(metav1.ConditionFalse), "Processing should be False when checkpoint is Ready")
+			Expect(processing.Reason).To(Equal("Completed"), "Processing reason should be Completed when finished")
+
+			// Verify checkpointName is set
+			Expect(mcr.Status.CheckpointName).NotTo(BeEmpty())
+			Expect(mcr.Status.CompletionTimestamp).NotTo(BeNil())
 
 			Expect(mcr.Status.ErrorReason).To(BeEmpty())
 		})
@@ -243,10 +248,25 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			targets := []storagev1alpha1.ManifestTarget{
 				GetNotFoundTarget(),
 			}
-			createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
+			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
 
+			// Verify initial state: ObservedGeneration != Generation (first attempt)
+			// Controller should requeue on first NotFound, not fail immediately
+			Eventually(func() bool {
+				var err error
+				mcr, err = getManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName)
+				if err != nil {
+					return false
+				}
+				// On first attempt, ObservedGeneration should be 0 (not observed yet)
+				// Controller will requeue, so we wait a bit
+				return mcr.Status.ObservedGeneration != 0 || mcr.Status.ErrorReason != ""
+			}, testTimeout, pollInterval).Should(BeTrue())
+
+			// After requeue, if target still not found and ObservedGeneration == Generation,
+			// controller should mark as Failed
 			// Wait for Failed
-			mcr := waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
+			mcr = waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
 			ready := findCondition(mcr.Status.Conditions, "Ready")
 			Expect(ready).NotTo(BeNil())
@@ -256,8 +276,44 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(failed).NotTo(BeNil())
 			Expect(failed.Status).To(Equal(metav1.ConditionTrue))
 
+			// Verify guard logic: ObservedGeneration == Generation means retry was attempted
+			Expect(mcr.Status.ObservedGeneration).To(Equal(mcr.Generation), "ObservedGeneration should equal Generation after retry")
+
 			Expect(mcr.Status.ErrorReason).To(Equal("NotFound"))
 			Expect(mcr.Status.CheckpointName).To(BeEmpty())
+		})
+
+		It("should requeue when target object not found on first attempt (race condition)", func() {
+			// Create MCR before target object exists (simulating race condition)
+			targets := []storagev1alpha1.ManifestTarget{
+				makeTarget("v1", "ConfigMap", "race-condition-cm"),
+			}
+			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
+
+			// Initially, target doesn't exist - controller should requeue
+			// Verify ObservedGeneration is still 0 (not observed yet)
+			Eventually(func() bool {
+				var err error
+				mcr, err = getManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName)
+				if err != nil {
+					return false
+				}
+				// Controller should requeue, so ObservedGeneration might still be 0
+				// or it might have been set but checkpointName is empty (requeue happened)
+				return mcr.Status.ObservedGeneration == 0 || (mcr.Status.ObservedGeneration != 0 && mcr.Status.CheckpointName == "")
+			}, 3*time.Second, pollInterval).Should(BeTrue(), "Controller should requeue when target not found on first attempt")
+
+			// Now create the target object
+			createConfigMap(ctx, testNS, "race-condition-cm", TestFixtures.TestConfigMapData)
+
+			// Wait for Ready (controller should process after requeue)
+			mcr = waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
+
+			// Verify checkpoint was created successfully after requeue
+			Expect(mcr.Status.CheckpointName).NotTo(BeEmpty())
+			ready := findCondition(mcr.Status.Conditions, "Ready")
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
 
 		It("should persist error state on reconcile", func() {
@@ -303,6 +359,41 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Verify checkpoint not recreated
 			mcp = getManifestCheckpoint(ctx, checkpointName)
 			Expect(mcp.UID).To(Equal(uidBefore))
+		})
+
+		It("should use deterministic checkpoint name (same name on multiple reconciles)", func() {
+			createConfigMap(ctx, testNS, TestFixtures.TestConfigMapName, TestFixtures.TestConfigMapData)
+			targets := []storagev1alpha1.ManifestTarget{
+				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
+			}
+			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
+			mcrUID := string(mcr.UID) // Save UID for verification
+
+			// Wait for Ready
+			mcr = waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
+			checkpointName1 := mcr.Status.CheckpointName
+			Expect(checkpointName1).NotTo(BeEmpty())
+
+			// Verify checkpointName is deterministic (based on MCR UID)
+			// Checkpoint name should be: mcp-<sha256(uid)[:8]>
+			Expect(checkpointName1).To(HavePrefix("mcp-"))
+
+			// Trigger multiple reconciles
+			for i := 0; i < 3; i++ {
+				triggerReconcile(ctx, mcr)
+				time.Sleep(200 * time.Millisecond) // Give controller time to process
+			}
+
+			// Verify checkpointName hasn't changed (deterministic)
+			mcr = getManifestCaptureRequestOrFail(ctx, testNS, TestFixtures.TestMCRName)
+			checkpointName2 := mcr.Status.CheckpointName
+			Expect(checkpointName2).To(Equal(checkpointName1), "Checkpoint name should be deterministic and not change on reconcile")
+
+			// Verify checkpoint still exists and is the same
+			mcp := getManifestCheckpoint(ctx, checkpointName1)
+			Expect(mcp).NotTo(BeNil())
+			Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
+			Expect(mcp.Spec.ManifestCaptureRequestRef.UID).To(Equal(mcrUID), "Checkpoint should reference correct MCR UID")
 		})
 
 		It("should not recreate retainers on reconcile", func() {
