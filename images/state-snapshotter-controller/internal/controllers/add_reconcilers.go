@@ -27,10 +27,10 @@ import (
 
 // AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager.
 func AddManifestCheckpointControllerToManager(
+	ctx context.Context,
 	mgr ctrl.Manager,
 	log logger.LoggerInterface,
 	cfg *config.Options,
-	ctx context.Context,
 ) error {
 	reconciler := &ManifestCheckpointController{
 		Client:    mgr.GetClient(),

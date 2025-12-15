@@ -18,10 +18,9 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
-
-	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
