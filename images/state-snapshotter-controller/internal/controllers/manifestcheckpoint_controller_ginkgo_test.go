@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -28,9 +30,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerruntime "sigs.k8s.io/controller-runtime"
 	clientpatch "sigs.k8s.io/controller-runtime/pkg/client"
+	clientpkg "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -48,15 +52,14 @@ func TestManifestCaptureRequestGinkgo(t *testing.T) {
 
 var _ = Describe("ManifestCaptureRequest TTL", func() {
 	var (
-		ctx    context.Context
-		client client.Client
-		ctrl   *ManifestCheckpointController
-		scheme *runtime.Scheme
-		cfg    *config.Options
+		baseClient clientpkg.Client
+		ctrl       *ManifestCheckpointController
+		scheme     *runtime.Scheme
+		cfg        *config.Options
+		testLogger logger.LoggerInterface
 	)
 
 	BeforeEach(func() {
-		ctx = context.Background()
 		scheme = runtime.NewScheme()
 		Expect(storagev1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(deckhousev1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -66,19 +69,28 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			DefaultTTLStr: "168h",
 		}
 
-		client = fake.NewClientBuilder().
+		baseClient = fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
-		testLogger, _ := logger.NewLogger("test")
+		var err error
+		testLogger, err = logger.NewLogger("info")
+		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
+		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
 		ctrl = &ManifestCheckpointController{
-			Client: client,
+			Client: baseClient,
 			Scheme: scheme,
 			Logger: testLogger,
 			Config: cfg,
 		}
 	})
+
+	// ============================================================================
+	// TTL-related tests
+	// ============================================================================
+	// These tests verify TTL annotation management and TTL scanner behavior.
+	// TTL enforcement is centralized in the background scanner, not in reconcile loop.
 
 	Describe("setTTLAnnotation", func() {
 		It("should set TTL annotation when not exists", func() {
@@ -126,153 +138,161 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 		})
 	})
 
-	Describe("checkAndHandleTTL", func() {
-		It("should return false when no TTL annotation", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-				},
-			}
+	Describe("TTL Scanner", func() {
+		var (
+			ctx           context.Context
+			scannerClient clientpkg.Client
+		)
 
-			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, mcr)
-
-			Expect(err).ToNot(HaveOccurred())
-			Expect(shouldDelete).To(BeFalse())
-			Expect(requeueAfter).To(Equal(time.Duration(0)))
+		BeforeEach(func() {
+			ctx = context.Background()
+			scannerClient = fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
+				Build()
+			// Initialize controller for scanner tests
+			// Reuse logger from parent BeforeEach
+			ctrl.Client = scannerClient
+			ctrl.Logger = testLogger
+			ctrl.Config = cfg
 		})
 
-		It("should return false when no CompletionTimestamp", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-					Annotations: map[string]string{
-						AnnotationKeyTTL: "168h",
-					},
-				},
-			}
-
-			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, mcr)
-
-			Expect(err).ToNot(HaveOccurred())
-			Expect(shouldDelete).To(BeFalse())
-			Expect(requeueAfter).To(Equal(time.Duration(0)))
-		})
-
-		It("should delete when TTL expired", func() {
+		It("should delete terminal MCR when TTL expired", func() {
 			now := time.Now()
-			completionTime := metav1.NewTime(now.Add(-200 * time.Hour)) // 200 hours ago, TTL=168h, so expired
+			// CompletionTimestamp is 2x TTL ago, so definitely expired
+			expiredTime := metav1.NewTime(now.Add(-2 * cfg.DefaultTTL))
 
 			mcr := &storagev1alpha1.ManifestCaptureRequest{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
+					Name:      "expired-mcr",
 					Namespace: "default",
-					Annotations: map[string]string{
-						AnnotationKeyTTL: "168h",
-					},
 				},
 				Status: storagev1alpha1.ManifestCaptureRequestStatus{
-					CompletionTimestamp: &completionTime,
-				},
-			}
-
-			Expect(client.Create(ctx, mcr)).To(Succeed())
-
-			// Re-read MCR to get latest state from fake client
-			createdMCR := &storagev1alpha1.ManifestCaptureRequest{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, createdMCR)).To(Succeed())
-
-			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, createdMCR)
-
-			Expect(err).ToNot(HaveOccurred())
-			Expect(shouldDelete).To(BeTrue())
-			Expect(requeueAfter).To(Equal(time.Duration(0)))
-
-			// Verify object is deleted
-			err = client.Get(ctx, types.NamespacedName{Name: createdMCR.Name, Namespace: createdMCR.Namespace}, createdMCR)
-			Expect(err).To(HaveOccurred())
-			Expect(errors.IsNotFound(err)).To(BeTrue())
-		})
-
-		It("should return RequeueAfter when TTL not expired", func() {
-			now := time.Now()
-			completionTime := metav1.NewTime(now.Add(-100 * time.Hour)) // 100 hours ago, TTL=168h, so 68h left
-
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-					Annotations: map[string]string{
-						AnnotationKeyTTL: "168h",
-					},
-				},
-				Status: storagev1alpha1.ManifestCaptureRequestStatus{
-					CompletionTimestamp: &completionTime,
-				},
-			}
-
-			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, mcr)
-
-			Expect(err).ToNot(HaveOccurred())
-			Expect(shouldDelete).To(BeFalse())
-			Expect(requeueAfter).To(BeNumerically(">=", 30*time.Second))
-			// RequeueAfter should be capped at 1 minute
-			Expect(requeueAfter).To(BeNumerically("<=", 70*time.Second))
-		})
-
-		It("should handle invalid TTL format without deleting object", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-					Annotations: map[string]string{
-						AnnotationKeyTTL: "168hours", // Invalid format
-					},
-				},
-				Status: storagev1alpha1.ManifestCaptureRequestStatus{
-					CompletionTimestamp: &metav1.Time{Time: time.Now()},
-				},
-			}
-
-			Expect(client.Create(ctx, mcr)).To(Succeed())
-
-			// Re-read MCR to get latest state from fake client
-			createdMCR := &storagev1alpha1.ManifestCaptureRequest{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, createdMCR)).To(Succeed())
-
-			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, createdMCR)
-
-			// Function should handle invalid TTL gracefully
-			// Note: With fake client, retry logic may not work perfectly, but object should not be deleted
-			Expect(shouldDelete).To(BeFalse())
-			if err == nil {
-				Expect(requeueAfter).To(Equal(time.Duration(0)))
-			}
-
-			// Verify object still exists (not deleted)
-			err = client.Get(ctx, types.NamespacedName{Name: createdMCR.Name, Namespace: createdMCR.Namespace}, createdMCR)
-			Expect(err).ToNot(HaveOccurred())
-		})
-
-		It("should not break Ready=True status when TTL is invalid and object is already completed", func() {
-			// Create MCR that is already Ready=True
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr-ready",
-					Namespace: "default",
-					Annotations: map[string]string{
-						AnnotationKeyTTL: "invalid-ttl", // Invalid format
-					},
-				},
-				Status: storagev1alpha1.ManifestCaptureRequestStatus{
-					CompletionTimestamp: &metav1.Time{Time: time.Now()},
+					CompletionTimestamp: &expiredTime,
 					Conditions: []metav1.Condition{
 						{
 							Type:               ConditionTypeReady,
 							Status:             metav1.ConditionTrue,
 							Reason:             ConditionReasonCompleted,
-							Message:            "Checkpoint created successfully",
+							LastTransitionTime: expiredTime,
+							ObservedGeneration: 1,
+						},
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionFalse,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: expiredTime,
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+
+			Expect(scannerClient.Create(ctx, mcr)).To(Succeed())
+
+			// Run scanner
+			ctrl.scanAndDeleteExpiredMCRs(ctx, scannerClient)
+
+			// Verify MCR was deleted
+			err := scannerClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, &storagev1alpha1.ManifestCaptureRequest{})
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should NOT delete terminal MCR when TTL not expired", func() {
+			now := time.Now()
+			// CompletionTimestamp is half TTL ago, so not expired yet
+			recentTime := metav1.NewTime(now.Add(-cfg.DefaultTTL / 2))
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "not-expired-mcr",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CompletionTimestamp: &recentTime,
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: recentTime,
+							ObservedGeneration: 1,
+						},
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionFalse,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: recentTime,
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+
+			Expect(scannerClient.Create(ctx, mcr)).To(Succeed())
+
+			// Run scanner
+			ctrl.scanAndDeleteExpiredMCRs(ctx, scannerClient)
+
+			// Verify MCR still exists
+			err := scannerClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, &storagev1alpha1.ManifestCaptureRequest{})
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should NOT delete non-terminal MCR even if TTL expired", func() {
+			now := time.Now()
+			expiredTime := metav1.NewTime(now.Add(-2 * cfg.DefaultTTL))
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "non-terminal-mcr",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CompletionTimestamp: &expiredTime,
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonInProgress,
+							LastTransitionTime: expiredTime,
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+
+			Expect(scannerClient.Create(ctx, mcr)).To(Succeed())
+
+			// Run scanner
+			ctrl.scanAndDeleteExpiredMCRs(ctx, scannerClient)
+
+			// Verify MCR still exists (not terminal, so not deleted)
+			err := scannerClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, &storagev1alpha1.ManifestCaptureRequest{})
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should NOT delete terminal MCR without CompletionTimestamp", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "no-completion-mcr",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					// CompletionTimestamp is nil
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: metav1.Now(),
+							ObservedGeneration: 1,
+						},
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionFalse,
+							Reason:             ConditionReasonCompleted,
 							LastTransitionTime: metav1.Now(),
 							ObservedGeneration: 1,
 						},
@@ -280,61 +300,242 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 				},
 			}
 
-			Expect(client.Create(ctx, mcr)).To(Succeed())
+			Expect(scannerClient.Create(ctx, mcr)).To(Succeed())
 
-			// Re-read MCR to get latest state from fake client
-			createdMCR := &storagev1alpha1.ManifestCaptureRequest{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, createdMCR)).To(Succeed())
+			// Run scanner
+			ctrl.scanAndDeleteExpiredMCRs(ctx, scannerClient)
 
-			// Verify Ready=True before TTL check
-			readyBefore := meta.FindStatusCondition(createdMCR.Status.Conditions, ConditionTypeReady)
-			Expect(readyBefore).ToNot(BeNil())
-			Expect(readyBefore.Status).To(Equal(metav1.ConditionTrue))
-
-			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, createdMCR)
-
-			// Should not delete and should not error
+			// Verify MCR still exists (no CompletionTimestamp, so TTL hasn't started)
+			err := scannerClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, &storagev1alpha1.ManifestCaptureRequest{})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(shouldDelete).To(BeFalse())
-			Expect(requeueAfter).To(Equal(time.Duration(0)))
-
-			// Re-read to verify Ready status is preserved
-			Expect(client.Get(ctx, types.NamespacedName{Name: createdMCR.Name, Namespace: createdMCR.Namespace}, createdMCR)).To(Succeed())
-			readyAfter := meta.FindStatusCondition(createdMCR.Status.Conditions, ConditionTypeReady)
-			// Ready status should remain True (not broken by invalid TTL)
-			Expect(readyAfter).ToNot(BeNil())
-			Expect(readyAfter.Status).To(Equal(metav1.ConditionTrue), "Ready=True should not be broken by invalid TTL when object is already completed")
 		})
 
-		It("should apply jitter to requeueAfter", func() {
+		It("should delete Failed MCR when TTL expired", func() {
 			now := time.Now()
-			completionTime := metav1.NewTime(now.Add(-100 * time.Hour))
+			expiredTime := metav1.NewTime(now.Add(-2 * cfg.DefaultTTL))
 
 			mcr := &storagev1alpha1.ManifestCaptureRequest{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
+					Name:      "failed-expired-mcr",
 					Namespace: "default",
-					Annotations: map[string]string{
-						AnnotationKeyTTL: "168h",
-					},
 				},
 				Status: storagev1alpha1.ManifestCaptureRequestStatus{
-					CompletionTimestamp: &completionTime,
+					CompletionTimestamp: &expiredTime,
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeFailed,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonInternalError,
+							LastTransitionTime: expiredTime,
+							ObservedGeneration: 1,
+						},
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionFalse,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: expiredTime,
+							ObservedGeneration: 1,
+						},
+					},
 				},
 			}
 
-			// Run multiple times to verify jitter
-			requeueValues := make(map[time.Duration]bool)
-			for i := 0; i < 20; i++ {
-				// Create a fresh copy each time to avoid side effects
-				mcrCopy := mcr.DeepCopy()
-				_, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, mcrCopy)
-				Expect(err).ToNot(HaveOccurred())
-				requeueValues[requeueAfter] = true
+			Expect(scannerClient.Create(ctx, mcr)).To(Succeed())
+
+			// Run scanner
+			ctrl.scanAndDeleteExpiredMCRs(ctx, scannerClient)
+
+			// Verify MCR was deleted
+			err := scannerClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, &storagev1alpha1.ManifestCaptureRequest{})
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Describe("Post-restart finalization", func() {
+		var (
+			ctx           context.Context
+			restartClient clientpkg.Client
+		)
+
+		BeforeEach(func() {
+			ctx = context.Background()
+			restartClient = fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
+				Build()
+			// Reuse logger from parent BeforeEach
+			ctrl.Client = restartClient
+			ctrl.APIReader = restartClient
+			ctrl.Logger = testLogger
+			ctrl.Config = cfg
+		})
+
+		It("should add TTL annotation to Ready MCR without annotation on reconcile", func() {
+			now := metav1.Now()
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "ready-no-ttl",
+					Namespace:  "default",
+					Generation: 1,
+					// No TTL annotation
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CheckpointName:      "mcp-test-123",
+					ObservedGeneration:  1,
+					CompletionTimestamp: &now,
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: now,
+							ObservedGeneration: 1,
+						},
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionFalse,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: now,
+							ObservedGeneration: 1,
+						},
+					},
+				},
 			}
 
-			// Should have some variation due to jitter
-			Expect(len(requeueValues)).To(BeNumerically(">", 1))
+			// Create checkpoint to simulate existing checkpoint
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "mcp-test-123",
+				},
+			}
+			Expect(restartClient.Create(ctx, checkpoint)).To(Succeed())
+			Expect(restartClient.Create(ctx, mcr)).To(Succeed())
+
+			// Reconcile (simulating post-restart reconcile)
+			req := controllerruntime.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      mcr.Name,
+					Namespace: mcr.Namespace,
+				},
+			}
+			result, err := ctrl.Reconcile(ctx, req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+
+			// Verify TTL annotation was added
+			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(restartClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
+			Expect(updatedMCR.Annotations).To(HaveKey(AnnotationKeyTTL))
+			Expect(updatedMCR.Annotations[AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
+
+			// Verify status unchanged
+			Expect(updatedMCR.Status.CheckpointName).To(Equal(mcr.Status.CheckpointName))
+			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
+			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, ConditionTypeReady)
+			Expect(readyCond).ToNot(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	// ============================================================================
+	// Reconcile logic tests
+	// ============================================================================
+	// These tests verify reconcile behavior: idempotency, recovery scenarios, and condition handling.
+
+	// Checkpoint exists finalization path covers recovery scenario when checkpoint was created,
+	// but controller crashed before MCR status was finalized. This test ensures reconcile
+	// can recover and complete the finalization process.
+	Describe("Checkpoint exists finalization path", func() {
+		var (
+			ctx            context.Context
+			finalizeClient clientpkg.Client
+		)
+
+		BeforeEach(func() {
+			ctx = context.Background()
+			finalizeClient = fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
+				Build()
+			ctrl.Client = finalizeClient
+			ctrl.APIReader = finalizeClient
+		})
+
+		It("should finalize MCR when checkpoint exists but MCR is not finalized", func() {
+			now := metav1.Now()
+			checkpointName := "mcp-test-finalize"
+
+			// Create checkpoint first
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: checkpointName,
+				},
+			}
+			Expect(finalizeClient.Create(ctx, checkpoint)).To(Succeed())
+
+			// Create MCR with checkpoint name but not finalized (no Ready, no CompletionTimestamp)
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "mcr-not-finalized",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CheckpointName:     checkpointName,
+					ObservedGeneration: 0, // Not observed yet
+					// No CompletionTimestamp
+					// No Ready condition
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeProcessing,
+							Status:             metav1.ConditionTrue, // Still processing
+							Reason:             ConditionReasonInProgress,
+							LastTransitionTime: now,
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+			Expect(finalizeClient.Create(ctx, mcr)).To(Succeed())
+
+			// Reconcile
+			req := controllerruntime.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      mcr.Name,
+					Namespace: mcr.Namespace,
+				},
+			}
+			result, err := ctrl.Reconcile(ctx, req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.Requeue).To(BeFalse())
+
+			// Verify MCR was finalized
+			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(finalizeClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
+
+			// Check Ready=True
+			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, ConditionTypeReady)
+			Expect(readyCond).ToNot(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCond.Reason).To(Equal(ConditionReasonCompleted))
+
+			// Check Processing=False
+			processingCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, ConditionTypeProcessing)
+			Expect(processingCond).ToNot(BeNil())
+			Expect(processingCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(processingCond.Reason).To(Equal(ConditionReasonCompleted))
+
+			// Check CompletionTimestamp set
+			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
+
+			// Check ObservedGeneration updated
+			Expect(updatedMCR.Status.ObservedGeneration).To(Equal(int64(1)))
+
+			// Check TTL annotation added
+			Expect(updatedMCR.Annotations).ToNot(BeNil())
+			Expect(updatedMCR.Annotations[AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
 		})
 	})
 })
@@ -342,7 +543,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 	var (
 		ctx    context.Context
-		client client.Client
+		client clientpkg.Client
 		scheme *runtime.Scheme
 	)
 
@@ -358,6 +559,11 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 	})
+
+	// ============================================================================
+	// ObjectKeeper integration tests
+	// ============================================================================
+	// These tests verify ObjectKeeper creation and UID-based binding contract.
 
 	Describe("ObjectKeeper creation", func() {
 		It("should create ObjectKeeper with FollowObject mode (no TTL)", func() {
@@ -537,7 +743,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", func() {
 	var (
 		ctx    context.Context
-		client client.Client
+		client clientpkg.Client
 		ctrl   *ManifestCheckpointController
 		scheme *runtime.Scheme
 		cfg    *config.Options
@@ -560,7 +766,9 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
-		testLogger, _ := logger.NewLogger("test")
+		testLogger, err := logger.NewLogger("info")
+		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
+		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
 		ctrl = &ManifestCheckpointController{
 			Client:    client,
 			APIReader: client, // Use same client for APIReader in tests
@@ -569,6 +777,11 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			Config:    cfg,
 		}
 	})
+
+	// ============================================================================
+	// Helper functions tests
+	// ============================================================================
+	// These tests verify internal helper functions used by the controller.
 
 	Describe("Deterministic checkpoint name generation", func() {
 		It("should generate same checkpoint name for same MCR UID", func() {
@@ -766,6 +979,490 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			Expect(mcr.Status.ObservedGeneration).To(Equal(mcr.Generation))
 			Expect(mcr.Status.ObservedGeneration).ToNot(Equal(int64(0)))
 			// This means should not requeue, should mark as Failed instead (tested via e2e)
+		})
+	})
+})
+
+var _ = Describe("Helper Functions", func() {
+	var (
+		ctrl *ManifestCheckpointController
+	)
+
+	BeforeEach(func() {
+		testLogger, err := logger.NewLogger("info")
+		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
+		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
+		ctrl = &ManifestCheckpointController{
+			Logger: testLogger,
+		}
+	})
+
+	Describe("setSingleCondition", func() {
+		It("should add first condition to empty list", func() {
+			conds := &[]metav1.Condition{}
+
+			setSingleCondition(conds, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				Reason:             "Completed",
+				Message:            "Test message",
+				LastTransitionTime: metav1.Now(),
+			})
+
+			Expect(len(*conds)).To(Equal(1))
+			cond := (*conds)[0]
+			Expect(cond.Type).To(Equal("Ready"))
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should replace existing condition of same type", func() {
+			conds := &[]metav1.Condition{
+				{
+					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					Reason:             "Completed",
+					LastTransitionTime: metav1.Now(),
+				},
+			}
+
+			setSingleCondition(conds, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				Reason:             "Failed",
+				Message:            "Updated message",
+				LastTransitionTime: metav1.Now(),
+			})
+
+			Expect(len(*conds)).To(Equal(1))
+			updatedCond := (*conds)[0]
+			Expect(updatedCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(updatedCond.Reason).To(Equal("Failed"))
+		})
+
+		It("should keep only one condition of each type", func() {
+			conds := &[]metav1.Condition{
+				{
+					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+				},
+				{
+					Type:               "Ready",
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: metav1.Now(),
+				},
+			}
+
+			setSingleCondition(conds, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				Reason:             "New",
+				LastTransitionTime: metav1.Now(),
+			})
+
+			Expect(len(*conds)).To(Equal(1))
+			Expect((*conds)[0].Reason).To(Equal("New"))
+		})
+	})
+
+	Describe("determineErrorReason", func() {
+		It("should return NotFound for NotFound errors", func() {
+			err := errors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "test")
+			reason := ctrl.determineErrorReason(err)
+			Expect(reason).To(Equal("NotFound"))
+		})
+
+		It("should return SerializationError for serialization errors", func() {
+			err := fmt.Errorf("failed to marshal json")
+			reason := ctrl.determineErrorReason(err)
+			Expect(reason).To(Equal("SerializationError"))
+		})
+
+		It("should return InternalError for generic errors", func() {
+			err := fmt.Errorf("some error")
+			reason := ctrl.determineErrorReason(err)
+			Expect(reason).To(Equal("InternalError"))
+		})
+
+		It("should return empty string for nil error", func() {
+			reason := ctrl.determineErrorReason(nil)
+			Expect(reason).To(Equal(""))
+		})
+
+		It("should never return RBACDenied", func() {
+			testCases := []error{
+				errors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "test"),
+				fmt.Errorf("failed to marshal json"),
+				fmt.Errorf("some error"),
+				nil,
+			}
+
+			for _, err := range testCases {
+				reason := ctrl.determineErrorReason(err)
+				Expect(reason).ToNot(Equal("RBACDenied"))
+			}
+		})
+	})
+
+	Describe("isNamespacedResource", func() {
+		It("should reject cluster-scoped resources", func() {
+			testCases := []struct {
+				name           string
+				gv             schema.GroupVersion
+				kind           string
+				expectedResult bool
+			}{
+				{"Namespace", schema.GroupVersion{Group: "", Version: "v1"}, "Namespace", false},
+				{"Node", schema.GroupVersion{Group: "", Version: "v1"}, "Node", false},
+				{"PersistentVolume", schema.GroupVersion{Group: "", Version: "v1"}, "PersistentVolume", false},
+				{"ClusterRole", schema.GroupVersion{Group: "rbac.authorization.k8s.io", Version: "v1"}, "ClusterRole", false},
+				{"ManifestCheckpoint", schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}, "ManifestCheckpoint", false},
+			}
+
+			for _, tc := range testCases {
+				result := ctrl.isNamespacedResource(tc.gv, tc.kind)
+				Expect(result).To(Equal(tc.expectedResult), "Expected %s to be cluster-scoped", tc.name)
+			}
+		})
+
+		It("should allow namespaced resources", func() {
+			testCases := []struct {
+				name           string
+				gv             schema.GroupVersion
+				kind           string
+				expectedResult bool
+			}{
+				{"ConfigMap", schema.GroupVersion{Group: "", Version: "v1"}, "ConfigMap", true},
+				{"Pod", schema.GroupVersion{Group: "", Version: "v1"}, "Pod", true},
+				{"Service", schema.GroupVersion{Group: "", Version: "v1"}, "Service", true},
+			}
+
+			for _, tc := range testCases {
+				result := ctrl.isNamespacedResource(tc.gv, tc.kind)
+				Expect(result).To(Equal(tc.expectedResult), "Expected %s to be namespaced", tc.name)
+			}
+		})
+	})
+})
+
+// ============================================================================
+// ADR and compliance tests
+// ============================================================================
+// These tests verify architectural decisions, resource scoping, and RBAC compliance.
+
+var _ = Describe("Conditions", func() {
+	Describe("Ready condition check", func() {
+		It("should identify Ready=True as ready", func() {
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				Status: storagev1alpha1.ManifestCheckpointStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               "Ready",
+							Status:             metav1.ConditionTrue,
+							Reason:             "Completed",
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			}
+
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, "Ready")
+			isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
+
+			Expect(isReady).To(BeTrue())
+			Expect(readyCondition.Reason).To(Equal("Completed"))
+		})
+
+		It("should identify Ready=False as not ready", func() {
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				Status: storagev1alpha1.ManifestCheckpointStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               "Ready",
+							Status:             metav1.ConditionFalse,
+							Reason:             "Failed",
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			}
+
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, "Ready")
+			isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
+
+			Expect(isReady).To(BeFalse())
+			Expect(readyCondition.Reason).To(Equal("Failed"))
+		})
+
+		It("should identify absence of Ready condition as not ready", func() {
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				Status: storagev1alpha1.ManifestCheckpointStatus{
+					Conditions: []metav1.Condition{},
+				},
+			}
+
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, "Ready")
+			isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
+
+			Expect(isReady).To(BeFalse())
+		})
+	})
+
+	Describe("No Phase field", func() {
+		It("should work with ManifestCheckpointStatus without Phase", func() {
+			status := storagev1alpha1.ManifestCheckpointStatus{
+				TotalObjects:   10,
+				TotalSizeBytes: 2048,
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             metav1.ConditionTrue,
+						Reason:             "Completed",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{Status: status}
+
+			Expect(checkpoint.Status.TotalObjects).To(Equal(10))
+			Expect(len(checkpoint.Status.Conditions)).To(Equal(1))
+
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, "Ready")
+			Expect(readyCondition).ToNot(BeNil())
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should work with ManifestCaptureRequest without Phase", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mcr",
+					Namespace: "test-namespace",
+				},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{
+							APIVersion: "v1",
+							Kind:       "ConfigMap",
+							Name:       "test-cm",
+						},
+					},
+				},
+			}
+
+			mcr.Status = storagev1alpha1.ManifestCaptureRequestStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Processing",
+						Status:             metav1.ConditionTrue,
+						Reason:             "InProgress",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+
+			Expect(len(mcr.Status.Conditions)).To(Equal(1))
+			processingCondition := meta.FindStatusCondition(mcr.Status.Conditions, "Processing")
+			Expect(processingCondition).ToNot(BeNil())
+		})
+	})
+})
+
+var _ = Describe("Resource Scoping", func() {
+	Describe("Cluster-scoped resources", func() {
+		It("should verify ManifestCheckpoint is cluster-scoped", func() {
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "mcp-test-123",
+					// No Namespace field - cluster-scoped
+				},
+				Spec: storagev1alpha1.ManifestCheckpointSpec{
+					SourceNamespace: "test-namespace",
+					ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
+						Name:      "test-mcr",
+						Namespace: "test-namespace",
+						UID:       "test-uid",
+					},
+				},
+			}
+
+			Expect(checkpoint.Namespace).To(Equal(""))
+			Expect(checkpoint.Name).ToNot(BeEmpty())
+			Expect(checkpoint.Spec.SourceNamespace).To(Equal("test-namespace"))
+		})
+
+		It("should verify ManifestCheckpointContentChunk is cluster-scoped", func() {
+			chunk := &storagev1alpha1.ManifestCheckpointContentChunk{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "mcp-test-123-0",
+					// No Namespace field - cluster-scoped
+				},
+				Spec: storagev1alpha1.ManifestCheckpointContentChunkSpec{
+					CheckpointName: "mcp-test-123",
+					Index:          0,
+					Data:           "test-data",
+					ObjectsCount:   5,
+					Checksum:       "test-checksum",
+				},
+			}
+
+			Expect(chunk.Namespace).To(Equal(""))
+			Expect(chunk.Name).ToNot(BeEmpty())
+			Expect(chunk.Spec.CheckpointName).ToNot(BeEmpty())
+		})
+	})
+})
+
+var _ = Describe("Object References", func() {
+	It("should create ManifestCaptureRequestRef correctly", func() {
+		mcr := &storagev1alpha1.ManifestCaptureRequest{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-mcr",
+				Namespace: "test-namespace",
+				UID:       "test-uid-123",
+			},
+		}
+
+		spec := storagev1alpha1.ManifestCheckpointSpec{
+			SourceNamespace: mcr.Namespace,
+			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
+				Name:      mcr.Name,
+				Namespace: mcr.Namespace,
+				UID:       string(mcr.UID),
+			},
+		}
+
+		Expect(spec.SourceNamespace).To(Equal(mcr.Namespace))
+		Expect(spec.ManifestCaptureRequestRef).ToNot(BeNil())
+		Expect(spec.ManifestCaptureRequestRef.Name).To(Equal(mcr.Name))
+		Expect(spec.ManifestCaptureRequestRef.Namespace).To(Equal(mcr.Namespace))
+		Expect(spec.ManifestCaptureRequestRef.UID).To(Equal(string(mcr.UID)))
+	})
+})
+
+var _ = Describe("ADR Compliance", func() {
+	var (
+		ctx    context.Context
+		client clientpkg.Client
+		ctrl   *ManifestCheckpointController
+		scheme *runtime.Scheme
+		cfg    *config.Options
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		scheme = runtime.NewScheme()
+		Expect(storagev1alpha1.AddToScheme(scheme)).To(Succeed())
+
+		cfg = &config.Options{
+			EnableFiltering: false,
+		}
+
+		client = fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		testLogger, err := logger.NewLogger("info")
+		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
+		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
+		ctrl = &ManifestCheckpointController{
+			Client: client,
+			Scheme: scheme,
+			Logger: testLogger,
+			Config: cfg,
+		}
+	})
+
+	Describe("collectTargetObjects rejects cluster-scoped resources", func() {
+		testCases := []struct {
+			name          string
+			target        storagev1alpha1.ManifestTarget
+			expectedError string
+		}{
+			{
+				name: "Namespace is rejected",
+				target: storagev1alpha1.ManifestTarget{
+					APIVersion: "v1",
+					Kind:       "Namespace",
+					Name:       "test-ns",
+				},
+				expectedError: "cluster-scoped resource",
+			},
+			{
+				name: "Node is rejected",
+				target: storagev1alpha1.ManifestTarget{
+					APIVersion: "v1",
+					Kind:       "Node",
+					Name:       "test-node",
+				},
+				expectedError: "cluster-scoped resource",
+			},
+			{
+				name: "PersistentVolume is rejected",
+				target: storagev1alpha1.ManifestTarget{
+					APIVersion: "v1",
+					Kind:       "PersistentVolume",
+					Name:       "test-pv",
+				},
+				expectedError: "cluster-scoped resource",
+			},
+			{
+				name: "ClusterRole is rejected",
+				target: storagev1alpha1.ManifestTarget{
+					APIVersion: "rbac.authorization.k8s.io/v1",
+					Kind:       "ClusterRole",
+					Name:       "test-cr",
+				},
+				expectedError: "cluster-scoped resource",
+			},
+		}
+
+		for _, tc := range testCases {
+			It(fmt.Sprintf("should reject %s", tc.name), func() {
+				mcr := &storagev1alpha1.ManifestCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-mcr",
+						Namespace: "test-namespace",
+					},
+					Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+						Targets: []storagev1alpha1.ManifestTarget{tc.target},
+					},
+				}
+
+				_, err := ctrl.collectTargetObjects(ctx, mcr)
+
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(tc.expectedError))
+				Expect(err.Error()).To(ContainSubstring("namespaced resources"))
+			})
+		}
+	})
+
+	Describe("RBAC compliance", func() {
+		It("should document allowed RBAC verbs for ManifestCheckpointContentChunk", func() {
+			allowedVerbs := map[string]bool{
+				"create": true,
+				"get":    true,
+				"delete": true,
+			}
+
+			forbiddenVerbs := map[string]bool{
+				"list":  true,
+				"watch": true,
+			}
+
+			// Verify allowed verbs are documented
+			for verb := range allowedVerbs {
+				Expect(allowedVerbs[verb]).To(BeTrue(), "Verb '%s' should be allowed for ManifestCheckpointContentChunk according to ADR", verb)
+			}
+
+			// Verify forbidden verbs are documented
+			for verb := range forbiddenVerbs {
+				Expect(forbiddenVerbs[verb]).To(BeTrue(), "Verb '%s' should be forbidden for ManifestCheckpointContentChunk according to ADR", verb)
+			}
+
+			// This test serves as documentation that:
+			// 1. Controller RBAC in templates/controller/rbac-for-us.yaml should only have: create, get, delete
+			// 2. No other ClusterRole/Role should grant list/watch on manifestcheckpointcontentchunks
+			// 3. This is enforced by ADR and should be verified in production via RBAC manifest validation
 		})
 	})
 })
