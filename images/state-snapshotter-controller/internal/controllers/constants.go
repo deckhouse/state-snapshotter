@@ -31,6 +31,7 @@ const (
 	ConditionReasonInternalError      = "InternalError"
 	ConditionReasonNotFound           = "NotFound"
 	ConditionReasonSerializationError = "SerializationError"
+	ConditionReasonInvalidTTL         = "InvalidTTL" // For invalid TTL annotation format
 )
 
 // Retainer-specific condition reasons (for ConditionTypeActive)
@@ -57,4 +58,17 @@ const (
 	RetainerConditionReasonInvalidTTL = "InvalidTTL"
 	// RetainerConditionReasonInvalidMode indicates unknown mode
 	RetainerConditionReasonInvalidMode = "InvalidMode"
+)
+
+// API constants for ObjectKeeper
+const (
+	// DeckhouseAPIVersion is the API version for deckhouse.io resources (ObjectKeeper)
+	// Note: This is group/version, not just group, despite the name.
+	DeckhouseAPIVersion = "deckhouse.io/v1alpha1"
+	KindObjectKeeper    = "ObjectKeeper"
+)
+
+// Annotation key constants
+const (
+	AnnotationKeyTTL = "state-snapshotter.deckhouse.io/ttl" // TTL annotation for automatic deletion
 )

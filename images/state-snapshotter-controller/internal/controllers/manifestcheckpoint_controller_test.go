@@ -19,15 +19,14 @@ package controllers
 import (
 	"fmt"
 	"testing"
-	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 )
 
 // TestSetSingleCondition verifies the setSingleCondition helper function that manages conditions.
@@ -524,14 +523,14 @@ func TestManifestCheckpointContentChunk_ClusterScoped(t *testing.T) {
 	}
 }
 
-// TestMCRTTLRetainer_CreatedWithCorrectTTL verifies that TTL Retainer for ManifestCaptureRequest is created with 10 minutes TTL.
-// ADR requirement: "TTL-логика удаляет ManifestCaptureRequest через 10 минут (что приводит к тому, что удаляется Retainer,
-// и если у ManifestCheckpoint не добавлены другие owner'ы, то и он)."
+// TestMCRObjectKeeper_CreatedWithFollowObject verifies that ObjectKeeper for ManifestCaptureRequest is created with FollowObject mode (no TTL).
+// ADR requirement: ObjectKeeper uses FollowObject mode to follow MCR lifecycle.
+// TTL and request cleanup are handled by MCR controller, not ObjectKeeper.
 // Checks:
-// - Retainer for MCR TTL is created with FollowObjectWithTTL mode
-// - TTL is set to exactly 10 minutes
-// - Retainer follows the ManifestCaptureRequest
-func TestMCRTTLRetainer_CreatedWithCorrectTTL(t *testing.T) {
+// - ObjectKeeper for MCR is created with FollowObject mode (no TTL)
+// - ObjectKeeper follows the ManifestCaptureRequest
+// - ObjectKeeper has no TTL (TTL is handled by MCR controller)
+func TestMCRObjectKeeper_CreatedWithFollowObject(t *testing.T) {
 	mcr := &storagev1alpha1.ManifestCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-mcr",
@@ -540,66 +539,57 @@ func TestMCRTTLRetainer_CreatedWithCorrectTTL(t *testing.T) {
 		},
 	}
 
-	// Simulate creating TTL Retainer (as in controller, lines 488-512)
+	// Simulate creating ObjectKeeper (as in controller)
 	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
-	expectedTTL := 10 * time.Minute
 
-	retainer := &iretainer.IRetainer{
+	objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "deckhouse.io/v1alpha1",
-			Kind:       "IRetainer",
+			APIVersion: DeckhouseAPIVersion,
+			Kind:       KindObjectKeeper,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: retainerName,
 		},
-		Spec: iretainer.IRetainerSpec{
-			Mode: "FollowObjectWithTTL",
-			FollowObjectRef: &iretainer.FollowObjectRef{
+		Spec: deckhousev1alpha1.ObjectKeeperSpec{
+			Mode: "FollowObject",
+			FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
 				APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 				Kind:       "ManifestCaptureRequest",
 				Namespace:  mcr.Namespace,
 				Name:       mcr.Name,
 				UID:        string(mcr.UID),
 			},
-			TTL: &metav1.Duration{
-				Duration: expectedTTL,
-			},
 		},
 	}
 
-	// Verify retainer name follows pattern
+	// Verify objectKeeper name follows pattern
 	expectedName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
-	if retainer.Name != expectedName {
-		t.Errorf("Expected retainer name %s, got %s", expectedName, retainer.Name)
+	if objectKeeper.Name != expectedName {
+		t.Errorf("Expected objectKeeper name %s, got %s", expectedName, objectKeeper.Name)
 	}
 
-	// Verify mode is FollowObjectWithTTL
-	if retainer.Spec.Mode != "FollowObjectWithTTL" {
-		t.Errorf("Expected mode FollowObjectWithTTL, got %s", retainer.Spec.Mode)
+	// Verify mode is FollowObject (not FollowObjectWithTTL)
+	if objectKeeper.Spec.Mode != "FollowObject" {
+		t.Errorf("Expected mode FollowObject, got %s", objectKeeper.Spec.Mode)
 	}
 
-	// Verify TTL is exactly 10 minutes
-	if retainer.Spec.TTL == nil {
-		t.Fatal("Expected TTL to be set")
-	}
-	if retainer.Spec.TTL.Duration != expectedTTL {
-		t.Errorf("Expected TTL %v, got %v", expectedTTL, retainer.Spec.TTL.Duration)
-	}
+	// Verify ObjectKeeper has NO TTL (TTL is handled by MCR controller)
+	// ObjectKeeper spec doesn't have TTL field - it's only FollowObject mode
 
 	// Verify FollowObjectRef points to MCR
-	if retainer.Spec.FollowObjectRef == nil {
+	if objectKeeper.Spec.FollowObjectRef == nil {
 		t.Fatal("Expected FollowObjectRef to be set")
 	}
-	if retainer.Spec.FollowObjectRef.Kind != "ManifestCaptureRequest" {
-		t.Errorf("Expected FollowObjectRef.Kind ManifestCaptureRequest, got %s", retainer.Spec.FollowObjectRef.Kind)
+	if objectKeeper.Spec.FollowObjectRef.Kind != "ManifestCaptureRequest" {
+		t.Errorf("Expected FollowObjectRef.Kind ManifestCaptureRequest, got %s", objectKeeper.Spec.FollowObjectRef.Kind)
 	}
-	if retainer.Spec.FollowObjectRef.Name != mcr.Name {
-		t.Errorf("Expected FollowObjectRef.Name %s, got %s", mcr.Name, retainer.Spec.FollowObjectRef.Name)
+	if objectKeeper.Spec.FollowObjectRef.Name != mcr.Name {
+		t.Errorf("Expected FollowObjectRef.Name %s, got %s", mcr.Name, objectKeeper.Spec.FollowObjectRef.Name)
 	}
-	if retainer.Spec.FollowObjectRef.Namespace != mcr.Namespace {
-		t.Errorf("Expected FollowObjectRef.Namespace %s, got %s", mcr.Namespace, retainer.Spec.FollowObjectRef.Namespace)
+	if objectKeeper.Spec.FollowObjectRef.Namespace != mcr.Namespace {
+		t.Errorf("Expected FollowObjectRef.Namespace %s, got %s", mcr.Namespace, objectKeeper.Spec.FollowObjectRef.Namespace)
 	}
-	if retainer.Spec.FollowObjectRef.UID != string(mcr.UID) {
-		t.Errorf("Expected FollowObjectRef.UID %s, got %s", string(mcr.UID), retainer.Spec.FollowObjectRef.UID)
+	if objectKeeper.Spec.FollowObjectRef.UID != string(mcr.UID) {
+		t.Errorf("Expected FollowObjectRef.UID %s, got %s", string(mcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
 	}
 }

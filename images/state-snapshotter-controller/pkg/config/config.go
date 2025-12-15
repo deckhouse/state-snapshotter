@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -39,6 +40,7 @@ const (
 	// Manifest capture defaults (TZ section 7)
 	DefaultMaxChunkSizeBytes = 800000          // 800KB (TZ: maxChunkSizeBytes)
 	DefaultTTL               = 168 * time.Hour // 7 days (TZ: defaultTTL)
+	DefaultTTLStr            = "168h"          // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
 )
 
@@ -51,6 +53,7 @@ type Options struct {
 	// Manifest capture config (TZ section 7)
 	MaxChunkSizeBytes  int64
 	DefaultTTL         time.Duration
+	DefaultTTLStr      string // String representation for annotation (e.g., "168h", "7d")
 	ExcludeKinds       []string
 	ExcludeAnnotations []string
 	// EnableFiltering controls whether filtering and cleaning should be applied
@@ -93,6 +96,7 @@ func NewConfig() *Options {
 	// Manifest capture defaults (TZ section 7)
 	opts.MaxChunkSizeBytes = DefaultMaxChunkSizeBytes
 	opts.DefaultTTL = DefaultTTL
+	opts.DefaultTTLStr = formatDurationForAnnotation(DefaultTTL)
 	opts.ExcludeKinds = []string{
 		"Pod", "Event", "Endpoints", "EndpointSlice", "Lease", "Node", "ControllerRevision",
 		"VolumeSnapshot", "VolumeSnapshotContent", "*Snapshot", "*SnapshotContent",
@@ -124,6 +128,7 @@ func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 	if val, ok := configMapData["defaultTTL"]; ok {
 		if duration, err := time.ParseDuration(val); err == nil && duration > 0 {
 			opts.DefaultTTL = duration
+			opts.DefaultTTLStr = formatDurationForAnnotation(duration)
 		}
 	}
 
@@ -157,4 +162,20 @@ func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 		valLower := strings.ToLower(strings.TrimSpace(val))
 		opts.EnableFiltering = valLower == "true" || valLower == "1" || valLower == "yes"
 	}
+}
+
+// formatDurationForAnnotation formats duration as a readable string for annotation
+// Examples: 10m, 1h, 168h, 7d
+func formatDurationForAnnotation(d time.Duration) string {
+	// Round to nearest minute for readability
+	minutes := int(d.Round(time.Minute).Minutes())
+	if minutes < 60 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	hours := minutes / 60
+	remainingMinutes := minutes % 60
+	if remainingMinutes == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%dm", hours, remainingMinutes)
 }

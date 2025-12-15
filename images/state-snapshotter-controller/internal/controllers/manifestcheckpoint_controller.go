@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	mathrand "math/rand"
 	"sort"
 	"strings"
 	"time"
@@ -38,11 +39,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -88,6 +91,18 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 	// This ensures snapshot immutability - checkpoint should not be recreated
 	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, ConditionTypeReady)
 	if readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
+		// Check TTL for completed MCR (after Ready short-circuit)
+		// This ensures TTL cleanup happens only after MCR is fully completed
+		if shouldDelete, requeueAfter, err := r.checkAndHandleTTL(ctx, mcr); err != nil {
+			r.Logger.Error(err, "Failed to check TTL")
+			return ctrl.Result{}, err
+		} else if shouldDelete {
+			// Object was deleted, return
+			return ctrl.Result{}, nil
+		} else if requeueAfter > 0 {
+			// TTL not expired yet, requeue
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
 		r.Logger.Info("MCR is already Ready - skipping reconcile", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, nil
 	}
@@ -95,6 +110,18 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 	// Skip if already Failed and observed
 	if readyCondition != nil && readyCondition.Status == metav1.ConditionFalse && readyCondition.Reason == ConditionReasonInternalError {
 		if mcr.Status.ObservedGeneration == mcr.Generation {
+			// Check TTL for failed MCR (after Failed short-circuit)
+			// This ensures TTL cleanup happens only after MCR is fully failed
+			if shouldDelete, requeueAfter, err := r.checkAndHandleTTL(ctx, mcr); err != nil {
+				r.Logger.Error(err, "Failed to check TTL")
+				return ctrl.Result{}, err
+			} else if shouldDelete {
+				// Object was deleted, return
+				return ctrl.Result{}, nil
+			} else if requeueAfter > 0 {
+				// TTL not expired yet, requeue
+				return ctrl.Result{RequeueAfter: requeueAfter}, nil
+			}
 			return ctrl.Result{}, nil
 		}
 	}
@@ -119,8 +146,21 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 				LastTransitionTime: now,
 				ObservedGeneration: mcr.Generation,
 			})
-			if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
-				return ctrl.Result{}, err
+			// Set TTL annotation when marking as Ready (same Patch as Ready condition)
+			// Use retry on conflict to handle concurrent updates
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				current := &storagev1alpha1.ManifestCaptureRequest{}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+					return err
+				}
+				// Apply status changes
+				current.Status = mcr.Status
+				// Set TTL annotation
+				r.setTTLAnnotation(current)
+				// Patch both metadata (annotations) and status in the same operation
+				return r.Patch(ctx, current, client.MergeFrom(base))
+			}); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to update MCR with Ready condition and TTL annotation: %w", err)
 			}
 			return ctrl.Result{}, nil
 		}
@@ -174,8 +214,24 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			LastTransitionTime: now,
 			ObservedGeneration: mcr.Generation,
 		})
-		if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
-			return ctrl.Result{}, err
+		// Set TTL annotation when marking as Failed (same Patch as Failed condition)
+		// Use retry on conflict to handle concurrent updates
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &storagev1alpha1.ManifestCaptureRequest{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+				return err
+			}
+			// Apply status changes
+			current.Status = mcr.Status
+			// Set TTL annotation
+			r.setTTLAnnotation(current)
+			// Patch both metadata (annotations) and status in the same operation.
+			// This is intentional: status updates and annotation changes should be atomic.
+			// Using Patch (not Status().Patch) ensures both are updated together, preventing
+			// race conditions where status and annotations get out of sync.
+			return r.Patch(ctx, current, client.MergeFrom(base))
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update MCR with Failed condition and TTL annotation: %w", err)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -238,45 +294,42 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"targets", len(mcr.Spec.Targets))
 	}
 
-	// ADR: Create only ONE Retainer: ret-mcr-<namespace>-<mcrName>
-	// This Retainer:
-	// - Uses FollowObjectWithTTL mode to follow MCR (implements MCR TTL)
-	// - Holds the ManifestCheckpoint (MCP has ownerRef to this Retainer)
-	// - When MCR is deleted, Retainer continues to live for TTL duration
-	// - When Retainer expires, it's deleted → GC deletes MCP (via ownerRef)
+	// ADR: Create only ONE ObjectKeeper: ret-mcr-<namespace>-<mcrName>
+	// This ObjectKeeper:
+	// - Uses FollowObject mode to follow MCR (no TTL)
+	// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
+	// - When MCR is deleted, ObjectKeeper is automatically deleted (FollowObject)
+	// - When ObjectKeeper is deleted, GC deletes MCP (via ownerRef)
+	// - TTL and request cleanup are handled by MCR controller, not ObjectKeeper
 	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
-	r.Logger.Info("Step 1: Creating Retainer for MCR", "retainer", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
 
-	retainer := &iretainer.IRetainer{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "deckhouse.io/v1alpha1",
-			Kind:       "IRetainer",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: retainerName,
-			// Retainer has NO ownerRef - it's a top-level resource
-		},
-		Spec: iretainer.IRetainerSpec{
-			Mode: "FollowObjectWithTTL",
-			FollowObjectRef: &iretainer.FollowObjectRef{
-				APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
-				Kind:       "ManifestCaptureRequest",
-				Namespace:  mcr.Namespace,
-				Name:       mcr.Name,
-				UID:        string(mcr.UID),
+	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
+	if errors.IsNotFound(err) {
+		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: DeckhouseAPIVersion,
+				Kind:       KindObjectKeeper,
 			},
-			TTL: &metav1.Duration{
-				Duration: 10 * time.Minute,
+			ObjectMeta: metav1.ObjectMeta{
+				Name: retainerName,
 			},
-		},
-	}
-
-	// Create Retainer first
-	if err := r.Create(ctx, retainer); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			r.Logger.Error(err, "Failed to create Retainer", "name", retainerName, "mode", retainer.Spec.Mode)
+			Spec: deckhousev1alpha1.ObjectKeeperSpec{
+				Mode: "FollowObject",
+				FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "ManifestCaptureRequest",
+					Namespace:  mcr.Namespace,
+					Name:       mcr.Name,
+					UID:        string(mcr.UID),
+				},
+			},
+		}
+		if err := r.Create(ctx, objectKeeper); err != nil {
+			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
 			base := mcr.DeepCopy()
-			message := fmt.Sprintf("Failed to create Retainer: %v", err)
+			message := fmt.Sprintf("Failed to create ObjectKeeper: %v", err)
 			mcr.Status.ErrorReason = ConditionReasonInternalError
 			mcr.Status.ObservedGeneration = mcr.Generation
 			now := metav1.Now()
@@ -302,20 +355,29 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			}
 			return ctrl.Result{}, err
 		}
-		// Retainer already exists, get it and use it
-		existingRetainer := &iretainer.IRetainer{}
-		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, existingRetainer); err != nil {
-			r.Logger.Error(err, "Failed to get existing Retainer", "name", retainerName)
-			return ctrl.Result{}, fmt.Errorf("failed to get existing Retainer: %w", err)
+		r.Logger.Info("Created ObjectKeeper", "name", retainerName)
+		// Re-read to get UID
+		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to get created ObjectKeeper: %w", err)
 		}
-		retainer = existingRetainer
-		r.Logger.Info("Retainer already exists, using existing", "retainer", retainerName, "uid", retainer.UID, "mode", retainer.Spec.Mode)
-	} else {
-		r.Logger.Info("✅ Step 1 complete: Created Retainer",
-			"retainer", retainerName,
-			"uid", retainer.UID,
+		r.Logger.Info("✅ Step 1 complete: Created ObjectKeeper",
+			"objectKeeper", retainerName,
+			"uid", objectKeeper.UID,
 			"checkpoint", checkpointName,
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+	} else if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
+	} else {
+		// ObjectKeeper exists - validate it belongs to this MCR
+		// This protects against race conditions where MCR was deleted and recreated with same name
+		if objectKeeper.Spec.FollowObjectRef == nil {
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
+		}
+		if objectKeeper.Spec.FollowObjectRef.UID != string(mcr.UID) {
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another MCR (UID mismatch: expected %s, got %s)",
+				retainerName, string(mcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
+		}
+		r.Logger.Info("ObjectKeeper already exists, using existing", "objectKeeper", retainerName, "uid", objectKeeper.UID)
 	}
 
 	// If checkpoint already exists → skip creation (assume it's correct)
@@ -326,9 +388,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
-	// Create ManifestCheckpoint with ownerRef to ret-mcr-* Retainer
+	// Create ManifestCheckpoint with ownerRef to ret-mcr-* ObjectKeeper
 	// ADR: Checkpoint MUST have ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
-	// This is the single Retainer that holds both MCR and MCP
+	// This is the single ObjectKeeper that holds both MCR and MCP
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
@@ -343,10 +405,10 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			// ADR: Checkpoint has ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: "deckhouse.io/v1alpha1",
-					Kind:       "IRetainer",
+					APIVersion: DeckhouseAPIVersion,
+					Kind:       KindObjectKeeper,
 					Name:       retainerName, // This is ret-mcr-<namespace>-<mcrName>
-					UID:        retainer.UID,
+					UID:        objectKeeper.UID,
 					Controller: func() *bool { b := true; return &b }(),
 				},
 			},
@@ -367,7 +429,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			r.Logger.Error(err, "Failed to create ManifestCheckpoint",
 				"checkpoint", checkpointName,
 				"owner", retainerName,
-				"ownerUID", retainer.UID)
+				"ownerUID", objectKeeper.UID)
 			base := mcr.DeepCopy()
 			message := fmt.Sprintf("Failed to create checkpoint: %v", err)
 			mcr.Status.ErrorReason = ConditionReasonInternalError
@@ -414,8 +476,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"checkpoint", checkpointName,
 			"uid", checkpoint.UID,
 			"ownerRefs", ownerRefDetails,
-			"retainerName", retainerName,
-			"retainerUID", retainer.UID)
+			"objectKeeperName", retainerName,
+			"objectKeeperUID", objectKeeper.UID)
 	}
 
 	// NOW create chunks (checkpoint exists, so ownerRef will work)
@@ -518,17 +580,29 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		LastTransitionTime: completionTime,
 		ObservedGeneration: mcr.Generation,
 	})
-	if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
-		return ctrl.Result{}, err
+	// Set TTL annotation when marking as Ready (same Patch as Ready condition)
+	// Use retry on conflict to handle concurrent updates
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.ManifestCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+			return err
+		}
+		// Apply status changes
+		current.Status = mcr.Status
+		// Set TTL annotation
+		r.setTTLAnnotation(current)
+		// Patch both metadata (annotations) and status in the same operation.
+		// This is intentional: status updates and annotation changes should be atomic.
+		// Using Patch (not Status().Patch) ensures both are updated together, preventing
+		// race conditions where status and annotations get out of sync.
+		return r.Patch(ctx, current, client.MergeFrom(base))
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update MCR with Ready condition and TTL annotation: %w", err)
 	}
 
-	// NOTE: We do NOT set ttl-start-timestamp here for ret-mcr-* retainer
-	// ADR: ret-mcr-* is a FollowObjectWithTTL retainer, not a checkpoint retainer
-	// For FollowObjectWithTTL mode:
-	// - TTL should start ONLY when the followed object (MCR) is deleted
-	// - Setting ttl-start-timestamp at MCR completion would cause TTL to start prematurely
-	// - RetainerController.reconcileFollowObjectWithTTL will set ttl-start-timestamp when MCR is deleted
-	// This ensures correct TTL behavior: retainer lives while MCR exists, TTL starts only after MCR deletion
+	// NOTE: ObjectKeeper uses FollowObject mode (no TTL)
+	// ObjectKeeper follows MCR lifecycle and is automatically deleted when MCR is deleted
+	// TTL and request cleanup are handled by MCR controller, not ObjectKeeper
 
 	r.Logger.Info("ManifestCaptureRequest processed successfully",
 		"name", mcr.Name,
@@ -1205,6 +1279,147 @@ func (r *ManifestCheckpointController) isNamespacedResource(gv schema.GroupVersi
 	// For other groups, assume namespaced unless explicitly cluster-scoped
 	// This is a heuristic - in production you might want to use RESTMapper
 	return true
+}
+
+// setTTLAnnotation sets TTL annotation on the object
+// TTL is set when Ready/Failed condition is set, and used for automatic deletion
+// TTL comes from configuration (state-snapshotter module settings), not from MCR spec
+// If annotation already exists, it is not overwritten (idempotent)
+func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.ManifestCaptureRequest) {
+	// Don't overwrite if annotation already exists
+	if mcr.Annotations != nil {
+		if _, exists := mcr.Annotations[AnnotationKeyTTL]; exists {
+			return
+		}
+	}
+	if mcr.Annotations == nil {
+		mcr.Annotations = make(map[string]string)
+	}
+	// Get TTL from configuration (default: 168h)
+	ttlStr := config.DefaultTTLStr
+	if r.Config != nil && r.Config.DefaultTTLStr != "" {
+		ttlStr = r.Config.DefaultTTLStr
+	}
+	mcr.Annotations[AnnotationKeyTTL] = ttlStr
+}
+
+// checkAndHandleTTL checks if TTL has expired and deletes the object if needed
+// Returns (shouldDelete, requeueAfter, error)
+func (r *ManifestCheckpointController) checkAndHandleTTL(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest) (bool, time.Duration, error) {
+	// Check if TTL annotation exists
+	ttlStr, hasTTL := mcr.Annotations[AnnotationKeyTTL]
+	if !hasTTL {
+		// No TTL annotation, nothing to do
+		return false, 0, nil
+	}
+
+	// Parse TTL duration
+	ttl, err := time.ParseDuration(ttlStr)
+	if err != nil {
+		// Invalid TTL format - log error but don't break Ready status if object is already completed
+		// This prevents breaking UX: if MCR is already Ready=True, we shouldn't change it to False
+		// just because TTL annotation is invalid. The object will remain until manually deleted.
+		l := log.FromContext(ctx)
+		l.Error(err, "Invalid TTL annotation format, object will not be auto-deleted", "ttl", ttlStr, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+
+		// Check if object is already in terminal state (Ready=True or Failed=True)
+		// If so, don't modify conditions - just return without TTL cleanup
+		readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, ConditionTypeReady)
+		failedCondition := meta.FindStatusCondition(mcr.Status.Conditions, ConditionTypeFailed)
+		isTerminal := (readyCondition != nil && readyCondition.Status == metav1.ConditionTrue) ||
+			(failedCondition != nil && failedCondition.Status == metav1.ConditionTrue)
+
+		if isTerminal {
+			// Object is already completed - don't break its status, just skip TTL cleanup
+			return false, 0, nil
+		}
+
+		// Object is not yet terminal - safe to set Ready=False to inform user about TTL issue
+		base := mcr.DeepCopy()
+		mcr.Status.ObservedGeneration = mcr.Generation
+		now := metav1.Now()
+		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             ConditionReasonInvalidTTL,
+			Message:            fmt.Sprintf("Invalid TTL annotation format: %s (error: %v). Object will not be auto-deleted.", ttlStr, err),
+			LastTransitionTime: now,
+			ObservedGeneration: mcr.Generation,
+		})
+		// Use retry on conflict to handle concurrent updates
+		// NOTE: We patch both status and metadata (annotations) in the same operation.
+		// This is intentional: status updates and annotation changes should be atomic.
+		// If someone modifies metadata separately, this ensures consistency.
+		if patchErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &storagev1alpha1.ManifestCaptureRequest{}
+			if getErr := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); getErr != nil {
+				return getErr
+			}
+			current.Status = mcr.Status
+			return r.Status().Patch(ctx, current, client.MergeFrom(base))
+		}); patchErr != nil {
+			l.Error(patchErr, "Failed to update status with InvalidTTL condition")
+			return false, 0, patchErr
+		}
+		return false, 0, nil
+	}
+
+	// Calculate expiration time: CompletionTimestamp + TTL
+	// IMPORTANT: TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Failed=True),
+	// NOT from creation time or deletion time. This ensures TTL cleanup happens only after successful completion.
+	// This semantic is different from the old IRetainer TTL which started after object deletion.
+	if mcr.Status.CompletionTimestamp == nil {
+		// No completion timestamp yet, TTL hasn't started
+		return false, 0, nil
+	}
+
+	completionTime := mcr.Status.CompletionTimestamp.Time
+	expirationTime := completionTime.Add(ttl)
+	now := time.Now()
+
+	// Check if TTL has expired
+	if now.After(expirationTime) {
+		// TTL expired, delete the object
+		// NOTE: MCR deletion is safe: ObjectKeeper follows MCR lifecycle.
+		// When MCR is deleted, ObjectKeeper is automatically deleted (follows object).
+		// When ObjectKeeper is deleted, GC deletes checkpoint through ownerRef.
+		log.FromContext(ctx).Info("TTL expired, deleting ManifestCaptureRequest",
+			"namespace", mcr.Namespace,
+			"name", mcr.Name,
+			"completionTime", completionTime,
+			"expirationTime", expirationTime,
+		)
+		if err := r.Delete(ctx, mcr); err != nil {
+			if errors.IsNotFound(err) {
+				// Already deleted, that's fine (double-delete is safe)
+				return true, 0, nil
+			}
+			return false, 0, fmt.Errorf("failed to delete expired ManifestCaptureRequest: %w", err)
+		}
+		return true, 0, nil
+	}
+
+	// TTL not expired yet, calculate requeue time with jitter to avoid reconcile flood
+	timeUntilExpiration := expirationTime.Sub(now)
+	// Requeue after min(timeLeft, 1m), but not less than 30s
+	requeueAfter := timeUntilExpiration
+	if requeueAfter > time.Minute {
+		requeueAfter = time.Minute
+	}
+	if requeueAfter < 30*time.Second {
+		requeueAfter = 30 * time.Second
+	}
+
+	// Add jitter (±10%) to avoid reconcile flood when multiple MCR expire simultaneously
+	// This follows the pattern used by JobController, DeploymentController, etc.
+	jitterRange := requeueAfter / 10 // 10% jitter
+	jitter := time.Duration(mathrand.Int63n(int64(2*jitterRange))) - jitterRange
+	requeueAfter = requeueAfter + jitter
+	if requeueAfter < 30*time.Second {
+		requeueAfter = 30 * time.Second // Ensure minimum after jitter
+	}
+
+	return false, requeueAfter, nil
 }
 
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {

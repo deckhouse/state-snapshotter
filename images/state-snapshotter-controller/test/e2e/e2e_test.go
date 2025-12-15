@@ -37,8 +37,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 )
 
 const (
@@ -82,33 +82,33 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			}
 		}
 
-		// Delete all Retainers created in this test
-		retainers := &iretainer.IRetainerList{}
-		if err := k8sClient.List(ctx, retainers); err == nil {
-			for i := range retainers.Items {
-				ret := &retainers.Items[i]
-				// ADR: Only ONE Retainer exists per MCR: ret-mcr-{namespace}-{mcrName}
-				// Delete MCR retainers for this namespace
-				if strings.HasPrefix(ret.Name, fmt.Sprintf("ret-mcr-%s-", testNS)) {
-					_ = k8sClient.Delete(ctx, ret)
+		// Delete all ObjectKeepers created in this test
+		objectKeepers := &deckhousev1alpha1.ObjectKeeperList{}
+		if err := k8sClient.List(ctx, objectKeepers); err == nil {
+			for i := range objectKeepers.Items {
+				ok := &objectKeepers.Items[i]
+				// ADR: Only ONE ObjectKeeper exists per MCR: ret-mcr-{namespace}-{mcrName}
+				// Delete MCR ObjectKeepers for this namespace
+				if strings.HasPrefix(ok.Name, fmt.Sprintf("ret-mcr-%s-", testNS)) {
+					_ = k8sClient.Delete(ctx, ok)
 					continue
 				}
-				// Legacy cleanup: Delete any old retainers that might have been created with old format
+				// Legacy cleanup: Delete any old ObjectKeepers that might have been created with old format
 				// (ret-{checkpointName}) - these should not exist with current ADR implementation
-				if strings.HasPrefix(ret.Name, "ret-") && !strings.HasPrefix(ret.Name, "ret-mcr-") {
-					// Extract checkpoint name from retainer name: "ret-{checkpointName}"
-					checkpointName := strings.TrimPrefix(ret.Name, "ret-")
+				if strings.HasPrefix(ok.Name, "ret-") && !strings.HasPrefix(ok.Name, "ret-mcr-") {
+					// Extract checkpoint name from ObjectKeeper name: "ret-{checkpointName}"
+					checkpointName := strings.TrimPrefix(ok.Name, "ret-")
 					// Check if this checkpoint belongs to our test namespace
 					cp := &storagev1alpha1.ManifestCheckpoint{}
 					if err := k8sClient.Get(ctx, types.NamespacedName{Name: checkpointName}, cp); err == nil {
 						if cp.Spec.ManifestCaptureRequestRef != nil &&
 							cp.Spec.ManifestCaptureRequestRef.Namespace == testNS {
-							// Legacy retainer found - delete it (should not exist with current ADR)
-							_ = k8sClient.Delete(ctx, ret)
+							// Legacy ObjectKeeper found - delete it (should not exist with current ADR)
+							_ = k8sClient.Delete(ctx, ok)
 						}
 					} else {
-						// Checkpoint doesn't exist (already deleted), safe to delete retainer
-						_ = k8sClient.Delete(ctx, ret)
+						// Checkpoint doesn't exist (already deleted), safe to delete ObjectKeeper
+						_ = k8sClient.Delete(ctx, ok)
 					}
 				}
 			}
@@ -387,8 +387,8 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 	// === GROUP 5: RETAINERS ===
 
-	Describe("Retainers", func() {
-		It("should create MCR TTL Retainer with correct TTL", func() {
+	Describe("ObjectKeepers", func() {
+		It("should create MCR ObjectKeeper with FollowObject mode", func() {
 			createConfigMap(ctx, testNS, TestFixtures.TestConfigMapName, TestFixtures.TestConfigMapData)
 			targets := []storagev1alpha1.ManifestTarget{
 				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
@@ -398,21 +398,20 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Wait for Ready
 			waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
-			// Verify MCR TTL Retainer
+			// Verify MCR ObjectKeeper
 			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
-			ret := getRetainer(ctx, retainerName)
+			ok := getRetainer(ctx, retainerName)
 
-			Expect(ret.Spec.Mode).To(Equal("FollowObjectWithTTL"))
-			Expect(ret.Spec.TTL).NotTo(BeNil())
-			Expect(ret.Spec.TTL.Duration).To(Equal(10 * time.Minute))
-			Expect(ret.Spec.FollowObjectRef).NotTo(BeNil())
-			Expect(ret.Spec.FollowObjectRef.Kind).To(Equal("ManifestCaptureRequest"))
-			Expect(ret.Spec.FollowObjectRef.Name).To(Equal(TestFixtures.TestMCRName))
-			Expect(ret.Spec.FollowObjectRef.Namespace).To(Equal(testNS))
-			Expect(ret.Spec.FollowObjectRef.UID).To(Equal(string(mcr.UID)))
+			Expect(ok.Spec.Mode).To(Equal("FollowObject"))
+			Expect(ok.Spec.FollowObjectRef).NotTo(BeNil())
+			Expect(ok.Spec.FollowObjectRef.Kind).To(Equal("ManifestCaptureRequest"))
+			Expect(ok.Spec.FollowObjectRef.Name).To(Equal(TestFixtures.TestMCRName))
+			Expect(ok.Spec.FollowObjectRef.Namespace).To(Equal(testNS))
+			Expect(ok.Spec.FollowObjectRef.UID).To(Equal(string(mcr.UID)))
+			// ObjectKeeper has no TTL (TTL is handled by MCR controller)
 		})
 
-		It("should create MCR Retainer with ownerRef", func() {
+		It("should create MCR ObjectKeeper with ownerRef", func() {
 			createConfigMap(ctx, testNS, TestFixtures.TestConfigMapName, TestFixtures.TestConfigMapData)
 			targets := []storagev1alpha1.ManifestTarget{
 				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
@@ -423,45 +422,45 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			mcr := waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 			checkpointName := mcr.Status.CheckpointName
 
-			// ADR: Only ONE Retainer exists: ret-mcr-<namespace>-<mcrName>
-			// This Retainer:
-			// - Uses FollowObjectWithTTL mode to follow MCR (implements MCR TTL)
-			// - Holds the ManifestCheckpoint (MCP has ownerRef to this Retainer)
+			// ADR: Only ONE ObjectKeeper exists: ret-mcr-<namespace>-<mcrName>
+			// This ObjectKeeper:
+			// - Uses FollowObject mode to follow MCR (no TTL - TTL is handled by MCR controller)
+			// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
 			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
-			ret := getRetainer(ctx, retainerName)
+			ok := getRetainer(ctx, retainerName)
 
-			// Verify retainer follows MCR in FollowObjectWithTTL mode
-			Expect(ret.Spec.Mode).To(Equal("FollowObjectWithTTL"), "Retainer must use FollowObjectWithTTL mode to follow MCR")
-			Expect(ret.Spec.FollowObjectRef).NotTo(BeNil(), "Retainer must follow MCR")
-			Expect(ret.Spec.FollowObjectRef.APIVersion).To(Equal("state-snapshotter.deckhouse.io/v1alpha1"))
-			Expect(ret.Spec.FollowObjectRef.Kind).To(Equal("ManifestCaptureRequest"))
-			Expect(ret.Spec.FollowObjectRef.Namespace).To(Equal(testNS))
-			Expect(ret.Spec.FollowObjectRef.Name).To(Equal(TestFixtures.TestMCRName))
-			Expect(ret.Spec.FollowObjectRef.UID).To(Equal(string(mcr.UID)))
-			Expect(ret.Spec.TTL).NotTo(BeNil(), "Retainer must have TTL for FollowObjectWithTTL mode")
+			// Verify ObjectKeeper follows MCR in FollowObject mode
+			Expect(ok.Spec.Mode).To(Equal("FollowObject"), "ObjectKeeper must use FollowObject mode to follow MCR")
+			Expect(ok.Spec.FollowObjectRef).NotTo(BeNil(), "ObjectKeeper must follow MCR")
+			Expect(ok.Spec.FollowObjectRef.APIVersion).To(Equal("state-snapshotter.deckhouse.io/v1alpha1"))
+			Expect(ok.Spec.FollowObjectRef.Kind).To(Equal("ManifestCaptureRequest"))
+			Expect(ok.Spec.FollowObjectRef.Namespace).To(Equal(testNS))
+			Expect(ok.Spec.FollowObjectRef.Name).To(Equal(TestFixtures.TestMCRName))
+			Expect(ok.Spec.FollowObjectRef.UID).To(Equal(string(mcr.UID)))
+			// ObjectKeeper has no TTL (TTL is handled by MCR controller)
 
-			// Verify MCP has ownerRef to this Retainer
+			// Verify MCP has ownerRef to this ObjectKeeper
 			mcp := getManifestCheckpoint(ctx, checkpointName)
-			Expect(len(mcp.OwnerReferences)).To(Equal(1), "MCP must have exactly one ownerRef to ret-mcr-* Retainer")
+			Expect(len(mcp.OwnerReferences)).To(Equal(1), "MCP must have exactly one ownerRef to ret-mcr-* ObjectKeeper")
 			ref := mcp.OwnerReferences[0]
-			Expect(ref.Kind).To(Equal("IRetainer"))
+			Expect(ref.Kind).To(Equal("ObjectKeeper"))
 			Expect(ref.Name).To(Equal(retainerName))
-			Expect(ref.UID).To(Equal(ret.UID))
+			Expect(ref.UID).To(Equal(ok.UID))
 			Expect(ref.Controller).NotTo(BeNil())
-			Expect(*ref.Controller).To(BeTrue(), "Retainer must be controller owner of MCP")
+			Expect(*ref.Controller).To(BeTrue(), "ObjectKeeper must be controller owner of MCP")
 		})
 
-		// TestRetainerCheckpointTTLExpiration verifies that when a checkpoint's TTL Retainer expires,
-		// the checkpoint is automatically deleted by garbage collection (via ownerReference).
-		// ADR states: checkpoint lives as long as its retainers hold it.
-		// Note: RetainerController calculates expiration as CreationTimestamp + TTL.Duration,
-		// so we need to delete the old retainer and create a new one with short TTL.
+		// TestObjectKeeperFollowsMCR verifies that when MCR is deleted, ObjectKeeper is also deleted
+		// (because it follows MCR in FollowObject mode), and checkpoint is deleted via GC.
+		// ADR states: ObjectKeeper follows MCR lifecycle. When MCR is deleted, ObjectKeeper is deleted.
+		// When ObjectKeeper is deleted, GC deletes checkpoint through ownerRef.
 		// IMPORTANT: In envtest, kube-controller-manager is not running, so actual GC won't work.
 		// This test verifies that:
-		// 1. Retainer is deleted after TTL expiration
-		// 2. Checkpoint has correct ownerReference (Controller=true) to retainer for GC to work in real cluster
-		// In a real cluster with kube-controller-manager, when retainer is deleted, checkpoint would be deleted automatically.
-		It("should delete checkpoint after MCR retainer expires when MCR is deleted", func() {
+		// 1. ObjectKeeper follows MCR in FollowObject mode (no TTL - TTL is handled by MCR controller)
+		// 2. When MCR is deleted, ObjectKeeper is automatically deleted (follows object)
+		// 3. Checkpoint has correct ownerReference (Controller=true) to ObjectKeeper for GC to work in real cluster
+		// In a real cluster with kube-controller-manager, when ObjectKeeper is deleted, checkpoint would be deleted automatically.
+		It("should delete checkpoint when MCR is deleted (ObjectKeeper follows MCR)", func() {
 			createConfigMap(ctx, testNS, TestFixtures.TestConfigMapName, TestFixtures.TestConfigMapData)
 			targets := []storagev1alpha1.ManifestTarget{
 				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
@@ -472,23 +471,23 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			mcr := waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 			checkpointName := mcr.Status.CheckpointName
 
-			// Get checkpoint and MCR retainer
+			// Get checkpoint and MCR ObjectKeeper
 			mcp := getManifestCheckpoint(ctx, checkpointName)
 			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
-			ret := getRetainer(ctx, retainerName)
+			ok := getRetainer(ctx, retainerName)
 
-			// Verify retainer exists and follows MCR
-			Expect(ret.Spec.Mode).To(Equal("FollowObjectWithTTL"))
-			Expect(ret.Spec.TTL).NotTo(BeNil())
+			// Verify ObjectKeeper exists and follows MCR
+			Expect(ok.Spec.Mode).To(Equal("FollowObject"))
+			// ObjectKeeper has no TTL (TTL is handled by MCR controller)
 
-			// Verify checkpoint has ownerRef to retainer
+			// Verify checkpoint has ownerRef to ObjectKeeper
 			Expect(len(mcp.OwnerReferences)).To(Equal(1))
-			Expect(mcp.OwnerReferences[0].Kind).To(Equal("IRetainer"))
+			Expect(mcp.OwnerReferences[0].Kind).To(Equal("ObjectKeeper"))
 			Expect(mcp.OwnerReferences[0].Name).To(Equal(retainerName))
 			Expect(mcp.OwnerReferences[0].Controller).NotTo(BeNil())
 			Expect(*mcp.OwnerReferences[0].Controller).To(BeTrue())
 
-			// Delete MCR - this should trigger TTL countdown in retainer
+			// Delete MCR - ObjectKeeper should be automatically deleted (follows object)
 			err := k8sClient.Delete(ctx, mcr)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -498,30 +497,24 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 				return errors.IsNotFound(err)
 			}, testTimeout, pollInterval).Should(BeTrue(), "MCR should be deleted")
 
-			// Wait for retainer to detect MCR deletion and start TTL countdown
-			// RetainerController should set ttl-start-timestamp when MCR is deleted
+			// Wait for ObjectKeeper to be deleted (it follows MCR)
+			// ObjectKeeperController should delete ObjectKeeper when MCR is deleted
 			Eventually(func() bool {
-				updatedRet := &iretainer.IRetainer{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: retainerName}, updatedRet)
-				if err != nil {
-					return false
-				}
-				// Check if ttl-start-timestamp annotation is set (indicates TTL countdown started)
-				return updatedRet.Annotations != nil &&
-					updatedRet.Annotations["retainer.deckhouse.io/ttl-start-timestamp"] != ""
-			}, testTimeout, pollInterval).Should(BeTrue(), "Retainer should start TTL countdown after MCR deletion")
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: retainerName}, &deckhousev1alpha1.ObjectKeeper{})
+				return errors.IsNotFound(err)
+			}, testTimeout, pollInterval).Should(BeTrue(), "ObjectKeeper should be deleted when MCR is deleted")
 
-			// Note: In envtest, we can't easily test full TTL expiration (10 minutes default)
+			// Note: In envtest, kube-controller-manager is not running, so actual GC won't work.
 			// This test verifies that:
-			// 1. Retainer correctly detects MCR deletion
-			// 2. TTL countdown starts (ttl-start-timestamp is set)
+			// 1. ObjectKeeper correctly follows MCR (FollowObject mode)
+			// 2. ObjectKeeper is deleted when MCR is deleted
 			// 3. Checkpoint has correct ownerReference for GC
-			// In a real cluster, when retainer expires after TTL, it would be deleted and GC would delete checkpoint
+			// In a real cluster with kube-controller-manager, when ObjectKeeper is deleted, checkpoint would be deleted automatically via GC.
 		})
 
-		// TestRetainerMCRDoesNotAffectCheckpoint verifies that MCR-retainer deletion
-		// does not affect checkpoint. MCR-retainer is only for MCR TTL, not checkpoint.
-		It("should delete checkpoint when MCR retainer is deleted (GC via ownerRef)", func() {
+		// TestObjectKeeperDeletionAffectsCheckpoint verifies that MCR ObjectKeeper deletion
+		// triggers checkpoint deletion via GC (via ownerReference).
+		It("should delete checkpoint when MCR ObjectKeeper is deleted (GC via ownerRef)", func() {
 			createConfigMap(ctx, testNS, TestFixtures.TestConfigMapName, TestFixtures.TestConfigMapData)
 			targets := []storagev1alpha1.ManifestTarget{
 				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
@@ -536,32 +529,32 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			mcp := getManifestCheckpoint(ctx, checkpointName)
 			Expect(mcp).NotTo(BeNil())
 
-			// Verify checkpoint has ownerRef to MCR retainer
+			// Verify checkpoint has ownerRef to MCR ObjectKeeper
 			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
 			Expect(len(mcp.OwnerReferences)).To(Equal(1))
-			Expect(mcp.OwnerReferences[0].Kind).To(Equal("IRetainer"))
+			Expect(mcp.OwnerReferences[0].Kind).To(Equal("ObjectKeeper"))
 			Expect(mcp.OwnerReferences[0].Name).To(Equal(retainerName))
 			Expect(mcp.OwnerReferences[0].Controller).NotTo(BeNil())
 			Expect(*mcp.OwnerReferences[0].Controller).To(BeTrue())
 
-			// Get MCR retainer
-			mcrRet := getRetainer(ctx, retainerName)
-			Expect(mcrRet).NotTo(BeNil())
+			// Get MCR ObjectKeeper
+			mcrOK := getRetainer(ctx, retainerName)
+			Expect(mcrOK).NotTo(BeNil())
 
-			// Delete MCR retainer manually (simulating TTL expiration)
-			// ADR: When retainer expires, it's deleted → GC deletes MCP (via ownerRef)
-			err := k8sClient.Delete(ctx, mcrRet)
+			// Delete MCR ObjectKeeper manually (simulating deletion)
+			// ADR: When ObjectKeeper is deleted → GC deletes MCP (via ownerRef)
+			err := k8sClient.Delete(ctx, mcrOK)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Wait for retainer to be deleted
+			// Wait for ObjectKeeper to be deleted
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: retainerName}, &iretainer.IRetainer{})
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: retainerName}, &deckhousev1alpha1.ObjectKeeper{})
 				return errors.IsNotFound(err)
-			}, testTimeout, pollInterval).Should(BeTrue(), "MCR retainer should be deleted")
+			}, testTimeout, pollInterval).Should(BeTrue(), "MCR ObjectKeeper should be deleted")
 
 			// Note: In envtest, kube-controller-manager is not running, so actual GC won't work.
 			// This test verifies the ownerReference setup (Controller=true) that would trigger GC in a real cluster.
-			// In a real cluster with kube-controller-manager, when retainer is deleted, checkpoint would be deleted automatically via GC.
+			// In a real cluster with kube-controller-manager, when ObjectKeeper is deleted, checkpoint would be deleted automatically via GC.
 			// For now, we just verify that checkpoint still exists (GC doesn't work in envtest)
 			// but the ownerRef is correctly set for GC to work in real cluster.
 			mcp = getManifestCheckpoint(ctx, checkpointName)
@@ -645,10 +638,10 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(mcp).NotTo(BeNil())
 
 			// CRITICAL: Verify checkpoint has NO ownerRef to MCR or Namespace
-			// Checkpoint should only have ownerRef to Retainer
+			// Checkpoint should only have ownerRef to ObjectKeeper
 			hasMCRRef := false
 			hasNamespaceRef := false
-			hasRetainerRef := false
+			hasObjectKeeperRef := false
 			for _, ref := range mcp.OwnerReferences {
 				if ref.Kind == "ManifestCaptureRequest" {
 					hasMCRRef = true
@@ -656,25 +649,25 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 				if ref.Kind == "Namespace" {
 					hasNamespaceRef = true
 				}
-				if ref.Kind == "IRetainer" {
-					hasRetainerRef = true
+				if ref.Kind == "ObjectKeeper" {
+					hasObjectKeeperRef = true
 				}
 			}
 			Expect(hasMCRRef).To(BeFalse(), "Checkpoint must NOT have ownerRef to ManifestCaptureRequest")
 			Expect(hasNamespaceRef).To(BeFalse(), "Checkpoint must NOT have ownerRef to Namespace")
-			Expect(hasRetainerRef).To(BeTrue(), "Checkpoint must have ownerRef to Retainer")
+			Expect(hasObjectKeeperRef).To(BeTrue(), "Checkpoint must have ownerRef to ObjectKeeper")
 
-			// ADR: Only ONE Retainer exists: ret-mcr-<namespace>-<mcrName>
-			// This Retainer uses FollowObjectWithTTL mode to follow MCR
+			// ADR: Only ONE ObjectKeeper exists: ret-mcr-<namespace>-<mcrName>
+			// This ObjectKeeper uses FollowObject mode to follow MCR
 			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
-			var retainer iretainer.IRetainer
-			err := k8sClient.Get(ctx, client.ObjectKey{Name: retainerName}, &retainer)
-			Expect(err).NotTo(HaveOccurred(), "MCR retainer should exist")
-			Expect(retainer.Spec.Mode).To(Equal("FollowObjectWithTTL"), "Retainer must use FollowObjectWithTTL mode to follow MCR")
-			Expect(retainer.Spec.FollowObjectRef).NotTo(BeNil(), "Retainer must follow MCR")
-			Expect(retainer.Spec.FollowObjectRef.Kind).To(Equal("ManifestCaptureRequest"))
-			Expect(retainer.Spec.FollowObjectRef.Namespace).To(Equal(testNS))
-			Expect(retainer.Spec.FollowObjectRef.Name).To(Equal(TestFixtures.TestMCRName))
+			var objectKeeper deckhousev1alpha1.ObjectKeeper
+			err := k8sClient.Get(ctx, client.ObjectKey{Name: retainerName}, &objectKeeper)
+			Expect(err).NotTo(HaveOccurred(), "MCR ObjectKeeper should exist")
+			Expect(objectKeeper.Spec.Mode).To(Equal("FollowObject"), "ObjectKeeper must use FollowObject mode to follow MCR")
+			Expect(objectKeeper.Spec.FollowObjectRef).NotTo(BeNil(), "ObjectKeeper must follow MCR")
+			Expect(objectKeeper.Spec.FollowObjectRef.Kind).To(Equal("ManifestCaptureRequest"))
+			Expect(objectKeeper.Spec.FollowObjectRef.Namespace).To(Equal(testNS))
+			Expect(objectKeeper.Spec.FollowObjectRef.Name).To(Equal(TestFixtures.TestMCRName))
 
 			// Delete MCR first (in real cluster, this would be cascaded from namespace deletion)
 			// In envtest, we need to explicitly delete MCR to allow namespace deletion
@@ -715,31 +708,21 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Wait a bit for any cascading operations to complete
 			time.Sleep(1 * time.Second)
 
-			// Verify retainer still exists (it should not be deleted because it uses TTL mode)
-			// In envtest, retainer might be deleted by RetainerController if it follows MCR,
-			// but since it uses TTL mode, it should remain
-			// Use Eventually to handle potential race conditions
+			// Verify ObjectKeeper is deleted (it follows MCR, so when MCR is deleted, ObjectKeeper is deleted)
+			// ObjectKeeperController should delete ObjectKeeper when MCR is deleted (FollowObject mode)
 			Eventually(func() bool {
-				var retainerAfterDelete iretainer.IRetainer
-				err := k8sClient.Get(ctx, client.ObjectKey{Name: retainerName}, &retainerAfterDelete)
-				if err != nil {
-					return false
-				}
-				// ADR: Retainer remains in FollowObjectWithTTL mode
-				// After MCR deletion, retainer starts TTL countdown (ttl-start-timestamp is set)
-				// Mode doesn't change, but TTL countdown begins
-				return retainerAfterDelete.Spec.Mode == "FollowObjectWithTTL" &&
-					retainerAfterDelete.Annotations != nil &&
-					retainerAfterDelete.Annotations["retainer.deckhouse.io/ttl-start-timestamp"] != ""
-			}, testTimeout, pollInterval).Should(BeTrue(), "MCR retainer should remain after namespace deletion and start TTL countdown")
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: retainerName}, &deckhousev1alpha1.ObjectKeeper{})
+				return errors.IsNotFound(err)
+			}, testTimeout, pollInterval).Should(BeTrue(), "MCR ObjectKeeper should be deleted when MCR is deleted")
 
-			// Verify checkpoint remains (cluster-scoped, not affected by namespace deletion)
-			// Checkpoint should NOT be deleted because:
-			// 1. It has NO ownerRef to MCR or Namespace (only to Retainer)
-			// 2. MCR Retainer uses FollowObjectWithTTL mode - when MCR is deleted, retainer starts TTL countdown
-			// 3. Retainer still exists (TTL hasn't expired yet), so checkpoint should remain via ownerRef
-			// 4. After TTL expires, retainer will be deleted → GC will delete checkpoint (in real cluster)
-			// Use Eventually to handle potential race conditions
+			// Note: In envtest, kube-controller-manager is not running, so actual GC won't work.
+			// In a real cluster:
+			// 1. When namespace is deleted, MCR is deleted (cascading)
+			// 2. When MCR is deleted, ObjectKeeper is deleted (follows object)
+			// 3. When ObjectKeeper is deleted, checkpoint is deleted via GC (ownerRef)
+			// This test verifies that checkpoint has correct ownerRef setup for GC to work in real cluster.
+			// For now, we just verify that checkpoint still exists (GC doesn't work in envtest)
+			// but the ownerRef is correctly set for GC to work in real cluster.
 			Eventually(func() bool {
 				var err error
 				mcp, err = func() (*storagev1alpha1.ManifestCheckpoint, error) {
@@ -749,7 +732,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 					return mcp, err
 				}()
 				return err == nil && mcp != nil
-			}, testTimeout, pollInterval).Should(BeTrue(), "Checkpoint should remain after namespace deletion")
+			}, testTimeout, pollInterval).Should(BeTrue(), "Checkpoint still exists (GC doesn't work in envtest, but ownerRef is correct for real cluster)")
 
 			// Verify chunks remain (cluster-scoped, not affected by namespace deletion)
 			chunks := listManifestCheckpointContentChunks(ctx, checkpointName)
