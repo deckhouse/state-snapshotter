@@ -158,7 +158,7 @@ func main() {
 	log.Info("[main] successfully created kubernetes manager")
 
 	// Add controllers
-	if err := controllers.AddManifestCheckpointControllerToManager(mgr, log, cfgParams); err != nil {
+	if err := controllers.AddManifestCheckpointControllerToManager(mgr, log, cfgParams, ctx); err != nil {
 		log.Error(err, "Failed to add ManifestCheckpointController to manager")
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)

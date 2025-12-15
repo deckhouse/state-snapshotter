@@ -17,6 +17,8 @@ limitations under the License.
 package controllers
 
 import (
+	"context"
+
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -28,6 +30,7 @@ func AddManifestCheckpointControllerToManager(
 	mgr ctrl.Manager,
 	log logger.LoggerInterface,
 	cfg *config.Options,
+	ctx context.Context,
 ) error {
 	reconciler := &ManifestCheckpointController{
 		Client:    mgr.GetClient(),
@@ -36,7 +39,13 @@ func AddManifestCheckpointControllerToManager(
 		Logger:    log,
 		Config:    cfg,
 	}
-	return reconciler.SetupWithManager(mgr)
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		return err
+	}
+	// Start TTL scanner in background goroutine
+	// Scanner periodically lists all MCRs and deletes expired ones based on completionTimestamp + TTL
+	reconciler.StartTTLScanner(ctx, mgr.GetClient())
+	return nil
 }
 
 // NOTE: AddRetainerControllerToManager has been removed.
