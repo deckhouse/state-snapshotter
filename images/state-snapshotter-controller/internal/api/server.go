@@ -146,8 +146,8 @@ func mTLSMiddleware(next http.Handler, logger logger.LoggerInterface, allowedCNs
 		cert := r.TLS.PeerCertificates[0]
 		cn := cert.Subject.CommonName
 
-		// Log client certificate details for debugging
-		logger.Info("Client certificate received",
+		// Log client certificate details for debugging (Debug level to reduce log noise)
+		logger.Debug("Client certificate received",
 			"client_subject", cert.Subject.String(),
 			"client_issuer", cert.Issuer.String(),
 			"client_serial", cert.SerialNumber.String(),
@@ -218,16 +218,27 @@ func loggingMiddleware(next http.Handler, logger logger.LoggerInterface) http.Ha
 			return
 		}
 
-		// Log the request
+		// Log the request (Debug level to reduce log noise, only log errors at Info level)
 		duration := time.Since(start)
-		logger.Info("HTTP request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"query", r.URL.RawQuery,
-			"status", wrapped.statusCode,
-			"duration", duration,
-			"remote_addr", r.RemoteAddr,
-			"user_agent", r.UserAgent())
+		if wrapped.statusCode >= 400 {
+			logger.Info("HTTP request error",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"query", r.URL.RawQuery,
+				"status", wrapped.statusCode,
+				"duration", duration,
+				"remote_addr", r.RemoteAddr,
+				"user_agent", r.UserAgent())
+		} else {
+			logger.Debug("HTTP request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"query", r.URL.RawQuery,
+				"status", wrapped.statusCode,
+				"duration", duration,
+				"remote_addr", r.RemoteAddr,
+				"user_agent", r.UserAgent())
+		}
 	})
 }
 
