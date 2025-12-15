@@ -140,9 +140,8 @@ var _ = BeforeSuite(func() {
 	err = mcpController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
-	// Setup RetainerController using helper function
-	err = controllers.AddRetainerControllerToManager(mgr, testLogger)
-	Expect(err).NotTo(HaveOccurred())
+	// NOTE: RetainerController (IRetainer) has been removed.
+	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
 
 	// Create context
 	ctx, cancel = context.WithCancel(context.Background())

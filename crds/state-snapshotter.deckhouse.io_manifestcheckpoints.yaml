@@ -5,9 +5,6 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: (devel)
   name: manifestcheckpoints.state-snapshotter.deckhouse.io
-  labels:
-    heritage: deckhouse
-    module: state-snapshotter
 spec:
   group: state-snapshotter.deckhouse.io
   names:

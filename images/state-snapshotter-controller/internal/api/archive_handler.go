@@ -411,26 +411,28 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 	if err := h.client.Get(r.Context(), types.NamespacedName{Name: checkpointName}, &checkpoint); err != nil {
 		if errors.IsNotFound(err) {
 			// Log detailed information about checkpoint not found
-			// Check if retainer exists to help diagnose GC issues
+			// Check if ObjectKeeper exists to help diagnose GC issues
+			// Note: ObjectKeeper name pattern is ret-mcr-{namespace}-{mcrName}, not ret-{checkpointName}
+			// For legacy checkpoints, we check the old pattern
 			retainerName := fmt.Sprintf("ret-%s", checkpointName)
-			var retainer metav1.PartialObjectMetadata
-			retainer.SetGroupVersionKind(schema.GroupVersionKind{
+			var objectKeeper metav1.PartialObjectMetadata
+			objectKeeper.SetGroupVersionKind(schema.GroupVersionKind{
 				Group:   "deckhouse.io",
 				Version: "v1alpha1",
-				Kind:    "IRetainer",
+				Kind:    "ObjectKeeper",
 			})
-			retainerExists := false
-			retainerUID := ""
-			if err := h.client.Get(r.Context(), types.NamespacedName{Name: retainerName}, &retainer); err == nil {
-				retainerExists = true
-				retainerUID = string(retainer.UID)
+			objectKeeperExists := false
+			objectKeeperUID := ""
+			if err := h.client.Get(r.Context(), types.NamespacedName{Name: retainerName}, &objectKeeper); err == nil {
+				objectKeeperExists = true
+				objectKeeperUID = string(objectKeeper.UID)
 			}
 			h.logger.Error(err, "Checkpoint not found",
 				"checkpoint", checkpointName,
-				"retainerExists", retainerExists,
-				"retainerName", retainerName,
-				"retainerUID", retainerUID,
-				"note", "If retainer exists but checkpoint doesn't, GC may have deleted checkpoint due to ownerRef mismatch")
+				"objectKeeperExists", objectKeeperExists,
+				"objectKeeperName", retainerName,
+				"objectKeeperUID", objectKeeperUID,
+				"note", "If ObjectKeeper exists but checkpoint doesn't, GC may have deleted checkpoint due to ownerRef mismatch")
 			status := metav1.Status{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Status",
