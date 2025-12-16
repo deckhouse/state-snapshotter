@@ -20,12 +20,17 @@ import (
 	"context"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager.
+// AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager
+// and starts TTL scanner as a leader-only runnable.
+//
+// TTL scanner runs only on the leader replica to prevent duplicate deletion attempts.
+// When leadership changes, the scanner context is cancelled and scanner stops gracefully.
 func AddManifestCheckpointControllerToManager(
 	ctx context.Context,
 	mgr ctrl.Manager,
@@ -42,9 +47,19 @@ func AddManifestCheckpointControllerToManager(
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return err
 	}
-	// Start TTL scanner in background goroutine
-	// Scanner periodically lists all MCRs and deletes expired ones based on completionTimestamp + TTL
-	reconciler.StartTTLScanner(ctx, mgr.GetClient())
+	// Start TTL scanner as leader-only runnable
+	// RunnableFunc is called only on the leader replica
+	// When leadership changes, ctx.Done() triggers graceful shutdown
+	// The scanner goroutine will exit when context is cancelled
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		reconciler.StartTTLScanner(ctx, mgr.GetClient())
+		// StartTTLScanner starts scanner in goroutine and returns immediately
+		// We need to wait for context cancellation to keep Runnable alive
+		<-ctx.Done()
+		return nil
+	})); err != nil {
+		return err
+	}
 	return nil
 }
 
