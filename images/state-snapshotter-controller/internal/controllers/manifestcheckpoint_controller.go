@@ -1563,8 +1563,11 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 }
 
 // StartTTLScanner starts the TTL scanner in a background goroutine.
-// Should be called after SetupWithManager, typically from main() or AddManifestCheckpointControllerToManager.
+// Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
 // Scanner periodically lists all MCRs and deletes expired ones based on completionTimestamp + TTL.
+//
+// IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
+// When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
 func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, client client.Client) {
 	go r.startTTLScanner(ctx, client)
 }
@@ -1573,11 +1576,32 @@ func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, clie
 // Scanner uses List() to get all MCRs and checks completionTimestamp + TTL from controller config.
 // This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
 //
-// IMPORTANT TTL SEMANTICS:
-// - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations.
-// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and does not affect deletion timing.
-// - TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Failed=True).
-// - Only terminal MCRs (Ready=True or Failed=True) with CompletionTimestamp are eligible for deletion.
+// TTL SCANNER CONTRACT:
+//
+// 1. Works only with terminal MCRs:
+//   - Ready=True (completed successfully)
+//   - Failed=True (failed)
+//   - Non-terminal MCRs are never touched
+//
+// 2. TTL source:
+//   - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations
+//   - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - This ensures predictable cluster-wide retention policy
+//
+// 3. TTL calculation:
+//   - TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Failed=True)
+//   - Expiration time = CompletionTimestamp + config.DefaultTTL
+//   - Only MCRs with CompletionTimestamp are eligible for deletion
+//
+// 4. Scanner behavior:
+//   - Scanner does NOT update status
+//   - Scanner does NOT patch objects
+//   - Scanner only performs List() and Delete() operations
+//   - Deletion of MCR triggers GC of ObjectKeeper and ManifestCheckpoint through ownerReferences
+//
+// 5. Leader-only execution:
+//   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
+//   - When leadership changes, ctx.Done() triggers graceful shutdown
 func (r *ManifestCheckpointController) startTTLScanner(ctx context.Context, client client.Client) {
 	// Scanner interval: check every 5 minutes
 	// This is a reasonable balance between responsiveness and API load
