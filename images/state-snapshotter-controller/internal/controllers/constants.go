@@ -16,50 +16,6 @@ limitations under the License.
 
 package controllers
 
-// Condition type constants
-const (
-	ConditionTypeReady      = "Ready"
-	ConditionTypeFailed     = "Failed"
-	ConditionTypeProcessing = "Processing"
-	ConditionTypeActive     = "Active"
-)
-
-// Condition reason constants
-const (
-	ConditionReasonCompleted          = "Completed"
-	ConditionReasonInProgress         = "InProgress"
-	ConditionReasonInternalError      = "InternalError"
-	ConditionReasonNotFound           = "NotFound"
-	ConditionReasonSerializationError = "SerializationError"
-	ConditionReasonInvalidTTL         = "InvalidTTL" // For invalid TTL annotation format
-)
-
-// Retainer-specific condition reasons (for ConditionTypeActive)
-const (
-	// RetainerConditionReasonObjectExists indicates the FollowObject exists and matches UID
-	RetainerConditionReasonObjectExists = "ObjectExists"
-	// RetainerConditionReasonTTLActive indicates TTL is active and not expired
-	RetainerConditionReasonTTLActive = "TTLActive"
-	// RetainerConditionReasonTTLExpired indicates TTL has expired
-	RetainerConditionReasonTTLExpired = "TTLExpired"
-	// RetainerConditionReasonObjectNotFound indicates FollowObject was not found
-	RetainerConditionReasonObjectNotFound = "ObjectNotFound"
-	// RetainerConditionReasonUIDMismatch indicates FollowObject UID mismatch (object recreated)
-	RetainerConditionReasonUIDMismatch = "UIDMismatch"
-	// RetainerConditionReasonNamespaceTerminating indicates namespace is terminating
-	RetainerConditionReasonNamespaceTerminating = "NamespaceTerminating"
-	// RetainerConditionReasonMissingFollowObjectRef indicates FollowObjectRef is missing
-	RetainerConditionReasonMissingFollowObjectRef = "MissingFollowObjectRef"
-	// RetainerConditionReasonMissingTTL indicates TTL is missing
-	RetainerConditionReasonMissingTTL = "MissingTTL"
-	// RetainerConditionReasonInvalidAPIVersion indicates invalid APIVersion
-	RetainerConditionReasonInvalidAPIVersion = "InvalidAPIVersion"
-	// RetainerConditionReasonInvalidTTL indicates invalid TTL duration
-	RetainerConditionReasonInvalidTTL = "InvalidTTL"
-	// RetainerConditionReasonInvalidMode indicates unknown mode
-	RetainerConditionReasonInvalidMode = "InvalidMode"
-)
-
 // API constants for ObjectKeeper
 const (
 	// DeckhouseAPIVersion is the API version for deckhouse.io resources (ObjectKeeper)

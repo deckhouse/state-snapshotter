@@ -142,18 +142,6 @@ spec:
                   - type
                   type: object
                 type: array
-              errorReason:
-                description: ErrorReason provides a programmatic identifier for the
-                  error type
-                enum:
-                - NotFound
-                - SerializationError
-                - InternalError
-                type: string
-              observedGeneration:
-                description: ObservedGeneration tracks the generation of the spec
-                format: int64
-                type: integer
             type: object
         required:
         - spec

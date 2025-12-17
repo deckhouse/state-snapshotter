@@ -196,12 +196,14 @@ var _ = BeforeSuite(func() {
 	}
 
 	// Setup ManifestCheckpointController
-	mcpController := &controllers.ManifestCheckpointController{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Logger: testLogger,
-		Config: cfgOptions,
-	}
+	mcpController, err := controllers.NewManifestCheckpointController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		testLogger,
+		cfgOptions,
+	)
+	Expect(err).NotTo(HaveOccurred())
 	err = mcpController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

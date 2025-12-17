@@ -176,7 +176,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			}
 
 			// Verify Ready condition
-			ready := findCondition(mcp.Status.Conditions, "Ready")
+			ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -185,39 +185,38 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 	// === GROUP 2: CONDITION TRANSITIONS ===
 
 	Describe("Condition Transitions", func() {
-		// TestConditionTransitionEmptyToProcessing verifies that when a ManifestCaptureRequest
-		// is created, it transitions from empty state to Processing condition.
-		// Note: Due to fast controller processing, Processing condition may not be observed,
-		// so we check for either Processing=True or Ready=True to indicate processing started.
-		It("should transition from Empty to Processing", func() {
+		// TestConditionTransitionEmptyToReady verifies that when a ManifestCaptureRequest
+		// is created, it eventually transitions to Ready condition (True on success, False on failure).
+		// Only Ready condition is used - it is set only in final state.
+		It("should transition from Empty to Ready", func() {
 			createConfigMap(ctx, testNS, TestFixtures.TestConfigMapName, TestFixtures.TestConfigMapData)
 			targets := []storagev1alpha1.ManifestTarget{
 				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
 			}
 			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
 
-			// Wait for any status update (Processing or Ready)
-			// Note: Processing condition may not be set if controller processes too fast
-			// So we wait for either Processing=True or Ready=True
+			// Wait for Ready condition to be set (Ready=True on success, Ready=False on failure)
+			// Ready condition is set only in final state (terminal success or terminal failure)
 			Eventually(func() bool {
 				var err error
 				mcr, err = getManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName)
 				if err != nil {
 					return false // MCR not found yet, retry
 				}
-				processing := findCondition(mcr.Status.Conditions, "Processing")
-				ready := findCondition(mcr.Status.Conditions, "Ready")
-				return (processing != nil && processing.Status == metav1.ConditionTrue) ||
-					(ready != nil && ready.Status == metav1.ConditionTrue) ||
-					len(mcr.Status.Conditions) > 0 // Any condition means processing started
+				ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+				// Ready condition is set only in final state
+				return ready != nil && (ready.Status == metav1.ConditionTrue || ready.Status == metav1.ConditionFalse)
 			}, testTimeout, pollInterval).Should(BeTrue())
 
-			// Verify that status was updated
+			// Verify that Ready condition was set (in final state)
 			mcr = getManifestCaptureRequestOrFail(ctx, testNS, TestFixtures.TestMCRName)
-			Expect(len(mcr.Status.Conditions)).To(BeNumerically(">", 0))
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil(), "Ready condition should be set")
+			// Ready condition is set only in final state (True on success, False on failure)
+			Expect(ready.Status).To(Or(Equal(metav1.ConditionTrue), Equal(metav1.ConditionFalse)), "Ready should be True or False")
 		})
 
-		It("should transition from Processing to Ready", func() {
+		It("should transition to Ready", func() {
 			createConfigMap(ctx, testNS, TestFixtures.TestConfigMapName, TestFixtures.TestConfigMapData)
 			targets := []storagev1alpha1.ManifestTarget{
 				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
@@ -227,113 +226,60 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Wait for Ready
 			mcr := waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
-			ready := findCondition(mcr.Status.Conditions, "Ready")
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-
-			// Verify Processing=False is explicitly set (not just missing)
-			processing := findCondition(mcr.Status.Conditions, "Processing")
-			Expect(processing).NotTo(BeNil(), "Processing condition should be explicitly set to False when Ready")
-			Expect(processing.Status).To(Equal(metav1.ConditionFalse), "Processing should be False when checkpoint is Ready")
-			Expect(processing.Reason).To(Equal("Completed"), "Processing reason should be Completed when finished")
 
 			// Verify checkpointName is set
 			Expect(mcr.Status.CheckpointName).NotTo(BeEmpty())
 			Expect(mcr.Status.CompletionTimestamp).NotTo(BeNil())
 
-			Expect(mcr.Status.ErrorReason).To(BeEmpty())
 		})
 
-		It("should transition from Processing to Error on NotFound", func() {
+		It("should transition to Ready=False on NotFound", func() {
 			targets := []storagev1alpha1.ManifestTarget{
 				GetNotFoundTarget(),
 			}
 			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
 
-			// Verify initial state: ObservedGeneration != Generation (first attempt)
-			// Controller should requeue on first NotFound, not fail immediately
-			Eventually(func() bool {
-				var err error
-				mcr, err = getManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName)
-				if err != nil {
-					return false
-				}
-				// On first attempt, ObservedGeneration should be 0 (not observed yet)
-				// Controller will requeue, so we wait a bit
-				return mcr.Status.ObservedGeneration != 0 || mcr.Status.ErrorReason != ""
-			}, testTimeout, pollInterval).Should(BeTrue())
-
-			// After requeue, if target still not found and ObservedGeneration == Generation,
-			// controller should mark as Failed
-			// Wait for Failed
+			// NotFound → Ready=False immediately (terminal state)
+			// To retry, user must delete and recreate MCR
 			mcr = waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
-			ready := findCondition(mcr.Status.Conditions, "Ready")
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-
-			failed := findCondition(mcr.Status.Conditions, "Failed")
-			Expect(failed).NotTo(BeNil())
-			Expect(failed.Status).To(Equal(metav1.ConditionTrue))
-
-			// Verify guard logic: ObservedGeneration == Generation means retry was attempted
-			Expect(mcr.Status.ObservedGeneration).To(Equal(mcr.Generation), "ObservedGeneration should equal Generation after retry")
-
-			Expect(mcr.Status.ErrorReason).To(Equal("NotFound"))
+			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonInternalError))
 			Expect(mcr.Status.CheckpointName).To(BeEmpty())
 		})
 
-		It("should requeue when target object not found on first attempt (race condition)", func() {
-			// Create MCR before target object exists (simulating race condition)
-			targets := []storagev1alpha1.ManifestTarget{
-				makeTarget("v1", "ConfigMap", "race-condition-cm"),
-			}
-			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
-
-			// Initially, target doesn't exist - controller should requeue
-			// Verify ObservedGeneration is still 0 (not observed yet)
-			Eventually(func() bool {
-				var err error
-				mcr, err = getManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName)
-				if err != nil {
-					return false
-				}
-				// Controller should requeue, so ObservedGeneration might still be 0
-				// or it might have been set but checkpointName is empty (requeue happened)
-				return mcr.Status.ObservedGeneration == 0 || (mcr.Status.ObservedGeneration != 0 && mcr.Status.CheckpointName == "")
-			}, 3*time.Second, pollInterval).Should(BeTrue(), "Controller should requeue when target not found on first attempt")
-
-			// Now create the target object
-			createConfigMap(ctx, testNS, "race-condition-cm", TestFixtures.TestConfigMapData)
-
-			// Wait for Ready (controller should process after requeue)
-			mcr = waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
-
-			// Verify checkpoint was created successfully after requeue
-			Expect(mcr.Status.CheckpointName).NotTo(BeEmpty())
-			ready := findCondition(mcr.Status.Conditions, "Ready")
-			Expect(ready).NotTo(BeNil())
-			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-		})
-
-		It("should persist error state on reconcile", func() {
+		It("should be noop for terminal Ready=False MCR", func() {
 			targets := []storagev1alpha1.ManifestTarget{
 				GetNotFoundTarget(),
 			}
 			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
 
-			// Wait for error
+			// Wait for Ready=False (NotFound) - terminal state
 			mcr = waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
-			errorReasonBefore := mcr.Status.ErrorReason
+			readyBefore := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(readyBefore).NotTo(BeNil())
+			reasonBefore := readyBefore.Reason
+			completionTimestampBefore := mcr.Status.CompletionTimestamp
 
-			// Trigger reconcile
+			// Trigger reconcile by updating annotation
+			mcr.Annotations["test"] = "trigger-reconcile"
 			triggerReconcile(ctx, mcr)
 
-			// Verify error persists
+			// Give controller time to process
+			time.Sleep(500 * time.Millisecond)
+
+			// Verify status unchanged (noop) - terminal Ready=False means no further processing
 			mcr = getManifestCaptureRequestOrFail(ctx, testNS, TestFixtures.TestMCRName)
-			Expect(mcr.Status.ErrorReason).To(Equal(errorReasonBefore))
-			ready := findCondition(mcr.Status.Conditions, "Ready")
+			Expect(mcr.Status.CompletionTimestamp).To(Equal(completionTimestampBefore))
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(reasonBefore))
 		})
 	})
 
@@ -436,7 +382,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 			// Verify checkpoint not recreated
 			mcp := getManifestCheckpoint(ctx, checkpointName)
-			ready := findCondition(mcp.Status.Conditions, "Ready")
+			ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
 	})
@@ -450,10 +396,13 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			}
 			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
 
-			// Wait for error
+			// Wait for Ready=False (terminal state)
 			mcr = waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
-			Expect(mcr.Status.ErrorReason).NotTo(BeEmpty())
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).NotTo(BeEmpty())
 			Expect(mcr.Status.CheckpointName).To(BeEmpty())
 
 			// Verify no checkpoint created for this MCR
