@@ -74,7 +74,7 @@ func createTestCheckpoint(name string, ready bool, chunks []storagev1alpha1.Chun
 
 	if ready {
 		meta.SetStatusCondition(&checkpoint.Status.Conditions, metav1.Condition{
-			Type:   "Ready",
+			Type:   storagev1alpha1.ConditionTypeReady,
 			Status: metav1.ConditionTrue,
 			Reason: "Completed",
 		})

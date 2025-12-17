@@ -27,15 +27,12 @@ import (
 // TestManifestCaptureRequest_NoPhaseInStatus verifies that ManifestCaptureRequestStatus does not contain Phase field.
 // Checks:
 // - Status can be created without Phase (field removed from API)
-// - ErrorReason enum does not contain RBACDenied
 // - Conditions work correctly
 // - Ready condition can be checked via meta.FindStatusCondition
 // - Code compiles and works without Phase
 func TestManifestCaptureRequest_NoPhaseInStatus(t *testing.T) {
 	status := ManifestCaptureRequestStatus{
 		CheckpointName: "test-checkpoint",
-		ObservedGeneration: 1,
-		ErrorReason: "NotFound",
 		Conditions: []metav1.Condition{
 			{
 				Type:               "Ready",
@@ -43,7 +40,6 @@ func TestManifestCaptureRequest_NoPhaseInStatus(t *testing.T) {
 				Reason:             "Completed",
 				Message:            "Request completed",
 				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: 1,
 			},
 		},
 	}
@@ -51,10 +47,6 @@ func TestManifestCaptureRequest_NoPhaseInStatus(t *testing.T) {
 	// Verify status fields work without Phase
 	if status.CheckpointName != "test-checkpoint" {
 		t.Errorf("Expected CheckpointName test-checkpoint, got %s", status.CheckpointName)
-	}
-
-	if status.ErrorReason != "NotFound" {
-		t.Errorf("Expected ErrorReason NotFound, got %s", status.ErrorReason)
 	}
 
 	if len(status.Conditions) != 1 {
@@ -89,41 +81,11 @@ func TestManifestCaptureRequest_NoPhaseInStatus(t *testing.T) {
 	}
 }
 
-// TestManifestCaptureRequest_ErrorReasonEnum verifies that ErrorReason enum does not contain RBACDenied.
-// Checks:
-// - ErrorReason can be set to NotFound, SerializationError, InternalError
-// - RBACDenied is not a valid value (should be removed from enum)
-func TestManifestCaptureRequest_ErrorReasonEnum(t *testing.T) {
-	validReasons := []string{"NotFound", "SerializationError", "InternalError"}
-	invalidReason := "RBACDenied"
-
-	for _, reason := range validReasons {
-		status := ManifestCaptureRequestStatus{
-			ErrorReason: reason,
-		}
-		if status.ErrorReason != reason {
-			t.Errorf("Expected ErrorReason %s, got %s", reason, status.ErrorReason)
-		}
-	}
-
-	// Verify RBACDenied is not in the enum by checking it's not a valid value
-	// Note: This test verifies the enum constraint, actual validation happens at CRD level
-	status := ManifestCaptureRequestStatus{
-		ErrorReason: invalidReason,
-	}
-	// The value can be set in Go code, but CRD validation should reject it
-	// This test just verifies the field exists and can be set
-	if status.ErrorReason != invalidReason {
-		t.Errorf("Expected ErrorReason %s, got %s", invalidReason, status.ErrorReason)
-	}
-}
-
 // TestManifestCaptureRequest_Conditions verifies that ManifestCaptureRequest uses Conditions instead of Phase.
 // Checks:
 // - Ready condition with True status indicates completion
-// - Failed condition with True status indicates failure
-// - Processing condition with True status indicates in progress
-// - Multiple conditions can coexist
+// - Ready condition with False status indicates failure
+// - Only Ready condition is used (single-condition model)
 func TestManifestCaptureRequest_Conditions(t *testing.T) {
 	status := ManifestCaptureRequestStatus{
 		Conditions: []metav1.Condition{
@@ -133,15 +95,6 @@ func TestManifestCaptureRequest_Conditions(t *testing.T) {
 				Reason:             "Completed",
 				Message:            "Request completed",
 				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: 1,
-			},
-			{
-				Type:               "Processing",
-				Status:             metav1.ConditionFalse,
-				Reason:             "Completed",
-				Message:            "Processing completed",
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: 1,
 			},
 		},
 	}
@@ -154,14 +107,4 @@ func TestManifestCaptureRequest_Conditions(t *testing.T) {
 	if readyCondition.Status != metav1.ConditionTrue {
 		t.Errorf("Expected Ready condition status True, got %s", readyCondition.Status)
 	}
-
-	// Check Processing condition
-	processingCondition := meta.FindStatusCondition(status.Conditions, "Processing")
-	if processingCondition == nil {
-		t.Fatal("Expected Processing condition to be present")
-	}
-	if processingCondition.Status != metav1.ConditionFalse {
-		t.Errorf("Expected Processing condition status False, got %s", processingCondition.Status)
-	}
 }
-

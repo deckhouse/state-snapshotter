@@ -37,31 +37,27 @@ func AddManifestCheckpointControllerToManager(
 	log logger.LoggerInterface,
 	cfg *config.Options,
 ) error {
-	reconciler := &ManifestCheckpointController{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(), // Direct API reader for read-after-write scenarios
-		Scheme:    mgr.GetScheme(),
-		Logger:    log,
-		Config:    cfg,
+	reconciler, err := NewManifestCheckpointController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		log,
+		cfg,
+	)
+	if err != nil {
+		return err
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return err
 	}
 	// Start TTL scanner as leader-only runnable
-	// RunnableFunc is called only on the leader replica
-	// When leadership changes, ctx.Done() triggers graceful shutdown
-	// The scanner goroutine will exit when context is cancelled
+	// RunnableFunc is executed only on the leader replica.
+	// On leadership change, ctx is cancelled and the scanner stops gracefully.
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		reconciler.StartTTLScanner(ctx, mgr.GetClient())
-		// StartTTLScanner starts scanner in goroutine and returns immediately
-		// We need to wait for context cancellation to keep Runnable alive
-		<-ctx.Done()
+		reconciler.runTTLScanner(ctx, mgr.GetClient())
 		return nil
 	})); err != nil {
 		return err
 	}
 	return nil
 }
-
-// NOTE: AddRetainerControllerToManager has been removed.
-// IRetainer has been replaced with ObjectKeeper, which is managed by deckhouse-controller.

@@ -200,7 +200,8 @@ func listManifestCheckpointContentChunks(ctx context.Context, checkpointName str
 	return result
 }
 
-// waitForManifestCaptureRequestReady waits for MCR to become Ready
+// waitForManifestCaptureRequestReady waits for MCR to become Ready=True (success state)
+// Only Ready condition is used - Ready=True indicates successful completion
 func waitForManifestCaptureRequestReady(ctx context.Context, namespace, name string, timeout time.Duration) *storagev1alpha1.ManifestCaptureRequest {
 	var mcr *storagev1alpha1.ManifestCaptureRequest
 	Eventually(func() bool {
@@ -209,13 +210,15 @@ func waitForManifestCaptureRequestReady(ctx context.Context, namespace, name str
 		if err != nil {
 			return false // MCR not found yet, retry
 		}
-		ready := findCondition(mcr.Status.Conditions, "Ready")
+		ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		// Ready=True indicates successful completion
 		return ready != nil && ready.Status == metav1.ConditionTrue
 	}, timeout, 100*time.Millisecond).Should(BeTrue())
 	return mcr
 }
 
-// waitForManifestCaptureRequestFailed waits for MCR to become Failed
+// waitForManifestCaptureRequestFailed waits for MCR to become Ready=False (terminal state)
+// Ready=False indicates terminal failure - no retry, operation is complete
 func waitForManifestCaptureRequestFailed(ctx context.Context, namespace, name string, timeout time.Duration) *storagev1alpha1.ManifestCaptureRequest {
 	var mcr *storagev1alpha1.ManifestCaptureRequest
 	Eventually(func() bool {
@@ -224,20 +227,21 @@ func waitForManifestCaptureRequestFailed(ctx context.Context, namespace, name st
 		if err != nil {
 			return false // MCR not found yet, retry
 		}
-		ready := findCondition(mcr.Status.Conditions, "Ready")
-		failed := findCondition(mcr.Status.Conditions, "Failed")
-		return ready != nil && ready.Status == metav1.ConditionFalse &&
-			failed != nil && failed.Status == metav1.ConditionTrue
+		ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		// Ready=False indicates terminal failure
+		return ready != nil && ready.Status == metav1.ConditionFalse
 	}, timeout, 100*time.Millisecond).Should(BeTrue())
 	return mcr
 }
 
-// waitForManifestCheckpointReady waits for MCP to become Ready
+// waitForManifestCheckpointReady waits for MCP to become Ready=True (success state)
+// Only Ready condition is used - Ready=True indicates successful completion
 func waitForManifestCheckpointReady(ctx context.Context, name string, timeout time.Duration) *storagev1alpha1.ManifestCheckpoint {
 	var mcp *storagev1alpha1.ManifestCheckpoint
 	Eventually(func() bool {
 		mcp = getManifestCheckpoint(ctx, name)
-		ready := findCondition(mcp.Status.Conditions, "Ready")
+		ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		// Ready=True indicates successful completion
 		return ready != nil && ready.Status == metav1.ConditionTrue
 	}, timeout, 100*time.Millisecond).Should(BeTrue())
 	return mcp
