@@ -43,8 +43,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -54,8 +54,8 @@ import (
 
 var (
 	resourcesSchemeFuncs = []func(*apiruntime.Scheme) error{
-		v1alpha1.AddToScheme,  // state-snapshotter.deckhouse.io group
-		iretainer.AddToScheme, // deckhouse.io group (IRetainer)
+		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
+		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
 		extv1.AddToScheme,
 		v1.AddToScheme,
@@ -133,8 +133,8 @@ func main() {
 	// Create full scheme for API direct client (no informers)
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
-	_ = v1alpha1.AddToScheme(fullScheme)  // state-snapshotter.deckhouse.io group
-	_ = iretainer.AddToScheme(fullScheme) // deckhouse.io group (IRetainer)
+	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group
+	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
 	// Create controller manager with full scheme (for informers)
 	// Don't restrict cache to specific namespace - ManifestCaptureRequest can be in any namespace
@@ -165,12 +165,8 @@ func main() {
 	}
 	log.Info("ManifestCheckpointController added to manager")
 
-	if err := controllers.AddRetainerControllerToManager(mgr, log); err != nil {
-		log.Error(err, "Failed to add RetainerController to manager")
-		cancel() // Ensure cleanup before exit
-		os.Exit(1)
-	}
-	log.Info("RetainerController added to manager")
+	// NOTE: RetainerController (IRetainer) has been removed.
+	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
 
 	// Add health checks
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

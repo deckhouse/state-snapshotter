@@ -4,10 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: (devel)
-  name: manifestcapturerequests.state-snapshotter.deckhouse.io
   labels:
-    heritage: deckhouse
     module: state-snapshotter
+  name: manifestcapturerequests.state-snapshotter.deckhouse.io
 spec:
   group: state-snapshotter.deckhouse.io
   names:
@@ -143,18 +142,6 @@ spec:
                   - type
                   type: object
                 type: array
-              errorReason:
-                description: ErrorReason provides a programmatic identifier for the
-                  error type
-                enum:
-                - NotFound
-                - SerializationError
-                - InternalError
-                type: string
-              observedGeneration:
-                description: ObservedGeneration tracks the generation of the spec
-                format: int64
-                type: integer
             type: object
         required:
         - spec

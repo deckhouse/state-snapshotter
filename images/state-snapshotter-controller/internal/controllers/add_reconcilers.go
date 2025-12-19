@@ -17,62 +17,46 @@ limitations under the License.
 package controllers
 
 import (
-	"fmt"
+	"context"
 
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/restmapper"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager.
+// AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager
+// and starts TTL scanner as a leader-only runnable.
+//
+// TTL scanner runs only on the leader replica to prevent duplicate deletion attempts.
+// When leadership changes, the scanner context is cancelled and scanner stops gracefully.
 func AddManifestCheckpointControllerToManager(
 	mgr ctrl.Manager,
 	log logger.LoggerInterface,
 	cfg *config.Options,
 ) error {
-	reconciler := &ManifestCheckpointController{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Logger: log,
-		Config: cfg,
-	}
-	return reconciler.SetupWithManager(mgr)
-}
-
-// AddRetainerControllerToManager adds the Retainer controller to the manager.
-// This is a system controller that requires privileged access to GET any namespaced objects.
-func AddRetainerControllerToManager(
-	mgr ctrl.Manager,
-	log logger.LoggerInterface,
-) error {
-	// Build dynamic client for accessing arbitrary API resources
-	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
-	if err != nil {
-		return fmt.Errorf("failed to create dynamic client: %w", err)
-	}
-
-	// Build RESTMapper for efficient Kind-to-resource mapping
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
-	if err != nil {
-		return fmt.Errorf("failed to create discovery client: %w", err)
-	}
-
-	// Create RESTMapper with caching
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(
-		memory.NewMemCacheClient(discoveryClient),
+	reconciler, err := NewManifestCheckpointController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		log,
+		cfg,
 	)
-
-	reconciler := &RetainerController{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Logger:     log,
-		dyn:        dyn,
-		restMapper: restMapper,
+	if err != nil {
+		return err
 	}
-	return reconciler.SetupWithManager(mgr)
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		return err
+	}
+	// Start TTL scanner as leader-only runnable
+	// StartTTLScanner runs TTL scanner and blocks until ctx.Done()
+	// RunnableFunc ensures leader-only execution
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		reconciler.StartTTLScanner(ctx, mgr.GetClient())
+		return nil
+	})); err != nil {
+		return err
+	}
+	return nil
 }

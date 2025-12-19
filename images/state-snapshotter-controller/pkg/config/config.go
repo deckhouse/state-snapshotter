@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -37,8 +38,9 @@ const (
 	DefaultRequeueStorageClassInterval   = 10
 	DefaultRequeueNodeSelectorInterval   = 10
 	// Manifest capture defaults (TZ section 7)
-	DefaultMaxChunkSizeBytes = 800000          // 800KB (TZ: maxChunkSizeBytes)
-	DefaultTTL               = 168 * time.Hour // 7 days (TZ: defaultTTL)
+	DefaultMaxChunkSizeBytes = 800000           // 800KB (TZ: maxChunkSizeBytes)
+	DefaultTTL               = 10 * time.Minute // 10 minutes (TZ: defaultTTL)
+	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
 )
 
@@ -51,6 +53,7 @@ type Options struct {
 	// Manifest capture config (TZ section 7)
 	MaxChunkSizeBytes  int64
 	DefaultTTL         time.Duration
+	DefaultTTLStr      string // String representation for annotation (e.g., "168h", "7d")
 	ExcludeKinds       []string
 	ExcludeAnnotations []string
 	// EnableFiltering controls whether filtering and cleaning should be applied
@@ -93,6 +96,7 @@ func NewConfig() *Options {
 	// Manifest capture defaults (TZ section 7)
 	opts.MaxChunkSizeBytes = DefaultMaxChunkSizeBytes
 	opts.DefaultTTL = DefaultTTL
+	opts.DefaultTTLStr = formatDurationForAnnotation(DefaultTTL)
 	opts.ExcludeKinds = []string{
 		"Pod", "Event", "Endpoints", "EndpointSlice", "Lease", "Node", "ControllerRevision",
 		"VolumeSnapshot", "VolumeSnapshotContent", "*Snapshot", "*SnapshotContent",
@@ -110,8 +114,14 @@ func NewConfig() *Options {
 	return &opts
 }
 
-// LoadFromConfigMap loads configuration from ConfigMap and updates Options
+// LoadFromConfigMap loads controller configuration from ConfigMap data and updates Options
 // This allows runtime configuration updates without restart
+// ConfigMap fields:
+//   - maxChunkSizeBytes: maximum chunk size in bytes (e.g., "800000")
+//   - defaultTTL: default TTL duration (e.g., "10m", "1h", "168h")
+//   - excludeKinds: comma-separated list of kinds to exclude (e.g., "Pod,Event")
+//   - excludeAnnotations: comma-separated list of annotation patterns to exclude
+//   - enableFiltering: enable object filtering/cleaning ("true"/"false"/"1"/"yes")
 func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 	// maxChunkSizeBytes
 	if val, ok := configMapData["maxChunkSizeBytes"]; ok {
@@ -124,6 +134,7 @@ func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 	if val, ok := configMapData["defaultTTL"]; ok {
 		if duration, err := time.ParseDuration(val); err == nil && duration > 0 {
 			opts.DefaultTTL = duration
+			opts.DefaultTTLStr = formatDurationForAnnotation(duration)
 		}
 	}
 
@@ -157,4 +168,20 @@ func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 		valLower := strings.ToLower(strings.TrimSpace(val))
 		opts.EnableFiltering = valLower == "true" || valLower == "1" || valLower == "yes"
 	}
+}
+
+// formatDurationForAnnotation formats duration as a readable string for annotation
+// Examples: 10m, 1h, 168h, 7d
+func formatDurationForAnnotation(d time.Duration) string {
+	// Round to nearest minute for readability
+	minutes := int(d.Round(time.Minute).Minutes())
+	if minutes < 60 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	hours := minutes / 60
+	remainingMinutes := minutes % 60
+	if remainingMinutes == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%dm", hours, remainingMinutes)
 }

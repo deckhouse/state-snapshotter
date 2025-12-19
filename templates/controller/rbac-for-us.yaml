@@ -37,15 +37,12 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["create", "get", "delete"]
 
-# IRetainer (cluster-scoped)
+# ObjectKeeper (cluster-scoped) - created by this controller for lifecycle management
+# ObjectKeeper is used in FollowObject mode to manage ManifestCheckpoint lifecycle
+# Watch permission is needed because controller-runtime creates informer for all types in scheme
 - apiGroups: ["deckhouse.io"]
-  resources: ["iretainers"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-# IRetainer status
-- apiGroups: ["deckhouse.io"]
-  resources: ["iretainers/status"]
-  verbs: ["get", "update", "patch"]
+  resources: ["objectkeepers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
 
 # Allow controller-runtime to watch namespaces
 - apiGroups: [""]

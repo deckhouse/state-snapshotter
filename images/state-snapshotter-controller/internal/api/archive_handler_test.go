@@ -80,15 +80,15 @@ func createTestCheckpoint(name string, ready bool) *storagev1alpha1.ManifestChec
 
 	if ready {
 		meta.SetStatusCondition(&checkpoint.Status.Conditions, metav1.Condition{
-			Type:   "Ready",
+			Type:   storagev1alpha1.ManifestCheckpointConditionTypeReady,
 			Status: metav1.ConditionTrue,
-			Reason: "Completed",
+			Reason: storagev1alpha1.ManifestCheckpointConditionReasonCompleted,
 		})
 	} else {
 		meta.SetStatusCondition(&checkpoint.Status.Conditions, metav1.Condition{
-			Type:   "Ready",
+			Type:   storagev1alpha1.ManifestCheckpointConditionTypeReady,
 			Status: metav1.ConditionFalse,
-			Reason: "Processing",
+			Reason: "Failed", // For test purposes, using string literal
 		})
 	}
 

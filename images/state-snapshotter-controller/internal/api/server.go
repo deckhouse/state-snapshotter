@@ -146,8 +146,8 @@ func mTLSMiddleware(next http.Handler, logger logger.LoggerInterface, allowedCNs
 		cert := r.TLS.PeerCertificates[0]
 		cn := cert.Subject.CommonName
 
-		// Log client certificate details for debugging
-		logger.Info("Client certificate received",
+		// Log client certificate details for debugging (Debug level to reduce log noise)
+		logger.Debug("Client certificate received",
 			"client_subject", cert.Subject.String(),
 			"client_issuer", cert.Issuer.String(),
 			"client_serial", cert.SerialNumber.String(),
@@ -213,21 +213,34 @@ func loggingMiddleware(next http.Handler, logger logger.LoggerInterface) http.Ha
 		// Call the next handler
 		next.ServeHTTP(wrapped, r)
 
-		// Skip logging for health check endpoints
-		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/livez" {
+		// Skip logging for health check endpoints and API discovery endpoints
+		// /openapi/v2, /openapi/v3, /apis are normal discovery requests from kube-apiserver
+		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/livez" ||
+			r.URL.Path == "/openapi/v2" || r.URL.Path == "/openapi/v3" || r.URL.Path == "/apis" {
 			return
 		}
 
-		// Log the request
+		// Log the request (Debug level to reduce log noise, only log errors at Info level)
 		duration := time.Since(start)
-		logger.Info("HTTP request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"query", r.URL.RawQuery,
-			"status", wrapped.statusCode,
-			"duration", duration,
-			"remote_addr", r.RemoteAddr,
-			"user_agent", r.UserAgent())
+		if wrapped.statusCode >= 400 {
+			logger.Info("HTTP request error",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"query", r.URL.RawQuery,
+				"status", wrapped.statusCode,
+				"duration", duration,
+				"remote_addr", r.RemoteAddr,
+				"user_agent", r.UserAgent())
+		} else {
+			logger.Debug("HTTP request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"query", r.URL.RawQuery,
+				"status", wrapped.statusCode,
+				"duration", duration,
+				"remote_addr", r.RemoteAddr,
+				"user_agent", r.UserAgent())
+		}
 	})
 }
 
