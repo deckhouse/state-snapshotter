@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -38,11 +37,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -61,11 +62,56 @@ func setSingleCondition(conds *[]metav1.Condition, cond metav1.Condition) {
 }
 
 // ManifestCheckpointController reconciles ManifestCaptureRequest objects
+//
+// ObjectKeeper is read via APIReader (direct API, no cache) after creation to get UID.
+// This ensures read-after-write consistency for the UID barrier pattern.
+//
+// Controllers MUST read ObjectKeeper via APIReader after creation. APIReader is a required dependency.
 type ManifestCheckpointController struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Logger logger.LoggerInterface
-	Config *config.Options
+	APIReader client.Reader // Required: for reading ObjectKeeper directly from API server after creation
+	Scheme    *runtime.Scheme
+	Logger    logger.LoggerInterface
+	Config    *config.Options
+}
+
+// NewManifestCheckpointController creates a new ManifestCheckpointController with validated dependencies.
+// All parameters are required and will be validated:
+//   - Client: Kubernetes client for reading/writing resources
+//   - APIReader: Required for reading ObjectKeeper directly from API server after creation (UID barrier pattern)
+//   - Scheme: Kubernetes runtime scheme
+//   - Logger: Logger interface for logging
+//   - Config: Controller configuration options
+func NewManifestCheckpointController(
+	client client.Client,
+	apiReader client.Reader,
+	scheme *runtime.Scheme,
+	logger logger.LoggerInterface,
+	cfg *config.Options,
+) (*ManifestCheckpointController, error) {
+	if client == nil {
+		return nil, fmt.Errorf("Client must not be nil")
+	}
+	if apiReader == nil {
+		return nil, fmt.Errorf("APIReader must not be nil: controllers require APIReader to read ObjectKeeper after creation (UID barrier pattern)")
+	}
+	if scheme == nil {
+		return nil, fmt.Errorf("Scheme must not be nil")
+	}
+	if logger == nil {
+		return nil, fmt.Errorf("Logger must not be nil")
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("Config must not be nil")
+	}
+
+	return &ManifestCheckpointController{
+		Client:    client,
+		APIReader: apiReader,
+		Scheme:    scheme,
+		Logger:    logger,
+		Config:    cfg,
+	}, nil
 }
 
 func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -73,6 +119,12 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 
 	// Load config from ConfigMap (TZ section 7)
 	if err := r.loadConfigFromConfigMap(ctx); err != nil {
+		// If config is nil, this is a fatal misconfiguration - return error
+		if r.Config == nil {
+			r.Logger.Error(err, "Config is nil - fatal misconfiguration, cannot proceed")
+			return ctrl.Result{}, fmt.Errorf("config is nil: %w", err)
+		}
+		// Other errors (e.g., ConfigMap not found) are non-fatal - use defaults
 		r.Logger.Warning("Failed to load config from ConfigMap, using defaults", "error", err)
 	}
 
@@ -84,46 +136,27 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	// Skip if already Ready - MCR is immutable once Ready
-	// This ensures snapshot immutability - checkpoint should not be recreated
-	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, ConditionTypeReady)
-	if readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
-		r.Logger.Info("MCR is already Ready - skipping reconcile", "namespace", req.Namespace, "name", req.Name)
+	// Guard: Check if already in terminal state (Ready=True|False) - MCR is immutable once terminal
+	// Terminal state means no further processing - TTL cleanup is handled by background scanner
+	if r.isTerminal(mcr) {
 		return ctrl.Result{}, nil
 	}
 
-	// Skip if already Failed and observed
-	if readyCondition != nil && readyCondition.Status == metav1.ConditionFalse && readyCondition.Reason == ConditionReasonInternalError {
-		if mcr.Status.ObservedGeneration == mcr.Generation {
-			return ctrl.Result{}, nil
-		}
-	}
-
-	// Check if already has checkpoint
+	// Guard: Check if checkpoint already exists (idempotency check)
+	// If checkpoint exists but MCR is not terminal, finalize MCR status
 	if mcr.Status.CheckpointName != "" {
-		// Verify checkpoint exists
 		var checkpoint storagev1alpha1.ManifestCheckpoint
 		if err := r.Get(ctx, client.ObjectKey{Name: mcr.Status.CheckpointName}, &checkpoint); err == nil {
-			// Checkpoint exists, mark as ready
-			base := mcr.DeepCopy()
-			mcr.Status.ObservedGeneration = mcr.Generation
-			now := metav1.Now()
-			if mcr.Status.CompletionTimestamp == nil {
-				mcr.Status.CompletionTimestamp = &now
-			}
-			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             ConditionReasonCompleted,
-				Message:            fmt.Sprintf("Checkpoint %s already exists", mcr.Status.CheckpointName),
-				LastTransitionTime: now,
-				ObservedGeneration: mcr.Generation,
-			})
-			if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+			// Checkpoint exists - finalize MCR status (idempotent finalization)
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", mcr.Status.CheckpointName)); err != nil {
+				if errors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, nil
 		}
+		// Checkpoint doesn't exist - proceed with normal processing
 	}
 
 	// Process the request
@@ -131,82 +164,70 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 }
 
 func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest) (ctrl.Result, error) {
-	// Set Processing condition if not set
-	processingCondition := meta.FindStatusCondition(mcr.Status.Conditions, ConditionTypeProcessing)
-	if processingCondition == nil {
-		base := mcr.DeepCopy()
-		mcr.Status.ObservedGeneration = mcr.Generation
-		now := metav1.Now()
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeProcessing,
-			Status:             metav1.ConditionTrue,
-			Reason:             ConditionReasonInProgress,
-			Message:            "Processing capture request",
-			LastTransitionTime: now,
-			ObservedGeneration: mcr.Generation,
-		})
-		if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+	// Set Processing condition if not already set
+	// CRITICAL: This must be done BEFORE any long-running operations
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
+		// Handle version conflicts: retry if conflict occurs
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &storagev1alpha1.ManifestCaptureRequest{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+				return err
+			}
+			// Re-check: maybe Processing was already set by another reconcile
+			currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			if currentReadyCondition != nil && currentReadyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
+				// Already Processing - update local mcr and return
+				mcr.Status = current.Status
+				return nil
+			}
+			// Set Processing condition on current object
+			setSingleCondition(&current.Status.Conditions, metav1.Condition{
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
+				Message:            "Operation started",
+				LastTransitionTime: metav1.Now(),
+			})
+			// Update status immediately to reflect Processing state
+			// This is UX-critical: user must see that operation started
+			if err := r.Status().Update(ctx, current); err != nil {
+				return err
+			}
+			// Update local mcr object to reflect the change
+			mcr.Status = current.Status
+			return nil
+		}); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
 
 	// Validate targets
 	if len(mcr.Spec.Targets) == 0 {
-		base := mcr.DeepCopy()
-		message := "No targets specified"
-		mcr.Status.ErrorReason = ConditionReasonInternalError
-		mcr.Status.ObservedGeneration = mcr.Generation
-		now := metav1.Now()
-		mcr.Status.CompletionTimestamp = &now
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             ConditionReasonInternalError,
-			Message:            message,
-			LastTransitionTime: now,
-			ObservedGeneration: mcr.Generation,
-		})
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeFailed,
-			Status:             metav1.ConditionTrue,
-			Reason:             ConditionReasonInternalError,
-			Message:            message,
-			LastTransitionTime: now,
-			ObservedGeneration: mcr.Generation,
-		})
-		if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, "No targets specified"); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
 
 	// Collect all target objects
+	// Note: NotFound errors from collectTargetObjects are always from target objects, not related objects.
+	// Related objects (ConfigMaps, Secrets from volumes) are collected in collectRelatedObjects,
+	// which silently ignores NotFound errors (checks err == nil). So if we get NotFound here, it's a target.
 	objects, err := r.collectTargetObjects(ctx, mcr)
 	if err != nil {
-		r.Logger.Error(err, "Failed to collect target objects", "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
-		base := mcr.DeepCopy()
-		message := fmt.Sprintf("Failed to collect objects: %v", err)
-		mcr.Status.ErrorReason = r.determineErrorReason(err)
-		mcr.Status.ObservedGeneration = mcr.Generation
-		now := metav1.Now()
-		mcr.Status.CompletionTimestamp = &now
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             mcr.Status.ErrorReason,
-			Message:            message,
-			LastTransitionTime: now,
-			ObservedGeneration: mcr.Generation,
-		})
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeFailed,
-			Status:             metav1.ConditionTrue,
-			Reason:             mcr.Status.ErrorReason,
-			Message:            message,
-			LastTransitionTime: now,
-			ObservedGeneration: mcr.Generation,
-		})
-		if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+		// Simple and clean: NotFound → Ready=False immediately
+		// Kubernetes is declarative: if object appears later, user must delete and recreate MCR
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to collect objects: %v", err)); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -221,7 +242,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		// Still create checkpoint with empty chunks
 	}
 
-	// Determine checkpoint name: use existing if available, otherwise generate new
+	// Determine checkpoint name: use existing if available, otherwise generate deterministic name
+	// Checkpoint name is deterministic based on MCR UID to prevent duplicate checkpoints
+	// if reconciliation happens multiple times before status is updated
 	var checkpointName string
 	if mcr.Status.CheckpointName != "" {
 		// Checkpoint already exists - use existing name (e.g., for retainer migration)
@@ -230,105 +253,111 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
 			"checkpoint", checkpointName)
 	} else {
-		// Generate new checkpoint name
-		checkpointName = r.generateCheckpointName()
+		// Generate deterministic checkpoint name based on MCR UID
+		// This prevents creating multiple checkpoints if reconciliation happens multiple times
+		// before status is successfully updated
+		checkpointName = r.generateCheckpointNameFromUID(string(mcr.UID))
 		r.Logger.Info("Starting checkpoint creation",
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
 			"checkpoint", checkpointName,
 			"targets", len(mcr.Spec.Targets))
 	}
 
-	// ADR: Create only ONE Retainer: ret-mcr-<namespace>-<mcrName>
-	// This Retainer:
-	// - Uses FollowObjectWithTTL mode to follow MCR (implements MCR TTL)
-	// - Holds the ManifestCheckpoint (MCP has ownerRef to this Retainer)
-	// - When MCR is deleted, Retainer continues to live for TTL duration
-	// - When Retainer expires, it's deleted → GC deletes MCP (via ownerRef)
+	// ADR: Create only ONE ObjectKeeper: ret-mcr-<namespace>-<mcrName>
+	// This ObjectKeeper:
+	// - Uses FollowObject mode to follow MCR (no TTL)
+	// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
+	// - When MCR is deleted, ObjectKeeper is automatically deleted (FollowObject)
+	// - When ObjectKeeper is deleted, GC deletes MCP (via ownerRef)
+	// - TTL and request cleanup are handled by MCR controller, not ObjectKeeper
 	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
-	r.Logger.Info("Step 1: Creating Retainer for MCR", "retainer", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+	// Update Processing message to show progress
+	_ = r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
 
-	retainer := &iretainer.IRetainer{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "deckhouse.io/v1alpha1",
-			Kind:       "IRetainer",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: retainerName,
-			// Retainer has NO ownerRef - it's a top-level resource
-		},
-		Spec: iretainer.IRetainerSpec{
-			Mode: "FollowObjectWithTTL",
-			FollowObjectRef: &iretainer.FollowObjectRef{
-				APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
-				Kind:       "ManifestCaptureRequest",
-				Namespace:  mcr.Namespace,
-				Name:       mcr.Name,
-				UID:        string(mcr.UID),
+	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
+	switch {
+	case errors.IsNotFound(err):
+		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: DeckhouseAPIVersion,
+				Kind:       KindObjectKeeper,
 			},
-			TTL: &metav1.Duration{
-				Duration: 10 * time.Minute,
+			ObjectMeta: metav1.ObjectMeta{
+				Name: retainerName,
 			},
-		},
-	}
-
-	// Create Retainer first
-	if err := r.Create(ctx, retainer); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			r.Logger.Error(err, "Failed to create Retainer", "name", retainerName, "mode", retainer.Spec.Mode)
-			base := mcr.DeepCopy()
-			message := fmt.Sprintf("Failed to create Retainer: %v", err)
-			mcr.Status.ErrorReason = ConditionReasonInternalError
-			mcr.Status.ObservedGeneration = mcr.Generation
-			now := metav1.Now()
-			mcr.Status.CompletionTimestamp = &now
-			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             ConditionReasonInternalError,
-				Message:            message,
-				LastTransitionTime: now,
-				ObservedGeneration: mcr.Generation,
-			})
-			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeFailed,
-				Status:             metav1.ConditionTrue,
-				Reason:             ConditionReasonInternalError,
-				Message:            message,
-				LastTransitionTime: now,
-				ObservedGeneration: mcr.Generation,
-			})
-			if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+			Spec: deckhousev1alpha1.ObjectKeeperSpec{
+				Mode: "FollowObject",
+				FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "ManifestCaptureRequest",
+					Namespace:  mcr.Namespace,
+					Name:       mcr.Name,
+					UID:        string(mcr.UID),
+				},
+			},
+		}
+		if err := r.Create(ctx, objectKeeper); err != nil {
+			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
+				if errors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, err
 		}
-		// Retainer already exists, get it and use it
-		existingRetainer := &iretainer.IRetainer{}
-		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, existingRetainer); err != nil {
-			r.Logger.Error(err, "Failed to get existing Retainer", "name", retainerName)
-			return ctrl.Result{}, fmt.Errorf("failed to get existing Retainer: %w", err)
+		r.Logger.Info("Created ObjectKeeper", "name", retainerName)
+		// After create, ensure it's observable via apiserver (UID barrier pattern)
+		// Always read via APIReader (direct API, no cache) to ensure read-after-write consistency
+		// This guarantees that ObjectKeeper is visible in apiserver before proceeding
+		// This is not retry logic - it's handling cache lag after Create()
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+			// UID barrier: if object is not yet observable via APIReader, requeue briefly
+			// This ensures read-after-write consistency for ownerRef UID
+			// This is not retry logic - it's handling cache lag after Create()
+			return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
-		retainer = existingRetainer
-		r.Logger.Info("Retainer already exists, using existing", "retainer", retainerName, "uid", retainer.UID, "mode", retainer.Spec.Mode)
-	} else {
-		r.Logger.Info("✅ Step 1 complete: Created Retainer",
-			"retainer", retainerName,
-			"uid", retainer.UID,
+		r.Logger.Info("✅ Step 1 complete: Created ObjectKeeper",
+			"objectKeeper", retainerName,
+			"uid", objectKeeper.UID,
 			"checkpoint", checkpointName,
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+	case err != nil:
+		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
+	default:
+		// ObjectKeeper exists - validate it belongs to this MCR
+		// This protects against race conditions where MCR was deleted and recreated with same name
+		if objectKeeper.Spec.FollowObjectRef == nil {
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
+		}
+		if objectKeeper.Spec.FollowObjectRef.UID != string(mcr.UID) {
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another MCR (UID mismatch: expected %s, got %s)",
+				retainerName, string(mcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
+		}
+		r.Logger.Info("ObjectKeeper already exists, using existing", "objectKeeper", retainerName, "uid", objectKeeper.UID)
 	}
 
-	// If checkpoint already exists → skip creation (assume it's correct)
+	// If checkpoint already exists → finalize MCR (idempotent finalization)
+	// This handles the case where checkpoint was created but MCR status update failed
 	var existingCheckpoint storagev1alpha1.ManifestCheckpoint
 	if err := r.Get(ctx, client.ObjectKey{Name: checkpointName}, &existingCheckpoint); err == nil {
-		r.Logger.Info("Checkpoint already exists, skipping creation",
+		r.Logger.Info("Checkpoint already exists, finalizing MCR",
 			"checkpoint", checkpointName)
+		mcr.Status.CheckpointName = checkpointName
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", checkpointName)); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
-	// Create ManifestCheckpoint with ownerRef to ret-mcr-* Retainer
+	// Create ManifestCheckpoint with ownerRef to ret-mcr-* ObjectKeeper
 	// ADR: Checkpoint MUST have ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
-	// This is the single Retainer that holds both MCR and MCP
+	// This is the single ObjectKeeper that holds both MCR and MCP
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
@@ -343,10 +372,10 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			// ADR: Checkpoint has ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: "deckhouse.io/v1alpha1",
-					Kind:       "IRetainer",
+					APIVersion: DeckhouseAPIVersion,
+					Kind:       KindObjectKeeper,
 					Name:       retainerName, // This is ret-mcr-<namespace>-<mcrName>
-					UID:        retainer.UID,
+					UID:        objectKeeper.UID,
 					Controller: func() *bool { b := true; return &b }(),
 				},
 			},
@@ -367,30 +396,11 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			r.Logger.Error(err, "Failed to create ManifestCheckpoint",
 				"checkpoint", checkpointName,
 				"owner", retainerName,
-				"ownerUID", retainer.UID)
-			base := mcr.DeepCopy()
-			message := fmt.Sprintf("Failed to create checkpoint: %v", err)
-			mcr.Status.ErrorReason = ConditionReasonInternalError
-			mcr.Status.ObservedGeneration = mcr.Generation
-			now := metav1.Now()
-			mcr.Status.CompletionTimestamp = &now
-			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             ConditionReasonInternalError,
-				Message:            message,
-				LastTransitionTime: now,
-				ObservedGeneration: mcr.Generation,
-			})
-			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeFailed,
-				Status:             metav1.ConditionTrue,
-				Reason:             ConditionReasonInternalError,
-				Message:            message,
-				LastTransitionTime: now,
-				ObservedGeneration: mcr.Generation,
-			})
-			if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+				"ownerUID", objectKeeper.UID)
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); err != nil {
+				if errors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, err
@@ -404,6 +414,23 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"checkpoint", checkpointName,
 			"uid", checkpoint.UID,
 			"ownerRefs", checkpoint.OwnerReferences)
+		// Checkpoint already exists - check if it's still Processing
+		readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
+		if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ManifestCheckpointConditionReasonProcessing {
+			// Not Processing - set Processing condition
+			now := metav1.Now()
+			setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
+				Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             storagev1alpha1.ManifestCheckpointConditionReasonProcessing,
+				Message:            "Resuming checkpoint creation, creating chunks...",
+				LastTransitionTime: now,
+			})
+			if err := r.Status().Update(ctx, checkpoint); err != nil {
+				r.Logger.Error(err, "Failed to set Processing condition on existing checkpoint", "checkpoint", checkpointName)
+				// Non-critical error, continue processing
+			}
+		}
 	} else {
 		// Log ownerRef details for debugging
 		ownerRefDetails := make([]string, 0, len(checkpoint.OwnerReferences))
@@ -414,8 +441,23 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"checkpoint", checkpointName,
 			"uid", checkpoint.UID,
 			"ownerRefs", ownerRefDetails,
-			"retainerName", retainerName,
-			"retainerUID", retainer.UID)
+			"objectKeeperName", retainerName,
+			"objectKeeperUID", objectKeeper.UID)
+		// Set Processing condition on checkpoint immediately after creation
+		now := metav1.Now()
+		setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.ManifestCheckpointConditionReasonProcessing,
+			Message:            "Checkpoint created, creating chunks...",
+			LastTransitionTime: now,
+		})
+		if err := r.Status().Update(ctx, checkpoint); err != nil {
+			r.Logger.Error(err, "Failed to set Processing condition on checkpoint", "checkpoint", checkpointName)
+			// Non-critical error, continue processing
+		}
+		// Update Processing message to show progress
+		_ = r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Created checkpoint %s, collecting objects...", checkpointName))
 	}
 
 	// NOW create chunks (checkpoint exists, so ownerRef will work)
@@ -424,35 +466,30 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"checkpoint", checkpointName,
 		"checkpointUID", checkpoint.UID,
 		"objects", len(objects))
+	// Update Processing message to show progress
+	_ = r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Creating chunks for checkpoint %s (%d objects)...", checkpointName, len(objects)))
 	chunks, err := r.createChunks(ctx, checkpointName, string(checkpoint.UID), objects)
 	if err != nil {
 		r.Logger.Error(err, "❌ Step 3 failed: Failed to create chunks",
 			"checkpoint", checkpointName,
 			"objects", len(objects),
 			"error", err.Error())
-		base := mcr.DeepCopy()
-		message := fmt.Sprintf("Failed to create chunks: %v", err)
-		mcr.Status.ErrorReason = ConditionReasonSerializationError
-		mcr.Status.ObservedGeneration = mcr.Generation
+		// Update checkpoint status to Failed
 		now := metav1.Now()
-		mcr.Status.CompletionTimestamp = &now
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
+		setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             ConditionReasonSerializationError,
-			Message:            message,
+			Reason:             storagev1alpha1.ManifestCheckpointConditionReasonFailed,
+			Message:            fmt.Sprintf("Failed to create chunks: %v", err),
 			LastTransitionTime: now,
-			ObservedGeneration: mcr.Generation,
 		})
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeFailed,
-			Status:             metav1.ConditionTrue,
-			Reason:             ConditionReasonSerializationError,
-			Message:            message,
-			LastTransitionTime: now,
-			ObservedGeneration: mcr.Generation,
-		})
-		if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+		if updateErr := r.Status().Update(ctx, checkpoint); updateErr != nil {
+			r.Logger.Error(updateErr, "Failed to update checkpoint status to Failed", "checkpoint", checkpointName)
+		}
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create chunks: %v", err)); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -478,9 +515,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	checkpoint.Status.TotalSizeBytes = totalSize
 	now := metav1.Now()
 	setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
+		Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             ConditionReasonCompleted,
+		Reason:             storagev1alpha1.ManifestCheckpointConditionReasonCompleted,
 		Message:            fmt.Sprintf("Checkpoint created with %d chunks, %d objects", len(chunks), totalObjects),
 		LastTransitionTime: now,
 	})
@@ -497,38 +534,17 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"totalObjects", totalObjects)
 
 	// Update MCR status
-	base := mcr.DeepCopy()
 	mcr.Status.CheckpointName = checkpointName
-	mcr.Status.ObservedGeneration = mcr.Generation
-	completionTime := metav1.Now()
-	mcr.Status.CompletionTimestamp = &completionTime
-	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             ConditionReasonCompleted,
-		Message:            fmt.Sprintf("Checkpoint %s created successfully", checkpointName),
-		LastTransitionTime: completionTime,
-		ObservedGeneration: mcr.Generation,
-	})
-	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeProcessing,
-		Status:             metav1.ConditionFalse,
-		Reason:             ConditionReasonCompleted,
-		Message:            "Processing completed",
-		LastTransitionTime: completionTime,
-		ObservedGeneration: mcr.Generation,
-	})
-	if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+	if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s created successfully", checkpointName)); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
-	// NOTE: We do NOT set ttl-start-timestamp here for ret-mcr-* retainer
-	// ADR: ret-mcr-* is a FollowObjectWithTTL retainer, not a checkpoint retainer
-	// For FollowObjectWithTTL mode:
-	// - TTL should start ONLY when the followed object (MCR) is deleted
-	// - Setting ttl-start-timestamp at MCR completion would cause TTL to start prematurely
-	// - RetainerController.reconcileFollowObjectWithTTL will set ttl-start-timestamp when MCR is deleted
-	// This ensures correct TTL behavior: retainer lives while MCR exists, TTL starts only after MCR deletion
+	// NOTE: ObjectKeeper uses FollowObject mode (no TTL)
+	// ObjectKeeper follows MCR lifecycle and is automatically deleted when MCR is deleted
+	// TTL and request cleanup are handled by MCR controller, not ObjectKeeper
 
 	r.Logger.Info("ManifestCaptureRequest processed successfully",
 		"name", mcr.Name,
@@ -547,19 +563,6 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	// CRITICAL: Filtering and cleaning must happen BEFORE adding (TZ requirement)
 	// But only if enableFiltering is true (default: false - include everything as-is)
 	addObject := func(obj *unstructured.Unstructured) {
-		// RULE 0: Never capture cluster-scoped objects (e.g. Namespace, Node, PersistentVolume, etc.)
-		// This is an absolute rule - cluster-scoped objects should never appear in snapshot,
-		// even if they are referenced as dependencies or collected through other means
-		gv, err := schema.ParseGroupVersion(obj.GetAPIVersion())
-		if err != nil {
-			r.Logger.Warning("Failed to parse APIVersion, skipping object", "apiVersion", obj.GetAPIVersion(), "kind", obj.GetKind(), "name", obj.GetName(), "error", err)
-			return
-		}
-		if !r.isNamespacedResource(gv, obj.GetKind()) {
-			r.Logger.Info("Skipping cluster-scoped object (never captured in snapshot)", "kind", obj.GetKind(), "name", obj.GetName())
-			return
-		}
-
 		var finalObj *unstructured.Unstructured
 
 		// Apply filtering only if enabled
@@ -611,12 +614,6 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			return nil, fmt.Errorf("invalid apiVersion %s: %w", target.APIVersion, err)
 		}
 
-		// Validate: cluster-scoped resources are not allowed in targets
-		// ManifestCaptureRequest is namespaced, so all targets must be namespaced too
-		if !r.isNamespacedResource(gv, target.Kind) {
-			return nil, fmt.Errorf("cluster-scoped resource %s/%s is not allowed in targets. ManifestCaptureRequest only supports namespaced resources", target.Kind, target.Name)
-		}
-
 		// Get the resource (all targets are namespaced, so use MCR namespace)
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(schema.GroupVersionKind{
@@ -631,6 +628,10 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			Namespace: mcr.Namespace,
 			Name:      target.Name,
 		}, obj); err != nil {
+			// Preserve original error for IsNotFound check in caller
+			// errors.IsNotFound works with wrapped errors (fmt.Errorf with %w preserves error type via errors.Unwrap)
+			// NotFound → Ready=False immediately (terminal state)
+			// To retry, user must delete and recreate MCR
 			return nil, fmt.Errorf("failed to get %s %s/%s: %w", target.Kind, mcr.Namespace, target.Name, err)
 		}
 
@@ -750,13 +751,6 @@ func (r *ManifestCheckpointController) sortObjects(objects []unstructured.Unstru
 	})
 }
 
-// cleanObject is now replaced by common.CleanObjectForSnapshot
-// This method is kept for backward compatibility but delegates to the common function
-// Uses default excludeAnnotations (nil) - ConfigMap customization should be applied via direct call
-func (r *ManifestCheckpointController) cleanObject(obj *unstructured.Unstructured) *unstructured.Unstructured {
-	return common.CleanObjectForSnapshot(obj, nil)
-}
-
 func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpointName string, checkpointUID string, objects []unstructured.Unstructured) ([]storagev1alpha1.ChunkInfo, error) {
 	r.Logger.Info("createChunks: Starting",
 		"checkpoint", checkpointName,
@@ -768,10 +762,13 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		r.Logger.Info("createChunks: No objects to chunk, creating empty chunk")
 		// Create empty chunk
 		emptyJSON := []byte("[]")
-		compressed, err := r.compressAndEncode(emptyJSON)
+		// Get gzip bytes first for size calculation
+		gzipBytes, err := r.compressToBytes(emptyJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compress empty chunk: %w", err)
 		}
+		// Encode to base64 for storage
+		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
 
 		checkpointID := checkpointName
 		if strings.HasPrefix(checkpointName, ChunkNamePrefix) {
@@ -811,12 +808,16 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			return nil, fmt.Errorf("failed to create empty chunk: %w", err)
 		}
 
+		// Calculate checksum for ChunkInfo (same as in chunk resource)
+		checksum := r.calculateChunkChecksum(compressed)
+
 		return []storagev1alpha1.ChunkInfo{
 			{
 				Name:         chunkName,
 				Index:        0,
 				ObjectsCount: 0,
-				SizeBytes:    int64(len(compressed)),
+				SizeBytes:    int64(len(gzipBytes)), // Use gzip bytes size, not base64 string size
+				Checksum:     checksum,
 			},
 		}, nil
 	}
@@ -865,14 +866,15 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			return nil, fmt.Errorf("failed to marshal test chunk: %w", err)
 		}
 
-		// Compress to check actual size
-		compressed, err := r.compressAndEncode(testJSON)
+		// Compress to check actual size (compare gzip bytes, not base64 string)
+		gzipBytes, err := r.compressToBytes(testJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compress test chunk: %w", err)
 		}
 
 		// If compressed size exceeds limit, finalize current chunk first
-		if len(compressed) > int(r.Config.MaxChunkSizeBytes) {
+		// Compare gzip bytes size (not base64 string) to match etcd/apiserver object size limits
+		if len(gzipBytes) > int(r.Config.MaxChunkSizeBytes) {
 			// If current chunk is not empty, save it
 			if len(currentChunk.objects) > 0 {
 				chunks = append(chunks, currentChunk)
@@ -881,11 +883,11 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 
 			// Now check if single object exceeds limit
 			singleObjJSON, _ := json.Marshal([]interface{}{obj})
-			singleCompressed, err := r.compressAndEncode(singleObjJSON)
-			if err == nil && len(singleCompressed) > int(r.Config.MaxChunkSizeBytes) {
+			singleGzipBytes, err := r.compressToBytes(singleObjJSON)
+			if err == nil && len(singleGzipBytes) > int(r.Config.MaxChunkSizeBytes) {
 				r.Logger.Warning("Object exceeds MaxChunkSizeBytes - storing as-is, may break etcd on large clusters",
-					"compressedSize", len(singleCompressed),
-					"maxSize", r.Config.MaxChunkSizeBytes)
+					"compressedSizeBytes", len(singleGzipBytes),
+					"maxSizeBytes", r.Config.MaxChunkSizeBytes)
 				chunks = append(chunks, chunkData{objects: []interface{}{obj}})
 				continue
 			}
@@ -921,12 +923,18 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		}
 
 		// Compress and encode (each chunk has its own gzip, not a split of one global gzip)
-		compressed, err := r.compressAndEncode(chunkJSON)
+		// Get gzip bytes first for size calculation (SizeBytes should reflect etcd/apiserver object size)
+		gzipBytes, err := r.compressToBytes(chunkJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compress chunk %d: %w", i, err)
 		}
+		// Encode to base64 for storage
+		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
 
 		objectsCount := len(chunk.objects)
+
+		// Calculate checksum once (used both in chunk resource and ChunkInfo)
+		checksum := r.calculateChunkChecksum(compressed)
 
 		// Create chunk resource
 		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{
@@ -953,47 +961,53 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				Index:          i,
 				Data:           compressed,
 				ObjectsCount:   objectsCount,
-				Checksum:       r.calculateChunkChecksum(compressed),
+				Checksum:       checksum,
 			},
 		}
 
-		// Create chunk with retry logic
+		// Create chunk (fail-fast semantics - consistent with MCR lifecycle)
 		r.Logger.Info("Creating chunk",
 			"chunk", chunkName,
 			"index", i,
 			"checkpoint", checkpointName,
 			"objects", objectsCount,
-			"sizeBytes", len(compressed))
-		maxRetries := 3
-		var createErr error
-		for retry := 0; retry < maxRetries; retry++ {
-			createErr = r.Create(ctx, chunk)
-			if createErr == nil {
-				r.Logger.Info("✅ Chunk created successfully",
-					"chunk", chunkName,
-					"index", i,
-					"objects", objectsCount,
-					"sizeBytes", len(compressed))
-				break
+			"sizeBytes", len(gzipBytes))
+		err = r.Create(ctx, chunk)
+		switch {
+		case err == nil:
+			r.Logger.Info("✅ Chunk created successfully",
+				"chunk", chunkName,
+				"index", i,
+				"objects", objectsCount,
+				"sizeBytes", len(gzipBytes))
+		case errors.IsAlreadyExists(err):
+			// Chunk already exists, get it to verify (idempotency check)
+			r.Logger.Info("Chunk already exists, verifying",
+				"chunk", chunkName,
+				"index", i,
+				"checkpoint", checkpointName)
+			if err := r.Get(ctx, client.ObjectKey{Name: chunkName}, chunk); err != nil {
+				r.Logger.Error(err, "Failed to get existing chunk", "chunk", chunkName)
+				return nil, fmt.Errorf("failed to get existing chunk %s: %w", chunkName, err)
 			}
-			if errors.IsAlreadyExists(createErr) {
-				// Chunk already exists, get it to verify
-				r.Logger.Info("Chunk already exists, verifying",
+			// Verify it's the same chunk (same index, checkpoint, and checksum)
+			if chunk.Spec.CheckpointName == checkpointName && chunk.Spec.Index == i {
+				// Verify checksum matches to ensure data consistency (idempotency check)
+				if chunk.Spec.Checksum != checksum {
+					r.Logger.Error(nil, "Chunk exists but checksum mismatch (data inconsistency detected)",
+						"chunk", chunkName,
+						"expectedChecksum", checksum,
+						"actualChecksum", chunk.Spec.Checksum,
+						"checkpoint", checkpointName,
+						"index", i)
+					return nil, fmt.Errorf("chunk %s already exists but checksum mismatch: expected %s, got %s", chunkName, checksum, chunk.Spec.Checksum)
+				}
+				r.Logger.Info("✅ Chunk already exists and matches (index, checkpoint, checksum)",
 					"chunk", chunkName,
 					"index", i,
-					"checkpoint", checkpointName)
-				if err := r.Get(ctx, client.ObjectKey{Name: chunkName}, chunk); err != nil {
-					r.Logger.Error(err, "Failed to get existing chunk", "chunk", chunkName)
-					return nil, fmt.Errorf("failed to get existing chunk %s: %w", chunkName, err)
-				}
-				// Verify it's the same chunk (same index and checkpoint)
-				if chunk.Spec.CheckpointName == checkpointName && chunk.Spec.Index == i {
-					r.Logger.Info("✅ Chunk already exists and matches",
-						"chunk", chunkName,
-						"index", i,
-						"checkpoint", chunk.Spec.CheckpointName)
-					break
-				}
+					"checkpoint", chunk.Spec.CheckpointName,
+					"checksum", checksum)
+			} else {
 				// If it's a different chunk, this is an error
 				r.Logger.Error(nil, "Chunk exists but belongs to different checkpoint",
 					"chunk", chunkName,
@@ -1003,35 +1017,23 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 					"actualIndex", chunk.Spec.Index)
 				return nil, fmt.Errorf("chunk %s already exists but belongs to different checkpoint", chunkName)
 			}
-			// Log retry with error details
-			if retry < maxRetries-1 {
-				r.Logger.Info("Retrying chunk creation",
-					"chunk", chunkName,
-					"retry", retry+1,
-					"maxRetries", maxRetries,
-					"error", createErr.Error())
-			} else {
-				r.Logger.Error(createErr, "Failed to create chunk after all retries",
-					"chunk", chunkName,
-					"retries", maxRetries,
-					"checkpoint", checkpointName,
-					"index", i,
-					"sizeBytes", len(compressed))
-			}
-		}
-		if createErr != nil && !errors.IsAlreadyExists(createErr) {
-			return nil, fmt.Errorf("failed to create chunk %s after %d retries: %w", chunkName, maxRetries, createErr)
+		default:
+			// Fail-fast: any other error → terminal failure
+			r.Logger.Error(err, "Failed to create chunk",
+				"chunk", chunkName,
+				"checkpoint", checkpointName,
+				"index", i,
+				"sizeBytes", len(gzipBytes))
+			return nil, fmt.Errorf("failed to create chunk %s: %w", chunkName, err)
 		}
 
-		// Calculate checksum for chunk
-		checksum := r.calculateChunkChecksum(compressed)
-
+		// checksum already calculated above, reuse it
 		chunkInfos = append(chunkInfos, storagev1alpha1.ChunkInfo{
 			Name:         chunkName,
 			Index:        i,
 			ObjectsCount: objectsCount,
-			SizeBytes:    int64(len(compressed)),
-			Checksum:     checksum,
+			SizeBytes:    int64(len(gzipBytes)), // Use gzip bytes size, not base64 string size
+			Checksum:     checksum,              // Reuse checksum calculated above
 		})
 
 		r.Logger.Info("Created chunk",
@@ -1039,26 +1041,24 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			"chunk", chunkName,
 			"index", i,
 			"objects", objectsCount,
-			"size", len(compressed))
+			"sizeBytes", len(gzipBytes))
 	}
 
 	return chunkInfos, nil
 }
 
-func (r *ManifestCheckpointController) compressAndEncode(data []byte) (string, error) {
-	// data should already be a JSON array
-	// Compress with gzip
+// compressToBytes compresses data with gzip and returns the compressed bytes.
+// This is used for size checking against MaxChunkSizeBytes limit.
+func (r *ManifestCheckpointController) compressToBytes(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	if _, err := gw.Write(data); err != nil {
-		return "", fmt.Errorf("failed to write to gzip: %w", err)
+		return nil, fmt.Errorf("failed to write to gzip: %w", err)
 	}
 	if err := gw.Close(); err != nil {
-		return "", fmt.Errorf("failed to close gzip: %w", err)
+		return nil, fmt.Errorf("failed to close gzip: %w", err)
 	}
-
-	// Encode to base64
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+	return buf.Bytes(), nil
 }
 
 // normalizeObjectForJSON normalizes an object to ensure it's a pure map[string]interface{}
@@ -1098,36 +1098,29 @@ func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData str
 	return hex.EncodeToString(hash[:])
 }
 
-func (r *ManifestCheckpointController) generateCheckpointName() string {
-	// Generate random ID using only RFC 1123 compliant characters (a-z0-9)
-	// Use hex encoding to guarantee only 0-9a-f characters (all valid for RFC 1123)
-	// Must start and end with alphanumeric (hex always does)
-	b := make([]byte, 8)
-	rand.Read(b)
-
-	// Hex encoding produces only 0-9a-f, all valid for RFC 1123 subdomain
-	// 8 bytes = 16 hex chars, which is a good length
-	id := hex.EncodeToString(b)
+// generateCheckpointNameFromUID generates a deterministic checkpoint name from MCR UID
+// This prevents creating multiple checkpoints if reconciliation happens multiple times
+// before status is successfully updated (e.g., due to status update failures)
+func (r *ManifestCheckpointController) generateCheckpointNameFromUID(mcrUID string) string {
+	// Use SHA256 hash of MCR UID to get deterministic, RFC 1123 compliant name
+	// Take first 16 hex chars (8 bytes) for checkpoint ID
+	hash := sha256.Sum256([]byte(mcrUID))
+	id := hex.EncodeToString(hash[:8]) // 8 bytes = 16 hex chars
 
 	return fmt.Sprintf("%s%s", ChunkNamePrefix, id)
 }
 
-// determineErrorReason determines the error reason based on the error type
-func (r *ManifestCheckpointController) determineErrorReason(err error) string {
-	if err == nil {
-		return ""
-	}
-	errStr := err.Error()
-	if errors.IsNotFound(err) {
-		return ConditionReasonNotFound
-	}
-	if strings.Contains(errStr, "marshal") || strings.Contains(errStr, "serialize") || strings.Contains(errStr, "json") {
-		return ConditionReasonSerializationError
-	}
-	return ConditionReasonInternalError
-}
-
-// loadConfigFromConfigMap loads configuration from ConfigMap (TZ section 7)
+// loadConfigFromConfigMap loads controller configuration from optional ConfigMap
+// ConfigMap name: state-snapshotter-config (in controller namespace)
+// This ConfigMap is optional - if not found, controller uses defaults from Go code
+// ConfigMap allows runtime configuration without restart:
+//   - maxChunkSizeBytes: maximum chunk size for checkpoint content (default: 800000)
+//   - defaultTTL: default TTL for ManifestCaptureRequest (default: 168h, see config.DefaultTTL)
+//   - excludeKinds: comma-separated list of kinds to exclude from snapshots
+//   - excludeAnnotations: comma-separated list of annotations to exclude
+//   - enableFiltering: enable object filtering/cleaning (default: false)
+//
+// See templates/controller/configmap.yaml for ConfigMap structure
 func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Context) error {
 	if r.Config == nil {
 		return fmt.Errorf("config is nil")
@@ -1142,21 +1135,24 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 		Name:      configMapName,
 	}, configMap); err != nil {
 		// ConfigMap not found - use defaults from Go code
-		// This is expected if ConfigMap is not created (user didn't override defaults)
+		// This is expected and normal if user didn't provide custom configuration via Helm values
+		// ConfigMap is only created when user sets controller.config.* values in Helm chart
 		if errors.IsNotFound(err) {
-			r.Logger.Info("ConfigMap not found, using defaults from code",
+			r.Logger.Debug("Optional controller ConfigMap not found, using defaults from code",
 				"configMap", configMapName,
 				"namespace", namespace,
-				"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
+				"note", "ConfigMap is optional - create it via Helm values (controller.config.*) to override defaults",
+				"defaultMaxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
 				"defaultTTL", r.Config.DefaultTTL)
 			return nil
 		}
-		return fmt.Errorf("failed to get configmap: %w", err)
+		return fmt.Errorf("failed to get controller ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
-	// Load config from ConfigMap data
+	// Load config from ConfigMap data (overrides defaults)
 	r.Config.LoadFromConfigMap(configMap.Data)
-	r.Logger.Info("Loaded config from ConfigMap",
+	r.Logger.Info("Loaded controller configuration from ConfigMap",
+		"configMap", fmt.Sprintf("%s/%s", namespace, configMapName),
 		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
 		"defaultTTL", r.Config.DefaultTTL,
 		"excludeKinds", len(r.Config.ExcludeKinds),
@@ -1166,49 +1162,331 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 	return nil
 }
 
-// isNamespacedResource checks if a resource is namespaced or cluster-scoped
-// Returns true if namespaced, false if cluster-scoped
-// Note: ManifestCaptureRequest is namespaced and is NOT included in clusterScopedKinds
-func (r *ManifestCheckpointController) isNamespacedResource(gv schema.GroupVersion, kind string) bool {
-	// Common cluster-scoped resources
-	// Note: ManifestCaptureRequest is namespaced, not cluster-scoped
-	clusterScopedKinds := map[string]bool{
-		"Namespace":                      true,
-		"Node":                           true,
-		"PersistentVolume":               true,
-		"ClusterRole":                    true,
-		"ClusterRoleBinding":             true,
-		"StorageClass":                   true,
-		"CustomResourceDefinition":       true,
-		"APIService":                     true,
-		"MutatingWebhookConfiguration":   true,
-		"ValidatingWebhookConfiguration": true,
-		"PriorityClass":                  true,
-		"CSIDriver":                      true,
-		"CSINode":                        true,
-		"VolumeSnapshotClass":            true,
-		"VolumeSnapshotContent":          true,
-		"ManifestCheckpoint":             true,
-		"ManifestCheckpointContentChunk": true,
-		"Retainer":                       true,
+// isTerminal checks if MCR is in terminal state.
+// Terminal MCRs are immutable and should not be processed further.
+// Terminality is determined by reason, not just status:
+// - Processing is NOT terminal (operation in progress)
+// - Completed, Failed are terminal
+func (r *ManifestCheckpointController) isTerminal(mcr *storagev1alpha1.ManifestCaptureRequest) bool {
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+	if readyCondition == nil {
+		return false // No condition = not terminal
 	}
 
-	if clusterScopedKinds[kind] {
+	// Processing is NOT terminal
+	if readyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
 		return false
 	}
 
-	// For core v1 API group, most resources are namespaced except the ones above
-	if gv.Group == "" && gv.Version == "v1" {
-		return true
+	// Terminal states:
+	// - True (always with Completed reason per contract)
+	// - False with Failed (covers all failure cases)
+	return readyCondition.Status == metav1.ConditionTrue ||
+		readyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonFailed
+}
+
+// updateProcessingMessage updates the message in Processing condition without changing reason or LastTransitionTime.
+// This allows showing progress to the user during long-running operations.
+func (r *ManifestCheckpointController) updateProcessingMessage(
+	ctx context.Context,
+	mcr *storagev1alpha1.ManifestCaptureRequest,
+	message string,
+) error {
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
+		// Not in Processing state - nothing to update
+		return nil
 	}
 
-	// For other groups, assume namespaced unless explicitly cluster-scoped
-	// This is a heuristic - in production you might want to use RESTMapper
-	return true
+	// Update only message, preserve reason and LastTransitionTime
+	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
+		Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
+		Message:            message,
+		LastTransitionTime: readyCondition.LastTransitionTime, // Preserve original time
+	})
+
+	// Update status (best-effort, no retry for progress updates)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.ManifestCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+			return err
+		}
+		// Re-check: still Processing?
+		currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+		if currentReadyCondition == nil || currentReadyCondition.Reason != storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
+			// No longer Processing - skip update
+			return nil
+		}
+		setSingleCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
+			Message:            message,
+			LastTransitionTime: currentReadyCondition.LastTransitionTime, // Preserve original time
+		})
+		return r.Status().Update(ctx, current)
+	}); err != nil {
+		// Log but don't fail - progress updates are best-effort
+		r.Logger.Debug("Failed to update Processing message (non-critical)", "error", err)
+		return nil
+	}
+	return nil
+}
+
+// finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
+// This is a unified helper to eliminate code duplication across all finalization paths.
+func (r *ManifestCheckpointController) finalizeMCR(
+	ctx context.Context,
+	mcr *storagev1alpha1.ManifestCaptureRequest,
+	status metav1.ConditionStatus,
+	reason, message string,
+) error {
+	// Validate reason matches status per contract
+	if status == metav1.ConditionTrue {
+		// Completed is the ONLY allowed reason for True
+		if reason != storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted {
+			reason = storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted // Force Completed for True
+		}
+	}
+	if status == metav1.ConditionFalse {
+		// Must have explicit reason for False
+		if reason == "" || reason == storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted {
+			reason = storagev1alpha1.ManifestCaptureRequestConditionReasonFailed // Default to Failed for False
+		}
+	}
+
+	now := metav1.Now()
+	if mcr.Status.CompletionTimestamp == nil {
+		mcr.Status.CompletionTimestamp = &now
+	}
+	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
+		Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: now,
+	})
+
+	// Update status (retry only for status conflicts)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.ManifestCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+			return err
+		}
+		base := current.DeepCopy()
+		current.Status = mcr.Status
+		return r.Status().Patch(ctx, current, client.MergeFrom(base))
+	}); err != nil {
+		if errors.IsNotFound(err) {
+			return nil // Object deleted - fine
+		}
+		return fmt.Errorf("failed to update MCR status: %w", err)
+	}
+
+	// Update TTL annotation (informational only, best-effort, no retry)
+	current := &storagev1alpha1.ManifestCaptureRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err == nil {
+		base := current.DeepCopy()
+		r.setTTLAnnotation(current)
+		_ = r.Patch(ctx, current, client.MergeFrom(base)) // Ignore errors - annotation is informational
+	}
+
+	return nil
+}
+
+// setTTLAnnotation sets TTL annotation on the object.
+//
+// IMPORTANT TTL SEMANTICS:
+// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is INFORMATIONAL ONLY.
+// - Actual TTL deletion timing is controlled by controller configuration (config.DefaultTTL).
+// - TTL scanner uses config.DefaultTTL, NOT the annotation value.
+// - Annotation is set for observability and post-mortem analysis, but does not affect deletion timing.
+//
+// TTL is set when Ready/Failed condition is set during finalization.
+// TTL comes from configuration (state-snapshotter module settings), not from MCR spec.
+// If annotation already exists, it is not overwritten (idempotent).
+func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.ManifestCaptureRequest) {
+	// Don't overwrite if annotation already exists
+	if mcr.Annotations != nil {
+		if _, exists := mcr.Annotations[AnnotationKeyTTL]; exists {
+			return
+		}
+	}
+	if mcr.Annotations == nil {
+		mcr.Annotations = make(map[string]string)
+	}
+	// Get TTL from configuration (default: 168h)
+	ttlStr := config.DefaultTTLStr
+	if r.Config != nil && r.Config.DefaultTTLStr != "" {
+		ttlStr = r.Config.DefaultTTLStr
+	}
+	mcr.Annotations[AnnotationKeyTTL] = ttlStr
 }
 
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {
+	// Runtime assertion: ensure required dependencies are set (fail-fast on incorrect wiring)
+	if r.APIReader == nil {
+		return fmt.Errorf("APIReader is required (UID barrier pattern)")
+	}
+	if r.Config == nil {
+		return fmt.Errorf("Config is required")
+	}
+	if r.Logger == nil {
+		return fmt.Errorf("Logger is required")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).
 		Complete(r)
+}
+
+// StartTTLScanner starts the TTL scanner.
+// Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
+// Scanner periodically lists all MCRs and deletes expired ones based on completionTimestamp + TTL.
+//
+// IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
+// RunnableFunc already runs in a separate goroutine, so we don't need an additional go statement.
+// When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
+// Scanner uses List() to get all MCRs and checks completionTimestamp + TTL from controller config.
+// This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
+//
+// TTL SCANNER CONTRACT:
+//
+// 1. Works only with terminal MCRs:
+//   - Ready=True (completed successfully)
+//   - Ready=False (failed, terminal error)
+//   - Non-terminal MCRs are never touched
+//
+// 2. TTL source:
+//   - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations
+//   - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - This ensures predictable cluster-wide retention policy
+//
+// 3. TTL calculation:
+//   - TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Ready=False)
+//   - Expiration time = CompletionTimestamp + config.DefaultTTL
+//   - Only MCRs with CompletionTimestamp are eligible for deletion
+//
+// 4. Scanner behavior:
+//   - Scanner does NOT update status
+//   - Scanner does NOT patch objects
+//   - Scanner only performs List() and Delete() operations
+//   - Deletion of MCR triggers GC of ObjectKeeper and ManifestCheckpoint through ownerReferences
+//
+// 5. Leader-only execution:
+//   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
+//   - When leadership changes, ctx.Done() triggers graceful shutdown
+func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, client client.Client) {
+	// Scanner interval: check every 5 minutes
+	// This is a reasonable balance between responsiveness and API load
+	scannerInterval := 5 * time.Minute
+	ticker := time.NewTicker(scannerInterval)
+	defer ticker.Stop()
+
+	l := log.FromContext(ctx)
+	l.Info("TTL scanner started", "interval", scannerInterval)
+
+	// Run immediately on startup, then periodically
+	r.scanAndDeleteExpiredMCRs(ctx, client)
+
+	for {
+		select {
+		case <-ctx.Done():
+			l.Info("TTL scanner stopped (context cancelled)")
+			return
+		case <-ticker.C:
+			r.scanAndDeleteExpiredMCRs(ctx, client)
+		}
+	}
+}
+
+// scanAndDeleteExpiredMCRs lists all MCRs and deletes those where completionTimestamp + TTL < now.
+//
+// IMPORTANT:
+// TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only.
+// Actual TTL is controlled exclusively by controller configuration.
+// This ensures predictable cluster-wide retention policy.
+//
+// TTL SEMANTICS:
+// - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations.
+// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - This ensures consistent cleanup behavior: all MCRs use the same TTL policy defined by controller config.
+// - TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Ready=False).
+func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Context, client client.Client) {
+	// Get TTL from controller config (this is the ONLY source of TTL timing)
+	// TTL annotation is informational only and is ignored here
+	defaultTTL := config.DefaultTTL
+	if r.Config != nil && r.Config.DefaultTTL > 0 {
+		defaultTTL = r.Config.DefaultTTL
+	}
+
+	// Guard: if TTL is disabled (<= 0), skip scanning
+	if defaultTTL <= 0 {
+		log.FromContext(ctx).V(1).Info("TTL scanner disabled (ttl <= 0)")
+		return
+	}
+
+	// List all MCRs across all namespaces
+	mcrList := &storagev1alpha1.ManifestCaptureRequestList{}
+	if err := client.List(ctx, mcrList); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list ManifestCaptureRequests for TTL scan")
+		return
+	}
+
+	now := time.Now()
+	deletedCount := 0
+	skippedCount := 0
+
+	for i := range mcrList.Items {
+		mcr := &mcrList.Items[i]
+
+		// Skip if not terminal (Ready=True or Ready=False)
+		if !r.isTerminal(mcr) {
+			skippedCount++
+			continue // Skip non-terminal MCRs
+		}
+
+		// Skip if no completionTimestamp
+		if mcr.Status.CompletionTimestamp == nil {
+			skippedCount++
+			continue
+		}
+
+		// Check if TTL expired: completionTimestamp + defaultTTL < now
+		completionTime := mcr.Status.CompletionTimestamp.Time
+		expirationTime := completionTime.Add(defaultTTL)
+
+		if now.After(expirationTime) {
+			// TTL expired, delete the object
+			log.FromContext(ctx).Info("TTL expired, deleting ManifestCaptureRequest",
+				"namespace", mcr.Namespace,
+				"name", mcr.Name,
+				"completionTime", completionTime,
+				"expirationTime", expirationTime,
+				"ttl", defaultTTL)
+
+			if err := client.Delete(ctx, mcr); err != nil {
+				if errors.IsNotFound(err) {
+					// Already deleted, that's fine (double-delete is safe)
+					log.FromContext(ctx).V(1).Info("MCR already deleted during TTL scan",
+						"namespace", mcr.Namespace,
+						"name", mcr.Name)
+				} else {
+					log.FromContext(ctx).Error(err, "Failed to delete expired ManifestCaptureRequest",
+						"namespace", mcr.Namespace,
+						"name", mcr.Name)
+				}
+			} else {
+				deletedCount++
+			}
+		}
+	}
+
+	if deletedCount > 0 || skippedCount > 0 {
+		log.FromContext(ctx).V(1).Info("TTL scan completed",
+			"total", len(mcrList.Items),
+			"deleted", deletedCount,
+			"skipped", skippedCount)
+	}
 }

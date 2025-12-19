@@ -63,20 +63,11 @@ type ManifestCaptureRequestStatus struct {
 	// CheckpointName is the name of the cluster-scoped ManifestCheckpoint
 	CheckpointName string `json:"checkpointName,omitempty"`
 
-	// ObservedGeneration tracks the generation of the spec
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-
-	// ErrorReason provides a programmatic identifier for the error type
-	// +kubebuilder:validation:Enum=NotFound;SerializationError;InternalError
-	ErrorReason string `json:"errorReason,omitempty"`
-
 	// CompletionTimestamp is when the request was completed
 	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
 
 	// Conditions represent the latest available observations of the request state
-	// Expected condition types:
-	// - Ready: indicates whether the capture request is ready (True) or not (False)
-	// - Failed: indicates whether the capture request has failed (True) or not (False)
-	// - Processing: indicates whether the capture request is being processed (True) or not (False)
+	// Only Ready condition is used - it is set to True on success or False on final failure
+	// Ready condition is set only in final state (terminal success or terminal failure)
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

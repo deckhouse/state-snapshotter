@@ -28,6 +28,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -36,8 +39,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	iretainer "github.com/deckhouse/state-snapshotter/api/v1alpha1/iretainer"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -103,8 +106,70 @@ var _ = BeforeSuite(func() {
 	err = storagev1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = iretainer.AddToScheme(scheme)
+	err = deckhousev1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
+
+	// Install ObjectKeeper CRD manually for e2e tests
+	// ObjectKeeper is managed by deckhouse-controller, but we need its CRD for tests
+	testCtx := context.Background()
+	objectKeeperCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "objectkeepers.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"mode": {
+											Type: "string",
+										},
+										"followObjectRef": {
+											Type: "object",
+											Properties: map[string]apiextensionsv1.JSONSchemaProps{
+												"apiVersion": {Type: "string"},
+												"kind":       {Type: "string"},
+												"name":       {Type: "string"},
+												"namespace":  {Type: "string"},
+												"uid":        {Type: "string"},
+											},
+										},
+									},
+								},
+								"status": {
+									Type: "object",
+								},
+							},
+						},
+					},
+				},
+			},
+			Scope: apiextensionsv1.ClusterScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "objectkeepers",
+				Singular: "objectkeeper",
+				Kind:     "ObjectKeeper",
+			},
+		},
+	}
+
+	// Create CRD client and install ObjectKeeper CRD
+	crdClient, err := apiextensionsv1client.NewForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, objectKeeperCRD, metav1.CreateOptions{})
+	// Ignore AlreadyExists error - CRD might already be installed
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
 
 	err = apiextensionsv1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
@@ -131,21 +196,22 @@ var _ = BeforeSuite(func() {
 	}
 
 	// Setup ManifestCheckpointController
-	mcpController := &controllers.ManifestCheckpointController{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Logger: testLogger,
-		Config: cfgOptions,
-	}
+	mcpController, err := controllers.NewManifestCheckpointController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		testLogger,
+		cfgOptions,
+	)
+	Expect(err).NotTo(HaveOccurred())
 	err = mcpController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
-	// Setup RetainerController using helper function
-	err = controllers.AddRetainerControllerToManager(mgr, testLogger)
-	Expect(err).NotTo(HaveOccurred())
+	// NOTE: RetainerController (IRetainer) has been removed.
+	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
 
 	// Create context
-	ctx, cancel = context.WithCancel(context.Background())
+	ctx, cancel = context.WithCancel(testCtx)
 
 	// Start manager in goroutine
 	go func() {
