@@ -395,19 +395,10 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				"checkpoint", checkpointName,
 				"owner", retainerName,
 				"ownerUID", objectKeeper.UID)
-			base := mcr.DeepCopy()
-			message := fmt.Sprintf("Failed to create checkpoint: %v", err)
-			now := metav1.Now()
-			mcr.Status.CompletionTimestamp = &now
-			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             storagev1alpha1.ConditionReasonFailed,
-				Message:            message,
-				LastTransitionTime: now,
-			})
-			// Failed condition removed - only Ready=False is used for failures
-			if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); err != nil {
+				if errors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, err
@@ -447,19 +438,10 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"checkpoint", checkpointName,
 			"objects", len(objects),
 			"error", err.Error())
-		base := mcr.DeepCopy()
-		message := fmt.Sprintf("Failed to create chunks: %v", err)
-		now := metav1.Now()
-		mcr.Status.CompletionTimestamp = &now
-		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             storagev1alpha1.ConditionReasonFailed,
-			Message:            message,
-			LastTransitionTime: now,
-		})
-		// Failed condition removed - only Ready=False is used for failures
-		if err := r.Status().Patch(ctx, mcr, client.MergeFrom(base)); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to create chunks: %v", err)); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil

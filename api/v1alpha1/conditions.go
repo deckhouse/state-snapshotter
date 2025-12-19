@@ -23,6 +23,15 @@ const (
 )
 
 // Condition reason constants
+//
+// NOTE:
+// Ready=False is not synonymous with failure in this controller.
+// reason distinguishes between:
+//   - Processing   (operation in progress, non-terminal)
+//   - InvalidSpec  (user error, retry is useless)
+//   - Failed       (execution error after valid start)
+//
+// Without explicit reasons Ready=False would be ambiguous and misleading.
 const (
 	// ConditionReasonProcessing indicates operation is in progress
 	// This is the ONLY non-terminal reason for Ready=False
@@ -33,9 +42,16 @@ const (
 	ConditionReasonCompleted = "Completed"
 
 	// ConditionReasonFailed indicates operation failed
+	// Used for execution-time failures where the request itself was valid,
+	// but the controller could not complete the operation (API errors, conflicts,
+	// infrastructure issues, etc.). These failures are terminal.
 	ConditionReasonFailed = "Failed"
 
 	// ConditionReasonInvalidSpec indicates invalid resource specification
+	// Used for runtime semantic validation that cannot be expressed via CRD schema
+	// validation (e.g. empty targets, unsupported object kinds, invalid combinations
+	// of fields). Such requests are valid YAML but meaningless to execute.
+	// Retry is useless; the user must fix the spec.
 	ConditionReasonInvalidSpec = "InvalidSpec"
 
 	// ConditionReasonInternalError indicates internal error (legacy, for backward compatibility)
