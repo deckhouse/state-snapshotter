@@ -24,8 +24,20 @@ const (
 
 // Condition reason constants
 const (
+	// ConditionReasonProcessing indicates operation is in progress
+	// This is the ONLY non-terminal reason for Ready=False
+	ConditionReasonProcessing = "Processing"
+
 	// ConditionReasonCompleted indicates successful completion
+	// This is the ONLY allowed reason for Ready=True
 	ConditionReasonCompleted = "Completed"
-	// ConditionReasonInternalError indicates internal error (used for all failure cases)
+
+	// ConditionReasonFailed indicates operation failed
+	ConditionReasonFailed = "Failed"
+
+	// ConditionReasonInvalidSpec indicates invalid resource specification
+	ConditionReasonInvalidSpec = "InvalidSpec"
+
+	// ConditionReasonInternalError indicates internal error (legacy, for backward compatibility)
 	ConditionReasonInternalError = "InternalError"
 )

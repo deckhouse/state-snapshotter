@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -163,12 +164,50 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 }
 
 func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest) (ctrl.Result, error) {
-	// Processing condition removed - only Ready condition is used
-	// Ready condition is set only in final state (True on success, False on failure)
+	// Set Processing condition if not already set
+	// CRITICAL: This must be done BEFORE any long-running operations
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ConditionReasonProcessing {
+		// Handle version conflicts: retry if conflict occurs
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			current := &storagev1alpha1.ManifestCaptureRequest{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+				return err
+			}
+			// Re-check: maybe Processing was already set by another reconcile
+			currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			if currentReadyCondition != nil && currentReadyCondition.Reason == storagev1alpha1.ConditionReasonProcessing {
+				// Already Processing - update local mcr and return
+				mcr.Status = current.Status
+				return nil
+			}
+			// Set Processing condition on current object
+			setSingleCondition(&current.Status.Conditions, metav1.Condition{
+				Type:               storagev1alpha1.ConditionTypeReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             storagev1alpha1.ConditionReasonProcessing,
+				Message:            "Operation started",
+				LastTransitionTime: metav1.Now(),
+			})
+			// Update status immediately to reflect Processing state
+			// This is UX-critical: user must see that operation started
+			if err := r.Status().Update(ctx, current); err != nil {
+				return err
+			}
+			// Update local mcr object to reflect the change
+			mcr.Status = current.Status
+			return nil
+		}); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, err
+		}
+	}
 
 	// Validate targets
 	if len(mcr.Spec.Targets) == 0 {
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInternalError, "No targets specified"); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInvalidSpec, "No targets specified"); err != nil {
 			if errors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
@@ -185,7 +224,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	if err != nil {
 		// Simple and clean: NotFound → Ready=False immediately
 		// Kubernetes is declarative: if object appears later, user must delete and recreate MCR
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("Failed to collect objects: %v", err)); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to collect objects: %v", err)); err != nil {
 			if errors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
@@ -259,7 +298,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 		if err := r.Create(ctx, objectKeeper); err != nil {
 			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
 				}
@@ -363,7 +402,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
 				Type:               storagev1alpha1.ConditionTypeReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             storagev1alpha1.ConditionReasonInternalError,
+				Reason:             storagev1alpha1.ConditionReasonFailed,
 				Message:            message,
 				LastTransitionTime: now,
 			})
@@ -415,7 +454,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
 			Type:               storagev1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             storagev1alpha1.ConditionReasonInternalError,
+			Reason:             storagev1alpha1.ConditionReasonFailed,
 			Message:            message,
 			LastTransitionTime: now,
 		})
@@ -1093,11 +1132,29 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 	return nil
 }
 
-// isTerminal checks if MCR is in terminal state (Ready=True or Ready=False).
+// isTerminal checks if MCR is in terminal state.
 // Terminal MCRs are immutable and should not be processed further.
+// Terminality is determined by reason, not just status:
+// - Processing is NOT terminal (operation in progress)
+// - Completed, Failed, InvalidSpec, InternalError are terminal
 func (r *ManifestCheckpointController) isTerminal(mcr *storagev1alpha1.ManifestCaptureRequest) bool {
 	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-	return readyCondition != nil && (readyCondition.Status == metav1.ConditionTrue || readyCondition.Status == metav1.ConditionFalse)
+	if readyCondition == nil {
+		return false // No condition = not terminal
+	}
+
+	// Processing is NOT terminal
+	if readyCondition.Reason == storagev1alpha1.ConditionReasonProcessing {
+		return false
+	}
+
+	// Terminal states:
+	// - True (always with Completed reason per contract)
+	// - False with Failed/InvalidSpec/InternalError
+	return readyCondition.Status == metav1.ConditionTrue ||
+		readyCondition.Reason == storagev1alpha1.ConditionReasonFailed ||
+		readyCondition.Reason == storagev1alpha1.ConditionReasonInvalidSpec ||
+		readyCondition.Reason == storagev1alpha1.ConditionReasonInternalError
 }
 
 // finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
@@ -1108,6 +1165,20 @@ func (r *ManifestCheckpointController) finalizeMCR(
 	status metav1.ConditionStatus,
 	reason, message string,
 ) error {
+	// Validate reason matches status per contract
+	if status == metav1.ConditionTrue {
+		// Completed is the ONLY allowed reason for True
+		if reason != storagev1alpha1.ConditionReasonCompleted {
+			reason = storagev1alpha1.ConditionReasonCompleted // Force Completed for True
+		}
+	}
+	if status == metav1.ConditionFalse {
+		// Must have explicit reason for False
+		if reason == "" || reason == storagev1alpha1.ConditionReasonCompleted {
+			reason = storagev1alpha1.ConditionReasonFailed // Default to Failed for False
+		}
+	}
+
 	now := metav1.Now()
 	if mcr.Status.CompletionTimestamp == nil {
 		mcr.Status.CompletionTimestamp = &now
@@ -1192,42 +1263,21 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 		Complete(r)
 }
 
-// runTTLScanner runs the TTL scanner synchronously within manager.RunnableFunc.
+// StartTTLScanner starts the TTL scanner.
 // Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
 // Scanner periodically lists all MCRs and deletes expired ones based on completionTimestamp + TTL.
 //
 // IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
-// RunnableFunc is executed only on the leader replica.
-// On leadership change, ctx is cancelled and the scanner stops gracefully.
-func (r *ManifestCheckpointController) runTTLScanner(ctx context.Context, client client.Client) {
-	// Scanner interval: check every 1 minute
-	scannerInterval := 1 * time.Minute
-	ticker := time.NewTicker(scannerInterval)
-	defer ticker.Stop()
-
-	r.Logger.Info("TTL scanner started", "interval", scannerInterval)
-
-	// Run immediately on startup, then periodically
-	r.scanAndDeleteExpiredMCRs(ctx, client)
-
-	for {
-		select {
-		case <-ctx.Done():
-			r.Logger.Info("TTL scanner stopped (context cancelled)")
-			return
-		case <-ticker.C:
-			r.scanAndDeleteExpiredMCRs(ctx, client)
-		}
-	}
-}
-
-// scanAndDeleteExpiredMCRs lists all MCRs and deletes those where completionTimestamp + TTL < now.
+// RunnableFunc already runs in a separate goroutine, so we don't need an additional go statement.
+// When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
+// Scanner uses List() to get all MCRs and checks completionTimestamp + TTL from controller config.
+// This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
 //
 // TTL SCANNER CONTRACT:
 //
 // 1. Works only with terminal MCRs:
 //   - Ready=True (completed successfully)
-//   - Ready=False (failed)
+//   - Ready=False (failed, terminal error)
 //   - Non-terminal MCRs are never touched
 //
 // 2. TTL source:
@@ -1249,17 +1299,60 @@ func (r *ManifestCheckpointController) runTTLScanner(ctx context.Context, client
 // 5. Leader-only execution:
 //   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
 //   - When leadership changes, ctx.Done() triggers graceful shutdown
+func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, client client.Client) {
+	// Scanner interval: check every 5 minutes
+	// This is a reasonable balance between responsiveness and API load
+	scannerInterval := 5 * time.Minute
+	ticker := time.NewTicker(scannerInterval)
+	defer ticker.Stop()
+
+	l := log.FromContext(ctx)
+	l.Info("TTL scanner started", "interval", scannerInterval)
+
+	// Run immediately on startup, then periodically
+	r.scanAndDeleteExpiredMCRs(ctx, client)
+
+	for {
+		select {
+		case <-ctx.Done():
+			l.Info("TTL scanner stopped (context cancelled)")
+			return
+		case <-ticker.C:
+			r.scanAndDeleteExpiredMCRs(ctx, client)
+		}
+	}
+}
+
+// scanAndDeleteExpiredMCRs lists all MCRs and deletes those where completionTimestamp + TTL < now.
+//
+// IMPORTANT:
+// TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only.
+// Actual TTL is controlled exclusively by controller configuration.
+// This ensures predictable cluster-wide retention policy.
+//
+// TTL SEMANTICS:
+// - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations.
+// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - This ensures consistent cleanup behavior: all MCRs use the same TTL policy defined by controller config.
+// - TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Ready=False).
 func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Context, client client.Client) {
 	// Get TTL from controller config (this is the ONLY source of TTL timing)
+	// TTL annotation is informational only and is ignored here
 	defaultTTL := config.DefaultTTL
 	if r.Config != nil && r.Config.DefaultTTL > 0 {
 		defaultTTL = r.Config.DefaultTTL
 	}
 
+	// Guard: if TTL is disabled (<= 0), skip scanning
+	if defaultTTL <= 0 {
+		log.FromContext(ctx).V(1).Info("TTL scanner disabled (ttl <= 0)")
+		return
+	}
+
 	// List all MCRs across all namespaces
 	mcrList := &storagev1alpha1.ManifestCaptureRequestList{}
 	if err := client.List(ctx, mcrList); err != nil {
-		r.Logger.Error(err, "Failed to list ManifestCaptureRequests for TTL scan")
+		log.FromContext(ctx).Error(err, "Failed to list ManifestCaptureRequests for TTL scan")
 		return
 	}
 
@@ -1288,7 +1381,7 @@ func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Cont
 
 		if now.After(expirationTime) {
 			// TTL expired, delete the object
-			r.Logger.Info("TTL expired, deleting ManifestCaptureRequest",
+			log.FromContext(ctx).Info("TTL expired, deleting ManifestCaptureRequest",
 				"namespace", mcr.Namespace,
 				"name", mcr.Name,
 				"completionTime", completionTime,
@@ -1298,11 +1391,11 @@ func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Cont
 			if err := client.Delete(ctx, mcr); err != nil {
 				if errors.IsNotFound(err) {
 					// Already deleted, that's fine (double-delete is safe)
-					r.Logger.Debug("MCR already deleted during TTL scan",
+					log.FromContext(ctx).V(1).Info("MCR already deleted during TTL scan",
 						"namespace", mcr.Namespace,
 						"name", mcr.Name)
 				} else {
-					r.Logger.Error(err, "Failed to delete expired ManifestCaptureRequest",
+					log.FromContext(ctx).Error(err, "Failed to delete expired ManifestCaptureRequest",
 						"namespace", mcr.Namespace,
 						"name", mcr.Name)
 				}
@@ -1313,7 +1406,7 @@ func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Cont
 	}
 
 	if deletedCount > 0 || skippedCount > 0 {
-		r.Logger.Debug("TTL scan completed",
+		log.FromContext(ctx).V(1).Info("TTL scan completed",
 			"total", len(mcrList.Items),
 			"deleted", deletedCount,
 			"skipped", skippedCount)

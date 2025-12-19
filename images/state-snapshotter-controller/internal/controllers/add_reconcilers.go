@@ -51,10 +51,10 @@ func AddManifestCheckpointControllerToManager(
 		return err
 	}
 	// Start TTL scanner as leader-only runnable
-	// RunnableFunc is executed only on the leader replica.
-	// On leadership change, ctx is cancelled and the scanner stops gracefully.
+	// StartTTLScanner runs TTL scanner and blocks until ctx.Done()
+	// RunnableFunc ensures leader-only execution
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		reconciler.runTTLScanner(ctx, mgr.GetClient())
+		reconciler.StartTTLScanner(ctx, mgr.GetClient())
 		return nil
 	})); err != nil {
 		return err
