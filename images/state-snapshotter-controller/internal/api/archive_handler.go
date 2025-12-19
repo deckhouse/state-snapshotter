@@ -90,6 +90,8 @@ func (h *ArchiveHandler) HandleGetCheckpointArchive(w http.ResponseWriter, r *ht
 	}
 
 	// Check if checkpoint is ready (using Ready condition)
+	// NOTE: ManifestCheckpoint uses ConditionTypeReady with its own semantics (artifact resource),
+	// independent from request-style Ready condition contract.
 	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue {
 		phaseMsg := "Unknown"
