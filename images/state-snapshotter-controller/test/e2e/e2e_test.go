@@ -249,7 +249,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonInternalError))
+			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
 			Expect(mcr.Status.CheckpointName).To(BeEmpty())
 		})
 

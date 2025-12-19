@@ -32,7 +32,6 @@ import (
 // TTL scanner runs only on the leader replica to prevent duplicate deletion attempts.
 // When leadership changes, the scanner context is cancelled and scanner stops gracefully.
 func AddManifestCheckpointControllerToManager(
-	ctx context.Context,
 	mgr ctrl.Manager,
 	log logger.LoggerInterface,
 	cfg *config.Options,

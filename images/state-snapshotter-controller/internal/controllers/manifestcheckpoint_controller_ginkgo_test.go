@@ -293,7 +293,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 						{
 							Type:               storagev1alpha1.ConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonInternalError,
+							Reason:             storagev1alpha1.ConditionReasonFailed,
 							LastTransitionTime: expiredTime,
 						},
 					},
@@ -860,7 +860,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 						{
 							Type:               storagev1alpha1.ConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonInternalError,
+							Reason:             storagev1alpha1.ConditionReasonFailed,
 							LastTransitionTime: now,
 						},
 					},
@@ -897,7 +897,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 			Expect(readyCond).ToNot(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ConditionReasonInternalError))
+			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
 			Expect(updatedMCR.Status.CompletionTimestamp).To(Equal(initialStatus.CompletionTimestamp))
 			// TTL annotation may be added (post-restart finalization), but status must be unchanged
 			Expect(updatedMCR.Status.Conditions).To(Equal(initialStatus.Conditions))
@@ -938,7 +938,7 @@ var _ = Describe("Helper Functions", func() {
 			setSingleCondition(conds, metav1.Condition{
 				Type:               storagev1alpha1.ConditionTypeReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             storagev1alpha1.ConditionReasonInternalError,
+				Reason:             storagev1alpha1.ConditionReasonFailed,
 				Message:            "Updated message",
 				LastTransitionTime: metav1.Now(),
 			})
@@ -946,7 +946,7 @@ var _ = Describe("Helper Functions", func() {
 			Expect(len(*conds)).To(Equal(1))
 			updatedCond := (*conds)[0]
 			Expect(updatedCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(updatedCond.Reason).To(Equal(storagev1alpha1.ConditionReasonInternalError))
+			Expect(updatedCond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
 		})
 
 		It("should keep only one condition of each type", func() {
@@ -1012,7 +1012,7 @@ var _ = Describe("Conditions", func() {
 						{
 							Type:               storagev1alpha1.ConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonInternalError,
+							Reason:             storagev1alpha1.ConditionReasonFailed,
 							LastTransitionTime: metav1.Now(),
 						},
 					},
@@ -1023,7 +1023,7 @@ var _ = Describe("Conditions", func() {
 			isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
 
 			Expect(isReady).To(BeFalse())
-			Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonInternalError))
+			Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
 		})
 
 		It("should identify absence of Ready condition as not ready", func() {
@@ -1430,7 +1430,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 
-		It("sets InvalidSpec without entering Processing", func() {
+		It("sets Failed without entering Processing for invalid spec", func() {
 			mcr := &storagev1alpha1.ManifestCaptureRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "bad",
@@ -1455,7 +1455,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 
 			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonInvalidSpec))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 	})
@@ -1479,8 +1479,177 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Entry("Processing", metav1.ConditionFalse, storagev1alpha1.ConditionReasonProcessing, false),
 			Entry("Completed", metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, true),
 			Entry("Failed", metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, true),
-			Entry("InvalidSpec", metav1.ConditionFalse, storagev1alpha1.ConditionReasonInvalidSpec, true),
-			Entry("InternalError", metav1.ConditionFalse, storagev1alpha1.ConditionReasonInternalError, true),
 		)
+	})
+
+	Describe("updateProcessingMessage", func() {
+		It("updates message in Processing condition", func() {
+			mcr := newProcessingMCR("test", "default")
+			initialTime := mcr.Status.Conditions[0].LastTransitionTime
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Update message
+			err := reconciler.updateProcessingMessage(ctx, mcr, "New progress message")
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonProcessing))
+			Expect(cond.Message).To(Equal("New progress message"))
+			// LastTransitionTime should be preserved (compare Unix time to avoid precision issues)
+			Expect(cond.LastTransitionTime.Unix()).To(Equal(initialTime.Unix()))
+		})
+
+		It("preserves LastTransitionTime when updating message", func() {
+			mcr := newProcessingMCR("test", "default")
+			initialTime := metav1.NewTime(time.Now().Add(-5 * time.Minute).Truncate(time.Second))
+			mcr.Status.Conditions[0].LastTransitionTime = initialTime
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Update message multiple times
+			err := reconciler.updateProcessingMessage(ctx, mcr, "Step 1")
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+			cond1 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond1.LastTransitionTime.Unix()).To(Equal(initialTime.Unix()))
+
+			err = reconciler.updateProcessingMessage(ctx, updated, "Step 2")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+			cond2 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond2.LastTransitionTime.Unix()).To(Equal(initialTime.Unix()))
+			Expect(cond2.Message).To(Equal("Step 2"))
+		})
+
+		It("does nothing if resource is not in Processing state", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "completed",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               storagev1alpha1.ConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             storagev1alpha1.ConditionReasonCompleted,
+							Message:            "Original message",
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Try to update message - should do nothing
+			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(Equal("Original message"))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+		})
+
+		It("does nothing if resource has no Ready condition", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "no-condition",
+					Namespace: "default",
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Try to update message - should do nothing
+			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).To(BeNil())
+		})
+
+		It("does nothing if resource is in Failed state", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "failed",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               storagev1alpha1.ConditionTypeReady,
+							Status:             metav1.ConditionFalse,
+							Reason:             storagev1alpha1.ConditionReasonFailed,
+							Message:            "Original error",
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Try to update message - should do nothing
+			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(Equal("Original error"))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+		})
+
+		It("skips update if resource transitions from Processing to Completed during update", func() {
+			mcr := newProcessingMCR("test", "default")
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Simulate transition to Completed by another reconcile
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+			setSingleCondition(&updated.Status.Conditions, metav1.Condition{
+				Type:               storagev1alpha1.ConditionTypeReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             storagev1alpha1.ConditionReasonCompleted,
+				Message:            "Completed",
+				LastTransitionTime: metav1.Now(),
+			})
+			Expect(k8sClient.Status().Update(ctx, updated)).To(Succeed())
+
+			// Try to update Processing message - should detect Completed and skip
+			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
+			Expect(err).NotTo(HaveOccurred())
+
+			final := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), final)).To(Succeed())
+
+			cond := meta.FindStatusCondition(final.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(cond.Message).To(Equal("Completed"))
+		})
+
+		It("handles NotFound error gracefully (best-effort)", func() {
+			mcr := newProcessingMCR("not-found", "default")
+			// Don't create it in k8sClient
+
+			// Should not panic or return error
+			err := reconciler.updateProcessingMessage(ctx, mcr, "Test message")
+			Expect(err).NotTo(HaveOccurred())
+		})
 	})
 })

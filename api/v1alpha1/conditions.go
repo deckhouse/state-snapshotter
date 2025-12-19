@@ -28,32 +28,20 @@ const (
 // Ready=False is not synonymous with failure in this controller.
 // reason distinguishes between:
 //   - Processing   (operation in progress, non-terminal)
-//   - InvalidSpec  (user error, retry is useless)
-//   - Failed       (execution error after valid start)
+//   - Failed       (operation could not be completed, terminal)
 //
 // Without explicit reasons Ready=False would be ambiguous and misleading.
 const (
-	// ConditionReasonProcessing indicates operation is in progress
-	// This is the ONLY non-terminal reason for Ready=False
+	// ConditionReasonProcessing indicates that the controller has accepted the request
+	// and the operation is currently in progress.
+	// This is the ONLY non-terminal Ready=False state.
 	ConditionReasonProcessing = "Processing"
 
-	// ConditionReasonCompleted indicates successful completion
-	// This is the ONLY allowed reason for Ready=True
+	// ConditionReasonCompleted indicates successful completion of the operation.
+	// This is the ONLY allowed reason for Ready=True.
 	ConditionReasonCompleted = "Completed"
 
-	// ConditionReasonFailed indicates operation failed
-	// Used for execution-time failures where the request itself was valid,
-	// but the controller could not complete the operation (API errors, conflicts,
-	// infrastructure issues, etc.). These failures are terminal.
+	// ConditionReasonFailed indicates that the operation could not be completed.
+	// Covers all terminal failure cases regardless of root cause.
 	ConditionReasonFailed = "Failed"
-
-	// ConditionReasonInvalidSpec indicates invalid resource specification
-	// Used for runtime semantic validation that cannot be expressed via CRD schema
-	// validation (e.g. empty targets, unsupported object kinds, invalid combinations
-	// of fields). Such requests are valid YAML but meaningless to execute.
-	// Retry is useless; the user must fix the spec.
-	ConditionReasonInvalidSpec = "InvalidSpec"
-
-	// ConditionReasonInternalError indicates internal error (legacy, for backward compatibility)
-	ConditionReasonInternalError = "InternalError"
 )
