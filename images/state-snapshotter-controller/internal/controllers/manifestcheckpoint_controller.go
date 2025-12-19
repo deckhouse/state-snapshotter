@@ -472,6 +472,10 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	checkpoint.Status.TotalObjects = totalObjects
 	checkpoint.Status.TotalSizeBytes = totalSize
 	now := metav1.Now()
+	// NOTE: ManifestCheckpoint (artifact resource) uses ConditionTypeReady/ConditionReasonCompleted
+	// with its own semantics: Ready=True+Completed means checkpoint is ready for use.
+	// This is independent from request-style Ready condition contract, even though
+	// the same constants are used.
 	setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
 		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,

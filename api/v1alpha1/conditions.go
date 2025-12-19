@@ -16,6 +16,18 @@ limitations under the License.
 
 package v1alpha1
 
+// Ready condition constants defined in this file.
+//
+// Primary use: request-style resources (e.g. ManifestCaptureRequest).
+// They describe the lifecycle of a long-running controller-driven operation:
+// accepted → processing → completed / failed.
+//
+// NOTE: These constants (ConditionTypeReady, ConditionReasonCompleted) may also
+// be used by artifact-style resources (e.g. ManifestCheckpoint), but with
+// different semantics. Artifact resources use Ready=True+Completed to indicate
+// the artifact is ready for use, which is independent from the request-style
+// lifecycle contract. See usage sites for semantic details.
+
 // Condition type constants
 // Only Ready condition is used - it is set to True on success or False on final failure
 const (
