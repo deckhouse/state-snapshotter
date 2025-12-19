@@ -207,7 +207,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 
 	// Validate targets
 	if len(mcr.Spec.Targets) == 0 {
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInvalidSpec, "No targets specified"); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, "No targets specified"); err != nil {
 			if errors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
@@ -272,6 +272,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	// - TTL and request cleanup are handled by MCR controller, not ObjectKeeper
 	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
 	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+	// Update Processing message to show progress
+	_ = r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
 
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
@@ -424,6 +426,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"ownerRefs", ownerRefDetails,
 			"objectKeeperName", retainerName,
 			"objectKeeperUID", objectKeeper.UID)
+		// Update Processing message to show progress
+		_ = r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Created checkpoint %s, collecting objects...", checkpointName))
 	}
 
 	// NOW create chunks (checkpoint exists, so ownerRef will work)
@@ -432,6 +436,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"checkpoint", checkpointName,
 		"checkpointUID", checkpoint.UID,
 		"objects", len(objects))
+	// Update Processing message to show progress
+	_ = r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Creating chunks for checkpoint %s (%d objects)...", checkpointName, len(objects)))
 	chunks, err := r.createChunks(ctx, checkpointName, string(checkpoint.UID), objects)
 	if err != nil {
 		r.Logger.Error(err, "❌ Step 3 failed: Failed to create chunks",
@@ -1118,7 +1124,7 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 // Terminal MCRs are immutable and should not be processed further.
 // Terminality is determined by reason, not just status:
 // - Processing is NOT terminal (operation in progress)
-// - Completed, Failed, InvalidSpec, InternalError are terminal
+// - Completed, Failed are terminal
 func (r *ManifestCheckpointController) isTerminal(mcr *storagev1alpha1.ManifestCaptureRequest) bool {
 	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 	if readyCondition == nil {
@@ -1132,11 +1138,59 @@ func (r *ManifestCheckpointController) isTerminal(mcr *storagev1alpha1.ManifestC
 
 	// Terminal states:
 	// - True (always with Completed reason per contract)
-	// - False with Failed/InvalidSpec/InternalError
+	// - False with Failed (covers all failure cases)
 	return readyCondition.Status == metav1.ConditionTrue ||
-		readyCondition.Reason == storagev1alpha1.ConditionReasonFailed ||
-		readyCondition.Reason == storagev1alpha1.ConditionReasonInvalidSpec ||
-		readyCondition.Reason == storagev1alpha1.ConditionReasonInternalError
+		readyCondition.Reason == storagev1alpha1.ConditionReasonFailed
+}
+
+// updateProcessingMessage updates the message in Processing condition without changing reason or LastTransitionTime.
+// This allows showing progress to the user during long-running operations.
+func (r *ManifestCheckpointController) updateProcessingMessage(
+	ctx context.Context,
+	mcr *storagev1alpha1.ManifestCaptureRequest,
+	message string,
+) error {
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ConditionReasonProcessing {
+		// Not in Processing state - nothing to update
+		return nil
+	}
+
+	// Update only message, preserve reason and LastTransitionTime
+	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
+		Type:               storagev1alpha1.ConditionTypeReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             storagev1alpha1.ConditionReasonProcessing,
+		Message:            message,
+		LastTransitionTime: readyCondition.LastTransitionTime, // Preserve original time
+	})
+
+	// Update status (best-effort, no retry for progress updates)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.ManifestCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+			return err
+		}
+		// Re-check: still Processing?
+		currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		if currentReadyCondition == nil || currentReadyCondition.Reason != storagev1alpha1.ConditionReasonProcessing {
+			// No longer Processing - skip update
+			return nil
+		}
+		setSingleCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.ConditionReasonProcessing,
+			Message:            message,
+			LastTransitionTime: currentReadyCondition.LastTransitionTime, // Preserve original time
+		})
+		return r.Status().Update(ctx, current)
+	}); err != nil {
+		// Log but don't fail - progress updates are best-effort
+		r.Logger.Debug("Failed to update Processing message (non-critical)", "error", err)
+		return nil
+	}
+	return nil
 }
 
 // finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
