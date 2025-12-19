@@ -30,8 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientpatch "sigs.k8s.io/controller-runtime/pkg/client"
-	clientpkg "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -49,7 +49,7 @@ func TestManifestCaptureRequestGinkgo(t *testing.T) {
 
 var _ = Describe("ManifestCaptureRequest TTL", func() {
 	var (
-		baseClient clientpkg.Client
+		baseClient client.Client
 		ctrl       *ManifestCheckpointController
 		scheme     *runtime.Scheme
 		cfg        *config.Options
@@ -140,7 +140,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 	Describe("TTL Scanner", func() {
 		var (
 			ctx           context.Context
-			scannerClient clientpkg.Client
+			scannerClient client.Client
 		)
 
 		BeforeEach(func() {
@@ -315,7 +315,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 	Describe("Post-restart finalization", func() {
 		var (
 			ctx           context.Context
-			restartClient clientpkg.Client
+			restartClient client.Client
 		)
 
 		BeforeEach(func() {
@@ -396,7 +396,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 	Describe("Checkpoint exists finalization path", func() {
 		var (
 			ctx            context.Context
-			finalizeClient clientpkg.Client
+			finalizeClient client.Client
 		)
 
 		BeforeEach(func() {
@@ -469,7 +469,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 	var (
 		ctx    context.Context
-		client clientpkg.Client
+		client client.Client
 		scheme *runtime.Scheme
 	)
 
@@ -669,7 +669,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", func() {
 	var (
 		ctx    context.Context
-		client clientpkg.Client
+		client client.Client
 		ctrl   *ManifestCheckpointController
 		scheme *runtime.Scheme
 		cfg    *config.Options
@@ -1202,5 +1202,285 @@ var _ = Describe("ADR Compliance", func() {
 			// 2. No other ClusterRole/Role should grant list/watch on manifestcheckpointcontentchunks
 			// 3. This is enforced by ADR and should be verified in production via RBAC manifest validation
 		})
+	})
+})
+
+// ============================================================================
+// Ready Condition Semantics Tests
+// ============================================================================
+// These tests verify the new Ready condition semantics with Processing reason.
+// See docs/architecture/ready-condition-semantics.md for the full specification.
+
+var _ = Describe("Ready Condition Semantics", func() {
+	var (
+		ctx        context.Context
+		k8sClient  client.Client
+		reconciler *ManifestCheckpointController
+		scheme     *runtime.Scheme
+		cfg        *config.Options
+		testLogger logger.LoggerInterface
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+
+		scheme = runtime.NewScheme()
+		Expect(storagev1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(deckhousev1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+		cfg = &config.Options{
+			DefaultTTL:    10 * time.Minute,
+			DefaultTTLStr: "10m",
+		}
+
+		k8sClient = fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
+			Build()
+
+		var err error
+		testLogger, err = logger.NewLogger("info")
+		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
+		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
+
+		reconciler, err = NewManifestCheckpointController(
+			k8sClient,
+			k8sClient, // Use same client for APIReader in tests
+			scheme,
+			testLogger,
+			cfg,
+		)
+		Expect(err).ToNot(HaveOccurred(), "Failed to create controller")
+	})
+
+	// Helper function to create MCR with Processing condition
+	newProcessingMCR := func(name, namespace string) *storagev1alpha1.ManifestCaptureRequest {
+		return &storagev1alpha1.ManifestCaptureRequest{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+			},
+			Status: storagev1alpha1.ManifestCaptureRequestStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               storagev1alpha1.ConditionTypeReady,
+						Status:             metav1.ConditionFalse,
+						Reason:             storagev1alpha1.ConditionReasonProcessing,
+						Message:            "Operation started",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+			Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+				Targets: []storagev1alpha1.ManifestTarget{
+					{
+						APIVersion: "v1",
+						Kind:       "ConfigMap",
+						Name:       "test-cm",
+					},
+				},
+			},
+		}
+	}
+
+	Describe("Processing condition", func() {
+		It("sets Ready=False with reason=Processing on first reconcile", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{
+							APIVersion: "v1",
+							Kind:       "ConfigMap",
+							Name:       "test-cm",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Create ConfigMap to avoid NotFound error
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cm",
+					Namespace: "default",
+				},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+			// Call processCaptureRequest directly to test Processing setup
+			// This avoids full reconcile which would try to create checkpoint/chunks
+			// Error is expected because we don't have all resources set up, but Processing should be set
+			// We check the status update, not the error
+			_, _ = reconciler.processCaptureRequest(ctx, mcr)
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonProcessing))
+			Expect(updated.Status.CompletionTimestamp).To(BeNil())
+		})
+
+		It("does not overwrite Processing condition on subsequent reconciles", func() {
+			now := metav1.Now()
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               storagev1alpha1.ConditionTypeReady,
+							Status:             metav1.ConditionFalse,
+							Reason:             storagev1alpha1.ConditionReasonProcessing,
+							Message:            "Operation started",
+							LastTransitionTime: now,
+						},
+					},
+				},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{
+							APIVersion: "v1",
+							Kind:       "ConfigMap",
+							Name:       "test-cm",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// Create ConfigMap to avoid NotFound error
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cm",
+					Namespace: "default",
+				},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+			// Call processCaptureRequest directly - Processing should not be overwritten
+			_, _ = reconciler.processCaptureRequest(ctx, mcr)
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			// LastTransitionTime should not be newer (Processing should not be overwritten)
+			// Allow small time difference due to Get() before Update()
+			Expect(cond.LastTransitionTime.Time.Before(now.Time.Add(time.Second)) || cond.LastTransitionTime.Time.Equal(now.Time)).To(BeTrue())
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonProcessing))
+		})
+	})
+
+	Describe("Condition transitions", func() {
+		It("transitions from Processing to Completed", func() {
+			mcr := newProcessingMCR("test", "default")
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			err := reconciler.finalizeMCR(
+				ctx,
+				mcr,
+				metav1.ConditionTrue,
+				storagev1alpha1.ConditionReasonCompleted,
+				"done",
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
+		})
+
+		It("transitions from Processing to Failed", func() {
+			mcr := newProcessingMCR("test", "default")
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			err := reconciler.finalizeMCR(
+				ctx,
+				mcr,
+				metav1.ConditionFalse,
+				storagev1alpha1.ConditionReasonFailed,
+				"boom",
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
+		})
+
+		It("sets InvalidSpec without entering Processing", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bad",
+					Namespace: "default",
+				},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{}, // Empty targets
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, controllerruntime.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      mcr.Name,
+					Namespace: mcr.Namespace,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonInvalidSpec))
+			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
+		})
+	})
+
+	Describe("isTerminal semantics", func() {
+		DescribeTable("isTerminal semantics",
+			func(status metav1.ConditionStatus, reason string, terminal bool) {
+				mcr := &storagev1alpha1.ManifestCaptureRequest{
+					Status: storagev1alpha1.ManifestCaptureRequestStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   storagev1alpha1.ConditionTypeReady,
+								Status: status,
+								Reason: reason,
+							},
+						},
+					},
+				}
+				Expect(reconciler.isTerminal(mcr)).To(Equal(terminal))
+			},
+			Entry("Processing", metav1.ConditionFalse, storagev1alpha1.ConditionReasonProcessing, false),
+			Entry("Completed", metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, true),
+			Entry("Failed", metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, true),
+			Entry("InvalidSpec", metav1.ConditionFalse, storagev1alpha1.ConditionReasonInvalidSpec, true),
+			Entry("InternalError", metav1.ConditionFalse, storagev1alpha1.ConditionReasonInternalError, true),
+		)
 	})
 })
