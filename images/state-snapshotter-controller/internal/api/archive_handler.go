@@ -90,9 +90,7 @@ func (h *ArchiveHandler) HandleGetCheckpointArchive(w http.ResponseWriter, r *ht
 	}
 
 	// Check if checkpoint is ready (using Ready condition)
-	// NOTE: ManifestCheckpoint uses ConditionTypeReady with its own semantics (artifact resource),
-	// independent from request-style Ready condition contract.
-	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue {
 		phaseMsg := "Unknown"
 		if readyCondition != nil {
@@ -174,7 +172,7 @@ func (h *ArchiveHandler) HandleGetCheckpointInfo(w http.ResponseWriter, r *http.
 	}
 
 	// Check Ready condition
-	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 	isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
 
 	// Get source capture request name from ref
@@ -459,7 +457,7 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Check if checkpoint is Ready
-	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue {
 		reason := "Unknown"
 		if readyCondition != nil {
@@ -569,7 +567,7 @@ func (h *ArchiveHandler) HandleListCheckpoints(w http.ResponseWriter, r *http.Re
 		}
 
 		// Check Ready condition
-		readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 		isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
 
 		checkpoints = append(checkpoints, CheckpointListItem{

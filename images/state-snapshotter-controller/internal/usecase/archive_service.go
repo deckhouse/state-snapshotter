@@ -138,9 +138,7 @@ func (s *ArchiveService) GetArchiveFromCheckpoint(ctx context.Context, checkpoin
 	}
 
 	// Validate checkpoint is ready (using Ready condition)
-	// NOTE: ManifestCheckpoint uses ConditionTypeReady with its own semantics (artifact resource),
-	// independent from request-style Ready condition contract.
-	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue {
 		reason := "Unknown"
 		if readyCondition != nil {

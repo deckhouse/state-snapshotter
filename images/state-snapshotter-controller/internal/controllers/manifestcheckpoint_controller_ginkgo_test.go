@@ -170,9 +170,9 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 					CompletionTimestamp: &expiredTime,
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             storagev1alpha1.ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 							LastTransitionTime: expiredTime,
 						},
 					},
@@ -204,9 +204,9 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 					CompletionTimestamp: &recentTime,
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             storagev1alpha1.ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 							LastTransitionTime: recentTime,
 						},
 					},
@@ -259,9 +259,9 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 					// CompletionTimestamp is nil
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             storagev1alpha1.ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 							LastTransitionTime: metav1.Now(),
 						},
 					},
@@ -291,9 +291,9 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 					CompletionTimestamp: &expiredTime,
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonFailed,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonFailed,
 							LastTransitionTime: expiredTime,
 						},
 					},
@@ -344,9 +344,9 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 					CompletionTimestamp: &now,
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             storagev1alpha1.ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 							LastTransitionTime: now,
 						},
 					},
@@ -379,7 +379,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(restartClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
 			Expect(updatedMCR.Status.CheckpointName).To(Equal(mcr.Status.CheckpointName))
 			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
-			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyCond).ToNot(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -451,10 +451,10 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(finalizeClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
 
 			// Check Ready=True
-			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyCond).ToNot(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 
 			// Check CompletionTimestamp set
 			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
@@ -761,9 +761,9 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 					CheckpointName: "mcp-test-123",
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             storagev1alpha1.ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 							Message:            "Test",
 							LastTransitionTime: metav1.Now(),
 						},
@@ -777,9 +777,9 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			// Update status (Ready condition)
 			base := mcr.DeepCopy()
 			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 				Status:             metav1.ConditionTrue,
-				Reason:             storagev1alpha1.ConditionReasonCompleted,
+				Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 				Message:            "Test checkpoint",
 				LastTransitionTime: metav1.Now(),
 			})
@@ -788,7 +788,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			// Verify status was updated
 			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
-			ready := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 
@@ -803,7 +803,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			Expect(finalMCR.Annotations).ToNot(BeNil())
 			Expect(finalMCR.Annotations[AnnotationKeyTTL]).To(Equal("10m"))
 			// Verify status is still intact
-			ready = meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready = meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -829,9 +829,9 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			// Simulate finalization: set Ready=True
 			base := mcr.DeepCopy()
 			setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 				Status:             metav1.ConditionTrue,
-				Reason:             storagev1alpha1.ConditionReasonCompleted,
+				Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 				Message:            "Checkpoint created successfully",
 				LastTransitionTime: metav1.Now(),
 			})
@@ -841,10 +841,10 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			finalMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, finalMCR)).To(Succeed())
 
-			readyCond := meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCond := meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyCond).ToNot(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 		})
 
 		It("should be noop for terminal Ready=False MCR", func() {
@@ -858,9 +858,9 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 					CompletionTimestamp: &now,
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonFailed,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonFailed,
 							LastTransitionTime: now,
 						},
 					},
@@ -894,10 +894,10 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
 
-			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyCond).ToNot(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
 			Expect(updatedMCR.Status.CompletionTimestamp).To(Equal(initialStatus.CompletionTimestamp))
 			// TTL annotation may be added (post-restart finalization), but status must be unchanged
 			Expect(updatedMCR.Status.Conditions).To(Equal(initialStatus.Conditions))
@@ -912,23 +912,23 @@ var _ = Describe("Helper Functions", func() {
 			conds := &[]metav1.Condition{}
 
 			setSingleCondition(conds, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 				Status:             metav1.ConditionTrue,
-				Reason:             storagev1alpha1.ConditionReasonCompleted,
+				Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 				Message:            "Test message",
 				LastTransitionTime: metav1.Now(),
 			})
 
 			Expect(len(*conds)).To(Equal(1))
 			cond := (*conds)[0]
-			Expect(cond.Type).To(Equal(storagev1alpha1.ConditionTypeReady))
+			Expect(cond.Type).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionTypeReady))
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		})
 
 		It("should replace existing condition of same type", func() {
 			conds := &[]metav1.Condition{
 				{
-					Type:               storagev1alpha1.ConditionTypeReady,
+					Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 					Status:             metav1.ConditionTrue,
 					Reason:             "Completed",
 					LastTransitionTime: metav1.Now(),
@@ -936,9 +936,9 @@ var _ = Describe("Helper Functions", func() {
 			}
 
 			setSingleCondition(conds, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             storagev1alpha1.ConditionReasonFailed,
+				Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonFailed,
 				Message:            "Updated message",
 				LastTransitionTime: metav1.Now(),
 			})
@@ -946,25 +946,25 @@ var _ = Describe("Helper Functions", func() {
 			Expect(len(*conds)).To(Equal(1))
 			updatedCond := (*conds)[0]
 			Expect(updatedCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(updatedCond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(updatedCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
 		})
 
 		It("should keep only one condition of each type", func() {
 			conds := &[]metav1.Condition{
 				{
-					Type:               storagev1alpha1.ConditionTypeReady,
+					Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 					Status:             metav1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
 				},
 				{
-					Type:               storagev1alpha1.ConditionTypeReady,
+					Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
 				},
 			}
 
 			setSingleCondition(conds, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 				Status:             metav1.ConditionTrue,
 				Reason:             "New",
 				LastTransitionTime: metav1.Now(),
@@ -989,7 +989,7 @@ var _ = Describe("Conditions", func() {
 				Status: storagev1alpha1.ManifestCheckpointStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionTrue,
 							Reason:             "Completed",
 							LastTransitionTime: metav1.Now(),
@@ -998,7 +998,7 @@ var _ = Describe("Conditions", func() {
 				},
 			}
 
-			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 			isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
 
 			Expect(isReady).To(BeTrue())
@@ -1010,20 +1010,20 @@ var _ = Describe("Conditions", func() {
 				Status: storagev1alpha1.ManifestCheckpointStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonFailed,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonFailed,
 							LastTransitionTime: metav1.Now(),
 						},
 					},
 				},
 			}
 
-			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 			isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
 
 			Expect(isReady).To(BeFalse())
-			Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
 		})
 
 		It("should identify absence of Ready condition as not ready", func() {
@@ -1033,7 +1033,7 @@ var _ = Describe("Conditions", func() {
 				},
 			}
 
-			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 			isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
 
 			Expect(isReady).To(BeFalse())
@@ -1047,7 +1047,7 @@ var _ = Describe("Conditions", func() {
 				TotalSizeBytes: 2048,
 				Conditions: []metav1.Condition{
 					{
-						Type:               storagev1alpha1.ConditionTypeReady,
+						Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 						Status:             metav1.ConditionTrue,
 						Reason:             "Completed",
 						LastTransitionTime: metav1.Now(),
@@ -1060,7 +1060,7 @@ var _ = Describe("Conditions", func() {
 			Expect(checkpoint.Status.TotalObjects).To(Equal(10))
 			Expect(len(checkpoint.Status.Conditions)).To(Equal(1))
 
-			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 			Expect(readyCondition).ToNot(BeNil())
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -1085,16 +1085,16 @@ var _ = Describe("Conditions", func() {
 			mcr.Status = storagev1alpha1.ManifestCaptureRequestStatus{
 				Conditions: []metav1.Condition{
 					{
-						Type:               storagev1alpha1.ConditionTypeReady,
+						Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 						Status:             metav1.ConditionTrue,
-						Reason:             storagev1alpha1.ConditionReasonCompleted,
+						Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 						LastTransitionTime: metav1.Now(),
 					},
 				},
 			}
 
 			Expect(len(mcr.Status.Conditions)).To(Equal(1))
-			readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyCondition).ToNot(BeNil())
 		})
 	})
@@ -1264,9 +1264,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Status: storagev1alpha1.ManifestCaptureRequestStatus{
 				Conditions: []metav1.Condition{
 					{
-						Type:               storagev1alpha1.ConditionTypeReady,
+						Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 						Status:             metav1.ConditionFalse,
-						Reason:             storagev1alpha1.ConditionReasonProcessing,
+						Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
 						Message:            "Operation started",
 						LastTransitionTime: metav1.Now(),
 					},
@@ -1321,10 +1321,10 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonProcessing))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing))
 			Expect(updated.Status.CompletionTimestamp).To(BeNil())
 		})
 
@@ -1339,9 +1339,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 				Status: storagev1alpha1.ManifestCaptureRequestStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonProcessing,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
 							Message:            "Operation started",
 							LastTransitionTime: now,
 						},
@@ -1374,12 +1374,12 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
 			// LastTransitionTime should not be newer (Processing should not be overwritten)
 			// Allow small time difference due to Get() before Update()
 			Expect(cond.LastTransitionTime.Time.Before(now.Time.Add(time.Second)) || cond.LastTransitionTime.Time.Equal(now.Time)).To(BeTrue())
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonProcessing))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing))
 		})
 	})
 
@@ -1392,7 +1392,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 				ctx,
 				mcr,
 				metav1.ConditionTrue,
-				storagev1alpha1.ConditionReasonCompleted,
+				storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 				"done",
 			)
 			Expect(err).NotTo(HaveOccurred())
@@ -1400,10 +1400,10 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 
@@ -1415,7 +1415,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 				ctx,
 				mcr,
 				metav1.ConditionFalse,
-				storagev1alpha1.ConditionReasonFailed,
+				storagev1alpha1.ManifestCaptureRequestConditionReasonFailed,
 				"boom",
 			)
 			Expect(err).NotTo(HaveOccurred())
@@ -1423,10 +1423,10 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 
@@ -1453,9 +1453,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 	})
@@ -1467,7 +1467,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 					Status: storagev1alpha1.ManifestCaptureRequestStatus{
 						Conditions: []metav1.Condition{
 							{
-								Type:   storagev1alpha1.ConditionTypeReady,
+								Type:   storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 								Status: status,
 								Reason: reason,
 							},
@@ -1476,9 +1476,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 				}
 				Expect(reconciler.isTerminal(mcr)).To(Equal(terminal))
 			},
-			Entry("Processing", metav1.ConditionFalse, storagev1alpha1.ConditionReasonProcessing, false),
-			Entry("Completed", metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, true),
-			Entry("Failed", metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, true),
+			Entry("Processing", metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing, false),
+			Entry("Completed", metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, true),
+			Entry("Failed", metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, true),
 		)
 	})
 
@@ -1495,10 +1495,10 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonProcessing))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing))
 			Expect(cond.Message).To(Equal("New progress message"))
 			// LastTransitionTime should be preserved (compare Unix time to avoid precision issues)
 			Expect(cond.LastTransitionTime.Unix()).To(Equal(initialTime.Unix()))
@@ -1516,14 +1516,14 @@ var _ = Describe("Ready Condition Semantics", func() {
 
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
-			cond1 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond1 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond1.LastTransitionTime.Unix()).To(Equal(initialTime.Unix()))
 
 			err = reconciler.updateProcessingMessage(ctx, updated, "Step 2")
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
-			cond2 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond2 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond2.LastTransitionTime.Unix()).To(Equal(initialTime.Unix()))
 			Expect(cond2.Message).To(Equal("Step 2"))
 		})
@@ -1537,9 +1537,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 				Status: storagev1alpha1.ManifestCaptureRequestStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             storagev1alpha1.ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 							Message:            "Original message",
 							LastTransitionTime: metav1.Now(),
 						},
@@ -1555,10 +1555,10 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Message).To(Equal("Original message"))
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 		})
 
 		It("does nothing if resource has no Ready condition", func() {
@@ -1577,7 +1577,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).To(BeNil())
 		})
 
@@ -1590,9 +1590,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 				Status: storagev1alpha1.ManifestCaptureRequestStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               storagev1alpha1.ConditionTypeReady,
+							Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 							Status:             metav1.ConditionFalse,
-							Reason:             storagev1alpha1.ConditionReasonFailed,
+							Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonFailed,
 							Message:            "Original error",
 							LastTransitionTime: metav1.Now(),
 						},
@@ -1608,10 +1608,10 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Message).To(Equal("Original error"))
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
 		})
 
 		It("skips update if resource transitions from Processing to Completed during update", func() {
@@ -1622,9 +1622,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 			setSingleCondition(&updated.Status.Conditions, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 				Status:             metav1.ConditionTrue,
-				Reason:             storagev1alpha1.ConditionReasonCompleted,
+				Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
 				Message:            "Completed",
 				LastTransitionTime: metav1.Now(),
 			})
@@ -1637,9 +1637,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 			final := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), final)).To(Succeed())
 
-			cond := meta.FindStatusCondition(final.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			cond := meta.FindStatusCondition(final.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 			Expect(cond.Message).To(Equal("Completed"))
 		})
 

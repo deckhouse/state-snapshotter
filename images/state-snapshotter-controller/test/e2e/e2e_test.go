@@ -176,7 +176,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			}
 
 			// Verify Ready condition
-			ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -203,14 +203,14 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 				if err != nil {
 					return false // MCR not found yet, retry
 				}
-				ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+				ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 				// Ready condition is set only in final state
 				return ready != nil && (ready.Status == metav1.ConditionTrue || ready.Status == metav1.ConditionFalse)
 			}, testTimeout, pollInterval).Should(BeTrue())
 
 			// Verify that Ready condition was set (in final state)
 			mcr = getManifestCaptureRequestOrFail(ctx, testNS, TestFixtures.TestMCRName)
-			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil(), "Ready condition should be set")
 			// Ready condition is set only in final state (True on success, False on failure)
 			Expect(ready.Status).To(Or(Equal(metav1.ConditionTrue), Equal(metav1.ConditionFalse)), "Ready should be True or False")
@@ -226,7 +226,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Wait for Ready
 			mcr := waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
-			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 
@@ -246,10 +246,10 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// To retry, user must delete and recreate MCR
 			mcr = waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
-			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonFailed))
+			Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
 			Expect(mcr.Status.CheckpointName).To(BeEmpty())
 		})
 
@@ -261,7 +261,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 			// Wait for Ready=False (NotFound) - terminal state
 			mcr = waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
-			readyBefore := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			readyBefore := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyBefore).NotTo(BeNil())
 			reasonBefore := readyBefore.Reason
 			completionTimestampBefore := mcr.Status.CompletionTimestamp
@@ -276,7 +276,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Verify status unchanged (noop) - terminal Ready=False means no further processing
 			mcr = getManifestCaptureRequestOrFail(ctx, testNS, TestFixtures.TestMCRName)
 			Expect(mcr.Status.CompletionTimestamp).To(Equal(completionTimestampBefore))
-			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal(reasonBefore))
@@ -382,7 +382,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 			// Verify checkpoint not recreated
 			mcp := getManifestCheckpoint(ctx, checkpointName)
-			ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
 	})
@@ -399,7 +399,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Wait for Ready=False (terminal state)
 			mcr = waitForManifestCaptureRequestFailed(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
-			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).NotTo(BeEmpty())
