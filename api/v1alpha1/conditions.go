@@ -16,44 +16,30 @@ limitations under the License.
 
 package v1alpha1
 
-// Ready condition constants defined in this file.
-//
-// Primary use: request-style resources (e.g. ManifestCaptureRequest).
-// They describe the lifecycle of a long-running controller-driven operation:
-// accepted → processing → completed / failed.
-//
-// NOTE: These constants (ConditionTypeReady, ConditionReasonCompleted) may also
-// be used by artifact-style resources (e.g. ManifestCheckpoint), but with
-// different semantics. Artifact resources use Ready=True+Completed to indicate
-// the artifact is ready for use, which is independent from the request-style
-// lifecycle contract. See usage sites for semantic details.
-
-// Condition type constants
-// Only Ready condition is used - it is set to True on success or False on final failure
+// ManifestCaptureRequest condition constants.
 const (
-	ConditionTypeReady = "Ready"
+	ManifestCaptureRequestConditionTypeReady = "Ready"
+
+	// Processing: operation in progress (Ready=False, non-terminal)
+	ManifestCaptureRequestConditionReasonProcessing = "Processing"
+
+	// Completed: operation succeeded (Ready=True)
+	ManifestCaptureRequestConditionReasonCompleted = "Completed"
+
+	// Failed: operation failed (Ready=False, terminal)
+	ManifestCaptureRequestConditionReasonFailed = "Failed"
 )
 
-// Condition reason constants
-//
-// NOTE:
-// Ready=False is not synonymous with failure in this controller.
-// reason distinguishes between:
-//   - Processing   (operation in progress, non-terminal)
-//   - Failed       (operation could not be completed, terminal)
-//
-// Without explicit reasons Ready=False would be ambiguous and misleading.
+// ManifestCheckpoint condition constants.
 const (
-	// ConditionReasonProcessing indicates that the controller has accepted the request
-	// and the operation is currently in progress.
-	// This is the ONLY non-terminal Ready=False state.
-	ConditionReasonProcessing = "Processing"
+	ManifestCheckpointConditionTypeReady = "Ready"
 
-	// ConditionReasonCompleted indicates successful completion of the operation.
-	// This is the ONLY allowed reason for Ready=True.
-	ConditionReasonCompleted = "Completed"
+	// Processing: checkpoint being created (Ready=False, non-terminal)
+	ManifestCheckpointConditionReasonProcessing = "Processing"
 
-	// ConditionReasonFailed indicates that the operation could not be completed.
-	// Covers all terminal failure cases regardless of root cause.
-	ConditionReasonFailed = "Failed"
+	// Completed: checkpoint ready for use (Ready=True)
+	ManifestCheckpointConditionReasonCompleted = "Completed"
+
+	// Failed: checkpoint creation failed (Ready=False, terminal)
+	ManifestCheckpointConditionReasonFailed = "Failed"
 )

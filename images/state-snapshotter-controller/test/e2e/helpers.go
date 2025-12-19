@@ -210,7 +210,7 @@ func waitForManifestCaptureRequestReady(ctx context.Context, namespace, name str
 		if err != nil {
 			return false // MCR not found yet, retry
 		}
-		ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 		// Ready=True indicates successful completion
 		return ready != nil && ready.Status == metav1.ConditionTrue
 	}, timeout, 100*time.Millisecond).Should(BeTrue())
@@ -227,7 +227,7 @@ func waitForManifestCaptureRequestFailed(ctx context.Context, namespace, name st
 		if err != nil {
 			return false // MCR not found yet, retry
 		}
-		ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		ready := findCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 		// Ready=False indicates terminal failure
 		return ready != nil && ready.Status == metav1.ConditionFalse
 	}, timeout, 100*time.Millisecond).Should(BeTrue())
@@ -240,7 +240,7 @@ func waitForManifestCheckpointReady(ctx context.Context, name string, timeout ti
 	var mcp *storagev1alpha1.ManifestCheckpoint
 	Eventually(func() bool {
 		mcp = getManifestCheckpoint(ctx, name)
-		ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+		ready := findCondition(mcp.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 		// Ready=True indicates successful completion
 		return ready != nil && ready.Status == metav1.ConditionTrue
 	}, timeout, 100*time.Millisecond).Should(BeTrue())

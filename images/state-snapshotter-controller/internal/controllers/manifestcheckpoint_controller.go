@@ -148,7 +148,7 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 		var checkpoint storagev1alpha1.ManifestCheckpoint
 		if err := r.Get(ctx, client.ObjectKey{Name: mcr.Status.CheckpointName}, &checkpoint); err == nil {
 			// Checkpoint exists - finalize MCR status (idempotent finalization)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", mcr.Status.CheckpointName)); err != nil {
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", mcr.Status.CheckpointName)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
 				}
@@ -166,8 +166,8 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest) (ctrl.Result, error) {
 	// Set Processing condition if not already set
 	// CRITICAL: This must be done BEFORE any long-running operations
-	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ConditionReasonProcessing {
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
 		// Handle version conflicts: retry if conflict occurs
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			current := &storagev1alpha1.ManifestCaptureRequest{}
@@ -175,17 +175,17 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				return err
 			}
 			// Re-check: maybe Processing was already set by another reconcile
-			currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-			if currentReadyCondition != nil && currentReadyCondition.Reason == storagev1alpha1.ConditionReasonProcessing {
+			currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			if currentReadyCondition != nil && currentReadyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
 				// Already Processing - update local mcr and return
 				mcr.Status = current.Status
 				return nil
 			}
 			// Set Processing condition on current object
 			setSingleCondition(&current.Status.Conditions, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
+				Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             storagev1alpha1.ConditionReasonProcessing,
+				Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
 				Message:            "Operation started",
 				LastTransitionTime: metav1.Now(),
 			})
@@ -207,7 +207,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 
 	// Validate targets
 	if len(mcr.Spec.Targets) == 0 {
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, "No targets specified"); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, "No targets specified"); err != nil {
 			if errors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
@@ -224,7 +224,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	if err != nil {
 		// Simple and clean: NotFound → Ready=False immediately
 		// Kubernetes is declarative: if object appears later, user must delete and recreate MCR
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to collect objects: %v", err)); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to collect objects: %v", err)); err != nil {
 			if errors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
@@ -300,7 +300,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 		if err := r.Create(ctx, objectKeeper); err != nil {
 			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
 				}
@@ -346,7 +346,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		r.Logger.Info("Checkpoint already exists, finalizing MCR",
 			"checkpoint", checkpointName)
 		mcr.Status.CheckpointName = checkpointName
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", checkpointName)); err != nil {
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", checkpointName)); err != nil {
 			if errors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
@@ -397,7 +397,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				"checkpoint", checkpointName,
 				"owner", retainerName,
 				"ownerUID", objectKeeper.UID)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); err != nil {
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
 				}
@@ -414,6 +414,23 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"checkpoint", checkpointName,
 			"uid", checkpoint.UID,
 			"ownerRefs", checkpoint.OwnerReferences)
+		// Checkpoint already exists - check if it's still Processing
+		readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
+		if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ManifestCheckpointConditionReasonProcessing {
+			// Not Processing - set Processing condition
+			now := metav1.Now()
+			setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
+				Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             storagev1alpha1.ManifestCheckpointConditionReasonProcessing,
+				Message:            "Resuming checkpoint creation, creating chunks...",
+				LastTransitionTime: now,
+			})
+			if err := r.Status().Update(ctx, checkpoint); err != nil {
+				r.Logger.Error(err, "Failed to set Processing condition on existing checkpoint", "checkpoint", checkpointName)
+				// Non-critical error, continue processing
+			}
+		}
 	} else {
 		// Log ownerRef details for debugging
 		ownerRefDetails := make([]string, 0, len(checkpoint.OwnerReferences))
@@ -426,6 +443,19 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"ownerRefs", ownerRefDetails,
 			"objectKeeperName", retainerName,
 			"objectKeeperUID", objectKeeper.UID)
+		// Set Processing condition on checkpoint immediately after creation
+		now := metav1.Now()
+		setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.ManifestCheckpointConditionReasonProcessing,
+			Message:            "Checkpoint created, creating chunks...",
+			LastTransitionTime: now,
+		})
+		if err := r.Status().Update(ctx, checkpoint); err != nil {
+			r.Logger.Error(err, "Failed to set Processing condition on checkpoint", "checkpoint", checkpointName)
+			// Non-critical error, continue processing
+		}
 		// Update Processing message to show progress
 		_ = r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Created checkpoint %s, collecting objects...", checkpointName))
 	}
@@ -444,7 +474,19 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"checkpoint", checkpointName,
 			"objects", len(objects),
 			"error", err.Error())
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonFailed, fmt.Sprintf("Failed to create chunks: %v", err)); err != nil {
+		// Update checkpoint status to Failed
+		now := metav1.Now()
+		setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.ManifestCheckpointConditionReasonFailed,
+			Message:            fmt.Sprintf("Failed to create chunks: %v", err),
+			LastTransitionTime: now,
+		})
+		if updateErr := r.Status().Update(ctx, checkpoint); updateErr != nil {
+			r.Logger.Error(updateErr, "Failed to update checkpoint status to Failed", "checkpoint", checkpointName)
+		}
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create chunks: %v", err)); err != nil {
 			if errors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
@@ -472,14 +514,10 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	checkpoint.Status.TotalObjects = totalObjects
 	checkpoint.Status.TotalSizeBytes = totalSize
 	now := metav1.Now()
-	// NOTE: ManifestCheckpoint (artifact resource) uses ConditionTypeReady/ConditionReasonCompleted
-	// with its own semantics: Ready=True+Completed means checkpoint is ready for use.
-	// This is independent from request-style Ready condition contract, even though
-	// the same constants are used.
 	setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
-		Type:               storagev1alpha1.ConditionTypeReady,
+		Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             storagev1alpha1.ConditionReasonCompleted,
+		Reason:             storagev1alpha1.ManifestCheckpointConditionReasonCompleted,
 		Message:            fmt.Sprintf("Checkpoint created with %d chunks, %d objects", len(chunks), totalObjects),
 		LastTransitionTime: now,
 	})
@@ -497,7 +535,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 
 	// Update MCR status
 	mcr.Status.CheckpointName = checkpointName
-	if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("Checkpoint %s created successfully", checkpointName)); err != nil {
+	if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s created successfully", checkpointName)); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -1130,13 +1168,13 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 // - Processing is NOT terminal (operation in progress)
 // - Completed, Failed are terminal
 func (r *ManifestCheckpointController) isTerminal(mcr *storagev1alpha1.ManifestCaptureRequest) bool {
-	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 	if readyCondition == nil {
 		return false // No condition = not terminal
 	}
 
 	// Processing is NOT terminal
-	if readyCondition.Reason == storagev1alpha1.ConditionReasonProcessing {
+	if readyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
 		return false
 	}
 
@@ -1144,7 +1182,7 @@ func (r *ManifestCheckpointController) isTerminal(mcr *storagev1alpha1.ManifestC
 	// - True (always with Completed reason per contract)
 	// - False with Failed (covers all failure cases)
 	return readyCondition.Status == metav1.ConditionTrue ||
-		readyCondition.Reason == storagev1alpha1.ConditionReasonFailed
+		readyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonFailed
 }
 
 // updateProcessingMessage updates the message in Processing condition without changing reason or LastTransitionTime.
@@ -1154,17 +1192,17 @@ func (r *ManifestCheckpointController) updateProcessingMessage(
 	mcr *storagev1alpha1.ManifestCaptureRequest,
 	message string,
 ) error {
-	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ConditionReasonProcessing {
+	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
 		// Not in Processing state - nothing to update
 		return nil
 	}
 
 	// Update only message, preserve reason and LastTransitionTime
 	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-		Type:               storagev1alpha1.ConditionTypeReady,
+		Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             storagev1alpha1.ConditionReasonProcessing,
+		Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
 		Message:            message,
 		LastTransitionTime: readyCondition.LastTransitionTime, // Preserve original time
 	})
@@ -1176,15 +1214,15 @@ func (r *ManifestCheckpointController) updateProcessingMessage(
 			return err
 		}
 		// Re-check: still Processing?
-		currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-		if currentReadyCondition == nil || currentReadyCondition.Reason != storagev1alpha1.ConditionReasonProcessing {
+		currentReadyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+		if currentReadyCondition == nil || currentReadyCondition.Reason != storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
 			// No longer Processing - skip update
 			return nil
 		}
 		setSingleCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionTypeReady,
+			Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             storagev1alpha1.ConditionReasonProcessing,
+			Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
 			Message:            message,
 			LastTransitionTime: currentReadyCondition.LastTransitionTime, // Preserve original time
 		})
@@ -1208,14 +1246,14 @@ func (r *ManifestCheckpointController) finalizeMCR(
 	// Validate reason matches status per contract
 	if status == metav1.ConditionTrue {
 		// Completed is the ONLY allowed reason for True
-		if reason != storagev1alpha1.ConditionReasonCompleted {
-			reason = storagev1alpha1.ConditionReasonCompleted // Force Completed for True
+		if reason != storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted {
+			reason = storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted // Force Completed for True
 		}
 	}
 	if status == metav1.ConditionFalse {
 		// Must have explicit reason for False
-		if reason == "" || reason == storagev1alpha1.ConditionReasonCompleted {
-			reason = storagev1alpha1.ConditionReasonFailed // Default to Failed for False
+		if reason == "" || reason == storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted {
+			reason = storagev1alpha1.ManifestCaptureRequestConditionReasonFailed // Default to Failed for False
 		}
 	}
 
@@ -1224,7 +1262,7 @@ func (r *ManifestCheckpointController) finalizeMCR(
 		mcr.Status.CompletionTimestamp = &now
 	}
 	setSingleCondition(&mcr.Status.Conditions, metav1.Condition{
-		Type:               storagev1alpha1.ConditionTypeReady,
+		Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
