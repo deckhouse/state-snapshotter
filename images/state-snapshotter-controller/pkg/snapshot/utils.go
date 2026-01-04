@@ -28,7 +28,10 @@ import (
 )
 
 const (
-	// FinalizerParentProtect protects resources from manual deletion
+	// FinalizerParentProtect prevents deletion of SnapshotContent
+	// while a parent Snapshot exists. This ensures that SnapshotContent
+	// cannot be manually deleted (via kubectl delete) while the parent
+	// Snapshot is still alive.
 	FinalizerParentProtect = "snapshot.deckhouse.io/parent-protect"
 )
 

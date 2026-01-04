@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -127,6 +128,22 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		logger.Error(err, "failed to extract SnapshotLike interface")
 		return ctrl.Result{}, err
+	}
+
+	// Step 0: Handle deletion - propagation Ready=False to parent
+	// If Snapshot is being deleted and was Ready=True, propagate Ready=False to parent
+	if !obj.GetDeletionTimestamp().IsZero() {
+		// Snapshot is being deleted
+		// Check if it was Ready=True and has a parent
+		if snapshot.IsReady(snapshotLike) {
+			// Propagate Ready=False to parent (if exists and not being deleted)
+			if err := r.propagateReadyFalseToParent(ctx, snapshotLike, obj); err != nil {
+				logger.Error(err, "Failed to propagate Ready=False to parent")
+				// Non-fatal: continue with deletion
+			}
+		}
+		// Snapshot is being deleted - no need to continue create-path
+		return ctrl.Result{}, nil
 	}
 
 	// Step 1: Barrier - Wait for HandledByDomainSpecificController
@@ -343,6 +360,120 @@ func (r *SnapshotController) ensureObjectKeeper(
 		logger.V(1).Info("ObjectKeeper already exists", "name", retainerName)
 		return objectKeeper, ctrl.Result{}, nil
 	}
+}
+
+// propagateReadyFalseToParent propagates Ready=False to parent Snapshot if:
+// - Snapshot was Ready=True
+// - Parent exists and is not being deleted
+// - Parent was Ready=True
+// This implements the tree consistency rule from deletion algorithm
+func (r *SnapshotController) propagateReadyFalseToParent(
+	ctx context.Context,
+	snapshotLike snapshot.SnapshotLike,
+	obj *unstructured.Unstructured,
+) error {
+	logger := log.FromContext(ctx)
+
+	// Find parent Snapshot through ownerRef
+	ownerRefs := obj.GetOwnerReferences()
+	var parentRef *metav1.OwnerReference
+	for i := range ownerRefs {
+		ref := &ownerRefs[i]
+		// Check if owner is another snapshot type (ends with "Snapshot")
+		if strings.HasSuffix(ref.Kind, "Snapshot") {
+			parentRef = ref
+			break
+		}
+	}
+
+	if parentRef == nil {
+		// No parent - nothing to propagate
+		return nil
+	}
+
+	// Get parent Snapshot
+	// Parse APIVersion (format: "group/version" or "version" for core APIs)
+	var parentGVK schema.GroupVersionKind
+	if idx := strings.Index(parentRef.APIVersion, "/"); idx != -1 {
+		parentGVK = schema.GroupVersionKind{
+			Group:   parentRef.APIVersion[:idx],
+			Version: parentRef.APIVersion[idx+1:],
+			Kind:    parentRef.Kind,
+		}
+	} else {
+		// Core API (e.g., "v1")
+		parentGVK = schema.GroupVersionKind{
+			Group:   "",
+			Version: parentRef.APIVersion,
+			Kind:    parentRef.Kind,
+		}
+	}
+
+	parentObj := &unstructured.Unstructured{}
+	parentObj.SetGroupVersionKind(parentGVK)
+	parentKey := client.ObjectKey{
+		Name:      parentRef.Name,
+		Namespace: obj.GetNamespace(), // Parent should be in the same namespace
+	}
+
+	// Use APIReader for read-after-write consistency
+	if err := r.APIReader.Get(ctx, parentKey, parentObj); err != nil {
+		if errors.IsNotFound(err) {
+			// Parent doesn't exist - nothing to propagate
+			return nil
+		}
+		return fmt.Errorf("failed to get parent Snapshot: %w", err)
+	}
+
+	// Guards: Don't propagate if:
+	// 1. Parent is being deleted (cascade deletion)
+	if !parentObj.GetDeletionTimestamp().IsZero() {
+		logger.V(1).Info("Parent Snapshot is being deleted, skipping propagation")
+		return nil
+	}
+
+	// 2. Parent was not Ready=True (don't propagate to already broken snapshots)
+	parentLike, err := snapshot.ExtractSnapshotLike(parentObj)
+	if err != nil {
+		return fmt.Errorf("failed to extract parent SnapshotLike: %w", err)
+	}
+
+	if !snapshot.IsReady(parentLike) {
+		logger.V(1).Info("Parent Snapshot is not Ready=True, skipping propagation")
+		return nil
+	}
+
+	// 3. Parent already has Ready=False (preserve existing Reason)
+	readyCond := snapshot.GetCondition(parentLike, snapshot.ConditionReady)
+	if readyCond != nil && readyCond.Status == metav1.ConditionFalse {
+		logger.V(1).Info("Parent Snapshot already has Ready=False, preserving existing Reason", "reason", readyCond.Reason)
+		return nil
+	}
+
+	// Propagate Ready=False to parent
+	// Preserve existing Reason if Ready=False already exists (root-cause preservation)
+	reason := snapshot.ReasonChildSnapshotMissing
+	if readyCond != nil && readyCond.Status == metav1.ConditionFalse {
+		reason = readyCond.Reason // Preserve existing reason
+	}
+
+	snapshot.SetCondition(parentLike, snapshot.ConditionReady, metav1.ConditionFalse, reason,
+		fmt.Sprintf("Child Snapshot %s/%s was deleted", obj.GetNamespace(), obj.GetName()))
+	
+	// Sync conditions to unstructured
+	snapshot.SyncConditionsToUnstructured(parentObj, parentLike.GetStatusConditions())
+	
+	if err := r.Status().Update(ctx, parentObj); err != nil {
+		return fmt.Errorf("failed to update parent Snapshot Ready=False: %w", err)
+	}
+
+	logger.Info("Propagated Ready=False to parent Snapshot",
+		"parent", fmt.Sprintf("%s/%s", parentObj.GetNamespace(), parentObj.GetName()),
+		"child", fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()),
+		"reason", reason)
+
+	// Recursively propagate to grandparent
+	return r.propagateReadyFalseToParent(ctx, parentLike, parentObj)
 }
 
 // getSnapshotContentGVK derives SnapshotContent GVK from Snapshot GVK

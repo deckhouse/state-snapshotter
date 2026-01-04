@@ -95,13 +95,17 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	logger.Info("Reconciling SnapshotContent")
 
 	// Get the unstructured object
-	// TODO: GVK should come from watch or map[Name]→GVK
-	// For now, we'll try to get it from the request context or use a default
-	// This is a placeholder - actual GVK will be determined from the watch setup
+	// ARCHITECTURAL NOTE: SnapshotContentController is expected to be instantiated per-GVK
+	// and registered with exact GVK in SetupWithManager.
+	// Each controller instance handles only one specific GVK (e.g., VirtualMachineSnapshotContent).
+	// This ensures we always know the correct GVK for the request.
+	//
+	// TODO: Implement proper watch setup that registers controller per GVK
+	// For now, this is a placeholder - controller is not functional until watches are configured
 	obj := &unstructured.Unstructured{}
-	// NOTE: We cannot determine GVK from Name alone
-	// This will be fixed when we set up proper watch with GVK mapping
-	// For skeleton, we assume the object already has correct GVK set from watch
+	// NOTE: We cannot determine GVK from NamespacedName alone.
+	// This will be fixed when we set up proper watch with GVK mapping.
+	// For skeleton, we assume the object already has correct GVK set from watch.
 	obj.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "", // TODO: Get from watch context or GVK map
 		Version: "v1alpha1",
@@ -124,10 +128,13 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Step 1: Manage finalizer (basic protection from manual deletion)
-	// At this stage, finalizer only protects from GC - no deletion logic yet
+	// Step 1: Manage finalizer and orphaning
+	// Invariant: SnapshotContent без Snapshot обязан стать orphaned и перейти под управление ObjectKeeper
+	
 	if obj.GetDeletionTimestamp().IsZero() {
-		// Object is not being deleted - ensure finalizer exists
+		// Object is not being deleted
+		
+		// Step 1.1: Ensure finalizer exists
 		if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
 			logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
 			if err := r.Update(ctx, obj); err != nil {
@@ -137,27 +144,93 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			// Requeue to continue processing after finalizer is added
 			return ctrl.Result{Requeue: true}, nil
 		}
+
+		// Step 1.2: Check if Snapshot exists (orphaning check)
+		// Use APIReader for read-after-write consistency
+		snapshotRef := contentLike.GetSpecSnapshotRef()
+		if snapshotRef == nil {
+			logger.V(1).Info("SnapshotContent has no snapshotRef, skipping orphaning check")
+		} else {
+			snapshotExists, err := r.checkSnapshotExists(ctx, snapshotRef)
+			if err != nil {
+				logger.Error(err, "Failed to check if Snapshot exists", "snapshot", fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name))
+				return ctrl.Result{}, err
+			}
+
+			if !snapshotExists {
+				// Snapshot was deleted - remove finalizer (orphaning)
+				// This allows SnapshotContent to become orphaned and be managed by ObjectKeeper TTL
+				if snapshot.RemoveFinalizer(obj, snapshot.FinalizerParentProtect) {
+					logger.Info(
+						"SnapshotContent is orphaned: Snapshot was deleted, removing finalizer",
+						"snapshot", fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name),
+						"snapshotContent", req.Name,
+					)
+					if err := r.Update(ctx, obj); err != nil {
+						logger.Error(err, "Failed to remove finalizer after orphaning")
+						return ctrl.Result{}, err
+					}
+					// Requeue to continue processing after finalizer is removed
+					return ctrl.Result{Requeue: true}, nil
+				}
+			}
+		}
 	} else {
-		// Object is being deleted - keep finalizer for now
-		// TODO: Later we'll add logic to:
-		// - Check if Snapshot exists
-		// - Remove finalizer if Snapshot is deleted (orphaning)
-		// - Cascade remove finalizers from children
-		// For now, just keep the finalizer (prevents GC)
-		logger.V(1).Info("SnapshotContent is being deleted, finalizer is held", "finalizer", snapshot.FinalizerParentProtect)
+		// Object is being deleted - handle deletion (Phase 2: Cascade)
+		// TODO: Phase 2 - Cascade finalizers removal from children
+		// For now, keep the finalizer (prevents GC until Phase 2 is implemented)
+		logger.Info(
+			"SnapshotContent is being deleted, finalizer will be removed after cascade",
+			"finalizer", snapshot.FinalizerParentProtect,
+			"snapshotContent", req.Name,
+		)
 	}
 
 	// TODO: Step 2 - Consistency checks (to be implemented later)
 	// - Check if artifacts exist (MCP, VSC)
 	// - Set Ready condition
 
-	// TODO: Step 3 - Deletion handling (to be implemented later)
-	// - Check if Snapshot exists
-	// - Remove finalizer if Snapshot is deleted
-	// - Cascade finalizers removal
+	// TODO: Step 3 - Deletion Phase 2 (to be implemented later)
+	// - Cascade remove finalizers from children
+	// - Let GC handle deletion through ownerRef
 
 	logger.Info("SnapshotContent reconciliation completed")
 	return ctrl.Result{}, nil
+}
+
+// checkSnapshotExists checks if the referenced Snapshot exists
+// Uses APIReader for read-after-write consistency (direct API, no cache)
+func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, snapshotRef *snapshot.ObjectRef) (bool, error) {
+	if snapshotRef == nil {
+		return false, nil
+	}
+
+	// Determine GVK from snapshotRef.Kind
+	// For now, we assume the GVK can be derived from Kind
+	// TODO: This should come from a GVK mapping or be passed as parameter
+	snapshotGVK := schema.GroupVersionKind{
+		Group:   "", // TODO: Get from GVK mapping
+		Version: "v1alpha1",
+		Kind:    snapshotRef.Kind,
+	}
+
+	snapshotObj := &unstructured.Unstructured{}
+	snapshotObj.SetGroupVersionKind(snapshotGVK)
+
+	key := client.ObjectKey{
+		Name:      snapshotRef.Name,
+		Namespace: snapshotRef.Namespace,
+	}
+
+	err := r.APIReader.Get(ctx, key, snapshotObj)
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get Snapshot: %w", err)
+	}
+
+	return true, nil
 }
 
 // SetupWithManager sets up the controller with the Manager

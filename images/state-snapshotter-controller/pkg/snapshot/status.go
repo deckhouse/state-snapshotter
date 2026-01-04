@@ -32,16 +32,20 @@ func SyncConditionsToUnstructured(obj *unstructured.Unstructured, conditions []m
 	}
 	statusMap := status.(map[string]interface{})
 
-	conditionsRaw := make([]interface{}, len(conditions))
-	for i, cond := range conditions {
-		conditionsRaw[i] = map[string]interface{}{
-			"type":                 cond.Type,
-			"status":               string(cond.Status),
-			"reason":               cond.Reason,
-			"message":               cond.Message,
-			"observedGeneration":    cond.ObservedGeneration,
-			"lastTransitionTime":    cond.LastTransitionTime.Format(metav1.RFC3339),
+	conditionsRaw := make([]interface{}, 0, len(conditions))
+	for _, cond := range conditions {
+		condMap := map[string]interface{}{
+			"type":               cond.Type,
+			"status":             string(cond.Status),
+			"reason":             cond.Reason,
+			"message":            cond.Message,
+			"observedGeneration": cond.ObservedGeneration,
 		}
+		// Only include lastTransitionTime if it's not zero
+		if !cond.LastTransitionTime.IsZero() {
+			condMap["lastTransitionTime"] = cond.LastTransitionTime.Format(metav1.RFC3339)
+		}
+		conditionsRaw = append(conditionsRaw, condMap)
 	}
 	statusMap["conditions"] = conditionsRaw
 }
