@@ -177,25 +177,125 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	} else {
 		// Object is being deleted - handle deletion (Phase 2: Cascade)
-		// TODO: Phase 2 - Cascade finalizers removal from children
-		// For now, keep the finalizer (prevents GC until Phase 2 is implemented)
-		logger.Info(
-			"SnapshotContent is being deleted, finalizer will be removed after cascade",
-			"finalizer", snapshot.FinalizerParentProtect,
-			"snapshotContent", req.Name,
-		)
+		// Invariant Phase 2: SnapshotContent с DeletionTimestamp →
+		// сначала cascade finalizers → потом GC через ownerRef
+		
+		// Step 2.1: Cascade remove finalizers from children
+		// This unlocks GC for children, but does NOT initiate Delete(child-content)
+		// GC will handle deletion through ownerRef
+		if err := r.cascadeRemoveFinalizersFromChildren(ctx, contentLike, obj); err != nil {
+			logger.Error(err, "Failed to cascade remove finalizers from children")
+			// Non-fatal: continue with finalizer removal
+		}
+
+		// Step 2.2: Remove finalizer from this SnapshotContent
+		// This unlocks GC for this object and its artifacts
+		if snapshot.RemoveFinalizer(obj, snapshot.FinalizerParentProtect) {
+			logger.Info(
+				"Removing finalizer from SnapshotContent, GC will handle deletion",
+				"finalizer", snapshot.FinalizerParentProtect,
+				"snapshotContent", req.Name,
+			)
+			if err := r.Update(ctx, obj); err != nil {
+				logger.Error(err, "Failed to remove finalizer")
+				return ctrl.Result{}, err
+			}
+			// After finalizer is removed, GC will handle deletion through ownerRef
+			return ctrl.Result{}, nil
+		}
+
+		// Finalizer already removed - GC is handling deletion
+		logger.V(1).Info("Finalizer already removed, GC is handling deletion")
+		return ctrl.Result{}, nil
 	}
 
-	// TODO: Step 2 - Consistency checks (to be implemented later)
+	// TODO: Step 3 - Consistency checks (to be implemented later)
 	// - Check if artifacts exist (MCP, VSC)
 	// - Set Ready condition
 
-	// TODO: Step 3 - Deletion Phase 2 (to be implemented later)
-	// - Cascade remove finalizers from children
-	// - Let GC handle deletion through ownerRef
-
 	logger.Info("SnapshotContent reconciliation completed")
 	return ctrl.Result{}, nil
+}
+
+// cascadeRemoveFinalizersFromChildren removes finalizers from child SnapshotContent objects
+// This unlocks GC for children, but does NOT initiate Delete(child-content)
+// GC will handle deletion through ownerRef
+//
+// Important: Handles broken links gracefully to avoid deadlock
+func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
+	ctx context.Context,
+	contentLike snapshot.SnapshotContentLike,
+	obj *unstructured.Unstructured,
+) error {
+	logger := log.FromContext(ctx)
+	childrenRefs := contentLike.GetStatusChildrenSnapshotContentRefs()
+	
+	if len(childrenRefs) == 0 {
+		// No children - nothing to cascade
+		return nil
+	}
+
+	logger.Info("Cascading finalizer removal to children", "childrenCount", len(childrenRefs))
+
+	// Get Content GVK to derive child Content GVK
+	contentGVK := obj.GetObjectKind().GroupVersionKind()
+	
+	var errors []error
+	for _, childRef := range childrenRefs {
+		// Derive child Content GVK from child Kind
+		// TODO: Use GVK registry when integrated
+		childContentGVK := schema.GroupVersionKind{
+			Group:   contentGVK.Group,
+			Version: contentGVK.Version,
+			Kind:    childRef.Kind,
+		}
+
+		childObj := &unstructured.Unstructured{}
+		childObj.SetGroupVersionKind(childContentGVK)
+		childKey := client.ObjectKey{Name: childRef.Name}
+
+		// Try to get child Content
+		if err := r.Get(ctx, childKey, childObj); err != nil {
+			if errors.IsNotFound(err) {
+				// Child already deleted - skip (broken link, but not an error)
+				logger.V(1).Info("Child SnapshotContent not found, skipping", "child", childRef.Name)
+				continue
+			}
+			// Other error - log but continue
+			logger.Error(err, "Failed to get child SnapshotContent", "child", childRef.Name)
+			errors = append(errors, fmt.Errorf("failed to get child %s: %w", childRef.Name, err))
+			continue
+		}
+
+		// Remove finalizer from child
+		if snapshot.RemoveFinalizer(childObj, snapshot.FinalizerParentProtect) {
+			logger.Info("Removed finalizer from child SnapshotContent", "child", childRef.Name)
+			if err := r.Update(ctx, childObj); err != nil {
+				if errors.IsNotFound(err) {
+					// Child was deleted between Get and Update - skip
+					logger.V(1).Info("Child SnapshotContent was deleted, skipping update", "child", childRef.Name)
+					continue
+				}
+				logger.Error(err, "Failed to remove finalizer from child", "child", childRef.Name)
+				errors = append(errors, fmt.Errorf("failed to update child %s: %w", childRef.Name, err))
+				continue
+			}
+		} else {
+			// Finalizer already removed - child is already being processed
+			logger.V(1).Info("Child SnapshotContent finalizer already removed", "child", childRef.Name)
+		}
+	}
+
+	// Return error only if all children failed (partial success is acceptable)
+	if len(errors) > 0 && len(errors) == len(childrenRefs) {
+		return fmt.Errorf("failed to remove finalizers from all children: %v", errors)
+	}
+
+	if len(errors) > 0 {
+		logger.Info("Some children failed, but cascade continues", "failedCount", len(errors), "totalCount", len(childrenRefs))
+	}
+
+	return nil
 }
 
 // checkSnapshotExists checks if the referenced Snapshot exists
