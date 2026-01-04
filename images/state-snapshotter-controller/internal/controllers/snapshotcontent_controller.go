@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -209,9 +210,12 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	// TODO: Step 3 - Consistency checks (to be implemented later)
-	// - Check if artifacts exist (MCP, VSC)
-	// - Set Ready condition
+	// Step 3: Consistency checks and Ready condition
+	// Check if artifacts exist and set Ready condition
+	if err := r.checkConsistencyAndSetReady(ctx, contentLike, obj); err != nil {
+		logger.Error(err, "Failed to check consistency")
+		// Non-fatal: continue reconciliation
+	}
 
 	logger.Info("SnapshotContent reconciliation completed")
 	return ctrl.Result{}, nil
@@ -296,6 +300,113 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 	}
 
 	return nil
+}
+
+// checkConsistencyAndSetReady checks if artifacts exist and sets Ready condition
+// According to ADR: Ready=False выставляется только для ранее успешных объектов
+func (r *SnapshotContentController) checkConsistencyAndSetReady(
+	ctx context.Context,
+	contentLike snapshot.SnapshotContentLike,
+	obj *unstructured.Unstructured,
+) error {
+	logger := log.FromContext(ctx)
+	wasReady := snapshot.IsReady(contentLike)
+
+	// Check ManifestCheckpoint if present
+	mcpName := contentLike.GetStatusManifestCheckpointName()
+	if mcpName != "" {
+		exists, err := r.checkArtifactExists(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1")
+		if err != nil {
+			return fmt.Errorf("failed to check ManifestCheckpoint: %w", err)
+		}
+		if !exists {
+			if wasReady {
+				// Artifact was lost - set Ready=False
+				snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
+					snapshot.ReasonArtifactMissing, fmt.Sprintf("ManifestCheckpoint %s not found", mcpName))
+				snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
+				if err := r.Status().Update(ctx, obj); err != nil {
+					return fmt.Errorf("failed to update Ready=False: %w", err)
+				}
+				logger.Info("ManifestCheckpoint missing, set Ready=False", "mcp", mcpName)
+			}
+			return nil // Artifact missing, but object was never Ready
+		}
+	}
+
+	// Check VolumeSnapshotContent if present (dataRef)
+	dataRef := contentLike.GetStatusDataRef()
+	if dataRef != nil && dataRef.Kind == "VolumeSnapshotContent" {
+		exists, err := r.checkArtifactExists(ctx, "VolumeSnapshotContent", dataRef.Name, "snapshot.storage.k8s.io/v1")
+		if err != nil {
+			return fmt.Errorf("failed to check VolumeSnapshotContent: %w", err)
+		}
+		if !exists {
+			if wasReady {
+				// Artifact was lost - set Ready=False
+				snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
+					snapshot.ReasonArtifactMissing, fmt.Sprintf("VolumeSnapshotContent %s not found", dataRef.Name))
+				snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
+				if err := r.Status().Update(ctx, obj); err != nil {
+					return fmt.Errorf("failed to update Ready=False: %w", err)
+				}
+				logger.Info("VolumeSnapshotContent missing, set Ready=False", "vsc", dataRef.Name)
+			}
+			return nil // Artifact missing, but object was never Ready
+		}
+	}
+
+	// All artifacts exist - set Ready=True if not already set
+	if !wasReady {
+		// Check if InProgress should be cleared
+		if snapshot.IsInProgress(contentLike) {
+			snapshot.SetCondition(contentLike, snapshot.ConditionInProgress, metav1.ConditionFalse,
+				snapshot.ReasonCompleted, "All artifacts exist")
+		}
+		snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionTrue,
+			snapshot.ReasonCompleted, "All artifacts exist and valid")
+		snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
+		if err := r.Status().Update(ctx, obj); err != nil {
+			return fmt.Errorf("failed to update Ready=True: %w", err)
+		}
+		logger.Info("All artifacts exist, set Ready=True")
+	}
+
+	return nil
+}
+
+// checkArtifactExists checks if an artifact exists
+// Uses APIReader for read-after-write consistency
+func (r *SnapshotContentController) checkArtifactExists(ctx context.Context, kind, name, apiVersion string) (bool, error) {
+	// Parse GVK from apiVersion
+	var gvk schema.GroupVersionKind
+	if idx := strings.Index(apiVersion, "/"); idx != -1 {
+		gvk = schema.GroupVersionKind{
+			Group:   apiVersion[:idx],
+			Version: apiVersion[idx+1:],
+			Kind:    kind,
+		}
+	} else {
+		gvk = schema.GroupVersionKind{
+			Group:   "",
+			Version: apiVersion,
+			Kind:    kind,
+		}
+	}
+
+	artifactObj := &unstructured.Unstructured{}
+	artifactObj.SetGroupVersionKind(gvk)
+	key := client.ObjectKey{Name: name}
+
+	err := r.APIReader.Get(ctx, key, artifactObj)
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get %s %s: %w", kind, name, err)
+	}
+
+	return true, nil
 }
 
 // checkSnapshotExists checks if the referenced Snapshot exists

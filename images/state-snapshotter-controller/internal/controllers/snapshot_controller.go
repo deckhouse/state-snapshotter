@@ -155,7 +155,11 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Check if already handled by common controller
 	if snapshot.HasCondition(snapshotLike, snapshot.ConditionHandledByCommonController, metav1.ConditionTrue) {
-		logger.V(1).Info("Snapshot already handled by common controller, skipping")
+		// Snapshot is already handled - check consistency and Ready condition
+		if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
+			logger.Error(err, "Failed to check consistency")
+			// Non-fatal: continue reconciliation
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -474,6 +478,196 @@ func (r *SnapshotController) propagateReadyFalseToParent(
 
 	// Recursively propagate to grandparent
 	return r.propagateReadyFalseToParent(ctx, parentLike, parentObj)
+}
+
+// checkConsistencyAndSetReady checks if SnapshotContent and children exist and sets Ready condition
+// According to ADR: Ready=False выставляется только для ранее успешных объектов
+func (r *SnapshotController) checkConsistencyAndSetReady(
+	ctx context.Context,
+	snapshotLike snapshot.SnapshotLike,
+	obj *unstructured.Unstructured,
+) error {
+	logger := log.FromContext(ctx)
+	wasReady := snapshot.IsReady(snapshotLike)
+
+	// Step 1: Check if SnapshotContent exists
+	contentName := snapshotLike.GetStatusContentName()
+	if contentName == "" {
+		if wasReady {
+			// Content was lost - set Ready=False
+			snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
+				snapshot.ReasonContentMissing, "SnapshotContent not found")
+			snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
+			if err := r.Status().Update(ctx, obj); err != nil {
+				return fmt.Errorf("failed to update Ready=False: %w", err)
+			}
+			logger.Info("SnapshotContent missing, set Ready=False")
+			// Propagate Ready=False to parent
+			return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
+		}
+		return nil // Content missing, but Snapshot was never Ready
+	}
+
+	// Step 2: Get SnapshotContent and check its Ready state
+	contentGVK := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
+	contentObj := &unstructured.Unstructured{}
+	contentObj.SetGroupVersionKind(contentGVK)
+	contentKey := client.ObjectKey{Name: contentName}
+
+	if err := r.APIReader.Get(ctx, contentKey, contentObj); err != nil {
+		if errors.IsNotFound(err) {
+			if wasReady {
+				// Content was deleted - set Ready=False
+				snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
+					snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
+				snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
+				if err := r.Status().Update(ctx, obj); err != nil {
+					return fmt.Errorf("failed to update Ready=False: %w", err)
+				}
+				logger.Info("SnapshotContent deleted, set Ready=False", "content", contentName)
+				// Propagate Ready=False to parent
+				return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
+			}
+			return nil // Content missing, but Snapshot was never Ready
+		}
+		return fmt.Errorf("failed to get SnapshotContent: %w", err)
+	}
+
+	// Check if Content is being deleted
+	if !contentObj.GetDeletionTimestamp().IsZero() {
+		if wasReady {
+			// Content is being deleted - set Ready=False
+			snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
+				snapshot.ReasonDeleting, fmt.Sprintf("SnapshotContent %s is being deleted", contentName))
+			snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
+			if err := r.Status().Update(ctx, obj); err != nil {
+				return fmt.Errorf("failed to update Ready=False: %w", err)
+			}
+			logger.Info("SnapshotContent deleting, set Ready=False", "content", contentName)
+			// Propagate Ready=False to parent
+			return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
+		}
+		return nil
+	}
+
+	// Check Content Ready condition
+	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
+	if err != nil {
+		return fmt.Errorf("failed to extract SnapshotContentLike: %w", err)
+	}
+
+	if !snapshot.IsReady(contentLike) {
+		if wasReady {
+			// Content is not Ready - set Ready=False
+			readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
+			reason := snapshot.ReasonContentMissing
+			message := fmt.Sprintf("SnapshotContent %s is not Ready", contentName)
+			if readyCond != nil {
+				reason = readyCond.Reason
+				message = fmt.Sprintf("SnapshotContent %s: %s", contentName, readyCond.Message)
+			}
+			snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse, reason, message)
+			snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
+			if err := r.Status().Update(ctx, obj); err != nil {
+				return fmt.Errorf("failed to update Ready=False: %w", err)
+			}
+			logger.Info("SnapshotContent not Ready, set Ready=False", "content", contentName, "reason", reason)
+			// Propagate Ready=False to parent
+			return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
+		}
+		return nil // Content not Ready, but Snapshot was never Ready
+	}
+
+	// Step 3: Check if all child Snapshots exist
+	childrenRefs := snapshotLike.GetStatusChildrenSnapshotRefs()
+	for _, childRef := range childrenRefs {
+		// Skip if Snapshot is being deleted (cascade deletion)
+		if !obj.GetDeletionTimestamp().IsZero() {
+			continue
+		}
+
+		childExists, err := r.checkChildSnapshotExists(ctx, &childRef)
+		if err != nil {
+			return fmt.Errorf("failed to check child Snapshot: %w", err)
+		}
+
+		if !childExists {
+			if wasReady {
+				// Child was deleted - set Ready=False
+				snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
+					snapshot.ReasonChildSnapshotMissing,
+					fmt.Sprintf("Child Snapshot %s/%s not found", childRef.Namespace, childRef.Name))
+				snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
+				if err := r.Status().Update(ctx, obj); err != nil {
+					return fmt.Errorf("failed to update Ready=False: %w", err)
+				}
+				logger.Info("Child Snapshot missing, set Ready=False",
+					"child", fmt.Sprintf("%s/%s", childRef.Namespace, childRef.Name))
+				// Propagate Ready=False to parent
+				return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
+			}
+			return nil // Child missing, but Snapshot was never Ready
+		}
+	}
+
+	// All checks passed - set Ready=True if not already set
+	if !wasReady {
+		// Check if InProgress should be cleared
+		if snapshot.IsInProgress(snapshotLike) {
+			snapshot.SetCondition(snapshotLike, snapshot.ConditionInProgress, metav1.ConditionFalse,
+				snapshot.ReasonCompleted, "SnapshotContent and children are ready")
+		}
+		snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionTrue,
+			snapshot.ReasonCompleted, "SnapshotContent and all children are ready")
+		snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
+		if err := r.Status().Update(ctx, obj); err != nil {
+			return fmt.Errorf("failed to update Ready=True: %w", err)
+		}
+		logger.Info("All checks passed, set Ready=True")
+	}
+
+	return nil
+}
+
+// checkChildSnapshotExists checks if a child Snapshot exists
+// Uses APIReader for read-after-write consistency
+func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, childRef *snapshot.ObjectRef) (bool, error) {
+	if childRef == nil {
+		return false, nil
+	}
+
+	// Parse GVK from childRef
+	var childGVK schema.GroupVersionKind
+	if idx := strings.Index(childRef.APIVersion, "/"); idx != -1 {
+		childGVK = schema.GroupVersionKind{
+			Group:   childRef.APIVersion[:idx],
+			Version: childRef.APIVersion[idx+1:],
+			Kind:    childRef.Kind,
+		}
+	} else {
+		childGVK = schema.GroupVersionKind{
+			Group:   "",
+			Version: childRef.APIVersion,
+			Kind:    childRef.Kind,
+		}
+	}
+
+	childObj := &unstructured.Unstructured{}
+	childObj.SetGroupVersionKind(childGVK)
+	childKey := client.ObjectKey{
+		Name:      childRef.Name,
+		Namespace: childRef.Namespace,
+	}
+
+	err := r.APIReader.Get(ctx, childKey, childObj)
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to get child Snapshot: %w", err)
+	}
+
+	return true, nil
 }
 
 // getSnapshotContentGVK derives SnapshotContent GVK from Snapshot GVK
