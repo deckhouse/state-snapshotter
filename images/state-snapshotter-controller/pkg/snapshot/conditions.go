@@ -58,9 +58,23 @@ const (
 	ReasonReady = "Ready"
 )
 
-// SetCondition sets a condition on a SnapshotLike or SnapshotContentLike object
-// This is the ONLY way to write conditions - all controllers must use this function
-// This ensures consistency and prevents races
+// SetCondition sets a condition on a SnapshotLike or SnapshotContentLike object.
+//
+// This is the ONLY way to write conditions - all controllers must use this function.
+// This ensures consistency and prevents races.
+//
+// IMPORTANT: Function Contract
+//
+// This function is a formal contract defined in unified-snapshots-test-plan.md.
+// The behavior MUST NOT be changed without updating:
+//   - unified-snapshots-test-plan.md (FUNCTIONS: pkg/snapshot Conditions)
+//
+// Contract Rules:
+//   - MUST be idempotent (setting same condition twice has no effect on LastTransitionTime)
+//   - MUST update LastTransitionTime ONLY when status changes
+//   - MUST work with any object implementing SnapshotLike or SnapshotContentLike
+//
+// See: unified-snapshots-test-plan.md (TEST CASE: SetCondition - Idempotency)
 func SetCondition(obj interface{}, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	var conditions []metav1.Condition
 	var setter func([]metav1.Condition)
@@ -125,12 +139,20 @@ func GetCondition(obj interface{}, conditionType string) *metav1.Condition {
 	return meta.FindStatusCondition(conditions, conditionType)
 }
 
-// IsReady returns true if the object has Ready=True condition
+// IsReady returns true if the object has Ready=True condition.
+//
+// Contract: Pure function, idempotent, no side effects.
+// Works with any object implementing SnapshotLike or SnapshotContentLike.
+//
+// See: unified-snapshots-test-plan.md (TEST CASE: IsReady - Returns True Only When Ready=True)
 func IsReady(obj interface{}) bool {
 	return HasCondition(obj, ConditionReady, metav1.ConditionTrue)
 }
 
-// IsInProgress returns true if the object has InProgress=True condition
+// IsInProgress returns true if the object has InProgress=True condition.
+//
+// Contract: Pure function, idempotent, no side effects.
+// Works with any object implementing SnapshotLike or SnapshotContentLike.
 func IsInProgress(obj interface{}) bool {
 	return HasCondition(obj, ConditionInProgress, metav1.ConditionTrue)
 }

@@ -23,8 +23,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// GVKRegistry provides mapping between Snapshot and SnapshotContent GVKs
-// This is a centralized source of truth for GVK resolution
+// GVKRegistry provides mapping between Snapshot and SnapshotContent GVKs.
+//
+// This is a centralized source of truth for GVK resolution in dynamic controllers.
+//
+// IMPORTANT: Interface Stability Contract
+//
+// This interface is a formal contract defined in unified-snapshots-test-plan.md.
+// The public methods (Register*, Resolve*) MUST NOT be changed without updating:
+//   - unified-snapshots-test-plan.md (PACKAGE INTERFACES section)
+//
+// Contract Rules:
+//   - Registration MUST be idempotent
+//   - Resolution MUST be deterministic
+//   - Errors MUST be informative
+//
+// See: unified-snapshots-test-plan.md (INTERFACE: pkg/snapshot.GVKRegistry)
 type GVKRegistry struct {
 	// snapshotGVKs maps snapshot Kind -> GVK
 	snapshotGVKs map[string]schema.GroupVersionKind
@@ -32,7 +46,7 @@ type GVKRegistry struct {
 	contentGVKs map[string]schema.GroupVersionKind
 }
 
-// NewGVKRegistry creates a new GVK registry
+// NewGVKRegistry creates a new GVK registry.
 func NewGVKRegistry() *GVKRegistry {
 	return &GVKRegistry{
 		snapshotGVKs: make(map[string]schema.GroupVersionKind),
@@ -40,8 +54,12 @@ func NewGVKRegistry() *GVKRegistry {
 	}
 }
 
-// RegisterSnapshotGVK registers a Snapshot GVK
+// RegisterSnapshotGVK registers a Snapshot GVK.
+//
+// Contract: Idempotent - registering the same GVK twice is allowed and has no effect.
 // Example: RegisterSnapshotGVK("VirtualMachineSnapshot", "virtualization.deckhouse.io/v1alpha1")
+//
+// See: unified-snapshots-test-plan.md (TEST CASE: RegisterSnapshotGVK - Idempotency)
 func (r *GVKRegistry) RegisterSnapshotGVK(kind string, apiVersion string) error {
 	gvk, err := parseGVK(kind, apiVersion)
 	if err != nil {
@@ -51,7 +69,9 @@ func (r *GVKRegistry) RegisterSnapshotGVK(kind string, apiVersion string) error 
 	return nil
 }
 
-// RegisterSnapshotContentGVK registers a SnapshotContent GVK
+// RegisterSnapshotContentGVK registers a SnapshotContent GVK.
+//
+// Contract: Idempotent - registering the same GVK twice is allowed and has no effect.
 // Example: RegisterSnapshotContentGVK("VirtualMachineSnapshotContent", "virtualization.deckhouse.io/v1alpha1")
 func (r *GVKRegistry) RegisterSnapshotContentGVK(kind string, apiVersion string) error {
 	gvk, err := parseGVK(kind, apiVersion)
@@ -62,8 +82,12 @@ func (r *GVKRegistry) RegisterSnapshotContentGVK(kind string, apiVersion string)
 	return nil
 }
 
-// ResolveSnapshotGVK resolves Snapshot GVK from Kind
-// Returns error if not found
+// ResolveSnapshotGVK resolves Snapshot GVK from Kind.
+//
+// Contract: Deterministic - same Kind always returns same GVK (if registered).
+// Returns error if not found.
+//
+// See: unified-snapshots-test-plan.md (TEST CASE: ResolveSnapshotGVK - Unknown Kind Returns Error)
 func (r *GVKRegistry) ResolveSnapshotGVK(kind string) (schema.GroupVersionKind, error) {
 	gvk, ok := r.snapshotGVKs[kind]
 	if !ok {
@@ -72,8 +96,14 @@ func (r *GVKRegistry) ResolveSnapshotGVK(kind string) (schema.GroupVersionKind, 
 	return gvk, nil
 }
 
-// ResolveSnapshotContentGVK resolves SnapshotContent GVK from Snapshot Kind
-// Derives Content GVK from Snapshot Kind (e.g., VirtualMachineSnapshot -> VirtualMachineSnapshotContent)
+// ResolveSnapshotContentGVK resolves SnapshotContent GVK from Snapshot Kind.
+//
+// Derives Content GVK from Snapshot Kind (e.g., VirtualMachineSnapshot -> VirtualMachineSnapshotContent).
+// Contract: Deterministic - same Snapshot Kind always returns same Content GVK.
+//
+// Fallback behavior:
+//   1. Try to find registered Content GVK
+//   2. If not found, derive from Snapshot GVK (add "Content" suffix)
 func (r *GVKRegistry) ResolveSnapshotContentGVK(snapshotKind string) (schema.GroupVersionKind, error) {
 	// First, try to find Snapshot GVK
 	snapshotGVK, err := r.ResolveSnapshotGVK(snapshotKind)
