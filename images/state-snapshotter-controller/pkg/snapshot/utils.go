@@ -19,12 +19,13 @@ package snapshot
 import (
 	"fmt"
 	"strings"
+	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -64,6 +65,127 @@ func (w *unstructuredSnapshotWrapper) DeepCopyObject() runtime.Object {
 
 func (w *unstructuredSnapshotWrapper) GetObjectMeta() metav1.Object {
 	return w.obj
+}
+
+// Delegate metav1.Object methods to underlying unstructured object
+func (w *unstructuredSnapshotWrapper) GetAnnotations() map[string]string {
+	return w.obj.GetAnnotations()
+}
+
+func (w *unstructuredSnapshotWrapper) SetAnnotations(annotations map[string]string) {
+	w.obj.SetAnnotations(annotations)
+}
+
+func (w *unstructuredSnapshotWrapper) GetLabels() map[string]string {
+	return w.obj.GetLabels()
+}
+
+func (w *unstructuredSnapshotWrapper) SetLabels(labels map[string]string) {
+	w.obj.SetLabels(labels)
+}
+
+func (w *unstructuredSnapshotWrapper) GetFinalizers() []string {
+	return w.obj.GetFinalizers()
+}
+
+func (w *unstructuredSnapshotWrapper) SetFinalizers(finalizers []string) {
+	w.obj.SetFinalizers(finalizers)
+}
+
+func (w *unstructuredSnapshotWrapper) GetOwnerReferences() []metav1.OwnerReference {
+	return w.obj.GetOwnerReferences()
+}
+
+func (w *unstructuredSnapshotWrapper) SetOwnerReferences(references []metav1.OwnerReference) {
+	w.obj.SetOwnerReferences(references)
+}
+
+func (w *unstructuredSnapshotWrapper) GetManagedFields() []metav1.ManagedFieldsEntry {
+	return w.obj.GetManagedFields()
+}
+
+func (w *unstructuredSnapshotWrapper) SetManagedFields(managedFields []metav1.ManagedFieldsEntry) {
+	w.obj.SetManagedFields(managedFields)
+}
+
+func (w *unstructuredSnapshotWrapper) GetCreationTimestamp() metav1.Time {
+	return w.obj.GetCreationTimestamp()
+}
+
+func (w *unstructuredSnapshotWrapper) SetCreationTimestamp(timestamp metav1.Time) {
+	w.obj.SetCreationTimestamp(timestamp)
+}
+
+func (w *unstructuredSnapshotWrapper) GetDeletionTimestamp() *metav1.Time {
+	return w.obj.GetDeletionTimestamp()
+}
+
+func (w *unstructuredSnapshotWrapper) SetDeletionTimestamp(timestamp *metav1.Time) {
+	w.obj.SetDeletionTimestamp(timestamp)
+}
+
+func (w *unstructuredSnapshotWrapper) GetDeletionGracePeriodSeconds() *int64 {
+	return w.obj.GetDeletionGracePeriodSeconds()
+}
+
+func (w *unstructuredSnapshotWrapper) SetDeletionGracePeriodSeconds(gracePeriodSeconds *int64) {
+	w.obj.SetDeletionGracePeriodSeconds(gracePeriodSeconds)
+}
+
+func (w *unstructuredSnapshotWrapper) GetGeneration() int64 {
+	return w.obj.GetGeneration()
+}
+
+func (w *unstructuredSnapshotWrapper) SetGeneration(generation int64) {
+	w.obj.SetGeneration(generation)
+}
+
+func (w *unstructuredSnapshotWrapper) GetName() string {
+	return w.obj.GetName()
+}
+
+func (w *unstructuredSnapshotWrapper) SetName(name string) {
+	w.obj.SetName(name)
+}
+
+func (w *unstructuredSnapshotWrapper) GetGenerateName() string {
+	return w.obj.GetGenerateName()
+}
+
+func (w *unstructuredSnapshotWrapper) SetGenerateName(name string) {
+	w.obj.SetGenerateName(name)
+}
+
+func (w *unstructuredSnapshotWrapper) GetNamespace() string {
+	return w.obj.GetNamespace()
+}
+
+func (w *unstructuredSnapshotWrapper) SetNamespace(namespace string) {
+	w.obj.SetNamespace(namespace)
+}
+
+func (w *unstructuredSnapshotWrapper) GetUID() types.UID {
+	return w.obj.GetUID()
+}
+
+func (w *unstructuredSnapshotWrapper) SetUID(uid types.UID) {
+	w.obj.SetUID(uid)
+}
+
+func (w *unstructuredSnapshotWrapper) GetResourceVersion() string {
+	return w.obj.GetResourceVersion()
+}
+
+func (w *unstructuredSnapshotWrapper) SetResourceVersion(version string) {
+	w.obj.SetResourceVersion(version)
+}
+
+func (w *unstructuredSnapshotWrapper) GetSelfLink() string {
+	return w.obj.GetSelfLink()
+}
+
+func (w *unstructuredSnapshotWrapper) SetSelfLink(selfLink string) {
+	w.obj.SetSelfLink(selfLink)
 }
 
 func (w *unstructuredSnapshotWrapper) GetSpecSnapshotRef() *ObjectRef {
@@ -205,8 +327,8 @@ func (w *unstructuredSnapshotWrapper) GetStatusConditions() []metav1.Condition {
 			cond.ObservedGeneration = observed
 		}
 		if lastTransition, ok := condMap["lastTransitionTime"].(string); ok {
-			if t, err := metav1.ParseTime(lastTransition); err == nil {
-				cond.LastTransitionTime = t
+			if t, err := time.Parse(time.RFC3339, lastTransition); err == nil {
+				cond.LastTransitionTime = metav1.NewTime(t)
 			}
 		}
 		conditions = append(conditions, cond)
@@ -229,7 +351,7 @@ func (w *unstructuredSnapshotWrapper) SetStatusConditions(conditions []metav1.Co
 			"reason":               cond.Reason,
 			"message":               cond.Message,
 			"observedGeneration":    cond.ObservedGeneration,
-			"lastTransitionTime":    cond.LastTransitionTime.Format(metav1.RFC3339),
+			"lastTransitionTime":    cond.LastTransitionTime.Format(time.RFC3339),
 		}
 	}
 	status["conditions"] = conditionsRaw
@@ -276,6 +398,127 @@ func (w *unstructuredSnapshotContentWrapper) DeepCopyObject() runtime.Object {
 
 func (w *unstructuredSnapshotContentWrapper) GetObjectMeta() metav1.Object {
 	return w.obj
+}
+
+// Delegate metav1.Object methods to underlying unstructured object
+func (w *unstructuredSnapshotContentWrapper) GetAnnotations() map[string]string {
+	return w.obj.GetAnnotations()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetAnnotations(annotations map[string]string) {
+	w.obj.SetAnnotations(annotations)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetLabels() map[string]string {
+	return w.obj.GetLabels()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetLabels(labels map[string]string) {
+	w.obj.SetLabels(labels)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetFinalizers() []string {
+	return w.obj.GetFinalizers()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetFinalizers(finalizers []string) {
+	w.obj.SetFinalizers(finalizers)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetOwnerReferences() []metav1.OwnerReference {
+	return w.obj.GetOwnerReferences()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetOwnerReferences(references []metav1.OwnerReference) {
+	w.obj.SetOwnerReferences(references)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetManagedFields() []metav1.ManagedFieldsEntry {
+	return w.obj.GetManagedFields()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetManagedFields(managedFields []metav1.ManagedFieldsEntry) {
+	w.obj.SetManagedFields(managedFields)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetCreationTimestamp() metav1.Time {
+	return w.obj.GetCreationTimestamp()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetCreationTimestamp(timestamp metav1.Time) {
+	w.obj.SetCreationTimestamp(timestamp)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetDeletionTimestamp() *metav1.Time {
+	return w.obj.GetDeletionTimestamp()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetDeletionTimestamp(timestamp *metav1.Time) {
+	w.obj.SetDeletionTimestamp(timestamp)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetDeletionGracePeriodSeconds() *int64 {
+	return w.obj.GetDeletionGracePeriodSeconds()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetDeletionGracePeriodSeconds(gracePeriodSeconds *int64) {
+	w.obj.SetDeletionGracePeriodSeconds(gracePeriodSeconds)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetGeneration() int64 {
+	return w.obj.GetGeneration()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetGeneration(generation int64) {
+	w.obj.SetGeneration(generation)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetName() string {
+	return w.obj.GetName()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetName(name string) {
+	w.obj.SetName(name)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetGenerateName() string {
+	return w.obj.GetGenerateName()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetGenerateName(name string) {
+	w.obj.SetGenerateName(name)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetNamespace() string {
+	return w.obj.GetNamespace()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetNamespace(namespace string) {
+	w.obj.SetNamespace(namespace)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetUID() types.UID {
+	return w.obj.GetUID()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetUID(uid types.UID) {
+	w.obj.SetUID(uid)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetResourceVersion() string {
+	return w.obj.GetResourceVersion()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetResourceVersion(version string) {
+	w.obj.SetResourceVersion(version)
+}
+
+func (w *unstructuredSnapshotContentWrapper) GetSelfLink() string {
+	return w.obj.GetSelfLink()
+}
+
+func (w *unstructuredSnapshotContentWrapper) SetSelfLink(selfLink string) {
+	w.obj.SetSelfLink(selfLink)
 }
 
 func (w *unstructuredSnapshotContentWrapper) GetSpecSnapshotRef() *ObjectRef {
@@ -393,8 +636,8 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusConditions() []metav1.Cond
 			cond.ObservedGeneration = observed
 		}
 		if lastTransition, ok := condMap["lastTransitionTime"].(string); ok {
-			if t, err := metav1.ParseTime(lastTransition); err == nil {
-				cond.LastTransitionTime = t
+			if t, err := time.Parse(time.RFC3339, lastTransition); err == nil {
+				cond.LastTransitionTime = metav1.NewTime(t)
 			}
 		}
 		conditions = append(conditions, cond)
@@ -417,7 +660,7 @@ func (w *unstructuredSnapshotContentWrapper) SetStatusConditions(conditions []me
 			"reason":               cond.Reason,
 			"message":               cond.Message,
 			"observedGeneration":    cond.ObservedGeneration,
-			"lastTransitionTime":    cond.LastTransitionTime.Format(metav1.RFC3339),
+			"lastTransitionTime":    cond.LastTransitionTime.Format(time.RFC3339),
 		}
 	}
 	status["conditions"] = conditionsRaw

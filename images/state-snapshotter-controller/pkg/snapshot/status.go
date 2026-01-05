@@ -17,6 +17,8 @@ limitations under the License.
 package snapshot
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -43,7 +45,7 @@ func SyncConditionsToUnstructured(obj *unstructured.Unstructured, conditions []m
 		}
 		// Only include lastTransitionTime if it's not zero
 		if !cond.LastTransitionTime.IsZero() {
-			condMap["lastTransitionTime"] = cond.LastTransitionTime.Format(metav1.RFC3339)
+			condMap["lastTransitionTime"] = cond.LastTransitionTime.Format(time.RFC3339)
 		}
 		conditionsRaw = append(conditionsRaw, condMap)
 	}

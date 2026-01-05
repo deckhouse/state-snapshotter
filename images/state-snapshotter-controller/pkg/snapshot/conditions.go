@@ -90,12 +90,23 @@ func SetCondition(obj interface{}, conditionType string, status metav1.Condition
 		return
 	}
 
+	// Check if condition already exists with same status
+	existingCond := meta.FindStatusCondition(conditions, conditionType)
+	var lastTransitionTime metav1.Time
+	if existingCond != nil && existingCond.Status == status {
+		// Status hasn't changed - preserve LastTransitionTime
+		lastTransitionTime = existingCond.LastTransitionTime
+	} else {
+		// Status changed or condition doesn't exist - use current time
+		lastTransitionTime = metav1.Now()
+	}
+
 	cond := metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
-		LastTransitionTime: metav1.Now(),
+		LastTransitionTime: lastTransitionTime,
 	}
 
 	// Remove existing condition of the same type
