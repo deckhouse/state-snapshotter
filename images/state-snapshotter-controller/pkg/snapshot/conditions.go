@@ -55,7 +55,8 @@ const (
 
 // Reasons for Ready=True
 const (
-	ReasonReady = "Ready"
+	ReasonReady    = "Ready"
+	ReasonCompleted = "Completed"
 )
 
 // SetCondition sets a condition on a SnapshotLike or SnapshotContentLike object.

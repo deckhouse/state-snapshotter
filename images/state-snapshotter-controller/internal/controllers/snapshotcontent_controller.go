@@ -122,11 +122,31 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// ARCHITECTURAL NOTE: SnapshotContentController is instantiated per-GVK
 	// and registered with exact GVK in SetupWithManager.
 	// Each controller instance handles only one specific GVK (e.g., VirtualMachineSnapshotContent).
-	// The GVK is determined from the watch context (req.GroupVersionKind set by controller-runtime).
+	// Get the unstructured object
+	// We need to try each registered GVK to find the correct one
 	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(req.GroupVersionKind)
+	var found bool
+	var err error
+	for _, gvk := range r.SnapshotContentGVKs {
+		obj.SetGroupVersionKind(gvk)
+		err = r.Get(ctx, req.NamespacedName, obj)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			logger.Error(err, "failed to get SnapshotContent")
+			return ctrl.Result{}, err
+		}
+		found = true
+		break
+	}
 
-	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
+	if !found {
+		logger.V(1).Info("SnapshotContent not found in any registered GVK, skipping")
+		return ctrl.Result{}, nil
+	}
+
+	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(1).Info("SnapshotContent not found, skipping")
 			return ctrl.Result{}, nil
@@ -257,7 +277,7 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 	// Get Content GVK to derive child Content GVK
 	contentGVK := obj.GetObjectKind().GroupVersionKind()
 	
-	var errors []error
+	var childErrors []error
 	for _, childRef := range childrenRefs {
 		// Resolve child Content GVK through registry
 		childContentGVK, err := r.GVKRegistry.ResolveSnapshotContentGVK(childRef.Kind)
@@ -276,29 +296,31 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 		childKey := client.ObjectKey{Name: childRef.Name}
 
 		// Try to get child Content
-		if err := r.Get(ctx, childKey, childObj); err != nil {
-			if errors.IsNotFound(err) {
+		childGetErr := r.Get(ctx, childKey, childObj)
+		if childGetErr != nil {
+			if errors.IsNotFound(childGetErr) {
 				// Child already deleted - skip (broken link, but not an error)
 				logger.V(1).Info("Child SnapshotContent not found, skipping", "child", childRef.Name)
 				continue
 			}
 			// Other error - log but continue
-			logger.Error(err, "Failed to get child SnapshotContent", "child", childRef.Name)
-			errors = append(errors, fmt.Errorf("failed to get child %s: %w", childRef.Name, err))
+			logger.Error(childGetErr, "Failed to get child SnapshotContent", "child", childRef.Name)
+			childErrors = append(childErrors, fmt.Errorf("failed to get child %s: %w", childRef.Name, childGetErr))
 			continue
 		}
 
 		// Remove finalizer from child
 		if snapshot.RemoveFinalizer(childObj, snapshot.FinalizerParentProtect) {
 			logger.Info("Removed finalizer from child SnapshotContent", "child", childRef.Name)
-			if err := r.Update(ctx, childObj); err != nil {
-				if errors.IsNotFound(err) {
+			childUpdateErr := r.Update(ctx, childObj)
+			if childUpdateErr != nil {
+				if errors.IsNotFound(childUpdateErr) {
 					// Child was deleted between Get and Update - skip
 					logger.V(1).Info("Child SnapshotContent was deleted, skipping update", "child", childRef.Name)
 					continue
 				}
-				logger.Error(err, "Failed to remove finalizer from child", "child", childRef.Name)
-				errors = append(errors, fmt.Errorf("failed to update child %s: %w", childRef.Name, err))
+				logger.Error(childUpdateErr, "Failed to remove finalizer from child", "child", childRef.Name)
+				childErrors = append(childErrors, fmt.Errorf("failed to update child %s: %w", childRef.Name, childUpdateErr))
 				continue
 			}
 		} else {
@@ -308,12 +330,12 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 	}
 
 	// Return error only if all children failed (partial success is acceptable)
-	if len(errors) > 0 && len(errors) == len(childrenRefs) {
-		return fmt.Errorf("failed to remove finalizers from all children: %v", errors)
+	if len(childErrors) > 0 && len(childErrors) == len(childrenRefs) {
+		return fmt.Errorf("failed to remove finalizers from all children: %v", childErrors)
 	}
 
-	if len(errors) > 0 {
-		logger.Info("Some children failed, but cascade continues", "failedCount", len(errors), "totalCount", len(childrenRefs))
+	if len(childErrors) > 0 {
+		logger.Info("Some children failed, but cascade continues", "failedCount", len(childErrors), "totalCount", len(childrenRefs))
 	}
 
 	return nil
@@ -436,22 +458,14 @@ func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, sna
 	// Resolve Snapshot GVK through registry
 	snapshotGVK, err := r.GVKRegistry.ResolveSnapshotGVK(snapshotRef.Kind)
 	if err != nil {
-		// Fallback: parse from APIVersion if registry doesn't know this GVK
-		if idx := strings.Index(snapshotRef.APIVersion, "/"); idx != -1 {
-			snapshotGVK = schema.GroupVersionKind{
-				Group:   snapshotRef.APIVersion[:idx],
-				Version: snapshotRef.APIVersion[idx+1:],
-				Kind:    snapshotRef.Kind,
-			}
-		} else {
-			snapshotGVK = schema.GroupVersionKind{
-				Group:   "",
-				Version: snapshotRef.APIVersion,
-				Kind:    snapshotRef.Kind,
-			}
-		}
+		// Fallback: try to find matching GVK from registered list
 		logger := log.FromContext(ctx)
-		logger.V(1).Info("Snapshot GVK not found in registry, using fallback parsing", "kind", snapshotRef.Kind)
+		logger.V(1).Info("Snapshot GVK not found in registry, trying registered GVKs", "kind", snapshotRef.Kind)
+		
+		// Try to find a matching GVK by Kind from registered Snapshot GVKs
+		// Note: We need to get Snapshot GVKs from registry or controller
+		// For now, return error if not found
+		return false, fmt.Errorf("snapshot GVK not found for kind %s: %w", snapshotRef.Kind, err)
 	}
 
 	snapshotObj := &unstructured.Unstructured{}
@@ -462,12 +476,12 @@ func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, sna
 		Namespace: snapshotRef.Namespace,
 	}
 
-	err := r.APIReader.Get(ctx, key, snapshotObj)
-	if errors.IsNotFound(err) {
+	getErr := r.APIReader.Get(ctx, key, snapshotObj)
+	if errors.IsNotFound(getErr) {
 		return false, nil
 	}
-	if err != nil {
-		return false, fmt.Errorf("failed to get Snapshot: %w", err)
+	if getErr != nil {
+		return false, fmt.Errorf("failed to get Snapshot: %w", getErr)
 	}
 
 	return true, nil

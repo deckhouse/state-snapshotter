@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,10 +36,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-const (
-	DeckhouseAPIVersion = "deckhouse.io/v1alpha1"
-	KindObjectKeeper    = "ObjectKeeper"
-)
 
 // SnapshotController reconciles generic XxxxSnapshot resources
 //
@@ -123,18 +118,28 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 	logger.Info("Reconciling Snapshot")
 
 	// Get the unstructured object
-	// GVK comes from the watch context (set by controller-runtime)
-	// Each controller instance watches a specific GVK, so req.GroupVersionKind is always correct
+	// We need to try each registered GVK to find the correct one
+	// In practice, each controller instance watches a specific GVK
 	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(req.GroupVersionKind)
-
-	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
-		if errors.IsNotFound(err) {
-			logger.V(1).Info("Snapshot not found, skipping")
-			return ctrl.Result{}, nil
+	var found bool
+	var err error
+	for _, gvk := range r.SnapshotGVKs {
+		obj.SetGroupVersionKind(gvk)
+		err = r.Get(ctx, req.NamespacedName, obj)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			logger.Error(err, "failed to get Snapshot")
+			return ctrl.Result{}, err
 		}
-		logger.Error(err, "failed to get Snapshot")
-		return ctrl.Result{}, err
+		found = true
+		break
+	}
+
+	if !found {
+		logger.V(1).Info("Snapshot not found in any registered GVK, skipping")
+		return ctrl.Result{}, nil
 	}
 
 	// Convert to typed interface
@@ -666,22 +671,23 @@ func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, child
 	// Resolve child Snapshot GVK through registry
 	childGVK, err := r.GVKRegistry.ResolveSnapshotGVK(childRef.Kind)
 	if err != nil {
-		// Fallback: parse from APIVersion if registry doesn't know this GVK
-		if idx := strings.Index(childRef.APIVersion, "/"); idx != -1 {
-			childGVK = schema.GroupVersionKind{
-				Group:   childRef.APIVersion[:idx],
-				Version: childRef.APIVersion[idx+1:],
-				Kind:    childRef.Kind,
-			}
-		} else {
-			childGVK = schema.GroupVersionKind{
-				Group:   "",
-				Version: childRef.APIVersion,
-				Kind:    childRef.Kind,
+		// Fallback: try to find matching GVK from registered list
+		// This handles cases where child snapshot type is not yet registered
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("Child GVK not found in registry, trying registered GVKs", "kind", childRef.Kind)
+		
+		// Try to find a matching GVK by Kind
+		for _, gvk := range r.SnapshotGVKs {
+			if gvk.Kind == childRef.Kind {
+				childGVK = gvk
+				break
 			}
 		}
-		logger := log.FromContext(ctx)
-		logger.V(1).Info("Child GVK not found in registry, using fallback parsing", "kind", childRef.Kind)
+		
+		// If still not found, return error
+		if childGVK.Kind == "" {
+			return false, fmt.Errorf("child Snapshot GVK not found for kind %s: %w", childRef.Kind, err)
+		}
 	}
 
 	childObj := &unstructured.Unstructured{}
@@ -691,12 +697,12 @@ func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, child
 		Namespace: childRef.Namespace,
 	}
 
-	err := r.APIReader.Get(ctx, childKey, childObj)
-	if errors.IsNotFound(err) {
+	getErr := r.APIReader.Get(ctx, childKey, childObj)
+	if errors.IsNotFound(getErr) {
 		return false, nil
 	}
-	if err != nil {
-		return false, fmt.Errorf("failed to get child Snapshot: %w", err)
+	if getErr != nil {
+		return false, fmt.Errorf("failed to get child Snapshot: %w", getErr)
 	}
 
 	return true, nil
