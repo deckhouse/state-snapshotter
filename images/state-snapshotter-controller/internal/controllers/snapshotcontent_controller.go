@@ -53,6 +53,9 @@ type SnapshotContentController struct {
 	Scheme    *runtime.Scheme
 	Config    *config.Options
 
+	// GVKRegistry provides centralized GVK resolution
+	GVKRegistry *snapshot.GVKRegistry
+
 	// SnapshotContentGVKs is a list of GVKs that this controller should watch
 	// This allows domain modules to register their snapshot content types
 	SnapshotContentGVKs []schema.GroupVersionKind
@@ -79,11 +82,31 @@ func NewSnapshotContentController(
 		return nil, fmt.Errorf("Config must not be nil")
 	}
 
+	// Initialize GVK Registry and register known GVKs
+	registry := snapshot.NewGVKRegistry()
+	for _, gvk := range snapshotContentGVKs {
+		// Extract Snapshot Kind from Content Kind (remove "Content" suffix)
+		snapshotKind := strings.TrimSuffix(gvk.Kind, "Content")
+		if snapshotKind == gvk.Kind {
+			// Content Kind doesn't end with "Content" - skip or handle differently
+			continue
+		}
+		// Register Content GVK
+		if err := registry.RegisterSnapshotContentGVK(gvk.Kind, gvk.GroupVersion().String()); err != nil {
+			return nil, fmt.Errorf("failed to register SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
+		// Register Snapshot GVK (derived from Content Kind)
+		if err := registry.RegisterSnapshotGVK(snapshotKind, gvk.GroupVersion().String()); err != nil {
+			return nil, fmt.Errorf("failed to register Snapshot GVK %s: %w", snapshotKind, err)
+		}
+	}
+
 	return &SnapshotContentController{
 		Client:               client,
 		APIReader:            apiReader,
 		Scheme:               scheme,
 		Config:               cfg,
+		GVKRegistry:          registry,
 		SnapshotContentGVKs: snapshotContentGVKs,
 	}, nil
 }
@@ -96,22 +119,12 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	logger.Info("Reconciling SnapshotContent")
 
 	// Get the unstructured object
-	// ARCHITECTURAL NOTE: SnapshotContentController is expected to be instantiated per-GVK
+	// ARCHITECTURAL NOTE: SnapshotContentController is instantiated per-GVK
 	// and registered with exact GVK in SetupWithManager.
 	// Each controller instance handles only one specific GVK (e.g., VirtualMachineSnapshotContent).
-	// This ensures we always know the correct GVK for the request.
-	//
-	// TODO: Implement proper watch setup that registers controller per GVK
-	// For now, this is a placeholder - controller is not functional until watches are configured
+	// The GVK is determined from the watch context (req.GroupVersionKind set by controller-runtime).
 	obj := &unstructured.Unstructured{}
-	// NOTE: We cannot determine GVK from NamespacedName alone.
-	// This will be fixed when we set up proper watch with GVK mapping.
-	// For skeleton, we assume the object already has correct GVK set from watch.
-	obj.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "", // TODO: Get from watch context or GVK map
-		Version: "v1alpha1",
-		Kind:    "SnapshotContent", // TODO: Get from watch context or GVK map
-	})
+	obj.SetGroupVersionKind(req.GroupVersionKind)
 
 	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
 		if errors.IsNotFound(err) {
@@ -246,12 +259,16 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 	
 	var errors []error
 	for _, childRef := range childrenRefs {
-		// Derive child Content GVK from child Kind
-		// TODO: Use GVK registry when integrated
-		childContentGVK := schema.GroupVersionKind{
-			Group:   contentGVK.Group,
-			Version: contentGVK.Version,
-			Kind:    childRef.Kind,
+		// Resolve child Content GVK through registry
+		childContentGVK, err := r.GVKRegistry.ResolveSnapshotContentGVK(childRef.Kind)
+		if err != nil {
+			// Fallback: derive from parent Content GVK if registry doesn't know
+			childContentGVK = schema.GroupVersionKind{
+				Group:   contentGVK.Group,
+				Version: contentGVK.Version,
+				Kind:    childRef.Kind,
+			}
+			logger.V(1).Info("Child Content GVK not found in registry, using fallback", "kind", childRef.Kind)
 		}
 
 		childObj := &unstructured.Unstructured{}
@@ -416,13 +433,25 @@ func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, sna
 		return false, nil
 	}
 
-	// Determine GVK from snapshotRef.Kind
-	// For now, we assume the GVK can be derived from Kind
-	// TODO: This should come from a GVK mapping or be passed as parameter
-	snapshotGVK := schema.GroupVersionKind{
-		Group:   "", // TODO: Get from GVK mapping
-		Version: "v1alpha1",
-		Kind:    snapshotRef.Kind,
+	// Resolve Snapshot GVK through registry
+	snapshotGVK, err := r.GVKRegistry.ResolveSnapshotGVK(snapshotRef.Kind)
+	if err != nil {
+		// Fallback: parse from APIVersion if registry doesn't know this GVK
+		if idx := strings.Index(snapshotRef.APIVersion, "/"); idx != -1 {
+			snapshotGVK = schema.GroupVersionKind{
+				Group:   snapshotRef.APIVersion[:idx],
+				Version: snapshotRef.APIVersion[idx+1:],
+				Kind:    snapshotRef.Kind,
+			}
+		} else {
+			snapshotGVK = schema.GroupVersionKind{
+				Group:   "",
+				Version: snapshotRef.APIVersion,
+				Kind:    snapshotRef.Kind,
+			}
+		}
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("Snapshot GVK not found in registry, using fallback parsing", "kind", snapshotRef.Kind)
 	}
 
 	snapshotObj := &unstructured.Unstructured{}
@@ -445,10 +474,24 @@ func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, sna
 }
 
 // SetupWithManager sets up the controller with the Manager
+// Registers watches for all registered SnapshotContent GVKs
+// Each GVK gets its own controller instance to ensure correct GVK context
 func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
-	// For now, we'll need to register watches for each GVK
-	// In the future, this can be done dynamically based on discovered CRDs
-	// For skeleton, we'll return nil - actual watch setup will be done later
+	// Register watch for each SnapshotContent GVK
+	for _, gvk := range r.SnapshotContentGVKs {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(gvk)
+		
+		// Create a controller builder for this specific GVK
+		builder := ctrl.NewControllerManagedBy(mgr).
+			For(obj).
+			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
+		
+		if err := builder.Complete(r); err != nil {
+			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
+	}
+	
 	return nil
 }
 
