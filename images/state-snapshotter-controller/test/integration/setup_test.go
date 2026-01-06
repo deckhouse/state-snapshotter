@@ -258,6 +258,14 @@ var _ = BeforeSuite(func() {
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
 												Schema: &apiextensionsv1.JSONSchemaProps{
 													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
 												},
 											},
 										},

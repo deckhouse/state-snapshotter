@@ -569,3 +569,255 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 	})
 }
 
+// Test IsTerminal - Returns True Only When Ready=True or Ready=False
+//
+// INTERFACE: pkg/snapshot.IsTerminal
+//
+// PRECONDITION:
+// - Object implements SnapshotLike or SnapshotContentLike
+//
+// TEST SCENARIOS:
+//
+// SCENARIO 1: Ready=True (terminal state)
+// - ACTIONS: SetCondition(obj, "Ready", True, "Completed", "Ready")
+// - EXPECTED: IsTerminal(obj) == true
+//
+// SCENARIO 2: Ready=False (terminal state)
+// - ACTIONS: SetCondition(obj, "Ready", False, "Failed", "Error")
+// - EXPECTED: IsTerminal(obj) == true
+//
+// SCENARIO 3: Ready condition missing (non-terminal)
+// - ACTIONS: No condition set
+// - EXPECTED: IsTerminal(obj) == false
+//
+// SCENARIO 4: Ready=Unknown (non-terminal)
+// - ACTIONS: SetCondition(obj, "Ready", Unknown, "Processing", "In progress")
+// - EXPECTED: IsTerminal(obj) == false
+func TestIsTerminal_ReturnsTrueOnlyWhenReadyTrueOrFalse(t *testing.T) {
+	t.Run("SnapshotLike", func(t *testing.T) {
+		obj := &mockSnapshotLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot"},
+			conditions: []metav1.Condition{},
+		}
+
+		// SCENARIO 1: Ready=True (terminal state)
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		if !IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return true when Ready=True")
+		}
+
+		// SCENARIO 2: Ready=False (terminal state)
+		SetCondition(obj, ConditionReady, metav1.ConditionFalse, "Failed", "Error")
+		if !IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return true when Ready=False")
+		}
+
+		// SCENARIO 3: Ready condition missing (non-terminal)
+		obj.conditions = []metav1.Condition{}
+		if IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return false when Ready condition is missing")
+		}
+
+		// SCENARIO 4: Ready=Unknown (non-terminal)
+		SetCondition(obj, ConditionReady, metav1.ConditionUnknown, "Processing", "In progress")
+		if IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return false when Ready=Unknown")
+		}
+	})
+
+	t.Run("SnapshotContentLike", func(t *testing.T) {
+		obj := &mockSnapshotContentLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-content"},
+			conditions: []metav1.Condition{},
+		}
+
+		// SCENARIO 1: Ready=True (terminal state)
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		if !IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return true when Ready=True")
+		}
+
+		// SCENARIO 2: Ready=False (terminal state)
+		SetCondition(obj, ConditionReady, metav1.ConditionFalse, "Failed", "Error")
+		if !IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return true when Ready=False")
+		}
+
+		// SCENARIO 3: Ready condition missing (non-terminal)
+		obj.conditions = []metav1.Condition{}
+		if IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return false when Ready condition is missing")
+		}
+
+		// SCENARIO 4: Ready=Unknown (non-terminal)
+		SetCondition(obj, ConditionReady, metav1.ConditionUnknown, "Processing", "In progress")
+		if IsTerminal(obj) {
+			t.Error("Expected IsTerminal() to return false when Ready=Unknown")
+		}
+	})
+}
+
+// Test GetCondition - Edge Cases
+//
+// INTERFACE: pkg/snapshot.GetCondition
+//
+// Tests edge cases for GetCondition function:
+// - nil object
+// - object that doesn't implement SnapshotLike or SnapshotContentLike
+// - condition type that doesn't exist
+// - multiple conditions (should return correct one)
+func TestGetCondition_EdgeCases(t *testing.T) {
+	t.Run("Nil object", func(t *testing.T) {
+		// EXPECTED BEHAVIOR: return nil without panic
+		cond := GetCondition(nil, ConditionReady)
+		if cond != nil {
+			t.Error("Expected GetCondition(nil, ...) to return nil")
+		}
+	})
+
+	t.Run("Invalid object type", func(t *testing.T) {
+		// EXPECTED BEHAVIOR: return nil without panic
+		invalidObj := struct{ name string }{name: "test"}
+		cond := GetCondition(invalidObj, ConditionReady)
+		if cond != nil {
+			t.Error("Expected GetCondition(invalidObj, ...) to return nil")
+		}
+	})
+
+	t.Run("Condition type doesn't exist", func(t *testing.T) {
+		obj := &mockSnapshotLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot"},
+			conditions: []metav1.Condition{},
+		}
+		// Set a different condition
+		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
+		// Try to get Ready condition (doesn't exist)
+		cond := GetCondition(obj, ConditionReady)
+		if cond != nil {
+			t.Error("Expected GetCondition() to return nil when condition doesn't exist")
+		}
+	})
+
+	t.Run("Multiple conditions - returns correct one", func(t *testing.T) {
+		obj := &mockSnapshotLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot"},
+			conditions: []metav1.Condition{},
+		}
+		// Set multiple conditions
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionHandledByCommonController, metav1.ConditionTrue, "Started", "Started")
+
+		// Get Ready condition
+		readyCond := GetCondition(obj, ConditionReady)
+		if readyCond == nil {
+			t.Fatal("Expected Ready condition to exist")
+		}
+		if readyCond.Type != ConditionReady {
+			t.Errorf("Expected condition type=%s, got %s", ConditionReady, readyCond.Type)
+		}
+		if readyCond.Status != metav1.ConditionTrue {
+			t.Errorf("Expected Ready condition status=True, got %v", readyCond.Status)
+		}
+
+		// Get InProgress condition
+		inProgressCond := GetCondition(obj, ConditionInProgress)
+		if inProgressCond == nil {
+			t.Fatal("Expected InProgress condition to exist")
+		}
+		if inProgressCond.Type != ConditionInProgress {
+			t.Errorf("Expected condition type=%s, got %s", ConditionInProgress, inProgressCond.Type)
+		}
+	})
+}
+
+// Test HasCondition - Edge Cases
+//
+// INTERFACE: pkg/snapshot.HasCondition
+//
+// Tests edge cases for HasCondition function:
+// - nil object
+// - object that doesn't implement SnapshotLike or SnapshotContentLike
+// - condition type that doesn't exist
+// - condition exists but with different status
+// - condition exists with correct status
+func TestHasCondition_EdgeCases(t *testing.T) {
+	t.Run("Nil object", func(t *testing.T) {
+		// EXPECTED BEHAVIOR: return false without panic
+		has := HasCondition(nil, ConditionReady, metav1.ConditionTrue)
+		if has {
+			t.Error("Expected HasCondition(nil, ...) to return false")
+		}
+	})
+
+	t.Run("Invalid object type", func(t *testing.T) {
+		// EXPECTED BEHAVIOR: return false without panic
+		invalidObj := struct{ name string }{name: "test"}
+		has := HasCondition(invalidObj, ConditionReady, metav1.ConditionTrue)
+		if has {
+			t.Error("Expected HasCondition(invalidObj, ...) to return false")
+		}
+	})
+
+	t.Run("Condition type doesn't exist", func(t *testing.T) {
+		obj := &mockSnapshotLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot"},
+			conditions: []metav1.Condition{},
+		}
+		// Set a different condition
+		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
+		// Check for Ready condition (doesn't exist)
+		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
+		if has {
+			t.Error("Expected HasCondition() to return false when condition doesn't exist")
+		}
+	})
+
+	t.Run("Condition exists but with different status", func(t *testing.T) {
+		obj := &mockSnapshotLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot"},
+			conditions: []metav1.Condition{},
+		}
+		// Set Ready condition with status=False
+		SetCondition(obj, ConditionReady, metav1.ConditionFalse, "Failed", "Error")
+		// Check for Ready=True (should return false)
+		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
+		if has {
+			t.Error("Expected HasCondition() to return false when condition exists but with different status")
+		}
+		// Check for Ready=False (should return true)
+		has = HasCondition(obj, ConditionReady, metav1.ConditionFalse)
+		if !has {
+			t.Error("Expected HasCondition() to return true when condition exists with correct status")
+		}
+	})
+
+	t.Run("Condition exists with correct status", func(t *testing.T) {
+		obj := &mockSnapshotLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot"},
+			conditions: []metav1.Condition{},
+		}
+		// Set Ready condition with status=True
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		// Check for Ready=True (should return true)
+		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
+		if !has {
+			t.Error("Expected HasCondition() to return true when condition exists with correct status")
+		}
+	})
+
+	t.Run("SnapshotContentLike", func(t *testing.T) {
+		obj := &mockSnapshotContentLike{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-content"},
+			conditions: []metav1.Condition{},
+		}
+		// Set Ready condition
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		// Check for Ready=True (should return true)
+		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
+		if !has {
+			t.Error("Expected HasCondition() to return true for SnapshotContentLike when condition exists")
+		}
+	})
+}
+

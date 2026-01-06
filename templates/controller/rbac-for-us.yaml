@@ -68,6 +68,22 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["get"]  # Only 'get' by name - no list/watch needed (no informer cache)
 
+# Unified Snapshots RBAC (for future XxxxSnapshot / XxxxSnapshotContent resources)
+# RBAC is scoped to API group, not to concrete Snapshot kinds
+# Adding a new Snapshot kind does not require RBAC changes
+# See ADR section 7 (RBAC Strategy) for details
+- apiGroups: ["snapshots.deckhouse.io"]
+  resources:
+  - "*snapshots"           # Wildcard matches all Snapshot kinds (VolumeSnapshot, NamespaceSnapshot, etc.)
+  - "*snapshotcontents"    # Wildcard matches all SnapshotContent kinds
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Unified Snapshots status subresources
+- apiGroups: ["snapshots.deckhouse.io"]
+  resources:
+  - "*snapshots/status"
+  - "*snapshotcontents/status"
+  verbs: ["get", "update", "patch"]
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
