@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -47,12 +48,14 @@ import (
 )
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mgr       ctrl.Manager
+	cfg                *rest.Config
+	k8sClient          client.Client
+	testEnv            *envtest.Environment
+	ctx                context.Context
+	cancel             context.CancelFunc
+	mgr                ctrl.Manager
+	snapshotController *controllers.SnapshotController
+	contentController  *controllers.SnapshotContentController
 )
 
 var _ = BeforeSuite(func() {
@@ -171,6 +174,175 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// Install TestSnapshot and TestSnapshotContent CRDs for unified snapshots E2E tests
+	testSnapshotCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "testsnapshots.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+								},
+								"status": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"contentName": {Type: "string"},
+										"conditions": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+				},
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "testsnapshots",
+				Singular: "testsnapshot",
+				Kind:     "TestSnapshot",
+			},
+		},
+	}
+
+	testSnapshotContentCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "testsnapshotcontents.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"snapshotRef": {
+											Type: "object",
+											Properties: map[string]apiextensionsv1.JSONSchemaProps{
+												"kind":      {Type: "string"},
+												"name":      {Type: "string"},
+												"namespace": {Type: "string"},
+											},
+										},
+									},
+								},
+								"status": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"conditions": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
+												},
+											},
+										},
+										"childrenSnapshotContentRefs": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"kind": {Type: "string"},
+														"name": {Type: "string"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+				},
+			},
+			Scope: apiextensionsv1.ClusterScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "testsnapshotcontents",
+				Singular: "testsnapshotcontent",
+				Kind:     "TestSnapshotContent",
+			},
+		},
+	}
+
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, testSnapshotCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, testSnapshotContentCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	// Wait for CRDs to be ready
+	Eventually(func() bool {
+		snapshotCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "testsnapshots.test.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		contentCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "testsnapshotcontents.test.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		// Check if CRDs are established
+		for _, condition := range snapshotCRD.Status.Conditions {
+			if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+				for _, condition := range contentCRD.Status.Conditions {
+					if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}).Should(BeTrue(), "TestSnapshot CRDs should be established")
+
 	err = apiextensionsv1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -205,6 +377,41 @@ var _ = BeforeSuite(func() {
 	)
 	Expect(err).NotTo(HaveOccurred())
 	err = mcpController.SetupWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
+	// Setup unified snapshots controllers (SnapshotController and SnapshotContentController)
+	// These controllers work with TestSnapshot/TestSnapshotContent for E2E tests
+	snapshotGVK := schema.GroupVersionKind{
+		Group:   "test.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "TestSnapshot",
+	}
+	contentGVK := schema.GroupVersionKind{
+		Group:   "test.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "TestSnapshotContent",
+	}
+
+	snapshotController, err = controllers.NewSnapshotController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		cfgOptions,
+		[]schema.GroupVersionKind{snapshotGVK},
+	)
+	Expect(err).NotTo(HaveOccurred())
+	err = snapshotController.SetupWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
+	contentController, err = controllers.NewSnapshotContentController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		cfgOptions,
+		[]schema.GroupVersionKind{contentGVK},
+	)
+	Expect(err).NotTo(HaveOccurred())
+	err = contentController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	// NOTE: RetainerController (IRetainer) has been removed.
