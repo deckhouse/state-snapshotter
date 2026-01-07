@@ -72,7 +72,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 	// - GC handles physical deletion through ownerRef
 
 	var (
-		ctx         context.Context
+		ctx        context.Context
 		contentGVK schema.GroupVersionKind
 	)
 

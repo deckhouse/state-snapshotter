@@ -28,22 +28,21 @@ limitations under the License.
 // Integration Test Rules (learned lessons):
 //
 // 1. Assertions MUST read objects using mgr.GetAPIReader()
-//    - k8sClient uses cache and may return stale data
-//    - Example: mgr.GetAPIReader().Get(ctx, key, obj) instead of k8sClient.Get(ctx, key, obj)
+//   - k8sClient uses cache and may return stale data
+//   - Example: mgr.GetAPIReader().Get(ctx, key, obj) instead of k8sClient.Get(ctx, key, obj)
 //
 // 2. Reconcile MUST be triggered inside Eventually blocks
-//    - Integration tests do not rely on watch-based reconciliation
-//    - Example: Eventually(func() { _, _ = ctrl.Reconcile(ctx, req); checkState() })
+//   - Integration tests do not rely on watch-based reconciliation
+//   - Example: Eventually(func() { _, _ = ctrl.Reconcile(ctx, req); checkState() })
 //
 // 3. Fresh objects MUST be created on each poll
-//    - Never reuse pointers across Eventually iterations
-//    - Example: freshObj := &unstructured.Unstructured{} inside Eventually
+//   - Never reuse pointers across Eventually iterations
+//   - Example: freshObj := &unstructured.Unstructured{} inside Eventually
 //
 // 4. Deletion MUST be asserted via apierrors.IsNotFound
-//    - GC may delete objects after finalizer removal (expected behavior)
-//    - Example: Expect(apierrors.IsNotFound(err)).To(BeTrue())
+//   - GC may delete objects after finalizer removal (expected behavior)
+//   - Example: Expect(apierrors.IsNotFound(err)).To(BeTrue())
 //
 // 5. Use explicit timeouts and intervals
-//    - Example: Eventually(func() bool {...}, "10s", "100ms").Should(BeTrue())
+//   - Example: Eventually(func() bool {...}, "10s", "100ms").Should(BeTrue())
 package integration
-

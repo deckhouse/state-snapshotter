@@ -174,7 +174,6 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-<<<<<<< HEAD
 	// Install TestSnapshot and TestSnapshotContent CRDs for unified snapshots E2E tests
 	testSnapshotCRD := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{

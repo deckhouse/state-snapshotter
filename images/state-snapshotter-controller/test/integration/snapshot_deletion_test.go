@@ -74,7 +74,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 	// - SnapshotContentController responsibility: lifecycle management (finalizers, deletion)
 
 	var (
-		ctx          context.Context
+		ctx         context.Context
 		snapshotGVK schema.GroupVersionKind
 		contentGVK  schema.GroupVersionKind
 	)
@@ -263,4 +263,3 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 		})
 	})
 })
-

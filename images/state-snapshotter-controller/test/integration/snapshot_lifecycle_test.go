@@ -54,11 +54,11 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 	// - SnapshotContent has finalizer
 
 	var (
-		ctx              context.Context
-		snapshotGVK      schema.GroupVersionKind
-		contentGVK       schema.GroupVersionKind
-		snapshotCtrl     *controllers.SnapshotController
-		contentCtrl      *controllers.SnapshotContentController
+		ctx          context.Context
+		snapshotGVK  schema.GroupVersionKind
+		contentGVK   schema.GroupVersionKind
+		snapshotCtrl *controllers.SnapshotController
+		contentCtrl  *controllers.SnapshotContentController
 	)
 
 	BeforeEach(func() {
@@ -260,4 +260,3 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		})
 	})
 })
-
