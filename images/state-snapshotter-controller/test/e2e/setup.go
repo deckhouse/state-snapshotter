@@ -174,6 +174,7 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+<<<<<<< HEAD
 	// Install TestSnapshot and TestSnapshotContent CRDs for unified snapshots E2E tests
 	testSnapshotCRD := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
@@ -403,6 +404,9 @@ var _ = BeforeSuite(func() {
 	err = snapshotController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	// NOTE: RetainerController (IRetainer) has been removed.
+	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
+
 	contentController, err = controllers.NewSnapshotContentController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
@@ -413,9 +417,6 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = contentController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
-
-	// NOTE: RetainerController (IRetainer) has been removed.
-	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
 
 	// Create context
 	ctx, cancel = context.WithCancel(testCtx)
