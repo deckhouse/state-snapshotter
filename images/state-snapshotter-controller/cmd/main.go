@@ -34,6 +34,7 @@ import (
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -164,6 +165,63 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("ManifestCheckpointController added to manager")
+
+	// Add unified snapshots controllers (SnapshotController and SnapshotContentController)
+	// These controllers work with any snapshot CRD that follows the unified snapshot pattern
+	// Register all known snapshot GVKs from the cluster
+	snapshotGVKs := []schema.GroupVersionKind{
+		// storage.deckhouse.io group
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
+		// snapshot.internal.virtualization.deckhouse.io group
+		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
+	}
+
+	snapshotContentGVKs := []schema.GroupVersionKind{
+		// storage.deckhouse.io group
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
+		// snapshot.internal.virtualization.deckhouse.io group
+		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshotContent"},
+	}
+
+	snapshotController, err := controllers.NewSnapshotController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		cfgParams,
+		snapshotGVKs,
+	)
+	if err != nil {
+		log.Error(err, "Failed to create SnapshotController")
+		cancel()
+		os.Exit(1)
+	}
+	if err := snapshotController.SetupWithManager(mgr); err != nil {
+		log.Error(err, "Failed to setup SnapshotController with manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("SnapshotController added to manager", "snapshotGVKs", len(snapshotGVKs))
+
+	contentController, err := controllers.NewSnapshotContentController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		cfgParams,
+		snapshotContentGVKs,
+	)
+	if err != nil {
+		log.Error(err, "Failed to create SnapshotContentController")
+		cancel()
+		os.Exit(1)
+	}
+	if err := contentController.SetupWithManager(mgr); err != nil {
+		log.Error(err, "Failed to setup SnapshotContentController with manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(snapshotContentGVKs))
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
