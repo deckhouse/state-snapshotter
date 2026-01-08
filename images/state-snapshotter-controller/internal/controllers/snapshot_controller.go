@@ -209,7 +209,18 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		contentName = snapshot.GenerateSnapshotContentName(obj.GetName(), string(obj.GetUID()))
 		
 		// Create SnapshotContent
-		contentGVK, err := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
+		snapshotGVK := obj.GetObjectKind().GroupVersionKind()
+		if snapshotGVK.Kind == "" {
+			// Fallback: try to get Kind from obj.Object directly
+			if kind, ok := obj.Object["kind"].(string); ok && kind != "" {
+				snapshotGVK.Kind = kind
+			} else {
+				logger.Error(nil, "Cannot create SnapshotContent: Snapshot Kind is empty and cannot be determined", "obj", obj.GetName())
+				return ctrl.Result{}, fmt.Errorf("cannot determine Snapshot Kind for object %s", obj.GetName())
+			}
+		}
+		
+		contentGVK, err := r.getSnapshotContentGVK(snapshotGVK)
 		if err != nil {
 			logger.Error(err, "Failed to resolve SnapshotContent GVK")
 			return ctrl.Result{}, err
@@ -220,9 +231,19 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// SnapshotContent is cluster-scoped, no namespace
 
 		// Set spec.snapshotRef
+		// IMPORTANT: Always set kind explicitly to ensure backward compatibility
+		// This prevents issues with old SnapshotContent objects that might have empty kind
+		//
+		// INVARIANT: snapshotRef.kind MUST be set for all new SnapshotContent objects.
+		// This is required for SnapshotContentController to correctly resolve Snapshot GVK.
+		// Fallback logic exists for backward compatibility with old objects, but new objects
+		// MUST have snapshotRef.kind set explicitly.
+		//
+		// Starting from controller version X, snapshotRef.kind is required.
+		// Old objects without kind are handled via fallback (deriving from SnapshotContent GVK).
 		spec := map[string]interface{}{
 			"snapshotRef": map[string]interface{}{
-				"kind":      obj.GetKind(),
+				"kind":      snapshotGVK.Kind, // Use explicitly determined Kind, not obj.GetKind()
 				"name":      obj.GetName(),
 				"namespace": obj.GetNamespace(),
 			},

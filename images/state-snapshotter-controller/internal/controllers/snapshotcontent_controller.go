@@ -185,7 +185,61 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		if snapshotRef == nil {
 			logger.V(1).Info("SnapshotContent has no snapshotRef, skipping orphaning check")
 		} else {
-			snapshotExists, err := r.checkSnapshotExists(ctx, snapshotRef)
+			// Get current SnapshotContent GVK (use most reliable method)
+			currentGVK := obj.GroupVersionKind()
+			if currentGVK.Kind == "" {
+				// Fallback: try to get Kind from obj.Object directly
+				if kind, ok := obj.Object["kind"].(string); ok && kind != "" {
+					currentGVK.Kind = kind
+					// Try to get Group/Version from obj.Object if available
+					if apiVersion, ok := obj.Object["apiVersion"].(string); ok && apiVersion != "" {
+						// Parse apiVersion (format: "group/version" or "version")
+						if idx := strings.Index(apiVersion, "/"); idx != -1 {
+							currentGVK.Group = apiVersion[:idx]
+							currentGVK.Version = apiVersion[idx+1:]
+						} else {
+							currentGVK.Version = apiVersion
+						}
+					}
+				}
+			}
+			
+			// Validate that we have a valid GVK
+			if currentGVK.Kind == "" {
+				logger.Error(nil, "Cannot determine SnapshotContent GVK: Kind is empty", "obj", obj.GetName())
+				return ctrl.Result{}, fmt.Errorf("cannot determine SnapshotContent GVK for object %s: Kind is empty", obj.GetName())
+			}
+			
+			// If snapshotRef.Kind is empty, derive it from current SnapshotContent GVK (backward compatibility)
+			// This handles old SnapshotContent objects created before Kind was always set
+			//
+			// INVARIANT: New SnapshotContent objects MUST have snapshotRef.kind set explicitly.
+			// This fallback is ONLY for backward compatibility with old/broken objects.
+			// Starting from controller version X, snapshotRef.kind is required.
+			//
+			// Fallback logic:
+			// - Derives Snapshot Kind from SnapshotContent Kind by removing "Content" suffix
+			// - This implements the unified snapshot convention: SnapshotContent Kind = Snapshot Kind + "Content"
+			// - Example: TestSnapshotContent -> TestSnapshot
+			if snapshotRef.Kind == "" {
+				// Extract Snapshot Kind from SnapshotContent Kind (remove "Content" suffix)
+				// This is a fallback for backward compatibility - normal path should have Kind set
+				snapshotKind := strings.TrimSuffix(currentGVK.Kind, "Content")
+				if snapshotKind != currentGVK.Kind {
+					// Successfully extracted Snapshot Kind
+					snapshotRef.Kind = snapshotKind
+					logger.V(1).Info("Derived Snapshot Kind from SnapshotContent GVK (backward compatibility)", 
+						"snapshotKind", snapshotKind, 
+						"contentKind", currentGVK.Kind,
+						"note", "This is a fallback for old objects. New objects should have snapshotRef.kind set explicitly.")
+				} else {
+					logger.Error(nil, "Cannot derive Snapshot Kind: SnapshotContent Kind does not end with 'Content'", 
+						"contentKind", currentGVK.Kind,
+						"contentGVK", currentGVK.String())
+					return ctrl.Result{}, fmt.Errorf("cannot derive Snapshot Kind from SnapshotContent Kind %s (does not end with 'Content')", currentGVK.Kind)
+				}
+			}
+			snapshotExists, err := r.checkSnapshotExists(ctx, snapshotRef, currentGVK)
 			if err != nil {
 				logger.Error(err, "Failed to check if Snapshot exists", "snapshot", fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name))
 				return ctrl.Result{}, err
@@ -450,22 +504,50 @@ func (r *SnapshotContentController) checkArtifactExists(ctx context.Context, kin
 
 // checkSnapshotExists checks if the referenced Snapshot exists
 // Uses APIReader for read-after-write consistency (direct API, no cache)
-func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, snapshotRef *snapshot.ObjectRef) (bool, error) {
+// contentGVK is used as fallback to derive Snapshot GVK if registry lookup fails
+func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, snapshotRef *snapshot.ObjectRef, contentGVK schema.GroupVersionKind) (bool, error) {
 	if snapshotRef == nil {
 		return false, nil
+	}
+
+	// Validate contentGVK before using it as fallback
+	if contentGVK.Kind == "" {
+		return false, fmt.Errorf("cannot use empty contentGVK as fallback for Snapshot GVK resolution")
 	}
 
 	// Resolve Snapshot GVK through registry
 	snapshotGVK, err := r.GVKRegistry.ResolveSnapshotGVK(snapshotRef.Kind)
 	if err != nil {
-		// Fallback: try to find matching GVK from registered list
+		// Fallback: derive Snapshot GVK from SnapshotContent GVK
+		// This handles cases where registry doesn't have the mapping (e.g., new snapshot types)
+		// or for backward compatibility with old objects
 		logger := log.FromContext(ctx)
-		logger.V(1).Info("Snapshot GVK not found in registry, trying registered GVKs", "kind", snapshotRef.Kind)
+		logger.V(1).Info("Snapshot GVK not found in registry, deriving from SnapshotContent GVK (fallback)", 
+			"snapshotKind", snapshotRef.Kind, 
+			"contentGVK", contentGVK.String(),
+			"note", "This is a fallback. Registry should ideally contain all mappings.")
 		
-		// Try to find a matching GVK by Kind from registered Snapshot GVKs
-		// Note: We need to get Snapshot GVKs from registry or controller
-		// For now, return error if not found
-		return false, fmt.Errorf("snapshot GVK not found for kind %s: %w", snapshotRef.Kind, err)
+		// Derive Snapshot Kind from SnapshotContent Kind (remove "Content" suffix)
+		// This implements the convention: SnapshotContent Kind = Snapshot Kind + "Content"
+		snapshotKind := strings.TrimSuffix(contentGVK.Kind, "Content")
+		if snapshotKind == contentGVK.Kind {
+			return false, fmt.Errorf("cannot derive Snapshot Kind from SnapshotContent Kind %s (does not end with 'Content'): %w", contentGVK.Kind, err)
+		}
+		
+		// Validate that derived Kind matches snapshotRef.Kind (if set)
+		if snapshotRef.Kind != "" && snapshotKind != snapshotRef.Kind {
+			logger.V(1).Info("Derived Snapshot Kind differs from snapshotRef.Kind, using derived", 
+				"derivedKind", snapshotKind, 
+				"refKind", snapshotRef.Kind)
+		}
+		
+		// Construct Snapshot GVK from SnapshotContent GVK
+		snapshotGVK = schema.GroupVersionKind{
+			Group:   contentGVK.Group,
+			Version: contentGVK.Version,
+			Kind:    snapshotKind,
+		}
+		logger.V(1).Info("Derived Snapshot GVK from SnapshotContent GVK", "snapshotGVK", snapshotGVK.String())
 	}
 
 	snapshotObj := &unstructured.Unstructured{}

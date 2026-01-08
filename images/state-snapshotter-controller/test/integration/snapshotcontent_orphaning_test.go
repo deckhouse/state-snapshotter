@@ -252,6 +252,195 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 			finalizers = contentObj.GetFinalizers()
 			Expect(len(finalizers)).To(Equal(0), "SnapshotContent should have no finalizers (orphaned)")
 		})
+
+		It("should handle orphaning when snapshotRef.kind is empty (backward compatibility)", func() {
+			// This test verifies backward compatibility fallback:
+			// - SnapshotContent with empty snapshotRef.kind (old/broken objects)
+			// - Controller should derive Snapshot Kind from SnapshotContent GVK
+			// - Orphaning should work correctly even without explicit Kind
+
+			// PRECONDITION: Create Snapshot
+			snapshotObj := &unstructured.Unstructured{}
+			snapshotObj.SetGroupVersionKind(snapshotGVK)
+			snapshotObj.SetName("test-orphaning-empty-kind-snapshot")
+			snapshotObj.SetNamespace("default")
+			snapshotObj.Object["spec"] = map[string]interface{}{}
+
+			err := k8sClient.Create(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate domain controller
+			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			snapshot.SetCondition(
+				snapshotLike,
+				snapshot.ConditionHandledByDomainSpecificController,
+				metav1.ConditionTrue,
+				"Processed",
+				"Domain controller processed snapshot",
+			)
+
+			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
+			err = k8sClient.Status().Update(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create controllers
+			snapshotCtrl, err := controllers.NewSnapshotController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			contentCtrl, err := controllers.NewSnapshotContentController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{contentGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create SnapshotContent via SnapshotController
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				},
+			}
+
+			// Wait for SnapshotContent creation
+			var contentName string
+			Eventually(func() bool {
+				_, err := snapshotCtrl.Reconcile(ctx, req)
+				if err != nil {
+					return false
+				}
+
+				err = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, snapshotObj)
+				if err != nil {
+					return false
+				}
+
+				snapshotLike, err = snapshot.ExtractSnapshotLike(snapshotObj)
+				if err != nil {
+					return false
+				}
+
+				contentName = snapshotLike.GetStatusContentName()
+				return contentName != ""
+			}).Should(BeTrue(), "SnapshotContent should be created")
+
+			// Simulate old/broken SnapshotContent: remove kind from snapshotRef
+			// This simulates backward compatibility scenario
+			contentObj := &unstructured.Unstructured{}
+			contentObj.SetGroupVersionKind(contentGVK)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Remove kind from snapshotRef to simulate old/broken object
+			spec, ok := contentObj.Object["spec"].(map[string]interface{})
+			Expect(ok).To(BeTrue(), "spec should exist")
+			snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
+			Expect(ok).To(BeTrue(), "snapshotRef should exist")
+			delete(snapshotRef, "kind") // Remove kind to trigger fallback
+			err = k8sClient.Update(ctx, contentObj)
+			Expect(err).NotTo(HaveOccurred(), "Should be able to update SnapshotContent to remove kind")
+
+			// Ensure finalizer is added
+			contentReq := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name: contentName,
+				},
+			}
+
+			// Wait for finalizer to be added
+			Eventually(func() bool {
+				_, err := contentCtrl.Reconcile(ctx, contentReq)
+				if err != nil {
+					return false
+				}
+
+				freshContent := &unstructured.Unstructured{}
+				freshContent.SetGroupVersionKind(contentGVK)
+				err = k8sClient.Get(ctx, types.NamespacedName{
+					Name: contentName,
+				}, freshContent)
+				if err != nil {
+					return false
+				}
+
+				finalizers := freshContent.GetFinalizers()
+				return contains(finalizers, snapshot.FinalizerParentProtect)
+			}).Should(BeTrue(), "Finalizer should be added")
+
+			// Verify PRECONDITION: SnapshotContent has finalizer and empty snapshotRef.kind
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			finalizers := contentObj.GetFinalizers()
+			Expect(finalizers).To(ContainElement(snapshot.FinalizerParentProtect), "SnapshotContent should have finalizer")
+
+			// Verify snapshotRef.kind is empty (simulating old object)
+			spec, ok = contentObj.Object["spec"].(map[string]interface{})
+			Expect(ok).To(BeTrue())
+			snapshotRef, ok = spec["snapshotRef"].(map[string]interface{})
+			Expect(ok).To(BeTrue())
+			_, hasKind := snapshotRef["kind"]
+			Expect(hasKind).To(BeFalse(), "snapshotRef.kind should be empty (simulating old object)")
+
+			// ACTIONS Step 1: Delete Snapshot
+			err = k8sClient.Delete(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Wait for Snapshot to be deleted
+			Eventually(func() bool {
+				freshSnapshot := &unstructured.Unstructured{}
+				freshSnapshot.SetGroupVersionKind(snapshotGVK)
+				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, freshSnapshot)
+				return apierrors.IsNotFound(err)
+			}, "10s", "100ms").Should(BeTrue(), "Snapshot should be deleted")
+
+			// ACTIONS Step 2 & 3: SnapshotContentController.Reconcile + Check finalizers
+			// Fallback should derive Snapshot Kind from SnapshotContent GVK (TestSnapshotContent -> TestSnapshot)
+			Eventually(func() []string {
+				// Trigger reconcile - fallback should derive Kind from Content GVK
+				_, _ = contentCtrl.Reconcile(ctx, contentReq)
+
+				// Read fresh object from live apiserver
+				freshContent := &unstructured.Unstructured{}
+				freshContent.SetGroupVersionKind(contentGVK)
+				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name: contentName,
+				}, freshContent)
+				if err != nil {
+					return nil
+				}
+				return freshContent.GetFinalizers()
+			}, "20s", "500ms").ShouldNot(ContainElement(snapshot.FinalizerParentProtect), "Finalizer should be removed after Snapshot deletion (fallback should work)")
+
+			// EXPECTED BEHAVIOR: SnapshotContent is orphaned (no finalizer)
+			// Fallback successfully derived Snapshot Kind from SnapshotContent GVK
+			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+			finalizers = contentObj.GetFinalizers()
+			Expect(len(finalizers)).To(Equal(0), "SnapshotContent should have no finalizers (orphaned, fallback worked)")
+		})
 	})
 })
 
