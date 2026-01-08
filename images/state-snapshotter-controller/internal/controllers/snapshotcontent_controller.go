@@ -102,11 +102,11 @@ func NewSnapshotContentController(
 	}
 
 	return &SnapshotContentController{
-		Client:               client,
-		APIReader:            apiReader,
-		Scheme:               scheme,
-		Config:               cfg,
-		GVKRegistry:          registry,
+		Client:              client,
+		APIReader:           apiReader,
+		Scheme:              scheme,
+		Config:              cfg,
+		GVKRegistry:         registry,
 		SnapshotContentGVKs: snapshotContentGVKs,
 	}, nil
 }
@@ -164,10 +164,10 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Step 1: Manage finalizer and orphaning
 	// Invariant: SnapshotContent без Snapshot обязан стать orphaned и перейти под управление ObjectKeeper
-	
+
 	if obj.GetDeletionTimestamp().IsZero() {
 		// Object is not being deleted
-		
+
 		// Step 1.1: Check if Snapshot exists FIRST (before adding finalizer)
 		// This prevents infinite loop: if Snapshot is deleted, we should NOT add finalizer
 		// Use APIReader for read-after-write consistency
@@ -195,13 +195,13 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 					}
 				}
 			}
-			
+
 			// Validate that we have a valid GVK
 			if currentGVK.Kind == "" {
 				logger.Error(nil, "Cannot determine SnapshotContent GVK: Kind is empty", "obj", obj.GetName())
 				return ctrl.Result{}, fmt.Errorf("cannot determine SnapshotContent GVK for object %s: Kind is empty", obj.GetName())
 			}
-			
+
 			// If snapshotRef.Kind is empty, derive it from current SnapshotContent GVK (backward compatibility)
 			// This handles old SnapshotContent objects created before Kind was always set
 			//
@@ -216,16 +216,32 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			if snapshotRef.Kind == "" {
 				// Extract Snapshot Kind from SnapshotContent Kind (remove "Content" suffix)
 				// This is a fallback for backward compatibility - normal path should have Kind set
+				//
+				// INVARIANT: Naming convention is REQUIRED for unified snapshots:
+				//   SnapshotContent Kind = Snapshot Kind + "Content"
+				//   Example: TestSnapshotContent → TestSnapshot
+				//
+				// This fallback handles legacy objects created before snapshotRef.kind was always set.
+				// New objects MUST have snapshotRef.kind set explicitly by SnapshotController.
+				//
+				// IMPORTANT: We do NOT automatically update legacy objects to avoid:
+				//   - Triggering other controllers unexpectedly
+				//   - Conflicts with user expectations
+				//   - Unexpected side-effects in shared clusters
+				// Migration should be done explicitly via separate tool/job, not in controller.
 				snapshotKind := strings.TrimSuffix(currentGVK.Kind, "Content")
 				if snapshotKind != currentGVK.Kind {
 					// Successfully extracted Snapshot Kind
 					snapshotRef.Kind = snapshotKind
-					logger.V(1).Info("Derived Snapshot Kind from SnapshotContent GVK (backward compatibility)", 
-						"snapshotKind", snapshotKind, 
+					logger.Info(
+						"SnapshotContent uses legacy format (snapshotRef.kind is empty); fallback logic applied",
+						"snapshotContent", req.Name,
+						"snapshotKind", snapshotKind,
 						"contentKind", currentGVK.Kind,
-						"note", "This is a fallback for old objects. New objects should have snapshotRef.kind set explicitly.")
+						"recommendation", "Run migration or recreate SnapshotContent to set snapshotRef.kind explicitly",
+					)
 				} else {
-					logger.Error(nil, "Cannot derive Snapshot Kind: SnapshotContent Kind does not end with 'Content'", 
+					logger.Error(nil, "Cannot derive Snapshot Kind: SnapshotContent Kind does not end with 'Content'",
 						"contentKind", currentGVK.Kind,
 						"contentGVK", currentGVK.String())
 					return ctrl.Result{}, fmt.Errorf("cannot derive Snapshot Kind from SnapshotContent Kind %s (does not end with 'Content')", currentGVK.Kind)
@@ -277,7 +293,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		// Object is being deleted - handle deletion (Phase 2: Cascade)
 		// Invariant Phase 2: SnapshotContent с DeletionTimestamp →
 		// сначала cascade finalizers → потом GC через ownerRef
-		
+
 		// Step 2.1: Cascade remove finalizers from children
 		// This unlocks GC for children, but does NOT initiate Delete(child-content)
 		// GC will handle deletion through ownerRef
@@ -330,7 +346,7 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 ) error {
 	logger := log.FromContext(ctx)
 	childrenRefs := contentLike.GetStatusChildrenSnapshotContentRefs()
-	
+
 	if len(childrenRefs) == 0 {
 		// No children - nothing to cascade
 		return nil
@@ -340,7 +356,7 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 
 	// Get Content GVK to derive child Content GVK
 	contentGVK := obj.GetObjectKind().GroupVersionKind()
-	
+
 	var childErrors []error
 	for _, childRef := range childrenRefs {
 		// Resolve child Content GVK through registry
@@ -532,25 +548,25 @@ func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, sna
 		// This handles cases where registry doesn't have the mapping (e.g., new snapshot types)
 		// or for backward compatibility with old objects
 		logger := log.FromContext(ctx)
-		logger.V(1).Info("Snapshot GVK not found in registry, deriving from SnapshotContent GVK (fallback)", 
-			"snapshotKind", snapshotRef.Kind, 
+		logger.V(1).Info("Snapshot GVK not found in registry, deriving from SnapshotContent GVK (fallback)",
+			"snapshotKind", snapshotRef.Kind,
 			"contentGVK", contentGVK.String(),
 			"note", "This is a fallback. Registry should ideally contain all mappings.")
-		
+
 		// Derive Snapshot Kind from SnapshotContent Kind (remove "Content" suffix)
 		// This implements the convention: SnapshotContent Kind = Snapshot Kind + "Content"
 		snapshotKind := strings.TrimSuffix(contentGVK.Kind, "Content")
 		if snapshotKind == contentGVK.Kind {
 			return false, fmt.Errorf("cannot derive Snapshot Kind from SnapshotContent Kind %s (does not end with 'Content'): %w", contentGVK.Kind, err)
 		}
-		
+
 		// Validate that derived Kind matches snapshotRef.Kind (if set)
 		if snapshotRef.Kind != "" && snapshotKind != snapshotRef.Kind {
-			logger.V(1).Info("Derived Snapshot Kind differs from snapshotRef.Kind, using derived", 
-				"derivedKind", snapshotKind, 
+			logger.V(1).Info("Derived Snapshot Kind differs from snapshotRef.Kind, using derived",
+				"derivedKind", snapshotKind,
 				"refKind", snapshotRef.Kind)
 		}
-		
+
 		// Construct Snapshot GVK from SnapshotContent GVK
 		snapshotGVK = schema.GroupVersionKind{
 			Group:   contentGVK.Group,
@@ -587,17 +603,16 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 	for _, gvk := range r.SnapshotContentGVKs {
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(gvk)
-		
+
 		// Create a controller builder for this specific GVK
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
-		
+
 		if err := builder.Complete(r); err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
 		}
 	}
-	
+
 	return nil
 }
-
