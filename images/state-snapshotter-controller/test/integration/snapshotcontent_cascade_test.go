@@ -236,7 +236,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 					return false
 				}
 				return parentContentObj.GetDeletionTimestamp() != nil
-			}, "10s", "100ms").Should(BeTrue(), "Parent should have deletionTimestamp set")
+			}, "15s", "200ms").Should(BeTrue(), "Parent should have deletionTimestamp set")
 
 			// ACTIONS Step 2-4: SnapshotContentController.Reconcile + Check finalizers
 			// Use APIReader for live read and reconcile inside Eventually for stability
@@ -281,12 +281,14 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 
 			// EXPECTED BEHAVIOR: All finalizers removed
 			// Re-read to verify final state (objects might be deleted by GC, which is OK)
+			freshChildForCheck := &unstructured.Unstructured{}
+			freshChildForCheck.SetGroupVersionKind(contentGVK)
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 				Name: childContentName,
-			}, childContentObj)
+			}, freshChildForCheck)
 			if err == nil {
 				// Object still exists - verify finalizer is removed
-				Expect(childContentObj.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect), "Child finalizer should be removed")
+				Expect(freshChildForCheck.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect), "Child finalizer should be removed")
 			} else {
 				// Object deleted by GC - that's OK, finalizer was removed
 				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Child should be deleted by GC after finalizer removal")

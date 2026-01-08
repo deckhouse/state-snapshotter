@@ -34,6 +34,9 @@ var _ = Describe("Integration: Controller Registration", func() {
 	// with the same pattern that is used in production (main.go).
 	// This ensures that the registration code in main.go is correct and will work in production.
 	//
+	// IMPORTANT: This test uses a DIFFERENT GVK (RegistrationTestSnapshot) to avoid conflicts
+	// with other integration tests that use TestSnapshot GVK.
+	//
 	// INTERFACE: controllers.NewSnapshotController, controllers.NewSnapshotContentController
 	//
 	// PRECONDITIONS:
@@ -41,8 +44,8 @@ var _ = Describe("Integration: Controller Registration", func() {
 	// - Test CRDs are installed (TestSnapshot, TestSnapshotContent)
 	//
 	// ACTIONS:
-	// 1. Create SnapshotController with production-like GVKs
-	// 2. Create SnapshotContentController with production-like GVKs
+	// 1. Create SnapshotController with production-like GVKs (using isolated GVK)
+	// 2. Create SnapshotContentController with production-like GVKs (using isolated GVK)
 	// 3. Setup controllers with manager (same pattern as main.go)
 	//
 	// EXPECTED BEHAVIOR:
@@ -51,18 +54,18 @@ var _ = Describe("Integration: Controller Registration", func() {
 	// - This verifies the registration pattern from main.go works correctly
 
 	It("should register both controllers together (as in main.go)", func() {
-		// Simulate the exact registration pattern from main.go
-		// This test verifies that the registration code in main.go works correctly
-		// Use TestSnapshot GVK (same pattern as production, but with test CRD)
+		// Use DIFFERENT GVK to avoid conflicts with other integration tests
+		// Other tests use TestSnapshot, we use RegistrationTestSnapshot for isolation
+		// This allows the test to run in parallel with other tests without conflicts
 		snapshotGVKs := []schema.GroupVersionKind{
-			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshot"},
+			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"},
 			// In production (main.go), these would be:
 			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
 			// {Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
 		}
 		snapshotContentGVKs := []schema.GroupVersionKind{
-			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshotContent"},
+			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshotContent"},
 			// In production (main.go), these would be:
 			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
@@ -96,3 +99,4 @@ var _ = Describe("Integration: Controller Registration", func() {
 		Expect(err).NotTo(HaveOccurred(), "SnapshotContentController should be registered with manager without errors")
 	})
 })
+
