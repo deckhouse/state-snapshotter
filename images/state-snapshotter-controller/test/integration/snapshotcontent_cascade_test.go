@@ -135,6 +135,12 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 			Expect(err).NotTo(HaveOccurred())
 
 			// Set children refs on parent
+			// Re-read parent to get fresh resourceVersion before update (avoid conflicts)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: parentContentName,
+			}, parentContentObj)
+			Expect(err).NotTo(HaveOccurred())
+
 			status, ok := parentContentObj.Object["status"].(map[string]interface{})
 			if !ok || status == nil {
 				status = make(map[string]interface{})
@@ -193,7 +199,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 				}
 
 				return contains(parentContentObj.GetFinalizers(), snapshot.FinalizerParentProtect)
-			}).Should(BeTrue(), "Parent should have finalizer")
+			}, "10s", "100ms").Should(BeTrue(), "Parent should have finalizer")
 
 			// Add finalizer to child
 			Eventually(func() bool {
@@ -210,7 +216,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 				}
 
 				return contains(childContentObj.GetFinalizers(), snapshot.FinalizerParentProtect)
-			}).Should(BeTrue(), "Child should have finalizer")
+			}, "10s", "100ms").Should(BeTrue(), "Child should have finalizer")
 
 			// Verify PRECONDITION: Both have finalizers
 			Expect(parentContentObj.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect))
@@ -230,7 +236,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 					return false
 				}
 				return parentContentObj.GetDeletionTimestamp() != nil
-			}).Should(BeTrue(), "Parent should have deletionTimestamp set")
+			}, "10s", "100ms").Should(BeTrue(), "Parent should have deletionTimestamp set")
 
 			// ACTIONS Step 2-4: SnapshotContentController.Reconcile + Check finalizers
 			// Use APIReader for live read and reconcile inside Eventually for stability

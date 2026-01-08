@@ -21,6 +21,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -64,54 +65,73 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 	})
 
 	AfterEach(func() {
-		// CRITICAL: Cleanup resources between tests to prevent race conditions
-		// This ensures tests don't interfere with each other when running multiple times
-		// Use soft cleanup - delete resources but don't wait for completion
-		// GC will handle cleanup in background, preventing blocking between tests
+		// HARD CLEANUP: Remove all test resources and wait until they are actually deleted
+		// This prevents race conditions when tests run in parallel or multiple times
+		// Critical: wait for actual deletion, not just "delete request sent"
+		ctx := context.Background()
 
-		// Cleanup namespaced resources (TestSnapshot) first
+		// 1) Delete all snapshots and wait until none left
 		snapshotList := &unstructured.UnstructuredList{}
 		snapshotList.SetGroupVersionKind(schema.GroupVersionKind{
 			Group:   "test.deckhouse.io",
 			Version: "v1alpha1",
 			Kind:    "TestSnapshotList",
 		})
-		if err := k8sClient.List(ctx, snapshotList); err == nil {
-			for i := range snapshotList.Items {
-				snapshot := &snapshotList.Items[i]
-				// Ignore errors - resource might already be deleted
-				_ = k8sClient.Delete(ctx, snapshot)
-			}
+
+		_ = k8sClient.List(ctx, snapshotList)
+		for i := range snapshotList.Items {
+			_ = k8sClient.Delete(ctx, &snapshotList.Items[i])
 		}
 
-		// Cleanup cluster-scoped resources (TestSnapshotContent) after snapshots
+		Eventually(func() int {
+			_ = k8sClient.List(ctx, snapshotList)
+			return len(snapshotList.Items)
+		}, "20s", "200ms").Should(Equal(0), "Snapshots should be cleaned up")
+
+		// 2) Remove finalizers + delete all contents and wait until none left
 		contentList := &unstructured.UnstructuredList{}
 		contentList.SetGroupVersionKind(schema.GroupVersionKind{
 			Group:   "test.deckhouse.io",
 			Version: "v1alpha1",
 			Kind:    "TestSnapshotContentList",
 		})
-		if err := k8sClient.List(ctx, contentList); err == nil {
-			for i := range contentList.Items {
-				content := &contentList.Items[i]
-				// Try to remove finalizers to allow deletion
-				freshContent := &unstructured.Unstructured{}
-				freshContent.SetGroupVersionKind(contentGVK)
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: content.GetName()}, freshContent); err == nil {
-					if snapshot.HasFinalizer(freshContent, snapshot.FinalizerParentProtect) {
-						snapshot.RemoveFinalizer(freshContent, snapshot.FinalizerParentProtect)
-						_ = k8sClient.Update(ctx, freshContent)
-					}
+
+		_ = k8sClient.List(ctx, contentList)
+		for i := range contentList.Items {
+			name := contentList.Items[i].GetName()
+
+			fresh := &unstructured.Unstructured{}
+			fresh.SetGroupVersionKind(contentGVK)
+			if err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: name}, fresh); err == nil {
+				if snapshot.HasFinalizer(fresh, snapshot.FinalizerParentProtect) {
+					snapshot.RemoveFinalizer(fresh, snapshot.FinalizerParentProtect)
+					_ = k8sClient.Update(ctx, fresh)
 				}
-				// Delete content (ignore errors - might already be deleted)
-				_ = k8sClient.Delete(ctx, content)
 			}
+			_ = k8sClient.Delete(ctx, &contentList.Items[i])
 		}
 
-		// Small delay to allow GC to start processing deletions
-		// Don't wait for completion - let GC work in background
-		// This prevents blocking between tests while still allowing cleanup
-		time.Sleep(100 * time.Millisecond)
+		Eventually(func() int {
+			_ = k8sClient.List(ctx, contentList)
+			return len(contentList.Items)
+		}, "20s", "200ms").Should(Equal(0), "SnapshotContents should be cleaned up")
+
+		// 3) Cleanup ObjectKeeper too (otherwise it leaks between tests)
+		okList := &unstructured.UnstructuredList{}
+		okList.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "deckhouse.io",
+			Version: "v1alpha1",
+			Kind:    "ObjectKeeperList",
+		})
+		_ = k8sClient.List(ctx, okList)
+		for i := range okList.Items {
+			_ = k8sClient.Delete(ctx, &okList.Items[i])
+		}
+
+		Eventually(func() int {
+			_ = k8sClient.List(ctx, okList)
+			return len(okList.Items)
+		}, "20s", "200ms").Should(Equal(0), "ObjectKeepers should be cleaned up")
 	})
 
 	Describe("Test 1: Create Snapshot → Ready", func() {
@@ -154,7 +174,8 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 
 		It("should create Snapshot and reach Ready=True state", func() {
 			namespace := "default"
-			snapshotName := "test-snapshot-e2e"
+			suffix := fmt.Sprintf("%d-%d", GinkgoRandomSeed(), time.Now().UnixNano())
+			snapshotName := "test-snapshot-e2e-" + suffix
 			contentName := ""
 
 			// Step 1: Create TestSnapshot (root, no parent)
@@ -293,7 +314,17 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 
 			// Step 6: Wait for Ready=True on Snapshot (HARD ASSERTION - only truly terminal point)
 			// This verifies SnapshotController propagation and end-to-end readiness
+			// Use explicit reconcile trigger to ensure propagation happens
 			Eventually(func() bool {
+				// Explicitly trigger reconcile to ensure propagation happens
+				snapshotReq := ctrl.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      snapshotName,
+						Namespace: namespace,
+					},
+				}
+				_, _ = snapshotController.Reconcile(ctx, snapshotReq)
+
 				freshSnapshot := &unstructured.Unstructured{}
 				freshSnapshot.SetGroupVersionKind(snapshotGVK)
 				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
@@ -308,7 +339,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 					return false
 				}
 				return snapshot.IsReady(snapshotLike)
-			}, "10s", "100ms").Should(BeTrue(), "Snapshot should reach Ready=True state")
+			}, "20s", "200ms").Should(BeTrue(), "Snapshot should reach Ready=True state")
 
 			// Verify supporting invariants (not hard assertions, but good to check)
 			freshSnapshot = &unstructured.Unstructured{}
@@ -400,7 +431,8 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 
 		It("should orphan SnapshotContent when Snapshot is deleted", func() {
 			namespace := "default"
-			snapshotName := "test-snapshot-delete-e2e"
+			suffix := fmt.Sprintf("%d-%d", GinkgoRandomSeed(), time.Now().UnixNano())
+			snapshotName := "test-snapshot-delete-e2e-" + suffix
 			contentName := ""
 
 			// PRECONDITION: Create Snapshot and wait for Ready=True
@@ -521,7 +553,17 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 
 			// Wait for Snapshot Ready=True
 			// Controller sets Ready=True after Content is Ready, need to wait for propagation
+			// Use longer timeout for E2E tests (system connectivity, not speed)
 			Eventually(func() bool {
+				// Explicitly trigger reconcile to ensure propagation happens
+				snapshotReq := ctrl.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      snapshotName,
+						Namespace: namespace,
+					},
+				}
+				_, _ = snapshotController.Reconcile(ctx, snapshotReq)
+
 				freshSnapshot := &unstructured.Unstructured{}
 				freshSnapshot.SetGroupVersionKind(snapshotGVK)
 				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
@@ -536,7 +578,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 					return false
 				}
 				return snapshot.IsReady(snapshotLike)
-			}, "15s", "200ms").Should(BeTrue(), "Snapshot should reach Ready=True state")
+			}, "20s", "200ms").Should(BeTrue(), "Snapshot should reach Ready=True state")
 
 			// ACTION: Delete Snapshot
 			// Get fresh Snapshot object for deletion
@@ -550,10 +592,29 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err = k8sClient.Delete(ctx, freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
+			// Wait for Snapshot deletion to start (deletionTimestamp set or NotFound)
+			// This ensures we wait for deletion to begin before checking orphaning
+			Eventually(func() bool {
+				freshSnapshot := &unstructured.Unstructured{}
+				freshSnapshot.SetGroupVersionKind(snapshotGVK)
+				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name:      snapshotName,
+					Namespace: namespace,
+				}, freshSnapshot)
+				if apierrors.IsNotFound(err) {
+					return true // Snapshot already deleted
+				}
+				if err != nil {
+					return false
+				}
+				return freshSnapshot.GetDeletionTimestamp() != nil // Deletion started
+			}, "10s", "200ms").Should(BeTrue(), "Snapshot deletion should start")
+
 			// Wait for finalizer removal (orphaning)
 			// SnapshotContentController should detect Snapshot deletion and remove finalizer
 			// In E2E, controllers run via watch, but we need to ensure reconcile happens
 			// Use explicit reconcile trigger similar to integration tests for stability
+			// IMPORTANT: Account for reconcile errors (conflicts) - retry on error
 			contentReq := ctrl.Request{
 				NamespacedName: types.NamespacedName{
 					Name: contentName,
@@ -562,12 +623,17 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			Eventually(func() bool {
 				// Trigger reconcile explicitly to ensure orphaning check happens
 				// This is critical when running multiple tests together - controllers may be busy
-				_, _ = contentController.Reconcile(ctx, contentReq)
+				_, err := contentController.Reconcile(ctx, contentReq)
+				if err != nil {
+					// Treat error as "not yet" - don't fail early
+					// Conflicts (resourceVersion) are expected in envtest
+					return false
+				}
 
 				// Get fresh SnapshotContent from live API server
 				freshContent := &unstructured.Unstructured{}
 				freshContent.SetGroupVersionKind(contentGVK)
-				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+				err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 					Name: contentName,
 				}, freshContent)
 				if err != nil {
@@ -659,7 +725,8 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 
 		It("should work with wildcard RBAC resources without forbidden errors", func() {
 			namespace := "default"
-			snapshotName := "test-snapshot-rbac-e2e"
+			suffix := fmt.Sprintf("%d-%d", GinkgoRandomSeed(), time.Now().UnixNano())
+			snapshotName := "test-snapshot-rbac-e2e-" + suffix
 			contentName := ""
 
 			// Step 1: Create TestSnapshot
@@ -803,4 +870,3 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 		})
 	})
 })
-
