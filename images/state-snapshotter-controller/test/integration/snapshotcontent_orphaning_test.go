@@ -441,6 +441,204 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 			finalizers = contentObj.GetFinalizers()
 			Expect(len(finalizers)).To(Equal(0), "SnapshotContent should have no finalizers (orphaned, fallback worked)")
 		})
+
+		It("should not create infinite reconcile loop when Snapshot is deleted (finalizer management)", func() {
+			// This test verifies the fix for infinite reconcile loop bug:
+			// - Before fix: Controller added finalizer → checked Snapshot → removed finalizer → repeat
+			// - After fix: Controller checks Snapshot FIRST → only adds finalizer if Snapshot exists
+			//
+			// BUG FIX: Prevent infinite reconcile loop when Snapshot is deleted
+			// The controller should check Snapshot existence BEFORE adding finalizer,
+			// not after. This prevents the cycle: add → check → remove → add → ...
+
+			// PRECONDITION: Create Snapshot
+			snapshotObj := &unstructured.Unstructured{}
+			snapshotObj.SetGroupVersionKind(snapshotGVK)
+			snapshotObj.SetName("test-no-infinite-loop-snapshot")
+			snapshotObj.SetNamespace("default")
+			snapshotObj.Object["spec"] = map[string]interface{}{}
+
+			err := k8sClient.Create(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate domain controller
+			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			snapshot.SetCondition(
+				snapshotLike,
+				snapshot.ConditionHandledByDomainSpecificController,
+				metav1.ConditionTrue,
+				"Processed",
+				"Domain controller processed snapshot",
+			)
+
+			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
+			err = k8sClient.Status().Update(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create controllers
+			snapshotCtrl, err := controllers.NewSnapshotController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			contentCtrl, err := controllers.NewSnapshotContentController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{contentGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create SnapshotContent via SnapshotController
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				},
+			}
+
+			// Wait for SnapshotContent creation
+			var contentName string
+			Eventually(func() bool {
+				_, err := snapshotCtrl.Reconcile(ctx, req)
+				if err != nil {
+					return false
+				}
+
+				err = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, snapshotObj)
+				if err != nil {
+					return false
+				}
+
+				snapshotLike, err = snapshot.ExtractSnapshotLike(snapshotObj)
+				if err != nil {
+					return false
+				}
+
+				contentName = snapshotLike.GetStatusContentName()
+				return contentName != ""
+			}).Should(BeTrue(), "SnapshotContent should be created")
+
+			// Ensure finalizer is added
+			contentReq := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name: contentName,
+				},
+			}
+
+			// Wait for finalizer to be added
+			Eventually(func() bool {
+				_, err := contentCtrl.Reconcile(ctx, contentReq)
+				if err != nil {
+					return false
+				}
+
+				freshContent := &unstructured.Unstructured{}
+				freshContent.SetGroupVersionKind(contentGVK)
+				err = k8sClient.Get(ctx, types.NamespacedName{
+					Name: contentName,
+				}, freshContent)
+				if err != nil {
+					return false
+				}
+
+				finalizers := freshContent.GetFinalizers()
+				return contains(finalizers, snapshot.FinalizerParentProtect)
+			}).Should(BeTrue(), "Finalizer should be added")
+
+			// Verify PRECONDITION: SnapshotContent has finalizer
+			contentObj := &unstructured.Unstructured{}
+			contentObj.SetGroupVersionKind(contentGVK)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			finalizers := contentObj.GetFinalizers()
+			Expect(finalizers).To(ContainElement(snapshot.FinalizerParentProtect), "SnapshotContent should have finalizer before Snapshot deletion")
+
+			// ACTIONS Step 1: Delete Snapshot
+			err = k8sClient.Delete(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Wait for Snapshot to be deleted
+			Eventually(func() bool {
+				freshSnapshot := &unstructured.Unstructured{}
+				freshSnapshot.SetGroupVersionKind(snapshotGVK)
+				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, freshSnapshot)
+				return apierrors.IsNotFound(err)
+			}, "10s", "100ms").Should(BeTrue(), "Snapshot should be deleted")
+
+			// ACTIONS Step 2: Wait for finalizer removal (first reconcile should remove it)
+			// Use Eventually to wait for finalizer removal, then verify it doesn't come back
+			Eventually(func() bool {
+				// Trigger reconcile to ensure finalizer removal
+				_, _ = contentCtrl.Reconcile(ctx, contentReq)
+
+				// Read fresh object from live apiserver
+				freshContent := &unstructured.Unstructured{}
+				freshContent.SetGroupVersionKind(contentGVK)
+				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name: contentName,
+				}, freshContent)
+				if err != nil {
+					return false
+				}
+
+				finalizers := freshContent.GetFinalizers()
+				return !contains(finalizers, snapshot.FinalizerParentProtect)
+			}, "20s", "500ms").Should(BeTrue(), "Finalizer should be removed after Snapshot deletion")
+
+			// ACTIONS Step 3: Trigger multiple reconciles to verify no infinite loop
+			// The controller should NOT add finalizer back after it's been removed
+			maxReconciles := 5 // Trigger multiple reconciles to verify stability
+
+			for i := 0; i < maxReconciles; i++ {
+				_, err := contentCtrl.Reconcile(ctx, contentReq)
+				Expect(err).NotTo(HaveOccurred(), "Reconcile should not fail (reconcile #%d)", i+1)
+
+				// Read fresh object after each reconcile
+				freshContent := &unstructured.Unstructured{}
+				freshContent.SetGroupVersionKind(contentGVK)
+				err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name: contentName,
+				}, freshContent)
+				Expect(err).NotTo(HaveOccurred(), "SnapshotContent should still exist (reconcile #%d)", i+1)
+
+				currentFinalizers := freshContent.GetFinalizers()
+				hasFinalizer := contains(currentFinalizers, snapshot.FinalizerParentProtect)
+
+				// Finalizer should NOT be present and should NOT be added back
+				Expect(hasFinalizer).To(BeFalse(), 
+					"Finalizer should not be re-added after removal (reconcile #%d)", i+1)
+			}
+
+			// EXPECTED BEHAVIOR: Finalizer removed and NOT re-added
+			// Verify final state after all reconciles
+			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			finalizers = contentObj.GetFinalizers()
+			Expect(finalizers).NotTo(ContainElement(snapshot.FinalizerParentProtect), 
+				"Finalizer should not be re-added after Snapshot deletion (no infinite loop)")
+			Expect(len(finalizers)).To(Equal(0), 
+				"SnapshotContent should have no finalizers after %d reconciles (no infinite loop)", maxReconciles)
+		})
 	})
 })
 

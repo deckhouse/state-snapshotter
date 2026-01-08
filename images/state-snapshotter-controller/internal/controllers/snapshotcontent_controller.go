@@ -168,22 +168,14 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	if obj.GetDeletionTimestamp().IsZero() {
 		// Object is not being deleted
 		
-		// Step 1.1: Ensure finalizer exists
-		if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
-			logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
-			if err := r.Update(ctx, obj); err != nil {
-				logger.Error(err, "Failed to add finalizer")
-				return ctrl.Result{}, err
-			}
-			// Requeue to continue processing after finalizer is added
-			return ctrl.Result{Requeue: true}, nil
-		}
-
-		// Step 1.2: Check if Snapshot exists (orphaning check)
+		// Step 1.1: Check if Snapshot exists FIRST (before adding finalizer)
+		// This prevents infinite loop: if Snapshot is deleted, we should NOT add finalizer
 		// Use APIReader for read-after-write consistency
 		snapshotRef := contentLike.GetSpecSnapshotRef()
+		var snapshotExists bool
 		if snapshotRef == nil {
-			logger.V(1).Info("SnapshotContent has no snapshotRef, skipping orphaning check")
+			logger.V(1).Info("SnapshotContent has no snapshotRef, treating as orphaned")
+			snapshotExists = false // Treat as orphaned if no ref
 		} else {
 			// Get current SnapshotContent GVK (use most reliable method)
 			currentGVK := obj.GroupVersionKind()
@@ -239,28 +231,46 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 					return ctrl.Result{}, fmt.Errorf("cannot derive Snapshot Kind from SnapshotContent Kind %s (does not end with 'Content')", currentGVK.Kind)
 				}
 			}
-			snapshotExists, err := r.checkSnapshotExists(ctx, snapshotRef, currentGVK)
+			var err error
+			snapshotExists, err = r.checkSnapshotExists(ctx, snapshotRef, currentGVK)
 			if err != nil {
 				logger.Error(err, "Failed to check if Snapshot exists", "snapshot", fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name))
 				return ctrl.Result{}, err
 			}
+		}
 
-			if !snapshotExists {
-				// Snapshot was deleted - remove finalizer (orphaning)
-				// This allows SnapshotContent to become orphaned and be managed by ObjectKeeper TTL
-				if snapshot.RemoveFinalizer(obj, snapshot.FinalizerParentProtect) {
-					logger.Info(
-						"SnapshotContent is orphaned: Snapshot was deleted, removing finalizer",
-						"snapshot", fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name),
-						"snapshotContent", req.Name,
-					)
-					if err := r.Update(ctx, obj); err != nil {
-						logger.Error(err, "Failed to remove finalizer after orphaning")
-						return ctrl.Result{}, err
-					}
-					// Requeue to continue processing after finalizer is removed
-					return ctrl.Result{Requeue: true}, nil
+		// Step 1.2: Manage finalizer based on Snapshot existence
+		// Only add finalizer if Snapshot exists (prevents infinite loop)
+		if snapshotExists {
+			// Snapshot exists - ensure finalizer exists
+			if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
+				logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
+				if err := r.Update(ctx, obj); err != nil {
+					logger.Error(err, "Failed to add finalizer")
+					return ctrl.Result{}, err
 				}
+				// Requeue to continue processing after finalizer is added
+				return ctrl.Result{Requeue: true}, nil
+			}
+		} else {
+			// Snapshot does not exist (orphaned) - ensure finalizer is removed
+			// This allows SnapshotContent to become orphaned and be managed by ObjectKeeper TTL
+			if snapshot.RemoveFinalizer(obj, snapshot.FinalizerParentProtect) {
+				snapshotRefStr := "none"
+				if snapshotRef != nil {
+					snapshotRefStr = fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name)
+				}
+				logger.Info(
+					"SnapshotContent is orphaned: Snapshot was deleted, removing finalizer",
+					"snapshot", snapshotRefStr,
+					"snapshotContent", req.Name,
+				)
+				if err := r.Update(ctx, obj); err != nil {
+					logger.Error(err, "Failed to remove finalizer after orphaning")
+					return ctrl.Result{}, err
+				}
+				// Requeue to continue processing after finalizer is removed
+				return ctrl.Result{Requeue: true}, nil
 			}
 		}
 	} else {

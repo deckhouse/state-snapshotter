@@ -72,14 +72,20 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 	// - GC handles physical deletion through ownerRef
 
 	var (
-		ctx        context.Context
-		contentGVK schema.GroupVersionKind
+		ctx         context.Context
+		snapshotGVK schema.GroupVersionKind
+		contentGVK  schema.GroupVersionKind
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
 
-		// Define test GVK
+		// Define test GVKs
+		snapshotGVK = schema.GroupVersionKind{
+			Group:   "test.deckhouse.io",
+			Version: "v1alpha1",
+			Kind:    "TestSnapshot",
+		}
 		contentGVK = schema.GroupVersionKind{
 			Group:   "test.deckhouse.io",
 			Version: "v1alpha1",
@@ -89,6 +95,24 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 
 	Describe("Cascade Finalizers Removal", func() {
 		It("should remove finalizers from children before parent", func() {
+			// PRECONDITION: Create Snapshots (required for controllers to add finalizers)
+			// Controller checks Snapshot existence before adding finalizer (prevents infinite loop)
+			parentSnapshotObj := &unstructured.Unstructured{}
+			parentSnapshotObj.SetGroupVersionKind(snapshotGVK)
+			parentSnapshotObj.SetName("test-cascade-snapshot")
+			parentSnapshotObj.SetNamespace("default")
+			parentSnapshotObj.Object["spec"] = map[string]interface{}{}
+			err := k8sClient.Create(ctx, parentSnapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			childSnapshotObj := &unstructured.Unstructured{}
+			childSnapshotObj.SetGroupVersionKind(snapshotGVK)
+			childSnapshotObj.SetName("test-cascade-child-snapshot")
+			childSnapshotObj.SetNamespace("default")
+			childSnapshotObj.Object["spec"] = map[string]interface{}{}
+			err = k8sClient.Create(ctx, childSnapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
 			// PRECONDITION: Create parent SnapshotContent
 			parentContentName := "test-cascade-parent-content"
 			parentContentObj := &unstructured.Unstructured{}
@@ -103,7 +127,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 			}
 			parentContentObj.Object["status"] = map[string]interface{}{}
 
-			err := k8sClient.Create(ctx, parentContentObj)
+			err = k8sClient.Create(ctx, parentContentObj)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Create child SnapshotContent
@@ -135,25 +159,31 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 			Expect(err).NotTo(HaveOccurred())
 
 			// Set children refs on parent
-			// Re-read parent to get fresh resourceVersion before update (avoid conflicts)
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name: parentContentName,
-			}, parentContentObj)
-			Expect(err).NotTo(HaveOccurred())
+			// Use Eventually to handle race conditions with controller updates
+			// Controller may add finalizers/update status concurrently, causing resourceVersion conflicts
+			Eventually(func() error {
+				// Re-read parent to get fresh resourceVersion before update (avoid conflicts)
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: parentContentName,
+				}, parentContentObj)
+				if err != nil {
+					return err
+				}
 
-			status, ok := parentContentObj.Object["status"].(map[string]interface{})
-			if !ok || status == nil {
-				status = make(map[string]interface{})
-				parentContentObj.Object["status"] = status
-			}
-			status["childrenSnapshotContentRefs"] = []interface{}{
-				map[string]interface{}{
-					"kind": contentGVK.Kind,
-					"name": childContentName,
-				},
-			}
-			err = k8sClient.Status().Update(ctx, parentContentObj)
-			Expect(err).NotTo(HaveOccurred())
+				status, ok := parentContentObj.Object["status"].(map[string]interface{})
+				if !ok || status == nil {
+					status = make(map[string]interface{})
+					parentContentObj.Object["status"] = status
+				}
+				status["childrenSnapshotContentRefs"] = []interface{}{
+					map[string]interface{}{
+						"kind": contentGVK.Kind,
+						"name": childContentName,
+					},
+				}
+				err = k8sClient.Status().Update(ctx, parentContentObj)
+				return err
+			}, "10s", "200ms").ShouldNot(HaveOccurred(), "Should successfully update parent status with children refs")
 
 			// Re-read parent to get updated status
 			err = k8sClient.Get(ctx, types.NamespacedName{
