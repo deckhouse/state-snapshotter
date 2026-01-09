@@ -209,10 +209,20 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			// This fallback is ONLY for backward compatibility with old/broken objects.
 			// Starting from controller version X, snapshotRef.kind is required.
 			//
+			// ARCHITECTURAL INVARIANT (REQUIRED):
+			// SnapshotContent Kind MUST be Snapshot Kind + "Content"
+			// This naming convention is REQUIRED for unified snapshots.
+			// Fallback logic relies on this convention: strings.TrimSuffix(kind, "Content")
+			//
+			// Examples:
+			//   TestSnapshotContent → TestSnapshot
+			//   NamespaceSnapshotContent → NamespaceSnapshot
+			//   InternalVirtualizationVirtualMachineSnapshotContent → InternalVirtualizationVirtualMachineSnapshot
+			//
 			// Fallback logic:
 			// - Derives Snapshot Kind from SnapshotContent Kind by removing "Content" suffix
 			// - This implements the unified snapshot convention: SnapshotContent Kind = Snapshot Kind + "Content"
-			// - Example: TestSnapshotContent -> TestSnapshot
+			// - Violation of this convention will cause fallback to fail with error
 			if snapshotRef.Kind == "" {
 				// Extract Snapshot Kind from SnapshotContent Kind (remove "Content" suffix)
 				// This is a fallback for backward compatibility - normal path should have Kind set
