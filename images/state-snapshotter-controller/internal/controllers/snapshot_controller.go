@@ -230,24 +230,59 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		contentObj.SetName(contentName)
 		// SnapshotContent is cluster-scoped, no namespace
 
+		// Get BackupClass to extract backupRepositoryName and deletionPolicy
+		// Snapshot.spec.backupClassName is required and links to BackupClass
+		// BackupClass.spec.backupRepositoryName provides the repository
+		// BackupClass.spec.deletionPolicy provides the deletion policy (or default to "Retain")
+		var backupRepositoryName string
+		var deletionPolicy string = "Retain" // Default deletion policy
+		var backupClassName string
+		
+		specObj, ok := obj.Object["spec"].(map[string]interface{})
+		if ok {
+			if backupClassNameRaw, ok := specObj["backupClassName"].(string); ok && backupClassNameRaw != "" {
+				backupClassName = backupClassNameRaw
+				// Try to get BackupClass
+				backupClassObj := &unstructured.Unstructured{}
+				backupClassObj.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "storage.deckhouse.io",
+					Version: "v1alpha1",
+					Kind:    "BackupClass",
+				})
+				if err := r.Get(ctx, client.ObjectKey{Name: backupClassNameRaw}, backupClassObj); err == nil {
+					// Extract backupRepositoryName from BackupClass
+					if backupClassSpec, ok := backupClassObj.Object["spec"].(map[string]interface{}); ok {
+						if repoName, ok := backupClassSpec["backupRepositoryName"].(string); ok && repoName != "" {
+							backupRepositoryName = repoName
+						}
+						// Extract deletionPolicy from BackupClass (if present)
+						if policy, ok := backupClassSpec["deletionPolicy"].(string); ok && policy != "" {
+							deletionPolicy = policy
+						}
+					}
+				} else {
+					logger.V(1).Info("BackupClass not found, using defaults", "backupClassName", backupClassNameRaw, "error", err)
+				}
+			}
+		}
+		
 		// Set spec.snapshotRef
-		// IMPORTANT: Always set kind explicitly to ensure backward compatibility
-		// This prevents issues with old SnapshotContent objects that might have empty kind
-		//
-		// INVARIANT: snapshotRef.kind MUST be set for all new SnapshotContent objects.
-		// This is required for SnapshotContentController to correctly resolve Snapshot GVK.
-		// Fallback logic exists for backward compatibility with old objects, but new objects
-		// MUST have snapshotRef.kind set explicitly.
-		//
-		// Starting from controller version X, snapshotRef.kind is required.
-		// Old objects without kind are handled via fallback (deriving from SnapshotContent GVK).
+		// CRD requires: name, namespace
 		spec := map[string]interface{}{
 			"snapshotRef": map[string]interface{}{
-				"kind":      snapshotGVK.Kind, // Use explicitly determined Kind, not obj.GetKind()
 				"name":      obj.GetName(),
 				"namespace": obj.GetNamespace(),
 			},
 		}
+		
+		// Add required fields from BackupClass
+		if backupRepositoryName == "" {
+			logger.Error(nil, "BackupClass does not have backupRepositoryName, cannot create SnapshotContent", "backupClassName", backupClassName)
+			return ctrl.Result{}, fmt.Errorf("BackupClass '%s' does not specify backupRepositoryName", backupClassName)
+		}
+		spec["backupRepositoryName"] = backupRepositoryName
+		spec["deletionPolicy"] = deletionPolicy
+		
 		contentObj.Object["spec"] = spec
 
 		// Set ownerRef: ObjectKeeper for root snapshots, Snapshot for children
