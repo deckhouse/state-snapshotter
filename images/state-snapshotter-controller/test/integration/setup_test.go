@@ -32,6 +32,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -182,11 +184,16 @@ var _ = BeforeSuite(func() {
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
 									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"backupClassName": {
+											Type: "string",
+										},
+									},
 								},
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"contentName": {Type: "string"},
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -310,6 +317,57 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// Create BackupClass CRD (required for SnapshotContent creation)
+	backupClassCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "backupclasses.storage.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "storage.deckhouse.io",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:     "BackupClass",
+				ListKind: "BackupClassList",
+				Plural:   "backupclasses",
+				Singular: "backupclass",
+			},
+			Scope: apiextensionsv1.ClusterScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"backupRepositoryName": {
+											Type: "string",
+										},
+										"deletionPolicy": {
+											Type: "string",
+											Enum: []apiextensionsv1.JSON{
+												{Raw: []byte(`"Retain"`)},
+												{Raw: []byte(`"Delete"`)},
+											},
+										},
+									},
+									Required: []string{"backupRepositoryName"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, backupClassCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
 	// Wait for CRDs to be ready
 	Eventually(func() bool {
 		snapshotCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "testsnapshots.test.deckhouse.io", metav1.GetOptions{})
@@ -320,12 +378,20 @@ var _ = BeforeSuite(func() {
 		if err != nil {
 			return false
 		}
+		backupClassCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "backupclasses.storage.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
 		// Check if CRDs are established
 		for _, condition := range snapshotCRD.Status.Conditions {
 			if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
 				for _, condition := range contentCRD.Status.Conditions {
 					if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-						return true
+						for _, condition := range backupClassCRD.Status.Conditions {
+							if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+								return true
+							}
+						}
 					}
 				}
 			}
@@ -366,6 +432,23 @@ var _ = BeforeSuite(func() {
 	Eventually(func() bool {
 		return mgr.GetCache().WaitForCacheSync(ctx)
 	}).Should(BeTrue())
+
+	// Create default BackupClass for tests (after client is ready)
+	backupClassObj := &unstructured.Unstructured{}
+	backupClassObj.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "storage.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "BackupClass",
+	})
+	backupClassObj.SetName("test-backup-class")
+	backupClassObj.Object["spec"] = map[string]interface{}{
+		"backupRepositoryName": "test-repository",
+		"deletionPolicy":       "Retain",
+	}
+	err = k8sClient.Create(testCtx, backupClassObj)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
 })
 
 var _ = AfterSuite(func() {

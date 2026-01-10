@@ -103,7 +103,9 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-deletion-snapshot")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())

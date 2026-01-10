@@ -314,20 +314,20 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		logger.Info("Created SnapshotContent", "name", contentName, "owner", ownerRef.Kind)
 
-		// Update Snapshot status.contentName
+		// Update Snapshot status.boundSnapshotContentName (as per CRD schema)
 		status := obj.Object["status"]
 		if status == nil {
 			status = make(map[string]interface{})
 			obj.Object["status"] = status
 		}
 		statusMap := status.(map[string]interface{})
-		statusMap["contentName"] = contentName
+		statusMap["boundSnapshotContentName"] = contentName
 
 		if err := r.Status().Update(ctx, obj); err != nil {
-			logger.Error(err, "Failed to update Snapshot status.contentName")
+			logger.Error(err, "Failed to update Snapshot status.boundSnapshotContentName")
 			return ctrl.Result{}, err
 		}
-		logger.Info("Updated Snapshot status.contentName", "contentName", contentName)
+		logger.Info("Updated Snapshot status.boundSnapshotContentName", "contentName", contentName)
 	}
 
 	// Step 5: Set HandledByCommonController condition

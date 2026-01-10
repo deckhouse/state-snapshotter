@@ -106,7 +106,9 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-finalizer-snapshot")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())

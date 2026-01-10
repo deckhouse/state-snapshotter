@@ -74,6 +74,8 @@ const (
 //   - MUST be idempotent (setting same condition twice has no effect on LastTransitionTime)
 //   - MUST update LastTransitionTime ONLY when status changes
 //   - MUST work with any object implementing SnapshotLike or SnapshotContentLike
+//   - observedGeneration is NOT set automatically (remains 0) - it's optional per ADR
+//     Controllers should set it explicitly if needed (e.g., obj.GetGeneration())
 //
 // See: unified-snapshots-test-plan.md (TEST CASE: SetCondition - Idempotency)
 func SetCondition(obj interface{}, conditionType string, status metav1.ConditionStatus, reason, message string) {

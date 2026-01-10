@@ -101,7 +101,9 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 			parentSnapshotObj.SetGroupVersionKind(snapshotGVK)
 			parentSnapshotObj.SetName("test-cascade-snapshot")
 			parentSnapshotObj.SetNamespace("default")
-			parentSnapshotObj.Object["spec"] = map[string]interface{}{}
+			parentSnapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 			err := k8sClient.Create(ctx, parentSnapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -109,7 +111,9 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 			childSnapshotObj.SetGroupVersionKind(snapshotGVK)
 			childSnapshotObj.SetName("test-cascade-child-snapshot")
 			childSnapshotObj.SetNamespace("default")
-			childSnapshotObj.Object["spec"] = map[string]interface{}{}
+			childSnapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 			err = k8sClient.Create(ctx, childSnapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 

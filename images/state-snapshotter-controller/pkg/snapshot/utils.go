@@ -228,7 +228,8 @@ func (w *unstructuredSnapshotWrapper) GetStatusContentName() string {
 	if !ok {
 		return ""
 	}
-	if name, ok := status["contentName"].(string); ok {
+	// Use boundSnapshotContentName as per CRD schema
+	if name, ok := status["boundSnapshotContentName"].(string); ok && name != "" {
 		return name
 	}
 	return ""

@@ -196,7 +196,7 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"contentName": {Type: "string"},
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{

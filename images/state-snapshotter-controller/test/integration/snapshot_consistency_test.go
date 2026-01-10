@@ -80,7 +80,9 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-missing-content")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -125,7 +127,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 				status = make(map[string]interface{})
 				snapshotObj.Object["status"] = status
 			}
-			status["contentName"] = "non-existent-content"
+			status["boundSnapshotContentName"] = "non-existent-content"
 
 			// Update status after creation (conditions and contentName need to be in status)
 			err = k8sClient.Status().Update(ctx, snapshotObj)
@@ -228,7 +230,9 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-missing-content-never-ready")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -268,7 +272,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 				status = make(map[string]interface{})
 				snapshotObj.Object["status"] = status
 			}
-			status["contentName"] = "non-existent-content-2"
+			status["boundSnapshotContentName"] = "non-existent-content-2"
 
 			// Update status after creation (conditions and contentName need to be in status)
 			err = k8sClient.Status().Update(ctx, snapshotObj)
@@ -329,7 +333,9 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-wrong-name")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -368,9 +374,9 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 				status = make(map[string]interface{})
 				snapshotObj.Object["status"] = status
 			}
-			status["contentName"] = contentName
+			status["boundSnapshotContentName"] = contentName
 
-			// Update status after creation (conditions and contentName need to be in status)
+			// Update status after creation (conditions and boundSnapshotContentName need to be in status)
 			err = k8sClient.Status().Update(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -432,7 +438,9 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-terminal-ready")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -538,9 +546,9 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 				status = make(map[string]interface{})
 				snapshotObj.Object["status"] = status
 			}
-			status["contentName"] = contentName
+			status["boundSnapshotContentName"] = contentName
 
-			// Update status after creation (conditions and contentName need to be in status)
+			// Update status after creation (conditions and boundSnapshotContentName need to be in status)
 			err = k8sClient.Status().Update(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 

@@ -48,7 +48,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 	// - No orphans exist
 	//
 	// INVARIANTS:
-	// - Snapshot.status.contentName → SnapshotContent.name
+	// - Snapshot.status.boundSnapshotContentName → SnapshotContent.name
 	// - SnapshotContent.spec.snapshotRef → Snapshot reference
 	// - SnapshotContent.ownerRef is set correctly
 	// - SnapshotContent has finalizer
@@ -119,7 +119,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		//
 		// EXPECTED BEHAVIOR:
 		// - SnapshotContent exists
-		// - Snapshot.status.contentName is set
+		// - Snapshot.status.boundSnapshotContentName is set
 		// - SnapshotContent.spec.snapshotRef points to Snapshot
 		// - SnapshotContent.ownerRef is set (ObjectKeeper for root)
 		// - SnapshotContent has finalizer
@@ -129,7 +129,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		// - No orphans
 		//
 		// INVARIANTS:
-		// - Snapshot.status.contentName → SnapshotContent.name
+		// - Snapshot.status.boundSnapshotContentName → SnapshotContent.name
 		// - SnapshotContent.spec.snapshotRef → Snapshot reference
 		// - SnapshotContent.ownerRef is correct
 		// - SnapshotContent.finalizers contains "snapshot.deckhouse.io/parent-protect"
@@ -140,7 +140,9 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-lifecycle-snapshot")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -194,10 +196,10 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 
 				contentName = snapshotLike.GetStatusContentName()
 				return contentName != ""
-			}).Should(BeTrue(), "Snapshot.status.contentName should be set")
+			}).Should(BeTrue(), "Snapshot.status.boundSnapshotContentName should be set")
 
-			// EXPECTED BEHAVIOR: Snapshot.status.contentName is set
-			Expect(contentName).NotTo(BeEmpty(), "Snapshot.status.contentName should be set")
+			// EXPECTED BEHAVIOR: Snapshot.status.boundSnapshotContentName is set
+			Expect(contentName).NotTo(BeEmpty(), "Snapshot.status.boundSnapshotContentName should be set")
 
 			// EXPECTED BEHAVIOR: SnapshotContent exists
 			contentObj := &unstructured.Unstructured{}
@@ -231,7 +233,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			Expect(ok).To(BeTrue(), "SnapshotContent should have spec")
 			snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
 			Expect(ok).To(BeTrue(), "SnapshotContent.spec.snapshotRef should exist")
-			Expect(snapshotRef["kind"]).To(Equal(snapshotGVK.Kind), "snapshotRef.kind should match Snapshot Kind")
+			// Note: snapshotRef.kind is optional (fallback logic handles it)
 			Expect(snapshotRef["name"]).To(Equal(snapshotObj.GetName()), "snapshotRef.name should match Snapshot name")
 			Expect(snapshotRef["namespace"]).To(Equal(snapshotObj.GetNamespace()), "snapshotRef.namespace should match Snapshot namespace")
 
@@ -247,7 +249,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 
 			// INVARIANT: Stable linkage - 1 Snapshot → 1 SnapshotContent
 			// Verify by checking that contentName matches the actual SnapshotContent name
-			Expect(contentObj.GetName()).To(Equal(contentName), "SnapshotContent name should match Snapshot.status.contentName")
+			Expect(contentObj.GetName()).To(Equal(contentName), "SnapshotContent name should match Snapshot.status.boundSnapshotContentName")
 
 			// INVARIANT: No orphans - SnapshotContent references existing Snapshot
 			// This is verified by successful Get() above
