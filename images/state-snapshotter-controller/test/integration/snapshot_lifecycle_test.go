@@ -54,11 +54,9 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 	// - SnapshotContent has finalizer
 
 	var (
-		ctx          context.Context
-		snapshotGVK  schema.GroupVersionKind
-		contentGVK   schema.GroupVersionKind
-		snapshotCtrl *controllers.SnapshotController
-		contentCtrl  *controllers.SnapshotContentController
+		ctx         context.Context
+		snapshotGVK schema.GroupVersionKind
+		contentGVK  schema.GroupVersionKind
 	)
 
 	BeforeEach(func() {
@@ -75,34 +73,6 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			Version: "v1alpha1",
 			Kind:    "TestSnapshotContent",
 		}
-
-		// Create SnapshotController
-		var err error
-		snapshotCtrl, err = controllers.NewSnapshotController(
-			k8sClient,
-			mgr.GetAPIReader(),
-			scheme,
-			testCfg,
-			[]schema.GroupVersionKind{snapshotGVK},
-		)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Create SnapshotContentController
-		contentCtrl, err = controllers.NewSnapshotContentController(
-			k8sClient,
-			mgr.GetAPIReader(),
-			scheme,
-			testCfg,
-			[]schema.GroupVersionKind{contentGVK},
-		)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Setup controllers with manager
-		err = snapshotCtrl.SetupWithManager(mgr)
-		Expect(err).NotTo(HaveOccurred())
-
-		err = contentCtrl.SetupWithManager(mgr)
-		Expect(err).NotTo(HaveOccurred())
 	})
 
 	Describe("Basic Lifecycle Contract", func() {
@@ -135,6 +105,28 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		// - SnapshotContent.finalizers contains "snapshot.deckhouse.io/parent-protect"
 
 		It("should establish stable Snapshot ↔ SnapshotContent linkage", func() {
+			// Create controllers for this test (without registering with manager to avoid conflicts)
+			snapshotCtrl, err := controllers.NewSnapshotController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			contentCtrl, err := controllers.NewSnapshotContentController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{contentGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Note: We don't register controllers with manager to avoid conflicts with other tests
+			// We call Reconcile directly, similar to consistency_test.go
+
 			// PRECONDITION: Create root snapshot
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -144,7 +136,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				"backupClassName": "test-backup-class",
 			}
 
-			err := k8sClient.Create(ctx, snapshotObj)
+			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Simulate domain controller: set HandledByDomainSpecificController=True
@@ -259,6 +251,207 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				Namespace: snapshotObj.GetNamespace(),
 			}, snapshotObj)
 			Expect(err).NotTo(HaveOccurred(), "Snapshot should still exist (no orphan)")
+		})
+
+		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {
+			// INTERFACE: SnapshotController.checkConsistencyAndSetReady
+			//
+			// PRECONDITION:
+			// - Snapshot created with HandledByDomainSpecificController=True
+			// - SnapshotContent created and has finalizer
+			//
+			// ACTIONS:
+			// 1. Set SnapshotContent Ready=True
+			// 2. Trigger Snapshot reconciliation
+			//
+			// EXPECTED BEHAVIOR:
+			// - SnapshotController.checkConsistencyAndSetReady is called after SnapshotContent creation
+			// - Snapshot Ready=True is set automatically when SnapshotContent is Ready=True
+			// - This verifies the fix: checkConsistencyAndSetReady is called after creating SnapshotContent
+			//
+			// POSTCONDITION:
+			// - Snapshot Ready=True
+			// - SnapshotContent Ready=True
+			//
+			// INVARIANTS:
+			// - Snapshot Ready=True only when SnapshotContent Ready=True
+			// - checkConsistencyAndSetReady is called automatically after SnapshotContent creation
+
+			// Create controllers for this test (without registering with manager to avoid conflicts)
+			snapshotCtrl, err := controllers.NewSnapshotController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			contentCtrl, err := controllers.NewSnapshotContentController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{contentGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Note: We don't register controllers with manager to avoid conflicts with other tests
+			// We call Reconcile directly, similar to consistency_test.go
+			// NOTE: This test relies on Reconcile being side-effect free and idempotent.
+			// If Reconcile becomes async, adds rate-limiting, or deferred requeue, this test may need updates.
+
+			// PRECONDITION: Create root snapshot
+			snapshotObj := &unstructured.Unstructured{}
+			snapshotObj.SetGroupVersionKind(snapshotGVK)
+			snapshotObj.SetName("test-ready-propagation-snapshot")
+			snapshotObj.SetNamespace("default")
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
+
+			err = k8sClient.Create(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate domain controller: set HandledByDomainSpecificController=True
+			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			snapshot.SetCondition(
+				snapshotLike,
+				snapshot.ConditionHandledByDomainSpecificController,
+				metav1.ConditionTrue,
+				"Processed",
+				"Domain controller processed snapshot",
+			)
+			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
+			err = k8sClient.Status().Update(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// ACTIONS Step 1: SnapshotController creates SnapshotContent
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				},
+			}
+
+			_, err = snapshotCtrl.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Wait for SnapshotContent creation
+			var contentName string
+			Eventually(func() bool {
+				freshSnapshot := &unstructured.Unstructured{}
+				freshSnapshot.SetGroupVersionKind(snapshotGVK)
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, freshSnapshot)
+				if err != nil {
+					return false
+				}
+
+				snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
+				if err != nil {
+					return false
+				}
+
+				contentName = snapshotLike.GetStatusContentName()
+				return contentName != ""
+			}).Should(BeTrue(), "Snapshot.status.boundSnapshotContentName should be set")
+
+			// ACTIONS Step 2: SnapshotContentController adds finalizer
+			contentReq := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name: contentName,
+				},
+			}
+
+			_, err = contentCtrl.Reconcile(ctx, contentReq)
+			Expect(err).NotTo(HaveOccurred())
+
+			// ACTIONS Step 3: Set SnapshotContent Ready=True
+			contentObj := &unstructured.Unstructured{}
+			contentObj.SetGroupVersionKind(contentGVK)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Set Ready=True and InProgress=False (terminal state)
+			snapshot.SetCondition(
+				contentLike,
+				snapshot.ConditionReady,
+				metav1.ConditionTrue,
+				snapshot.ReasonReady,
+				"Content is ready",
+			)
+			snapshot.SetCondition(
+				contentLike,
+				snapshot.ConditionInProgress,
+				metav1.ConditionFalse,
+				"Completed",
+				"Content processing completed",
+			)
+			snapshot.SyncConditionsToUnstructured(contentObj, contentLike.GetStatusConditions())
+			err = k8sClient.Status().Update(ctx, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// ACTIONS Step 4: Trigger Snapshot reconciliation
+			// This should call checkConsistencyAndSetReady and set Ready=True on Snapshot
+			_, err = snapshotCtrl.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			// EXPECTED BEHAVIOR: Snapshot Ready=True is set automatically
+			Eventually(func() bool {
+				freshSnapshot := &unstructured.Unstructured{}
+				freshSnapshot.SetGroupVersionKind(snapshotGVK)
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, freshSnapshot)
+				if err != nil {
+					return false
+				}
+
+				snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
+				if err != nil {
+					return false
+				}
+
+				return snapshot.IsReady(snapshotLike)
+			}, "10s", "200ms").Should(BeTrue(), "Snapshot should reach Ready=True automatically when SnapshotContent is Ready=True")
+
+			// Verify Snapshot Ready=True condition
+			freshSnapshot := &unstructured.Unstructured{}
+			freshSnapshot.SetGroupVersionKind(snapshotGVK)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, freshSnapshot)
+			Expect(err).NotTo(HaveOccurred())
+
+			snapshotLike, err = snapshot.ExtractSnapshotLike(freshSnapshot)
+			Expect(err).NotTo(HaveOccurred())
+
+			readyCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
+			Expect(readyCond).NotTo(BeNil(), "Ready condition should exist")
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "Ready should be True")
+			Expect(readyCond.Reason).To(Equal(snapshot.ReasonCompleted), "Reason should be Completed")
+
+			// Verify SnapshotContent is Ready=True
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			contentLike, err = snapshot.ExtractSnapshotContentLike(contentObj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snapshot.IsReady(contentLike)).To(BeTrue(), "SnapshotContent should be Ready=True")
 		})
 	})
 })

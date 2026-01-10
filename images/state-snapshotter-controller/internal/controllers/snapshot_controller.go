@@ -336,6 +336,19 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
+	// Step 6: Check consistency and set Ready condition
+	// Only check if SnapshotContent already exists (has been processed by SnapshotContentController)
+	// This avoids checking consistency in a "half-assembled" state where SnapshotContent
+	// might not have finalizer or Ready condition yet.
+	// If SnapshotContent is not ready yet, the next reconcile (triggered by SnapshotContentController
+	// setting Ready=True) will set Snapshot Ready=True.
+	if snapshotLike.GetStatusContentName() != "" {
+		if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
+			logger.Error(err, "Failed to check consistency after creating SnapshotContent")
+			// Non-fatal: will retry on next reconcile
+		}
+	}
+
 	logger.Info("Snapshot reconciliation completed (create path)")
 	return ctrl.Result{}, nil
 }
