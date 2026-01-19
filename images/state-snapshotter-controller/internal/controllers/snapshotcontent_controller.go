@@ -124,11 +124,11 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Each controller instance handles only one specific GVK (e.g., VirtualMachineSnapshotContent).
 	// Get the unstructured object
 	// We need to try each registered GVK to find the correct one
-	// Note: SnapshotContent is cluster-scoped, so use Name only (not NamespacedName)
+	// SnapshotContent is cluster-scoped; use Name only (no namespace).
 	obj := &unstructured.Unstructured{}
 	var found bool
 	var err error
-	contentKey := client.ObjectKey{Name: req.Name} // Cluster-scoped resource, no namespace
+	contentKey := client.ObjectKey{Name: req.Name}
 	for _, gvk := range r.SnapshotContentGVKs {
 		obj.SetGroupVersionKind(gvk)
 		err = r.Get(ctx, contentKey, obj)
