@@ -144,13 +144,18 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	if !found {
+		// SnapshotContent not found in any registered GVK - object was deleted or doesn't exist
+		// This is normal after finalizer removal when GC deletes the object
 		logger.V(1).Info("SnapshotContent not found in any registered GVK, skipping")
 		return ctrl.Result{}, nil
 	}
 
+	// If we reach here, found == true, which means err == nil (we successfully got the object)
+	// The duplicate error check below is unreachable code, but kept for safety
 	if err != nil {
+		// This should never happen if found == true, but handle it gracefully
 		if errors.IsNotFound(err) {
-			logger.V(1).Info("SnapshotContent not found, skipping")
+			logger.V(1).Info("SnapshotContent not found (race condition: deleted between Get calls), skipping")
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "failed to get SnapshotContent")

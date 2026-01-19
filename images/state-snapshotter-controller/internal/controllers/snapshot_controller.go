@@ -27,9 +27,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -790,7 +793,7 @@ func (r *SnapshotController) getSnapshotContentGVK(snapshotGVK schema.GroupVersi
 }
 
 // SetupWithManager sets up the controller with the Manager
-// Registers watches for all registered Snapshot GVKs
+// Registers watches for all registered Snapshot GVKs and their corresponding SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
 func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
 	// Register watch for each Snapshot GVK
@@ -798,9 +801,27 @@ func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(gvk)
 
+		// Get corresponding SnapshotContent GVK
+		contentGVK, err := r.getSnapshotContentGVK(gvk)
+		if err != nil {
+			return fmt.Errorf("failed to resolve SnapshotContent GVK for %s: %w", gvk.String(), err)
+		}
+
+		contentObj := &unstructured.Unstructured{}
+		contentObj.SetGroupVersionKind(contentGVK)
+
 		// Create a controller builder for this specific GVK
+		// Watch both Snapshot (For) and SnapshotContent (Watches) to trigger reconcile when Content becomes Ready
+		// This ensures SnapshotController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
+		// Note: We use a closure to capture the controller instance 'r'
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
+			Watches(
+				contentObj,
+				handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+					return r.mapSnapshotContentToSnapshot(ctx, obj)
+				}),
+			).
 			Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 
 		if err := builder.Complete(r); err != nil {
@@ -810,3 +831,68 @@ func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
 
 	return nil
 }
+
+// mapSnapshotContentToSnapshot maps SnapshotContent to its corresponding Snapshot for reconcile
+// This ensures SnapshotController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
+// Signature matches handler.MapFunc = TypedMapFunc[client.Object, reconcile.Request]
+// which is func(context.Context, client.Object) []reconcile.Request
+func (r *SnapshotController) mapSnapshotContentToSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
+	contentObj, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+
+	// Extract snapshotRef from SnapshotContent spec
+	spec, ok := contentObj.Object["spec"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	name, ok := snapshotRef["name"].(string)
+	if !ok || name == "" {
+		return nil
+	}
+
+	namespace, ok := snapshotRef["namespace"].(string)
+	if !ok || namespace == "" {
+		return nil
+	}
+
+	// Determine Snapshot Kind from SnapshotContent Kind
+	// SnapshotContent Kind = Snapshot Kind + "Content"
+	contentKind := contentObj.GetKind()
+	snapshotKind := strings.TrimSuffix(contentKind, "Content")
+	if snapshotKind == contentKind {
+		// Fallback failed - cannot determine Snapshot Kind
+		return nil
+	}
+
+	// Find matching Snapshot GVK
+	var snapshotGVK schema.GroupVersionKind
+	for _, gvk := range r.SnapshotGVKs {
+		if gvk.Kind == snapshotKind && gvk.Group == contentObj.GroupVersionKind().Group {
+			snapshotGVK = gvk
+			break
+		}
+	}
+
+	if snapshotGVK.Kind == "" {
+		// Snapshot GVK not found - skip
+		return nil
+	}
+
+	return []reconcile.Request{
+		{
+			NamespacedName: types.NamespacedName{
+				Name:      name,
+				Namespace: namespace,
+			},
+		},
+	}
+}
+
