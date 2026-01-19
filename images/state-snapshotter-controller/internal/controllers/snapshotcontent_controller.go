@@ -115,8 +115,7 @@ func NewSnapshotContentController(
 //
 // Step 1 (Skeleton): Basic structure - no finalizers, no deletion, no consistency checks
 func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithValues("snapshotcontent", req.Name)
-	logger.Info("Reconciling SnapshotContent")
+	logger := log.FromContext(ctx).WithValues("snapshotcontent", req.Name, "reqNamespace", req.Namespace)
 
 	// Get the unstructured object
 	// ARCHITECTURAL NOTE: SnapshotContentController is instantiated per-GVK
@@ -125,10 +124,12 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Get the unstructured object
 	// We need to try each registered GVK to find the correct one
 	// SnapshotContent is cluster-scoped; use Name only (no namespace).
+	contentKey := client.ObjectKey{Name: req.Name}
+	logger.Info("Reconciling SnapshotContent", "contentKeyNamespace", contentKey.Namespace)
+
 	obj := &unstructured.Unstructured{}
 	var found bool
 	var err error
-	contentKey := client.ObjectKey{Name: req.Name}
 	for _, gvk := range r.SnapshotContentGVKs {
 		obj.SetGroupVersionKind(gvk)
 		err = r.Get(ctx, contentKey, obj)
@@ -616,6 +617,12 @@ func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, sna
 // Registers watches for all registered SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
 func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
+	gvkStrings := make([]string, 0, len(r.SnapshotContentGVKs))
+	for _, gvk := range r.SnapshotContentGVKs {
+		gvkStrings = append(gvkStrings, gvk.String())
+	}
+	ctrl.Log.WithName("snapshotcontent-controller").Info("SnapshotContent controller configured", "gvks", gvkStrings)
+
 	// Register watch for each SnapshotContent GVK
 	for _, gvk := range r.SnapshotContentGVKs {
 		obj := &unstructured.Unstructured{}

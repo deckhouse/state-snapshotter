@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	goruntime "runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -106,6 +107,23 @@ func main() {
 
 	log.Info(fmt.Sprintf("[main] Go Version:%s ", goruntime.Version()))
 	log.Info(fmt.Sprintf("[main] OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
+	if buildInfo, ok := debug.ReadBuildInfo(); ok {
+		log.Info(fmt.Sprintf("[main] BuildInfo: module=%s version=%s", buildInfo.Main.Path, buildInfo.Main.Version))
+		var vcsRevision, vcsTime, vcsModified string
+		for _, setting := range buildInfo.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				vcsRevision = setting.Value
+			case "vcs.time":
+				vcsTime = setting.Value
+			case "vcs.modified":
+				vcsModified = setting.Value
+			}
+		}
+		if vcsRevision != "" || vcsTime != "" || vcsModified != "" {
+			log.Info(fmt.Sprintf("[main] VCS: revision=%s time=%s modified=%s", vcsRevision, vcsTime, vcsModified))
+		}
+	}
 
 	log.Info("[main] CfgParams has been successfully created")
 	log.Info(fmt.Sprintf("[main] %s = %s", config.LogLevelEnvName, cfgParams.Loglevel))
