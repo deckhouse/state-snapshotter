@@ -41,9 +41,9 @@ type ObjectRef struct {
 //   - unified-snapshots-architecture-diagrams.md (GLOBAL INVARIANTS)
 //
 // Changes to this interface require:
-//   1. Architectural justification
-//   2. Test plan update
-//   3. Backward compatibility consideration
+//  1. Architectural justification
+//  2. Test plan update
+//  3. Backward compatibility consideration
 //
 // Contract Rules:
 //   - Getter methods MUST be pure functions (no side effects, no mutations)
@@ -112,9 +112,9 @@ type SnapshotLike interface {
 //   - unified-snapshots-architecture-diagrams.md (GLOBAL INVARIANTS)
 //
 // Changes to this interface require:
-//   1. Architectural justification
-//   2. Test plan update
-//   3. Backward compatibility consideration
+//  1. Architectural justification
+//  2. Test plan update
+//  3. Backward compatibility consideration
 //
 // Contract Rules:
 //   - Getter methods MUST be pure functions (no side effects, no mutations)
@@ -162,4 +162,3 @@ type SnapshotContentLike interface {
 	// Contract: Pure function, idempotent, no side effects.
 	GetStatusDataSnapshotMethod() string
 }
-

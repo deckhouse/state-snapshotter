@@ -71,7 +71,7 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 	// This test only verifies finalizer removal, not physical deletion.
 
 	var (
-		ctx          context.Context
+		ctx         context.Context
 		snapshotGVK schema.GroupVersionKind
 		contentGVK  schema.GroupVersionKind
 	)
@@ -628,7 +628,7 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 				hasFinalizer := contains(currentFinalizers, snapshot.FinalizerParentProtect)
 
 				// Finalizer should NOT be present and should NOT be added back
-				Expect(hasFinalizer).To(BeFalse(), 
+				Expect(hasFinalizer).To(BeFalse(),
 					"Finalizer should not be re-added after removal (reconcile #%d)", i+1)
 			}
 
@@ -640,11 +640,10 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			finalizers = contentObj.GetFinalizers()
-			Expect(finalizers).NotTo(ContainElement(snapshot.FinalizerParentProtect), 
+			Expect(finalizers).NotTo(ContainElement(snapshot.FinalizerParentProtect),
 				"Finalizer should not be re-added after Snapshot deletion (no infinite loop)")
-			Expect(len(finalizers)).To(Equal(0), 
+			Expect(len(finalizers)).To(Equal(0),
 				"SnapshotContent should have no finalizers after %d reconciles (no infinite loop)", maxReconciles)
 		})
 	})
 })
-

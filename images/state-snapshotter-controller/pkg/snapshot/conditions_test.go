@@ -820,4 +820,3 @@ func TestHasCondition_EdgeCases(t *testing.T) {
 		}
 	})
 }
-

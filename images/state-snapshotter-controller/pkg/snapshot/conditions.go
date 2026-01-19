@@ -47,15 +47,15 @@ const (
 
 // Reasons for Ready=False
 const (
-	ReasonContentMissing        = "ContentMissing"
-	ReasonChildSnapshotMissing  = "ChildSnapshotMissing"
-	ReasonArtifactMissing       = "ArtifactMissing"
-	ReasonDeleting              = "Deleting"
+	ReasonContentMissing       = "ContentMissing"
+	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
+	ReasonArtifactMissing      = "ArtifactMissing"
+	ReasonDeleting             = "Deleting"
 )
 
 // Reasons for Ready=True
 const (
-	ReasonReady    = "Ready"
+	ReasonReady     = "Ready"
 	ReasonCompleted = "Completed"
 )
 
@@ -176,4 +176,3 @@ func IsTerminal(obj interface{}) bool {
 	readyCond := GetCondition(obj, ConditionReady)
 	return readyCond != nil && (readyCond.Status == metav1.ConditionTrue || readyCond.Status == metav1.ConditionFalse)
 }
-

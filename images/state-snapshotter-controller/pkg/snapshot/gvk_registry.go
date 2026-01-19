@@ -102,8 +102,8 @@ func (r *GVKRegistry) ResolveSnapshotGVK(kind string) (schema.GroupVersionKind, 
 // Contract: Deterministic - same Snapshot Kind always returns same Content GVK.
 //
 // Fallback behavior:
-//   1. Try to find registered Content GVK
-//   2. If not found, derive from Snapshot GVK (add "Content" suffix)
+//  1. Try to find registered Content GVK
+//  2. If not found, derive from Snapshot GVK (add "Content" suffix)
 func (r *GVKRegistry) ResolveSnapshotContentGVK(snapshotKind string) (schema.GroupVersionKind, error) {
 	// First, try to find Snapshot GVK
 	snapshotGVK, err := r.ResolveSnapshotGVK(snapshotKind)
@@ -147,4 +147,3 @@ func parseGVK(kind, apiVersion string) (schema.GroupVersionKind, error) {
 	}
 	return gvk, nil
 }
-

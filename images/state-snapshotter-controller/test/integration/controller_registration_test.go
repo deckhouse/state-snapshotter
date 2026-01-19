@@ -99,4 +99,3 @@ var _ = Describe("Integration: Controller Registration", func() {
 		Expect(err).NotTo(HaveOccurred(), "SnapshotContentController should be registered with manager without errors")
 	})
 })
-

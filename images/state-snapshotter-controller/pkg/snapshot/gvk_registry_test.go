@@ -179,7 +179,7 @@ func TestResolveSnapshotContentGVK_FallbackLogic(t *testing.T) {
 
 		expectedGVK := schema.GroupVersionKind{
 			Group:   "virtualization.deckhouse.io",
-			Version: "v1alpha1", // Should derive from Snapshot GVK
+			Version: "v1alpha1",                      // Should derive from Snapshot GVK
 			Kind:    "VirtualMachineSnapshotContent", // Should add "Content" suffix
 		}
 		if contentGVK != expectedGVK {
@@ -219,6 +219,7 @@ func TestResolveSnapshotContentGVK_FallbackLogic(t *testing.T) {
 // - Registration either:
 //   - Returns error (conflict detected), OR
 //   - Is idempotent (same GVK registered twice is OK)
+//
 // - ResolveSnapshotGVK returns consistent result
 //
 // POSTCONDITION:
@@ -419,4 +420,3 @@ func TestGVKRegistry_EdgeCases(t *testing.T) {
 		}
 	})
 }
-

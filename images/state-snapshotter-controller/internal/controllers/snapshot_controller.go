@@ -36,7 +36,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-
 // SnapshotController reconciles generic XxxxSnapshot resources
 //
 // This controller works with any CRD that implements the SnapshotLike interface
@@ -207,7 +206,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if contentName == "" {
 		// Generate deterministic name
 		contentName = snapshot.GenerateSnapshotContentName(obj.GetName(), string(obj.GetUID()))
-		
+
 		// Create SnapshotContent
 		snapshotGVK := obj.GetObjectKind().GroupVersionKind()
 		if snapshotGVK.Kind == "" {
@@ -219,7 +218,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 				return ctrl.Result{}, fmt.Errorf("cannot determine Snapshot Kind for object %s", obj.GetName())
 			}
 		}
-		
+
 		contentGVK, err := r.getSnapshotContentGVK(snapshotGVK)
 		if err != nil {
 			logger.Error(err, "Failed to resolve SnapshotContent GVK")
@@ -237,12 +236,12 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		var backupRepositoryName string
 		var deletionPolicy string = "Retain" // Default deletion policy
 		var backupClassName string
-		
+
 		specObj, ok := obj.Object["spec"].(map[string]interface{})
 		if ok {
 			if backupClassNameRaw, ok := specObj["backupClassName"].(string); ok && backupClassNameRaw != "" {
 				backupClassName = backupClassNameRaw
-				// Try to get BackupClass
+				// Get BackupClass to extract backupRepositoryName and deletionPolicy
 				backupClassObj := &unstructured.Unstructured{}
 				backupClassObj.SetGroupVersionKind(schema.GroupVersionKind{
 					Group:   "storage.deckhouse.io",
@@ -250,12 +249,11 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 					Kind:    "BackupClass",
 				})
 				if err := r.Get(ctx, client.ObjectKey{Name: backupClassNameRaw}, backupClassObj); err == nil {
-					// Extract backupRepositoryName from BackupClass
+					// Extract backupRepositoryName and deletionPolicy from BackupClass
 					if backupClassSpec, ok := backupClassObj.Object["spec"].(map[string]interface{}); ok {
 						if repoName, ok := backupClassSpec["backupRepositoryName"].(string); ok && repoName != "" {
 							backupRepositoryName = repoName
 						}
-						// Extract deletionPolicy from BackupClass (if present)
 						if policy, ok := backupClassSpec["deletionPolicy"].(string); ok && policy != "" {
 							deletionPolicy = policy
 						}
@@ -265,7 +263,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 				}
 			}
 		}
-		
+
 		// Set spec.snapshotRef
 		// CRD requires: name, namespace
 		// snapshotRef.kind is optional in CRD but SHOULD be set for new objects (per ADR)
@@ -281,7 +279,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		spec := map[string]interface{}{
 			"snapshotRef": snapshotRef,
 		}
-		
+
 		// Add required fields from BackupClass
 		if backupRepositoryName == "" {
 			logger.Error(nil, "BackupClass does not have backupRepositoryName, cannot create SnapshotContent", "backupClassName", backupClassName)
@@ -289,7 +287,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		spec["backupRepositoryName"] = backupRepositoryName
 		spec["deletionPolicy"] = deletionPolicy
-		
+
 		contentObj.Object["spec"] = spec
 
 		// Set ownerRef: ObjectKeeper for root snapshots, Snapshot for children
@@ -334,7 +332,8 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 			logger.Error(err, "Failed to update Snapshot status.boundSnapshotContentName")
 			return ctrl.Result{}, err
 		}
-		logger.Info("Updated Snapshot status.boundSnapshotContentName", "contentName", contentName)
+		// Log both field names for backward compatibility with log parsers
+		logger.Info("Updated Snapshot status.boundSnapshotContentName", "boundSnapshotContentName", contentName, "contentName", contentName)
 	}
 
 	// Step 5: Set HandledByCommonController condition
@@ -568,10 +567,10 @@ func (r *SnapshotController) propagateReadyFalseToParent(
 
 	snapshot.SetCondition(parentLike, snapshot.ConditionReady, metav1.ConditionFalse, reason,
 		fmt.Sprintf("Child Snapshot %s/%s was deleted", obj.GetNamespace(), obj.GetName()))
-	
+
 	// Sync conditions to unstructured
 	snapshot.SyncConditionsToUnstructured(parentObj, parentLike.GetStatusConditions())
-	
+
 	if err := r.Status().Update(ctx, parentObj); err != nil {
 		return fmt.Errorf("failed to update parent Snapshot Ready=False: %w", err)
 	}
@@ -751,7 +750,7 @@ func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, child
 		// This handles cases where child snapshot type is not yet registered
 		logger := log.FromContext(ctx)
 		logger.V(1).Info("Child GVK not found in registry, trying registered GVKs", "kind", childRef.Kind)
-		
+
 		// Try to find a matching GVK by Kind
 		for _, gvk := range r.SnapshotGVKs {
 			if gvk.Kind == childRef.Kind {
@@ -759,7 +758,7 @@ func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, child
 				break
 			}
 		}
-		
+
 		// If still not found, return error
 		if childGVK.Kind == "" {
 			return false, fmt.Errorf("child Snapshot GVK not found for kind %s: %w", childRef.Kind, err)
@@ -798,17 +797,16 @@ func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
 	for _, gvk := range r.SnapshotGVKs {
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(gvk)
-		
+
 		// Create a controller builder for this specific GVK
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
-		
+
 		if err := builder.Complete(r); err != nil {
 			return fmt.Errorf("failed to setup watch for Snapshot GVK %s: %w", gvk.String(), err)
 		}
 	}
-	
+
 	return nil
 }
-

@@ -69,4 +69,3 @@ func RemoveFinalizer(obj metav1.Object, finalizer string) bool {
 	}
 	return false
 }
-

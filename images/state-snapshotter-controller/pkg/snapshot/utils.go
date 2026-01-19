@@ -347,12 +347,12 @@ func (w *unstructuredSnapshotWrapper) SetStatusConditions(conditions []metav1.Co
 	conditionsRaw := make([]interface{}, len(conditions))
 	for i, cond := range conditions {
 		conditionsRaw[i] = map[string]interface{}{
-			"type":                 cond.Type,
-			"status":               string(cond.Status),
-			"reason":               cond.Reason,
-			"message":               cond.Message,
-			"observedGeneration":    cond.ObservedGeneration,
-			"lastTransitionTime":    cond.LastTransitionTime.Format(time.RFC3339),
+			"type":               cond.Type,
+			"status":             string(cond.Status),
+			"reason":             cond.Reason,
+			"message":            cond.Message,
+			"observedGeneration": cond.ObservedGeneration,
+			"lastTransitionTime": cond.LastTransitionTime.Format(time.RFC3339),
 		}
 	}
 	status["conditions"] = conditionsRaw
@@ -656,12 +656,12 @@ func (w *unstructuredSnapshotContentWrapper) SetStatusConditions(conditions []me
 	conditionsRaw := make([]interface{}, len(conditions))
 	for i, cond := range conditions {
 		conditionsRaw[i] = map[string]interface{}{
-			"type":                 cond.Type,
-			"status":               string(cond.Status),
-			"reason":               cond.Reason,
-			"message":               cond.Message,
-			"observedGeneration":    cond.ObservedGeneration,
-			"lastTransitionTime":    cond.LastTransitionTime.Format(time.RFC3339),
+			"type":               cond.Type,
+			"status":             string(cond.Status),
+			"reason":             cond.Reason,
+			"message":            cond.Message,
+			"observedGeneration": cond.ObservedGeneration,
+			"lastTransitionTime": cond.LastTransitionTime.Format(time.RFC3339),
 		}
 	}
 	status["conditions"] = conditionsRaw
@@ -718,4 +718,3 @@ func IsRootSnapshot(obj metav1.Object) bool {
 	}
 	return true
 }
-

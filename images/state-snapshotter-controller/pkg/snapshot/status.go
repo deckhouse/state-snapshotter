@@ -51,4 +51,3 @@ func SyncConditionsToUnstructured(obj *unstructured.Unstructured, conditions []m
 	}
 	statusMap["conditions"] = conditionsRaw
 }
-

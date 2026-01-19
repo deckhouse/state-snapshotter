@@ -78,7 +78,7 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 	// - See GLOBAL INVARIANTS G7 (Finalizer protects against manual deletion)
 
 	var (
-		ctx          context.Context
+		ctx         context.Context
 		snapshotGVK schema.GroupVersionKind
 		contentGVK  schema.GroupVersionKind
 	)
@@ -248,4 +248,3 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 		})
 	})
 })
-

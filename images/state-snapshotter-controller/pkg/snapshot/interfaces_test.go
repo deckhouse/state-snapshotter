@@ -29,13 +29,13 @@ import (
 type testSnapshotLike struct {
 	metav1.ObjectMeta
 	specSnapshotRef              *ObjectRef
-	statusContentName             string
-	statusManifestCaptureRequest  string
-	statusVolumeCaptureRequest    string
-	statusChildrenSnapshotRefs    []ObjectRef
-	statusConditions              []metav1.Condition
-	statusDataConsistency         string
-	statusDataSnapshotMethod      string
+	statusContentName            string
+	statusManifestCaptureRequest string
+	statusVolumeCaptureRequest   string
+	statusChildrenSnapshotRefs   []ObjectRef
+	statusConditions             []metav1.Condition
+	statusDataConsistency        string
+	statusDataSnapshotMethod     string
 	isNamespaced                 bool
 }
 
@@ -93,13 +93,13 @@ func (t *testSnapshotLike) IsNamespaced() bool {
 // testSnapshotContentLike is a test implementation of SnapshotContentLike with mutable state for purity testing
 type testSnapshotContentLike struct {
 	metav1.ObjectMeta
-	specSnapshotRef                    *ObjectRef
-	statusManifestCheckpointName       string
-	statusDataRef                      *ObjectRef
-	statusChildrenSnapshotContentRefs  []ObjectRef
-	statusConditions                   []metav1.Condition
-	statusDataConsistency              string
-	statusDataSnapshotMethod           string
+	specSnapshotRef                   *ObjectRef
+	statusManifestCheckpointName      string
+	statusDataRef                     *ObjectRef
+	statusChildrenSnapshotContentRefs []ObjectRef
+	statusConditions                  []metav1.Condition
+	statusDataConsistency             string
+	statusDataSnapshotMethod          string
 }
 
 func (t *testSnapshotContentLike) GetObjectKind() schema.ObjectKind {
@@ -155,15 +155,16 @@ func (t *testSnapshotContentLike) GetStatusDataSnapshotMethod() string {
 // ACTIONS:
 // 1. Record initial state (conditions, refs, etc.)
 // 2. Call all getter methods multiple times:
-//    - GetSpecSnapshotRef()
-//    - GetStatusContentName()
-//    - GetStatusChildrenSnapshotRefs()
-//    - GetStatusConditions()
-//    - GetStatusManifestCaptureRequestName()
-//    - GetStatusVolumeCaptureRequestName()
-//    - GetStatusDataConsistency()
-//    - GetStatusDataSnapshotMethod()
-//    - IsNamespaced()
+//   - GetSpecSnapshotRef()
+//   - GetStatusContentName()
+//   - GetStatusChildrenSnapshotRefs()
+//   - GetStatusConditions()
+//   - GetStatusManifestCaptureRequestName()
+//   - GetStatusVolumeCaptureRequestName()
+//   - GetStatusDataConsistency()
+//   - GetStatusDataSnapshotMethod()
+//   - IsNamespaced()
+//
 // 3. Record final state
 //
 // EXPECTED BEHAVIOR:
@@ -204,9 +205,9 @@ func TestSnapshotLike_GettersArePure(t *testing.T) {
 		statusManifestCaptureRequest: "test-mcr",
 		statusVolumeCaptureRequest:   "test-vcr",
 		statusChildrenSnapshotRefs:   initialChildrenRefs,
-		statusConditions:              initialConditions,
+		statusConditions:             initialConditions,
 		statusDataConsistency:        "ApplicationConsistent",
-		statusDataSnapshotMethod:      "VolumeSnapshot",
+		statusDataSnapshotMethod:     "VolumeSnapshot",
 		isNamespaced:                 true,
 	}
 
@@ -327,13 +328,14 @@ func TestSnapshotLike_GettersArePure(t *testing.T) {
 // ACTIONS:
 // 1. Record initial state (conditions, refs, etc.)
 // 2. Call all getter methods multiple times:
-//    - GetSpecSnapshotRef()
-//    - GetStatusManifestCheckpointName()
-//    - GetStatusDataRef()
-//    - GetStatusChildrenSnapshotContentRefs()
-//    - GetStatusConditions()
-//    - GetStatusDataConsistency()
-//    - GetStatusDataSnapshotMethod()
+//   - GetSpecSnapshotRef()
+//   - GetStatusManifestCheckpointName()
+//   - GetStatusDataRef()
+//   - GetStatusChildrenSnapshotContentRefs()
+//   - GetStatusConditions()
+//   - GetStatusDataConsistency()
+//   - GetStatusDataSnapshotMethod()
+//
 // 3. Record final state
 //
 // EXPECTED BEHAVIOR:
@@ -483,7 +485,7 @@ func TestSnapshotLike_GettersHandleNilAndEmpty(t *testing.T) {
 			Name: "test-snapshot",
 		},
 		specSnapshotRef:              nil, // nil ref
-		statusContentName:            "",   // empty string
+		statusContentName:            "",  // empty string
 		statusManifestCaptureRequest: "",
 		statusVolumeCaptureRequest:   "",
 		statusChildrenSnapshotRefs:   nil, // nil slice
@@ -562,4 +564,3 @@ func TestSnapshotContentLike_GettersHandleNilAndEmpty(t *testing.T) {
 		}
 	}
 }
-

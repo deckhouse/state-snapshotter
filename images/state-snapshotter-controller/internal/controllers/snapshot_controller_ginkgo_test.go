@@ -1,3 +1,6 @@
+//go:build unit_ginkgo
+// +build unit_ginkgo
+
 /*
 Copyright 2025 Flant JSC
 
@@ -12,6 +15,10 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+NOTE: This test suite is disabled by default (build tag unit_ginkgo).
+The functionality is covered by integration tests in test/integration/.
+To run this suite, use: go test -tags unit_ginkgo ./internal/controllers
 */
 
 package controllers
@@ -29,16 +36,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// TestSnapshotControllerGinkgo is the single entry point for all Ginkgo tests
+// TestSnapshotControllerGinkgo is the entry point for SnapshotController Ginkgo tests
+// This suite is only compiled when build tag unit_ginkgo is set.
+// By default, this file is excluded from builds to avoid confusion.
+// Functionality is covered by integration tests in test/integration/.
 func TestSnapshotControllerGinkgo(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "SnapshotController Suite")
@@ -49,8 +59,8 @@ func TestSnapshotControllerGinkgo(t *testing.T) {
 type contentCaptureClient struct {
 	client.Client
 	capturedContent **unstructured.Unstructured
-	backupClass      *unstructured.Unstructured
-	snapshotObj      *unstructured.Unstructured
+	backupClass     *unstructured.Unstructured
+	snapshotObj     *unstructured.Unstructured
 }
 
 func (c *contentCaptureClient) Status() client.StatusWriter {
@@ -108,13 +118,11 @@ func (c *contentCaptureClient) Get(ctx context.Context, key client.ObjectKey, ob
 
 var _ = Describe("SnapshotController - SnapshotContent Creation", func() {
 	var (
-		ctx          context.Context
-		k8sClient    client.Client
-		scheme       *runtime.Scheme
-		testCfg      *config.Options
-		snapshotGVK  schema.GroupVersionKind
-		contentGVK   schema.GroupVersionKind
-		controller   *SnapshotController
+		ctx         context.Context
+		k8sClient   client.Client
+		scheme      *runtime.Scheme
+		testCfg     *config.Options
+		snapshotGVK schema.GroupVersionKind
 	)
 
 	BeforeEach(func() {
@@ -135,11 +143,6 @@ var _ = Describe("SnapshotController - SnapshotContent Creation", func() {
 			Group:   "test.deckhouse.io",
 			Version: "v1alpha1",
 			Kind:    "TestSnapshot",
-		}
-		contentGVK = schema.GroupVersionKind{
-			Group:   "test.deckhouse.io",
-			Version: "v1alpha1",
-			Kind:    "TestSnapshotContent",
 		}
 
 		// Setup fake client
@@ -241,13 +244,13 @@ var _ = Describe("SnapshotController - SnapshotContent Creation", func() {
 
 			// EXPECTED BEHAVIOR: SnapshotContent should be created with snapshotRef.kind set
 			Expect(createdContent).NotTo(BeNil(), "SnapshotContent should be created via Create call")
-			
+
 			// Verify snapshotRef.kind is set
 			spec, ok := createdContent.Object["spec"].(map[string]interface{})
 			Expect(ok).To(BeTrue(), "SnapshotContent should have spec")
 			snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
 			Expect(ok).To(BeTrue(), "SnapshotContent should have snapshotRef")
-			
+
 			kind, ok := snapshotRef["kind"].(string)
 			Expect(ok).To(BeTrue(), "snapshotRef.kind should be set")
 			Expect(kind).To(Equal("TestSnapshot"), "snapshotRef.kind should match Snapshot Kind")
@@ -255,89 +258,5 @@ var _ = Describe("SnapshotController - SnapshotContent Creation", func() {
 			Expect(snapshotRef["namespace"]).To(Equal("default"), "snapshotRef.namespace should match Snapshot namespace")
 		})
 
-		It("should set snapshotRef.kind even when Snapshot Kind is determined from object", func() {
-			Skip("This test requires full CRD support in fake client - covered by integration tests")
-			// PRECONDITION: Create BackupClass
-			backupClass := &unstructured.Unstructured{}
-			backupClass.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "storage.deckhouse.io",
-				Version: "v1alpha1",
-				Kind:    "BackupClass",
-			})
-			backupClass.SetName("test-backup-class")
-			backupClass.Object["spec"] = map[string]interface{}{
-				"backupRepositoryName": "test-repository",
-				"deletionPolicy":       "Retain",
-			}
-			Expect(k8sClient.Create(ctx, backupClass)).To(Succeed())
-
-			// PRECONDITION: Create Snapshot with Kind in object (not in GVK)
-			snapshotObj := &unstructured.Unstructured{}
-			// Initialize Object map first
-			snapshotObj.Object = make(map[string]interface{})
-			// Don't set GVK, set Kind in object directly
-			snapshotObj.Object["kind"] = "TestSnapshot"
-			snapshotObj.Object["apiVersion"] = "test.deckhouse.io/v1alpha1"
-			snapshotObj.SetName("test-snapshot-fallback")
-			snapshotObj.SetNamespace("default")
-			snapshotObj.SetUID(types.UID("test-uid-67890"))
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
-
-			// Set HandledByDomainSpecificController condition
-			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
-			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
-
-			Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
-			Expect(k8sClient.Status().Update(ctx, snapshotObj)).To(Succeed())
-
-			// Create controller
-			controller, err = NewSnapshotController(
-				k8sClient,
-				k8sClient,
-				scheme,
-				testCfg,
-				[]schema.GroupVersionKind{snapshotGVK},
-			)
-			Expect(err).NotTo(HaveOccurred())
-
-			// ACTIONS: Trigger reconciliation
-			req := ctrl.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      snapshotObj.GetName(),
-					Namespace: snapshotObj.GetNamespace(),
-				},
-			}
-
-			_, err = controller.Reconcile(ctx, req)
-			Expect(err).NotTo(HaveOccurred())
-
-			// EXPECTED BEHAVIOR: SnapshotContent should be created with snapshotRef.kind set
-			contentName := snapshot.GenerateSnapshotContentName(snapshotObj.GetName(), string(snapshotObj.GetUID()))
-			contentObj := &unstructured.Unstructured{}
-			contentObj.SetGroupVersionKind(contentGVK)
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, contentObj)
-			Expect(err).NotTo(HaveOccurred(), "SnapshotContent should be created")
-
-			// Verify snapshotRef.kind is set
-			spec, ok := contentObj.Object["spec"].(map[string]interface{})
-			Expect(ok).To(BeTrue(), "SnapshotContent should have spec")
-			snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
-			Expect(ok).To(BeTrue(), "SnapshotContent should have snapshotRef")
-			
-			kind, ok := snapshotRef["kind"].(string)
-			Expect(ok).To(BeTrue(), "snapshotRef.kind should be set")
-			Expect(kind).To(Equal("TestSnapshot"), "snapshotRef.kind should match Snapshot Kind")
-		})
 	})
 })
-
