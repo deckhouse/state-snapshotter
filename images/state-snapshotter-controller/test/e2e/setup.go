@@ -457,6 +457,7 @@ var _ = BeforeSuite(func() {
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetScheme(),
+		mgr.GetRESTMapper(),
 		cfgOptions,
 		[]schema.GroupVersionKind{contentGVK},
 	)
@@ -511,17 +512,18 @@ var _ = BeforeSuite(func() {
 
 	// Create default BackupClass for tests
 	backupClassObj := &unstructured.Unstructured{}
+	backupClassObj.Object = map[string]interface{}{
+		"spec": map[string]interface{}{
+			"backupRepositoryName": "test-repository",
+			"deletionPolicy":       "Retain",
+		},
+	}
 	backupClassObj.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "storage.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    "BackupClass",
 	})
 	backupClassObj.SetName("test-backup-class")
-	backupClassObj.Object = make(map[string]interface{})
-	backupClassObj.Object["spec"] = map[string]interface{}{
-		"backupRepositoryName": "test-repository",
-		"deletionPolicy":       "Retain",
-	}
 	err = k8sClient.Create(testCtx, backupClassObj)
 	if err != nil && !errors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred())

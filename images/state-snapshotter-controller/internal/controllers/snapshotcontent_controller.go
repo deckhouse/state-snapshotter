@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,6 +53,9 @@ type SnapshotContentController struct {
 	APIReader client.Reader // Required: for reading resources directly from API server
 	Scheme    *runtime.Scheme
 	Config    *config.Options
+	RESTMapper meta.RESTMapper
+	clusterGVKs   []schema.GroupVersionKind
+	namespacedGVKs []schema.GroupVersionKind
 
 	// GVKRegistry provides centralized GVK resolution
 	GVKRegistry *snapshot.GVKRegistry
@@ -66,6 +70,7 @@ func NewSnapshotContentController(
 	client client.Client,
 	apiReader client.Reader,
 	scheme *runtime.Scheme,
+	restMapper meta.RESTMapper,
 	cfg *config.Options,
 	snapshotContentGVKs []schema.GroupVersionKind,
 ) (*SnapshotContentController, error) {
@@ -78,8 +83,25 @@ func NewSnapshotContentController(
 	if scheme == nil {
 		return nil, fmt.Errorf("Scheme must not be nil")
 	}
+	if restMapper == nil {
+		return nil, fmt.Errorf("RESTMapper must not be nil")
+	}
 	if cfg == nil {
 		return nil, fmt.Errorf("Config must not be nil")
+	}
+
+	var clusterGVKs []schema.GroupVersionKind
+	var namespacedGVKs []schema.GroupVersionKind
+	for _, gvk := range snapshotContentGVKs {
+		mapping, mapErr := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if mapErr != nil {
+			return nil, fmt.Errorf("failed to resolve GVK mapping for %s: %w", gvk.String(), mapErr)
+		}
+		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+			namespacedGVKs = append(namespacedGVKs, gvk)
+		} else {
+			clusterGVKs = append(clusterGVKs, gvk)
+		}
 	}
 
 	// Initialize GVK Registry and register known GVKs
@@ -105,6 +127,9 @@ func NewSnapshotContentController(
 		Client:              client,
 		APIReader:           apiReader,
 		Scheme:              scheme,
+		RESTMapper:          restMapper,
+		clusterGVKs:         clusterGVKs,
+		namespacedGVKs:      namespacedGVKs,
 		Config:              cfg,
 		GVKRegistry:         registry,
 		SnapshotContentGVKs: snapshotContentGVKs,
@@ -116,6 +141,10 @@ func NewSnapshotContentController(
 // Step 1 (Skeleton): Basic structure - no finalizers, no deletion, no consistency checks
 func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("snapshotcontent", req.Name, "reqNamespace", req.Namespace)
+	if req.Name == "" {
+		logger.V(1).Info("Skipping reconcile: empty name")
+		return ctrl.Result{}, nil
+	}
 
 	// Get the unstructured object
 	// ARCHITECTURAL NOTE: SnapshotContentController is instantiated per-GVK
@@ -124,13 +153,17 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Get the unstructured object
 	// We need to try each registered GVK to find the correct one
 	// SnapshotContent is cluster-scoped; use Name only (no namespace).
-	contentKey := client.ObjectKey{Name: req.Name}
+	contentKey := client.ObjectKey{Name: req.Name, Namespace: req.Namespace}
 	logger.Info("Reconciling SnapshotContent", "contentKeyNamespace", contentKey.Namespace)
 
 	obj := &unstructured.Unstructured{}
 	var found bool
 	var err error
-	for _, gvk := range r.SnapshotContentGVKs {
+	gvksToCheck := r.clusterGVKs
+	if contentKey.Namespace != "" {
+		gvksToCheck = r.namespacedGVKs
+	}
+	for _, gvk := range gvksToCheck {
 		obj.SetGroupVersionKind(gvk)
 		err = r.Get(ctx, contentKey, obj)
 		if err != nil {

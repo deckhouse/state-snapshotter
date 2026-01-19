@@ -119,6 +119,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
+				mgr.GetRESTMapper(),
 				testCfg,
 				[]schema.GroupVersionKind{contentGVK},
 			)
@@ -291,6 +292,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
+				mgr.GetRESTMapper(),
 				testCfg,
 				[]schema.GroupVersionKind{contentGVK},
 			)

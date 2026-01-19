@@ -226,6 +226,7 @@ func main() {
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetScheme(),
+		mgr.GetRESTMapper(),
 		cfgParams,
 		snapshotContentGVKs,
 	)

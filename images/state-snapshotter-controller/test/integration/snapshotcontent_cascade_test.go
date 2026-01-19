@@ -200,6 +200,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
+				mgr.GetRESTMapper(),
 				testCfg,
 				[]schema.GroupVersionKind{contentGVK},
 			)

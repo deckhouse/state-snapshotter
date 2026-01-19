@@ -90,6 +90,7 @@ var _ = Describe("Integration: Controller Registration", func() {
 			k8sClient,
 			mgr.GetAPIReader(),
 			scheme,
+			mgr.GetRESTMapper(),
 			testCfg,
 			snapshotContentGVKs,
 		)

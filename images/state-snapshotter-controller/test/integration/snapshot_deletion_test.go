@@ -140,6 +140,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
+				mgr.GetRESTMapper(),
 				testCfg,
 				[]schema.GroupVersionKind{contentGVK},
 			)

@@ -269,15 +269,10 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		// Set spec.snapshotRef
 		// CRD requires: name, namespace
-		// snapshotRef.kind is optional in CRD but SHOULD be set for new objects (per ADR)
-		// This avoids fallback logic in SnapshotContentController and makes the link explicit
+		// NOTE: snapshotRef.kind is intentionally omitted to avoid CRD schema warnings.
 		snapshotRef := map[string]interface{}{
 			"name":      obj.GetName(),
 			"namespace": obj.GetNamespace(),
-		}
-		// Set kind explicitly to avoid legacy format warnings
-		if snapshotGVK.Kind != "" {
-			snapshotRef["kind"] = snapshotGVK.Kind
 		}
 		spec := map[string]interface{}{
 			"snapshotRef": snapshotRef,

@@ -307,12 +307,161 @@ var _ = BeforeSuite(func() {
 		},
 	}
 
+	// RegistrationTestSnapshot and RegistrationTestSnapshotContent for controller registration tests
+	registrationSnapshotCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "registrationtestsnapshots.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"backupClassName": {Type: "string"},
+									},
+								},
+								"status": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"boundSnapshotContentName": {Type: "string"},
+										"conditions": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+				},
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "registrationtestsnapshots",
+				Singular: "registrationtestsnapshot",
+				Kind:     "RegistrationTestSnapshot",
+			},
+		},
+	}
+
+	registrationSnapshotContentCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "registrationtestsnapshotcontents.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"snapshotRef": {
+											Type: "object",
+											Properties: map[string]apiextensionsv1.JSONSchemaProps{
+												"kind":      {Type: "string"},
+												"name":      {Type: "string"},
+												"namespace": {Type: "string"},
+											},
+										},
+									},
+								},
+								"status": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"conditions": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
+												},
+											},
+										},
+										"childrenSnapshotContentRefs": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"kind": {Type: "string"},
+														"name": {Type: "string"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+				},
+			},
+			Scope: apiextensionsv1.ClusterScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "registrationtestsnapshotcontents",
+				Singular: "registrationtestsnapshotcontent",
+				Kind:     "RegistrationTestSnapshotContent",
+			},
+		},
+	}
+
 	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, testSnapshotCRD, metav1.CreateOptions{})
 	if err != nil && !errors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
 	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, testSnapshotContentCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, registrationSnapshotCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, registrationSnapshotContentCRD, metav1.CreateOptions{})
 	if err != nil && !errors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -378,6 +527,14 @@ var _ = BeforeSuite(func() {
 		if err != nil {
 			return false
 		}
+		regSnapshotCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "registrationtestsnapshots.test.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		regContentCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "registrationtestsnapshotcontents.test.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
 		backupClassCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "backupclasses.storage.deckhouse.io", metav1.GetOptions{})
 		if err != nil {
 			return false
@@ -387,9 +544,17 @@ var _ = BeforeSuite(func() {
 			if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
 				for _, condition := range contentCRD.Status.Conditions {
 					if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-						for _, condition := range backupClassCRD.Status.Conditions {
+						for _, condition := range regSnapshotCRD.Status.Conditions {
 							if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-								return true
+								for _, condition := range regContentCRD.Status.Conditions {
+									if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+										for _, condition := range backupClassCRD.Status.Conditions {
+											if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+												return true
+											}
+										}
+									}
+								}
 							}
 						}
 					}
@@ -432,6 +597,18 @@ var _ = BeforeSuite(func() {
 	Eventually(func() bool {
 		return mgr.GetCache().WaitForCacheSync(ctx)
 	}).Should(BeTrue())
+
+	// Wait for RESTMapper to discover test GVKs (avoid discovery race)
+	waitForMapping := func(gvk schema.GroupVersionKind) error {
+		_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+		return err
+	}
+	Eventually(func() error {
+		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshotContent"})
+	}).Should(Succeed(), "RESTMapper should discover TestSnapshotContent")
+	Eventually(func() error {
+		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshotContent"})
+	}).Should(Succeed(), "RESTMapper should discover RegistrationTestSnapshotContent")
 
 	// Create default BackupClass for tests (after client is ready)
 	backupClassObj := &unstructured.Unstructured{}
