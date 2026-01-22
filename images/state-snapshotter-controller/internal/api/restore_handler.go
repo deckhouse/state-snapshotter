@@ -3,11 +3,12 @@ package api
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -35,7 +36,7 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 		// Extract path after /apis/.../v1alpha1/namespaces/
 		path := strings.TrimPrefix(r.URL.Path, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/")
 		parts := strings.Split(path, "/")
-		if len(parts) < 3 || parts[1] != "snapshots" {
+		if len(parts) < 2 || parts[1] != "snapshots" {
 			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
 			return
 		}
@@ -130,19 +131,15 @@ func (h *RestoreHandler) writeRestoreError(w http.ResponseWriter, err error) {
 	reason := "InternalError"
 	message := err.Error()
 
-	if errors.IsNotFound(err) {
-		status = http.StatusNotFound
-		reason = "NotFound"
-	} else if strings.Contains(err.Error(), "not ready") ||
-		strings.Contains(err.Error(), "manifestCheckpointName") ||
-		strings.Contains(err.Error(), "dataRef") ||
-		strings.Contains(err.Error(), "child SnapshotContent") ||
-		strings.Contains(err.Error(), "multiple SnapshotContent") {
-		status = http.StatusConflict
-		reason = "Conflict"
-	} else if strings.Contains(err.Error(), "restoreStrategy") {
+	if errors.Is(err, restore.ErrBadRequest) {
 		status = http.StatusBadRequest
 		reason = "BadRequest"
+	} else if errors.Is(err, restore.ErrNotFound) || apierrors.IsNotFound(err) {
+		status = http.StatusNotFound
+		reason = "NotFound"
+	} else if errors.Is(err, restore.ErrNotReady) || errors.Is(err, restore.ErrContractViolation) {
+		status = http.StatusConflict
+		reason = "Conflict"
 	}
 
 	h.writeKubernetesErrorResponse(w, status, reason, message)

@@ -28,6 +28,9 @@ func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService
 }
 
 func (s *Service) BuildManifestsWithDataRestoration(ctx context.Context, opts Options) ([]byte, error) {
+	if opts.TargetNamespace != "" && opts.TargetNamespace != opts.SnapshotNamespace {
+		return nil, fmt.Errorf("%w: targetNamespace differs from snapshot namespace (MVP limitation)", ErrBadRequest)
+	}
 	root, err := s.resolver.ResolveSnapshotTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
 	if err != nil {
 		return nil, err
@@ -42,6 +45,9 @@ func (s *Service) BuildManifestsWithDataRestoration(ctx context.Context, opts Op
 }
 
 func (s *Service) BuildManifests(ctx context.Context, opts Options) ([]byte, error) {
+	if opts.TargetNamespace != "" && opts.TargetNamespace != opts.SnapshotNamespace {
+		return nil, fmt.Errorf("%w: targetNamespace differs from snapshot namespace (MVP limitation)", ErrBadRequest)
+	}
 	root, err := s.resolver.ResolveSnapshotTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
 	if err != nil {
 		return nil, err
@@ -92,9 +98,20 @@ func (s *Service) collectRawManifests(ctx context.Context, node *SnapshotContent
 }
 
 func marshalObjects(objects []unstructured.Unstructured) ([]byte, error) {
+	seen := make(map[string]struct{})
 	raw := make([]map[string]interface{}, 0, len(objects))
 	for i := range objects {
-		raw = append(raw, objects[i].Object)
+		obj := objects[i]
+		namespace := obj.GetNamespace()
+		if namespace == "" {
+			namespace = "_cluster"
+		}
+		key := fmt.Sprintf("%s|%s|%s|%s", obj.GetAPIVersion(), obj.GetKind(), namespace, obj.GetName())
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("%w: duplicate object %s", ErrContractViolation, key)
+		}
+		seen[key] = struct{}{}
+		raw = append(raw, obj.Object)
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {

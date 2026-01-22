@@ -122,8 +122,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 func mTLSMiddleware(next http.Handler, logger logger.LoggerInterface, allowedCNs []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip health check endpoints (for in-cluster probes)
-		if r.URL.Path == "/healthz" || r.URL.Path == "/livez" ||
-			r.URL.Path == "/readyz" || r.URL.Path == "/health" || r.URL.Path == "/ready" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/livez" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -219,7 +218,7 @@ func loggingMiddleware(next http.Handler, logger logger.LoggerInterface) http.Ha
 
 		// Skip logging for health check endpoints and API discovery endpoints
 		// /openapi/v2, /openapi/v3, /apis are normal discovery requests from kube-apiserver
-		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/livez" ||
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/livez" ||
 			r.URL.Path == "/openapi/v2" || r.URL.Path == "/openapi/v3" || r.URL.Path == "/apis" {
 			return
 		}

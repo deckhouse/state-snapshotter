@@ -3,10 +3,11 @@ package restore
 import (
 	"context"
 	"fmt"
-	"strings"
+	"sort"
 
-	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,97 +24,102 @@ func NewResolver(client client.Client) *Resolver {
 }
 
 func (r *Resolver) ResolveSnapshotTree(ctx context.Context, snapshotNamespace, snapshotName string) (*SnapshotContentNode, error) {
-	contentGVKs, contentGVKByKind, err := r.listSnapshotContentGVKs(ctx)
-	if err != nil {
-		return nil, err
+	snapshotGVK := schema.GroupVersionKind{
+		Group:   "state-snapshotter.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "Snapshot",
 	}
-
-	rootContent, err := r.findRootContent(ctx, contentGVKs, snapshotNamespace, snapshotName)
-	if err != nil {
-		return nil, err
-	}
-
-	return r.buildTree(ctx, contentGVKByKind, rootContent)
-}
-
-func (r *Resolver) listSnapshotContentGVKs(ctx context.Context) ([]schema.GroupVersionKind, map[string]schema.GroupVersionKind, error) {
-	crdList := &extv1.CustomResourceDefinitionList{}
-	if err := r.client.List(ctx, crdList); err != nil {
-		return nil, nil, fmt.Errorf("failed to list CRDs: %w", err)
-	}
-
-	var gvks []schema.GroupVersionKind
-	byKind := make(map[string]schema.GroupVersionKind)
-	for _, crd := range crdList.Items {
-		if !strings.HasSuffix(crd.Spec.Names.Kind, "SnapshotContent") {
-			continue
+	snapshotObj := &unstructured.Unstructured{}
+	snapshotObj.SetGroupVersionKind(snapshotGVK)
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: snapshotNamespace, Name: snapshotName}, snapshotObj); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: snapshot %s/%s", ErrNotFound, snapshotNamespace, snapshotName)
 		}
-		var servedVersion string
-		for _, version := range crd.Spec.Versions {
-			if version.Served {
-				servedVersion = version.Name
-				break
+		return nil, fmt.Errorf("failed to get snapshot %s/%s: %w", snapshotNamespace, snapshotName, err)
+	}
+	if err := ensureSnapshotReady(snapshotObj); err != nil {
+		return nil, err
+	}
+
+	snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+	if err != nil {
+		return nil, err
+	}
+
+	contentGVK := schema.GroupVersionKind{
+		Group:   snapshotGVK.Group,
+		Version: snapshotGVK.Version,
+		Kind:    snapshotGVK.Kind + "Content",
+	}
+
+	boundName := snapshotLike.GetStatusContentName()
+	if boundName != "" {
+		rootContent := &unstructured.Unstructured{}
+		rootContent.SetGroupVersionKind(contentGVK)
+		if err := r.client.Get(ctx, client.ObjectKey{Name: boundName}, rootContent); err != nil {
+			if errors.IsNotFound(err) {
+				return nil, fmt.Errorf("%w: bound SnapshotContent %s not found", ErrContractViolation, boundName)
 			}
+			return nil, fmt.Errorf("failed to get bound SnapshotContent %s: %w", boundName, err)
 		}
-		if servedVersion == "" {
-			continue
+		if err := ensureReady(rootContent); err != nil {
+			return nil, err
 		}
-		gvk := schema.GroupVersionKind{
-			Group:   crd.Spec.Group,
-			Version: servedVersion,
-			Kind:    crd.Spec.Names.Kind,
-		}
-		gvks = append(gvks, gvk)
-		byKind[gvk.Kind] = gvk
+		return r.buildTree(ctx, contentGVK, rootContent)
 	}
 
-	if len(gvks) == 0 {
-		return nil, nil, fmt.Errorf("no SnapshotContent CRDs found")
+	rootContent, err := r.findRootContentBySnapshotRef(ctx, contentGVK, snapshotNamespace, snapshotName)
+	if err != nil {
+		return nil, err
 	}
-	return gvks, byKind, nil
+	return r.buildTree(ctx, contentGVK, rootContent)
 }
 
-func (r *Resolver) findRootContent(ctx context.Context, gvks []schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*unstructured.Unstructured, error) {
+func (r *Resolver) findRootContentBySnapshotRef(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*unstructured.Unstructured, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   gvk.Group,
+		Version: gvk.Version,
+		Kind:    gvk.Kind + "List",
+	})
+	if err := r.client.List(ctx, list); err != nil {
+		return nil, fmt.Errorf("failed to list %s: %w", gvk.String(), err)
+	}
+
 	var matches []*unstructured.Unstructured
-	for _, gvk := range gvks {
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(gvk)
-		if err := r.client.List(ctx, list); err != nil {
-			return nil, fmt.Errorf("failed to list %s: %w", gvk.String(), err)
+	for i := range list.Items {
+		item := &list.Items[i]
+		contentLike, err := snapshot.ExtractSnapshotContentLike(item)
+		if err != nil {
+			continue
 		}
-
-		for i := range list.Items {
-			item := &list.Items[i]
-			contentLike, err := snapshot.ExtractSnapshotContentLike(item)
-			if err != nil {
-				continue
-			}
-			ref := contentLike.GetSpecSnapshotRef()
-			if ref == nil {
-				continue
-			}
-			if ref.Name == snapshotName && ref.Namespace == snapshotNamespace {
-				matches = append(matches, item)
-			}
+		ref := contentLike.GetSpecSnapshotRef()
+		if ref == nil {
+			continue
+		}
+		if ref.Name == snapshotName && ref.Namespace == snapshotNamespace {
+			matches = append(matches, item)
 		}
 	}
-
 	if len(matches) == 0 {
-		return nil, errors.NewNotFound(schema.GroupResource{Group: "subresources.state-snapshotter.deckhouse.io", Resource: "snapshots"}, snapshotName)
+		return nil, fmt.Errorf("%w: SnapshotContent not found for snapshot %s/%s", ErrNotReady, snapshotNamespace, snapshotName)
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("multiple SnapshotContent objects found for snapshot %s/%s", snapshotNamespace, snapshotName)
+		return nil, fmt.Errorf("%w: multiple SnapshotContent objects found for snapshot %s/%s", ErrContractViolation, snapshotNamespace, snapshotName)
+	}
+	if err := ensureReady(matches[0]); err != nil {
+		return nil, err
 	}
 	return matches[0], nil
 }
 
-func (r *Resolver) buildTree(ctx context.Context, gvkByKind map[string]schema.GroupVersionKind, root *unstructured.Unstructured) (*SnapshotContentNode, error) {
+func (r *Resolver) buildTree(ctx context.Context, contentGVK schema.GroupVersionKind, root *unstructured.Unstructured) (*SnapshotContentNode, error) {
 	contentLike, err := snapshot.ExtractSnapshotContentLike(root)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse SnapshotContent: %w", err)
+		return nil, fmt.Errorf("%w: failed to parse SnapshotContent", ErrContractViolation)
 	}
 	if contentLike.GetStatusManifestCheckpointName() == "" {
-		return nil, fmt.Errorf("manifestCheckpointName is empty for SnapshotContent %s", root.GetName())
+		return nil, fmt.Errorf("%w: manifestCheckpointName is empty for SnapshotContent %s", ErrContractViolation, root.GetName())
 	}
 
 	node := &SnapshotContentNode{
@@ -126,21 +132,59 @@ func (r *Resolver) buildTree(ctx context.Context, gvkByKind map[string]schema.Gr
 	}
 
 	children := contentLike.GetStatusChildrenSnapshotContentRefs()
+	sort.Slice(children, func(i, j int) bool {
+		if children[i].Kind == children[j].Kind {
+			return children[i].Name < children[j].Name
+		}
+		return children[i].Kind < children[j].Kind
+	})
 	for _, child := range children {
-		gvk, ok := gvkByKind[child.Kind]
-		if !ok {
-			return nil, fmt.Errorf("child SnapshotContent kind not found in registry: %s", child.Kind)
+		gvk := contentGVK
+		if child.Kind != "" && child.Kind != contentGVK.Kind {
+			return nil, fmt.Errorf("%w: child SnapshotContent kind mismatch: %s", ErrContractViolation, child.Kind)
 		}
 		childObj := &unstructured.Unstructured{}
 		childObj.SetGroupVersionKind(gvk)
 		if err := r.client.Get(ctx, client.ObjectKey{Name: child.Name}, childObj); err != nil {
-			return nil, fmt.Errorf("child SnapshotContent %s not found: %w", child.Name, err)
+			return nil, fmt.Errorf("%w: child SnapshotContent %s not found", ErrContractViolation, child.Name)
 		}
-		childNode, err := r.buildTree(ctx, gvkByKind, childObj)
+		if err := ensureReady(childObj); err != nil {
+			return nil, err
+		}
+		childNode, err := r.buildTree(ctx, contentGVK, childObj)
 		if err != nil {
 			return nil, err
 		}
 		node.Children = append(node.Children, childNode)
 	}
 	return node, nil
+}
+
+func ensureReady(obj *unstructured.Unstructured) error {
+	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
+	if err != nil {
+		return fmt.Errorf("%w: failed to parse SnapshotContent", ErrContractViolation)
+	}
+	conditions := contentLike.GetStatusConditions()
+	ready := meta.FindStatusCondition(conditions, "Ready")
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return fmt.Errorf("%w: SnapshotContent %s is not Ready", ErrNotReady, obj.GetName())
+	}
+	return nil
+}
+
+func ensureSnapshotReady(snapshotObj *unstructured.Unstructured) error {
+	snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+	if err != nil {
+		return fmt.Errorf("%w: failed to parse Snapshot", ErrContractViolation)
+	}
+	conditions := snapshotLike.GetStatusConditions()
+	ready := meta.FindStatusCondition(conditions, "Ready")
+	if ready == nil {
+		return nil
+	}
+	if ready.Status != metav1.ConditionTrue {
+		return fmt.Errorf("%w: Snapshot %s is not Ready", ErrNotReady, snapshotObj.GetName())
+	}
+	return nil
 }

@@ -58,15 +58,23 @@ func buildVRR(pvc unstructured.Unstructured, node *SnapshotContentNode, opts Opt
 	uidSuffix := shortUID(node.Content.GetUID())
 	vrrName := fmt.Sprintf("restore-%s-%s", pvcName, uidSuffix)
 
+	metadata := map[string]interface{}{
+		"name": pvcName,
+	}
+	if labels := pvc.GetLabels(); len(labels) > 0 {
+		metadata["labels"] = labels
+	}
+	if annotations := pvc.GetAnnotations(); len(annotations) > 0 {
+		metadata["annotations"] = annotations
+	}
+
 	spec := map[string]interface{}{
 		"source": map[string]interface{}{
 			"kind": node.DataRefKind,
 			"name": node.DataRefName,
 		},
 		"pvcTemplate": map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"name": pvcName,
-			},
+			"metadata": metadata,
 			"spec": extractPVCSpec(pvc),
 		},
 	}
@@ -91,18 +99,12 @@ func extractPVCSpec(pvc unstructured.Unstructured) map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	result := map[string]interface{}{}
-	if val, ok := spec["accessModes"]; ok {
-		result["accessModes"] = val
+	for key, val := range spec {
+		result[key] = val
 	}
-	if val, ok := spec["resources"]; ok {
-		result["resources"] = val
-	}
-	if val, ok := spec["storageClassName"]; ok {
-		result["storageClassName"] = val
-	}
-	if val, ok := spec["volumeMode"]; ok {
-		result["volumeMode"] = val
-	}
+	delete(result, "volumeName")
+	delete(result, "dataSource")
+	delete(result, "dataSourceRef")
 	return result
 }
 
