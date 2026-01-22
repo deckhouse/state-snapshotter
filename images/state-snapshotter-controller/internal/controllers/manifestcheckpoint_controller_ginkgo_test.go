@@ -1489,8 +1489,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 
 			// Update message
-			err := reconciler.updateProcessingMessage(ctx, mcr, "New progress message")
-			Expect(err).NotTo(HaveOccurred())
+			reconciler.updateProcessingMessage(ctx, mcr, "New progress message")
 
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
@@ -1511,16 +1510,14 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 
 			// Update message multiple times
-			err := reconciler.updateProcessingMessage(ctx, mcr, "Step 1")
-			Expect(err).NotTo(HaveOccurred())
+			reconciler.updateProcessingMessage(ctx, mcr, "Step 1")
 
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 			cond1 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(cond1.LastTransitionTime.Unix()).To(Equal(initialTime.Unix()))
 
-			err = reconciler.updateProcessingMessage(ctx, updated, "Step 2")
-			Expect(err).NotTo(HaveOccurred())
+			reconciler.updateProcessingMessage(ctx, updated, "Step 2")
 
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
 			cond2 := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
@@ -1549,8 +1546,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 
 			// Try to update message - should do nothing
-			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
-			Expect(err).NotTo(HaveOccurred())
+			reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
 
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
@@ -1571,8 +1567,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 
 			// Try to update message - should do nothing
-			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
-			Expect(err).NotTo(HaveOccurred())
+			reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
 
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
@@ -1602,8 +1597,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 
 			// Try to update message - should do nothing
-			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
-			Expect(err).NotTo(HaveOccurred())
+			reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
 
 			updated := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), updated)).To(Succeed())
@@ -1631,8 +1625,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(k8sClient.Status().Update(ctx, updated)).To(Succeed())
 
 			// Try to update Processing message - should detect Completed and skip
-			err := reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
-			Expect(err).NotTo(HaveOccurred())
+			reconciler.updateProcessingMessage(ctx, mcr, "Should not update")
 
 			final := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), final)).To(Succeed())
@@ -1647,9 +1640,8 @@ var _ = Describe("Ready Condition Semantics", func() {
 			mcr := newProcessingMCR("not-found", "default")
 			// Don't create it in k8sClient
 
-			// Should not panic or return error
-			err := reconciler.updateProcessingMessage(ctx, mcr, "Test message")
-			Expect(err).NotTo(HaveOccurred())
+			// Should not panic
+			reconciler.updateProcessingMessage(ctx, mcr, "Test message")
 		})
 	})
 })
