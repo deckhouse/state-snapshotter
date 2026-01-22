@@ -32,7 +32,7 @@ func (m *mockObjectKind) GroupVersionKind() schema.GroupVersionKind {
 	return schema.GroupVersionKind{}
 }
 
-func (m *mockObjectKind) SetGroupVersionKind(gvk schema.GroupVersionKind) {}
+func (m *mockObjectKind) SetGroupVersionKind(_ schema.GroupVersionKind) {}
 
 // mockSnapshotLike is a test implementation of SnapshotLike interface
 type mockSnapshotLike struct {
@@ -46,8 +46,8 @@ func (m *mockSnapshotLike) GetObjectKind() schema.ObjectKind {
 
 func (m *mockSnapshotLike) DeepCopyObject() runtime.Object {
 	// Simple shallow copy for testing
-	copy := *m
-	return &copy
+	copied := *m
+	return &copied
 }
 
 func (m *mockSnapshotLike) GetSpecSnapshotRef() *ObjectRef {
@@ -102,8 +102,8 @@ func (m *mockSnapshotContentLike) GetObjectKind() schema.ObjectKind {
 
 func (m *mockSnapshotContentLike) DeepCopyObject() runtime.Object {
 	// Simple shallow copy for testing
-	copy := *m
-	return &copy
+	copied := *m
+	return &copied
 }
 
 func (m *mockSnapshotContentLike) GetSpecSnapshotRef() *ObjectRef {
@@ -493,14 +493,14 @@ func TestIsInProgress_ReturnsTrueOnlyWhenInProgressTrue(t *testing.T) {
 // - empty condition type
 // - multiple conditions
 func TestSetCondition_EdgeCases(t *testing.T) {
-	t.Run("Nil object", func(t *testing.T) {
+	t.Run("Nil object", func(_ *testing.T) {
 		// EXPECTED BEHAVIOR: no panic, no side effects
 		// Should handle nil gracefully without panicking
 		SetCondition(nil, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
 		// Test passes if no panic occurred
 	})
 
-	t.Run("Invalid object type", func(t *testing.T) {
+	t.Run("Invalid object type", func(_ *testing.T) {
 		// EXPECTED BEHAVIOR: no panic, no side effects
 		// Object that doesn't implement SnapshotLike or SnapshotContentLike
 		invalidObj := struct{ name string }{name: "test"}
@@ -667,7 +667,7 @@ func TestIsTerminal_ReturnsTrueOnlyWhenReadyTrueOrFalse(t *testing.T) {
 // - condition type that doesn't exist
 // - multiple conditions (should return correct one)
 func TestGetCondition_EdgeCases(t *testing.T) {
-	t.Run("Nil object", func(t *testing.T) {
+	t.Run("Nil object", func(_ *testing.T) {
 		// EXPECTED BEHAVIOR: return nil without panic
 		cond := GetCondition(nil, ConditionReady)
 		if cond != nil {
@@ -675,7 +675,7 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("Invalid object type", func(t *testing.T) {
+	t.Run("Invalid object type", func(_ *testing.T) {
 		// EXPECTED BEHAVIOR: return nil without panic
 		invalidObj := struct{ name string }{name: "test"}
 		cond := GetCondition(invalidObj, ConditionReady)
@@ -742,7 +742,7 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 // - condition exists but with different status
 // - condition exists with correct status
 func TestHasCondition_EdgeCases(t *testing.T) {
-	t.Run("Nil object", func(t *testing.T) {
+	t.Run("Nil object", func(_ *testing.T) {
 		// EXPECTED BEHAVIOR: return false without panic
 		has := HasCondition(nil, ConditionReady, metav1.ConditionTrue)
 		if has {
@@ -750,7 +750,7 @@ func TestHasCondition_EdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("Invalid object type", func(t *testing.T) {
+	t.Run("Invalid object type", func(_ *testing.T) {
 		// EXPECTED BEHAVIOR: return false without panic
 		invalidObj := struct{ name string }{name: "test"}
 		has := HasCondition(invalidObj, ConditionReady, metav1.ConditionTrue)

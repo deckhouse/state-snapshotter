@@ -40,7 +40,7 @@ func (t *Transformer) Transform(objects []unstructured.Unstructured, opts Option
 		if node.DataRefKind == "" || node.DataRefName == "" {
 			return TransformResult{}, fmt.Errorf("dataRef is required for PVC %s", obj.GetName())
 		}
-		vrr, err := buildVRR(obj, node, opts, targetNamespace)
+		vrr, err := buildVRR(obj, node, targetNamespace)
 		if err != nil {
 			return TransformResult{}, err
 		}
@@ -49,7 +49,7 @@ func (t *Transformer) Transform(objects []unstructured.Unstructured, opts Option
 	return TransformResult{Objects: output}, nil
 }
 
-func buildVRR(pvc unstructured.Unstructured, node *SnapshotContentNode, opts Options, targetNamespace string) (*unstructured.Unstructured, error) {
+func buildVRR(pvc unstructured.Unstructured, node *SnapshotContentNode, targetNamespace string) (*unstructured.Unstructured, error) {
 	pvcName := pvc.GetName()
 	if pvcName == "" {
 		return nil, fmt.Errorf("PVC name is empty")

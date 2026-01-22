@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -245,7 +245,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// BackupClass.spec.backupRepositoryName provides the repository
 		// BackupClass.spec.deletionPolicy provides the deletion policy (or default to "Retain")
 		var backupRepositoryName string
-		var deletionPolicy string = "Retain" // Default deletion policy
+		deletionPolicy := "Retain" // Default deletion policy
 		var backupClassName string
 
 		specObj, ok := obj.Object["spec"].(map[string]interface{})
@@ -559,7 +559,7 @@ func (r *SnapshotController) updateSnapshotStatus(ctx context.Context, obj *unst
 // contentName is optional - used only for updating ownerRef if ObjectKeeper already exists
 func (r *SnapshotController) ensureObjectKeeper(
 	ctx context.Context,
-	snapshotLike snapshot.SnapshotLike,
+	_ snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
 	contentName string,
 ) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
@@ -660,7 +660,7 @@ func (r *SnapshotController) ensureObjectKeeper(
 // This implements the tree consistency rule from deletion algorithm
 func (r *SnapshotController) propagateReadyFalseToParent(
 	ctx context.Context,
-	snapshotLike snapshot.SnapshotLike,
+	_ snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
 ) error {
 	logger := log.FromContext(ctx)
@@ -1019,7 +1019,7 @@ func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
 // This ensures SnapshotController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
 // Signature matches handler.MapFunc = TypedMapFunc[client.Object, reconcile.Request]
 // which is func(context.Context, client.Object) []reconcile.Request
-func (r *SnapshotController) mapSnapshotContentToSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
+func (r *SnapshotController) mapSnapshotContentToSnapshot(_ context.Context, obj client.Object) []reconcile.Request {
 	contentObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return nil

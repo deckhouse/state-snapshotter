@@ -273,7 +273,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
 	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
 	// Update Processing message to show progress
-	_ = r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
+	r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
 
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
@@ -457,7 +457,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			// Non-critical error, continue processing
 		}
 		// Update Processing message to show progress
-		_ = r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Created checkpoint %s, collecting objects...", checkpointName))
+		r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Created checkpoint %s, collecting objects...", checkpointName))
 	}
 
 	// NOW create chunks (checkpoint exists, so ownerRef will work)
@@ -467,7 +467,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"checkpointUID", checkpoint.UID,
 		"objects", len(objects))
 	// Update Processing message to show progress
-	_ = r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Creating chunks for checkpoint %s (%d objects)...", checkpointName, len(objects)))
+	r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Creating chunks for checkpoint %s (%d objects)...", checkpointName, len(objects)))
 	chunks, err := r.createChunks(ctx, checkpointName, string(checkpoint.UID), objects)
 	if err != nil {
 		r.Logger.Error(err, "❌ Step 3 failed: Failed to create chunks",
@@ -1191,11 +1191,11 @@ func (r *ManifestCheckpointController) updateProcessingMessage(
 	ctx context.Context,
 	mcr *storagev1alpha1.ManifestCaptureRequest,
 	message string,
-) error {
+) {
 	readyCondition := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 	if readyCondition == nil || readyCondition.Reason != storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
 		// Not in Processing state - nothing to update
-		return nil
+		return
 	}
 
 	// Update only message, preserve reason and LastTransitionTime
@@ -1230,9 +1230,9 @@ func (r *ManifestCheckpointController) updateProcessingMessage(
 	}); err != nil {
 		// Log but don't fail - progress updates are best-effort
 		r.Logger.Debug("Failed to update Processing message (non-critical)", "error", err)
-		return nil
+		return
 	}
-	return nil
+	return
 }
 
 // finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.

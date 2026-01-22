@@ -46,8 +46,8 @@ func (t *testSnapshotLike) GetObjectKind() schema.ObjectKind {
 }
 
 func (t *testSnapshotLike) DeepCopyObject() runtime.Object {
-	copy := *t
-	return &copy
+	copied := *t
+	return &copied
 }
 
 func (t *testSnapshotLike) GetSpecSnapshotRef() *ObjectRef {
@@ -108,8 +108,8 @@ func (t *testSnapshotContentLike) GetObjectKind() schema.ObjectKind {
 }
 
 func (t *testSnapshotContentLike) DeepCopyObject() runtime.Object {
-	copy := *t
-	return &copy
+	copied := *t
+	return &copied
 }
 
 func (t *testSnapshotContentLike) GetSpecSnapshotRef() *ObjectRef {
@@ -508,12 +508,12 @@ func TestSnapshotLike_GettersHandleNilAndEmpty(t *testing.T) {
 		}
 
 		childrenRefs := obj.GetStatusChildrenSnapshotRefs()
-		if childrenRefs != nil && len(childrenRefs) != 0 {
+		if len(childrenRefs) != 0 {
 			t.Errorf("Expected nil or empty children refs, got %v", childrenRefs)
 		}
 
 		conditions := obj.GetStatusConditions()
-		if conditions != nil && len(conditions) != 0 {
+		if len(conditions) != 0 {
 			t.Errorf("Expected nil or empty conditions, got %v", conditions)
 		}
 
@@ -554,12 +554,12 @@ func TestSnapshotContentLike_GettersHandleNilAndEmpty(t *testing.T) {
 		}
 
 		childrenRefs := obj.GetStatusChildrenSnapshotContentRefs()
-		if childrenRefs != nil && len(childrenRefs) != 0 {
+		if len(childrenRefs) != 0 {
 			t.Errorf("Expected nil or empty children refs, got %v", childrenRefs)
 		}
 
 		conditions := obj.GetStatusConditions()
-		if conditions != nil && len(conditions) != 0 {
+		if len(conditions) != 0 {
 			t.Errorf("Expected nil or empty conditions, got %v", conditions)
 		}
 	}

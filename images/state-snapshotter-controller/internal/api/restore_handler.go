@@ -132,13 +132,14 @@ func (h *RestoreHandler) writeRestoreError(w http.ResponseWriter, err error) {
 	reason := "InternalError"
 	message := err.Error()
 
-	if errors.Is(err, restore.ErrBadRequest) {
+	switch {
+	case errors.Is(err, restore.ErrBadRequest):
 		status = http.StatusBadRequest
 		reason = "BadRequest"
-	} else if errors.Is(err, restore.ErrNotFound) || apierrors.IsNotFound(err) {
+	case errors.Is(err, restore.ErrNotFound) || apierrors.IsNotFound(err):
 		status = http.StatusNotFound
 		reason = "NotFound"
-	} else if errors.Is(err, restore.ErrNotReady) || errors.Is(err, restore.ErrContractViolation) {
+	case errors.Is(err, restore.ErrNotReady) || errors.Is(err, restore.ErrContractViolation):
 		status = http.StatusConflict
 		reason = "Conflict"
 	}
