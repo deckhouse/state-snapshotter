@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -51,10 +52,13 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 
 	// Create archive handler with directClient for ManifestCheckpoint
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
+	restoreService := restore.NewService(directClient, archiveService)
+	restoreHandler := NewRestoreHandler(directClient, restoreService, logger)
 
 	// Setup routes
 	mux := http.NewServeMux()
 	archiveHandler.SetupRoutes(mux)
+	restoreHandler.SetupRoutes(mux)
 
 	// Add logging middleware
 	handler := loggingMiddleware(mux, logger)

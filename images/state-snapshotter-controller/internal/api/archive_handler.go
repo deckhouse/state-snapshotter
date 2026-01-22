@@ -362,6 +362,25 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 				Kind:       "ManifestCheckpoint",
 				Verbs:      []string{"get"},
 			},
+			{
+				Name:         "snapshots",
+				SingularName: "snapshot",
+				Namespaced:   true,
+				Kind:         "Snapshot",
+				Verbs:        []string{"get", "list"},
+			},
+			{
+				Name:       "snapshots/manifests",
+				Namespaced: true,
+				Kind:       "Snapshot",
+				Verbs:      []string{"get"},
+			},
+			{
+				Name:       "snapshots/manifests-with-data-restoration",
+				Namespaced: true,
+				Kind:       "Snapshot",
+				Verbs:      []string{"get"},
+			},
 		},
 	}
 
