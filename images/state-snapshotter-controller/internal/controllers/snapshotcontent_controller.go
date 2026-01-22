@@ -50,11 +50,11 @@ import (
 // - Manages finalizers through pkg/snapshot/finalizers (to be implemented)
 type SnapshotContentController struct {
 	client.Client
-	APIReader client.Reader // Required: for reading resources directly from API server
-	Scheme    *runtime.Scheme
-	Config    *config.Options
-	RESTMapper meta.RESTMapper
-	clusterGVKs   []schema.GroupVersionKind
+	APIReader      client.Reader // Required: for reading resources directly from API server
+	Scheme         *runtime.Scheme
+	Config         *config.Options
+	RESTMapper     meta.RESTMapper
+	clusterGVKs    []schema.GroupVersionKind
 	namespacedGVKs []schema.GroupVersionKind
 
 	// GVKRegistry provides centralized GVK resolution
@@ -205,6 +205,11 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Step 1: Ensure finalizer (manual deletion protection)
 	if obj.GetDeletionTimestamp().IsZero() {
+		annotations := obj.GetAnnotations()
+		if annotations != nil && annotations[snapshot.AnnotationParentDeleted] == "true" {
+			// Parent Snapshot is gone; don't re-add finalizer.
+			return ctrl.Result{}, nil
+		}
 		if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
 			logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
 			if err := r.Update(ctx, obj); err != nil {

@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 )
 
@@ -104,6 +105,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = deckhousev1alpha1.AddToScheme(scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = storagev1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// Install ObjectKeeper CRD manually
@@ -193,6 +197,8 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"manifestCaptureRequestName": {Type: "string"},
+										"volumeCaptureRequestName":   {Type: "string"},
 										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
@@ -341,6 +347,8 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"manifestCaptureRequestName": {Type: "string"},
+										"volumeCaptureRequestName":   {Type: "string"},
 										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",

@@ -216,8 +216,15 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			originalOwnerRefs := contentObj.GetOwnerReferences()
 
 			// Add test finalizer to keep Snapshot around while deletionTimestamp is set
-			snapshotObj.SetFinalizers(append(snapshotObj.GetFinalizers(), "test.finalizer"))
-			err = k8sClient.Update(ctx, snapshotObj)
+			freshSnapshot := &unstructured.Unstructured{}
+			freshSnapshot.SetGroupVersionKind(snapshotGVK)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, freshSnapshot)
+			Expect(err).NotTo(HaveOccurred())
+			freshSnapshot.SetFinalizers(append(freshSnapshot.GetFinalizers(), "test.finalizer"))
+			err = k8sClient.Update(ctx, freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
 			// ACTIONS Step 1: Delete Snapshot (sets deletionTimestamp)
@@ -328,8 +335,15 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Add test finalizer to keep Snapshot around while deletionTimestamp is set
-			snapshotObj.SetFinalizers(append(snapshotObj.GetFinalizers(), "test.finalizer"))
-			err = k8sClient.Update(ctx, snapshotObj)
+			freshSnapshot := &unstructured.Unstructured{}
+			freshSnapshot.SetGroupVersionKind(snapshotGVK)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, freshSnapshot)
+			Expect(err).NotTo(HaveOccurred())
+			freshSnapshot.SetFinalizers(append(freshSnapshot.GetFinalizers(), "test.finalizer"))
+			err = k8sClient.Update(ctx, freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Delete Snapshot to set deletionTimestamp

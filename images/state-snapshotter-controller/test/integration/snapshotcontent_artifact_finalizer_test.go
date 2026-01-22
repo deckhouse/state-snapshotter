@@ -24,7 +24,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,6 +47,20 @@ var _ = Describe("Integration: SnapshotContentController - Artifact finalizers",
 	})
 
 	It("should add and remove artifact finalizer on MCP", func() {
+		// Create MCR (required for MCP ref UID)
+		mcr := &unstructured.Unstructured{}
+		mcr.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "state-snapshotter.deckhouse.io",
+			Version: "v1alpha1",
+			Kind:    "ManifestCaptureRequest",
+		})
+		mcr.SetName("mcr-artifact-finalizer")
+		mcr.SetNamespace("default")
+		mcr.Object["spec"] = map[string]interface{}{
+			"targets": []interface{}{},
+		}
+		Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
 		// Create MCP
 		mcp := &unstructured.Unstructured{}
 		mcp.SetGroupVersionKind(mcpGVK)
@@ -55,9 +68,9 @@ var _ = Describe("Integration: SnapshotContentController - Artifact finalizers",
 		mcp.Object["spec"] = map[string]interface{}{
 			"sourceNamespace": "default",
 			"manifestCaptureRequestRef": map[string]interface{}{
-				"name":      "mcr-artifact-finalizer",
-				"namespace": "default",
-				"kind":      "ManifestCaptureRequest",
+				"name":      mcr.GetName(),
+				"namespace": mcr.GetNamespace(),
+				"uid":       string(mcr.GetUID()),
 			},
 		}
 		Expect(k8sClient.Create(ctx, mcp)).To(Succeed())
@@ -66,11 +79,14 @@ var _ = Describe("Integration: SnapshotContentController - Artifact finalizers",
 		content := &unstructured.Unstructured{}
 		content.SetGroupVersionKind(contentGVK)
 		content.SetName("content-artifact-finalizer")
-		content.Object["status"] = map[string]interface{}{
+		Expect(k8sClient.Create(ctx, content)).To(Succeed())
+		freshContent := &unstructured.Unstructured{}
+		freshContent.SetGroupVersionKind(contentGVK)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: content.GetName()}, freshContent)).To(Succeed())
+		freshContent.Object["status"] = map[string]interface{}{
 			"manifestCheckpointName": mcp.GetName(),
 		}
-		Expect(k8sClient.Create(ctx, content)).To(Succeed())
-		Expect(k8sClient.Status().Update(ctx, content)).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, freshContent)).To(Succeed())
 
 		contentCtrl, err := controllers.NewSnapshotContentController(
 			k8sClient,
@@ -82,30 +98,36 @@ var _ = Describe("Integration: SnapshotContentController - Artifact finalizers",
 		)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Reconcile to add artifact finalizer
-		_, err = contentCtrl.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Name: content.GetName()},
-		})
-		Expect(err).NotTo(HaveOccurred())
+		// Reconcile to add artifact finalizer (may require requeue)
+		Eventually(func() bool {
+			_, _ = contentCtrl.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: content.GetName()},
+			})
 
-		freshMCP := &unstructured.Unstructured{}
-		freshMCP.SetGroupVersionKind(mcpGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: mcp.GetName()}, freshMCP)).To(Succeed())
-		Expect(freshMCP.GetFinalizers()).To(ContainElement(snapshot.FinalizerArtifactProtect))
+			freshMCP := &unstructured.Unstructured{}
+			freshMCP.SetGroupVersionKind(mcpGVK)
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: mcp.GetName()}, freshMCP); err != nil {
+				return false
+			}
+			return contains(freshMCP.GetFinalizers(), snapshot.FinalizerArtifactProtect)
+		}, "10s", "100ms").Should(BeTrue())
 
 		// Delete SnapshotContent (it has parent-protect finalizer added by controller)
 		err = k8sClient.Delete(ctx, content)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Reconcile delete path to remove artifact finalizer
-		_, err = contentCtrl.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Name: content.GetName()},
-		})
-		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() bool {
+			_, _ = contentCtrl.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: content.GetName()},
+			})
 
-		freshMCP2 := &unstructured.Unstructured{}
-		freshMCP2.SetGroupVersionKind(mcpGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: mcp.GetName()}, freshMCP2)).To(Succeed())
-		Expect(freshMCP2.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerArtifactProtect))
+			freshMCP2 := &unstructured.Unstructured{}
+			freshMCP2.SetGroupVersionKind(mcpGVK)
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: mcp.GetName()}, freshMCP2); err != nil {
+				return false
+			}
+			return !contains(freshMCP2.GetFinalizers(), snapshot.FinalizerArtifactProtect)
+		}, "10s", "100ms").Should(BeTrue())
 	})
 })

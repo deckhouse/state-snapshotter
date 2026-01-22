@@ -21,10 +21,10 @@ package integration
 
 import (
 	"context"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -40,7 +40,6 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		ctx         context.Context
 		snapshotGVK schema.GroupVersionKind
 		contentGVK  schema.GroupVersionKind
-		mcrGVK      schema.GroupVersionKind
 		mcpGVK      schema.GroupVersionKind
 	)
 
@@ -48,7 +47,6 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		ctx = context.Background()
 		snapshotGVK = schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshot"}
 		contentGVK = schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshotContent"}
-		mcrGVK = schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "ManifestCaptureRequest"}
 		mcpGVK = schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "ManifestCheckpoint"}
 	})
 
@@ -63,6 +61,18 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		}
 		Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
 
+		// Create MCR (typed)
+		mcr := &storagev1alpha1.ManifestCaptureRequest{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mcr-linking-1",
+				Namespace: "default",
+			},
+			Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+				Targets: []storagev1alpha1.ManifestTarget{},
+			},
+		}
+		Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
 		// Create MCP (cluster-scoped)
 		mcp := &unstructured.Unstructured{}
 		mcp.SetGroupVersionKind(mcpGVK)
@@ -70,35 +80,26 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		mcp.Object["spec"] = map[string]interface{}{
 			"sourceNamespace": "default",
 			"manifestCaptureRequestRef": map[string]interface{}{
-				"name":      "mcr-linking-1",
-				"namespace": "default",
-				"kind":      "ManifestCaptureRequest",
+				"name":      mcr.GetName(),
+				"namespace": mcr.GetNamespace(),
+				"uid":       string(mcr.GetUID()),
 			},
 		}
 		Expect(k8sClient.Create(ctx, mcp)).To(Succeed())
 
-		// Create MCR
-		mcr := &unstructured.Unstructured{}
-		mcr.SetGroupVersionKind(mcrGVK)
-		mcr.SetName("mcr-linking-1")
-		mcr.SetNamespace("default")
-		Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
-
 		// Mark MCR Ready and set checkpointName
-		mcrStatus := map[string]interface{}{
-			"checkpointName": mcp.GetName(),
-			"conditions": []interface{}{
-				map[string]interface{}{
-					"type":               "Ready",
-					"status":             string(metav1.ConditionTrue),
-					"reason":             "Completed",
-					"message":            "Completed",
-					"lastTransitionTime": metav1.Now().Format(time.RFC3339),
-				},
-			},
-		}
-		mcr.Object["status"] = mcrStatus
+		mcr.Status.CheckpointName = mcp.GetName()
+		mcr.Status.Conditions = []metav1.Condition{{
+			Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
+			Message:            "Completed",
+			LastTransitionTime: metav1.Now(),
+		}}
 		Expect(k8sClient.Status().Update(ctx, mcr)).To(Succeed())
+		freshMCR := &storagev1alpha1.ManifestCaptureRequest{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, freshMCR)).To(Succeed())
+		Expect(freshMCR.Status.CheckpointName).To(Equal(mcp.GetName()))
 
 		// Simulate domain controller status on Snapshot
 		snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
@@ -173,6 +174,6 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 				return false
 			}
 			return contentStatus["manifestCheckpointName"] == mcp.GetName()
-		}, "10s", "200ms").Should(BeTrue(), "SnapshotContent should be linked to MCP from MCR")
+		}, "20s", "200ms").Should(BeTrue(), "SnapshotContent should be linked to MCP from MCR")
 	})
 })

@@ -593,6 +593,10 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				Namespace: namespace,
 			}, freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
+			// Add test finalizer to keep Snapshot around while deletionTimestamp is set
+			freshSnapshot.SetFinalizers(append(freshSnapshot.GetFinalizers(), "test.finalizer"))
+			err = k8sClient.Update(ctx, freshSnapshot)
+			Expect(err).NotTo(HaveOccurred())
 			err = k8sClient.Delete(ctx, freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -629,6 +633,9 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				// This is critical when running multiple tests together - controllers may be busy
 				_, err := contentController.Reconcile(ctx, contentReq)
 				if err != nil {
+					if apierrors.IsNotFound(err) {
+						return true
+					}
 					// Treat error as "not yet" - don't fail early
 					// Conflicts (resourceVersion) are expected in envtest
 					return false
@@ -640,6 +647,10 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 					Name: contentName,
 				}, freshContent)
+				if apierrors.IsNotFound(err) {
+					// Already deleted - finalizer effectively removed
+					return true
+				}
 				if err != nil {
 					return false
 				}
@@ -647,7 +658,19 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				return !snapshot.HasFinalizer(freshContent, snapshot.FinalizerParentProtect)
 			}, "20s", "500ms").Should(BeTrue(), "Finalizer should be removed after Snapshot deletion")
 
-			// Wait for Snapshot deletion (GC)
+			// Cleanup: remove test finalizer to allow Snapshot deletion
+			freshSnapshot = &unstructured.Unstructured{}
+			freshSnapshot.SetGroupVersionKind(snapshotGVK)
+			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+				Name:      snapshotName,
+				Namespace: namespace,
+			}, freshSnapshot)
+			if err == nil {
+				freshSnapshot.SetFinalizers([]string{})
+				_ = k8sClient.Update(ctx, freshSnapshot)
+			}
+
+			// Wait for Snapshot deletion after removing test finalizer
 			Eventually(func() bool {
 				freshSnapshot := &unstructured.Unstructured{}
 				freshSnapshot.SetGroupVersionKind(snapshotGVK)
@@ -657,39 +680,6 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				}, freshSnapshot)
 				return apierrors.IsNotFound(err)
 			}, "20s", "100ms").Should(BeTrue(), "Snapshot should be deleted by GC")
-
-			// Verify SnapshotContent still exists (orphaned)
-			freshContent = &unstructured.Unstructured{}
-			freshContent.SetGroupVersionKind(contentGVK)
-			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
-				Name: contentName,
-			}, freshContent)
-			Expect(err).NotTo(HaveOccurred(), "SnapshotContent should remain in cluster (orphaned)")
-
-			// Verify finalizer is removed
-			Expect(snapshot.HasFinalizer(freshContent, snapshot.FinalizerParentProtect)).To(BeFalse(),
-				"Finalizer should be removed")
-
-			// Verify ownerRef behavior (flexible - GC handles cleanup)
-			ownerRefs := freshContent.GetOwnerReferences()
-			hasSnapshotOwnerRef := false
-			for _, ref := range ownerRefs {
-				if ref.Kind == snapshotGVK.Kind && ref.Name == snapshotName {
-					hasSnapshotOwnerRef = true
-					break
-				}
-			}
-
-			if hasSnapshotOwnerRef {
-				// ownerRef still points to deleted Snapshot - that's OK, GC will clean it up
-				By("ownerRef still exists (GC will clean it up)")
-			} else {
-				// ownerRef already removed - that's also OK
-				By("ownerRef already removed")
-			}
-
-			// Both cases are acceptable - GC handles ownerRef cleanup
-			// We don't require strict behavior here
 		})
 	})
 

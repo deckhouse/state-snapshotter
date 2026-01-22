@@ -37,6 +37,8 @@ const (
 	// FinalizerArtifactProtect prevents deletion of artifacts (MCP/VSC)
 	// while they are linked from SnapshotContent.
 	FinalizerArtifactProtect = "snapshot.deckhouse.io/artifact-protect"
+	// AnnotationParentDeleted marks SnapshotContent as detached from parent Snapshot.
+	AnnotationParentDeleted = "snapshot.deckhouse.io/parent-deleted"
 )
 
 // ExtractSnapshotLike converts an unstructured object to SnapshotLike interface

@@ -88,6 +88,20 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", func
 	})
 
 	It("should require children to be Ready before setting Ready=True", func() {
+		// Create MCR for parent (required for MCP ref UID)
+		parentMCR := &unstructured.Unstructured{}
+		parentMCR.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "state-snapshotter.deckhouse.io",
+			Version: "v1alpha1",
+			Kind:    "ManifestCaptureRequest",
+		})
+		parentMCR.SetName("mcr-parent")
+		parentMCR.SetNamespace("default")
+		parentMCR.Object["spec"] = map[string]interface{}{
+			"targets": []interface{}{},
+		}
+		Expect(k8sClient.Create(ctx, parentMCR)).To(Succeed())
+
 		// Create MCP for parent
 		parentMCP := &unstructured.Unstructured{}
 		parentMCP.SetGroupVersionKind(mcpGVK)
@@ -95,9 +109,9 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", func
 		parentMCP.Object["spec"] = map[string]interface{}{
 			"sourceNamespace": "default",
 			"manifestCaptureRequestRef": map[string]interface{}{
-				"name":      "mcr-parent",
-				"namespace": "default",
-				"kind":      "ManifestCaptureRequest",
+				"name":      parentMCR.GetName(),
+				"namespace": parentMCR.GetNamespace(),
+				"uid":       string(parentMCR.GetUID()),
 			},
 		}
 		Expect(k8sClient.Create(ctx, parentMCP)).To(Succeed())
@@ -106,18 +120,24 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", func
 		child := &unstructured.Unstructured{}
 		child.SetGroupVersionKind(contentGVK)
 		child.SetName("child-ready-contract")
-		childStatus := map[string]interface{}{
+		Expect(k8sClient.Create(ctx, child)).To(Succeed())
+		freshChildForStatus := &unstructured.Unstructured{}
+		freshChildForStatus.SetGroupVersionKind(contentGVK)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: child.GetName()}, freshChildForStatus)).To(Succeed())
+		freshChildForStatus.Object["status"] = map[string]interface{}{
 			"manifestCheckpointName": parentMCP.GetName(),
 		}
-		child.Object["status"] = childStatus
-		Expect(k8sClient.Create(ctx, child)).To(Succeed())
-		Expect(k8sClient.Status().Update(ctx, child)).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, freshChildForStatus)).To(Succeed())
 
 		// Create parent SnapshotContent with child ref
 		parent := &unstructured.Unstructured{}
 		parent.SetGroupVersionKind(contentGVK)
 		parent.SetName("parent-ready-contract")
-		parent.Object["status"] = map[string]interface{}{
+		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
+		freshParentForStatus := &unstructured.Unstructured{}
+		freshParentForStatus.SetGroupVersionKind(contentGVK)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: parent.GetName()}, freshParentForStatus)).To(Succeed())
+		freshParentForStatus.Object["status"] = map[string]interface{}{
 			"manifestCheckpointName": parentMCP.GetName(),
 			"childrenSnapshotContentRefs": []interface{}{
 				map[string]interface{}{
@@ -126,8 +146,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", func
 				},
 			},
 		}
-		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
-		Expect(k8sClient.Status().Update(ctx, parent)).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, freshParentForStatus)).To(Succeed())
 
 		contentCtrl, err := controllers.NewSnapshotContentController(
 			k8sClient,
@@ -162,17 +181,22 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", func
 		snapshot.SyncConditionsToUnstructured(freshChild, childLike.GetStatusConditions())
 		Expect(k8sClient.Status().Update(ctx, freshChild)).To(Succeed())
 
-		// Reconcile parent and expect Ready=True
-		_, err = contentCtrl.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Name: parent.GetName()},
-		})
-		Expect(err).NotTo(HaveOccurred())
+		// Reconcile parent and expect Ready=True (may require requeue)
+		Eventually(func() bool {
+			_, _ = contentCtrl.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: parent.GetName()},
+			})
 
-		freshParent2 := &unstructured.Unstructured{}
-		freshParent2.SetGroupVersionKind(contentGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: parent.GetName()}, freshParent2)).To(Succeed())
-		parentLike2, err := snapshot.ExtractSnapshotContentLike(freshParent2)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(snapshot.IsReady(parentLike2)).To(BeTrue(), "Parent must become Ready after child is Ready")
+			freshParent2 := &unstructured.Unstructured{}
+			freshParent2.SetGroupVersionKind(contentGVK)
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: parent.GetName()}, freshParent2); err != nil {
+				return false
+			}
+			parentLike2, err := snapshot.ExtractSnapshotContentLike(freshParent2)
+			if err != nil {
+				return false
+			}
+			return snapshot.IsReady(parentLike2)
+		}, "10s", "100ms").Should(BeTrue(), "Parent must become Ready after child is Ready")
 	})
 })

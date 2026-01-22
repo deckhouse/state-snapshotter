@@ -500,7 +500,8 @@ func (r *SnapshotController) removeSnapshotContentFinalizer(
 ) error {
 	contentName := snapshotLike.GetStatusContentName()
 	if contentName == "" && obj.GetUID() != "" {
-		// Fallback to deterministic name to avoid race when status not yet set
+		// Fallback to deterministic name to avoid race when status not yet set.
+		// UID is available only after the Snapshot is persisted.
 		contentName = snapshot.GenerateSnapshotContentName(obj.GetName(), string(obj.GetUID()))
 	}
 	if contentName == "" {
@@ -521,11 +522,24 @@ func (r *SnapshotController) removeSnapshotContentFinalizer(
 		return err
 	}
 
+	updated := false
+	annotations := contentObj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	if annotations[snapshot.AnnotationParentDeleted] != "true" {
+		annotations[snapshot.AnnotationParentDeleted] = "true"
+		contentObj.SetAnnotations(annotations)
+		updated = true
+	}
 	if snapshot.RemoveFinalizer(contentObj, snapshot.FinalizerParentProtect) {
+		updated = true
+		log.FromContext(ctx).Info("Removed finalizer from SnapshotContent after Snapshot deletion", "content", contentName)
+	}
+	if updated {
 		if err := r.Update(ctx, contentObj); err != nil {
 			return err
 		}
-		log.FromContext(ctx).Info("Removed finalizer from SnapshotContent after Snapshot deletion", "content", contentName)
 	}
 
 	return nil

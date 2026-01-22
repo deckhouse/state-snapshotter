@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,12 +43,12 @@ func TestCleanupArtifactsForMCR_DeletesOrphans(t *testing.T) {
 	}
 
 	err := client.Get(context.Background(), ctrlclient.ObjectKey{Name: "mcp-1"}, &v1alpha1.ManifestCheckpoint{})
-	if err == nil {
-		t.Fatal("expected ManifestCheckpoint to be deleted")
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected ManifestCheckpoint to be deleted, got: %v", err)
 	}
 	err = client.Get(context.Background(), ctrlclient.ObjectKey{Name: "chunk-1"}, &v1alpha1.ManifestCheckpointContentChunk{})
-	if err == nil {
-		t.Fatal("expected chunk to be deleted")
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected chunk to be deleted, got: %v", err)
 	}
 }
 
