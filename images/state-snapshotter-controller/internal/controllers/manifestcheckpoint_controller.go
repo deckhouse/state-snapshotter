@@ -1466,13 +1466,7 @@ func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Cont
 				"expirationTime", expirationTime,
 				"ttl", defaultTTL)
 
-			// Best-effort cleanup of artifacts that have no ownerRef
-			if err := r.cleanupArtifactsForMCR(ctx, mcr); err != nil {
-				log.FromContext(ctx).Error(err, "Failed to cleanup MCR artifacts (ownerRef missing)",
-					"namespace", mcr.Namespace,
-					"name", mcr.Name)
-			}
-
+			// MCP deletion is handled by ObjectKeeper (FollowObject + ownerRef).
 			if err := client.Delete(ctx, mcr); err != nil {
 				if errors.IsNotFound(err) {
 					// Already deleted, that's fine (double-delete is safe)
@@ -1496,62 +1490,4 @@ func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Cont
 			"deleted", deletedCount,
 			"skipped", skippedCount)
 	}
-}
-
-// cleanupArtifactsForMCR deletes MCR-created artifacts if they have no ownerRef.
-// This is a best-effort cleanup used by the TTL scanner to avoid orphaned artifacts.
-func (r *ManifestCheckpointController) cleanupArtifactsForMCR(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest) error {
-	checkpointName := mcr.Status.CheckpointName
-	if checkpointName == "" {
-		return nil
-	}
-
-	checkpoint := &storagev1alpha1.ManifestCheckpoint{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: checkpointName}, checkpoint); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-
-	// If checkpoint has ownerRef, assume it is managed by SnapshotContent and skip deletion.
-	if hasSnapshotContentOwnerRef(checkpoint.OwnerReferences) {
-		return nil
-	}
-
-	// Delete chunks that have no ownerRef.
-	for _, chunkInfo := range checkpoint.Status.Chunks {
-		if chunkInfo.Name == "" {
-			continue
-		}
-		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{}
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: chunkInfo.Name}, chunk); err != nil {
-			if errors.IsNotFound(err) {
-				continue
-			}
-			return err
-		}
-		if hasSnapshotContentOwnerRef(chunk.OwnerReferences) {
-			continue
-		}
-		if err := r.Delete(ctx, chunk); err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-	}
-
-	// Delete checkpoint itself (no ownerRef)
-	if err := r.Delete(ctx, checkpoint); err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
-	return nil
-}
-
-func hasSnapshotContentOwnerRef(refs []metav1.OwnerReference) bool {
-	for _, ref := range refs {
-		if strings.HasSuffix(ref.Kind, "SnapshotContent") {
-			return true
-		}
-	}
-	return false
 }
