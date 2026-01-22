@@ -254,6 +254,81 @@ func TestHandleGetManifests_WithGzip(t *testing.T) {
 	}
 }
 
+func TestHandleGetManifests_TrailingSlash(t *testing.T) {
+	handler, client := setupTestHandler()
+	server := setupTestServer(handler)
+	defer server.Close()
+
+	data1, checksum1 := encodeTestChunkData([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "Test", "metadata": map[string]interface{}{"name": "test1"}},
+	})
+	chunk0 := &storagev1alpha1.ManifestCheckpointContentChunk{
+		ObjectMeta: metav1.ObjectMeta{Name: "chunk-0"},
+		Spec: storagev1alpha1.ManifestCheckpointContentChunkSpec{
+			CheckpointName: "test-checkpoint",
+			Index:          0,
+			Data:           data1,
+			Checksum:       checksum1,
+			ObjectsCount:   1,
+		},
+	}
+	_ = client.Create(context.Background(), chunk0)
+
+	checkpoint := createTestCheckpoint("test-checkpoint", true)
+	checkpoint.Status.Chunks = []storagev1alpha1.ChunkInfo{
+		{Name: "chunk-0", Index: 0, Checksum: checksum1},
+	}
+	checkpoint.Status.TotalObjects = 1
+	_ = client.Create(context.Background(), checkpoint)
+
+	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/test-checkpoint/manifests/")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleAPIResourceListDiscovery_SubresourcesOnly(t *testing.T) {
+	handler, _ := setupTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1", nil)
+	w := httptest.NewRecorder()
+
+	handler.HandleAPIResourceListDiscovery(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", w.Code)
+	}
+
+	var list metav1.APIResourceList
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("Failed to unmarshal APIResourceList: %v", err)
+	}
+
+	resources := map[string]metav1.APIResource{}
+	for _, res := range list.APIResources {
+		resources[res.Name] = res
+	}
+
+	if _, exists := resources["manifestcheckpoints"]; exists {
+		t.Fatalf("manifestcheckpoints should not be in discovery")
+	}
+	if _, exists := resources["snapshots"]; exists {
+		t.Fatalf("snapshots should not be in discovery")
+	}
+	if _, exists := resources["manifestcheckpoints/manifests"]; !exists {
+		t.Fatalf("manifestcheckpoints/manifests missing in discovery")
+	}
+	if _, exists := resources["snapshots/manifests"]; !exists {
+		t.Fatalf("snapshots/manifests missing in discovery")
+	}
+	if _, exists := resources["snapshots/manifests-with-data-restoration"]; !exists {
+		t.Fatalf("snapshots/manifests-with-data-restoration missing in discovery")
+	}
+}
+
 // TestHandleGetManifests_WithoutGzip tests uncompressed JSON response.
 // Verifies:
 // - Returns HTTP 200 OK
