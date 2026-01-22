@@ -35,6 +35,7 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
 		// Extract path after /apis/.../v1alpha1/namespaces/
 		path := strings.TrimPrefix(r.URL.Path, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/")
+		path = strings.TrimSuffix(path, "/")
 		parts := strings.Split(path, "/")
 		if len(parts) < 2 || parts[1] != "snapshots" {
 			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")

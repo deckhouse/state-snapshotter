@@ -101,80 +101,6 @@ func createTestCheckpoint(name string, ready bool) *storagev1alpha1.ManifestChec
 	return checkpoint
 }
 
-// TestHandleListManifestCheckpoints tests the list endpoint for manifestcheckpoints.
-// Verifies:
-// - Returns HTTP 200 OK
-// - Response has correct Kubernetes API structure (kind, apiVersion)
-// - Returns real items array
-// - Metadata contains selfLink
-func TestHandleListManifestCheckpoints(t *testing.T) {
-	handler, client := setupTestHandler()
-	ctx := context.Background()
-	_ = client.Create(ctx, createTestCheckpoint("cp-1", true))
-	_ = client.Create(ctx, createTestCheckpoint("cp-2", false))
-
-	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints", nil)
-	w := httptest.NewRecorder()
-
-	handler.HandleListManifestCheckpoints(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	var list storagev1alpha1.ManifestCheckpointList
-	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
-		t.Fatalf("Failed to unmarshal response: %v", err)
-	}
-
-	if list.Kind != "ManifestCheckpointList" {
-		t.Errorf("Expected kind ManifestCheckpointList, got %v", list.Kind)
-	}
-
-	if list.APIVersion != "subresources.state-snapshotter.deckhouse.io/v1alpha1" {
-		t.Errorf("Expected apiVersion subresources.state-snapshotter.deckhouse.io/v1alpha1, got %v", list.APIVersion)
-	}
-
-	if len(list.Items) != 2 {
-		t.Errorf("Expected 2 items, got %d items", len(list.Items))
-	}
-	for _, item := range list.Items {
-		if item.Kind != "ManifestCheckpoint" || item.APIVersion != "subresources.state-snapshotter.deckhouse.io/v1alpha1" {
-			t.Errorf("Expected item kind/apiVersion ManifestCheckpoint/subresources..., got %s/%s", item.Kind, item.APIVersion)
-		}
-	}
-
-	if list.ListMeta.SelfLink == "" {
-		t.Error("Expected selfLink in metadata")
-	}
-}
-
-// TestHandleListManifestCheckpointsWithQueryParams tests that query parameters are preserved in selfLink.
-// Verifies:
-// - Query parameters are included in metadata.selfLink
-// - Response structure remains correct
-func TestHandleListManifestCheckpointsWithQueryParams(t *testing.T) {
-	handler, _ := setupTestHandler()
-
-	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints?limit=500", nil)
-	w := httptest.NewRecorder()
-
-	handler.HandleListManifestCheckpoints(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	var response map[string]interface{}
-	_ = json.Unmarshal(w.Body.Bytes(), &response)
-
-	metadata := response["metadata"].(map[string]interface{})
-	selfLink := metadata["selfLink"].(string)
-
-	if !strings.Contains(selfLink, "limit=500") {
-		t.Errorf("Expected selfLink to contain query params, got %s", selfLink)
-	}
-}
 
 // TestHandleGetManifests_NotFound tests handling of non-existent checkpoint.
 // Verifies:
@@ -432,74 +358,41 @@ func encodeTestChunkData(objects []map[string]interface{}) (string, string) {
 	return encoded, checksum
 }
 
-// TestHandleGetManifestCheckpoint_OK tests GET request for MCP object.
-func TestHandleGetManifestCheckpoint_OK(t *testing.T) {
-	handler, client := setupTestHandler()
-	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
-
-	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1", nil)
-	w := httptest.NewRecorder()
-
-	handler.HandleGetManifestCheckpoint(w, req, "cp-1")
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	var checkpoint storagev1alpha1.ManifestCheckpoint
-	if err := json.Unmarshal(w.Body.Bytes(), &checkpoint); err != nil {
-		t.Fatalf("Failed to unmarshal checkpoint: %v", err)
-	}
-	if checkpoint.Name != "cp-1" {
-		t.Fatalf("Expected checkpoint name cp-1, got %s", checkpoint.Name)
-	}
-}
-
-// TestHandleGetManifestCheckpoint_NotFound tests GET request for non-existent MCP.
-func TestHandleGetManifestCheckpoint_NotFound(t *testing.T) {
-	handler, _ := setupTestHandler()
-
-	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/missing", nil)
-	w := httptest.NewRecorder()
-
-	handler.HandleGetManifestCheckpoint(w, req, "missing")
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("Expected status 404, got %d", w.Code)
-	}
-
-	var status metav1.Status
-	_ = json.Unmarshal(w.Body.Bytes(), &status)
-	if status.Reason != metav1.StatusReasonNotFound {
-		t.Errorf("Expected reason NotFound, got %v", status.Reason)
-	}
-}
-
-// TestHandleGetManifestCheckpoint_MethodNotAllowed tests non-GET methods.
-func TestHandleGetManifestCheckpoint_MethodNotAllowed(t *testing.T) {
+// TestHandleManifestCheckpoints_NoSubresource tests GET without subresource.
+func TestHandleManifestCheckpoints_NoSubresource(t *testing.T) {
 	handler, client := setupTestHandler()
 	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
 	server := setupTestServer(handler)
 	defer server.Close()
 
-	methods := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
-	for _, method := range methods {
-		t.Run(method, func(t *testing.T) {
-			req, _ := http.NewRequest(method, server.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1", nil)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("request failed: %v", err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusMethodNotAllowed {
-				t.Errorf("Expected status 405 for %s, got %d", method, resp.StatusCode)
-			}
-		})
+	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 }
 
-// TestHandleGetManifestCheckpoint_UnknownSubresource tests unknown subresource routing.
-func TestHandleGetManifestCheckpoint_UnknownSubresource(t *testing.T) {
+func TestHandleManifestCheckpoints_NoSubresourceTrailingSlash(t *testing.T) {
+	handler, client := setupTestHandler()
+	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
+	server := setupTestServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1/")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleManifestCheckpoints_UnknownSubresource tests unknown subresource routing.
+func TestHandleManifestCheckpoints_UnknownSubresource(t *testing.T) {
 	handler, client := setupTestHandler()
 	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
 	server := setupTestServer(handler)
@@ -515,54 +408,6 @@ func TestHandleGetManifestCheckpoint_UnknownSubresource(t *testing.T) {
 	}
 }
 
-func TestHandleGetManifestCheckpoint_TrailingSlash(t *testing.T) {
-	handler, client := setupTestHandler()
-	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
-	server := setupTestServer(handler)
-	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1/")
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", resp.StatusCode)
-	}
-}
-
-// TestHandleListManifestCheckpoints_MethodNotAllowed tests unsupported HTTP methods on list endpoint.
-// Verifies:
-// - POST, PUT, DELETE, PATCH return HTTP 405 Method Not Allowed
-// - Uses Kubernetes Status format with MethodNotAllowed reason
-func TestHandleListManifestCheckpoints_MethodNotAllowed(t *testing.T) {
-	handler, _ := setupTestHandler()
-
-	methods := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
-
-	for _, method := range methods {
-		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints", nil)
-			w := httptest.NewRecorder()
-
-			// Simulate routing check
-			if req.Method != http.MethodGet {
-				handler.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported for list")
-			}
-
-			if w.Code != http.StatusMethodNotAllowed {
-				t.Errorf("Expected status 405 for %s, got %d", method, w.Code)
-			}
-
-			var status metav1.Status
-			_ = json.Unmarshal(w.Body.Bytes(), &status)
-
-			if status.Reason != metav1.StatusReason("MethodNotAllowed") {
-				t.Errorf("Expected reason MethodNotAllowed, got %v", status.Reason)
-			}
-		})
-	}
-}
 
 // TestHandleGetManifests_ReturnsJSON tests that /manifests endpoint always returns JSON.
 // Verifies:
@@ -611,49 +456,3 @@ func TestHandleGetManifests_ReturnsJSON(t *testing.T) {
 	}
 }
 
-// TestHandleListManifestCheckpoints_ComplexQueryParams tests preservation of complex query parameters in selfLink.
-// Verifies:
-// - Multiple query parameters are preserved
-// - URL-encoded characters are handled correctly
-// - selfLink contains all query parameters
-func TestHandleListManifestCheckpoints_ComplexQueryParams(t *testing.T) {
-	handler, _ := setupTestHandler()
-
-	tests := []struct {
-		name          string
-		query         string
-		shouldContain string
-	}{
-		{"multiple params", "limit=500&continue=a%2Fb", "limit=500"},
-		{"encoded chars", "labelSelector=a%2Cb", "labelSelector=a%2Cb"},
-		{"empty query", "", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			url := "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints"
-			if tt.query != "" {
-				url += "?" + tt.query
-			}
-			req := httptest.NewRequest(http.MethodGet, url, nil)
-			w := httptest.NewRecorder()
-
-			handler.HandleListManifestCheckpoints(w, req)
-
-			if w.Code != http.StatusOK {
-				t.Errorf("Expected status 200, got %d", w.Code)
-				return
-			}
-
-			var response map[string]interface{}
-			_ = json.Unmarshal(w.Body.Bytes(), &response)
-
-			metadata := response["metadata"].(map[string]interface{})
-			selfLink := metadata["selfLink"].(string)
-
-			if tt.query != "" && !strings.Contains(selfLink, tt.shouldContain) {
-				t.Errorf("Expected selfLink to contain %s, got %s", tt.shouldContain, selfLink)
-			}
-		})
-	}
-}

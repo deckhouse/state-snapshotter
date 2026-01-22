@@ -311,26 +311,12 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 		GroupVersion: "subresources.state-snapshotter.deckhouse.io/v1alpha1",
 		APIResources: []metav1.APIResource{
 			// Primary resource: required by Kubernetes API aggregation layer
-			{
-				Name:         "manifestcheckpoints",
-				SingularName: "manifestcheckpoint",
-				Namespaced:   false, // ManifestCheckpoint is cluster-scoped
-				Kind:         "ManifestCheckpoint",
-				Verbs:        []string{"get", "list"},
-			},
 			// Subresource: the actual /manifests endpoint
 			{
 				Name:       "manifestcheckpoints/manifests",
 				Namespaced: false, // ManifestCheckpoint is cluster-scoped
 				Kind:       "ManifestCheckpoint",
 				Verbs:      []string{"get"},
-			},
-			{
-				Name:         "snapshots",
-				SingularName: "snapshot",
-				Namespaced:   true,
-				Kind:         "Snapshot",
-				Verbs:        []string{"get", "list"},
 			},
 			{
 				Name:       "snapshots/manifests",
@@ -353,77 +339,6 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "Failed to encode response")
 		return
 	}
-}
-
-// HandleListManifestCheckpoints handles GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints
-func (h *ArchiveHandler) HandleListManifestCheckpoints(w http.ResponseWriter, r *http.Request) {
-	// Build selfLink for kubectl compatibility
-	selfLink := r.URL.Path
-	if r.URL.RawQuery != "" {
-		selfLink += "?" + r.URL.RawQuery
-	}
-
-	var list storagev1alpha1.ManifestCheckpointList
-	if err := h.client.List(r.Context(), &list); err != nil {
-		h.logger.Error(err, "Failed to list ManifestCheckpoints")
-		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "failed to list ManifestCheckpoints")
-		return
-	}
-
-	list.TypeMeta = metav1.TypeMeta{
-		Kind:       "ManifestCheckpointList",
-		APIVersion: "subresources.state-snapshotter.deckhouse.io/v1alpha1",
-	}
-	list.ListMeta.SelfLink = selfLink
-	for i := range list.Items {
-		list.Items[i].TypeMeta = metav1.TypeMeta{
-			Kind:       "ManifestCheckpoint",
-			APIVersion: "subresources.state-snapshotter.deckhouse.io/v1alpha1",
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(&list)
-}
-
-// HandleGetManifestCheckpoint handles GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>
-func (h *ArchiveHandler) HandleGetManifestCheckpoint(w http.ResponseWriter, r *http.Request, checkpointName string) {
-	var checkpoint storagev1alpha1.ManifestCheckpoint
-	if err := h.client.Get(r.Context(), types.NamespacedName{Name: checkpointName}, &checkpoint); err != nil {
-		if errors.IsNotFound(err) {
-			status := metav1.Status{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "Status",
-					APIVersion: "v1",
-				},
-				Status:  metav1.StatusFailure,
-				Message: fmt.Sprintf("checkpoint %s not found", checkpointName),
-				Reason:  metav1.StatusReasonNotFound,
-				Code:    http.StatusNotFound,
-				Details: &metav1.StatusDetails{
-					Name: checkpointName,
-					Kind: "ManifestCheckpoint",
-				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(status)
-			return
-		}
-		h.logger.Error(err, "Failed to get checkpoint", "checkpoint", checkpointName)
-		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", fmt.Sprintf("failed to get checkpoint: %v", err))
-		return
-	}
-
-	checkpoint.TypeMeta = metav1.TypeMeta{
-		Kind:       "ManifestCheckpoint",
-		APIVersion: "subresources.state-snapshotter.deckhouse.io/v1alpha1",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(&checkpoint)
 }
 
 // HandleGetManifests handles GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests
@@ -720,23 +635,6 @@ func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1", h.HandleAPIResourceListDiscovery)
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/", h.HandleAPIResourceListDiscovery)
 
-	// Path: /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints
-	// Supports:
-	//   - GET /apis/.../manifestcheckpoints (list)
-	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints", func(w http.ResponseWriter, r *http.Request) {
-		// Handle list endpoint - check path without trailing slash and ignore query parameters
-		// Kubernetes may call with query params like ?limit=500
-		path := strings.TrimSuffix(r.URL.Path, "/")
-		if path == "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints" {
-			if r.Method != http.MethodGet {
-				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported for list")
-				return
-			}
-			h.HandleListManifestCheckpoints(w, r)
-			return
-		}
-	})
-
 	// Path: /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/", func(w http.ResponseWriter, r *http.Request) {
 		// Extract path after /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/
@@ -745,7 +643,7 @@ func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
 
 		if path == "" {
 			// Should not happen due to routing, but handle gracefully
-			h.HandleListManifestCheckpoints(w, r)
+			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required: use /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests")
 			return
 		}
 
@@ -753,11 +651,7 @@ func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
 		parts := strings.SplitN(path, "/", 2)
 		checkpointName := parts[0]
 		if len(parts) == 1 {
-			if r.Method != http.MethodGet {
-				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
-				return
-			}
-			h.HandleGetManifestCheckpoint(w, r, checkpointName)
+			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required: use /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests")
 			return
 		}
 
