@@ -34,6 +34,9 @@ const (
 	// cannot be manually deleted (via kubectl delete) while the parent
 	// Snapshot is still alive.
 	FinalizerParentProtect = "snapshot.deckhouse.io/parent-protect"
+	// FinalizerArtifactProtect prevents deletion of artifacts (MCP/VSC)
+	// while they are linked from SnapshotContent.
+	FinalizerArtifactProtect = "snapshot.deckhouse.io/artifact-protect"
 )
 
 // ExtractSnapshotLike converts an unstructured object to SnapshotLike interface

@@ -203,142 +203,15 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Step 1: Manage finalizer and orphaning
-	// Invariant: SnapshotContent без Snapshot обязан стать orphaned и перейти под управление ObjectKeeper
-
+	// Step 1: Ensure finalizer (manual deletion protection)
 	if obj.GetDeletionTimestamp().IsZero() {
-		// Object is not being deleted
-
-		// Step 1.1: Check if Snapshot exists FIRST (before adding finalizer)
-		// This prevents infinite loop: if Snapshot is deleted, we should NOT add finalizer
-		// Use APIReader for read-after-write consistency
-		snapshotRef := contentLike.GetSpecSnapshotRef()
-		var snapshotExists bool
-		if snapshotRef == nil {
-			logger.V(1).Info("SnapshotContent has no snapshotRef, treating as orphaned")
-			snapshotExists = false // Treat as orphaned if no ref
-		} else {
-			// Get current SnapshotContent GVK (use most reliable method)
-			currentGVK := obj.GroupVersionKind()
-			if currentGVK.Kind == "" {
-				// Fallback: try to get Kind from obj.Object directly
-				if kind, ok := obj.Object["kind"].(string); ok && kind != "" {
-					currentGVK.Kind = kind
-					// Try to get Group/Version from obj.Object if available
-					if apiVersion, ok := obj.Object["apiVersion"].(string); ok && apiVersion != "" {
-						// Parse apiVersion (format: "group/version" or "version")
-						if idx := strings.Index(apiVersion, "/"); idx != -1 {
-							currentGVK.Group = apiVersion[:idx]
-							currentGVK.Version = apiVersion[idx+1:]
-						} else {
-							currentGVK.Version = apiVersion
-						}
-					}
-				}
-			}
-
-			// Validate that we have a valid GVK
-			if currentGVK.Kind == "" {
-				logger.Error(nil, "Cannot determine SnapshotContent GVK: Kind is empty", "obj", obj.GetName())
-				return ctrl.Result{}, fmt.Errorf("cannot determine SnapshotContent GVK for object %s: Kind is empty", obj.GetName())
-			}
-
-			// If snapshotRef.Kind is empty, derive it from current SnapshotContent GVK (backward compatibility)
-			// This handles old SnapshotContent objects created before Kind was always set
-			//
-			// INVARIANT: New SnapshotContent objects MUST have snapshotRef.kind set explicitly.
-			// This fallback is ONLY for backward compatibility with old/broken objects.
-			// Starting from controller version X, snapshotRef.kind is required.
-			//
-			// ARCHITECTURAL INVARIANT (REQUIRED):
-			// SnapshotContent Kind MUST be Snapshot Kind + "Content"
-			// This naming convention is REQUIRED for unified snapshots.
-			// Fallback logic relies on this convention: strings.TrimSuffix(kind, "Content")
-			//
-			// Examples:
-			//   TestSnapshotContent → TestSnapshot
-			//   NamespaceSnapshotContent → NamespaceSnapshot
-			//   InternalVirtualizationVirtualMachineSnapshotContent → InternalVirtualizationVirtualMachineSnapshot
-			//
-			// Fallback logic:
-			// - Derives Snapshot Kind from SnapshotContent Kind by removing "Content" suffix
-			// - This implements the unified snapshot convention: SnapshotContent Kind = Snapshot Kind + "Content"
-			// - Violation of this convention will cause fallback to fail with error
-			if snapshotRef.Kind == "" {
-				// Extract Snapshot Kind from SnapshotContent Kind (remove "Content" suffix)
-				// This is a fallback for backward compatibility - normal path should have Kind set
-				//
-				// INVARIANT: Naming convention is REQUIRED for unified snapshots:
-				//   SnapshotContent Kind = Snapshot Kind + "Content"
-				//   Example: TestSnapshotContent → TestSnapshot
-				//
-				// This fallback handles legacy objects created before snapshotRef.kind was always set.
-				// New objects MUST have snapshotRef.kind set explicitly by SnapshotController.
-				//
-				// IMPORTANT: We do NOT automatically update legacy objects to avoid:
-				//   - Triggering other controllers unexpectedly
-				//   - Conflicts with user expectations
-				//   - Unexpected side-effects in shared clusters
-				// Migration should be done explicitly via separate tool/job, not in controller.
-				snapshotKind := strings.TrimSuffix(currentGVK.Kind, "Content")
-				if snapshotKind != currentGVK.Kind {
-					// Successfully extracted Snapshot Kind
-					snapshotRef.Kind = snapshotKind
-					logger.Info(
-						"SnapshotContent uses legacy format (snapshotRef.kind is empty); fallback logic applied",
-						"snapshotContent", req.Name,
-						"snapshotKind", snapshotKind,
-						"contentKind", currentGVK.Kind,
-						"recommendation", "Run migration or recreate SnapshotContent to set snapshotRef.kind explicitly",
-					)
-				} else {
-					logger.Error(nil, "Cannot derive Snapshot Kind: SnapshotContent Kind does not end with 'Content'",
-						"contentKind", currentGVK.Kind,
-						"contentGVK", currentGVK.String())
-					return ctrl.Result{}, fmt.Errorf("cannot derive Snapshot Kind from SnapshotContent Kind %s (does not end with 'Content')", currentGVK.Kind)
-				}
-			}
-			var err error
-			snapshotExists, err = r.checkSnapshotExists(ctx, snapshotRef, currentGVK)
-			if err != nil {
-				logger.Error(err, "Failed to check if Snapshot exists", "snapshot", fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name))
+		if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
+			logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
+			if err := r.Update(ctx, obj); err != nil {
+				logger.Error(err, "Failed to add finalizer")
 				return ctrl.Result{}, err
 			}
-		}
-
-		// Step 1.2: Manage finalizer based on Snapshot existence
-		// Only add finalizer if Snapshot exists (prevents infinite loop)
-		if snapshotExists {
-			// Snapshot exists - ensure finalizer exists
-			if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
-				logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
-				if err := r.Update(ctx, obj); err != nil {
-					logger.Error(err, "Failed to add finalizer")
-					return ctrl.Result{}, err
-				}
-				// Requeue to continue processing after finalizer is added
-				return ctrl.Result{Requeue: true}, nil
-			}
-		} else {
-			// Snapshot does not exist (orphaned) - ensure finalizer is removed
-			// This allows SnapshotContent to become orphaned and be managed by ObjectKeeper TTL
-			if snapshot.RemoveFinalizer(obj, snapshot.FinalizerParentProtect) {
-				snapshotRefStr := "none"
-				if snapshotRef != nil {
-					snapshotRefStr = fmt.Sprintf("%s/%s", snapshotRef.Namespace, snapshotRef.Name)
-				}
-				logger.Info(
-					"SnapshotContent is orphaned: Snapshot was deleted, removing finalizer",
-					"snapshot", snapshotRefStr,
-					"snapshotContent", req.Name,
-				)
-				if err := r.Update(ctx, obj); err != nil {
-					logger.Error(err, "Failed to remove finalizer after orphaning")
-					return ctrl.Result{}, err
-				}
-				// Requeue to continue processing after finalizer is removed
-				return ctrl.Result{Requeue: true}, nil
-			}
+			return ctrl.Result{Requeue: true}, nil
 		}
 	} else {
 		// Object is being deleted - handle deletion (Phase 2: Cascade)
@@ -351,6 +224,18 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.cascadeRemoveFinalizersFromChildren(ctx, contentLike, obj); err != nil {
 			logger.Error(err, "Failed to cascade remove finalizers from children")
 			// Non-fatal: continue with finalizer removal
+		}
+
+		// Step 2.1.1: Remove finalizers from linked artifacts (MCP/VSC)
+		if mcpName := contentLike.GetStatusManifestCheckpointName(); mcpName != "" {
+			if err := r.removeArtifactFinalizer(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1"); err != nil {
+				logger.Error(err, "Failed to remove ManifestCheckpoint finalizer", "mcp", mcpName)
+			}
+		}
+		if dataRef := contentLike.GetStatusDataRef(); dataRef != nil && dataRef.Kind == "VolumeSnapshotContent" {
+			if err := r.removeArtifactFinalizer(ctx, "VolumeSnapshotContent", dataRef.Name, "snapshot.storage.k8s.io/v1"); err != nil {
+				logger.Error(err, "Failed to remove VolumeSnapshotContent finalizer", "vsc", dataRef.Name)
+			}
 		}
 
 		// Step 2.2: Remove finalizer from this SnapshotContent
@@ -484,6 +369,11 @@ func (r *SnapshotContentController) checkConsistencyAndSetReady(
 
 	// Check ManifestCheckpoint if present
 	mcpName := contentLike.GetStatusManifestCheckpointName()
+	if mcpName == "" {
+		// Ready must not become True without MCP link
+		logger.V(1).Info("ManifestCheckpointName is empty; not Ready yet", "snapshotContent", obj.GetName())
+		return nil
+	}
 	if mcpName != "" {
 		exists, err := r.checkArtifactExists(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1")
 		if err != nil {
@@ -501,6 +391,9 @@ func (r *SnapshotContentController) checkConsistencyAndSetReady(
 				logger.Info("ManifestCheckpoint missing, set Ready=False", "mcp", mcpName)
 			}
 			return nil // Artifact missing, but object was never Ready
+		}
+		if err := r.ensureArtifactFinalizer(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1"); err != nil {
+			return fmt.Errorf("failed to ensure ManifestCheckpoint finalizer: %w", err)
 		}
 	}
 
@@ -523,6 +416,47 @@ func (r *SnapshotContentController) checkConsistencyAndSetReady(
 				logger.Info("VolumeSnapshotContent missing, set Ready=False", "vsc", dataRef.Name)
 			}
 			return nil // Artifact missing, but object was never Ready
+		}
+		if err := r.ensureArtifactFinalizer(ctx, "VolumeSnapshotContent", dataRef.Name, "snapshot.storage.k8s.io/v1"); err != nil {
+			return fmt.Errorf("failed to ensure VolumeSnapshotContent finalizer: %w", err)
+		}
+	}
+
+	// Check children SnapshotContents if present
+	childrenRefs := contentLike.GetStatusChildrenSnapshotContentRefs()
+	if len(childrenRefs) > 0 {
+		for _, childRef := range childrenRefs {
+			childObj := &unstructured.Unstructured{}
+			childObj.SetGroupVersionKind(obj.GroupVersionKind())
+			if err := r.APIReader.Get(ctx, client.ObjectKey{Name: childRef.Name}, childObj); err != nil {
+				if errors.IsNotFound(err) {
+					if wasReady {
+						snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
+							snapshot.ReasonArtifactMissing, fmt.Sprintf("Child SnapshotContent %s not found", childRef.Name))
+						snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
+						if err := r.Status().Update(ctx, obj); err != nil {
+							return fmt.Errorf("failed to update Ready=False: %w", err)
+						}
+					}
+					return nil
+				}
+				return fmt.Errorf("failed to get child SnapshotContent %s: %w", childRef.Name, err)
+			}
+			childLike, err := snapshot.ExtractSnapshotContentLike(childObj)
+			if err != nil {
+				return fmt.Errorf("failed to extract child SnapshotContentLike: %w", err)
+			}
+			if !snapshot.IsReady(childLike) {
+				if wasReady {
+					snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
+						snapshot.ReasonArtifactMissing, fmt.Sprintf("Child SnapshotContent %s is not Ready", childRef.Name))
+					snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
+					if err := r.Status().Update(ctx, obj); err != nil {
+						return fmt.Errorf("failed to update Ready=False: %w", err)
+					}
+				}
+				return nil
+			}
 		}
 	}
 
@@ -579,71 +513,76 @@ func (r *SnapshotContentController) checkArtifactExists(ctx context.Context, kin
 	return true, nil
 }
 
-// checkSnapshotExists checks if the referenced Snapshot exists
-// Uses APIReader for read-after-write consistency (direct API, no cache)
-// contentGVK is used as fallback to derive Snapshot GVK if registry lookup fails
-func (r *SnapshotContentController) checkSnapshotExists(ctx context.Context, snapshotRef *snapshot.ObjectRef, contentGVK schema.GroupVersionKind) (bool, error) {
-	if snapshotRef == nil {
-		return false, nil
-	}
-
-	// Validate contentGVK before using it as fallback
-	if contentGVK.Kind == "" {
-		return false, fmt.Errorf("cannot use empty contentGVK as fallback for Snapshot GVK resolution")
-	}
-
-	// Resolve Snapshot GVK through registry
-	snapshotGVK, err := r.GVKRegistry.ResolveSnapshotGVK(snapshotRef.Kind)
-	if err != nil {
-		// Fallback: derive Snapshot GVK from SnapshotContent GVK
-		// This handles cases where registry doesn't have the mapping (e.g., new snapshot types)
-		// or for backward compatibility with old objects
-		logger := log.FromContext(ctx)
-		logger.V(1).Info("Snapshot GVK not found in registry, deriving from SnapshotContent GVK (fallback)",
-			"snapshotKind", snapshotRef.Kind,
-			"contentGVK", contentGVK.String(),
-			"note", "This is a fallback. Registry should ideally contain all mappings.")
-
-		// Derive Snapshot Kind from SnapshotContent Kind (remove "Content" suffix)
-		// This implements the convention: SnapshotContent Kind = Snapshot Kind + "Content"
-		snapshotKind := strings.TrimSuffix(contentGVK.Kind, "Content")
-		if snapshotKind == contentGVK.Kind {
-			return false, fmt.Errorf("cannot derive Snapshot Kind from SnapshotContent Kind %s (does not end with 'Content'): %w", contentGVK.Kind, err)
+// ensureArtifactFinalizer adds artifact-protect finalizer to MCP/VSC if missing.
+func (r *SnapshotContentController) ensureArtifactFinalizer(ctx context.Context, kind, name, apiVersion string) error {
+	var gvk schema.GroupVersionKind
+	if idx := strings.Index(apiVersion, "/"); idx != -1 {
+		gvk = schema.GroupVersionKind{
+			Group:   apiVersion[:idx],
+			Version: apiVersion[idx+1:],
+			Kind:    kind,
 		}
-
-		// Validate that derived Kind matches snapshotRef.Kind (if set)
-		if snapshotRef.Kind != "" && snapshotKind != snapshotRef.Kind {
-			logger.V(1).Info("Derived Snapshot Kind differs from snapshotRef.Kind, using derived",
-				"derivedKind", snapshotKind,
-				"refKind", snapshotRef.Kind)
+	} else {
+		gvk = schema.GroupVersionKind{
+			Group:   "",
+			Version: apiVersion,
+			Kind:    kind,
 		}
+	}
 
-		// Construct Snapshot GVK from SnapshotContent GVK
-		snapshotGVK = schema.GroupVersionKind{
-			Group:   contentGVK.Group,
-			Version: contentGVK.Version,
-			Kind:    snapshotKind,
+	artifactObj := &unstructured.Unstructured{}
+	artifactObj.SetGroupVersionKind(gvk)
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
 		}
-		logger.V(1).Info("Derived Snapshot GVK from SnapshotContent GVK", "snapshotGVK", snapshotGVK.String())
+		return err
 	}
 
-	snapshotObj := &unstructured.Unstructured{}
-	snapshotObj.SetGroupVersionKind(snapshotGVK)
-
-	key := client.ObjectKey{
-		Name:      snapshotRef.Name,
-		Namespace: snapshotRef.Namespace,
+	if snapshot.AddFinalizer(artifactObj, snapshot.FinalizerArtifactProtect) {
+		if err := r.Update(ctx, artifactObj); err != nil {
+			return err
+		}
+		log.FromContext(ctx).Info("Added artifact finalizer", "kind", kind, "name", name, "finalizer", snapshot.FinalizerArtifactProtect)
 	}
 
-	getErr := r.APIReader.Get(ctx, key, snapshotObj)
-	if errors.IsNotFound(getErr) {
-		return false, nil
-	}
-	if getErr != nil {
-		return false, fmt.Errorf("failed to get Snapshot: %w", getErr)
+	return nil
+}
+
+// removeArtifactFinalizer removes artifact-protect finalizer from MCP/VSC if present.
+func (r *SnapshotContentController) removeArtifactFinalizer(ctx context.Context, kind, name, apiVersion string) error {
+	var gvk schema.GroupVersionKind
+	if idx := strings.Index(apiVersion, "/"); idx != -1 {
+		gvk = schema.GroupVersionKind{
+			Group:   apiVersion[:idx],
+			Version: apiVersion[idx+1:],
+			Kind:    kind,
+		}
+	} else {
+		gvk = schema.GroupVersionKind{
+			Group:   "",
+			Version: apiVersion,
+			Kind:    kind,
+		}
 	}
 
-	return true, nil
+	artifactObj := &unstructured.Unstructured{}
+	artifactObj.SetGroupVersionKind(gvk)
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	if snapshot.RemoveFinalizer(artifactObj, snapshot.FinalizerArtifactProtect) {
+		if err := r.Update(ctx, artifactObj); err != nil {
+			return err
+		}
+		log.FromContext(ctx).Info("Removed artifact finalizer", "kind", kind, "name", name, "finalizer", snapshot.FinalizerArtifactProtect)
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager

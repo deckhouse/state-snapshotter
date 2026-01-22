@@ -260,6 +260,15 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"manifestCheckpointName": {Type: "string"},
+										"dataRef": {
+											Type: "object",
+											Properties: map[string]apiextensionsv1.JSONSchemaProps{
+												"kind":      {Type: "string"},
+												"name":      {Type: "string"},
+												"namespace": {Type: "string"},
+											},
+										},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -399,6 +408,15 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"manifestCheckpointName": {Type: "string"},
+										"dataRef": {
+											Type: "object",
+											Properties: map[string]apiextensionsv1.JSONSchemaProps{
+												"kind":      {Type: "string"},
+												"name":      {Type: "string"},
+												"namespace": {Type: "string"},
+											},
+										},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{

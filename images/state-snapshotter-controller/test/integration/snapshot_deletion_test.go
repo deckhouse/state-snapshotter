@@ -41,7 +41,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 	// This test verifies that SnapshotController correctly handles Snapshot deletion:
 	// - SnapshotController NEVER deletes SnapshotContent directly
 	// - SnapshotController does NOT break Content lifecycle
-	// - SnapshotController does NOT manage Content finalizers
+	// - SnapshotController removes SnapshotContent finalizer on Snapshot deletion
 	// - SnapshotController only propagates Ready=False to parent (if applicable)
 	//
 	// INTERFACE: controllers.SnapshotController.Reconcile
@@ -55,19 +55,17 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 	// 1. Delete Snapshot (sets deletionTimestamp)
 	// 2. SnapshotController.Reconcile(ctx, req)
 	// 3. Check SnapshotContent still exists
-	// 4. Check SnapshotContent finalizers unchanged
+	// 4. Check SnapshotContent finalizer removed
 	// 5. Check SnapshotContent ownerRef unchanged
 	//
 	// EXPECTED BEHAVIOR:
 	// - SnapshotContent still exists (NOT deleted by SnapshotController)
-	// - SnapshotContent finalizers will be removed by SnapshotContentController (via orphaning logic)
-	//   NOTE: SnapshotController doesn't manage finalizers, but SnapshotContentController does
+	// - SnapshotContent finalizer is removed by SnapshotController on parent deletion
 	// - SnapshotContent ownerRef unchanged (lifecycle not broken)
 	// - SnapshotContent can be managed by SnapshotContentController (orphaning)
 	//
 	// POSTCONDITION:
-	// - SnapshotContent exists and is orphaned
-	// - SnapshotContentController will handle finalizer removal (via orphaning logic)
+	// - SnapshotContent exists and is unblocked for GC by finalizer removal
 	//
 	// INVARIANT:
 	// - See GLOBAL INVARIANTS G1 (Controllers MUST NOT delete objects directly, ONLY remove finalizers)
@@ -97,7 +95,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 	})
 
 	Describe("Snapshot Deletion - Content Lifecycle Preserved", func() {
-		It("should NOT delete SnapshotContent directly", func() {
+		It("should remove SnapshotContent finalizer on Snapshot deletion", func() {
 			// PRECONDITION: Create Snapshot
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -217,6 +215,11 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			Expect(contentObj.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect), "SnapshotContent should have finalizer")
 			originalOwnerRefs := contentObj.GetOwnerReferences()
 
+			// Add test finalizer to keep Snapshot around while deletionTimestamp is set
+			snapshotObj.SetFinalizers(append(snapshotObj.GetFinalizers(), "test.finalizer"))
+			err = k8sClient.Update(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
 			// ACTIONS Step 1: Delete Snapshot (sets deletionTimestamp)
 			err = k8sClient.Delete(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -250,9 +253,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			}, "10s", "100ms").Should(BeTrue(), "SnapshotContent should still exist (NOT deleted by SnapshotController)")
 
 			// ACTIONS Step 4: Check SnapshotContent finalizers
-			// NOTE: SnapshotController doesn't manage finalizers, but SnapshotContentController does
-			// After Snapshot deletion, SnapshotContentController will remove finalizer via orphaning logic
-			// This is correct behavior - we verify that SnapshotController doesn't interfere
+			// SnapshotController removes parent-protect finalizer on Snapshot deletion
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 				Name: contentName,
 			}, contentObj)
@@ -266,9 +267,103 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			// ACTIONS Step 5: Check SnapshotContent ownerRef unchanged
 			Expect(contentObj.GetOwnerReferences()).To(Equal(originalOwnerRefs), "SnapshotContent ownerRef should be unchanged (lifecycle not broken)")
 
-			// EXPECTED BEHAVIOR: SnapshotContent exists and is orphaned
-			// SnapshotContentController will handle finalizer removal via orphaning logic
-			Expect(contentObj.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect), "Finalizer should remain (SnapshotContentController will remove it via orphaning)")
+			// EXPECTED BEHAVIOR: SnapshotContent exists and finalizer is removed
+			Expect(contentObj.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect), "Finalizer should be removed on Snapshot deletion")
+
+			// Cleanup: remove test finalizer to allow snapshot deletion
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, snapshotObj)
+			if err == nil {
+				snapshotObj.SetFinalizers([]string{})
+				_ = k8sClient.Update(ctx, snapshotObj)
+			}
+		})
+
+		It("should remove SnapshotContent finalizer even if boundSnapshotContentName is missing", func() {
+			// PRECONDITION: Create Snapshot
+			snapshotObj := &unstructured.Unstructured{}
+			snapshotObj.SetGroupVersionKind(snapshotGVK)
+			snapshotObj.SetName("test-deletion-snapshot-missing-content-name")
+			snapshotObj.SetNamespace("default")
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
+
+			err := k8sClient.Create(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate domain controller
+			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+			snapshot.SetCondition(
+				snapshotLike,
+				snapshot.ConditionHandledByDomainSpecificController,
+				metav1.ConditionTrue,
+				"Processed",
+				"Domain controller processed snapshot",
+			)
+			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
+			err = k8sClient.Status().Update(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create SnapshotContent manually with deterministic name (status.boundSnapshotContentName is missing)
+			contentName := snapshot.GenerateSnapshotContentName(snapshotObj.GetName(), string(snapshotObj.GetUID()))
+			contentObj := &unstructured.Unstructured{}
+			contentObj.SetGroupVersionKind(contentGVK)
+			contentObj.SetName(contentName)
+			contentObj.SetFinalizers([]string{snapshot.FinalizerParentProtect})
+			err = k8sClient.Create(ctx, contentObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create controller
+			snapshotCtrl, err := controllers.NewSnapshotController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Add test finalizer to keep Snapshot around while deletionTimestamp is set
+			snapshotObj.SetFinalizers(append(snapshotObj.GetFinalizers(), "test.finalizer"))
+			err = k8sClient.Update(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Delete Snapshot to set deletionTimestamp
+			err = k8sClient.Delete(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Trigger reconcile (deletion path)
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				},
+			}
+			_, err = snapshotCtrl.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Finalizer should be removed from SnapshotContent
+			contentObj2 := &unstructured.Unstructured{}
+			contentObj2.SetGroupVersionKind(contentGVK)
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name: contentName,
+			}, contentObj2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(contentObj2.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect))
+
+			// Cleanup: remove test finalizer
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, snapshotObj)
+			if err == nil {
+				snapshotObj.SetFinalizers([]string{})
+				_ = k8sClient.Update(ctx, snapshotObj)
+			}
 		})
 	})
 })
