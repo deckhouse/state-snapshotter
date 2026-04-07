@@ -49,6 +49,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -192,11 +193,31 @@ func main() {
 	log.Info("DomainSpecificSnapshotController reconciler added to manager")
 
 	// Add unified snapshots controllers (SnapshotController and SnapshotContentController).
-	// Only register GVKs that exist in the apiserver (S1–S2): missing module CRDs must not crash the process.
-	desiredPairs := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
+	// Desired pairs = static bootstrap ∪ DSC mappings for objects that satisfy ADR watch formula
+	// (Accepted=True, RBACReady=True, matching observedGeneration). DSC overrides bootstrap for the same snapshot GVK.
+	// Snapshot: this runs once at process start; adding watches without restart is not supported here (see docs/state-snapshotter-rework/design/implementation-plan.md).
+	dscBootstrapClient, err := client.New(kConfig, client.Options{
+		Scheme: scheme,
+		Mapper: mgr.GetRESTMapper(),
+	})
+	if err != nil {
+		log.Error(err, "[main] unable to create client for DSC→unified GVK bootstrap")
+		cancel()
+		os.Exit(1)
+	}
+	dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, dscBootstrapClient)
+	if err != nil {
+		log.Warning("DSC list/parse for unified GVK bootstrap failed; using static default pairs only", "error", err)
+		dscPairs = nil
+	} else {
+		log.Info("[main] DSC-derived unified GVK pair candidates (watch-eligible)", "count", len(dscPairs))
+	}
+	defaultPairs := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
+	mergedPairs := unifiedbootstrap.MergeBootstrapAndDSCPairs(defaultPairs, dscPairs)
+	log.Info("[main] unified GVK pairs after merge (bootstrap + DSC)", "count", len(mergedPairs))
 	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
-		desiredPairs,
+		mergedPairs,
 		ctrl.Log.WithName("unified-bootstrap"),
 	)
 	if len(snapshotGVKs) == 0 {
