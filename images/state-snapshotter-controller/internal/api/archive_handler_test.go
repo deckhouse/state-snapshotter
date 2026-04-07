@@ -53,6 +53,12 @@ func setupTestHandler() (*ArchiveHandler, client.Client) {
 	return handler, fakeClient
 }
 
+func setupTestServer(handler *ArchiveHandler) *httptest.Server {
+	mux := http.NewServeMux()
+	handler.SetupRoutes(mux)
+	return httptest.NewServer(mux)
+}
+
 //nolint:unparam // name parameter is kept for test flexibility
 func createTestCheckpoint(name string, ready bool) *storagev1alpha1.ManifestCheckpoint {
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
@@ -93,87 +99,6 @@ func createTestCheckpoint(name string, ready bool) *storagev1alpha1.ManifestChec
 	}
 
 	return checkpoint
-}
-
-// TestHandleListManifestCheckpoints tests the list endpoint for manifestcheckpoints.
-// Verifies:
-// - Returns HTTP 200 OK
-// - Response has correct Kubernetes API structure (kind, apiVersion)
-// - Returns empty items array
-// - Metadata contains resourceVersion and selfLink
-func TestHandleListManifestCheckpoints(t *testing.T) {
-	handler, _ := setupTestHandler()
-
-	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints", nil)
-	w := httptest.NewRecorder()
-
-	handler.HandleListManifestCheckpoints(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	var response map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-		t.Fatalf("Failed to unmarshal response: %v", err)
-	}
-
-	if response["kind"] != "ManifestCheckpointList" {
-		t.Errorf("Expected kind ManifestCheckpointList, got %v", response["kind"])
-	}
-
-	if response["apiVersion"] != "subresources.state-snapshotter.deckhouse.io/v1alpha1" {
-		t.Errorf("Expected apiVersion subresources.state-snapshotter.deckhouse.io/v1alpha1, got %v", response["apiVersion"])
-	}
-
-	items, ok := response["items"].([]interface{})
-	if !ok {
-		t.Fatal("items is not an array")
-	}
-
-	if len(items) != 0 {
-		t.Errorf("Expected empty items array, got %d items", len(items))
-	}
-
-	metadata, ok := response["metadata"].(map[string]interface{})
-	if !ok {
-		t.Fatal("metadata is not an object")
-	}
-
-	if metadata["resourceVersion"] != "0" {
-		t.Errorf("Expected resourceVersion 0, got %v", metadata["resourceVersion"])
-	}
-
-	if metadata["selfLink"] == nil {
-		t.Error("Expected selfLink in metadata")
-	}
-}
-
-// TestHandleListManifestCheckpointsWithQueryParams tests that query parameters are preserved in selfLink.
-// Verifies:
-// - Query parameters are included in metadata.selfLink
-// - Response structure remains correct
-func TestHandleListManifestCheckpointsWithQueryParams(t *testing.T) {
-	handler, _ := setupTestHandler()
-
-	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints?limit=500", nil)
-	w := httptest.NewRecorder()
-
-	handler.HandleListManifestCheckpoints(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	var response map[string]interface{}
-	_ = json.Unmarshal(w.Body.Bytes(), &response)
-
-	metadata := response["metadata"].(map[string]interface{})
-	selfLink := metadata["selfLink"].(string)
-
-	if !strings.Contains(selfLink, "limit=500") {
-		t.Errorf("Expected selfLink to contain query params, got %s", selfLink)
-	}
 }
 
 // TestHandleGetManifests_NotFound tests handling of non-existent checkpoint.
@@ -328,6 +253,81 @@ func TestHandleGetManifests_WithGzip(t *testing.T) {
 	}
 }
 
+func TestHandleGetManifests_TrailingSlash(t *testing.T) {
+	handler, client := setupTestHandler()
+	server := setupTestServer(handler)
+	defer server.Close()
+
+	data1, checksum1 := encodeTestChunkData([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "Test", "metadata": map[string]interface{}{"name": "test1"}},
+	})
+	chunk0 := &storagev1alpha1.ManifestCheckpointContentChunk{
+		ObjectMeta: metav1.ObjectMeta{Name: "chunk-0"},
+		Spec: storagev1alpha1.ManifestCheckpointContentChunkSpec{
+			CheckpointName: "test-checkpoint",
+			Index:          0,
+			Data:           data1,
+			Checksum:       checksum1,
+			ObjectsCount:   1,
+		},
+	}
+	_ = client.Create(context.Background(), chunk0)
+
+	checkpoint := createTestCheckpoint("test-checkpoint", true)
+	checkpoint.Status.Chunks = []storagev1alpha1.ChunkInfo{
+		{Name: "chunk-0", Index: 0, Checksum: checksum1},
+	}
+	checkpoint.Status.TotalObjects = 1
+	_ = client.Create(context.Background(), checkpoint)
+
+	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/test-checkpoint/manifests/")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleAPIResourceListDiscovery_SubresourcesOnly(t *testing.T) {
+	handler, _ := setupTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1", nil)
+	w := httptest.NewRecorder()
+
+	handler.HandleAPIResourceListDiscovery(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", w.Code)
+	}
+
+	var list metav1.APIResourceList
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("Failed to unmarshal APIResourceList: %v", err)
+	}
+
+	resources := map[string]metav1.APIResource{}
+	for _, res := range list.APIResources {
+		resources[res.Name] = res
+	}
+
+	if _, exists := resources["manifestcheckpoints"]; exists {
+		t.Fatalf("manifestcheckpoints should not be in discovery")
+	}
+	if _, exists := resources["snapshots"]; exists {
+		t.Fatalf("snapshots should not be in discovery")
+	}
+	if _, exists := resources["manifestcheckpoints/manifests"]; !exists {
+		t.Fatalf("manifestcheckpoints/manifests missing in discovery")
+	}
+	if _, exists := resources["snapshots/manifests"]; !exists {
+		t.Fatalf("snapshots/manifests missing in discovery")
+	}
+	if _, exists := resources["snapshots/manifests-with-data-restoration"]; !exists {
+		t.Fatalf("snapshots/manifests-with-data-restoration missing in discovery")
+	}
+}
+
 // TestHandleGetManifests_WithoutGzip tests uncompressed JSON response.
 // Verifies:
 // - Returns HTTP 200 OK
@@ -432,69 +432,53 @@ func encodeTestChunkData(objects []map[string]interface{}) (string, string) {
 	return encoded, checksum
 }
 
-// TestHandleGetManifests_WithoutSubresource tests GET request without subresource path.
-// Verifies:
-// - Returns HTTP 404 Not Found
-// - Error message indicates subresource is required
-// - Uses Kubernetes Status format
-func TestHandleGetManifests_WithoutSubresource(t *testing.T) {
-	handler, _ := setupTestHandler()
+// TestHandleManifestCheckpoints_NoSubresource tests GET without subresource.
+func TestHandleManifestCheckpoints_NoSubresource(t *testing.T) {
+	handler, client := setupTestHandler()
+	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
+	server := setupTestServer(handler)
+	defer server.Close()
 
-	// GET /apis/.../manifestcheckpoints/test (without /manifests)
-	req := httptest.NewRequest(http.MethodGet, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/test", nil)
-	w := httptest.NewRecorder()
-
-	// Simulate routing - this would be handled by the router
-	// In real scenario, router would call handler with empty subresource
-	path := strings.TrimPrefix(req.URL.Path, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 {
-		// This is the case we're testing
-		handler.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required: use /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests")
+	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
 	}
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("Expected status 404, got %d", w.Code)
-	}
-
-	var status metav1.Status
-	_ = json.Unmarshal(w.Body.Bytes(), &status)
-
-	if status.Reason != metav1.StatusReasonNotFound {
-		t.Errorf("Expected reason NotFound, got %v", status.Reason)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 }
 
-// TestHandleListManifestCheckpoints_MethodNotAllowed tests unsupported HTTP methods on list endpoint.
-// Verifies:
-// - POST, PUT, DELETE, PATCH return HTTP 405 Method Not Allowed
-// - Uses Kubernetes Status format with MethodNotAllowed reason
-func TestHandleListManifestCheckpoints_MethodNotAllowed(t *testing.T) {
-	handler, _ := setupTestHandler()
+func TestHandleManifestCheckpoints_NoSubresourceTrailingSlash(t *testing.T) {
+	handler, client := setupTestHandler()
+	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
+	server := setupTestServer(handler)
+	defer server.Close()
 
-	methods := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
+	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1/")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
 
-	for _, method := range methods {
-		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints", nil)
-			w := httptest.NewRecorder()
+// TestHandleManifestCheckpoints_UnknownSubresource tests unknown subresource routing.
+func TestHandleManifestCheckpoints_UnknownSubresource(t *testing.T) {
+	handler, client := setupTestHandler()
+	_ = client.Create(context.Background(), createTestCheckpoint("cp-1", true))
+	server := setupTestServer(handler)
+	defer server.Close()
 
-			// Simulate routing check
-			if req.Method != http.MethodGet {
-				handler.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported for list")
-			}
-
-			if w.Code != http.StatusMethodNotAllowed {
-				t.Errorf("Expected status 405 for %s, got %d", method, w.Code)
-			}
-
-			var status metav1.Status
-			_ = json.Unmarshal(w.Body.Bytes(), &status)
-
-			if status.Reason != metav1.StatusReason("MethodNotAllowed") {
-				t.Errorf("Expected reason MethodNotAllowed, got %v", status.Reason)
-			}
-		})
+	resp, err := http.Get(server.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/cp-1/unknown")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404, got %d", resp.StatusCode)
 	}
 }
 
@@ -542,52 +526,5 @@ func TestHandleGetManifests_ReturnsJSON(t *testing.T) {
 	contentType := w.Header().Get("Content-Type")
 	if !strings.Contains(contentType, "application/json") {
 		t.Errorf("Expected Content-Type application/json, got %s", contentType)
-	}
-}
-
-// TestHandleListManifestCheckpoints_ComplexQueryParams tests preservation of complex query parameters in selfLink.
-// Verifies:
-// - Multiple query parameters are preserved
-// - URL-encoded characters are handled correctly
-// - selfLink contains all query parameters
-func TestHandleListManifestCheckpoints_ComplexQueryParams(t *testing.T) {
-	handler, _ := setupTestHandler()
-
-	tests := []struct {
-		name          string
-		query         string
-		shouldContain string
-	}{
-		{"multiple params", "limit=500&continue=a%2Fb", "limit=500"},
-		{"encoded chars", "labelSelector=a%2Cb", "labelSelector=a%2Cb"},
-		{"empty query", "", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			url := "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints"
-			if tt.query != "" {
-				url += "?" + tt.query
-			}
-			req := httptest.NewRequest(http.MethodGet, url, nil)
-			w := httptest.NewRecorder()
-
-			handler.HandleListManifestCheckpoints(w, req)
-
-			if w.Code != http.StatusOK {
-				t.Errorf("Expected status 200, got %d", w.Code)
-				return
-			}
-
-			var response map[string]interface{}
-			_ = json.Unmarshal(w.Body.Bytes(), &response)
-
-			metadata := response["metadata"].(map[string]interface{})
-			selfLink := metadata["selfLink"].(string)
-
-			if tt.query != "" && !strings.Contains(selfLink, tt.shouldContain) {
-				t.Errorf("Expected selfLink to contain %s, got %s", tt.shouldContain, selfLink)
-			}
-		})
 	}
 }

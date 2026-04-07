@@ -39,15 +39,15 @@ var TestFixtures = struct {
 	// ManifestCaptureRequests
 	TestMCRName string
 }{
-	TestNamespace1: "test-ns-1",
-	TestNamespace2: "test-ns-2",
+	TestNamespace1:    "test-ns-1",
+	TestNamespace2:    "test-ns-2",
 	TestConfigMapName: "test-cm",
 	TestConfigMapData: map[string]string{
 		"key1": "value1",
 		"key2": "value2",
 	},
 	TestServiceName: "test-svc",
-	TestMCRName: "test-mcr",
+	TestMCRName:     "test-mcr",
 }
 
 // GetStandardTargets returns a standard set of targets for testing
@@ -67,4 +67,3 @@ func GetClusterScopedTarget() storagev1alpha1.ManifestTarget {
 func GetNotFoundTarget() storagev1alpha1.ManifestTarget {
 	return makeTarget("v1", "ConfigMap", "non-existent-cm")
 }
-

@@ -1,0 +1,167 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io
+spec:
+  group: state-snapshotter.deckhouse.io
+  names:
+    kind: DomainSpecificSnapshotController
+    listKind: DomainSpecificSnapshotControllerList
+    plural: domainspecificsnapshotcontrollers
+    shortNames:
+    - dssc
+    singular: domainspecificsnapshotcontroller
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.ownerModule
+      name: Owner
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          DomainSpecificSnapshotController registers unified snapshot types for a platform module (DSC).
+          See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              manifestTransformation:
+                description: ManifestTransformation optional webhook for manifest
+                  transforms for this DSC.
+                properties:
+                  serviceRef:
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
+                required:
+                - serviceRef
+                type: object
+              ownerModule:
+                description: OwnerModule identifies the owning Deckhouse module (audit/RBAC);
+                  immutable in v1alpha1.
+                type: string
+              snapshotResourceMapping:
+                description: SnapshotResourceMapping declares supported snapshot types
+                  using CRD names only (v1alpha1).
+                items:
+                  description: SnapshotResourceMappingEntry maps resource / snapshot
+                    / content CRDs (plural.resource.group form).
+                  properties:
+                    contentCRDName:
+                      type: string
+                    priority:
+                      description: Priority is used when ordering orchestration across
+                        mappings (lower runs first).
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    resourceCRDName:
+                      type: string
+                    snapshotCRDName:
+                      type: string
+                  required:
+                  - contentCRDName
+                  - resourceCRDName
+                  - snapshotCRDName
+                  type: object
+                minItems: 1
+                type: array
+            required:
+            - ownerModule
+            - snapshotResourceMapping
+            type: object
+          status:
+            properties:
+              conditions:
+                description: Conditions include Accepted, RBACReady, Ready (see ADR).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

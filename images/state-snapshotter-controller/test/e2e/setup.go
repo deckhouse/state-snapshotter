@@ -31,7 +31,9 @@ import (
 	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -47,12 +49,14 @@ import (
 )
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mgr       ctrl.Manager
+	cfg                *rest.Config
+	k8sClient          client.Client
+	testEnv            *envtest.Environment
+	ctx                context.Context
+	cancel             context.CancelFunc
+	mgr                ctrl.Manager
+	snapshotController *controllers.SnapshotController
+	contentController  *controllers.SnapshotContentController
 )
 
 var _ = BeforeSuite(func() {
@@ -171,6 +175,221 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// Install TestSnapshot and TestSnapshotContent CRDs for unified snapshots E2E tests
+	testSnapshotCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "testsnapshots.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"backupClassName": {Type: "string"},
+									},
+								},
+								"status": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"boundSnapshotContentName": {Type: "string"},
+										"conditions": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+				},
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "testsnapshots",
+				Singular: "testsnapshot",
+				Kind:     "TestSnapshot",
+			},
+		},
+	}
+
+	testSnapshotContentCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "testsnapshotcontents.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"snapshotRef": {
+											Type: "object",
+											Properties: map[string]apiextensionsv1.JSONSchemaProps{
+												"kind":      {Type: "string"},
+												"name":      {Type: "string"},
+												"namespace": {Type: "string"},
+											},
+										},
+									},
+								},
+								"status": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"conditions": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
+												},
+											},
+										},
+										"childrenSnapshotContentRefs": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"kind": {Type: "string"},
+														"name": {Type: "string"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+				},
+			},
+			Scope: apiextensionsv1.ClusterScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "testsnapshotcontents",
+				Singular: "testsnapshotcontent",
+				Kind:     "TestSnapshotContent",
+			},
+		},
+	}
+
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, testSnapshotCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, testSnapshotContentCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	// Create BackupClass CRD (required for SnapshotContent creation)
+	backupClassCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "backupclasses.storage.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "storage.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"backupRepositoryName": {Type: "string"},
+										"deletionPolicy":       {Type: "string"},
+									},
+									// deletionPolicy is optional - controller defaults to "Retain" if not set
+									Required: []string{"backupRepositoryName"},
+								},
+							},
+						},
+					},
+				},
+			},
+			Scope: apiextensionsv1.ClusterScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "backupclasses",
+				Singular: "backupclass",
+				Kind:     "BackupClass",
+			},
+		},
+	}
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, backupClassCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	// Wait for CRDs to be ready
+	Eventually(func() bool {
+		snapshotCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "testsnapshots.test.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		contentCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "testsnapshotcontents.test.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		// Check if CRDs are established
+		for _, condition := range snapshotCRD.Status.Conditions {
+			if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+				for _, condition := range contentCRD.Status.Conditions {
+					if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}).Should(BeTrue(), "TestSnapshot CRDs should be established")
+
 	err = apiextensionsv1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -207,8 +426,44 @@ var _ = BeforeSuite(func() {
 	err = mcpController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	// Setup unified snapshots controllers (SnapshotController and SnapshotContentController)
+	// These controllers work with TestSnapshot/TestSnapshotContent for E2E tests
+	snapshotGVK := schema.GroupVersionKind{
+		Group:   "test.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "TestSnapshot",
+	}
+	contentGVK := schema.GroupVersionKind{
+		Group:   "test.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "TestSnapshotContent",
+	}
+
+	snapshotController, err = controllers.NewSnapshotController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		cfgOptions,
+		[]schema.GroupVersionKind{snapshotGVK},
+	)
+	Expect(err).NotTo(HaveOccurred())
+	err = snapshotController.SetupWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
+
+	contentController, err = controllers.NewSnapshotContentController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		mgr.GetRESTMapper(),
+		cfgOptions,
+		[]schema.GroupVersionKind{contentGVK},
+	)
+	Expect(err).NotTo(HaveOccurred())
+	err = contentController.SetupWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
 
 	// Create context
 	ctx, cancel = context.WithCancel(testCtx)
@@ -224,10 +479,55 @@ var _ = BeforeSuite(func() {
 	k8sClient = mgr.GetClient()
 	Expect(k8sClient).NotTo(BeNil())
 
-	// Wait for cache to sync
+	// Wait for cache to sync first
 	Eventually(func() bool {
 		return mgr.GetCache().WaitForCacheSync(ctx)
 	}).Should(BeTrue())
+
+	// Wait for BackupClass CRD to be established
+	Eventually(func() bool {
+		backupClassCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "backupclasses.storage.deckhouse.io", metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		for _, condition := range backupClassCRD.Status.Conditions {
+			if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+				return true
+			}
+		}
+		return false
+	}).Should(BeTrue(), "BackupClass CRD should be established")
+
+	// Wait for BackupClass GVK to be available in cache before creating objects
+	// This ensures the informer is ready and prevents "resource not found" errors
+	Eventually(func() error {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "storage.deckhouse.io",
+			Version: "v1alpha1",
+			Kind:    "BackupClassList",
+		})
+		return k8sClient.List(testCtx, list)
+	}).Should(Succeed(), "BackupClass GVK should be available in cache")
+
+	// Create default BackupClass for tests
+	backupClassObj := &unstructured.Unstructured{}
+	backupClassObj.Object = map[string]interface{}{
+		"spec": map[string]interface{}{
+			"backupRepositoryName": "test-repository",
+			"deletionPolicy":       "Retain",
+		},
+	}
+	backupClassObj.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "storage.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "BackupClass",
+	})
+	backupClassObj.SetName("test-backup-class")
+	err = k8sClient.Create(testCtx, backupClassObj)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
 })
 
 var _ = AfterSuite(func() {

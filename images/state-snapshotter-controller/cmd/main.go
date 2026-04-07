@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	goruntime "runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -48,7 +49,10 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -105,6 +109,23 @@ func main() {
 
 	log.Info(fmt.Sprintf("[main] Go Version:%s ", goruntime.Version()))
 	log.Info(fmt.Sprintf("[main] OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
+	if buildInfo, ok := debug.ReadBuildInfo(); ok {
+		log.Info(fmt.Sprintf("[main] BuildInfo: module=%s version=%s", buildInfo.Main.Path, buildInfo.Main.Version))
+		var vcsRevision, vcsTime, vcsModified string
+		for _, setting := range buildInfo.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				vcsRevision = setting.Value
+			case "vcs.time":
+				vcsTime = setting.Value
+			case "vcs.modified":
+				vcsModified = setting.Value
+			}
+		}
+		if vcsRevision != "" || vcsTime != "" || vcsModified != "" {
+			log.Info(fmt.Sprintf("[main] VCS: revision=%s time=%s modified=%s", vcsRevision, vcsTime, vcsModified))
+		}
+	}
 
 	log.Info("[main] CfgParams has been successfully created")
 	log.Info(fmt.Sprintf("[main] %s = %s", config.LogLevelEnvName, cfgParams.Loglevel))
@@ -164,6 +185,101 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("ManifestCheckpointController added to manager")
+
+	// Unified snapshots: optional rollout (STATE_SNAPSHOTTER_UNIFIED_ENABLED); bootstrap list from R5 env or defaults.
+	var unifiedSyncFn func(context.Context) error
+
+	if cfgParams.UnifiedSnapshotDisabled {
+		log.Info("[main] unified snapshot wiring disabled (STATE_SNAPSHOTTER_UNIFIED_ENABLED); skipping Snapshot/SnapshotContent and runtime sync; DSC reconciler runs without sync")
+		unifiedSyncFn = nil
+	} else {
+		dscBootstrapClient, err := client.New(kConfig, client.Options{
+			Scheme: scheme,
+			Mapper: mgr.GetRESTMapper(),
+		})
+		if err != nil {
+			log.Error(err, "[main] unable to create client for DSC→unified GVK bootstrap")
+			cancel()
+			os.Exit(1)
+		}
+		dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, dscBootstrapClient)
+		if err != nil {
+			log.Warning("DSC list/parse for unified GVK bootstrap failed; using bootstrap-only merge", "error", err)
+			dscPairs = nil
+		} else {
+			log.Info("[main] DSC-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(dscPairs))
+		}
+		bootstrapPairs := cfgParams.EffectiveUnifiedBootstrapPairs()
+		log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs), "bootstrapMode", cfgParams.UnifiedBootstrapMode)
+		mergedPairs := unifiedbootstrap.MergeBootstrapAndDSCPairs(bootstrapPairs, dscPairs)
+		log.Info("[main] unified GVK pairs after merge (bootstrap + DSC)", "count", len(mergedPairs))
+		snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+			mgr.GetRESTMapper(),
+			mergedPairs,
+			ctrl.Log.WithName("unified-bootstrap"),
+		)
+		if len(snapshotGVKs) == 0 {
+			log.Info("[main] no unified snapshot CRDs found in API; unified snapshot controllers run with zero watches (manifest/MCR and other controllers continue)")
+		} else {
+			log.Info("[main] unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
+		}
+
+		snapshotController, err := controllers.NewSnapshotController(
+			mgr.GetClient(),
+			mgr.GetAPIReader(),
+			mgr.GetScheme(),
+			cfgParams,
+			snapshotGVKs,
+		)
+		if err != nil {
+			log.Error(err, "Failed to create SnapshotController")
+			cancel()
+			os.Exit(1)
+		}
+		if err := snapshotController.SetupWithManager(mgr); err != nil {
+			log.Error(err, "Failed to setup SnapshotController with manager")
+			cancel()
+			os.Exit(1)
+		}
+		log.Info("SnapshotController added to manager", "snapshotGVKs", len(snapshotGVKs))
+
+		contentController, err := controllers.NewSnapshotContentController(
+			mgr.GetClient(),
+			mgr.GetAPIReader(),
+			mgr.GetScheme(),
+			mgr.GetRESTMapper(),
+			cfgParams,
+			snapshotContentGVKs,
+		)
+		if err != nil {
+			log.Error(err, "Failed to create SnapshotContentController")
+			cancel()
+			os.Exit(1)
+		}
+		if err := contentController.SetupWithManager(mgr); err != nil {
+			log.Error(err, "Failed to setup SnapshotContentController with manager")
+			cancel()
+			os.Exit(1)
+		}
+		log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(snapshotContentGVKs))
+
+		unifiedSync := unifiedruntime.NewSyncer(
+			mgr,
+			ctrl.Log,
+			cfgParams.EffectiveUnifiedBootstrapPairs(),
+			mgr.GetAPIReader(),
+			snapshotController,
+			contentController,
+		)
+		unifiedSyncFn = unifiedSync.Sync
+	}
+
+	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams, unifiedSyncFn); err != nil {
+		log.Error(err, "Failed to add DomainSpecificSnapshotController reconciler to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("DomainSpecificSnapshotController reconciler added to manager")
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
