@@ -69,10 +69,7 @@ func NewGVKRegistry() *GVKRegistry {
 //
 // See: unified-snapshots-test-plan.md (TEST CASE: RegisterSnapshotGVK - Idempotency)
 func (r *GVKRegistry) RegisterSnapshotGVK(kind string, apiVersion string) error {
-	gvk, err := parseGVK(kind, apiVersion)
-	if err != nil {
-		return fmt.Errorf("failed to parse Snapshot GVK: %w", err)
-	}
+	gvk := parseGVK(kind, apiVersion)
 	if existing, ok := r.snapshotGVKs[kind]; ok {
 		if existing.GroupVersion().String() != gvk.GroupVersion().String() {
 			return fmt.Errorf("Snapshot Kind %q is already registered for %s; cannot register %s",
@@ -89,10 +86,7 @@ func (r *GVKRegistry) RegisterSnapshotGVK(kind string, apiVersion string) error 
 // Contract: Idempotent - registering the same GVK twice is allowed and has no effect.
 // Example: RegisterSnapshotContentGVK("VirtualMachineSnapshotContent", "virtualization.deckhouse.io/v1alpha1")
 func (r *GVKRegistry) RegisterSnapshotContentGVK(kind string, apiVersion string) error {
-	gvk, err := parseGVK(kind, apiVersion)
-	if err != nil {
-		return fmt.Errorf("failed to parse SnapshotContent GVK: %w", err)
-	}
+	gvk := parseGVK(kind, apiVersion)
 	if existing, ok := r.contentGVKs[kind]; ok {
 		if existing.GroupVersion().String() != gvk.GroupVersion().String() {
 			return fmt.Errorf("SnapshotContent Kind %q is already registered for %s; cannot register %s",
@@ -115,10 +109,7 @@ func (r *GVKRegistry) RegisterSnapshotContentMapping(snapshotKind, snapshotAPIVe
 		return err
 	}
 
-	contentGVK, err := parseGVK(contentKind, contentAPIVersion)
-	if err != nil {
-		return fmt.Errorf("failed to parse SnapshotContent mapping GVK: %w", err)
-	}
+	contentGVK := parseGVK(contentKind, contentAPIVersion)
 
 	if existing, ok := r.contentGVKBySnapshotKind[snapshotKind]; ok {
 		if existing != contentGVK {
@@ -230,21 +221,18 @@ func groupKindKey(gvk schema.GroupVersionKind) string {
 
 // parseGVK parses GVK from kind and apiVersion
 // apiVersion format: "group/version" or "version" (for core APIs)
-func parseGVK(kind, apiVersion string) (schema.GroupVersionKind, error) {
-	var gvk schema.GroupVersionKind
+func parseGVK(kind, apiVersion string) schema.GroupVersionKind {
 	if idx := strings.Index(apiVersion, "/"); idx != -1 {
-		gvk = schema.GroupVersionKind{
+		return schema.GroupVersionKind{
 			Group:   apiVersion[:idx],
 			Version: apiVersion[idx+1:],
 			Kind:    kind,
 		}
-	} else {
-		// Core API (e.g., "v1")
-		gvk = schema.GroupVersionKind{
-			Group:   "",
-			Version: apiVersion,
-			Kind:    kind,
-		}
 	}
-	return gvk, nil
+	// Core API (e.g., "v1")
+	return schema.GroupVersionKind{
+		Group:   "",
+		Version: apiVersion,
+		Kind:    kind,
+	}
 }

@@ -75,7 +75,7 @@ func buildVRR(pvc unstructured.Unstructured, node *SnapshotContentNode, targetNa
 		},
 		"pvcTemplate": map[string]interface{}{
 			"metadata": metadata,
-			"spec": extractPVCSpec(pvc),
+			"spec":     extractPVCSpec(pvc),
 		},
 	}
 

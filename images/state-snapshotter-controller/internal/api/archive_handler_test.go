@@ -101,7 +101,6 @@ func createTestCheckpoint(name string, ready bool) *storagev1alpha1.ManifestChec
 	return checkpoint
 }
 
-
 // TestHandleGetManifests_NotFound tests handling of non-existent checkpoint.
 // Verifies:
 // - Returns HTTP 404 Not Found
@@ -483,7 +482,6 @@ func TestHandleManifestCheckpoints_UnknownSubresource(t *testing.T) {
 	}
 }
 
-
 // TestHandleGetManifests_ReturnsJSON tests that /manifests endpoint always returns JSON.
 // Verifies:
 // - /manifests endpoint always returns JSON
@@ -530,4 +528,3 @@ func TestHandleGetManifests_ReturnsJSON(t *testing.T) {
 		t.Errorf("Expected Content-Type application/json, got %s", contentType)
 	}
 }
-

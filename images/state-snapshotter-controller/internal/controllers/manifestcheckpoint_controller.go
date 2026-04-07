@@ -1230,9 +1230,7 @@ func (r *ManifestCheckpointController) updateProcessingMessage(
 	}); err != nil {
 		// Log but don't fail - progress updates are best-effort
 		r.Logger.Debug("Failed to update Processing message (non-critical)", "error", err)
-		return
 	}
-	return
 }
 
 // finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
