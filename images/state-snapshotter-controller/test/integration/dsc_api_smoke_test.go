@@ -79,11 +79,12 @@ var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", func
 			},
 			Spec: storagev1alpha1.DomainSpecificSnapshotControllerSpec{
 				OwnerModule: "integration-test",
+				// RegistrationTest* CRDs: avoids hanging a global TestSnapshot watch (lifecycle tests use direct Reconcile on TestSnapshot).
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "testsnapshots.test.deckhouse.io",
-						SnapshotCRDName: "testsnapshots.test.deckhouse.io",
-						ContentCRDName:  "testsnapshotcontents.test.deckhouse.io",
+						ResourceCRDName: "registrationtestsnapshots.test.deckhouse.io",
+						SnapshotCRDName: "registrationtestsnapshots.test.deckhouse.io",
+						ContentCRDName:  "registrationtestsnapshotcontents.test.deckhouse.io",
 					},
 				},
 			},

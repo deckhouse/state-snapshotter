@@ -45,6 +45,9 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -54,9 +57,10 @@ var (
 	testEnv   *envtest.Environment
 	ctx       context.Context
 	cancel    context.CancelFunc
-	mgr       ctrl.Manager
-	scheme    *runtime.Scheme
-	testCfg   *config.Options
+	mgr           ctrl.Manager
+	scheme        *runtime.Scheme
+	testCfg       *config.Options
+	unifiedSyncer *unifiedruntime.Syncer
 )
 
 func TestIntegration(t *testing.T) {
@@ -621,7 +625,53 @@ var _ = BeforeSuite(func() {
 
 	integrationLog, err := logger.NewLogger("error")
 	Expect(err).NotTo(HaveOccurred())
-	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg, nil)).To(Succeed())
+
+	dscListingClient, err := client.New(cfg, client.Options{
+		Scheme: scheme,
+		Mapper: mgr.GetRESTMapper(),
+	})
+	Expect(err).NotTo(HaveOccurred())
+	dscPairs, derr := dscregistry.EligibleUnifiedGVKPairs(testCtx, dscListingClient)
+	if derr != nil {
+		dscPairs = nil
+	}
+	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs(), dscPairs)
+	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+		mgr.GetRESTMapper(),
+		merged,
+		ctrl.Log.WithName("integration-unified-bootstrap"),
+	)
+	snapshotController, err := controllers.NewSnapshotController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		scheme,
+		testCfg,
+		snapGVKs,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(snapshotController.SetupWithManager(mgr)).To(Succeed())
+
+	var contentController *controllers.SnapshotContentController
+	contentController, err = controllers.NewSnapshotContentController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		scheme,
+		mgr.GetRESTMapper(),
+		testCfg,
+		contentGVKs,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(contentController.SetupWithManager(mgr)).To(Succeed())
+
+	unifiedSyncer = unifiedruntime.NewSyncer(
+		mgr,
+		ctrl.Log,
+		unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs(),
+		mgr.GetAPIReader(),
+		snapshotController,
+		contentController,
+	)
+	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg, unifiedSyncer.Sync)).To(Succeed())
 
 	// Create context
 	ctx, cancel = context.WithCancel(testCtx)
@@ -648,11 +698,17 @@ var _ = BeforeSuite(func() {
 		return err
 	}
 	Eventually(func() error {
+		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshot"})
+	}).Should(Succeed(), "RESTMapper should discover TestSnapshot")
+	Eventually(func() error {
 		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshotContent"})
 	}).Should(Succeed(), "RESTMapper should discover TestSnapshotContent")
 	Eventually(func() error {
 		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshotContent"})
 	}).Should(Succeed(), "RESTMapper should discover RegistrationTestSnapshotContent")
+	Eventually(func() error {
+		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"})
+	}).Should(Succeed(), "RESTMapper should discover RegistrationTestSnapshot")
 
 	// Create default BackupClass for tests (after client is ready)
 	backupClassObj := &unstructured.Unstructured{}

@@ -50,10 +50,10 @@ var _ = Describe("Integration: Controller Registration", func() {
 	//
 	// EXPECTED BEHAVIOR:
 	// - Controllers are created without errors
-	// - Controllers are registered with manager without errors
-	// - This verifies the registration pattern from main.go works correctly
+	// - BeforeSuite already registers production-like unified controllers + unifiedruntime.Syncer on mgr;
+	//   this test only checks New* succeeds (duplicate SetupWithManager would collide on controller names).
 
-	It("should register both controllers together (as in main.go)", func() {
+	It("should construct both controllers (same options as main.go wiring)", func() {
 		// Use DIFFERENT GVK to avoid conflicts with other integration tests
 		// Other tests use TestSnapshot, we use RegistrationTestSnapshot for isolation
 		// This allows the test to run in parallel with other tests without conflicts
@@ -82,8 +82,6 @@ var _ = Describe("Integration: Controller Registration", func() {
 		)
 		Expect(err).NotTo(HaveOccurred(), "SnapshotController should be created without errors")
 		Expect(snapshotCtrl).NotTo(BeNil(), "SnapshotController should not be nil")
-		err = snapshotCtrl.SetupWithManager(mgr)
-		Expect(err).NotTo(HaveOccurred(), "SnapshotController should be registered with manager without errors")
 
 		// Create SnapshotContentController (same pattern as main.go)
 		contentCtrl, err := controllers.NewSnapshotContentController(
@@ -96,7 +94,5 @@ var _ = Describe("Integration: Controller Registration", func() {
 		)
 		Expect(err).NotTo(HaveOccurred(), "SnapshotContentController should be created without errors")
 		Expect(contentCtrl).NotTo(BeNil(), "SnapshotContentController should not be nil")
-		err = contentCtrl.SetupWithManager(mgr)
-		Expect(err).NotTo(HaveOccurred(), "SnapshotContentController should be registered with manager without errors")
 	})
 })
