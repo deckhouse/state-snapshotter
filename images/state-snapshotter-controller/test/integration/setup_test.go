@@ -635,7 +635,7 @@ var _ = BeforeSuite(func() {
 	if derr != nil {
 		dscPairs = nil
 	}
-	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs(), dscPairs)
+	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(testCfg.EffectiveUnifiedBootstrapPairs(), dscPairs)
 	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
 		merged,
@@ -666,7 +666,7 @@ var _ = BeforeSuite(func() {
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
-		unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs(),
+		testCfg.EffectiveUnifiedBootstrapPairs(),
 		mgr.GetAPIReader(),
 		snapshotController,
 		contentController,

@@ -26,6 +26,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/consts"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/logger"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 const (
@@ -60,6 +61,14 @@ type Options struct {
 	// If false, all objects are included as-is (no filtering, no cleaning)
 	// Default: false (filtering disabled by default)
 	EnableFiltering bool
+
+	// UnifiedSnapshotDisabled: when true, do not register Snapshot/SnapshotContent controllers or unifiedruntime.Sync;
+	// DSC reconciler still runs (status only), with nil runtime sync. Env: STATE_SNAPSHOTTER_UNIFIED_ENABLED=false|0|no|off.
+	UnifiedSnapshotDisabled bool
+	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible DSC (R5).
+	// See EffectiveUnifiedBootstrapPairs().
+	UnifiedBootstrapMode        UnifiedBootstrapMode
+	UnifiedBootstrapCustomPairs []unifiedbootstrap.UnifiedGVKPair
 }
 
 func NewConfig() *Options {
@@ -110,6 +119,16 @@ func NewConfig() *Options {
 	}
 	// Filtering disabled by default - all objects included as-is
 	opts.EnableFiltering = false
+
+	opts.UnifiedSnapshotDisabled = parseUnifiedSnapshotDisabled(os.Getenv(EnvUnifiedSnapshotEnabled))
+	mode, pairs, perr := ParseUnifiedBootstrapPairsEnv(os.Getenv(EnvUnifiedBootstrapPairs))
+	if perr != nil {
+		log.Printf("Invalid %s (%v); using default bootstrap list", EnvUnifiedBootstrapPairs, perr)
+		mode = UnifiedBootstrapDefault
+		pairs = nil
+	}
+	opts.UnifiedBootstrapMode = mode
+	opts.UnifiedBootstrapCustomPairs = pairs
 
 	return &opts
 }

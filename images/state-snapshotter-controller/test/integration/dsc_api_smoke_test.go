@@ -37,17 +37,34 @@ import (
 )
 
 // Smoke: DSC CRD + scheme + reconciler writes Accepted; status subresource + Ready after RBACReady handshake.
-var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", func() {
+// Serial: same RegistrationTest snapshot kind as other DSC specs; avoids KindConflict with parallel nodes.
+var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", Serial, func() {
 	const smokeName = "integration-dsc-smoke"
 
 	BeforeEach(func() {
-		d := &storagev1alpha1.DomainSpecificSnapshotController{}
-		d.SetName(smokeName)
-		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
-		Eventually(func() bool {
-			err := k8sClient.Get(ctx, client.ObjectKey{Name: smokeName}, &storagev1alpha1.DomainSpecificSnapshotController{})
-			return errors.IsNotFound(err)
-		}).WithTimeout(15*time.Second).WithPolling(100*time.Millisecond).Should(BeTrue())
+		// Same RegistrationTest snapshot kind as other specs; remove stray DSCs or KindConflict breaks Accepted/Ready.
+		for _, name := range []string{
+			smokeName,
+			"integration-unified-runtime-hot-add",
+			"integration-eligibility-loss",
+			"integration-t4-no-rbac",
+		} {
+			d := &storagev1alpha1.DomainSpecificSnapshotController{}
+			d.SetName(name)
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
+		}
+		for _, name := range []string{
+			smokeName,
+			"integration-unified-runtime-hot-add",
+			"integration-eligibility-loss",
+			"integration-t4-no-rbac",
+		} {
+			n := name
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: n}, &storagev1alpha1.DomainSpecificSnapshotController{})
+				return errors.IsNotFound(err)
+			}).WithTimeout(20*time.Second).WithPolling(100*time.Millisecond).Should(BeTrue())
+		}
 	})
 
 	It("reconciles Accepted from CRD resolution and supports Ready after RBACReady", func() {

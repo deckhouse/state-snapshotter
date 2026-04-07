@@ -43,15 +43,20 @@ var _ = Describe("Integration: unified runtime hot-add (DSC → Sync)", Serial, 
 	const hotDSCName = "integration-unified-runtime-hot-add"
 	// Same name as dsc_api_smoke_test: two eligible DSCs with the same snapshot GVK → KindConflict / Accepted=False.
 	const integrationSmokeDSCName = "integration-dsc-smoke"
+	// RBAC/eligibility specs (other Serial Describe) use the same RegistrationTest kind; must be gone or KindConflict breaks this block and smoke.
+	const integrationEligibilityDSCName = "integration-eligibility-loss"
+	const integrationT4DSCName          = "integration-t4-no-rbac"
 	snapGVK := schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"}
 
+	dscNamesToClear := []string{hotDSCName, integrationSmokeDSCName, integrationEligibilityDSCName, integrationT4DSCName}
+
 	BeforeEach(func() {
-		for _, name := range []string{hotDSCName, integrationSmokeDSCName} {
+		for _, name := range dscNamesToClear {
 			d := &storagev1alpha1.DomainSpecificSnapshotController{}
 			d.SetName(name)
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
 		}
-		for _, name := range []string{hotDSCName, integrationSmokeDSCName} {
+		for _, name := range dscNamesToClear {
 			n := name
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, client.ObjectKey{Name: n}, &storagev1alpha1.DomainSpecificSnapshotController{})
@@ -61,13 +66,18 @@ var _ = Describe("Integration: unified runtime hot-add (DSC → Sync)", Serial, 
 	})
 
 	AfterEach(func() {
-		d := &storagev1alpha1.DomainSpecificSnapshotController{}
-		d.SetName(hotDSCName)
-		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
-		Eventually(func() bool {
-			err := k8sClient.Get(ctx, client.ObjectKey{Name: hotDSCName}, &storagev1alpha1.DomainSpecificSnapshotController{})
-			return errors.IsNotFound(err)
-		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
+		for _, name := range dscNamesToClear {
+			d := &storagev1alpha1.DomainSpecificSnapshotController{}
+			d.SetName(name)
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
+		}
+		for _, name := range dscNamesToClear {
+			n := name
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: n}, &storagev1alpha1.DomainSpecificSnapshotController{})
+				return errors.IsNotFound(err)
+			}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
+		}
 	})
 
 	It("registers watches when DSC becomes eligible and updates layered state", func() {
