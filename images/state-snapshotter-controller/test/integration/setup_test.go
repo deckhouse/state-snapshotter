@@ -43,7 +43,9 @@ import (
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 var (
@@ -492,6 +494,36 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// Namespace-scoped *SnapshotContent stand-in for DSC InvalidSpec (content must be cluster-scoped) tests.
+	namespacedTestSnapshotContentCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "namespacedtestsnapshotcontents.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object"},
+					},
+				},
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "namespacedtestsnapshotcontents",
+				Singular: "namespacedtestsnapshotcontent",
+				Kind:     "NamespacedTestSnapshotContent",
+			},
+		},
+	}
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, namespacedTestSnapshotContentCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
 	// Create BackupClass CRD (required for SnapshotContent creation)
 	backupClassCRD := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
@@ -543,51 +575,33 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	// Wait for CRDs to be ready
-	Eventually(func() bool {
-		snapshotCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "testsnapshots.test.deckhouse.io", metav1.GetOptions{})
+	crdEstablished := func(name string) bool {
+		obj, err := crdClient.CustomResourceDefinitions().Get(testCtx, name, metav1.GetOptions{})
 		if err != nil {
 			return false
 		}
-		contentCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "testsnapshotcontents.test.deckhouse.io", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		regSnapshotCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "registrationtestsnapshots.test.deckhouse.io", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		regContentCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "registrationtestsnapshotcontents.test.deckhouse.io", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		backupClassCRD, err := crdClient.CustomResourceDefinitions().Get(testCtx, "backupclasses.storage.deckhouse.io", metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		// Check if CRDs are established
-		for _, condition := range snapshotCRD.Status.Conditions {
-			if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-				for _, condition := range contentCRD.Status.Conditions {
-					if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-						for _, condition := range regSnapshotCRD.Status.Conditions {
-							if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-								for _, condition := range regContentCRD.Status.Conditions {
-									if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-										for _, condition := range backupClassCRD.Status.Conditions {
-											if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
-												return true
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
+		for _, c := range obj.Status.Conditions {
+			if c.Type == apiextensionsv1.Established && c.Status == apiextensionsv1.ConditionTrue {
+				return true
 			}
 		}
 		return false
+	}
+	crdNamesWaitEstablished := []string{
+		"testsnapshots.test.deckhouse.io",
+		"testsnapshotcontents.test.deckhouse.io",
+		"registrationtestsnapshots.test.deckhouse.io",
+		"registrationtestsnapshotcontents.test.deckhouse.io",
+		"namespacedtestsnapshotcontents.test.deckhouse.io",
+		"backupclasses.storage.deckhouse.io",
+	}
+	Eventually(func() bool {
+		for _, n := range crdNamesWaitEstablished {
+			if !crdEstablished(n) {
+				return false
+			}
+		}
+		return true
 	}).Should(BeTrue(), "CRDs should be established")
 
 	// Create manager
@@ -604,6 +618,10 @@ var _ = BeforeSuite(func() {
 		EnableFiltering: false,
 		DefaultTTL:      168 * time.Hour,
 	}
+
+	integrationLog, err := logger.NewLogger("error")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 
 	// Create context
 	ctx, cancel = context.WithCancel(testCtx)

@@ -184,6 +184,13 @@ func main() {
 	}
 	log.Info("ManifestCheckpointController added to manager")
 
+	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams); err != nil {
+		log.Error(err, "Failed to add DomainSpecificSnapshotController reconciler to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("DomainSpecificSnapshotController reconciler added to manager")
+
 	// Add unified snapshots controllers (SnapshotController and SnapshotContentController).
 	// Only register GVKs that exist in the apiserver (S1–S2): missing module CRDs must not crash the process.
 	desiredPairs := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()

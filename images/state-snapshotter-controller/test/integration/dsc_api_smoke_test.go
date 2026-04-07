@@ -20,20 +20,37 @@ limitations under the License.
 package integration
 
 import (
+	"time"
+
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-// Smoke test for R1: DSC CRD from repo crds/, client-go scheme, status subresource.
+// Smoke: DSC CRD + scheme + reconciler writes Accepted; status subresource + Ready after RBACReady handshake.
 var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", func() {
-	It("registers GVK in scheme, CRD is established, create and status update work", func() {
+	const smokeName = "integration-dsc-smoke"
+
+	BeforeEach(func() {
+		d := &storagev1alpha1.DomainSpecificSnapshotController{}
+		d.SetName(smokeName)
+		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
+		Eventually(func() bool {
+			err := k8sClient.Get(ctx, client.ObjectKey{Name: smokeName}, &storagev1alpha1.DomainSpecificSnapshotController{})
+			return errors.IsNotFound(err)
+		}).WithTimeout(15*time.Second).WithPolling(100*time.Millisecond).Should(BeTrue())
+	})
+
+	It("reconciles Accepted from CRD resolution and supports Ready after RBACReady", func() {
 		gvk := schema.GroupVersionKind{
 			Group:   storagev1alpha1.APIGroup,
 			Version: storagev1alpha1.APIVersion,
@@ -58,12 +75,10 @@ var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", func
 
 		dsc := &storagev1alpha1.DomainSpecificSnapshotController{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "integration-dsc-smoke",
+				Name: smokeName,
 			},
 			Spec: storagev1alpha1.DomainSpecificSnapshotControllerSpec{
 				OwnerModule: "integration-test",
-				// Deliberately minimal / unrealistic mapping: this test is API plumbing (CRD + status),
-				// not snapshotResourceMapping semantics or reconciler validation.
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
 						ResourceCRDName: "testsnapshots.test.deckhouse.io",
@@ -75,27 +90,44 @@ var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", func
 		}
 		Expect(k8sClient.Create(ctx, dsc)).To(Succeed())
 
-		fetched := &storagev1alpha1.DomainSpecificSnapshotController{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dsc.Name}, fetched)).To(Succeed())
-		observedGen := fetched.GetGeneration()
+		Eventually(func(g Gomega) {
+			cur := &storagev1alpha1.DomainSpecificSnapshotController{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dsc.Name}, cur)).To(Succeed())
+			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
+			g.Expect(acc).NotTo(BeNil())
+			g.Expect(acc.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(acc.Reason).To(Equal("Resolved"))
+			g.Expect(acc.ObservedGeneration).To(Equal(cur.GetGeneration()))
+		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		fetched.Status.Conditions = []metav1.Condition{
-			{
-				Type:               "Accepted",
-				Status:             metav1.ConditionTrue,
-				Reason:             "IntegrationSmoke",
-				Message:            "ok",
-				LastTransitionTime: metav1.Now(),
-				ObservedGeneration: observedGen,
-			},
-		}
-		Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+		Eventually(func(g Gomega) {
+			cur := &storagev1alpha1.DomainSpecificSnapshotController{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dsc.Name}, cur)).To(Succeed())
+			ready := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		after := &storagev1alpha1.DomainSpecificSnapshotController{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dsc.Name}, after)).To(Succeed())
-		Expect(after.Status.Conditions).NotTo(BeEmpty())
-		Expect(after.Status.Conditions[0].Type).To(Equal("Accepted"))
-		Expect(after.Status.Conditions[0].Status).To(Equal(metav1.ConditionTrue))
-		Expect(after.Status.Conditions[0].ObservedGeneration).To(Equal(observedGen))
+		hookDSC := &storagev1alpha1.DomainSpecificSnapshotController{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dsc.Name}, hookDSC)).To(Succeed())
+		gen := hookDSC.GetGeneration()
+		meta.SetStatusCondition(&hookDSC.Status.Conditions, metav1.Condition{
+			Type:               controllers.DSCConditionRBACReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "IntegrationHook",
+			Message:            "simulated hook",
+			LastTransitionTime: metav1.Now(),
+			ObservedGeneration: gen,
+		})
+		Expect(k8sClient.Status().Update(ctx, hookDSC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			cur := &storagev1alpha1.DomainSpecificSnapshotController{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dsc.Name}, cur)).To(Succeed())
+			ready := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(ready.Reason).To(Equal("Active"))
+		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })

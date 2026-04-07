@@ -60,3 +60,21 @@ func AddManifestCheckpointControllerToManager(
 	}
 	return nil
 }
+
+// AddDomainSpecificSnapshotControllerToManager registers the DSC reconciler (registry/status only; no runtime watch activation).
+func AddDomainSpecificSnapshotControllerToManager(
+	mgr ctrl.Manager,
+	log logger.LoggerInterface,
+	cfg *config.Options,
+) error {
+	rec, err := NewDomainSpecificSnapshotControllerReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		log,
+		cfg,
+	)
+	if err != nil {
+		return err
+	}
+	return rec.SetupWithManager(mgr)
+}
