@@ -216,18 +216,12 @@ func TestResolveSnapshotContentGVK_FallbackLogic(t *testing.T) {
 // 2. ResolveSnapshotGVK("VirtualMachineSnapshot")
 //
 // EXPECTED BEHAVIOR:
-// - Registration either:
-//   - Returns error (conflict detected), OR
-//   - Is idempotent (same GVK registered twice is OK)
-//
-// - ResolveSnapshotGVK returns consistent result
+// - Registration returns error (conflict detected)
+// - Registry keeps the original mapping
 //
 // POSTCONDITION:
 // - Registry state is consistent
-// - No undefined behavior on conflict
-//
-// NOTE: This tests current behavior - registration overwrites previous value.
-// This is documented behavior, not a bug.
+// - No overwrite on conflict
 func TestGVKRegistry_RegistrationConflictHandling(t *testing.T) {
 	registry := NewGVKRegistry()
 
@@ -244,27 +238,18 @@ func TestGVKRegistry_RegistrationConflictHandling(t *testing.T) {
 	}
 
 	// Register conflicting GVK (different group/version)
-	// EXPECTED BEHAVIOR: Current implementation allows overwrite (idempotent by design)
 	err2 := registry.RegisterSnapshotGVK("VirtualMachineSnapshot", "different.group.io/v1alpha1")
-	if err2 != nil {
-		// If implementation changes to detect conflicts, that's OK
-		// But current behavior is: no error, overwrite allowed
-		t.Logf("Registration with conflict returned error (acceptable): %v", err2)
-		return
+	if err2 == nil {
+		t.Fatal("Expected error on conflicting registration, got nil")
 	}
 
-	// Resolve after conflict registration
+	// Resolve after conflict registration - should remain the original GVK
 	gvk2, err := registry.ResolveSnapshotGVK("VirtualMachineSnapshot")
 	if err != nil {
 		t.Fatalf("Failed to resolve after conflict registration: %v", err)
 	}
-
-	// CRITICAL: Registry state should be consistent
-	// Current behavior: last registration wins (overwrites)
-	if gvk2.Group != "different.group.io" {
-		t.Logf("Note: Registration conflict overwrites previous value (current behavior)")
-		t.Logf("Initial GVK: %v", gvk1)
-		t.Logf("After conflict: %v", gvk2)
+	if gvk2 != gvk1 {
+		t.Errorf("Expected GVK to remain unchanged after conflict, but changed: %v -> %v", gvk1, gvk2)
 	}
 }
 
@@ -361,6 +346,92 @@ func TestGVKRegistry_MultipleRegistrations(t *testing.T) {
 		if resolved != gvk.expected {
 			t.Errorf("Expected %s GVK=%v, got %v", gvk.kind, gvk.expected, resolved)
 		}
+	}
+}
+
+// Test GVK Registry - Explicit SnapshotContent mapping
+func TestGVKRegistry_ExplicitContentMapping(t *testing.T) {
+	registry := NewGVKRegistry()
+
+	err := registry.RegisterSnapshotContentMapping(
+		"CustomSnapshot",
+		"custom.group.io/v1alpha1",
+		"CustomArchive",
+		"custom.group.io/v1beta1",
+	)
+	if err != nil {
+		t.Fatalf("Failed to register explicit mapping: %v", err)
+	}
+
+	contentGVK, err := registry.ResolveSnapshotContentGVK("CustomSnapshot")
+	if err != nil {
+		t.Fatalf("Failed to resolve mapped Content GVK: %v", err)
+	}
+	expectedContent := schema.GroupVersionKind{
+		Group:   "custom.group.io",
+		Version: "v1beta1",
+		Kind:    "CustomArchive",
+	}
+	if contentGVK != expectedContent {
+		t.Errorf("Expected mapped Content GVK=%v, got %v", expectedContent, contentGVK)
+	}
+
+	kind, err := registry.ResolveSnapshotKindByContentGVK(expectedContent)
+	if err != nil {
+		t.Fatalf("Failed to resolve Snapshot Kind from Content GVK: %v", err)
+	}
+	if kind != "CustomSnapshot" {
+		t.Errorf("Expected Snapshot Kind %q, got %q", "CustomSnapshot", kind)
+	}
+}
+
+func TestResolveSnapshotKindByContentGVK_FallbackRequiresRegisteredSnapshot(t *testing.T) {
+	registry := NewGVKRegistry()
+
+	contentGVK := schema.GroupVersionKind{
+		Group:   "storage.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "GhostSnapshotContent",
+	}
+
+	_, err := registry.ResolveSnapshotKindByContentGVK(contentGVK)
+	if err == nil {
+		t.Fatal("Expected error for fallback when Snapshot Kind is not registered, got nil")
+	}
+}
+
+func TestResolveSnapshotKindByContentGVK_FallbackGroupMismatch(t *testing.T) {
+	registry := NewGVKRegistry()
+
+	err := registry.RegisterSnapshotGVK("GhostSnapshot", "other.group.io/v1alpha1")
+	if err != nil {
+		t.Fatalf("Failed to register Snapshot GVK: %v", err)
+	}
+
+	contentGVK := schema.GroupVersionKind{
+		Group:   "storage.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "GhostSnapshotContent",
+	}
+
+	_, err = registry.ResolveSnapshotKindByContentGVK(contentGVK)
+	if err == nil {
+		t.Fatal("Expected error on group mismatch fallback, got nil")
+	}
+}
+
+func TestResolveSnapshotKindByContentGVK_NoContentSuffix(t *testing.T) {
+	registry := NewGVKRegistry()
+
+	contentGVK := schema.GroupVersionKind{
+		Group:   "storage.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "CustomArchive",
+	}
+
+	_, err := registry.ResolveSnapshotKindByContentGVK(contentGVK)
+	if err == nil {
+		t.Fatal("Expected error for Content Kind without suffix, got nil")
 	}
 }
 

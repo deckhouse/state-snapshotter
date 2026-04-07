@@ -1019,7 +1019,7 @@ func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
 // This ensures SnapshotController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
 // Signature matches handler.MapFunc = TypedMapFunc[client.Object, reconcile.Request]
 // which is func(context.Context, client.Object) []reconcile.Request
-func (r *SnapshotController) mapSnapshotContentToSnapshot(_ context.Context, obj client.Object) []reconcile.Request {
+func (r *SnapshotController) mapSnapshotContentToSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
 	contentObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return nil
@@ -1028,44 +1028,51 @@ func (r *SnapshotController) mapSnapshotContentToSnapshot(_ context.Context, obj
 	// Extract snapshotRef from SnapshotContent spec
 	spec, ok := contentObj.Object["spec"].(map[string]interface{})
 	if !ok {
+		log.FromContext(ctx).V(1).Info("SnapshotContent spec is missing or invalid", "content", contentObj.GetName())
 		return nil
 	}
 
 	snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
 	if !ok {
+		log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef is missing or invalid", "content", contentObj.GetName())
+		return nil
+	}
+
+	kind, ok := snapshotRef["kind"].(string)
+	if !ok || kind == "" {
+		log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef.kind is missing", "content", contentObj.GetName())
 		return nil
 	}
 
 	name, ok := snapshotRef["name"].(string)
 	if !ok || name == "" {
+		log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef.name is missing", "content", contentObj.GetName())
 		return nil
 	}
 
 	namespace, ok := snapshotRef["namespace"].(string)
 	if !ok || namespace == "" {
-		return nil
-	}
-
-	// Determine Snapshot Kind from SnapshotContent Kind
-	// SnapshotContent Kind = Snapshot Kind + "Content"
-	contentKind := contentObj.GetKind()
-	snapshotKind := strings.TrimSuffix(contentKind, "Content")
-	if snapshotKind == contentKind {
-		// Fallback failed - cannot determine Snapshot Kind
-		return nil
-	}
-
-	// Find matching Snapshot GVK
-	var snapshotGVK schema.GroupVersionKind
-	for _, gvk := range r.SnapshotGVKs {
-		if gvk.Kind == snapshotKind && gvk.Group == contentObj.GroupVersionKind().Group {
-			snapshotGVK = gvk
-			break
+		if kind != "ClusterSnapshot" {
+			log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef.namespace is missing", "content", contentObj.GetName(), "kind", kind)
+			return nil
 		}
 	}
 
-	if snapshotGVK.Kind == "" {
-		// Snapshot GVK not found - skip
+	// Determine Snapshot Kind from SnapshotContent GVK (registry-aware)
+	contentGVK := contentObj.GroupVersionKind()
+	snapshotKind, err := r.GVKRegistry.ResolveSnapshotKindByContentGVK(contentGVK)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("Snapshot Kind resolution failed for SnapshotContent", "content", contentObj.GetName(), "gvk", contentGVK.String(), "error", err)
+		return nil
+	}
+
+	snapshotGVK, err := r.GVKRegistry.ResolveSnapshotGVK(snapshotKind)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("Snapshot GVK not registered for SnapshotContent", "snapshotKind", snapshotKind, "content", contentObj.GetName(), "error", err)
+		return nil
+	}
+	if snapshotGVK.Group != contentGVK.Group {
+		log.FromContext(ctx).V(1).Info("Snapshot GVK group mismatch for SnapshotContent", "snapshotKind", snapshotKind, "snapshotGroup", snapshotGVK.Group, "contentGroup", contentGVK.Group, "content", contentObj.GetName())
 		return nil
 	}
 
@@ -1078,4 +1085,3 @@ func (r *SnapshotController) mapSnapshotContentToSnapshot(_ context.Context, obj
 		},
 	}
 }
-

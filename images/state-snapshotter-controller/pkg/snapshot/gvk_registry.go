@@ -40,17 +40,25 @@ import (
 //
 // See: unified-snapshots-test-plan.md (INTERFACE: pkg/snapshot.GVKRegistry)
 type GVKRegistry struct {
-	// snapshotGVKs maps snapshot Kind -> GVK
+	// snapshotGVKs maps snapshot Kind -> GVK (Kind must be globally unique across groups/versions)
+	// This is a strict contract of the unified snapshot mechanism.
 	snapshotGVKs map[string]schema.GroupVersionKind
-	// contentGVKs maps content Kind -> GVK
+	// contentGVKs maps content Kind -> GVK (Kind must be globally unique across groups/versions)
+	// This follows the same uniqueness contract as snapshot Kind.
 	contentGVKs map[string]schema.GroupVersionKind
+	// snapshotKindByContentGroupKind maps "group/kind" (content) -> snapshot Kind
+	snapshotKindByContentGroupKind map[string]string
+	// contentGVKBySnapshotKind maps snapshot Kind -> explicit content GVK
+	contentGVKBySnapshotKind map[string]schema.GroupVersionKind
 }
 
 // NewGVKRegistry creates a new GVK registry.
 func NewGVKRegistry() *GVKRegistry {
 	return &GVKRegistry{
-		snapshotGVKs: make(map[string]schema.GroupVersionKind),
-		contentGVKs:  make(map[string]schema.GroupVersionKind),
+		snapshotGVKs:                   make(map[string]schema.GroupVersionKind),
+		contentGVKs:                    make(map[string]schema.GroupVersionKind),
+		snapshotKindByContentGroupKind: make(map[string]string),
+		contentGVKBySnapshotKind:       make(map[string]schema.GroupVersionKind),
 	}
 }
 
@@ -65,6 +73,13 @@ func (r *GVKRegistry) RegisterSnapshotGVK(kind string, apiVersion string) error 
 	if err != nil {
 		return fmt.Errorf("failed to parse Snapshot GVK: %w", err)
 	}
+	if existing, ok := r.snapshotGVKs[kind]; ok {
+		if existing.GroupVersion().String() != gvk.GroupVersion().String() {
+			return fmt.Errorf("Snapshot Kind %q is already registered for %s; cannot register %s",
+				kind, existing.GroupVersion().String(), gvk.GroupVersion().String())
+		}
+		return nil
+	}
 	r.snapshotGVKs[kind] = gvk
 	return nil
 }
@@ -78,7 +93,46 @@ func (r *GVKRegistry) RegisterSnapshotContentGVK(kind string, apiVersion string)
 	if err != nil {
 		return fmt.Errorf("failed to parse SnapshotContent GVK: %w", err)
 	}
+	if existing, ok := r.contentGVKs[kind]; ok {
+		if existing.GroupVersion().String() != gvk.GroupVersion().String() {
+			return fmt.Errorf("SnapshotContent Kind %q is already registered for %s; cannot register %s",
+				kind, existing.GroupVersion().String(), gvk.GroupVersion().String())
+		}
+		return nil
+	}
 	r.contentGVKs[kind] = gvk
+	r.registerDefaultContentMapping(gvk)
+	return nil
+}
+
+// RegisterSnapshotContentMapping registers an explicit mapping between Snapshot and SnapshotContent GVKs.
+// This is the escape hatch for cases where Content Kind is not SnapshotKind+"Content".
+func (r *GVKRegistry) RegisterSnapshotContentMapping(snapshotKind, snapshotAPIVersion, contentKind, contentAPIVersion string) error {
+	if err := r.RegisterSnapshotGVK(snapshotKind, snapshotAPIVersion); err != nil {
+		return err
+	}
+	if err := r.RegisterSnapshotContentGVK(contentKind, contentAPIVersion); err != nil {
+		return err
+	}
+
+	contentGVK, err := parseGVK(contentKind, contentAPIVersion)
+	if err != nil {
+		return fmt.Errorf("failed to parse SnapshotContent mapping GVK: %w", err)
+	}
+
+	if existing, ok := r.contentGVKBySnapshotKind[snapshotKind]; ok {
+		if existing != contentGVK {
+			return fmt.Errorf("Snapshot Kind %q already mapped to Content %s; cannot map to %s",
+				snapshotKind, existing.String(), contentGVK.String())
+		}
+	} else {
+		r.contentGVKBySnapshotKind[snapshotKind] = contentGVK
+	}
+
+	groupKind := groupKindKey(contentGVK)
+	// Explicit mapping overrides any default mapping derived from "Content" suffix.
+	r.snapshotKindByContentGroupKind[groupKind] = snapshotKind
+
 	return nil
 }
 
@@ -105,6 +159,9 @@ func (r *GVKRegistry) ResolveSnapshotGVK(kind string) (schema.GroupVersionKind, 
 //  1. Try to find registered Content GVK
 //  2. If not found, derive from Snapshot GVK (add "Content" suffix)
 func (r *GVKRegistry) ResolveSnapshotContentGVK(snapshotKind string) (schema.GroupVersionKind, error) {
+	if mapped, ok := r.contentGVKBySnapshotKind[snapshotKind]; ok {
+		return mapped, nil
+	}
 	// First, try to find Snapshot GVK
 	snapshotGVK, err := r.ResolveSnapshotGVK(snapshotKind)
 	if err != nil {
@@ -125,6 +182,50 @@ func (r *GVKRegistry) ResolveSnapshotContentGVK(snapshotKind string) (schema.Gro
 		Version: snapshotGVK.Version,
 		Kind:    contentKind,
 	}, nil
+}
+
+// ResolveSnapshotKindByContentGVK resolves Snapshot Kind from Content GVK.
+// This is used for content -> snapshot mapping in watch handlers.
+func (r *GVKRegistry) ResolveSnapshotKindByContentGVK(contentGVK schema.GroupVersionKind) (string, error) {
+	groupKind := groupKindKey(contentGVK)
+	if kind, ok := r.snapshotKindByContentGroupKind[groupKind]; ok {
+		return kind, nil
+	}
+
+	// Fallback: derive by suffix if content kind ends with "Content"
+	if strings.HasSuffix(contentGVK.Kind, "Content") {
+		snapshotKind := strings.TrimSuffix(contentGVK.Kind, "Content")
+		snapshotGVK, err := r.ResolveSnapshotGVK(snapshotKind)
+		if err != nil {
+			return "", fmt.Errorf("Snapshot Kind not registered for Content GVK: %s", contentGVK.String())
+		}
+		if snapshotGVK.Group != contentGVK.Group {
+			return "", fmt.Errorf("Snapshot Kind %q registered in group %q does not match Content group %q",
+				snapshotKind, snapshotGVK.Group, contentGVK.Group)
+		}
+		return snapshotKind, nil
+	}
+
+	return "", fmt.Errorf("Snapshot Kind not found for Content GVK: %s", contentGVK.String())
+}
+
+func (r *GVKRegistry) registerDefaultContentMapping(contentGVK schema.GroupVersionKind) {
+	if !strings.HasSuffix(contentGVK.Kind, "Content") {
+		return
+	}
+	snapshotKind := strings.TrimSuffix(contentGVK.Kind, "Content")
+	if snapshotKind == "" {
+		return
+	}
+	groupKind := groupKindKey(contentGVK)
+	if existing, ok := r.snapshotKindByContentGroupKind[groupKind]; ok && existing != snapshotKind {
+		return
+	}
+	r.snapshotKindByContentGroupKind[groupKind] = snapshotKind
+}
+
+func groupKindKey(gvk schema.GroupVersionKind) string {
+	return fmt.Sprintf("%s/%s", gvk.Group, gvk.Kind)
 }
 
 // parseGVK parses GVK from kind and apiVersion
