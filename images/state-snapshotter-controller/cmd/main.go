@@ -35,7 +35,6 @@ import (
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,6 +50,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -184,23 +184,18 @@ func main() {
 	}
 	log.Info("ManifestCheckpointController added to manager")
 
-	// Add unified snapshots controllers (SnapshotController and SnapshotContentController)
-	// These controllers work with any snapshot CRD that follows the unified snapshot pattern
-	// Register all known snapshot GVKs from the cluster
-	snapshotGVKs := []schema.GroupVersionKind{
-		// storage.deckhouse.io group
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
-		// snapshot.internal.virtualization.deckhouse.io group
-		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
-	}
-
-	snapshotContentGVKs := []schema.GroupVersionKind{
-		// storage.deckhouse.io group
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
-		// snapshot.internal.virtualization.deckhouse.io group
-		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshotContent"},
+	// Add unified snapshots controllers (SnapshotController and SnapshotContentController).
+	// Only register GVKs that exist in the apiserver (S1–S2): missing module CRDs must not crash the process.
+	desiredPairs := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
+	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+		mgr.GetRESTMapper(),
+		desiredPairs,
+		ctrl.Log.WithName("unified-bootstrap"),
+	)
+	if len(snapshotGVKs) == 0 {
+		log.Info("[main] no unified snapshot CRDs found in API; unified snapshot controllers run with zero watches (manifest/MCR and other controllers continue)")
+	} else {
+		log.Info("[main] unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
 	}
 
 	snapshotController, err := controllers.NewSnapshotController(
