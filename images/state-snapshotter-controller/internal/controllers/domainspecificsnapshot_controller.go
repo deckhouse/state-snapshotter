@@ -63,6 +63,9 @@ type DomainSpecificSnapshotControllerReconciler struct {
 	Scheme *runtime.Scheme
 	Logger logger.LoggerInterface
 	Config *config.Options
+
+	// UnifiedRuntimeSync runs after a successful full DSC reconcile (optional). Used for R2 2b/R3 additive watches.
+	UnifiedRuntimeSync func(context.Context) error
 }
 
 func NewDomainSpecificSnapshotControllerReconciler(
@@ -97,6 +100,11 @@ func (r *DomainSpecificSnapshotControllerReconciler) Reconcile(ctx context.Conte
 	if err := r.reconcileAll(ctx, list.Items); err != nil {
 		r.Logger.Error(err, "DSC reconcileAll failed")
 		return ctrl.Result{}, err
+	}
+	if r.UnifiedRuntimeSync != nil {
+		if err := r.UnifiedRuntimeSync(ctx); err != nil {
+			r.Logger.Warning("unified GVK runtime sync after DSC reconcile failed", "error", err)
+		}
 	}
 	return ctrl.Result{}, nil
 }

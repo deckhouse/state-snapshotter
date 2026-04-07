@@ -127,6 +127,33 @@ func (r *GVKRegistry) RegisterSnapshotContentMapping(snapshotKind, snapshotAPIVe
 	return nil
 }
 
+// RevertSnapshotRegistrationIfExact removes the explicit snapshot↔content pair and related map entries
+// only when every stored field still matches the given pair (all-or-nothing). If anything differs — no-op,
+// so we never strip snapshot GVK while leaving a mismatched explicit mapping (or vice versa).
+// Intended for rollback after RegisterSnapshotContentMapping succeeded but watch setup failed.
+func (r *GVKRegistry) RevertSnapshotRegistrationIfExact(snapshotKind string, snapshotGVK, contentGVK schema.GroupVersionKind) {
+	mapped, ok := r.contentGVKBySnapshotKind[snapshotKind]
+	if !ok || mapped != contentGVK {
+		return
+	}
+	snap, ok := r.snapshotGVKs[snapshotKind]
+	if !ok || snap != snapshotGVK {
+		return
+	}
+	cont, ok := r.contentGVKs[contentGVK.Kind]
+	if !ok || cont != contentGVK {
+		return
+	}
+	gk := groupKindKey(contentGVK)
+	if sk, ok := r.snapshotKindByContentGroupKind[gk]; !ok || sk != snapshotKind {
+		return
+	}
+	delete(r.contentGVKBySnapshotKind, snapshotKind)
+	delete(r.snapshotKindByContentGroupKind, gk)
+	delete(r.snapshotGVKs, snapshotKind)
+	delete(r.contentGVKs, contentGVK.Kind)
+}
+
 // ResolveSnapshotGVK resolves Snapshot GVK from Kind.
 //
 // Contract: Deterministic - same Kind always returns same GVK (if registered).

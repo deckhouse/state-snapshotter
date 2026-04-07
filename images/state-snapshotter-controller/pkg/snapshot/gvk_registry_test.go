@@ -491,3 +491,69 @@ func TestGVKRegistry_EdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func TestRevertSnapshotRegistrationIfExact(t *testing.T) {
+	reg := NewGVKRegistry()
+	snapGVK := schema.GroupVersionKind{Group: "widgets.example.com", Version: "v1", Kind: "WidgetSnapshot"}
+	contGVK := schema.GroupVersionKind{Group: "widgets.example.com", Version: "v1", Kind: "WidgetSnapData"}
+	if err := reg.RegisterSnapshotContentMapping(
+		"WidgetSnapshot", "widgets.example.com/v1",
+		"WidgetSnapData", "widgets.example.com/v1",
+	); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := reg.ResolveSnapshotGVK("WidgetSnapshot"); err != nil {
+		t.Fatalf("resolve before revert: %v", err)
+	}
+	reg.RevertSnapshotRegistrationIfExact("WidgetSnapshot", snapGVK, contGVK)
+	if _, err := reg.ResolveSnapshotGVK("WidgetSnapshot"); err == nil {
+		t.Fatal("expected snapshot kind removed after revert")
+	}
+	if _, err := reg.ResolveSnapshotKindByContentGVK(contGVK); err == nil {
+		t.Fatal("expected content GVK no longer mapped after revert")
+	}
+}
+
+func TestRevertSnapshotRegistrationIfExact_NoOpWhenPairDoesNotMatchStored(t *testing.T) {
+	reg := NewGVKRegistry()
+	snapGVK := schema.GroupVersionKind{Group: "widgets.example.com", Version: "v1", Kind: "WidgetSnapshot"}
+	contGVK := schema.GroupVersionKind{Group: "widgets.example.com", Version: "v1", Kind: "WidgetSnapData"}
+	otherCont := schema.GroupVersionKind{Group: "widgets.example.com", Version: "v1", Kind: "OtherSnapData"}
+	if err := reg.RegisterSnapshotContentMapping(
+		"WidgetSnapshot", "widgets.example.com/v1",
+		"WidgetSnapData", "widgets.example.com/v1",
+	); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	reg.RevertSnapshotRegistrationIfExact("WidgetSnapshot", snapGVK, otherCont)
+	got, err := reg.ResolveSnapshotGVK("WidgetSnapshot")
+	if err != nil {
+		t.Fatalf("expected registry unchanged, got resolve error: %v", err)
+	}
+	if got != snapGVK {
+		t.Fatalf("snapshot GVK: got %v want %v", got, snapGVK)
+	}
+	resolvedContent, err := reg.ResolveSnapshotContentGVK("WidgetSnapshot")
+	if err != nil {
+		t.Fatalf("ResolveSnapshotContentGVK: %v", err)
+	}
+	if resolvedContent != contGVK {
+		t.Fatalf("content GVK: got %v want %v", resolvedContent, contGVK)
+	}
+}
+
+func TestRevertSnapshotRegistrationIfExact_NoOpWhenSnapshotGVKMismatch(t *testing.T) {
+	reg := NewGVKRegistry()
+	wrongSnap := schema.GroupVersionKind{Group: "other.group", Version: "v1", Kind: "WidgetSnapshot"}
+	contGVK := schema.GroupVersionKind{Group: "widgets.example.com", Version: "v1", Kind: "WidgetSnapData"}
+	if err := reg.RegisterSnapshotContentMapping(
+		"WidgetSnapshot", "widgets.example.com/v1",
+		"WidgetSnapData", "widgets.example.com/v1",
+	); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	reg.RevertSnapshotRegistrationIfExact("WidgetSnapshot", wrongSnap, contGVK)
+	if _, err := reg.ResolveSnapshotGVK("WidgetSnapshot"); err != nil {
+		t.Fatalf("expected registry unchanged: %v", err)
+	}
+}

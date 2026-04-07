@@ -61,11 +61,13 @@ func AddManifestCheckpointControllerToManager(
 	return nil
 }
 
-// AddDomainSpecificSnapshotControllerToManager registers the DSC reconciler (registry/status only; no runtime watch activation).
+// AddDomainSpecificSnapshotControllerToManager registers the DSC reconciler (registry/status).
+// unifiedRuntimeSync is optional; when set, it runs after each successful full DSC reconcile (additive unified watches).
 func AddDomainSpecificSnapshotControllerToManager(
 	mgr ctrl.Manager,
 	log logger.LoggerInterface,
 	cfg *config.Options,
+	unifiedRuntimeSync func(context.Context) error,
 ) error {
 	rec, err := NewDomainSpecificSnapshotControllerReconciler(
 		mgr.GetClient(),
@@ -76,5 +78,6 @@ func AddDomainSpecificSnapshotControllerToManager(
 	if err != nil {
 		return err
 	}
+	rec.UnifiedRuntimeSync = unifiedRuntimeSync
 	return rec.SetupWithManager(mgr)
 }

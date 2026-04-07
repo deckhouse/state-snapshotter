@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -64,6 +65,9 @@ type SnapshotController struct {
 	// SnapshotGVKs is a list of GVKs that this controller should watch
 	// This allows domain modules to register their snapshot types
 	SnapshotGVKs []schema.GroupVersionKind
+
+	watchMu                sync.RWMutex
+	activeSnapshotWatchSet map[string]struct{} // snapshot GVK String() -> watch registered with manager
 }
 
 // NewSnapshotController creates a new SnapshotController with validated dependencies
@@ -106,12 +110,13 @@ func NewSnapshotController(
 	}
 
 	return &SnapshotController{
-		Client:       client,
-		APIReader:    apiReader,
-		Scheme:       scheme,
-		Config:       cfg,
-		GVKRegistry:  registry,
-		SnapshotGVKs: snapshotGVKs,
+		Client:                 client,
+		APIReader:              apiReader,
+		Scheme:                 scheme,
+		Config:                 cfg,
+		GVKRegistry:            registry,
+		SnapshotGVKs:           snapshotGVKs,
+		activeSnapshotWatchSet: make(map[string]struct{}),
 	}, nil
 }
 
@@ -128,7 +133,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 	obj := &unstructured.Unstructured{}
 	var found bool
 	var err error
-	for _, gvk := range r.SnapshotGVKs {
+	for _, gvk := range r.snapshotGVKsSnapshot() {
 		obj.SetGroupVersionKind(gvk)
 		err = r.Get(ctx, req.NamespacedName, obj)
 		if err != nil {
@@ -938,7 +943,7 @@ func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, child
 		logger.V(1).Info("Child GVK not found in registry, trying registered GVKs", "kind", childRef.Kind)
 
 		// Try to find a matching GVK by Kind
-		for _, gvk := range r.SnapshotGVKs {
+		for _, gvk := range r.snapshotGVKsSnapshot() {
 			if gvk.Kind == childRef.Kind {
 				childGVK = gvk
 				break
@@ -975,43 +980,98 @@ func (r *SnapshotController) getSnapshotContentGVK(snapshotGVK schema.GroupVersi
 	return r.GVKRegistry.ResolveSnapshotContentGVK(snapshotGVK.Kind)
 }
 
+func (r *SnapshotController) snapshotGVKsSnapshot() []schema.GroupVersionKind {
+	r.watchMu.RLock()
+	defer r.watchMu.RUnlock()
+	out := make([]schema.GroupVersionKind, len(r.SnapshotGVKs))
+	copy(out, r.SnapshotGVKs)
+	return out
+}
+
+// registerSnapshotWatch calls builder.Complete. When the manager is already running, this relies on
+// controller-runtime allowing new runnables via Add — behavior is runtime-sensitive; upgrade c-r with care.
+func (r *SnapshotController) registerSnapshotWatch(mgr ctrl.Manager, gvk, contentGVK schema.GroupVersionKind) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	contentObj := &unstructured.Unstructured{}
+	contentObj.SetGroupVersionKind(contentGVK)
+	builder := ctrl.NewControllerManagedBy(mgr).
+		For(obj).
+		Watches(
+			contentObj,
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+				return r.mapSnapshotContentToSnapshot(ctx, o)
+			}),
+		).
+		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
+	return builder.Complete(r)
+}
+
+// AddWatchForPair registers Snapshot + SnapshotContent watches for one pair at runtime (after manager.New).
+// Idempotent per snapshot GVK. Uses explicit content GVK (DSC mapping may differ from Kind+"Content").
+// If watch setup fails after a new slice entry was appended, that entry is removed and registry entries
+// matching this exact pair are reverted (see GVKRegistry.RevertSnapshotRegistrationIfExact). If the
+// snapshot GVK was already in the slice (bootstrap), registry is not reverted on failure.
+func (r *SnapshotController) AddWatchForPair(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if r.activeSnapshotWatchSet == nil {
+		r.activeSnapshotWatchSet = make(map[string]struct{})
+	}
+	key := snapshotGVK.String()
+	if _, ok := r.activeSnapshotWatchSet[key]; ok {
+		return nil
+	}
+	if err := r.GVKRegistry.RegisterSnapshotContentMapping(
+		snapshotGVK.Kind, snapshotGVK.GroupVersion().String(),
+		contentGVK.Kind, contentGVK.GroupVersion().String(),
+	); err != nil {
+		return fmt.Errorf("register snapshot/content mapping: %w", err)
+	}
+	needAppend := true
+	for _, g := range r.SnapshotGVKs {
+		if g == snapshotGVK {
+			needAppend = false
+			break
+		}
+	}
+	if needAppend {
+		r.SnapshotGVKs = append(r.SnapshotGVKs, snapshotGVK)
+	}
+	if err := r.registerSnapshotWatch(mgr, snapshotGVK, contentGVK); err != nil {
+		if needAppend {
+			r.SnapshotGVKs = r.SnapshotGVKs[:len(r.SnapshotGVKs)-1]
+			r.GVKRegistry.RevertSnapshotRegistrationIfExact(snapshotGVK.Kind, snapshotGVK, contentGVK)
+		}
+		return fmt.Errorf("setup snapshot watch for %s: %w", snapshotGVK.String(), err)
+	}
+	r.activeSnapshotWatchSet[key] = struct{}{}
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager
 // Registers watches for all registered Snapshot GVKs and their corresponding SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
 func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
-	// Register watch for each Snapshot GVK
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if r.activeSnapshotWatchSet == nil {
+		r.activeSnapshotWatchSet = make(map[string]struct{})
+	}
 	for _, gvk := range r.SnapshotGVKs {
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(gvk)
-
-		// Get corresponding SnapshotContent GVK
+		key := gvk.String()
+		if _, ok := r.activeSnapshotWatchSet[key]; ok {
+			continue
+		}
 		contentGVK, err := r.getSnapshotContentGVK(gvk)
 		if err != nil {
 			return fmt.Errorf("failed to resolve SnapshotContent GVK for %s: %w", gvk.String(), err)
 		}
-
-		contentObj := &unstructured.Unstructured{}
-		contentObj.SetGroupVersionKind(contentGVK)
-
-		// Create a controller builder for this specific GVK
-		// Watch both Snapshot (For) and SnapshotContent (Watches) to trigger reconcile when Content becomes Ready
-		// This ensures SnapshotController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
-		// Note: We use a closure to capture the controller instance 'r'
-		builder := ctrl.NewControllerManagedBy(mgr).
-			For(obj).
-			Watches(
-				contentObj,
-				handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-					return r.mapSnapshotContentToSnapshot(ctx, obj)
-				}),
-			).
-			Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
-
-		if err := builder.Complete(r); err != nil {
+		if err := r.registerSnapshotWatch(mgr, gvk, contentGVK); err != nil {
 			return fmt.Errorf("failed to setup watch for Snapshot GVK %s: %w", gvk.String(), err)
 		}
+		r.activeSnapshotWatchSet[key] = struct{}{}
 	}
-
 	return nil
 }
 

@@ -621,7 +621,7 @@ var _ = BeforeSuite(func() {
 
 	integrationLog, err := logger.NewLogger("error")
 	Expect(err).NotTo(HaveOccurred())
-	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
+	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg, nil)).To(Succeed())
 
 	// Create context
 	ctx, cancel = context.WithCancel(testCtx)

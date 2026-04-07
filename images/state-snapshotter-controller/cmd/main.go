@@ -52,6 +52,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -185,17 +186,12 @@ func main() {
 	}
 	log.Info("ManifestCheckpointController added to manager")
 
-	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams); err != nil {
-		log.Error(err, "Failed to add DomainSpecificSnapshotController reconciler to manager")
-		cancel()
-		os.Exit(1)
-	}
-	log.Info("DomainSpecificSnapshotController reconciler added to manager")
-
 	// Add unified snapshots controllers (SnapshotController and SnapshotContentController).
 	// Desired pairs = static bootstrap ∪ DSC mappings for objects that satisfy ADR watch formula
 	// (Accepted=True, RBACReady=True, matching observedGeneration). DSC overrides bootstrap for the same snapshot GVK.
-	// Snapshot: this runs once at process start; adding watches without restart is not supported here (see docs/state-snapshotter-rework/design/implementation-plan.md).
+	// Initial unified watches from bootstrap ∪ eligible DSC; DSC reconciler also runs unifiedruntime.Sync for additive updates (R2 2b/R3).
+	// Separate client (not mgr.GetClient): uncached reads for this one-shot bootstrap List/Get of DSC and CRDs.
+	// For phase 2b, consider whether mgr.GetClient() or GetAPIReader() is enough to avoid duplicate API machinery.
 	dscBootstrapClient, err := client.New(kConfig, client.Options{
 		Scheme: scheme,
 		Mapper: mgr.GetRESTMapper(),
@@ -210,7 +206,7 @@ func main() {
 		log.Warning("DSC list/parse for unified GVK bootstrap failed; using static default pairs only", "error", err)
 		dscPairs = nil
 	} else {
-		log.Info("[main] DSC-derived unified GVK pair candidates (watch-eligible)", "count", len(dscPairs))
+		log.Info("[main] DSC-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(dscPairs))
 	}
 	defaultPairs := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
 	mergedPairs := unifiedbootstrap.MergeBootstrapAndDSCPairs(defaultPairs, dscPairs)
@@ -264,6 +260,21 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(snapshotContentGVKs))
+
+	unifiedSync := unifiedruntime.NewSyncer(
+		mgr,
+		ctrl.Log,
+		unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs(),
+		mgr.GetAPIReader(),
+		snapshotController,
+		contentController,
+	)
+	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams, unifiedSync.Sync); err != nil {
+		log.Error(err, "Failed to add DomainSpecificSnapshotController reconciler to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("DomainSpecificSnapshotController reconciler added to manager")
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
