@@ -8,6 +8,7 @@ package unifiedruntime
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -45,6 +46,7 @@ func NewSyncer(
 	snap *controllers.SnapshotController,
 	content *controllers.SnapshotContentController,
 ) *Syncer {
+	registerUnifiedRuntimeMetrics()
 	return &Syncer{
 		mgr:                   mgr,
 		log:                   log.WithName("unified-runtime"),
@@ -119,6 +121,33 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			continue
 		}
 		s.activeSnapshotGVKKeys[snapGVK.String()] = struct{}{}
+	}
+
+	var staleKeys []string
+	for k := range s.activeSnapshotGVKKeys {
+		if _, ok := curResolved[k]; !ok {
+			staleKeys = append(staleKeys, k)
+		}
+	}
+	sort.Strings(staleKeys)
+
+	resolvedN := len(curResolved)
+	activeN := len(s.activeSnapshotGVKKeys)
+	staleN := len(staleKeys)
+	resolvedSnapshotGVKGauge.Set(float64(resolvedN))
+	activeMonotonicSnapshotGVKGauge.Set(float64(activeN))
+	staleActiveSnapshotGVKGauge.Set(float64(staleN))
+
+	s.log.V(2).Info("unified runtime sync summary",
+		"resolvedSnapshotCount", resolvedN,
+		"activeMonotonicCount", activeN,
+		"staleActiveCount", staleN)
+	if staleN > 0 {
+		s.log.Info("unified runtime: snapshot GVK keys remain active in-process but are no longer in the resolved set (additive watches are not removed); consider restarting the pod for a clean informer set",
+			"staleSnapshotGVKKeys", staleKeys,
+			"staleActiveCount", staleN,
+			"resolvedSnapshotCount", resolvedN,
+			"activeMonotonicCount", activeN)
 	}
 	return nil
 }
