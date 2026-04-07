@@ -4,28 +4,31 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: manifestcheckpoints.state-snapshotter.deckhouse.io
+  name: domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io
 spec:
   group: state-snapshotter.deckhouse.io
   names:
-    kind: ManifestCheckpoint
-    listKind: ManifestCheckpointList
-    plural: manifestcheckpoints
+    kind: DomainSpecificSnapshotController
+    listKind: DomainSpecificSnapshotControllerList
+    plural: domainspecificsnapshotcontrollers
     shortNames:
-    - mcp
-    singular: manifestcheckpoint
+    - dssc
+    singular: domainspecificsnapshotcontroller
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.totalObjects
-      name: Objects
-      type: integer
-    - jsonPath: .status.totalSizeBytes
-      name: Size
+    - jsonPath: .spec.ownerModule
+      name: Owner
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
       type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: |-
+          DomainSpecificSnapshotController registers unified snapshot types for a platform module (DSC).
+          See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
         properties:
           apiVersion:
             description: |-
@@ -46,67 +49,61 @@ spec:
             type: object
           spec:
             properties:
-              manifestCaptureRequestRef:
-                description: ManifestCaptureRequestRef references the ManifestCaptureRequest
-                  that created this checkpoint
+              manifestTransformation:
+                description: ManifestTransformation optional webhook for manifest
+                  transforms for this DSC.
                 properties:
-                  name:
-                    description: Name of the referred object
-                    type: string
-                  namespace:
-                    description: Namespace of the referred object (empty for cluster-scoped
-                      objects)
-                    type: string
-                  uid:
-                    description: UID of the referred object
-                    type: string
+                  serviceRef:
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
                 required:
-                - name
-                - namespace
-                - uid
+                - serviceRef
                 type: object
-              sourceNamespace:
-                description: SourceNamespace is the namespace of the original ManifestCaptureRequest
+              ownerModule:
+                description: OwnerModule identifies the owning Deckhouse module (audit/RBAC);
+                  immutable in v1alpha1.
                 type: string
+              snapshotResourceMapping:
+                description: SnapshotResourceMapping declares supported snapshot types
+                  using CRD names only (v1alpha1).
+                items:
+                  description: SnapshotResourceMappingEntry maps resource / snapshot
+                    / content CRDs (plural.resource.group form).
+                  properties:
+                    contentCRDName:
+                      type: string
+                    priority:
+                      description: Priority is used when ordering orchestration across
+                        mappings (lower runs first).
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    resourceCRDName:
+                      type: string
+                    snapshotCRDName:
+                      type: string
+                  required:
+                  - contentCRDName
+                  - resourceCRDName
+                  - snapshotCRDName
+                  type: object
+                minItems: 1
+                type: array
             required:
-            - manifestCaptureRequestRef
-            - sourceNamespace
+            - ownerModule
+            - snapshotResourceMapping
             type: object
           status:
             properties:
-              chunks:
-                description: Chunks contains information about all chunks
-                items:
-                  properties:
-                    checksum:
-                      description: |-
-                        Checksum is the SHA256 hash of the compressed chunk data (base64 encoded)
-                        Used for integrity validation and debugging
-                      type: string
-                    index:
-                      description: Index of the chunk (0-based)
-                      type: integer
-                    name:
-                      description: Name of the chunk
-                      type: string
-                    objectsCount:
-                      description: ObjectsCount is the number of objects in this chunk
-                      type: integer
-                    sizeBytes:
-                      description: SizeBytes is the size of this chunk in bytes (compressed)
-                      format: int64
-                      type: integer
-                  required:
-                  - index
-                  - name
-                  - objectsCount
-                  - sizeBytes
-                  type: object
-                type: array
               conditions:
-                description: |-
-                  Conditions represent the latest available observations of the checkpoint state
-                  Expected condition types: Ready
+                description: Conditions include Accepted, RBACReady, Ready (see ADR).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -162,17 +159,7 @@ spec:
                   - type
                   type: object
                 type: array
-              totalObjects:
-                description: TotalObjects is the total number of objects captured
-                type: integer
-              totalSizeBytes:
-                description: TotalSizeBytes is the total size of all chunks in bytes
-                  (compressed)
-                format: int64
-                type: integer
             type: object
-        required:
-        - spec
         type: object
     served: true
     storage: true
