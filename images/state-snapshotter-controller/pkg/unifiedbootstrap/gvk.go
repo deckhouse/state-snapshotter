@@ -20,10 +20,9 @@ limitations under the License.
 package unifiedbootstrap
 
 import (
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"github.com/go-logr/logr"
 )
 
 // UnifiedGVKPair is a Snapshot-like kind and its SnapshotContent kind in the same API group/version.
