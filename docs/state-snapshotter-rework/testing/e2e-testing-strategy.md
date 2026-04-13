@@ -36,6 +36,7 @@
 | `controller_registration_test.go` | Конструирование контроллеров как в production; **без** повторного `SetupWithManager` на общем `mgr` |
 | `namespacesnapshot_lifecycle_test.go` | **N1 skeleton:** `NamespaceSnapshot` → `NamespaceSnapshotContent`, `status.boundSnapshotContentName` (unified root bind field), Ready через conditions (без ObjectKeeper / полного N2) |
 | `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — root удаляется, `NamespaceSnapshotContent` остаётся; Delete — финализатор root снимается только после `NotFound` на content (ожидание удаления CR в API) |
+| `namespacesnapshot_n1_boundary_test.go` | **Формальное закрытие N1:** `ContentRefMismatch` при неверном `namespaceSnapshotRef` на NSC; **recovery** — после сброса `status` при валидном content снова `Bound`+`Ready`; короткая **стабильность** (Consistently) |
 
 ## Планируемые тесты
 

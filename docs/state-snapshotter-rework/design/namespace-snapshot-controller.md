@@ -52,6 +52,8 @@
 - Опционально: include/exclude групп ресурсов (MVP — минимальный набор или фиксированный профиль).
 - Опционально позже: `capturePolicy` (см. §9); в MVP допустимо заложить поле, но **выставить только fail-closed**.
 
+**Default exclusions / GVR до реального capture (N1→N2):** в CRD на этапе N1 **нет** полей `includedResources` / `excludedResources` у root — пользовательский allow/deny **не задаётся**. Пока capture остаётся placeholder/fake, **исключения не применяются**. С включением **реального** capture (N2+) **по умолчанию fail-closed**: без явно разрешённого набора GVR (через class/profile или зафиксированный built-in минимум в коде — конкретизация в N2) **запускать** list/capture **нельзя**; произвольный «снимать всё» без политики не допускается.
+
 **Status (логически):**
 
 - **`conditions` — единственный** нормативный источник жизненного цикла и ошибок для операторов; поля **`status.phase` нет** (см. [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md)).
