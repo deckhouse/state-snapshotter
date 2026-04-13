@@ -38,15 +38,15 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on child failure", func() {
+var _ = Describe("Integration: NamespaceSnapshot N2b parent Ready aggregate on synthetic child failure", func() {
 	It("sets parent Ready=False ChildSnapshotFailed when synthetic child hits terminal capture failure", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "nss-pr3-tree-",
+				GenerateName: "nss-n2b-synth-fail-",
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-tree-pr3",
+					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-synthetic-child-failure",
 				},
 			},
 		}
@@ -57,12 +57,12 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on chi
 		})
 
 		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "nss-pr3-cm", Namespace: nsName},
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-synth-fail-cm", Namespace: nsName},
 			Data:       map[string]string{"k": "v"},
 		}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
-		parentName := "parent-pr3"
+		parentName := "parent-synth-fail"
 		childName := namespacemanifest.NamespaceSnapshotSyntheticChildName(parentName)
 
 		parent := &storagev1alpha1.NamespaceSnapshot{
@@ -70,7 +70,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on chi
 				Name:      parentName,
 				Namespace: nsName,
 				Annotations: map[string]string{
-					namespacemanifest.AnnotationN2bPR2SyntheticTree: "true",
+					namespacemanifest.AnnotationSyntheticChildTree: "true",
 				},
 			},
 			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
@@ -107,7 +107,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on chi
 		mcr.Spec.Targets = append(append([]ssv1alpha1.ManifestTarget(nil), mcr.Spec.Targets...), ssv1alpha1.ManifestTarget{
 			APIVersion: "v1",
 			Kind:       "ConfigMap",
-			Name:       "nss-pr3-drift-fake-not-in-cluster",
+			Name:       "nss-synth-fail-drift-fake-not-in-cluster",
 		})
 		Expect(k8sClient.Patch(ctx, mcr, client.MergeFrom(mcrPatchBase))).To(Succeed())
 
@@ -117,7 +117,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on chi
 		if childFresh.Annotations == nil {
 			childFresh.Annotations = map[string]string{}
 		}
-		childFresh.Annotations["state-snapshotter.deckhouse.io/integration-pr3-drift-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
+		childFresh.Annotations["state-snapshotter.deckhouse.io/integration-synth-child-drift-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
 		Expect(k8sClient.Patch(ctx, childFresh, client.MergeFrom(childBase))).To(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -129,7 +129,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on chi
 			g.Expect(cr.Reason).To(Equal("CapturePlanDrift"))
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
-		// Tech debt / test workaround: synthetic child → parent is wired via Watches(mapSyntheticChildNamespaceSnapshotToParent),
+		// Tech debt / test workaround: synthetic child → parent is wired via Watches(mapSyntheticChildSnapshotToParent),
 		// but in envtest we still see races where the parent reconcile runs before the child Ready condition shows terminal failure,
 		// leaving the parent on ChildSnapshotPending until another event. Patching parent metadata each poll forces a reconcile so
 		// the assertion is stable. Follow-up: confirm watch + queue reliably deliver the final child status transition without
@@ -141,7 +141,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on chi
 			if pKick.Annotations == nil {
 				pKick.Annotations = map[string]string{}
 			}
-			pKick.Annotations["state-snapshotter.deckhouse.io/integration-pr3-parent-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
+			pKick.Annotations["state-snapshotter.deckhouse.io/integration-synth-parent-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
 			g.Expect(k8sClient.Patch(ctx, pKick, client.MergeFrom(pKickBase))).To(Succeed())
 
 			p := &storagev1alpha1.NamespaceSnapshot{}

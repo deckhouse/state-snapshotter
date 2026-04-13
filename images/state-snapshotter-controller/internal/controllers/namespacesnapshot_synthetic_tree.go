@@ -14,13 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// N2b PR2 synthetic one-child tree (temporary scaffold until domain wiring ~PR5).
+// Temporary N2b synthetic one-child tree scaffold until domain-specific child wiring replaces it.
 //
-// Does not change N2a leaf semantics: synthetic children have no PR2 opt-in annotation and run normal
-// reconcileCaptureN2a. Parents with n2b-pr2-synthetic-tree only add a post-MCP step that waits for one child.
-//
-// Annotation name and parentName+"-child" naming are scaffold-only; parent/child Ready aggregation — PR3
-// (namespacesnapshot_synthetic_child_pr3.go); PR5 replaces synthetic path.
+// Synthetic child NamespaceSnapshots always behave as N2a leaves (no synthetic-tree annotation) and never
+// create nested synthetic children. Parents that opt in via annotation get a post–manifest-capture step that
+// ensures one synthetic child and gates parent Ready on that child (see namespacesnapshot_synthetic_child_state.go).
 
 package controllers
 
@@ -68,31 +66,31 @@ func namespaceSnapshotContentChildRefsEqual(a, b []storagev1alpha1.NamespaceSnap
 	return true
 }
 
-func validateSyntheticChildLabelsForPR2Parent(child *storagev1alpha1.NamespaceSnapshot, parent *storagev1alpha1.NamespaceSnapshot) error {
-	if child.Labels[namespacemanifest.LabelN2bSyntheticChild] != "true" {
-		return fmt.Errorf("NamespaceSnapshot %s/%s is not marked as PR2 synthetic child", child.Namespace, child.Name)
+func validateSyntheticChildLabelsForParent(child *storagev1alpha1.NamespaceSnapshot, parent *storagev1alpha1.NamespaceSnapshot) error {
+	if child.Labels[namespacemanifest.LabelSyntheticChild] != "true" {
+		return fmt.Errorf("NamespaceSnapshot %s/%s is not marked as synthetic child", child.Namespace, child.Name)
 	}
-	if child.Labels[namespacemanifest.LabelN2bParentName] != parent.Name {
+	if child.Labels[namespacemanifest.LabelSyntheticParentName] != parent.Name {
 		return fmt.Errorf("synthetic child %s/%s has n2b-parent-name %q, want parent name %q",
-			child.Namespace, child.Name, child.Labels[namespacemanifest.LabelN2bParentName], parent.Name)
+			child.Namespace, child.Name, child.Labels[namespacemanifest.LabelSyntheticParentName], parent.Name)
 	}
-	if child.Labels[namespacemanifest.LabelN2bParentUID] != string(parent.UID) {
+	if child.Labels[namespacemanifest.LabelSyntheticParentUID] != string(parent.UID) {
 		return fmt.Errorf("synthetic child %s/%s has n2b-parent-uid %q, want current parent UID %q (stale child or wrong object)",
-			child.Namespace, child.Name, child.Labels[namespacemanifest.LabelN2bParentUID], string(parent.UID))
+			child.Namespace, child.Name, child.Labels[namespacemanifest.LabelSyntheticParentUID], string(parent.UID))
 	}
 	return nil
 }
 
-// mapSyntheticChildNamespaceSnapshotToParent enqueues the parent named in labels only for PR2 synthetic
-// children (not a duplicate For() — it bridges child status events to parent reconcile).
+// mapSyntheticChildSnapshotToParent enqueues the parent named in labels for synthetic-child snapshots only
+// (not a duplicate For() — it bridges child status events to parent reconcile).
 // Requires n2b-parent-uid so stale map events still correlate; authoritative UID check is in reconcile.
-func mapSyntheticChildNamespaceSnapshotToParent(_ context.Context, o client.Object) []reconcile.Request {
+func mapSyntheticChildSnapshotToParent(_ context.Context, o client.Object) []reconcile.Request {
 	labels := o.GetLabels()
-	if !namespacemanifest.N2bIsSyntheticChildNamespaceSnapshot(labels) {
+	if !namespacemanifest.IsSyntheticChildNamespaceSnapshot(labels) {
 		return nil
 	}
-	parentName := labels[namespacemanifest.LabelN2bParentName]
-	parentUID := labels[namespacemanifest.LabelN2bParentUID]
+	parentName := labels[namespacemanifest.LabelSyntheticParentName]
+	parentUID := labels[namespacemanifest.LabelSyntheticParentUID]
 	ns := o.GetNamespace()
 	if parentName == "" || ns == "" || parentUID == "" {
 		return nil
@@ -100,9 +98,9 @@ func mapSyntheticChildNamespaceSnapshotToParent(_ context.Context, o client.Obje
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: parentName}}}
 }
 
-// reconcileSyntheticTreePR2 runs after parent N2a manifest capture has persisted (MCP on parent NSC).
+// reconcileSyntheticChildTree runs after parent N2a manifest capture has persisted (MCP on parent NSC).
 // It does not alter N2a capture itself; it only adds graph + readiness gating on the parent root.
-func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
+func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
 	parentContent *storagev1alpha1.NamespaceSnapshotContent,
@@ -123,9 +121,9 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 				Name:      childName,
 				Namespace: nsSnap.Namespace,
 				Labels: map[string]string{
-					namespacemanifest.LabelN2bSyntheticChild: "true",
-					namespacemanifest.LabelN2bParentName:     nsSnap.Name,
-					namespacemanifest.LabelN2bParentUID:      string(nsSnap.UID),
+					namespacemanifest.LabelSyntheticChild:      "true",
+					namespacemanifest.LabelSyntheticParentName: nsSnap.Name,
+					namespacemanifest.LabelSyntheticParentUID:  string(nsSnap.UID),
 				},
 			},
 			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
@@ -136,12 +134,12 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 			}
 			return ctrl.Result{}, err
 		}
-		logger.Info("created PR2 synthetic child NamespaceSnapshot", "parent", nsSnap.Name, "child", childName)
+		logger.Info("created synthetic child NamespaceSnapshot (temporary N2b tree scaffold)", "parent", nsSnap.Name, "child", childName)
 		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	case err != nil:
 		return ctrl.Result{}, err
 	default:
-		if err := validateSyntheticChildLabelsForPR2Parent(child, nsSnap); err != nil {
+		if err := validateSyntheticChildLabelsForParent(child, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -160,12 +158,12 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 	if err := r.Client.Get(ctx, childKey, child); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := validateSyntheticChildLabelsForPR2Parent(child, nsSnap); err != nil {
+	if err := validateSyntheticChildLabelsForParent(child, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}
 	if child.Status.BoundSnapshotContentName == "" {
-		agg := evaluateSyntheticRequiredChildStateForPR2(child)
-		return r.patchParentSyntheticTreeAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
+		agg := evaluateSyntheticRequiredChildState(child)
+		return r.patchParentSyntheticChildAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
 	}
 
 	wantContentRefs := []storagev1alpha1.NamespaceSnapshotContentChildRef{
@@ -183,13 +181,13 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 	if err := r.Client.Get(ctx, childKey, child); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := validateSyntheticChildLabelsForPR2Parent(child, nsSnap); err != nil {
+	if err := validateSyntheticChildLabelsForParent(child, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	agg := evaluateSyntheticRequiredChildStateForPR2(child)
+	agg := evaluateSyntheticRequiredChildState(child)
 	if agg.Phase != syntheticChildAggregateReady {
-		return r.patchParentSyntheticTreeAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
+		return r.patchParentSyntheticChildAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
 	}
 
 	if err := r.patchParentRootReadyAfterSyntheticChild(ctx, parentKey, mcpName); err != nil {
@@ -267,7 +265,7 @@ func (r *NamespaceSnapshotReconciler) patchParentRootReadyAfterSyntheticChild(ct
 	})
 }
 
-func (r *NamespaceSnapshotReconciler) patchParentSyntheticTreeAggregateReady(
+func (r *NamespaceSnapshotReconciler) patchParentSyntheticChildAggregateReady(
 	ctx context.Context,
 	parentKey types.NamespacedName,
 	reason string,
@@ -294,15 +292,11 @@ func (r *NamespaceSnapshotReconciler) patchParentSyntheticTreeAggregateReady(
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 }
 
-// skipN2bPR2SyntheticTree: synthetic child must stay N2a leaf. Naming is PR2-scoped technical debt until
-// a neutral tree-strategy hook exists (~PR5).
-func skipN2bPR2SyntheticTree(nsSnap *storagev1alpha1.NamespaceSnapshot) bool {
-	return namespacemanifest.N2bIsSyntheticChildNamespaceSnapshot(nsSnap.Labels)
-}
-
-func parentWantsN2bPR2SyntheticTree(nsSnap *storagev1alpha1.NamespaceSnapshot) bool {
-	if skipN2bPR2SyntheticTree(nsSnap) {
+// parentRequestsSyntheticChildTree is true when the snapshot opts into the temporary synthetic child tree
+// and is not itself the synthetic child (synthetic children stay N2a leaves).
+func parentRequestsSyntheticChildTree(nsSnap *storagev1alpha1.NamespaceSnapshot) bool {
+	if namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.Labels) {
 		return false
 	}
-	return namespacemanifest.N2bPR2SyntheticTreeEnabled(nsSnap.Annotations)
+	return namespacemanifest.SyntheticChildTreeAnnotationEnabled(nsSnap.Annotations)
 }

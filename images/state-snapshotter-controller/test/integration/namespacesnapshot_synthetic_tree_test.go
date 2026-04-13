@@ -36,15 +36,15 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tree", func() {
+var _ = Describe("Integration: NamespaceSnapshot N2b synthetic tree (temporary one-child scaffold)", func() {
 	It("creates synthetic child, writes graph refs, parent Ready only after child Ready", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "nss-pr2-tree-",
+				GenerateName: "nss-n2b-synth-tree-",
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-tree-pr2",
+					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-synthetic-tree",
 				},
 			},
 		}
@@ -55,7 +55,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tre
 		})
 
 		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "nss-pr2-cm", Namespace: nsName},
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-synth-tree-cm", Namespace: nsName},
 			Data:       map[string]string{"k": "v"},
 		}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
@@ -68,7 +68,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tre
 				Name:      parentName,
 				Namespace: nsName,
 				Annotations: map[string]string{
-					namespacemanifest.AnnotationN2bPR2SyntheticTree: "true",
+					namespacemanifest.AnnotationSyntheticChildTree: "true",
 				},
 			},
 			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
@@ -84,15 +84,15 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tre
 			g.Expect(p.UID).NotTo(BeEmpty())
 			ch := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, childKey, ch)).To(Succeed())
-			g.Expect(ch.Labels[namespacemanifest.LabelN2bSyntheticChild]).To(Equal("true"))
-			g.Expect(ch.Labels[namespacemanifest.LabelN2bParentName]).To(Equal(parentName))
-			g.Expect(ch.Labels[namespacemanifest.LabelN2bParentUID]).To(Equal(string(p.UID)))
+			g.Expect(ch.Labels[namespacemanifest.LabelSyntheticChild]).To(Equal("true"))
+			g.Expect(ch.Labels[namespacemanifest.LabelSyntheticParentName]).To(Equal(parentName))
+			g.Expect(ch.Labels[namespacemanifest.LabelSyntheticParentUID]).To(Equal(string(p.UID)))
 			ann := ch.Annotations
 			if ann == nil {
 				ann = map[string]string{}
 			}
-			_, hasPR2Ann := ann[namespacemanifest.AnnotationN2bPR2SyntheticTree]
-			g.Expect(hasPR2Ann).To(BeFalse(), "synthetic child must not opt into PR2 tree (stays N2a leaf)")
+			_, hasSynthTreeAnn := ann[namespacemanifest.AnnotationSyntheticChildTree]
+			g.Expect(hasSynthTreeAnn).To(BeFalse(), "synthetic child must not opt into synthetic tree (stays N2a leaf)")
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {

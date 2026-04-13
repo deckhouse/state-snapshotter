@@ -27,7 +27,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
+func TestEvaluateSyntheticRequiredChildState(t *testing.T) {
 	t.Parallel()
 	ns, name := "ns1", "parent-child"
 	base := func() *storagev1alpha1.NamespaceSnapshot {
@@ -43,7 +43,7 @@ func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
 		t.Parallel()
 		ch := base()
 		ch.Status.BoundSnapshotContentName = ""
-		got := evaluateSyntheticRequiredChildStateForPR2(ch)
+		got := evaluateSyntheticRequiredChildState(ch)
 		if got.Phase != syntheticChildAggregatePending || got.Reason != snapshot.ReasonChildSnapshotPending {
 			t.Fatalf("got %+v", got)
 		}
@@ -54,7 +54,7 @@ func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
 
 	t.Run("no ready condition pending", func(t *testing.T) {
 		t.Parallel()
-		got := evaluateSyntheticRequiredChildStateForPR2(base())
+		got := evaluateSyntheticRequiredChildState(base())
 		if got.Phase != syntheticChildAggregatePending {
 			t.Fatalf("got %+v", got)
 		}
@@ -68,7 +68,7 @@ func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
 			Status: metav1.ConditionTrue,
 			Reason: snapshot.ReasonCompleted,
 		})
-		got := evaluateSyntheticRequiredChildStateForPR2(ch)
+		got := evaluateSyntheticRequiredChildState(ch)
 		if got.Phase != syntheticChildAggregateReady || got.Reason != "" {
 			t.Fatalf("got %+v", got)
 		}
@@ -83,7 +83,7 @@ func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
 			Reason:  "ManifestCheckpointPending",
 			Message: "waiting for ManifestCheckpoint \"mcp-123\"",
 		})
-		got := evaluateSyntheticRequiredChildStateForPR2(ch)
+		got := evaluateSyntheticRequiredChildState(ch)
 		if got.Phase != syntheticChildAggregatePending || got.Reason != snapshot.ReasonChildSnapshotPending {
 			t.Fatalf("got %+v", got)
 		}
@@ -101,7 +101,7 @@ func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
 			Reason:  "NoCaptureTargets",
 			Message: "no targets",
 		})
-		got := evaluateSyntheticRequiredChildStateForPR2(ch)
+		got := evaluateSyntheticRequiredChildState(ch)
 		if got.Phase != syntheticChildAggregateFailed || got.Reason != snapshot.ReasonChildSnapshotFailed {
 			t.Fatalf("got %+v", got)
 		}
@@ -118,7 +118,7 @@ func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
 			Status: metav1.ConditionFalse,
 			Reason: "SomeFutureReason",
 		})
-		got := evaluateSyntheticRequiredChildStateForPR2(ch)
+		got := evaluateSyntheticRequiredChildState(ch)
 		if got.Phase != syntheticChildAggregatePending {
 			t.Fatalf("got %+v", got)
 		}

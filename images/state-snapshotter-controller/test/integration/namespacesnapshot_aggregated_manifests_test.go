@@ -49,7 +49,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-func pr4IntegrationEncodeChunk(objects []map[string]interface{}) (data string, checksum string) {
+func aggregatedManifestsIntegrationEncodeChunk(objects []map[string]interface{}) (data string, checksum string) {
 	jsonData, _ := json.Marshal(objects)
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
@@ -60,9 +60,9 @@ func pr4IntegrationEncodeChunk(objects []map[string]interface{}) (data string, c
 	return encoded, hex.EncodeToString(hash[:])
 }
 
-// pr4IntegrationMustInstallReadyMCP creates chunk + ManifestCheckpoint and writes MCP status (Create ignores .Status).
-func pr4IntegrationMustInstallReadyMCP(ctx context.Context, cl client.Client, name, srcNS string, objects []map[string]interface{}) *ssv1alpha1.ManifestCheckpoint {
-	d, cs := pr4IntegrationEncodeChunk(objects)
+// aggregatedManifestsIntegrationMustInstallReadyMCP creates chunk + ManifestCheckpoint and writes MCP status (Create ignores .Status).
+func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl client.Client, name, srcNS string, objects []map[string]interface{}) *ssv1alpha1.ManifestCheckpoint {
+	d, cs := aggregatedManifestsIntegrationEncodeChunk(objects)
 	chName := name + "-chunk-0"
 	ch := &ssv1alpha1.ManifestCheckpointContentChunk{
 		ObjectMeta: metav1.ObjectMeta{Name: chName},
@@ -79,9 +79,9 @@ func pr4IntegrationMustInstallReadyMCP(ctx context.Context, cl client.Client, na
 		Spec: ssv1alpha1.ManifestCheckpointSpec{
 			SourceNamespace: srcNS,
 			ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{
-				Name:      "mcr-pr4-" + name,
+				Name:      "mcr-agg-tst-" + name,
 				Namespace: srcNS,
-				UID:       "pr4-mcr-uid-" + name,
+				UID:       "agg-mcr-uid-" + name,
 			},
 		},
 	}
@@ -99,8 +99,8 @@ func pr4IntegrationMustInstallReadyMCP(ctx context.Context, cl client.Client, na
 	return mcp
 }
 
-// pr4IntegrationMustCreateNSC creates a NamespaceSnapshotContent and writes status (Create ignores .Status on CRD).
-func pr4IntegrationMustCreateNSC(ctx context.Context, cl client.Client, name, snapNS, snapName, mcpName string, children ...string) {
+// aggregatedManifestsIntegrationMustCreateNSC creates a NamespaceSnapshotContent and writes status (Create ignores .Status on CRD).
+func aggregatedManifestsIntegrationMustCreateNSC(ctx context.Context, cl client.Client, name, snapNS, snapName, mcpName string, children ...string) {
 	var refs []storagev1alpha1.NamespaceSnapshotContentChildRef
 	for _, c := range children {
 		refs = append(refs, storagev1alpha1.NamespaceSnapshotContentChildRef{Name: c})
@@ -126,7 +126,7 @@ func pr4IntegrationMustCreateNSC(ctx context.Context, cl client.Client, name, sn
 	Expect(cl.Status().Update(ctx, nsc)).To(Succeed())
 }
 
-func pr4IntegrationStartServer() *httptest.Server {
+func aggregatedManifestsIntegrationStartServer() *httptest.Server {
 	log, err := logger.NewLogger("error")
 	Expect(err).NotTo(HaveOccurred())
 	arch := usecase.NewArchiveService(k8sClient, k8sClient, log)
@@ -140,13 +140,13 @@ func pr4IntegrationStartServer() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func() {
+var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresource", func() {
 	It("returns aggregated manifests for parent-only (N2a lifecycle)", func() {
 		ctx := context.Background()
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "nss-pr4-",
-				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "nss-pr4"},
+				GenerateName: "nss-agg-manifests-",
+				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "nss-aggregated-manifests"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
@@ -171,7 +171,7 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 			g.Expect(f.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		srv := pr4IntegrationStartServer()
+		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
 		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/namespacesnapshots/snap/manifests", srv.URL, nsName)
 		resp, err := http.Get(url)
@@ -189,8 +189,8 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 		ctx := context.Background()
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "nss-pr4-tree-",
-				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "nss-pr4-tree"},
+				GenerateName: "nss-agg-manifests-tree-",
+				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "nss-aggregated-manifests-tree"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
@@ -217,11 +217,11 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 			g.Expect(rootContentName).NotTo(BeEmpty())
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		child := "pr4-extr-one-" + nsName
-		mcpChild := pr4IntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-pr4-one-"+nsName, nsName, []map[string]interface{}{
+		child := "agg-extr-one-" + nsName
+		mcpChild := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-one-"+nsName, nsName, []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "only-child", "namespace": nsName}},
 		})
-		pr4IntegrationMustCreateNSC(ctx, k8sClient, child, nsName, "snap", mcpChild.Name)
+		aggregatedManifestsIntegrationMustCreateNSC(ctx, k8sClient, child, nsName, "snap", mcpChild.Name)
 
 		rootNSC := &storagev1alpha1.NamespaceSnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: rootContentName}, rootNSC)).To(Succeed())
@@ -229,7 +229,7 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 		rootNSC.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: child}}
 		Expect(k8sClient.Status().Patch(ctx, rootNSC, client.MergeFrom(base))).To(Succeed())
 
-		srv := pr4IntegrationStartServer()
+		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
 		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/namespacesnapshots/snap/manifests", srv.URL, nsName)
 		resp, err := http.Get(url)
@@ -262,8 +262,8 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 		ctx := context.Background()
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "nss-pr4-2ch-",
-				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "nss-pr4-2ch"},
+				GenerateName: "nss-agg-manifests-2ch-",
+				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "nss-aggregated-manifests-2ch"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
@@ -290,18 +290,18 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 			g.Expect(rootContentName).NotTo(BeEmpty())
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		childA := "pr4-extr-a-" + nsName
-		childB := "pr4-extr-b-" + nsName
+		childA := "agg-extr-a-" + nsName
+		childB := "agg-extr-b-" + nsName
 
-		mcpA := pr4IntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-pr4-a-"+nsName, nsName, []map[string]interface{}{
+		mcpA := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-a-"+nsName, nsName, []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "only-a", "namespace": nsName}},
 		})
-		mcpB := pr4IntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-pr4-b-"+nsName, nsName, []map[string]interface{}{
+		mcpB := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-b-"+nsName, nsName, []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "only-b", "namespace": nsName}},
 		})
 
-		pr4IntegrationMustCreateNSC(ctx, k8sClient, childA, nsName, "snap", mcpA.Name)
-		pr4IntegrationMustCreateNSC(ctx, k8sClient, childB, nsName, "snap", mcpB.Name)
+		aggregatedManifestsIntegrationMustCreateNSC(ctx, k8sClient, childA, nsName, "snap", mcpA.Name)
+		aggregatedManifestsIntegrationMustCreateNSC(ctx, k8sClient, childB, nsName, "snap", mcpB.Name)
 
 		rootNSC := &storagev1alpha1.NamespaceSnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: rootContentName}, rootNSC)).To(Succeed())
@@ -313,7 +313,7 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 		}
 		Expect(k8sClient.Status().Patch(ctx, rootNSC, client.MergeFrom(base))).To(Succeed())
 
-		srv := pr4IntegrationStartServer()
+		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
 		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/namespacesnapshots/snap/manifests", srv.URL, nsName)
 		resp, err := http.Get(url)
@@ -343,9 +343,9 @@ var _ = Describe("Integration: NamespaceSnapshot PR4 aggregated manifests", func
 	})
 
 	It("returns 404 for missing NamespaceSnapshot", func() {
-		srv := pr4IntegrationStartServer()
+		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/namespacesnapshots/does-not-exist-pr4/manifests"
+		url := srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/namespacesnapshots/does-not-exist-agg/manifests"
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()

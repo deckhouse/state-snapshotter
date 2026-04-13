@@ -154,8 +154,8 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, err
 	}
 
-	if parentWantsN2bPR2SyntheticTree(nsSnap) {
-		return r.reconcileSyntheticTreePR2(ctx, nsSnap, content)
+	if parentRequestsSyntheticChildTree(nsSnap) {
+		return r.reconcileSyntheticChildTree(ctx, nsSnap, content)
 	}
 
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation

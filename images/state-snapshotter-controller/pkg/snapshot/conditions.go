@@ -59,7 +59,7 @@ const (
 	// is not yet bound, not yet Ready, or Ready=False with a non-terminal (in-progress) child reason.
 	ReasonChildSnapshotPending = "ChildSnapshotPending"
 	// ReasonChildSnapshotFailed is set on an N2b parent when a required child has a terminal Ready=False
-	// (N2a terminal reasons; whitelist next to evaluateSyntheticRequiredChildStateForPR2 in controller code).
+	// (N2a terminal reasons; whitelist next to evaluateSyntheticRequiredChildState in controller code).
 	ReasonChildSnapshotFailed = "ChildSnapshotFailed"
 )
 

@@ -75,10 +75,10 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 			handler.EnqueueRequestsFromMapFunc(mapNamespaceSnapshotContentToNamespaceSnapshot),
 		).
 		// Secondary source: child NamespaceSnapshot status updates → parent reconcile (map only enqueues
-		// for PR2 synthetic children with n2b-parent-name / n2b-parent-uid; not redundant with For()).
+		// for synthetic children with n2b-parent-name / n2b-parent-uid; not redundant with For()).
 		Watches(
 			&storagev1alpha1.NamespaceSnapshot{},
-			handler.EnqueueRequestsFromMapFunc(mapSyntheticChildNamespaceSnapshotToParent),
+			handler.EnqueueRequestsFromMapFunc(mapSyntheticChildSnapshotToParent),
 		).
 		Complete(r)
 }

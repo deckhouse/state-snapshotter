@@ -31,7 +31,7 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
-// AggregatedStatusError carries HTTP status for NamespaceSnapshot aggregated manifests (PR4 SSOT).
+// AggregatedStatusError carries HTTP status for NamespaceSnapshot aggregated manifests (see spec doc linked on BuildAggregatedJSON).
 type AggregatedStatusError struct {
 	HTTPStatus int
 	Reason     string
@@ -45,13 +45,13 @@ func NewAggregatedStatusError(httpStatus int, reason, message string) *Aggregate
 	return &AggregatedStatusError{HTTPStatus: httpStatus, Reason: reason, Message: message}
 }
 
-// AggregatedNamespaceManifests builds a single JSON array of manifest objects for a NamespaceSnapshot subtree (PR4).
+// AggregatedNamespaceManifests builds a single JSON array of manifest objects for a NamespaceSnapshot subtree.
 type AggregatedNamespaceManifests struct {
 	client  client.Client
 	archive *ArchiveService
 }
 
-// NewAggregatedNamespaceManifests creates a PR4 aggregator.
+// NewAggregatedNamespaceManifests creates an aggregated-manifests service for the manifests subresource.
 func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService) *AggregatedNamespaceManifests {
 	return &AggregatedNamespaceManifests{client: c, archive: a}
 }
