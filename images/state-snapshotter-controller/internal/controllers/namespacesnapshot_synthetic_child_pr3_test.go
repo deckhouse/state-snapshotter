@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -77,13 +78,17 @@ func TestEvaluateSyntheticRequiredChildStateForPR2(t *testing.T) {
 		t.Parallel()
 		ch := base()
 		meta.SetStatusCondition(&ch.Status.Conditions, metav1.Condition{
-			Type:   snapshot.ConditionReady,
-			Status: metav1.ConditionFalse,
-			Reason: "ManifestCheckpointPending",
+			Type:    snapshot.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  "ManifestCheckpointPending",
+			Message: "waiting for ManifestCheckpoint \"mcp-123\"",
 		})
 		got := evaluateSyntheticRequiredChildStateForPR2(ch)
 		if got.Phase != syntheticChildAggregatePending || got.Reason != snapshot.ReasonChildSnapshotPending {
 			t.Fatalf("got %+v", got)
+		}
+		if !strings.Contains(got.Message, "ManifestCheckpointPending") || !strings.Contains(got.Message, "mcp-123") {
+			t.Fatalf("pending message should carry child reason and message: %q", got.Message)
 		}
 	})
 

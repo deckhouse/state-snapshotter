@@ -129,9 +129,12 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR3 parent aggregate on chi
 			g.Expect(cr.Reason).To(Equal("CapturePlanDrift"))
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
+		// Tech debt / test workaround: synthetic child → parent is wired via Watches(mapSyntheticChildNamespaceSnapshotToParent),
+		// but in envtest we still see races where the parent reconcile runs before the child Ready condition shows terminal failure,
+		// leaving the parent on ChildSnapshotPending until another event. Patching parent metadata each poll forces a reconcile so
+		// the assertion is stable. Follow-up: confirm watch + queue reliably deliver the final child status transition without
+		// this kick (same concern for real clusters: parent may stay pending briefly until the next unrelated reconcile).
 		Eventually(func(g Gomega) {
-			// Re-enqueue parent each tick: a reconcile may run once while child status is still non-terminal,
-			// leaving parent on ChildSnapshotPending until the next reconcile after child fails closed.
 			pKick := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, parentKey, pKick)).To(Succeed())
 			pKickBase := pKick.DeepCopy()

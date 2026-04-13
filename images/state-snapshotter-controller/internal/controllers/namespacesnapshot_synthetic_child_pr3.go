@@ -47,8 +47,11 @@ type syntheticChildAggregateResult struct {
 }
 
 // n2bSyntheticChildTerminalReadyReasons is the PR3 allowlist: child NamespaceSnapshot Ready=False reasons
-// that N2a treats as terminal capture failure. Any other Ready=False on the child keeps the parent pending
-// (in-progress / MCP pending / unknown). Extend only together with N2a fail paths and design §11.1.
+// that N2a treats as terminal capture failure. Include only reasons after which the child is not expected
+// to return to Ready=True without external intervention (fix spec, delete MCR, recreate root, etc.); do not
+// add transient or ambiguous reasons or the parent will falsely report ChildSnapshotFailed. Any other
+// Ready=False on the child keeps the parent pending (in-progress / MCP pending / unknown). Extend only
+// together with N2a fail paths and design §11.1.
 var n2bSyntheticChildTerminalReadyReasons = map[string]struct{}{
 	"ListFailed":               {},
 	"NoCaptureTargets":         {},
@@ -63,8 +66,19 @@ func isN2bSyntheticChildTerminalReadyFailure(reason string) bool {
 	return ok
 }
 
+func formatSyntheticChildPendingUntilReadyMessage(childKey, childReason, childMsg string) string {
+	if childMsg != "" {
+		return fmt.Sprintf("waiting for synthetic child %s Ready=True: child reason=%s, message=%s", childKey, childReason, childMsg)
+	}
+	return fmt.Sprintf("waiting for synthetic child %s Ready=True: child reason=%s", childKey, childReason)
+}
+
 // evaluateSyntheticRequiredChildStateForPR2 maps one synthetic child's status to parent aggregate state.
-// Caller ensures this runs only for the PR2 synthetic child after parent's own manifest result is persisted.
+//
+// Preconditions (enforced by call site, not this function): the parent must already have completed N2a
+// manifest capture with a persisted ManifestCheckpoint on the parent NamespaceSnapshotContent — i.e.
+// reconcileSyntheticTreePR2 runs only after that stage. Do not call this helper earlier or the parent
+// Ready semantics will be wrong.
 func evaluateSyntheticRequiredChildStateForPR2(child *storagev1alpha1.NamespaceSnapshot) syntheticChildAggregateResult {
 	childKey := fmt.Sprintf("%s/%s", child.Namespace, child.Name)
 	if child.Status.BoundSnapshotContentName == "" {
@@ -96,13 +110,17 @@ func evaluateSyntheticRequiredChildStateForPR2(child *storagev1alpha1.NamespaceS
 		return syntheticChildAggregateResult{
 			Phase:   syntheticChildAggregatePending,
 			Reason:  snapshot.ReasonChildSnapshotPending,
-			Message: fmt.Sprintf("waiting for synthetic child %s Ready=True (child reason=%s)", childKey, rc.Reason),
+			Message: formatSyntheticChildPendingUntilReadyMessage(childKey, rc.Reason, rc.Message),
 		}
 	default:
+		msg := fmt.Sprintf("waiting for synthetic child %s Ready (child Ready status Unknown)", childKey)
+		if rc.Message != "" {
+			msg = fmt.Sprintf("%s: child message=%s", msg, rc.Message)
+		}
 		return syntheticChildAggregateResult{
 			Phase:   syntheticChildAggregatePending,
 			Reason:  snapshot.ReasonChildSnapshotPending,
-			Message: fmt.Sprintf("waiting for synthetic child %s Ready (child Ready status Unknown)", childKey),
+			Message: msg,
 		}
 	}
 }
