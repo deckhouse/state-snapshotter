@@ -14,6 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// N2b PR2 synthetic one-child tree (temporary scaffold until domain wiring ~PR5).
+//
+// Does not change N2a leaf semantics: synthetic children have no PR2 opt-in annotation and run normal
+// reconcileCaptureN2a. Parents with n2b-pr2-synthetic-tree only add a post-MCP step that waits for one child.
+//
+// Annotation name, ChildSnapshotPending reason, and parentName+"-child" naming are scaffold-only, not the
+// long-term product contract (PR3+ will refine reasons; PR5 replaces synthetic path).
+
 package controllers
 
 import (
@@ -25,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,6 +44,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
+// reasonChildSnapshotPending is a single umbrella pending reason for PR2; PR3 should split not-bound /
+// not-ready / child-failed with stable reason codes.
 const reasonChildSnapshotPending = "ChildSnapshotPending"
 
 func namespaceSnapshotChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotChildRef) bool {
@@ -61,22 +72,40 @@ func namespaceSnapshotContentChildRefsEqual(a, b []storagev1alpha1.NamespaceSnap
 	return true
 }
 
-// mapSyntheticChildNamespaceSnapshotToParent requeues the parent when a PR2 synthetic child NamespaceSnapshot changes.
+func validateSyntheticChildLabelsForPR2Parent(child *storagev1alpha1.NamespaceSnapshot, parent *storagev1alpha1.NamespaceSnapshot) error {
+	if child.Labels[namespacemanifest.LabelN2bSyntheticChild] != "true" {
+		return fmt.Errorf("NamespaceSnapshot %s/%s is not marked as PR2 synthetic child", child.Namespace, child.Name)
+	}
+	if child.Labels[namespacemanifest.LabelN2bParentName] != parent.Name {
+		return fmt.Errorf("synthetic child %s/%s has n2b-parent-name %q, want parent name %q",
+			child.Namespace, child.Name, child.Labels[namespacemanifest.LabelN2bParentName], parent.Name)
+	}
+	if child.Labels[namespacemanifest.LabelN2bParentUID] != string(parent.UID) {
+		return fmt.Errorf("synthetic child %s/%s has n2b-parent-uid %q, want current parent UID %q (stale child or wrong object)",
+			child.Namespace, child.Name, child.Labels[namespacemanifest.LabelN2bParentUID], string(parent.UID))
+	}
+	return nil
+}
+
+// mapSyntheticChildNamespaceSnapshotToParent enqueues the parent named in labels only for PR2 synthetic
+// children (not a duplicate For() — it bridges child status events to parent reconcile).
+// Requires n2b-parent-uid so stale map events still correlate; authoritative UID check is in reconcile.
 func mapSyntheticChildNamespaceSnapshotToParent(_ context.Context, o client.Object) []reconcile.Request {
 	labels := o.GetLabels()
 	if !namespacemanifest.N2bIsSyntheticChildNamespaceSnapshot(labels) {
 		return nil
 	}
 	parentName := labels[namespacemanifest.LabelN2bParentName]
+	parentUID := labels[namespacemanifest.LabelN2bParentUID]
 	ns := o.GetNamespace()
-	if parentName == "" || ns == "" {
+	if parentName == "" || ns == "" || parentUID == "" {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: parentName}}}
 }
 
-// reconcileSyntheticTreePR2 runs after parent N2a manifest capture has persisted (content status updated).
-// It ensures one synthetic child, writes graph refs, and sets parent root Ready only when the child is Ready.
+// reconcileSyntheticTreePR2 runs after parent N2a manifest capture has persisted (MCP on parent NSC).
+// It does not alter N2a capture itself; it only adds graph + readiness gating on the parent root.
 func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
@@ -116,30 +145,26 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 	case err != nil:
 		return ctrl.Result{}, err
 	default:
-		if child.Labels[namespacemanifest.LabelN2bSyntheticChild] != "true" ||
-			child.Labels[namespacemanifest.LabelN2bParentUID] != string(nsSnap.UID) {
-			return ctrl.Result{}, fmt.Errorf("NamespaceSnapshot %s/%s exists but is not the PR2 synthetic child of parent %s (labels conflict)",
-				child.Namespace, child.Name, nsSnap.Name)
+		if err := validateSyntheticChildLabelsForPR2Parent(child, nsSnap); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
 	wantRootRefs := []storagev1alpha1.NamespaceSnapshotChildRef{
 		{Name: childName, Namespace: nsSnap.Namespace},
 	}
-	parentRoot := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, parentKey, parentRoot); err != nil {
+	updated, err := r.patchParentRootChildrenRefsIfNeeded(ctx, parentKey, wantRootRefs)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !namespaceSnapshotChildRefsEqual(parentRoot.Status.ChildrenSnapshotRefs, wantRootRefs) {
-		parentRoot.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), wantRootRefs...)
-		parentRoot.Status.ObservedGeneration = parentRoot.Generation
-		if err := r.Client.Status().Update(ctx, parentRoot); err != nil {
-			return ctrl.Result{}, err
-		}
+	if updated {
 		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	}
 
 	if err := r.Client.Get(ctx, childKey, child); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := validateSyntheticChildLabelsForPR2Parent(child, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}
 	if child.Status.BoundSnapshotContentName == "" {
@@ -150,15 +175,12 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 	wantContentRefs := []storagev1alpha1.NamespaceSnapshotContentChildRef{
 		{Name: child.Status.BoundSnapshotContentName},
 	}
-	contentKey := client.ObjectKey{Name: parentContent.Name}
-	if err := r.Client.Get(ctx, contentKey, parentContent); err != nil {
+	contentName := parentContent.Name
+	updated, err = r.patchParentContentChildRefsIfNeeded(ctx, contentName, wantContentRefs)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !namespaceSnapshotContentChildRefsEqual(parentContent.Status.ChildrenSnapshotContentRefs, wantContentRefs) {
-		parentContent.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), wantContentRefs...)
-		if err := r.Client.Status().Update(ctx, parentContent); err != nil {
-			return ctrl.Result{}, err
-		}
+	if updated {
 		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	}
 
@@ -171,49 +193,109 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 		return r.markParentWaitingForSyntheticChild(ctx, parentKey, msg)
 	}
 
-	parentFinal := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, parentKey, parentFinal); err != nil {
-		return ctrl.Result{}, err
-	}
-	parentFinal.Status.ObservedGeneration = parentFinal.Generation
-	meta.SetStatusCondition(&parentFinal.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             snapshot.ReasonCompleted,
-		Message:            fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s); synthetic child ready", mcpName),
-		ObservedGeneration: parentFinal.Generation,
-	})
-	if err := r.Client.Status().Update(ctx, parentFinal); err != nil {
+	if err := r.patchParentRootReadyAfterSyntheticChild(ctx, parentKey, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *NamespaceSnapshotReconciler) markParentWaitingForSyntheticChild(ctx context.Context, parentKey types.NamespacedName, msg string) (ctrl.Result, error) {
-	nsSnap := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, parentKey, nsSnap); err != nil {
-		return ctrl.Result{}, err
-	}
-	nsSnap.Status.ObservedGeneration = nsSnap.Generation
-	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             reasonChildSnapshotPending,
-		Message:            msg,
-		ObservedGeneration: nsSnap.Generation,
+// patchParentRootChildrenRefsIfNeeded returns (true, nil) if it performed an update. Status conflicts are
+// retried; other errors propagate and controller-runtime will requeue.
+func (r *NamespaceSnapshotReconciler) patchParentRootChildrenRefsIfNeeded(
+	ctx context.Context,
+	parentKey types.NamespacedName,
+	want []storagev1alpha1.NamespaceSnapshotChildRef,
+) (bool, error) {
+	var didUpdate bool
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, parentKey, o); err != nil {
+			return err
+		}
+		if namespaceSnapshotChildRefsEqual(o.Status.ChildrenSnapshotRefs, want) {
+			return nil
+		}
+		o.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), want...)
+		o.Status.ObservedGeneration = o.Generation
+		if err := r.Client.Status().Update(ctx, o); err != nil {
+			return err
+		}
+		didUpdate = true
+		return nil
 	})
-	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
+	return didUpdate, err
+}
+
+func (r *NamespaceSnapshotReconciler) patchParentContentChildRefsIfNeeded(
+	ctx context.Context,
+	contentName string,
+	want []storagev1alpha1.NamespaceSnapshotContentChildRef,
+) (bool, error) {
+	var didUpdate bool
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		c := &storagev1alpha1.NamespaceSnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, c); err != nil {
+			return err
+		}
+		if namespaceSnapshotContentChildRefsEqual(c.Status.ChildrenSnapshotContentRefs, want) {
+			return nil
+		}
+		c.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), want...)
+		if err := r.Client.Status().Update(ctx, c); err != nil {
+			return err
+		}
+		didUpdate = true
+		return nil
+	})
+	return didUpdate, err
+}
+
+func (r *NamespaceSnapshotReconciler) patchParentRootReadyAfterSyntheticChild(ctx context.Context, parentKey types.NamespacedName, mcpName string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, parentKey, o); err != nil {
+			return err
+		}
+		o.Status.ObservedGeneration = o.Generation
+		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             snapshot.ReasonCompleted,
+			Message:            fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s); synthetic child ready", mcpName),
+			ObservedGeneration: o.Generation,
+		})
+		return r.Client.Status().Update(ctx, o)
+	})
+}
+
+func (r *NamespaceSnapshotReconciler) markParentWaitingForSyntheticChild(ctx context.Context, parentKey types.NamespacedName, msg string) (ctrl.Result, error) {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		nsSnap := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, parentKey, nsSnap); err != nil {
+			return err
+		}
+		nsSnap.Status.ObservedGeneration = nsSnap.Generation
+		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reasonChildSnapshotPending,
+			Message:            msg,
+			ObservedGeneration: nsSnap.Generation,
+		})
+		return r.Client.Status().Update(ctx, nsSnap)
+	})
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 }
 
-// reconcileCaptureN2a entry: synthetic child is always a leaf — never run PR2 tree from it.
+// skipN2bPR2SyntheticTree: synthetic child must stay N2a leaf. Naming is PR2-scoped technical debt until
+// a neutral tree-strategy hook exists (~PR5).
 func skipN2bPR2SyntheticTree(nsSnap *storagev1alpha1.NamespaceSnapshot) bool {
 	return namespacemanifest.N2bIsSyntheticChildNamespaceSnapshot(nsSnap.Labels)
 }
 
-// parentWantsN2bPR2SyntheticTree is true when the root opts in and is not itself a synthetic child.
 func parentWantsN2bPR2SyntheticTree(nsSnap *storagev1alpha1.NamespaceSnapshot) bool {
 	if skipN2bPR2SyntheticTree(nsSnap) {
 		return false

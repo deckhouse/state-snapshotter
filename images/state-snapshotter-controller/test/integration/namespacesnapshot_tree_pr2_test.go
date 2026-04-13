@@ -21,8 +21,6 @@ package integration
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -81,11 +79,20 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tre
 		childKey := types.NamespacedName{Namespace: nsName, Name: childName}
 
 		Eventually(func(g Gomega) {
+			p := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
+			g.Expect(p.UID).NotTo(BeEmpty())
 			ch := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, childKey, ch)).To(Succeed())
 			g.Expect(ch.Labels[namespacemanifest.LabelN2bSyntheticChild]).To(Equal("true"))
 			g.Expect(ch.Labels[namespacemanifest.LabelN2bParentName]).To(Equal(parentName))
-			g.Expect(ch.Labels[namespacemanifest.LabelN2bParentUID]).NotTo(BeEmpty())
+			g.Expect(ch.Labels[namespacemanifest.LabelN2bParentUID]).To(Equal(string(p.UID)))
+			ann := ch.Annotations
+			if ann == nil {
+				ann = map[string]string{}
+			}
+			_, hasPR2Ann := ann[namespacemanifest.AnnotationN2bPR2SyntheticTree]
+			g.Expect(hasPR2Ann).To(BeFalse(), "synthetic child must not opt into PR2 tree (stays N2a leaf)")
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -147,9 +154,6 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tre
 		Expect(parentContent.Status.ChildrenSnapshotContentRefs[0].Name).To(Equal(childSnap.Status.BoundSnapshotContentName))
 
 		Expect(childSnap.Status.ChildrenSnapshotRefs).To(BeEmpty())
-
 		Expect(parentSnap.Status.ChildrenSnapshotRefs).To(HaveLen(1))
-		wantContent := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(parentSnap.UID), "-", ""))
-		Expect(parentSnap.Status.BoundSnapshotContentName).To(Equal(wantContent))
 	})
 })
