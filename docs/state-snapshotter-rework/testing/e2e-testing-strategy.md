@@ -38,13 +38,15 @@
 | `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — root удаляется, `NamespaceSnapshotContent` остаётся; Delete — финализатор root снимается только после `NotFound` на content (ожидание удаления CR в API) |
 | `namespacesnapshot_n1_boundary_test.go` | **Формальное закрытие N1:** `ContentRefMismatch` при неверном `namespaceSnapshotRef` на NSC; **recovery** — после сброса `status` при валидном content снова `Bound`+`Ready`; короткая **стабильность** (Consistently) |
 
-**N2 (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1 / N2.8):** happy path (объекты в namespace → Job success → артефакт/result → root ready); fail-closed / нет профиля; **Retain** с ObjectKeeper/артефактом; runner fail (Job failed); smoke **pagination** для list.
+**N2a (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1):** happy path (namespace → внутренний **MCR→ManifestCheckpoint** → persisted result → **Ready** на root/content); **не** выводить Ready только из промежуточного состояния без готового MCP; fail-closed / нет профиля или провал capture; **Retain** с **ObjectKeeper** + MCP/chunks; негативный сценарий провала MCR/MCP; smoke **pagination**/лимиты list, если list в capture-потоке.  
+
+**N2b:** дерево — дочерние NS/NSC, **childrenSnapshotRefs** / **childrenSnapshotContentRefs**, агрегированный **Ready** parent, **aggregated manifests download** (без data); интеграционные сценарии по §2.4.1.
 
 ## Планируемые тесты
 
 **Бэклог integration:** T5, T8–T11 и др. — по необходимости. R5 + T4/eligibility — см. [`design/implementation-plan.md`](../design/implementation-plan.md).
 
-**Порядок с M-треком:** сценарии **T6** и прочая нагрузка/расширение **MCR** не являются приоритетом, пока не закрыт **real capture N2** (§2.4.1) для пары **NamespaceSnapshot** / **NamespaceSnapshotContent** / retention; см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4–§2.4.1.
+**Порядок с M-треком:** сценарии **T6** и расширение **MCR spec** — по gate в [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4 / §4 (**N2a** или явное исключение); закрытие **N2b** не обязано блокировать M1, если так зафиксировано в плане.
 
 | ID | Тест | Связь | Статус |
 |----|------|--------|--------|

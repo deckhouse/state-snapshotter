@@ -57,7 +57,7 @@
 
 | # | Задача | Зачем | Статус |
 |---|--------|--------|--------|
-| M1 | Расширение **MCR spec** | UX | ⬜ **отложено** до стабилизации **NamespaceSnapshot / NamespaceSnapshotContent / ObjectKeeper** (N1–N3) |
+| M1 | Расширение **MCR spec** | UX | ⬜ **отложено** до стабилизации **NamespaceSnapshot / NamespaceSnapshotContent / ObjectKeeper** по поставке **N2a** (и при необходимости N3); не смешивать с закрытием **N2b** без явного gate |
 | M2 | Лимиты объёма, таймауты list | Защита apiserver/etcd | ⬜ **после M1** (тот же gate) |
 
 ### 2.4 Namespace snapshot + NamespaceSnapshotContent + ObjectKeeper
@@ -67,156 +67,78 @@
 | # | Задача | Документ / примечание | Статус |
 |---|--------|------------------------|--------|
 | N0 | **Gate:** **Chosen option** в [`namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `NamespaceSnapshot` / `NamespaceSnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §13–§16 | ✅ (scope resolved; group `storage.deckhouse.io/v1alpha1` на этапе N1) |
-| N1 | **CRD + API:** типы `NamespaceSnapshot`, `NamespaceSnapshotContent`, codegen, OpenAPI; **убрать** использование **generic `SnapshotContent`** как носителя результата для namespace root. | decision + design §14 | ✅ **закрыт:** skeleton reconciler; bind + delete (Retain/Delete); `status.boundSnapshotContentName`; integration: lifecycle, deletion, **ref mismatch**, **status recovery**; default exclusions до real capture — §4.1 design; без ObjectKeeper / real capture (**N2**). |
-| N2 | **Первый real capture** для `NamespaceSnapshot` без child/volume/export/vision-flow: профиль GVR, контракт артефакта v1, контракт runner, Job orchestration, runner (list/sanitize/bundle), запись в `NamespaceSnapshotContent.status`, **ObjectKeeper** как retention anchor, integration. Пошагово — **§2.4.1**. | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) + §2.4.1 ниже | ⬜ |
+| N1 | **API + lifecycle skeleton (завершённый подготовительный слой, код не откатывается):** типы `NamespaceSnapshot`, `NamespaceSnapshotContent`, codegen, OpenAPI; **убрать** generic `SnapshotContent` как носитель root; bind + delete; integration (lifecycle, deletion, mismatch, recovery). **В N1 намеренно нет:** ObjectKeeper, реального manifest capture, дочернего дерева. | decision + design §14–§16 | ✅ |
+| N2 | **Manifests-only snapshot path** (без data-layer), в два подэтапа — **§2.4.1:** **N2a** — первый рабочий снимок манифестов одного root (OK + MCR→ManifestCheckpoint + статус на NSC + download одного снимка); **N2b** — дерево манифест-only снимков (дети, refs на graph, агрегированный Ready, aggregated download). | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) + §2.4.1 | ⬜ |
 | N3 | **Интеграция / hardening:** envtest — recovery после **рестарта** контроллера; доп. негативные кейсы; политика по §15. Базовые mismatch/recovery/status уже в N1 (`namespacesnapshot_n1_boundary_test.go`). | design §15 | ⬜ |
-| N4 | **После закрытого N2:** углублённые лимиты большого namespace, политики таймаутов list/apiserver (пересечение с §8.6 design, M2). | design §8.6, §16 | ⬜ |
-| N5 | **Полный ТЗ:** дочерние снимки, DSC priority, экспорт/импорт, restore — итерациями по [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) без изменения ТЗ из `docs/`. | бэклог | ⬜ |
+| N4 | **После закрытого N2 (N2a+N2b):** углублённые лимиты большого namespace, политики таймаутов list/apiserver (пересечение с §8.6 design, M2). | design §8.6, §16 | ⬜ |
+| N5 | **За пределами manifests-only дерева:** data-layer (volume/VSC/VCR и т.д.), DSC priority traversal в полном объёме, экспорт/импорт/restore с данными — итерациями по [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) без изменения ТЗ из `docs/`. Дочерняя **композиция манифест-only** — в **N2b**, не в N5. | бэклог | ⬜ |
 
 Трек **N*** и **M1–M2** не смешивать в одном PR без необходимости.
 
-#### 2.4.1 N2 — декомпозиция (приземлённый порядок)
+#### 2.4.1 N2 — manifests-only путь (N2a / N2b), SSOT декомпозиции
 
-**Цель N2:** первый **реальный** capture состояния namespace для `NamespaceSnapshot` — с runner, сбором объектов, артефактом, retention anchor и понятным lifecycle — **без** дочерних domain snapshots, volume orchestration, export/import и полного vision-flow.
+**Граница N1 ↔ N2 (код N1 не пересматривается как «неудачная работа»):** **N1** — **завершённый** слой **API + lifecycle skeleton**: CRD/типы, bind root↔`NamespaceSnapshotContent`, delete (Retain/Delete), integration (lifecycle, mismatch, recovery). **В N1 намеренно нет:** **ObjectKeeper**, **реального** manifest capture, **дочернего дерева**. Дальнейшие этапы опираются на этот скелет без отката CRD/bind/delete.
 
-**Уже заложено в N1 (не повторять как «новый N2»):** пара GVK NS/NSC в bootstrap/unified wiring, dedicated reconciler, bind/delete, `status.boundSnapshotContentName`, базовые integration; fail-closed формулировка по exclusions до real capture — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §4.1.
+**Зафиксированные договорённости для N2:**
 
-**Вне N2 (следующие пласты):** child snapshots, DSC priority traversal, VM-специфика, PVC/VolumeSnapshot orchestration, export/import API, restore pipeline, полный tree graph.
+- **ObjectKeeper** нужен уже в **первом рабочем** проходе (**N2a**), как **retention anchor** для корневого content/артефакта; OK **не** заменяет bind (**`spec.namespaceSnapshotRef`** / **`status.boundSnapshotContentName`**).
+- Рабочий scope до data-layer — **manifests-only**; **VolumeCaptureRequest**, **VolumeSnapshotContent**, dataRefs и прочие data-ветки — **не реализуются** в N2; в API допускаются только **placeholders**, если они уже заложены в модели.
+- **Внутренний** путь исполнения manifest capture — **ManifestCaptureRequest → ManifestCheckpoint** (+ существующие **ManifestCheckpointContentChunk** в коде модуля); публичный lifecycle и статусы — **`NamespaceSnapshot` / `NamespaceSnapshotContent`** (+ при необходимости те же поля связи, что у unified content с MCP, по аналогии со `SnapshotContent`).
+- **Дерево snapshot-ов и child composition** — **целевая ось продукта**, закрывается в **N2b** (manifests-only), а не откладывается как «дальний optional».
 
----
+**Цель N2 целиком:** кратчайший путь к **первым рабочим** снимкам манифестов (**N2a**), затем к **рабочему дереву** manifests-only снимков (**N2b**). Полный vision из [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) **не** тащить в один этап.
 
-**Рекомендуемый порядок работ**
-
-| Фаза | Содержание |
-|------|------------|
-| **Этап 1 — до кода** | N2.1 capture profile → N2.2 artifact contract v1 → N2.3 runner contract |
-| **Этап 2 — controller + runner** | N2.4 Job orchestration → N2.5 реализация capture в runner → N2.7 запись result в `NamespaceSnapshotContent.status` (+ root conditions) |
-| **Этап 3 — retention** | N2.6 ObjectKeeper |
-| **Этап 4 — тесты** | N2.8 integration вокруг real capture |
+**Вне N2 (явный out-of-scope для всего N2a+N2b):** volume/data snapshots; реальный поток **VCR/VSC**; **restore с данными**; полный **export/import** продукта; **storage class remap**; **VM data restore**; выдача поддерева **с data payloads** (агрегированный download в N2b — **только манифесты**).
 
 ---
 
-**N2.1. Минимальный capture profile (зафиксировать до runner)**
+**N2a — первый рабочий manifests-only snapshot (один root, без дерева)**
 
-Зафиксировать в design (короткий раздел или отдельная заметка, со ссылкой из [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md)):
+**Definition of Done (N2a):**
 
-- **built-in allowlist GVR** для MVP (узкий набор: например core workload/API-объекты namespaced — ConfigMap, Secret, Service, Deployment, StatefulSet, DaemonSet, Job, CronJob, Ingress; при необходимости **metadata-only** для PVC как manifest; плюс явно перечисленные namespaced CR модуля, если нужны с первого дня).
-- **exclusions policy:** всегда исключать служебное: `NamespaceSnapshot`, `NamespaceSnapshotContent`, объекты runner/результата, служебные префиксы snapshotter; при необходимости расширяемый список `excludedKinds` / GVR.
-- **unsupportedKinds:** что сознательно не поддерживается в N2 (документировать, чтобы не разъезжались ожидания).
-- **fail-closed:** профиль не задан / неразрешён → не стартовать capture; `Ready=False` с понятным reason.
+1. **ObjectKeeper** для корневого **`NamespaceSnapshotContent`** (и согласованность с MCP по ТЗ `snapshot-rework`).  
+2. Реальный manifest capture через цепочку **MCR → ManifestCheckpoint** (chunks), управляемый из потока **NamespaceSnapshot** (ensure MCR, observe MCP, без публичной обязанности MCR для оператора — см. design §10).  
+3. Запись результата в **`NamespaceSnapshotContent.status`** (имя/ссылка на MCP, метаданные, conditions по согласованию с API).  
+4. **`Ready=True`** на root **только** после **persisted** manifest-результата (MCP Ready + консистентные chunks / статус MCP), **не** из «промежуточного» события вроде одного лишь факта создания MCR без готового checkpoint.  
+5. Рабочий **read/download path** манифестов **одного** снимка (на базе существующей склейки chunks / archive path в модуле, без обязательности нового формата хранения).  
+6. **Без** агрегации детей и **без** data-flow; поля data-related — только **placeholders**, если уже есть в CRD.
 
-**Нормативно для N2:** **runner MUST** собирать объекты **только** из явно зафиксированного built-in allowlist / профиля (один SSOT-список GVR в коде или генерируемый из одного источника, описанного в design). Поведение «снять всё подряд» / ad-hoc расширение списка только в runner **запрещены**.
+**Порядок работ N2a (ориентир):** (1) design: allowlist/таргеты для MCR из NS, исключения, fail-closed; (2) поля статуса NSC/root и связь с MCP; (3) reconciler: ensure MCR, watch MCP/MCR, OK; (4) интеграция с **ArchiveService** / выдачей download для одного checkpoint; (5) integration-тесты (happy, fail MCP/MCR, Retain+OK).
 
-Результат: перечислимые **`defaultCaptureProfile`**, **`excludedKinds`**, **`unsupportedKinds`** (имена условные — в документе и коде согласовать).
+**Нормативно:** набор захватываемых GVR/targets — **один SSOT** (built-in profile / генерация targets для MCR); ad-hoc «снять всё подряд» **запрещён**.
 
----
-
-**N2.2. Контракт артефакта v1**
-
-До реализации runner зафиксировать:
-
-- layout: каталог артефакта с **`metadata.json`** + **один бинарный payload-архив**;
-- **Формат архива для artifact v1 (N2):** нормативно **gzip-сжатый tar — файл `bundle.tar.gz`** (расширение и MIME согласовать в модуле). Иной формат (zip, только ref без файла) — **не v1**, а новая `formatVersion` или отдельное ADR/решение, чтобы не плодить «у каждого свой архив».
-- обязательные поля `metadata.json` (как минимум: `formatVersion`, `snapshotKind`, `sourceNamespace`, `capturedAt`, `resourceCount`, учёт included/excluded, `partial`, `warningsCount` — уточнить список при записи в design);
-- что считается **успешной** записью артефакта;
-- нужен ли отдельный `warnings.json` в v1.
-
-Результат: контракт, на который опираются runner, запись в `NamespaceSnapshotContent.status` и будущий restore/import.
+**Хранилище манифестов N2a:** по умолчанию **тот же**, что у manifest-линии сегодня — **ManifestCheckpoint + gzip/json chunks**; логический «bundle» для оператора может выдаваться как **склейка** (см. `ArchiveService`). Отдельный on-disk **`bundle.tar.gz`** как единственный носитель **не обязателен** для N2a, если публичный контракт download удовлетворён; эволюция формата — через `formatVersion` / ADR при смене носителя.
 
 ---
 
-**N2.3. Контракт runner (вход/выход, до Job в коде)**
+**N2b — дерево manifests-only snapshot-ов**
 
-Решить и задокументировать:
+**Definition of Done (N2b):**
 
-- **Runner shape:** для MVP — **Job** (distroless-friendly: бинарь runner без shell entrypoint).
-- **Вход:** env и/или labels/annotations (как минимум: имя/namespace `NamespaceSnapshot`, имя content, идентификатор/версия capture profile, ref на цель артефакта / repository — уточнить по инфраструктуре модуля).
-- **Выход / наблюдаемость:** для MVP — статус Job + **result object** (например ConfigMap) или запись, которую контроллер надёжно читает; **heartbeat** — опционально позже.
-- **Timeout policy** для Job и для reconcile (явно в design).
+1. Создание **дочерних** snapshot **доменными контроллерами** (по ТЗ), дочерние **`NamespaceSnapshotContent`**.  
+2. На **`NamespaceSnapshot`**: **`childrenSnapshotRefs`** (или согласованное имя) — **observability** / намерения.  
+3. На **`NamespaceSnapshotContent`**: **`childrenSnapshotContentRefs`** (или согласованное имя) — **канонический graph** результата.  
+4. **`Ready=True`** у parent **только** когда готовы **собственный** manifest-result **и** все релевантные дети (политика агрегации зафиксировать в design/API).  
+5. **Aggregated manifests download** для **subtree / root** (только манифесты, без data payloads).  
+6. По-прежнему **без** data-flow (volume и т.д.).
 
-**Источник истины для готовности (N2):** контроллер **обязан** выводить успех capture (в т.ч. возможность выставить на root **`Ready=True`**) из **устойчиво сохранённого результата runner** (артефакт + `metadata.json` по контракту v1 и/или явный success marker в result object / запись, согласованная в N2.3), после чего обновляется **`NamespaceSnapshotContent.status`** (и затем root). **Одного** факта `Job.status.completionTime` / `Succeeded` **недостаточно** — Job может завершиться без валидного артефакта или до записи result; **MUST NOT** ставить `Ready=True` только потому, что Job завершился успешно.
-
----
-
-**N2.4. Job orchestration в reconciler**
-
-Код контроллера:
-
-- создать runner Job **один раз**, находить существующий, не плодить дубликаты;
-- маппинг фаз Job → **conditions** на root (и при необходимости на content): минимально — `Bound=True`, флаг/condition старта capture (`CaptureStarted` или эквивалент), `Ready=False` до подтверждённого persisted result (см. **N2.3**), `Ready=True` только после выполнения критериев N2.3/N2.7, `Ready=False` + reason при fail;
-- не использовать «Job Succeeded ⇒ сразу Ready=True» без проверки артефакта/result.
+**Порядок работ N2b (ориентир):** модель полей API → контракт graph → reconciler parent/child → тесты дерева + aggregated download.
 
 ---
 
-**N2.5. Реализация capture в runner**
+**Definition of Done (N2 целиком = N2a ∧ N2b)**
 
-Runner (отдельный бинарь/образ, не shell):
-
-1. Загрузить built-in allowlist GVR.
-2. List с **пагинацией**, применить exclusions.
-3. **Sanitization** manifestов.
-4. Запись bundle (streaming/chunked по мере необходимости).
-5. Запись `metadata.json`, сохранение артефакта по контракту v1.
-6. Запись result marker для контроллера.
-
-**Не делать в N2:** доменные ветки, DSC traversal, VM special handling, children, volume data — только manifest capture namespace.
-
----
-
-**N2.6. ObjectKeeper / retention anchor**
-
-Минимально для N2 (без тяжёлой retention-математики):
-
-- **ObjectKeeper** в N2 — это **retention anchor** для удержания content/артефакта после удаления root/namespace; **не** слой bind между root и content и **не** замена **`spec.namespaceSnapshotRef`** / **`status.boundSnapshotContentName`** (bind остаётся контрактом NS↔NSC; OK — отдельная ось lifecycle удержания).
-- после **успешного** real capture: создать/обновить **ObjectKeeper** так, чтобы content/артефакт имели **retention anchor** (не «просто cluster content отдельно от root»);
-- связь `NamespaceSnapshotContent` ↔ OK (ownerReference / политика по ТЗ `snapshot-rework` — сверять при реализации);
-- delete root + **Retain** не ломают удержание результата; **FollowObjectWithTTL** / TTL — минимальный вариант по ТЗ, без усложнения в первом merge.
-
----
-
-**N2.7. Результат в `NamespaceSnapshotContent.status`**
-
-После успешного runner:
-
-- conditions на content, ссылки/метаданные артефакта (location, `formatVersion`, `capturedAt` — по контракту);
-- на root: `Ready=True` отражает **реально сохранённый** артефакт, а не fake capture N1.
-
----
-
-**N2.8. Integration tests (real capture)**
-
-Минимум:
-
-1. **Happy path:** namespace с несколькими объектами → Job success → артефакт/result → root ready.
-2. **Fail-closed / no profile:** `Ready=False`, понятный reason.
-3. **Retain:** root удалён → content + OK остаются (в духе уже существующих delete-тестов N1, расширить под OK/артефакт).
-4. **Runner fail:** Job failed → snapshot not ready, reason.
-5. **Large namespace:** хотя бы smoke на путь **pagination** (полные лимиты — см. N4 / M2).
-
----
-
-**Definition of Done (N2 закрыт)**
-
-1. `NamespaceSnapshot` запускает **реальный** capture runner.  
-2. Runner собирает **разрешённый** набор namespaced объектов.  
-3. Артефакт **реально создаётся** и сохраняется по контракту v1.  
-4. `NamespaceSnapshotContent.status` содержит result metadata.  
-5. `Ready=True` означает **persisted artifact** и подтверждённый result по **N2.3**, не placeholder N1 и не «только Job Succeeded».  
-6. **Retain** удерживает результат при независимой судьбе root (через OK / политику).  
-7. Есть integration tests: happy, fail-closed/fail, retain (и smoke pagination).
+Выполнены DoD **N2a** и **N2b**; out-of-scope выше **не** смешан с закрытием N2 без явного расширения этапа.
 
 ---
 
 **Практический task-list (копипаст backlog)**
 
-1. Spec/design: built-in GVR allowlist + exclusions + unsupported.  
-2. Spec/design: artifact format v1.  
-3. Spec/design: runner I/O + timeouts.  
-4. Code: Job create/observe + conditions.  
-5. Code: runner capture (pagination, sanitization, bundle + metadata).  
-6. Code: persist artifact + update content (and root) status.  
-7. Code: ObjectKeeper integration.  
-8. Tests: happy / fail / retain (+ pagination smoke).
+**N2a:** design profile/targets + status fields → code NS reconciler + MCR/MCP + OK → download одного снимка → integration (happy / fail / Retain+OK / smoke list limits).  
+
+**N2b:** API refs + domain wiring → parent Ready aggregation → aggregated download → integration дерева.
+
+**В этой задаче (только план):** не переписывать CRD N1 без отдельного решения; не менять bind/delete skeleton без необходимости; не включать data snapshots и полный export/import/restore.
 
 ### 2.5 Документация и операционка
 
@@ -240,8 +162,8 @@ Runner (отдельный бинарь/образ, не shell):
 
 1. ~~**R5 + feature gates**~~ ✅ — `STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`; Helm `unifiedSnapshotEnabled`, `unifiedBootstrapPairs`.
 2. ~~**Точечные integration-тесты**~~ ✅ — `unified_runtime_rbac_eligibility_test.go`: без RBACReady нет записи в `EligibleFromDSC`; после снятия RBACReady resolved теряет пару, monotonic active сохраняет ключ.
-3. ~~**N0 → N1**~~ ✅; **N2** — по **§2.4.1** (real capture поэтапно); затем **N3** (restart/hardening), **N4** (лимиты после N2), **N5** (полный сценарий ТЗ `snapshot-rework` итерациями).
-4. **M1**, затем **M2** — только после стабилизации namespace-flow (**N2 закрыт** или явный gate в плане); manifest-трек не смешивать с N2 без необходимости.
+3. ~~**N0 → N1**~~ ✅; **N2** — по **§2.4.1**: **N2a** (первый manifests-only snapshot + OK + download), затем **N2b** (дерево + aggregated download); далее **N3** (restart/hardening), **N4** (лимиты после N2), **N5** (data-layer и полный ТЗ вне manifests-only дерева).
+4. **M1**, затем **M2** — только после стабилизации namespace-flow (**N2a** или явный gate в плане; расширение MCR spec не блокируется закрытием **N2b**, если так зафиксировано); manifest-трек не смешивать с N2 без необходимости.
 
 *(R5 и M1–M2 не смешивать в одном PR без необходимости.)*
 

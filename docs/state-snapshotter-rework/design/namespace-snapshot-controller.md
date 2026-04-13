@@ -16,20 +16,23 @@
 
 ### 2.1 Целевая семантика (согласовано с ТЗ)
 
-**NamespaceSnapshot** — namespaced root / intention; результат фиксируется в cluster-scoped **`NamespaceSnapshotContent`** (пара 1:1 с root по смыслу ТЗ). Generic **`SnapshotContent`** для этого потока **не** используется как root-carrier. Связка с **ObjectKeeper** — по правилам из `snapshot-rework`; целевой режим для namespace-flow — **FollowObjectWithTTL** (полный OK lifecycle — N2+).
+**NamespaceSnapshot** — namespaced root / intention; результат фиксируется в cluster-scoped **`NamespaceSnapshotContent`** (пара 1:1 с root по смыслу ТЗ). Generic **`SnapshotContent`** для этого потока **не** используется как root-carrier. Связка с **ObjectKeeper** — по правилам из `snapshot-rework`; целевой режим для namespace-flow — **FollowObjectWithTTL** (OK в первом рабочем проходе — **N2a**, см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
 
-**Поставка поэтапно** (см. §16 и [`implementation-plan.md`](implementation-plan.md)): сначала bind NS↔NSC + OK + conditions и скелет capture; полная оркестрация дочерних снимков, экспорт/импорт и restore — наращиванием до полного ТЗ, **не** переписывая SSOT в `snapshot-rework`.
+**Поставка поэтапно** (см. §16 и [`implementation-plan.md`](implementation-plan.md)): **N1** — skeleton bind/delete без OK и без real capture; **N2a** — manifests-only один root + OK + внутренний **MCR→ManifestCheckpoint** + download; **N2b** — **дерево** manifests-only (дети, refs, aggregated Ready/download); data-layer, полный export/import/restore — после N2, **не** переписывая SSOT в `snapshot-rework`.
 
-- **Capture** тяжёлой работы — отдельный runner (Job и т.п.), root-контроллер не обязан list-ить весь apiserver в горячем пути.
+- **Capture** тяжёлой работы: для manifests в **N2a** — через **внутренний** путь **ManifestCaptureRequest → ManifestCheckpoint** (существующий контроллер/chunks); root-контроллер **не** обязан держать весь list/capture в одном reconcile, но **не** обязателен и отдельный Job, если исполнение согласовано с MCR-потоком.
 - **Unified shared runtime** там, где применим общий паттерн Snapshot/SnapshotContent для **других** GVK; для пары namespace root используем **свой** content kind (`NamespaceSnapshotContent`), см. [`namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md).
 
 ### 2.2 Out of scope на ранних milestones (N1–N2)
 
-До выхода на полный сценарий ТЗ в одном релизе **можно** отложить (но SSOT остаётся в `snapshot-rework`):
+**N2** по [`implementation-plan.md`](implementation-plan.md) §2.4.1 — **только manifests-only**: **N2a** (один root) + **N2b** (дерево). Явно **вне N2:** volume/data snapshots, реальный VCR/VSC, restore с данными, полный export/import продукта, storage class remap, VM data restore, выдача поддерева с **data payloads**.
 
-- Полная оркестрация child domain snapshots / priority traversal **в одном** reconcile (см. ТЗ — там это есть; в коде — отдельные этапы после N2).
-- Экспорт/импорт архива и CLI как в ТЗ.
-- **`ManifestCaptureRequest` как обязательный публичный контракт** для оператора — см. §10; публично: root + **NamespaceSnapshotContent** + artifact metadata.
+До полного сценария ТЗ в одном релизе (SSOT в `snapshot-rework`):
+
+- **Child composition (manifests-only)** — целевая ось **N2b**, не «опциональный потом».
+- DSC priority traversal **в полном объёме**, data-layer — после закрытого N2 / в **N5** по плану.
+- Экспорт/импорт архива и CLI как в полном ТЗ — не обещать в рамках N2.
+- **`ManifestCaptureRequest` как обязательный публичный контракт** для оператора — см. §10; публично: root + **NamespaceSnapshotContent** + artifact metadata; MCR/MCP — **внутренний** execution path в **N2a**.
 
 ---
 
@@ -95,7 +98,7 @@
 
 ### 4.3 ObjectKeeper
 
-Правила создания **ObjectKeeper**, **FollowObjectWithTTL** для корневого content, **FollowObject** для ManifestCheckpoint / VolumeSnapshotContent, дополнительные **ownerReference** — **не дублировать** здесь; следовать [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) и связанным ADR в том каталоге. В поставке N2/N3 — отдельные задачи на reconciler OK и интеграционные тесты.
+Правила создания **ObjectKeeper**, **FollowObjectWithTTL** для корневого content, **FollowObject** для ManifestCheckpoint / VolumeSnapshotContent, дополнительные **ownerReference** — **не дублировать** здесь; следовать [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) и связанным ADR в том каталоге. **N2a** — ввод OK для корневого content; **N3** — доп. hardening/recovery; интеграционные тесты — по [`implementation-plan.md`](implementation-plan.md) §2.4.1 и [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md).
 
 ---
 
@@ -106,10 +109,10 @@
 1. Fetch; при удалении — §5.2.
 2. Ensure finalizer на root.
 3. Validation (namespace существует, class/policy валидна, spec консистентен) — §7.
-4. Ensure **NamespaceSnapshotContent** + запись bind в status root и ссылки root↔content — §4.2; ensure **ObjectKeeper** по ТЗ — §4.3.
-5. **Reconcile capture** через domain service: старт Job/runner при необходимости, observe прогресса, таймауты/heartbeat — §8 и milestone **N2** (реальный capture).
-6. По успеху: записать artifact metadata в **`NamespaceSnapshotContent.status`**, синхронизировать root (Ready и условия).
-7. Не выполнять тяжёлую работу list/watch namespace в горячем пути reconcile root, если это перенесено в runner (политика ресурсов apiserver).
+4. Ensure **NamespaceSnapshotContent** + запись bind в status root и ссылки root↔content — §4.2; ensure **ObjectKeeper** по ТЗ — §4.3 (**N2a+**).
+5. **Reconcile capture** через domain service: в **N2a** — внутренний **ManifestCaptureRequest → ManifestCheckpoint** (observe MCR/MCP, таймауты); при альтернативной реализации — Job/runner, согласованный с §8 и [`implementation-plan.md`](implementation-plan.md) §2.4.1.
+6. По успеху: записать artifact metadata (в т.ч. ссылка на MCP) в **`NamespaceSnapshotContent.status`**, синхронизировать root (Ready и условия).
+7. Не выполнять тяжёлую работу list/watch namespace в горячем пути reconcile root, если она перенесена в MCR/controller capture path (политика ресурсов apiserver).
 
 ### 5.2 Deletion flow
 
@@ -117,7 +120,7 @@
 
 **Proposed deletion order (MVP)**
 
-1. **Пока идёт capture:** по политике — попытка **отмены** runner (например delete Job / сигнал отмены) **или** **ожидание** завершения capture (конкретная политика — TBD, но должна быть одна на продукт и покрыта тестом).
+1. **Пока идёт capture:** по политике — попытка **отмены** (delete MCR/Job / сигнал) **или** **ожидание** завершения capture (конкретная политика — TBD, но должна быть одна на продукт и покрыта тестом).
 2. Если **deletionPolicy = Delete** (или эквивалент для артефакта): инициировать **удаление объекта в backend**; дождаться подтверждения **или** зафиксировать best-effort + явное условие/событие **Warning** (не оставлять поведение неопределённым в коде без комментария в spec).
 3. Довести **NamespaceSnapshotContent** до согласованного терминального состояния (артефакт удалён или помечен retained согласно политике), снять с content финализаторы, допускающие удаление; согласовать с **ObjectKeeper** по ТЗ.
 4. Снять финализатор с **NamespaceSnapshot**, удалить root.
@@ -148,9 +151,9 @@
 ```
 
 - **Bound=True** — NamespaceSnapshotContent создан и согласован с root (поля ссылок по §4.2).
-- **Ready=True** — снимок для данного поколения spec **успешно** завершён (в т.ч. fake capture на N1).
+- **Ready=True** — на **N1**: placeholder/fake capture (скелет). На **N2a+**: **persisted** manifest-результат (в т.ч. готовый **ManifestCheckpoint** и согласованный статус на NSC), не промежуточное состояние MCR без MCP. На **N2b** для parent — см. §11 (агрегация детей).
 - **Ready=False** с устойчивым reason — терминальная ошибка пользователя/конфигурации (см. §7.1).
-- **Progressing** / **CaptureStarted** / **ArtifactStored** — по мере появления реального runner (N2); смысл «идёт capture» задаётся **condition**, не отдельным enum в status.
+- **Progressing** / **CaptureStarted** / **ArtifactStored** — по мере появления реального manifest capture (**N2a**); смысл «идёт capture» задаётся **condition**, не отдельным enum в status.
 
 **Progressing vs CaptureStarted:** до фиксации в CRD/`pkg/snapshot` выбрать одну линию, чтобы не дублировать «идёт работа» двумя типами с True одновременно.
 
@@ -178,9 +181,8 @@
 
 ### 8.1 Payload layout (минимум MVP)
 
-- `metadata.json` — обязателен.
-- `warnings.json` — опционален (или пустой массив в metadata).
-- `bundle.tar.gz` (или аналог) — сериализованный набор манифестов.
+- Логически: метаданные + сериализованный набор манифестов. Для **N2a** физическое хранение может совпадать с manifest-линией: **ManifestCheckpoint + chunks** (gzip/json); выдача клиенту — склейка в архив (см. `ArchiveService`).  
+- Для «файлового» контракта (restore/export позже): `metadata.json` — обязателен; `warnings.json` — опционален; **`bundle.tar.gz`** (или аналог) — при необходимости как формат **download**, не обязательно как отдельный объект в etcd на этапе N2a.
 
 ### 8.2 metadata.json (минимум полей)
 
@@ -220,11 +222,11 @@
 
 ### 8.6 Large-namespace capture constraints (MVP)
 
-Явные ограничения для runner (нормативно для реализации **N2**):
+Явные ограничения для capture (нормативно для **N2a** и далее):
 
-- Capture **не должен** загружать **всё** состояние namespace в память **одним** чтением: потоковая обработка или **chunking** обязательны для больших объёмов.
-- **Пагинация** (`continue`) при list по GVR **обязательна**; отсутствие лимитов на размер ответа — риск для apiserver и runner.
-- **Сериализация** bundle (например tar.gz) — **streaming** или по частям, чтобы не держать целый архив в RAM.
+- Capture **не должен** загружать **всё** состояние namespace в память **одним** чтением: потоковая обработка или **chunking** (в т.ч. существующий split по `MaxChunkSizeBytes` в MCP) обязательны для больших объёмов.
+- **Пагинация** (`continue`) при list по GVR **обязательна**, если list выполняется в worker/MCR-потоке.
+- **Сериализация** при выдаче download (tar и т.д.) — **streaming** или по частям, чтобы не держать целый архив в RAM без лимитов.
 
 ---
 
@@ -246,9 +248,9 @@ spec:
 
 ## 10. MCR and manifest track
 
-- **Источник правды:** `NamespaceSnapshot` + **`NamespaceSnapshotContent`** + artifact metadata (+ при необходимости статус Job как implementation detail).
-- **`ManifestCaptureRequest` / `ManifestCheckpoint`:** если runner внутри использует те же механики, что и manifest line, это **внутренний** implementation detail, **не** дублирующий публичный статус для оператора рядом с root/content.
-- Публично наружу: статус root, статус content, artifact metadata, маркеры partial/warnings согласно §9.
+- **Источник правды:** `NamespaceSnapshot` + **`NamespaceSnapshotContent`** + artifact metadata (имя/UID **ManifestCheckpoint**, счётчики, conditions).
+- **`ManifestCaptureRequest` / `ManifestCheckpoint`:** в **N2a** — **основной внутренний** путь исполнения manifest capture (как уже в коде модуля); публично оператор опирается на root/content, а не на MCR.
+- Публично наружу: статус root, статус content, ссылка/метаданные MCP, маркеры partial/warnings согласно §9. Статус Job — только если отдельный Job введён поверх MCR; **Ready** не выводить **только** из завершения Job без persisted MCP (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
 
 См. также разделение линий в [`../README.md`](../README.md).
 
@@ -261,9 +263,10 @@ spec:
 - Root валиден (runtime validation прошла).
 - `NamespaceSnapshotContent` создан и **корректно привязан** к root.
 - Capture **завершён успешно** (в терминах §9 — без провала fail-closed).
-- Артефакт **persisted** в backend.
+- Артефакт манифестов **persisted** (для **N2a+** — готовый **ManifestCheckpoint**/chunks; для **N1** — допускается placeholder).
 - Метаданные артефакта записаны в `NamespaceSnapshotContent.status` (или согласованное поле).
-- Дальнейший reconcile **не ожидает** незавершённых операций capture/runner для этого поколения spec.
+- Дальнейший reconcile **не ожидает** незавершённых операций capture для этого поколения spec.
+- Для **N2b** (parent): собственный manifest-result **и** требуемые дети в состоянии готовности по согласованной политике агрегации.
 
 **Ready=True не означает:**
 
@@ -306,15 +309,18 @@ spec:
 
 ## 15. Testing strategy
 
-- **N3:** envtest — create → bind → ready (fake capture) → delete → recovery после рестарта контроллера (имитация).
-- **N4+:** сценарии с Job, таймаутами, крупным namespace (пагинация, лимиты), terminal vs retriable; затем кейсы из ТЗ **N5**.
-- Идемпотентность ensure **NamespaceSnapshotContent**, OK и stable naming — отдельные кейсы.
+- **N1:** уже в коде — lifecycle, delete, mismatch, recovery (fake Ready).
+- **N2a:** integration — MCR/MCP, OK, persisted Ready, download одного снимка, Retain; см. [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md).
+- **N2b:** integration — дерево, refs, parent Ready, aggregated download (manifests-only).
+- **N3:** envtest — recovery после рестарта контроллера поверх закрытого N2a (и при необходимости N2b).
+- **N4+:** лимиты большого namespace, таймауты; затем кейсы **N5** (data и полный ТЗ).
+- Идемпотентность ensure **NamespaceSnapshotContent**, OK, MCR/MCP и stable naming — отдельные кейсы.
 
 ---
 
 ## 16. Поставка (milestones N0–N5, не `status.phase`)
 
-Имена **N0–N5** — этапы [`implementation-plan.md`](implementation-plan.md) §2.4; **не** поля API. Статус объектов — только **conditions** (§6). Детальный бэклог **N5** — только по ТЗ в `snapshot-rework/`. **Декомпозиция N2** (real capture по шагам N2.1–N2.8, DoD, out-of-scope) — **[`implementation-plan.md`](implementation-plan.md) §2.4.1** (SSOT порядка работ; этот §16 остаётся кратким указателем).
+Имена **N0–N5** — этапы [`implementation-plan.md`](implementation-plan.md) §2.4; **не** поля API. Статус объектов — только **conditions** (§6). Детальный бэклог **N5** — только по ТЗ в `snapshot-rework/` (data-layer и полный сценарий вне manifests-only дерева). **Декомпозиция N2** (**N2a** / **N2b**, DoD, out-of-scope) — **[`implementation-plan.md`](implementation-plan.md) §2.4.1** (SSOT; этот §16 — краткий указатель).
 
 ### N0 — Contract / gate
 
@@ -324,23 +330,28 @@ spec:
 
 ### N1 — CRD / API / skeleton lifecycle
 
-✅ Закрыт в поставке кода: CRD, типы, codegen; generic `SnapshotContent` не носитель root; bind/delete; integration (lifecycle, deletion, mismatch, recovery). См. [`implementation-plan.md`](implementation-plan.md) §2.4.
+✅ Закрыт: подготовительный слой без ObjectKeeper, без real manifest capture, без дочернего дерева — см. [`implementation-plan.md`](implementation-plan.md) §2.4 и §2.4.1 (граница N1). Код **не** считается «временным» — это база для N2.
 
-### N2 — Real capture (первый рабочий runner)
+### N2 — Manifests-only: N2a затем N2b
 
-Поэтапно **§2.4.1** в [`implementation-plan.md`](implementation-plan.md): профиль GVR + exclusions, контракт артефакта v1, контракт runner, Job orchestration, реализация capture, **ObjectKeeper** как retention anchor, запись в `NamespaceSnapshotContent.status`, integration. §8 — ориентир по артефакту; детали v1 согласовать с §2.4.1 до кодирования.
+SSOT: **§2.4.1** в [`implementation-plan.md`](implementation-plan.md).
+
+- **N2a:** OK + **MCR→ManifestCheckpoint** + запись результата в **`NamespaceSnapshotContent.status`** + **Ready** только по persisted MCP + download **одного** снимка; data — placeholders.
+- **N2b:** дочерние snapshot/content, **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, агрегированный **Ready** parent, **aggregated manifests download** subtree; всё ещё без data-flow.
+
+§8 — логический контракт манифестов; физическое хранение N2a согласовать с MCP/chunks и download path в коде.
 
 ### N3 — Envtest / hardening
 
-Расширение сценариев §15 (в т.ч. recovery после рестарта контроллера); негативные кейсы сверх уже закрытых в N1.
+Расширение сценариев §15 (в т.ч. recovery после рестарта контроллера); негативные кейсы сверх уже закрытых в N1 и N2a.
 
-### N4 — После N2
+### N4 — После N2 (N2a+N2b)
 
 Углублённые лимиты большого namespace (§8.6), таймауты — см. [`implementation-plan.md`](implementation-plan.md) §2.4 и M2.
 
-### N5 — Полный ТЗ
+### N5 — За пределами manifests-only дерева
 
-Оркестрация детей, экспорт/импорт, restore — по [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md), без правок ТЗ из `docs/`.
+Data-layer (volume/VSC/VCR), полный export/import, restore с данными, DSC traversal в полном объёме — по [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md). **Дерево манифест-only** — в **N2b**, не в N5.
 
 ---
 
