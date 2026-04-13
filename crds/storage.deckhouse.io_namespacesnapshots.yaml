@@ -57,6 +57,24 @@ spec:
                   BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
                   The content kind is defined by the snapshot line (e.g. NamespaceSnapshotContent), not by this field name.
                 type: string
+              childrenSnapshotRefs:
+                description: |-
+                  ChildrenSnapshotRefs lists child NamespaceSnapshot roots in the manifests-only tree (N2b).
+                  Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
+                items:
+                  description: |-
+                    SnapshotRef identifies a namespaced NamespaceSnapshot child (N2b graph on root status).
+                    PR1: shape only; controller wiring and semantics come in later PRs (see implementation-plan §2.4.2).
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  - namespace
+                  type: object
+                type: array
               conditions:
                 description: Conditions represent the latest observations (Ready,
                   Bound, Failed, etc.).

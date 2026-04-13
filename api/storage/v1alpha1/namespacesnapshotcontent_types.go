@@ -58,5 +58,10 @@ type NamespaceSnapshotContentStatus struct {
 	// +optional
 	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
 
+	// ChildrenSnapshotContentRefs lists child NamespaceSnapshotContent objects (N2b graph).
+	// Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
+	// +optional
+	ChildrenSnapshotContentRefs []SnapshotContentRef `json:"childrenSnapshotContentRefs,omitempty"`
+
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

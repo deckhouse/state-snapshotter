@@ -129,8 +129,8 @@
 **Definition of Done (N2b):**
 
 1. Создание **дочерних** snapshot **доменными контроллерами** (по ТЗ), дочерние **`NamespaceSnapshotContent`**.  
-2. На **`NamespaceSnapshot`**: **`childrenSnapshotRefs`** (или согласованное имя) — **observability** / намерения.  
-3. На **`NamespaceSnapshotContent`**: **`childrenSnapshotContentRefs`** (или согласованное имя) — **канонический graph** результата.  
+2. На **`NamespaceSnapshot`**: **`childrenSnapshotRefs`** — **observability** / намерения.  
+3. На **`NamespaceSnapshotContent`**: **`childrenSnapshotContentRefs`** — **канонический graph** результата.  
 4. **`Ready=True`** у parent — по политике **[`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §11.1** (собственный result + required children; child failed → parent `Ready=False` / `ChildSnapshotFailed`).  
 5. **Aggregated manifests download** для **subtree / root** (только манифесты, без data payloads; на чтении из MCP/chunks — §8.7 design).  
 6. По-прежнему **без** data-flow (volume и т.д.).

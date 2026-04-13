@@ -80,6 +80,21 @@ spec:
             type: object
           status:
             properties:
+              childrenSnapshotContentRefs:
+                description: |-
+                  ChildrenSnapshotContentRefs lists child NamespaceSnapshotContent objects (N2b graph).
+                  Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
+                items:
+                  description: |-
+                    SnapshotContentRef identifies a cluster-scoped NamespaceSnapshotContent child (N2b graph on content status).
+                    PR1: shape only.
+                  properties:
+                    name:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
