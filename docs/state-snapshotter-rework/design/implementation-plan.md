@@ -141,7 +141,7 @@
 
 | PR | Фокус | Включить | Не включать (отложить) | Критерий остановки |
 |----|--------|----------|-------------------------|-------------------|
-| **PR1** | Только **форма графа** в API | `NamespaceSnapshot.status.childrenSnapshotRefs`; `NamespaceSnapshotContent.status.childrenSnapshotContentRefs`; обновление **design** и при необходимости **spec** под точные имена полей; константы / заготовки под §11.1 **без** полной агрегации; unit / envtest на **сериализацию** и статусную поверхность | Aggregated download; полный parent **Ready**; несколько типов детей; domain traversal | «API графа стабилен, дерево в поведении ещё не оживлено» |
+| **PR1** | Только **форма графа** в API | JSON: `childrenSnapshotRefs` / `childrenSnapshotContentRefs`; в Go элементы — **`NamespaceSnapshotChildRef`** / **`NamespaceSnapshotContentChildRef`** (узкие имена, не путать с полем **`snapshotRef`** у generic **`SnapshotContent.spec`**). Обновление **design** и при необходимости **spec**; unit / envtest на **сериализацию** | Aggregated download; полный parent **Ready**; несколько типов детей; domain traversal | «API графа стабилен, дерево в поведении ещё не оживлено» |
 | **PR2** | **Один** искусственный child **end-to-end** | Parent пишет **одного** child в `childrenSnapshotRefs`; parent content — одного child в `childrenSnapshotContentRefs`; parent reconcile **ждёт** готовности этого child; интеграция: parent + 1 child → parent **Ready** только после child **Ready** (упрощение: child **required**, без optional/required развода; child через **простой детерминированный** путь, не полный DSC traversal) | Subtree download; несколько детей | «Дерево на **одном** ребёнке работает» |
 | **PR3** | **Политика агрегации Ready** отдельно | Точный контракт: parent **Ready=True** только при своём persisted result **и** всех **required** children **Ready=True**; child in progress → parent не Ready; child failed → parent **Ready=False**, reason вроде **`ChildSnapshotFailed`**; таблица reason/message в **design**; integration: child success / pending / failed | Не смешивать с первичным wiring из PR2, если PR2 уже разбил слои — PR3 **уточняет и закрепляет** политику тестами | «Семантика parent **Ready** предсказуема и ревьюабельна отдельно» |
 | **PR4** | **Aggregated manifests download** (без data) | Обход `childrenSnapshotContentRefs`; read-time композиция subtree/root; политика ошибок (missing child MCP, child not ready, broken subtree); integration: parent + 1 child, затем parent + 2 children | Data payloads; export/import; restore | «N2b manifests-only **для пользователя** замкнут на чтении subtree» |
@@ -163,7 +163,7 @@
 
 **N2a:** CRD §4.4.1 + allowlist §4.5 + §4.7 → NS reconciler → download §8.7.1 → integration.  
 
-**N2b:** по шагам **§2.4.2** ниже (PR1→PR4, затем PR5 при необходимости).
+**N2b:** по шагам **§2.4.2** (таблица PR в подразделе **2.4.2** выше в этом документе; PR1→PR4, затем PR5 при необходимости).
 
 **В этой задаче (только план):** не переписывать CRD N1 без отдельного решения; не менять bind/delete skeleton без необходимости; не включать data snapshots и полный export/import/restore.
 

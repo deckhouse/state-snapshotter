@@ -63,8 +63,10 @@ spec:
                   Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
                 items:
                   description: |-
-                    SnapshotRef identifies a namespaced NamespaceSnapshot child (N2b graph on root status).
-                    PR1: shape only; controller wiring and semantics come in later PRs (see implementation-plan §2.4.2).
+                    NamespaceSnapshotChildRef identifies one child NamespaceSnapshot in the N2b manifests-only tree
+                    (element of status.childrenSnapshotRefs). It is not a generic snapshot reference: it does not
+                    carry apiVersion/kind; N2b currently assumes children are NamespaceSnapshot roots in the named
+                    namespace. A future multi-kind child model would require extending or replacing this shape.
                   properties:
                     name:
                       type: string

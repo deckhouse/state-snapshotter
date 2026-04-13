@@ -59,7 +59,7 @@ type NamespaceSnapshotStatus struct {
 	// ChildrenSnapshotRefs lists child NamespaceSnapshot roots in the manifests-only tree (N2b).
 	// Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
 	// +optional
-	ChildrenSnapshotRefs []SnapshotRef `json:"childrenSnapshotRefs,omitempty"`
+	ChildrenSnapshotRefs []NamespaceSnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 
 	// Conditions represent the latest observations (Ready, Bound, Failed, etc.).
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

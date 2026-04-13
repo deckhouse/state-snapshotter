@@ -26,7 +26,7 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 	ns := NamespaceSnapshot{
 		Status: NamespaceSnapshotStatus{
 			BoundSnapshotContentName: "parent-content",
-			ChildrenSnapshotRefs: []SnapshotRef{
+			ChildrenSnapshotRefs: []NamespaceSnapshotChildRef{
 				{Name: "child1", Namespace: "ns-a"},
 			},
 		},
@@ -42,6 +42,13 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 		t.Fatalf("unmarshal: %v", err)
 	}
 
+	if got := out.Status.ChildrenSnapshotRefs; len(got) != 1 {
+		t.Fatalf("ChildrenSnapshotRefs len: got %d want 1 (full %#v)", len(got), got)
+	}
+	if got := out.Status.ChildrenSnapshotRefs[0]; got.Name != "child1" || got.Namespace != "ns-a" {
+		t.Fatalf("ChildrenSnapshotRefs[0]: got %#v want Name=child1 Namespace=ns-a", got)
+	}
+
 	if !reflect.DeepEqual(out.Status.ChildrenSnapshotRefs, ns.Status.ChildrenSnapshotRefs) {
 		t.Fatalf("childrenSnapshotRefs mismatch: got %#v want %#v", out.Status.ChildrenSnapshotRefs, ns.Status.ChildrenSnapshotRefs)
 	}
@@ -52,6 +59,9 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 	}
 	status := raw["status"].(map[string]interface{})
 	refs := status["childrenSnapshotRefs"].([]interface{})
+	if len(refs) != 1 {
+		t.Fatalf("raw childrenSnapshotRefs len: got %d want 1", len(refs))
+	}
 	item := refs[0].(map[string]interface{})
 	if item["name"] != "child1" || item["namespace"] != "ns-a" {
 		t.Fatalf("expected JSON keys name/namespace, got %#v", item)
@@ -62,7 +72,7 @@ func TestNamespaceSnapshotContentStatus_ChildrenSnapshotContentRefs_JSONRoundTri
 	nsc := NamespaceSnapshotContent{
 		Status: NamespaceSnapshotContentStatus{
 			ManifestCheckpointName: "mcp-1",
-			ChildrenSnapshotContentRefs: []SnapshotContentRef{
+			ChildrenSnapshotContentRefs: []NamespaceSnapshotContentChildRef{
 				{Name: "child-content-1"},
 			},
 		},
@@ -76,6 +86,13 @@ func TestNamespaceSnapshotContentStatus_ChildrenSnapshotContentRefs_JSONRoundTri
 	var out NamespaceSnapshotContent
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got := out.Status.ChildrenSnapshotContentRefs; len(got) != 1 {
+		t.Fatalf("ChildrenSnapshotContentRefs len: got %d want 1 (full %#v)", len(got), got)
+	}
+	if got := out.Status.ChildrenSnapshotContentRefs[0].Name; got != "child-content-1" {
+		t.Fatalf("ChildrenSnapshotContentRefs[0].Name: got %q want child-content-1", got)
 	}
 
 	if !reflect.DeepEqual(out.Status.ChildrenSnapshotContentRefs, nsc.Status.ChildrenSnapshotContentRefs) {
@@ -103,5 +120,28 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_OmittedWhenEmpty(t *testin
 	}
 	if _, ok := m["childrenSnapshotRefs"]; ok {
 		t.Fatal("childrenSnapshotRefs must be omitted when empty")
+	}
+}
+
+func TestNamespaceSnapshotContentStatus_ChildrenSnapshotContentRefs_OmittedWhenEmpty(t *testing.T) {
+	nsc := NamespaceSnapshotContent{
+		Status: NamespaceSnapshotContentStatus{
+			ManifestCheckpointName: "mcp-only",
+		},
+	}
+	if nsc.Status.ChildrenSnapshotContentRefs != nil {
+		t.Fatalf("expected nil slice by default, got %#v", nsc.Status.ChildrenSnapshotContentRefs)
+	}
+
+	data, err := json.Marshal(nsc.Status)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := m["childrenSnapshotContentRefs"]; ok {
+		t.Fatal("childrenSnapshotContentRefs must be omitted when empty")
 	}
 }

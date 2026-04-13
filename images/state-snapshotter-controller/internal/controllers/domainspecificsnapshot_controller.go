@@ -372,14 +372,13 @@ func buildDSCStatusConditions(
 	}
 
 	readyReason := DSCReadyReasonNotReady
-	var readyMsg string
-	switch {
-	case readyStatus == metav1.ConditionTrue:
+	readyMsg := "Accepted and RBACReady must be True with observedGeneration matching metadata.generation"
+	if readyStatus == metav1.ConditionTrue {
 		readyReason = "Active"
 		readyMsg = "Accepted and RBACReady are True for current generation"
-	case acceptedStatus != metav1.ConditionTrue:
+	} else if acceptedStatus != metav1.ConditionTrue {
 		readyMsg = "Ready=False because condition Accepted is not True; see Accepted for details"
-	default:
+	} else {
 		readyMsg = "Waiting for RBACReady=True with observedGeneration matching metadata.generation (Deckhouse hook)"
 	}
 

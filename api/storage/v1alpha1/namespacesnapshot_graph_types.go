@@ -16,19 +16,22 @@ limitations under the License.
 
 package v1alpha1
 
-// SnapshotRef identifies a namespaced NamespaceSnapshot child (N2b graph on root status).
-// PR1: shape only; controller wiring and semantics come in later PRs (see implementation-plan §2.4.2).
+// NamespaceSnapshotChildRef identifies one child NamespaceSnapshot in the N2b manifests-only tree
+// (element of status.childrenSnapshotRefs). It is not a generic snapshot reference: it does not
+// carry apiVersion/kind; N2b currently assumes children are NamespaceSnapshot roots in the named
+// namespace. A future multi-kind child model would require extending or replacing this shape.
 //
 // +k8s:deepcopy-gen=true
-type SnapshotRef struct {
+type NamespaceSnapshotChildRef struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
 }
 
-// SnapshotContentRef identifies a cluster-scoped NamespaceSnapshotContent child (N2b graph on content status).
-// PR1: shape only.
+// NamespaceSnapshotContentChildRef identifies one child NamespaceSnapshotContent in the N2b graph
+// (element of status.childrenSnapshotContentRefs). Cluster-scoped name only; kind is implied
+// (NamespaceSnapshotContent). Not a universal SnapshotContent reference.
 //
 // +k8s:deepcopy-gen=true
-type SnapshotContentRef struct {
+type NamespaceSnapshotContentChildRef struct {
 	Name string `json:"name"`
 }

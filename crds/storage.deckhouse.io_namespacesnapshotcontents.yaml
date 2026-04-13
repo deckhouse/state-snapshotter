@@ -86,8 +86,9 @@ spec:
                   Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
                 items:
                   description: |-
-                    SnapshotContentRef identifies a cluster-scoped NamespaceSnapshotContent child (N2b graph on content status).
-                    PR1: shape only.
+                    NamespaceSnapshotContentChildRef identifies one child NamespaceSnapshotContent in the N2b graph
+                    (element of status.childrenSnapshotContentRefs). Cluster-scoped name only; kind is implied
+                    (NamespaceSnapshotContent). Not a universal SnapshotContent reference.
                   properties:
                     name:
                       type: string
