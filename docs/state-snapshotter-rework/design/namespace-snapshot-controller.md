@@ -460,10 +460,10 @@ spec:
 
 ### N2 — Manifests-only: N2a затем N2b
 
-SSOT: **§2.4.1** в [`implementation-plan.md`](implementation-plan.md).
+SSOT: **§2.4.1** и **§2.4.2** (декомпозиция N2b по PR) в [`implementation-plan.md`](implementation-plan.md).
 
 - **N2a:** OK + **MCR→ManifestCheckpoint** + запись результата в **`NamespaceSnapshotContent.status`** + **Ready** только по persisted MCP + download **одного** снимка; data — placeholders.
-- **N2b:** дочерние snapshot/content, **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, агрегированный **Ready** parent, **aggregated manifests download** subtree; всё ещё без data-flow.
+- **N2b:** дочерние snapshot/content, **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, агрегированный **Ready** parent, **aggregated manifests download** subtree; всё ещё без data-flow. Вход в N2b — с **PR1** (только поля графа + docs/spec), см. **§2.4.2**.
 
 §8 — логический контракт манифестов; физическое хранение N2a согласовать с MCP/chunks и download path в коде.
 

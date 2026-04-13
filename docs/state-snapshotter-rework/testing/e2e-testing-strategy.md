@@ -42,7 +42,7 @@
 
 **N2a (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1 и [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §4.4–§4.7, §5.2, §8.7):** happy path (namespace → **MCR→ManifestCheckpoint** → persisted result → **Ready** только по MCP/chunks; на NSC **`manifestCheckpointName`**; root **без** MCR в status; MCR name по §4.7); fail-closed / allowlist; **Retain** с **root OK** + execution OK для MCR; провал MCR/MCP; **удаление root во время capture** — отмена через delete MCR (§5.2); download одного снимка (**§8.7.1**, 409 если MCP не Ready, 500 при битой склейке); smoke **pagination** при list в capture-потоке.  
 
-**N2b:** дерево — дочерние NS/NSC, **childrenSnapshotRefs** / **childrenSnapshotContentRefs**, агрегированный **Ready** parent (**§11.1** design), **aggregated manifests download** на чтении (**§8.7**); интеграция по [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1.
+**N2b:** дерево — дочерние NS/NSC, **childrenSnapshotRefs** / **childrenSnapshotContentRefs**, агрегированный **Ready** parent (**§11.1** design), **aggregated manifests download** на чтении (**§8.7**); поставка короткими PR — [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.2**; интеграция наращивать по мере PR2–PR4.
 
 ## Планируемые тесты
 
