@@ -96,9 +96,68 @@
 
 Точная схема полей — в CRD и в `system-spec.md` после выравнивания с ТЗ.
 
-### 4.3 ObjectKeeper
+### 4.3 ObjectKeeper, ownerReference и границы scope
 
-Правила создания **ObjectKeeper**, **FollowObjectWithTTL** для корневого content, **FollowObject** для ManifestCheckpoint / VolumeSnapshotContent, дополнительные **ownerReference** — **не дублировать** здесь; следовать [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) и связанным ADR в том каталоге. **N2a** — ввод OK для корневого content; **N3** — доп. hardening/recovery; интеграционные тесты — по [`implementation-plan.md`](implementation-plan.md) §2.4.1 и [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md).
+Полная схема полей OK — в [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) и ADR там же. Ниже — **design lock** для N2a/N2b, согласованный с текущим кодом manifest-линии (`ManifestCheckpointController`: OK `ret-mcr-*` в режиме **FollowObject** на MCR, **ManifestCheckpoint** с `ownerReference` на этот OK, **chunks** с `ownerReference` на MCP).
+
+#### 4.3.1 Правило: ownerReference vs ObjectKeeper
+
+- **`ownerReference`** используем там, где объекты в **совместимом scope** для Kubernetes GC (например оба cluster-scoped): **ManifestCheckpointContentChunk → ManifestCheckpoint** — chunks удаляются через ownerRef на MCP (как сейчас в коде).
+- **ObjectKeeper** используем там, где нужен **cluster-scoped retention anchor** и/или связь проходит **границу scope** (namespaced ↔ cluster-scoped): логический bind **root ↔ NamespaceSnapshotContent** остаётся **spec/status**, не ownerRef; удержание результата снимка — отдельный OK.
+- **ObjectKeeper нигде не подменяет** bind-контракт **`spec.namespaceSnapshotRef`** / **`status.boundSnapshotContentName`**.
+
+#### 4.3.2 Два применения ObjectKeeper (не смешивать)
+
+1. **Root / snapshot result (N2a+):** ObjectKeeper для **`NamespaceSnapshotContent`** в режиме **`FollowObjectWithTTL`** — **retention anchor** результата namespace-snapshot после удаления root/namespace по policy (как в ТЗ для корневого content).
+2. **Manifest capture execution path (уже в коде для MCR):** отдельный ObjectKeeper в режиме **`FollowObject`**, следующий за **ManifestCaptureRequest** — **технический** lifecycle для MCR→MCP: MCP держится через ownerRef на этот OK; при удалении MCR цепочка OK→MCP→chunks согласуется с GC (см. комментарии в `manifestcheckpoint_controller.go`). Это **не** тот же объект OK, что retention для NSC (разные роли, разные режимы).
+
+**Инвариант:** связь **NamespaceSnapshot → MCR** не обязана быть ownerRef; MCR создаётся/наблюдается **NamespaceSnapshot controller**; **ManifestCheckpointController** **только** исполняет **MCR → MCP** (+ chunks). Статусы **NS/NSC** пишет **NamespaceSnapshot controller** по наблюдению MCP/MCR.
+
+**N2a.x (до wiring NS→MCR):** сверить документ с фактом в коде (имя OK, ownerRef MCP→OK, chunks→MCP, FollowObject на MCR); при расхождении — один вариант в коде и в docs до merge N2a.
+
+---
+
+### 4.4 N2a — публичный status surface (design lock)
+
+Цель: оператор и автоматизация не зависят от **ManifestCaptureRequest** в API root.
+
+**`NamespaceSnapshot.status` (N2a, публично):**
+
+- **`boundSnapshotContentName`** (уже есть) + **`conditions`** (+ при необходимости **`observedGeneration`**, временные метки — по мере появления в CRD).
+- **Без** `manifestCaptureRequestName` и любых полей MCR на root: MCR — **implementation detail**, создаётся в namespace capture, но **не** часть публичного контракта root.
+
+**`NamespaceSnapshotContent.status` (N2a, публично):**
+
+- **`manifestCheckpointName`** (cluster-scoped имя готового **ManifestCheckpoint**) — каноническая ссылка на persisted manifest-результат.
+- **`conditions`** (в т.ч. готовность к download, ошибки capture).
+- Опционально для UX/наблюдаемости: **`capturedAt`**, **`resourceCount`** (или эквивалент из metadata MCP), **`artifactFormatVersion`** / `formatVersion` — если нужны до расширения spec; имена полей — финализировать в CRD и `system-spec.md`.
+
+**Источник `Ready=True` на root (N2a):** только после того, как на **NSC** зафиксированы persisted результат (MCP + согласованные chunks) и согласованные **conditions**, а не по факту «создали MCR».
+
+---
+
+### 4.5 N2a — built-in allowlist и исключения (первый набор, SSOT до кода)
+
+**Включить в первый built-in profile (namespaced, list по GVR):**
+
+| API group | Версия | Resource (plural) | Примечание |
+|-----------|--------|---------------------|------------|
+| `apps` | `v1` | `deployments`, `statefulsets`, `daemonsets` | |
+| `batch` | `v1` | `jobs`, `cronjobs` | |
+| | `v1` | `pods`, `services`, `configmaps`, `secrets`, `serviceaccounts`, `persistentvolumeclaims` | PVC — **только манифест** (metadata/spec), без данных тома |
+| `networking.k8s.io` | `v1` | `ingresses` | |
+| `networking.k8s.io` | `v1` | `networkpolicies` | Опционально: включать только явным решением в PR; иначе **вне** первого merge |
+| `rbac.authorization.k8s.io` | `v1` | `roles`, `rolebindings` | |
+
+**Явно исключить (не list / не target):**
+
+- `events`, `leases`, `endpointslices` (core / coordination / discovery — по фактическим GVR в кластере).
+- `replicasets`, `controllerrevisions` — derived/controller-owned; не дублировать workload.
+- **PodDisruptionBudget** — в первом наборе **не включать**; включение — отдельное решение.
+- Все **внутренние** объекты snapshotter: `NamespaceSnapshot`, `NamespaceSnapshotContent`, `ManifestCaptureRequest`, `ManifestCheckpoint`, `ManifestCheckpointContentChunk`, `ObjectKeeper` (и пр. CR модуля по списку), служебные объекты runner/MCR (по **labels/prefixes** — зафиксировать в коде рядом с allowlist).
+- Любые GVR не из таблицы выше — **не** захватывать в N2a (fail-closed расширение только через изменение SSOT-списка).
+
+Профиль должен быть **один** в коде (или генерироваться из одного источника); ad-hoc «снять всё» запрещён (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
 
 ---
 
@@ -142,7 +201,7 @@
 
 - **Conditions** — **единственный** нормативный источник истины для операторов и автоматизации на `NamespaceSnapshot` (нет дублирующего `status.phase`). Решение: [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md).
 
-**Минимальный lifecycle** — выражается **только** через conditions и поля фактов (имя привязанного **NamespaceSnapshotContent**, `observedGeneration`):
+**Минимальный lifecycle** — выражается **только** через conditions и поля фактов (имя привязанного **NamespaceSnapshotContent**, `observedGeneration`). Полный перечень публичных полей статуса для **N2a** — §4.4; агрегация parent для **N2b** — §11.1.
 
 ```text
 (нет Bound / Bound=False) → Bound=True → … capture … → Ready=True
@@ -228,6 +287,12 @@
 - **Пагинация** (`continue`) при list по GVR **обязательна**, если list выполняется в worker/MCR-потоке.
 - **Сериализация** при выдаче download (tar и т.д.) — **streaming** или по частям, чтобы не держать целый архив в RAM без лимитов.
 
+### 8.7 Download semantics (N2a / N2b, design lock)
+
+- **N2a — download одного снимка:** отдаёт **только** манифесты **этого** root/content (один MCP / его chunks), **без** дочерних snapshot и без data payloads.
+- **N2b — aggregated download:** отдаёт манифесты **parent + subtree** (обход по **`childrenSnapshotContentRefs`** / согласованному graph), **только манифесты**, **без** data payloads.
+- **Материализация:** для N2a и N2b по умолчанию **не** хранить отдельный заранее собранный архив в etcd/storage; **read-only агрегация на чтении** из существующих **MCP + chunks** (склейка через `ArchiveService` или эквивалент). Предматериализованный артефакт — только если отдельное ADR/этап.
+
 ---
 
 ## 9. Partial snapshot policy
@@ -248,11 +313,14 @@ spec:
 
 ## 10. MCR and manifest track
 
-- **Источник правды:** `NamespaceSnapshot` + **`NamespaceSnapshotContent`** + artifact metadata (имя/UID **ManifestCheckpoint**, счётчики, conditions).
-- **`ManifestCaptureRequest` / `ManifestCheckpoint`:** в **N2a** — **основной внутренний** путь исполнения manifest capture (как уже в коде модуля); публично оператор опирается на root/content, а не на MCR.
-- Публично наружу: статус root, статус content, ссылка/метаданные MCP, маркеры partial/warnings согласно §9. Статус Job — только если отдельный Job введён поверх MCR; **Ready** не выводить **только** из завершения Job без persisted MCP (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
+- **Источник правды:** `NamespaceSnapshot` + **`NamespaceSnapshotContent`** + artifact metadata (имя **ManifestCheckpoint** на NSC, conditions). Публичный контракт статусов — §4.4.
+- **`ManifestCaptureRequest` / `ManifestCheckpoint`:** в **N2a** — **внутренний** execution path; MCR **не** в статусе root (§4.4).
+- **Разделение ответственности (N2a):**
+  - **`NamespaceSnapshot` controller:** ensure **NamespaceSnapshotContent**; ensure **root ObjectKeeper** (**FollowObjectWithTTL**); ensure **MCR**; observe **MCR/MCP**; пишет **status** на **NamespaceSnapshot** и **NamespaceSnapshotContent**; выставляет **Ready** по persisted MCP.
+  - **`ManifestCheckpointController`:** **только** исполняет **MCR → ManifestCheckpoint** (+ chunks); создаёт/использует **отдельный ObjectKeeper (FollowObject)** для MCR/MCP lifecycle (как в текущем коде); **не** пишет публичный статус NS/NSC.
+- Публично наружу: статус root/content по §4.4; маркеры partial/warnings согласно §9. Статус Job — только если Job введён поверх MCR; **Ready** не выводить без persisted MCP (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
 
-См. также разделение линий в [`../README.md`](../README.md).
+Связь OK для MCR/MCP vs root NSC — §4.3. См. также [`../README.md`](../README.md).
 
 ---
 
@@ -266,7 +334,14 @@ spec:
 - Артефакт манифестов **persisted** (для **N2a+** — готовый **ManifestCheckpoint**/chunks; для **N1** — допускается placeholder).
 - Метаданные артефакта записаны в `NamespaceSnapshotContent.status` (или согласованное поле).
 - Дальнейший reconcile **не ожидает** незавершённых операций capture для этого поколения spec.
-- Для **N2b** (parent): собственный manifest-result **и** требуемые дети в состоянии готовности по согласованной политике агрегации.
+- Для **N2b** (parent): см. **§11.1**.
+
+### 11.1 N2b — политика агрегации Ready (design lock)
+
+- **`Ready=True` у parent** только если: **собственный** `NamespaceSnapshotContent` в состоянии готовности (как у листа, N2a) **и** все **required** дочерние snapshot (по graph из **`childrenSnapshotRefs`** / доменной логике) также **`Ready=True`**.
+- **Child в процессе** (ещё не Ready, не Failed): parent **не** `Ready=True`; допускаются **Progressing** / незавершённый capture на parent (конкретные condition types — в CRD).
+- **Child в терминальном сбое** (`Ready=False` / Failed): parent **`Ready=False`** с устойчивым reason, например **`ChildSnapshotFailed`** (имя согласовать с `pkg/snapshot`), с указанием какого child.
+- Список **required** children vs optional — зафиксировать в spec/API при введении N2b (до кода агрегации).
 
 **Ready=True не означает:**
 
@@ -293,10 +368,11 @@ spec:
 
 ### 13.2 Open (до финализации API / реализации)
 
-1. Точные **имена condition types** и их соответствие существующим unified CRD.
+1. Точные **имена condition types** и их соответствие существующим unified CRD (в т.ч. **`ChildSnapshotFailed`** для N2b — §11.1).
 2. **Deletion policy** на уровне class vs spec (что наследуется от SnapshotClass аналога).
-3. Минимальный набор **GVR по умолчанию** для MVP capture и механизм include/exclude (простой allowlist vs профили).
-4. Политика при удалении во время capture: **отмена runner vs ожидание завершения** (§5.2) — выбрать одну для MVP и отразить в spec.
+3. ~~Минимальный набор **GVR** для N2a~~ — зафиксирован в **§4.5**; остаётся перенос в CRD/code и при необходимости сужение/расширение через PR с обновлением §4.5.
+4. Политика при удалении во время capture: **отмена MCR vs ожидание завершения** (§5.2) — выбрать одну для MVP и отразить в spec.
+5. **Required vs optional** дочерние snapshot для агрегации **N2b** — §11.1.
 
 ---
 

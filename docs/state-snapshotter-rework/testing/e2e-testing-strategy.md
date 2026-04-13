@@ -38,9 +38,9 @@
 | `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — root удаляется, `NamespaceSnapshotContent` остаётся; Delete — финализатор root снимается только после `NotFound` на content (ожидание удаления CR в API) |
 | `namespacesnapshot_n1_boundary_test.go` | **Формальное закрытие N1:** `ContentRefMismatch` при неверном `namespaceSnapshotRef` на NSC; **recovery** — после сброса `status` при валидном content снова `Bound`+`Ready`; короткая **стабильность** (Consistently) |
 
-**N2a (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1):** happy path (namespace → внутренний **MCR→ManifestCheckpoint** → persisted result → **Ready** на root/content); **не** выводить Ready только из промежуточного состояния без готового MCP; fail-closed / нет профиля или провал capture; **Retain** с **ObjectKeeper** + MCP/chunks; негативный сценарий провала MCR/MCP; smoke **pagination**/лимиты list, если list в capture-потоке.  
+**N2a (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1 и [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §4.4–§4.5, §8.7):** happy path (namespace → **MCR→ManifestCheckpoint** → persisted result → **Ready** только по MCP/chunks; на NSC **`manifestCheckpointName`**; root **без** MCR в status); fail-closed / allowlist; **Retain** с **root OK** + execution OK для MCR; провал MCR/MCP; download одного снимка (склейка на чтении); smoke **pagination** при list в capture-потоке.  
 
-**N2b:** дерево — дочерние NS/NSC, **childrenSnapshotRefs** / **childrenSnapshotContentRefs**, агрегированный **Ready** parent, **aggregated manifests download** (без data); интеграционные сценарии по §2.4.1.
+**N2b:** дерево — дочерние NS/NSC, **childrenSnapshotRefs** / **childrenSnapshotContentRefs**, агрегированный **Ready** parent (**§11.1** design), **aggregated manifests download** на чтении (**§8.7**); интеграция по [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1.
 
 ## Планируемые тесты
 

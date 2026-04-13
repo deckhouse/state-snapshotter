@@ -96,18 +96,29 @@
 
 **Definition of Done (N2a):**
 
-1. **ObjectKeeper** для корневого **`NamespaceSnapshotContent`** (и согласованность с MCP по ТЗ `snapshot-rework`).  
+1. **Два ObjectKeeper не смешивать:** retention для корневого **`NamespaceSnapshotContent`** (**`FollowObjectWithTTL`**) отдельно от execution OK для цепочки **MCR→MCP** (**`FollowObject`** на MCR, как в текущем `ManifestCheckpointController`); chunks **MCP → ownerRef на MCP** (cluster-scoped GC). Детали — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §4.3.  
 2. Реальный manifest capture через цепочку **MCR → ManifestCheckpoint** (chunks), управляемый из потока **NamespaceSnapshot** (ensure MCR, observe MCP, без публичной обязанности MCR для оператора — см. design §10).  
-3. Запись результата в **`NamespaceSnapshotContent.status`** (имя/ссылка на MCP, метаданные, conditions по согласованию с API).  
+3. Запись результата в **`NamespaceSnapshotContent.status`** по **§4.4** design (как минимум **`manifestCheckpointName`**, conditions; опционально `capturedAt`, `resourceCount`).  
 4. **`Ready=True`** на root **только** после **persisted** manifest-результата (MCP Ready + консистентные chunks / статус MCP), **не** из «промежуточного» события вроде одного лишь факта создания MCR без готового checkpoint.  
 5. Рабочий **read/download path** манифестов **одного** снимка (на базе существующей склейки chunks / archive path в модуле, без обязательности нового формата хранения).  
 6. **Без** агрегации детей и **без** data-flow; поля data-related — только **placeholders**, если уже есть в CRD.
 
-**Порядок работ N2a (ориентир):** (1) design: allowlist/таргеты для MCR из NS, исключения, fail-closed; (2) поля статуса NSC/root и связь с MCP; (3) reconciler: ensure MCR, watch MCP/MCR, OK; (4) интеграция с **ArchiveService** / выдачей download для одного checkpoint; (5) integration-тесты (happy, fail MCP/MCR, Retain+OK).
+**Design lock до кода N2a (подробности в design, не дублировать здесь):**
 
-**Нормативно:** набор захватываемых GVR/targets — **один SSOT** (built-in profile / генерация targets для MCR); ad-hoc «снять всё подряд» **запрещён**.
+- Публичный **status surface** N2a — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) **§4.4** (root без MCR в status; NSC — `manifestCheckpointName` + conditions + опциональные счётчики/время).  
+- **Allowlist / exclusions** — **§4.5**.  
+- **Download** (один снимок, без предматериализации) — **§8.7**.  
+- **N2b агрегация Ready** — **§11.1**.  
+- **Контроллеры** (NS vs `ManifestCheckpointController`) — **§10**.  
+- **OK vs ownerRef** — **§4.3**.
 
-**Хранилище манифестов N2a:** по умолчанию **тот же**, что у manifest-линии сегодня — **ManifestCheckpoint + gzip/json chunks**; логический «bundle» для оператора может выдаваться как **склейка** (см. `ArchiveService`). Отдельный on-disk **`bundle.tar.gz`** как единственный носитель **не обязателен** для N2a, если публичный контракт download удовлетворён; эволюция формата — через `formatVersion` / ADR при смене носителя.
+**N2a.x (до wiring NS→MCR):** сверить §4.3 с кодом (`ManifestCheckpointController`: OK `FollowObject` на MCR, MCP→OK, chunks→MCP); один вариант в коде и docs.
+
+**Порядок работ N2a (ориентир):** (0) **N2a.x** + design lock; (1) CRD/status по §4.4; (2) allowlist §4.5 в коде; (3) NS reconciler: NSC, **root OK**, MCR, observe MCP, статусы NS/NSC, Ready; (4) download §8.7; (5) integration.
+
+**Нормативно:** набор GVR — **§4.5** + один SSOT в коде; ad-hoc «снять всё подряд» **запрещён**.
+
+**Хранилище манифестов N2a:** **ManifestCheckpoint + gzip/json chunks**; выдача — склейка на читании (см. `ArchiveService`, §8.7). Отдельный заранее материализованный **`bundle.tar.gz`** **не обязателен** для N2a.
 
 ---
 
@@ -118,8 +129,8 @@
 1. Создание **дочерних** snapshot **доменными контроллерами** (по ТЗ), дочерние **`NamespaceSnapshotContent`**.  
 2. На **`NamespaceSnapshot`**: **`childrenSnapshotRefs`** (или согласованное имя) — **observability** / намерения.  
 3. На **`NamespaceSnapshotContent`**: **`childrenSnapshotContentRefs`** (или согласованное имя) — **канонический graph** результата.  
-4. **`Ready=True`** у parent **только** когда готовы **собственный** manifest-result **и** все релевантные дети (политика агрегации зафиксировать в design/API).  
-5. **Aggregated manifests download** для **subtree / root** (только манифесты, без data payloads).  
+4. **`Ready=True`** у parent — по политике **[`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §11.1** (собственный result + required children; child failed → parent `Ready=False` / `ChildSnapshotFailed`).  
+5. **Aggregated manifests download** для **subtree / root** (только манифесты, без data payloads; на чтении из MCP/chunks — §8.7 design).  
 6. По-прежнему **без** data-flow (volume и т.д.).
 
 **Порядок работ N2b (ориентир):** модель полей API → контракт graph → reconciler parent/child → тесты дерева + aggregated download.
@@ -134,7 +145,7 @@
 
 **Практический task-list (копипаст backlog)**
 
-**N2a:** design profile/targets + status fields → code NS reconciler + MCR/MCP + OK → download одного снимка → integration (happy / fail / Retain+OK / smoke list limits).  
+**N2a:** **N2a.x** → CRD §4.4 + allowlist §4.5 → NS reconciler (NSC + root OK + MCR + observe MCP + статусы) → download §8.7 → integration.  
 
 **N2b:** API refs + domain wiring → parent Ready aggregation → aggregated download → integration дерева.
 
