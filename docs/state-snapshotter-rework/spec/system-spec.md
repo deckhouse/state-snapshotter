@@ -25,7 +25,7 @@
 - **R3 ✅ (ядро):** явный слой state в `pkg/unifiedruntime`; интеграционный proof hot-add — `test/integration/unified_runtime_hot_add_test.go`; Prometheus gauges + лог при «stale» active (ключ есть в monotonic active, но выпал из resolved). **Опционально:** доп. proof-сценарии — по плану.
 - **Цель (ядро):** регистрация типов через DSC + **RBACReady** + активация watch без рестарта для новых eligible типов — реализовано для additive-пути; симметричное снятие watch — нет.
 - **Manifest / MCR / ManifestCheckpoint** — отдельный трек от unified registry snapshot-типов; не смешивать с DSC.
-- **NamespaceSnapshot manifests-only path (N2):** этапы **N2a** / **N2b** — [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.1**. Публичные поля статуса N2a, allowlist, download, агрегация N2b, OK vs ownerRef — [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) **§4.3–§4.5**, **§8.7**, **§10–§11**. Data-layer и полный export/restore — за пределами N2. При стабильном контракте в API — дополнять этот spec, не дублируя design.
+- **NamespaceSnapshot manifests-only path (N2):** этапы **N2a** / **N2b** — [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.1**. Публичные поля статуса N2a, allowlist, корреляция MCR/MCP, delete во время capture, download API/ошибки, агрегация N2b, OK vs ownerRef — [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) **§4.3–§4.7**, **§5.2**, **§8.7**, **§10–§11**. Data-layer и полный export/restore — за пределами N2. При стабильном контракте в API — дополнять этот spec, не дублируя design.
 
 ## §2. Ссылки
 

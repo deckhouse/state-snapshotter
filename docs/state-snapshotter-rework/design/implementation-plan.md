@@ -112,9 +112,9 @@
 - **Контроллеры** (NS vs `ManifestCheckpointController`) — **§10**.  
 - **OK vs ownerRef** — **§4.3**.
 
-**N2a.x (до wiring NS→MCR):** сверить §4.3 с кодом (`ManifestCheckpointController`: OK `FollowObject` на MCR, MCP→OK, chunks→MCP); один вариант в коде и docs.
+**N2a.x:** выполнено — см. [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) **§4.6** (сверка с `ManifestCheckpointController`).
 
-**Порядок работ N2a (ориентир):** (0) **N2a.x** + design lock; (1) CRD/status по §4.4; (2) allowlist §4.5 в коде; (3) NS reconciler: NSC, **root OK**, MCR, observe MCP, статусы NS/NSC, Ready; (4) download §8.7; (5) integration.
+**Порядок работ N2a (ориентир):** (0) прочитать design lock + §4.6–§4.7; (1) CRD **`manifestCheckpointName`** на NSC (§4.4.1); (2) allowlist §4.5 в коде; (3) NS reconciler: NSC, **root OK**, MCR по §4.7, observe MCP, статусы NS/NSC, Ready; (4) download §8.7.1; (5) integration.
 
 **Нормативно:** набор GVR — **§4.5** + один SSOT в коде; ad-hoc «снять всё подряд» **запрещён**.
 
@@ -145,7 +145,7 @@
 
 **Практический task-list (копипаст backlog)**
 
-**N2a:** **N2a.x** → CRD §4.4 + allowlist §4.5 → NS reconciler (NSC + root OK + MCR + observe MCP + статусы) → download §8.7 → integration.  
+**N2a:** CRD §4.4.1 + allowlist §4.5 + §4.7 → NS reconciler → download §8.7.1 → integration.  
 
 **N2b:** API refs + domain wiring → parent Ready aggregation → aggregated download → integration дерева.
 
