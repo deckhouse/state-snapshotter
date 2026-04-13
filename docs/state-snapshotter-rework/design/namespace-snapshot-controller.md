@@ -388,12 +388,21 @@ spec:
 
 ### 11.1 N2b — политика агрегации Ready (design lock)
 
-- **`Ready=True` у parent** только если: **собственный** `NamespaceSnapshotContent` в состоянии готовности (как у листа, N2a) **и** все **required** дочерние snapshot (по graph из **`childrenSnapshotRefs`** / доменной логике) также **`Ready=True`**.
-- **Child в процессе** (ещё не Ready, не Failed): parent **не** `Ready=True`; допускаются **Progressing** / незавершённый capture на parent (конкретные condition types — в CRD).
-- **Child в терминальном сбое** (`Ready=False` / Failed): parent **`Ready=False`** с устойчивым reason, например **`ChildSnapshotFailed`** (имя согласовать с `pkg/snapshot`), с указанием какого child.
-- Список **required** children vs optional — зафиксировать в spec/API при введении N2b (до кода агрегации).
+- **`Ready=True` у parent** только если: **собственный** persisted manifest-результат (N2a: **ManifestCheckpoint** на parent `NamespaceSnapshotContent`, как сегодня в коде) **и** все **required** дочерние snapshot (по graph из **`childrenSnapshotRefs`** / доменной логике) также **`Ready=True`**.
+- **Child в процессе** (не bound, нет `Ready`, `Ready=False` с не-терминальной причиной N2a): parent **`Ready=False`**, reason **`ChildSnapshotPending`** (`pkg/snapshot.ReasonChildSnapshotPending`); message поясняет этап (ожидание bind child content / ожидание `Ready=True` у child и т.д.).
+- **Child в терминальном сбое** N2a (`Ready=False` с причиной из allowlist терминальных root-capture ошибок): parent **`Ready=False`**, reason **`ChildSnapshotFailed`** (`pkg/snapshot.ReasonChildSnapshotFailed`); message содержит имя child и reason/message child.
+- Успешный parent после агрегации: **`Ready=True`**, reason **`Completed`** (`pkg/snapshot.ReasonCompleted`), как у N2a leaf после MCP.
+- Список **required** children vs optional — зафиксировать в spec/API при полном N2b (до расширения beyond synthetic scaffold).
 
-**PR2 (реализованный scaffold, не product flow):** при аннотации **`state-snapshotter.deckhouse.io/n2b-pr2-synthetic-tree: "true"`** на parent `NamespaceSnapshot` контроллер создаёт **ровно одного** synthetic child с именем **`<parent>-child`** в том же namespace, помечает child **label** **`state-snapshotter.deckhouse.io/n2b-synthetic-child=true`** и **`n2b-parent-uid`** (корреляция с **текущим** UID parent в reconcile, не только с именем; watch map требует непустой **`n2b-parent-uid`**). Child **не** порождает следующих детей и идёт обычным **N2a leaf**. Parent пишет **`status.childrenSnapshotRefs`** и **`NamespaceSnapshotContent.status.childrenSnapshotContentRefs`** с **`RetryOnConflict`** на status-апдейтах. **Root `Ready=True`** только после **`Ready=True`** у child; пока child не готов — root **`Ready=False`**, reason **`ChildSnapshotPending`** (единый зонтичный reason до PR3). **Без** aggregated download, **без** domain traversal; до **PR5** это временная проверка графа/reconcile — см. [`implementation-plan.md`](implementation-plan.md) §2.4.2 PR2.
+**PR2–PR3 (synthetic one-child scaffold, не product domain flow):** при аннотации **`state-snapshotter.deckhouse.io/n2b-pr2-synthetic-tree: "true"`** на parent контроллер создаёт **ровно одного** synthetic child **`<parent>-child`** в том же namespace, label **`state-snapshotter.deckhouse.io/n2b-synthetic-child=true`**, **`n2b-parent-uid`**. Child — **N2a leaf** без PR2-аннотации. Parent пишет graph refs с **`RetryOnConflict`**. Агрегация parent **`Ready`** вынесена в helper **`evaluateSyntheticRequiredChildStateForPR2`** (код): терминальный провал child — whitelist N2a (`ListFailed`, `NoCaptureTargets`, `CapturePlanDrift`, `ManifestCheckpointFailed`, `ContentRefMismatch`, `NamespaceNotFound`); любая другая **`Ready=False`** у child оставляет parent в **`ChildSnapshotPending`**. **Без** aggregated download (PR4), **без** domain traversal (PR5) — см. [`implementation-plan.md`](implementation-plan.md) §2.4.2.
+
+| Child state (синтетический required child) | Parent `Ready` | Parent `Ready` reason |
+|-------------------------------------------|----------------|------------------------|
+| Нет привязанного `NamespaceSnapshotContent` / child reconcile в процессе | `False` | `ChildSnapshotPending` |
+| `Ready` отсутствует или `Unknown` | `False` | `ChildSnapshotPending` |
+| `Ready=False` с не-терминальной причиной (например `ManifestCheckpointPending`) | `False` | `ChildSnapshotPending` |
+| `Ready=False` с терминальной причиной N2a (whitelist в коде) | `False` | `ChildSnapshotFailed` |
+| `Ready=True` и у parent уже persisted MCP | `True` | `Completed` |
 
 **Ready=True не означает:**
 

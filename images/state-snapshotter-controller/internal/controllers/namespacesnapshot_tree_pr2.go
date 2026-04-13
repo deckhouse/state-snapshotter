@@ -19,8 +19,8 @@ limitations under the License.
 // Does not change N2a leaf semantics: synthetic children have no PR2 opt-in annotation and run normal
 // reconcileCaptureN2a. Parents with n2b-pr2-synthetic-tree only add a post-MCP step that waits for one child.
 //
-// Annotation name, ChildSnapshotPending reason, and parentName+"-child" naming are scaffold-only, not the
-// long-term product contract (PR3+ will refine reasons; PR5 replaces synthetic path).
+// Annotation name and parentName+"-child" naming are scaffold-only; parent/child Ready aggregation — PR3
+// (namespacesnapshot_synthetic_child_pr3.go); PR5 replaces synthetic path.
 
 package controllers
 
@@ -43,10 +43,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
-
-// reasonChildSnapshotPending is a single umbrella pending reason for PR2; PR3 should split not-bound /
-// not-ready / child-failed with stable reason codes.
-const reasonChildSnapshotPending = "ChildSnapshotPending"
 
 func namespaceSnapshotChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotChildRef) bool {
 	if len(a) != len(b) {
@@ -168,8 +164,8 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 		return ctrl.Result{}, err
 	}
 	if child.Status.BoundSnapshotContentName == "" {
-		return r.markParentWaitingForSyntheticChild(ctx, parentKey,
-			"waiting for synthetic child NamespaceSnapshot to bind NamespaceSnapshotContent")
+		agg := evaluateSyntheticRequiredChildStateForPR2(child)
+		return r.patchParentSyntheticTreeAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
 	}
 
 	wantContentRefs := []storagev1alpha1.NamespaceSnapshotContentChildRef{
@@ -184,13 +180,16 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticTreePR2(
 		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	}
 
-	childReady := meta.FindStatusCondition(child.Status.Conditions, snapshot.ConditionReady)
-	if childReady == nil || childReady.Status != metav1.ConditionTrue {
-		msg := "waiting for synthetic child NamespaceSnapshot Ready=True"
-		if childReady != nil && childReady.Message != "" {
-			msg = fmt.Sprintf("waiting for synthetic child Ready: %s", childReady.Message)
-		}
-		return r.markParentWaitingForSyntheticChild(ctx, parentKey, msg)
+	if err := r.Client.Get(ctx, childKey, child); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := validateSyntheticChildLabelsForPR2Parent(child, nsSnap); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	agg := evaluateSyntheticRequiredChildStateForPR2(child)
+	if agg.Phase != syntheticChildAggregateReady {
+		return r.patchParentSyntheticTreeAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
 	}
 
 	if err := r.patchParentRootReadyAfterSyntheticChild(ctx, parentKey, mcpName); err != nil {
@@ -268,7 +267,12 @@ func (r *NamespaceSnapshotReconciler) patchParentRootReadyAfterSyntheticChild(ct
 	})
 }
 
-func (r *NamespaceSnapshotReconciler) markParentWaitingForSyntheticChild(ctx context.Context, parentKey types.NamespacedName, msg string) (ctrl.Result, error) {
+func (r *NamespaceSnapshotReconciler) patchParentSyntheticTreeAggregateReady(
+	ctx context.Context,
+	parentKey types.NamespacedName,
+	reason string,
+	msg string,
+) (ctrl.Result, error) {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		nsSnap := &storagev1alpha1.NamespaceSnapshot{}
 		if err := r.Client.Get(ctx, parentKey, nsSnap); err != nil {
@@ -278,7 +282,7 @@ func (r *NamespaceSnapshotReconciler) markParentWaitingForSyntheticChild(ctx con
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             reasonChildSnapshotPending,
+			Reason:             reason,
 			Message:            msg,
 			ObservedGeneration: nsSnap.Generation,
 		})

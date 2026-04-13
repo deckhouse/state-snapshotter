@@ -122,6 +122,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tre
 			pReady := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(pReady).NotTo(BeNil())
 			g.Expect(pReady.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(pReady.Reason).To(Equal(snapshot.ReasonChildSnapshotPending))
 		}).WithTimeout(120 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -138,6 +139,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b PR2 synthetic one-child tre
 			pr := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(pr).NotTo(BeNil())
 			g.Expect(pr.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(pr.Reason).To(Equal(snapshot.ReasonCompleted))
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		var parentSnap storagev1alpha1.NamespaceSnapshot
