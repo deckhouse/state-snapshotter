@@ -8,7 +8,7 @@
 
 - Пара root/content + отказ от generic `SnapshotContent` для namespace root: [`decisions/namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md)
 - Поверхность статуса (без `status.phase`): [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md)
-- **Gate до N1:** cluster-scoped vs namespaced — [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md)
+- **Scope (resolved):** namespaced root — [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md)
 
 ---
 
@@ -16,7 +16,7 @@
 
 ### 2.1 Целевая семантика (согласовано с ТЗ)
 
-**NamespaceSnapshot** — root / intention; результат фиксируется в **`NamespaceSnapshotContent`** (пара 1:1 с root по смыслу ТЗ). Связка с **ObjectKeeper** — по правилам из `snapshot-rework` (корневой content, FollowObjectWithTTL и т.д.).
+**NamespaceSnapshot** — namespaced root / intention; результат фиксируется в cluster-scoped **`NamespaceSnapshotContent`** (пара 1:1 с root по смыслу ТЗ). Generic **`SnapshotContent`** для этого потока **не** используется как root-carrier. Связка с **ObjectKeeper** — по правилам из `snapshot-rework`; целевой режим для namespace-flow — **FollowObjectWithTTL** (полный OK lifecycle — N2+).
 
 **Поставка поэтапно** (см. §16 и [`implementation-plan.md`](implementation-plan.md)): сначала bind NS↔NSC + OK + conditions и скелет capture; полная оркестрация дочерних снимков, экспорт/импорт и restore — наращиванием до полного ТЗ, **не** переписывая SSOT в `snapshot-rework`.
 
@@ -43,11 +43,11 @@
 
 ### 4.1 NamespaceSnapshot (черновик полей)
 
-До **разрешённого** решения cluster-scoped vs namespaced ([`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md), §13) — логические поля без привязки к финальному CRD.
+**Scope:** namespaced root — зафиксировано в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md). На текущем этапе целевой namespace совпадает с `metadata.namespace` объекта `NamespaceSnapshot`.
 
 **Spec (логически):**
 
-- Источник: `source.namespaceName` (или эквивалент).
+- Источник namespace для capture: тот же, что `metadata.namespace` root (расширение через отдельное поле — позже, если понадобится продуктово).
 - Класс/политика: `snapshotClassName` / `className` (как в продуктовой модели unified snapshots).
 - Опционально: include/exclude групп ресурсов (MVP — минимальный набор или фиксированный профиль).
 - Опционально позже: `capturePolicy` (см. §9); в MVP допустимо заложить поле, но **выставить только fail-closed**.
@@ -56,7 +56,7 @@
 
 - **`conditions` — единственный** нормативный источник жизненного цикла и ошибок для операторов; поля **`status.phase` нет** (см. [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md)).
 - `conditions`: как минимум согласованный набор с unified-паттерном (например Ready, Bound, Progressing; при необходимости CaptureStarted, ArtifactStored; терминальные сбои — через Ready=False и reason).
-- Имя привязанного **`NamespaceSnapshotContent`** — как в ТЗ (например `contentName` в примерах `snapshot-rework`); в CRD зафиксировать одно согласованное поле.
+- Имя привязанного **`NamespaceSnapshotContent`** — в CRD: **`status.contentName`** (cluster-scoped имя content).
 - `observedGeneration`.
 - `startedAt`, `completedAt` (опционально).
 - Сводные поля прогресса/ошибки по необходимости (без дублирования детального состояния Job).
@@ -69,7 +69,7 @@
 
 **Content → Root**
 
-- В `NamespaceSnapshotContent.spec` (или эквивалент): **двусторонняя** ссылка на root: `apiVersion`, `kind`, `name`, **`uid`** (и `namespace`, если root namespaced).
+- В `NamespaceSnapshotContent.spec`: ссылка **`namespaceSnapshotRef`**: `apiVersion`, `kind`, `name`, **`uid`**, `namespace` (root namespaced).
 
 **Инварианты**
 
@@ -271,10 +271,10 @@ spec:
 
 ## 12. Access model
 
-Зависит от **разрешённого** решения cluster-scoped vs namespaced — [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md).
+**Выбрано:** namespaced root — [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md).
 
-- **Cluster-scoped:** сильнее выраженные требования к RBAC, admission, SubjectAccessReview и ограничению доступа по `spec.source.namespaceName`. Если выбран этот вариант — добавить в этот раздел **explicit cost** (webhook, модель прав).
-- **Namespaced:** проще делегирование прав и UX, но семантика «root относительно целевого namespace» требует явного описания в CRD (тот же namespace / другой namespace только через политику продукта).
+- Проще делегирование прав и UX относительно владельцев namespace; целевой namespace на текущем этапе = `metadata.namespace` у `NamespaceSnapshot`.
+- `NamespaceSnapshotContent` остаётся **cluster-scoped**; права на content и OK — отдельно от namespaced root (см. RBAC в шаблонах модуля и будущий N2).
 
 ---
 
@@ -282,7 +282,7 @@ spec:
 
 ### 13.1 Blocking (MUST до N1)
 
-1. **Cluster-scoped vs namespaced NamespaceSnapshot** — архитектурная развилка: RBAC, admission, restore access, форма CRD, тесты. Зафиксировать в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md). **Формальный критерий допуска N1 — один:** пока **Chosen option = TBD**, **N1** не начинать (см. Gate в том файле).
+1. ~~**Cluster-scoped vs namespaced NamespaceSnapshot**~~ — **снято:** выбрано **namespaced** в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md).
 
 ### 13.2 Open (до финализации API / реализации)
 

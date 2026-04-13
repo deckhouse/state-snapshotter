@@ -38,7 +38,7 @@ import (
 )
 
 var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
-	It("binds SnapshotContent and reaches Ready via conditions (N1 skeleton)", func() {
+	It("binds NamespaceSnapshotContent and reaches Ready via conditions (N1 skeleton)", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -68,22 +68,22 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
-			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
+			g.Expect(fresh.Status.ContentName).NotTo(BeEmpty())
 
 			wantContent := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(fresh.UID), "-", ""))
-			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(wantContent))
+			g.Expect(fresh.Status.ContentName).To(Equal(wantContent))
 			g.Expect(fresh.Status.ObservedGeneration).To(Equal(fresh.Generation))
 
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 
-			sc := &storagev1alpha1.SnapshotContent{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
+			sc := &storagev1alpha1.NamespaceSnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.ContentName}, sc)).To(Succeed())
 			g.Expect(sc.Spec.DeletionPolicy).To(Equal(storagev1alpha1.SnapshotContentDeletionPolicyRetain))
-			g.Expect(sc.Spec.SnapshotRef.Kind).To(Equal("NamespaceSnapshot"))
-			g.Expect(sc.Spec.SnapshotRef.Name).To(Equal(fresh.Name))
-			g.Expect(sc.Spec.SnapshotRef.Namespace).To(Equal(fresh.Namespace))
+			g.Expect(sc.Spec.NamespaceSnapshotRef.Kind).To(Equal("NamespaceSnapshot"))
+			g.Expect(sc.Spec.NamespaceSnapshotRef.Name).To(Equal(fresh.Name))
+			g.Expect(sc.Spec.NamespaceSnapshotRef.Namespace).To(Equal(fresh.Namespace))
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })

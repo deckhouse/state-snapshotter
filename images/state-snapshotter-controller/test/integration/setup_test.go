@@ -603,6 +603,7 @@ var _ = BeforeSuite(func() {
 		"namespacedtestsnapshotcontents.test.deckhouse.io",
 		"backupclasses.storage.deckhouse.io",
 		"namespacesnapshots.storage.deckhouse.io",
+		"namespacesnapshotcontents.storage.deckhouse.io",
 		"snapshotcontents.storage.deckhouse.io",
 	}
 	Eventually(func() bool {
@@ -648,6 +649,7 @@ var _ = BeforeSuite(func() {
 		ctrl.Log.WithName("integration-unified-bootstrap"),
 	)
 	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
+	genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
 	snapshotController, err := controllers.NewSnapshotController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
@@ -665,7 +667,7 @@ var _ = BeforeSuite(func() {
 		scheme,
 		mgr.GetRESTMapper(),
 		testCfg,
-		contentGVKs,
+		genericContentGVKs,
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())

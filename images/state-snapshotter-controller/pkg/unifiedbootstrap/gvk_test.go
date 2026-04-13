@@ -43,7 +43,7 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 		{Snapshot: snap, SnapshotContent: content},
 		{
 			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"},
+			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshotContent"},
 		},
 	}
 
@@ -82,6 +82,21 @@ func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T)
 	assertEqualSliceLens(t, snaps, contents)
 	if len(snaps) != 0 {
 		t.Fatalf("expected pair skipped when SnapshotContent missing from API, got %d snapshot GVKs", len(snaps))
+	}
+}
+
+func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing.T) {
+	snapGVKs := []schema.GroupVersionKind{
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
+	}
+	contentGVKs := []schema.GroupVersionKind{
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
+	}
+	out := FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
+	if len(out) != 1 || out[0].Kind != "SnapshotContent" {
+		t.Fatalf("expected single generic SnapshotContent GVK, got %v", out)
 	}
 }
 

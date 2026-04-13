@@ -4,27 +4,23 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: namespacesnapshots.storage.deckhouse.io
+  name: namespacesnapshotcontents.storage.deckhouse.io
 spec:
   group: storage.deckhouse.io
   names:
-    kind: NamespaceSnapshot
-    listKind: NamespaceSnapshotList
-    plural: namespacesnapshots
+    kind: NamespaceSnapshotContent
+    listKind: NamespaceSnapshotContentList
+    plural: namespacesnapshotcontents
     shortNames:
-    - nssnap
-    singular: namespacesnapshot
-  scope: Namespaced
+    - nssnapct
+    singular: namespacesnapshotcontent
+  scope: Cluster
   versions:
-  - additionalPrinterColumns:
-    - jsonPath: .status.contentName
-      name: Content
-      type: string
-    name: v1alpha1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'NamespaceSnapshot requests a namespace state/configuration snapshot
-          (MVP: design namespace-snapshot-controller.md).'
+        description: NamespaceSnapshotContent holds the materialized result for a
+          NamespaceSnapshot root (not generic SnapshotContent).
         properties:
           apiVersion:
             description: |-
@@ -45,16 +41,46 @@ spec:
             type: object
           spec:
             properties:
-              snapshotClassName:
-                description: SnapshotClassName optionally selects class/policy (aligned
-                  with unified snapshot model; resolution is N2+).
+              backupRepositoryName:
+                description: BackupRepositoryName optional; used when snapshot class
+                  resolves to a backup repository.
                 type: string
+              deletionPolicy:
+                description: DeletionPolicy controls whether the controller may delete
+                  this NamespaceSnapshotContent when the root is removed.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              namespaceSnapshotRef:
+                description: NamespaceSnapshotRef points to the namespaced NamespaceSnapshot
+                  root.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+            required:
+            - namespaceSnapshotRef
             type: object
           status:
             properties:
               conditions:
-                description: Conditions represent the latest observations (Ready,
-                  Bound, Failed, etc.).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -110,15 +136,6 @@ spec:
                   - type
                   type: object
                 type: array
-              contentName:
-                description: ContentName is the cluster-scoped NamespaceSnapshotContent
-                  bound to this root.
-                type: string
-              observedGeneration:
-                description: ObservedGeneration is the metadata.generation the controller
-                  last reconciled into this status.
-                format: int64
-                type: integer
             type: object
         type: object
     served: true

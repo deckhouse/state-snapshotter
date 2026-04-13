@@ -30,7 +30,7 @@ import (
 )
 
 // T1 (plan): CSI Snapshot and optional module snapshot CRDs are not installed in this envtest cluster.
-// NamespaceSnapshot + generic SnapshotContent ship with this repo and are present in crds/.
+// NamespaceSnapshot + NamespaceSnapshotContent ship with this repo and are present in crds/.
 // Controller wiring must tolerate missing pairs and succeed; optional pairs register no watches.
 var _ = Describe("Integration T1: unified bootstrap without optional snapshot CRDs", func() {
 	It("filters out missing API types; envtest exposes NamespaceSnapshot pair when repo CRDs load", func() {
@@ -47,7 +47,7 @@ var _ = Describe("Integration T1: unified bootstrap without optional snapshot CR
 			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot",
 		}))
 		Expect(available[0].SnapshotContent).To(Equal(schema.GroupVersionKind{
-			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent",
+			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent",
 		}))
 
 		snapshotController, err := controllers.NewSnapshotController(

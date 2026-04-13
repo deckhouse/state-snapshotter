@@ -60,7 +60,7 @@ import (
 var (
 	resourcesSchemeFuncs = []func(*apiruntime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
-		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (NamespaceSnapshot, SnapshotContent, …)
+		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (NamespaceSnapshot, NamespaceSnapshotContent, SnapshotContent, …)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
 		extv1.AddToScheme,
@@ -227,6 +227,7 @@ func main() {
 		}
 
 		genericSnapshotGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
+		genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapshotGVKs, snapshotContentGVKs)
 
 		snapshotController, err := controllers.NewSnapshotController(
 			mgr.GetClient(),
@@ -253,7 +254,7 @@ func main() {
 			mgr.GetScheme(),
 			mgr.GetRESTMapper(),
 			cfgParams,
-			snapshotContentGVKs,
+			genericContentGVKs,
 		)
 		if err != nil {
 			log.Error(err, "Failed to create SnapshotContentController")
@@ -265,7 +266,7 @@ func main() {
 			cancel()
 			os.Exit(1)
 		}
-		log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(snapshotContentGVKs))
+		log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(genericContentGVKs))
 
 		if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams); err != nil {
 			log.Error(err, "Failed to add NamespaceSnapshotController to manager")

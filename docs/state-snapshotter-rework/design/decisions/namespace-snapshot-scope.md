@@ -2,7 +2,7 @@
 
 ## Status
 
-**Pending** — решение в проработке (удобная человекочитаемая метка; **не** отдельный формальный gate).
+**Resolved** — для текущей поставки (MVP и код в репозитории) выбран **namespaced** root; детали ниже в **Chosen option**.
 
 Связанный design: [`../namespace-snapshot-controller.md`](../namespace-snapshot-controller.md) (§12, §13).
 
@@ -26,7 +26,7 @@
 
 ## Chosen option
 
-**TBD** — после продуктового решения: одна строка (**cluster-scoped** или **namespaced**) + при необходимости ссылка на ADR.
+**Namespaced** — `NamespaceSnapshot` живёт в том же namespace, который снимается на текущем этапе (без отдельного `spec.source` для смены цели). Это снижает сложность RBAC, admission и SAR относительно cluster-scoped root и достаточно для N0–N1 и скелета N2.
 
 ## Consequences
 
@@ -37,7 +37,7 @@
 
 ## Gate
 
-**Единственный формальный критерий допуска N1 (runtime skeleton):** **Chosen option** ≠ TBD (записан выбранный вариант или ссылка на принятое продуктовое решение). Пока **Chosen option = TBD**, нельзя финализировать scope CRD, RBAC и admission.
+**Критерий допуска N1 (runtime skeleton):** **Chosen option** ≠ TBD — выполнено.
 
 **N1** (см. [`../namespace-snapshot-controller.md`](../namespace-snapshot-controller.md) §16) не начинать, пока критерий не выполнен. Эквивалент в другом нормативном документе допустим **только** со ссылкой отсюда.
 

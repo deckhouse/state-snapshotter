@@ -34,12 +34,13 @@
 | `unified_runtime_hot_add_test.go` | **R3 proof:** DSC создаётся после старта manager; после `RBACReady` — `unifiedSyncer.ActiveSnapshotGVKKeys` и `LastLayeredState()` (resolved + eligible). **`Serial`**; очистка конфликтующих DSC (в т.ч. rbac/eligibility/smoke). |
 | `unified_runtime_rbac_eligibility_test.go` | **T4 + eligibility:** без RBACReady нет eligible-слоя для RegistrationTest; после снятия RBACReady resolved без пары, monotonic active сохраняет ключ. **`Serial`**; `AfterEach` чистит DSC. |
 | `controller_registration_test.go` | Конструирование контроллеров как в production; **без** повторного `SetupWithManager` на общем `mgr` |
+| `namespacesnapshot_lifecycle_test.go` | **N1 skeleton:** `NamespaceSnapshot` → `NamespaceSnapshotContent`, `status.contentName`, условие Ready (без ObjectKeeper / полного N2) |
 
 ## Планируемые тесты
 
 **Бэклог integration:** T5, T8–T11 и др. — по необходимости. R5 + T4/eligibility — см. [`design/implementation-plan.md`](../design/implementation-plan.md).
 
-**Порядок с M-треком:** сценарии **T6** и прочая нагрузка/расширение **MCR** не являются приоритетом, пока не стабилизированы **NamespaceSnapshot** + **NamespaceSnapshotContent** + **ObjectKeeper** (**N1–N3** в [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4).
+**Порядок с M-треком:** сценарии **T6** и прочая нагрузка/расширение **MCR** не являются приоритетом, пока не стабилизированы **NamespaceSnapshot** + **NamespaceSnapshotContent** + **ObjectKeeper** (**N2–N3** после закрытого **N0–N1** API/bootstrap в [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4).
 
 | ID | Тест | Связь | Статус |
 |----|------|--------|--------|

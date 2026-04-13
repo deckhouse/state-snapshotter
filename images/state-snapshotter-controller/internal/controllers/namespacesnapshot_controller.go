@@ -35,8 +35,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// NamespaceSnapshotReconciler implements N1 skeleton: finalizer, SnapshotContent bind, fake capture; status via conditions only (no status.phase).
-// Binding uses status + spec.snapshotRef only (no ownerReference on cluster SnapshotContent).
+// NamespaceSnapshotReconciler implements N1 skeleton: finalizer, NamespaceSnapshotContent bind, fake capture; status via conditions only (no status.phase).
+// Binding uses status + spec.namespaceSnapshotRef only (no ownerReference on cluster NamespaceSnapshotContent).
 type NamespaceSnapshotReconciler struct {
 	Client client.Client
 	Scheme *runtime.Scheme
@@ -60,7 +60,7 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=snapshotcontents,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -106,9 +106,8 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	expectedName := namespaceSnapshotContentName(nsSnap)
 
-	// Stale status: bound name must match deterministic name for this UID.
-	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
-		nsSnap.Status.BoundSnapshotContentName = ""
+	if nsSnap.Status.ContentName != "" && nsSnap.Status.ContentName != expectedName {
+		nsSnap.Status.ContentName = ""
 		meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionBound)
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
@@ -116,11 +115,11 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	content := &storagev1alpha1.SnapshotContent{}
+	content := &storagev1alpha1.NamespaceSnapshotContent{}
 	err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content)
 	if errors.IsNotFound(err) {
-		if nsSnap.Status.BoundSnapshotContentName != "" {
-			nsSnap.Status.BoundSnapshotContentName = ""
+		if nsSnap.Status.ContentName != "" {
+			nsSnap.Status.ContentName = ""
 			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionBound)
 			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionReady)
 			nsSnap.Status.ObservedGeneration = nsSnap.Generation
@@ -130,7 +129,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		newContent := &storagev1alpha1.SnapshotContent{
+		newContent := &storagev1alpha1.NamespaceSnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: expectedName},
 			Spec:       desiredNamespaceSnapshotContentSpec(nsSnap),
 		}
@@ -140,13 +139,13 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			}
 			return ctrl.Result{}, err
 		}
-		nsSnap.Status.BoundSnapshotContentName = expectedName
+		nsSnap.Status.ContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionBound,
 			Status:             metav1.ConditionTrue,
 			Reason:             "ContentCreated",
-			Message:            "SnapshotContent exists",
+			Message:            "NamespaceSnapshotContent exists",
 			ObservedGeneration: nsSnap.Generation,
 		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -158,20 +157,20 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	if !snapshotSubjectRefMatches(content.Spec.SnapshotRef, nsSnap) {
+	if !snapshotSubjectRefMatches(content.Spec.NamespaceSnapshotRef, nsSnap) {
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             "ContentRefMismatch",
-			Message:            fmt.Sprintf("SnapshotContent %q does not reference this NamespaceSnapshot", expectedName),
+			Message:            fmt.Sprintf("NamespaceSnapshotContent %q does not reference this NamespaceSnapshot", expectedName),
 			ObservedGeneration: nsSnap.Generation,
 		})
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionBound,
 			Status:             metav1.ConditionFalse,
 			Reason:             "ContentRefMismatch",
-			Message:            "SnapshotContent snapshotRef does not match this object",
+			Message:            "NamespaceSnapshotContent namespaceSnapshotRef does not match this object",
 			ObservedGeneration: nsSnap.Generation,
 		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -180,14 +179,14 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	if nsSnap.Status.BoundSnapshotContentName == "" {
-		nsSnap.Status.BoundSnapshotContentName = expectedName
+	if nsSnap.Status.ContentName == "" {
+		nsSnap.Status.ContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionBound,
 			Status:             metav1.ConditionTrue,
 			Reason:             "ContentBound",
-			Message:            "SnapshotContent exists and references this NamespaceSnapshot",
+			Message:            "NamespaceSnapshotContent exists and references this NamespaceSnapshot",
 			ObservedGeneration: nsSnap.Generation,
 		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -211,17 +210,17 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, expectedName string) (ctrl.Result, error) {
-	content := &storagev1alpha1.SnapshotContent{}
+	content := &storagev1alpha1.NamespaceSnapshotContent{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	if !snapshotSubjectRefMatches(content.Spec.SnapshotRef, nsSnap) {
+	if !snapshotSubjectRefMatches(content.Spec.NamespaceSnapshotRef, nsSnap) {
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             "ContentRefMismatch",
-			Message:            fmt.Sprintf("existing SnapshotContent %q is not owned by this NamespaceSnapshot", expectedName),
+			Message:            fmt.Sprintf("existing NamespaceSnapshotContent %q is not owned by this NamespaceSnapshot", expectedName),
 			ObservedGeneration: nsSnap.Generation,
 		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -229,13 +228,13 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 		}
 		return ctrl.Result{}, nil
 	}
-	nsSnap.Status.BoundSnapshotContentName = expectedName
+	nsSnap.Status.ContentName = expectedName
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 		Type:               snapshot.ConditionBound,
 		Status:             metav1.ConditionTrue,
 		Reason:             "ContentExists",
-		Message:            "SnapshotContent already existed with matching snapshotRef",
+		Message:            "NamespaceSnapshotContent already existed with matching namespaceSnapshotRef",
 		ObservedGeneration: nsSnap.Generation,
 	})
 	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -245,7 +244,7 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 }
 
 func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
-	if nsSnap.Status.BoundSnapshotContentName == "" {
+	if nsSnap.Status.ContentName == "" {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 			if err := r.Client.Update(ctx, nsSnap); err != nil {
 				return ctrl.Result{}, err
@@ -255,8 +254,8 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 		return ctrl.Result{}, nil
 	}
 
-	content := &storagev1alpha1.SnapshotContent{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Status.BoundSnapshotContentName}, content)
+	content := &storagev1alpha1.NamespaceSnapshotContent{}
+	err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Status.ContentName}, content)
 	if errors.IsNotFound(err) {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 			if err := r.Client.Update(ctx, nsSnap); err != nil {
@@ -275,7 +274,6 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 			return ctrl.Result{}, err
 		}
 	}
-	// Retain, empty, or unknown policy: do not delete SnapshotContent.
 
 	if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 		if err := r.Client.Update(ctx, nsSnap); err != nil {
@@ -286,9 +284,9 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 	return ctrl.Result{}, nil
 }
 
-func desiredNamespaceSnapshotContentSpec(nsSnap *storagev1alpha1.NamespaceSnapshot) storagev1alpha1.SnapshotContentSpec {
-	return storagev1alpha1.SnapshotContentSpec{
-		SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
+func desiredNamespaceSnapshotContentSpec(nsSnap *storagev1alpha1.NamespaceSnapshot) storagev1alpha1.NamespaceSnapshotContentSpec {
+	return storagev1alpha1.NamespaceSnapshotContentSpec{
+		NamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 			Kind:       "NamespaceSnapshot",
 			Name:       nsSnap.Name,
