@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -254,8 +255,9 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 		return ctrl.Result{}, nil
 	}
 
+	contentKey := client.ObjectKey{Name: nsSnap.Status.BoundSnapshotContentName}
 	content := &storagev1alpha1.NamespaceSnapshotContent{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Status.BoundSnapshotContentName}, content)
+	err := r.Client.Get(ctx, contentKey, content)
 	if errors.IsNotFound(err) {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 			if err := r.Client.Update(ctx, nsSnap); err != nil {
@@ -271,6 +273,12 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 	policy := content.Spec.DeletionPolicy
 	if policy == storagev1alpha1.SnapshotContentDeletionPolicyDelete {
 		if err := r.Client.Delete(ctx, content); err != nil && !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		// Do not remove the root finalizer until NamespaceSnapshotContent is fully gone from the API.
+		if err := r.Client.Get(ctx, contentKey, content); err == nil {
+			return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+		} else if !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
 	}

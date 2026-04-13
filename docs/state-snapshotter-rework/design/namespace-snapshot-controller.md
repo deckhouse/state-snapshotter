@@ -122,6 +122,8 @@
 
 **Инвариант:** финализатор root **снимается только после** того, как NamespaceSnapshotContent достиг **согласованного с deletion policy терминального состояния**; не раньше.
 
+**Скелет (Phase 2, API-объект content):** при **DeletionPolicy=Delete** на `NamespaceSnapshotContent` контроллер вызывает `Delete` на CR и **не** снимает финализатор с root, пока `Get(NamespaceSnapshotContent)` не вернёт **NotFound** (requeue до исчезновения объекта из API).
+
 При **Retain:** артефакт и при необходимости **NamespaceSnapshotContent** переживают root — явный итог reconcile (**conditions** на content и ссылки orphaning). См. ТЗ в `snapshot-rework`.
 
 ### 5.3 Recovery after restart
