@@ -60,6 +60,12 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
 
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-del-retain-cm", Namespace: nsName},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
 		snap := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "snap",
@@ -81,7 +87,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			sc := &storagev1alpha1.NamespaceSnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
 			g.Expect(sc.Spec.DeletionPolicy).To(Equal(storagev1alpha1.SnapshotContentDeletionPolicyRetain))
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName},
@@ -90,7 +96,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(ctx, key, &storagev1alpha1.NamespaceSnapshot{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		sc := &storagev1alpha1.NamespaceSnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
@@ -113,6 +119,12 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
 
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-del-delete-cm", Namespace: nsName},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
 		snap := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "snap-del",
@@ -132,7 +144,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			contentName = fresh.Status.BoundSnapshotContentName
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		sc := &storagev1alpha1.NamespaceSnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
@@ -147,11 +159,11 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.NamespaceSnapshotContent{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(ctx, key, &storagev1alpha1.NamespaceSnapshot{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 })

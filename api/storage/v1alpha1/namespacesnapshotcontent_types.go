@@ -54,5 +54,9 @@ type NamespaceSnapshotContentSpec struct {
 
 // +k8s:deepcopy-gen=true
 type NamespaceSnapshotContentStatus struct {
+	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name once manifest capture has persisted (N2a).
+	// +optional
+	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
+
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

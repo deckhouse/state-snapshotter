@@ -136,6 +136,10 @@ spec:
                   - type
                   type: object
                 type: array
+              manifestCheckpointName:
+                description: ManifestCheckpointName is the cluster-scoped ManifestCheckpoint
+                  name once manifest capture has persisted (N2a).
+                type: string
             type: object
         type: object
     served: true

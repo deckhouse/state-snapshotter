@@ -27,21 +27,26 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// NamespaceSnapshotReconciler implements N1 skeleton: finalizer, NamespaceSnapshotContent bind, fake capture; status via conditions only (no status.phase).
+// NamespaceSnapshotReconciler implements N1 bind + N2a manifest capture (MCR→MCP); status via conditions only (no status.phase).
 // Binding uses status + spec.namespaceSnapshotRef only (no ownerReference on cluster NamespaceSnapshotContent).
 type NamespaceSnapshotReconciler struct {
-	Client client.Client
-	Scheme *runtime.Scheme
-	Config *config.Options
+	Client    client.Client
+	APIReader client.Reader
+	Dynamic   dynamic.Interface
+	Scheme    *runtime.Scheme
+	Config    *config.Options
 }
 
 // AddNamespaceSnapshotControllerToManager registers the NamespaceSnapshot reconciler.
@@ -49,10 +54,16 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}
+	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("namespace snapshot controller: dynamic client: %w", err)
+	}
 	r := &NamespaceSnapshotReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: cfg,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Dynamic:   dyn,
+		Scheme:    mgr.GetScheme(),
+		Config:    cfg,
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.NamespaceSnapshot{}).
@@ -62,6 +73,12 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=deckhouse.io,resources=objectkeepers,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
 func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -196,18 +213,10 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	nsSnap.Status.ObservedGeneration = nsSnap.Generation
-	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             snapshot.ReasonCompleted,
-		Message:            "fake capture complete (N1 skeleton)",
-		ObservedGeneration: nsSnap.Generation,
-	})
-	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+	return r.reconcileCaptureN2a(ctx, nsSnap, content)
 }
 
 func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, expectedName string) (ctrl.Result, error) {
@@ -245,6 +254,54 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 }
 
 func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
+	mcrKey := client.ObjectKey{Namespace: nsSnap.Namespace, Name: namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)}
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	var mcpName string
+
+	if err := r.Client.Get(ctx, mcrKey, mcr); err == nil {
+		mcpName = namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+		if err := r.Client.Delete(ctx, mcr); err != nil && !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	} else if !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	if mcpName == "" && nsSnap.Status.BoundSnapshotContentName != "" {
+		contentForMCP := &storagev1alpha1.NamespaceSnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Status.BoundSnapshotContentName}, contentForMCP); err == nil {
+			mcpName = contentForMCP.Status.ManifestCheckpointName
+		} else if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
+
+	if err := r.Client.Get(ctx, mcrKey, mcr); err == nil {
+		return ctrl.Result{RequeueAfter: 300 * time.Millisecond}, nil
+	} else if !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	if mcpName != "" {
+		mcp := &ssv1alpha1.ManifestCheckpoint{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err == nil {
+			// Explicit MCP delete after MCR removal: idempotent cancel/cleanup. In production, removal of the
+			// ret-mcr ObjectKeeper (FollowObject on MCR) normally lets GC delete MCP; this Delete is still valid
+			// best-effort teardown and matches operator cancel intent. Envtest lacks deckhouse-controller, so the
+			// OK→GC chain may not run; the same path unblocks integration without test-only branching.
+			if err := r.Client.Delete(ctx, mcp); err != nil && !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		} else if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err == nil {
+			return ctrl.Result{RequeueAfter: 300 * time.Millisecond}, nil
+		} else if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
+
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 			if err := r.Client.Update(ctx, nsSnap); err != nil {

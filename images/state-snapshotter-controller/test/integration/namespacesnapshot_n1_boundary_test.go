@@ -28,9 +28,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -74,20 +76,29 @@ var _ = Describe("Integration: NamespaceSnapshot N1 boundary (mismatch + recover
 			_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName}})
 		})
 
+		badRef := storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+			Kind:       "NamespaceSnapshot",
+			Name:       snap.Name,
+			Namespace:  nsName,
+			UID:        types.UID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+		}
 		badContent := &storagev1alpha1.NamespaceSnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: contentName},
 			Spec: storagev1alpha1.NamespaceSnapshotContentSpec{
-				NamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
-					Name:       snap.Name,
-					Namespace:  nsName,
-					UID:        types.UID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
-				},
-				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
+				NamespaceSnapshotRef: badRef,
+				DeletionPolicy:       storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 			},
 		}
-		Expect(k8sClient.Create(ctx, badContent)).To(Succeed())
+		// The reconciler may create NamespaceSnapshotContent before this Create runs (N2a adds more work per loop).
+		// Accept AlreadyExists and patch spec to the mismatched ref so the scenario stays deterministic.
+		if err := k8sClient.Create(ctx, badContent); err != nil {
+			Expect(apierrors.IsAlreadyExists(err)).To(BeTrue(), "unexpected error creating NamespaceSnapshotContent: %v", err)
+			existing := &storagev1alpha1.NamespaceSnapshotContent{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, existing)).To(Succeed())
+			existing.Spec.NamespaceSnapshotRef = badRef
+			Expect(k8sClient.Update(ctx, existing)).To(Succeed())
+		}
 
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.NamespaceSnapshot{}
@@ -125,6 +136,12 @@ var _ = Describe("Integration: NamespaceSnapshot N1 boundary (mismatch + recover
 			_ = k8sClient.Delete(cctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
 
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-recover-cm", Namespace: nsName},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
 		snap := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "snap",
@@ -143,7 +160,7 @@ var _ = Describe("Integration: NamespaceSnapshot N1 boundary (mismatch + recover
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			contentName = fresh.Status.BoundSnapshotContentName
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		fresh := &storagev1alpha1.NamespaceSnapshot{}
 		Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
@@ -162,7 +179,7 @@ var _ = Describe("Integration: NamespaceSnapshot N1 boundary (mismatch + recover
 			ready := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		Consistently(func(g Gomega) {
 			stable := &storagev1alpha1.NamespaceSnapshot{}

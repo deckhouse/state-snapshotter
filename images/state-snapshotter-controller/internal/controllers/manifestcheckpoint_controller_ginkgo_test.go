@@ -37,6 +37,7 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -713,27 +714,27 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 	Describe("Deterministic checkpoint name generation", func() {
 		It("should generate same checkpoint name for same MCR UID", func() {
 			mcrUID := types.UID("test-uid-12345")
-			name1 := ctrl.generateCheckpointNameFromUID(string(mcrUID))
-			name2 := ctrl.generateCheckpointNameFromUID(string(mcrUID))
+			name1 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
+			name2 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
 
 			Expect(name1).To(Equal(name2))
-			Expect(name1).To(HavePrefix(ChunkNamePrefix))
+			Expect(name1).To(HavePrefix(namespacemanifest.CheckpointNamePrefix))
 		})
 
 		It("should generate different checkpoint names for different MCR UIDs", func() {
 			mcrUID1 := types.UID("test-uid-12345")
 			mcrUID2 := types.UID("test-uid-67890")
-			name1 := ctrl.generateCheckpointNameFromUID(string(mcrUID1))
-			name2 := ctrl.generateCheckpointNameFromUID(string(mcrUID2))
+			name1 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID1)
+			name2 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID2)
 
 			Expect(name1).ToNot(Equal(name2))
-			Expect(name1).To(HavePrefix(ChunkNamePrefix))
-			Expect(name2).To(HavePrefix(ChunkNamePrefix))
+			Expect(name1).To(HavePrefix(namespacemanifest.CheckpointNamePrefix))
+			Expect(name2).To(HavePrefix(namespacemanifest.CheckpointNamePrefix))
 		})
 
 		It("should generate RFC 1123 compliant checkpoint name", func() {
 			mcrUID := types.UID("test-uid-12345")
-			name := ctrl.generateCheckpointNameFromUID(string(mcrUID))
+			name := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
 
 			// RFC 1123: lowercase alphanumeric, must start and end with alphanumeric
 			Expect(name).To(MatchRegexp("^[a-z0-9][a-z0-9-]*[a-z0-9]$"))

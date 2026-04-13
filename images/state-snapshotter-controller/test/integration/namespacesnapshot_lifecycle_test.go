@@ -34,11 +34,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
-	It("binds NamespaceSnapshotContent and reaches Ready via conditions (N1 skeleton)", func() {
+	It("binds NamespaceSnapshotContent and reaches Ready with manifestCheckpointName on content (N2a)", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -54,6 +56,12 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 		DeferCleanup(func() {
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-target-cm", Namespace: nsName},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
 		snap := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
@@ -84,6 +92,52 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			g.Expect(sc.Spec.NamespaceSnapshotRef.Kind).To(Equal("NamespaceSnapshot"))
 			g.Expect(sc.Spec.NamespaceSnapshotRef.Name).To(Equal(fresh.Name))
 			g.Expect(sc.Spec.NamespaceSnapshotRef.Namespace).To(Equal(fresh.Namespace))
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+
+			mcrName := namespacemanifest.NamespaceSnapshotMCRName(fresh.UID)
+			mcr := &ssv1alpha1.ManifestCaptureRequest{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: mcrName}, mcr)).To(Succeed())
+			wantMCP := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+			g.Expect(sc.Status.ManifestCheckpointName).To(Equal(wantMCP))
+			mcp := &ssv1alpha1.ManifestCheckpoint{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: wantMCP}, mcp)).To(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
+	})
+
+	It("fails capture with NoCaptureTargets when the namespace has no N2a allowlisted resources", func() {
+		ctx := context.Background()
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "nss-notargets-",
+				Labels: map[string]string{
+					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-no-targets",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		nsName := ns.Name
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
+		})
+
+		snap := &storagev1alpha1.NamespaceSnapshot{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "snap",
+				Namespace: nsName,
+			},
+			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
+		}
+		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
+
+		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
+		Eventually(func(g Gomega) {
+			fresh := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
+			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
+			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(ready.Reason).To(Equal("NoCaptureTargets"))
+		}).WithTimeout(60 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })

@@ -46,12 +46,8 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
-)
-
-const (
-	// ChunkNamePrefix is the prefix for chunk names
-	ChunkNamePrefix = "mcp-"
 )
 
 // setSingleCondition sets a condition, removing any existing condition of the same type first
@@ -256,7 +252,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		// Generate deterministic checkpoint name based on MCR UID
 		// This prevents creating multiple checkpoints if reconciliation happens multiple times
 		// before status is successfully updated
-		checkpointName = r.generateCheckpointNameFromUID(string(mcr.UID))
+		checkpointName = namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
 		r.Logger.Info("Starting checkpoint creation",
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
 			"checkpoint", checkpointName,
@@ -771,10 +767,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
 
 		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, ChunkNamePrefix) {
-			checkpointID = checkpointName[len(ChunkNamePrefix):]
+		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
+			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
 		}
-		chunkName := fmt.Sprintf("%s%s-0", ChunkNamePrefix, checkpointID)
+		chunkName := fmt.Sprintf("%s%s-0", namespacemanifest.CheckpointNamePrefix, checkpointID)
 
 		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{
 			TypeMeta: metav1.TypeMeta{
@@ -911,10 +907,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	for i, chunk := range chunks {
 		// Extract ID from checkpoint name (remove prefix if present)
 		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, ChunkNamePrefix) {
-			checkpointID = checkpointName[len(ChunkNamePrefix):]
+		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
+			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
 		}
-		chunkName := fmt.Sprintf("%s%s-%d", ChunkNamePrefix, checkpointID, i)
+		chunkName := fmt.Sprintf("%s%s-%d", namespacemanifest.CheckpointNamePrefix, checkpointID, i)
 
 		// Marshal chunk objects to JSON array
 		chunkJSON, err := json.Marshal(chunk.objects)
@@ -1096,18 +1092,6 @@ func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData str
 	}
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
-}
-
-// generateCheckpointNameFromUID generates a deterministic checkpoint name from MCR UID
-// This prevents creating multiple checkpoints if reconciliation happens multiple times
-// before status is successfully updated (e.g., due to status update failures)
-func (r *ManifestCheckpointController) generateCheckpointNameFromUID(mcrUID string) string {
-	// Use SHA256 hash of MCR UID to get deterministic, RFC 1123 compliant name
-	// Take first 16 hex chars (8 bytes) for checkpoint ID
-	hash := sha256.Sum256([]byte(mcrUID))
-	id := hex.EncodeToString(hash[:8]) // 8 bytes = 16 hex chars
-
-	return fmt.Sprintf("%s%s", ChunkNamePrefix, id)
 }
 
 // loadConfigFromConfigMap loads controller configuration from optional ConfigMap

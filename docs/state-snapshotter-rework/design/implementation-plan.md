@@ -96,7 +96,7 @@
 
 **Definition of Done (N2a):**
 
-1. **Два ObjectKeeper не смешивать:** retention для корневого **`NamespaceSnapshotContent`** (**`FollowObjectWithTTL`**) отдельно от execution OK для цепочки **MCR→MCP** (**`FollowObject`** на MCR, как в текущем `ManifestCheckpointController`); chunks **MCP → ownerRef на MCP** (cluster-scoped GC). Детали — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §4.3.  
+1. **Два ObjectKeeper не смешивать:** корневой OK для **`NamespaceSnapshotContent`** (**N2a:** **`FollowObject`** на NSC по UID — lifecycle helper; **целевой** retention — **`FollowObjectWithTTL`**, отдельный этап) **отдельно** от execution OK для цепочки **MCR→MCP** (**`FollowObject`** на MCR, как в `ManifestCheckpointController`); chunks **MCP → ownerRef на MCP** (cluster-scoped GC). Детали — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §4.3.  
 2. Реальный manifest capture через цепочку **MCR → ManifestCheckpoint** (chunks), управляемый из потока **NamespaceSnapshot** (ensure MCR, observe MCP, без публичной обязанности MCR для оператора — см. design §10).  
 3. Запись результата в **`NamespaceSnapshotContent.status`** по **§4.4** design (как минимум **`manifestCheckpointName`**, conditions; опционально `capturedAt`, `resourceCount`).  
 4. **`Ready=True`** на root **только** после **persisted** manifest-результата (MCP Ready + консистентные chunks / статус MCP), **не** из «промежуточного» события вроде одного лишь факта создания MCR без готового checkpoint.  

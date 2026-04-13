@@ -21,10 +21,13 @@ package integration
 
 import (
 	"context"
+	"time"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -40,14 +43,12 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		ctx         context.Context
 		snapshotGVK schema.GroupVersionKind
 		contentGVK  schema.GroupVersionKind
-		mcpGVK      schema.GroupVersionKind
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
 		snapshotGVK = schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshot"}
 		contentGVK = schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshotContent"}
-		mcpGVK = schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "ManifestCheckpoint"}
 	})
 
 	It("should link ManifestCheckpointName into SnapshotContent when MCR is Ready", func() {
@@ -61,45 +62,40 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		}
 		Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
 
-		// Create MCR (typed)
+		linkCM := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "mcr-linking-cm", Namespace: "default"},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, linkCM)).To(Succeed())
+
 		mcr := &storagev1alpha1.ManifestCaptureRequest{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "mcr-linking-1",
 				Namespace: "default",
 			},
 			Spec: storagev1alpha1.ManifestCaptureRequestSpec{
-				Targets: []storagev1alpha1.ManifestTarget{},
+				Targets: []storagev1alpha1.ManifestTarget{{
+					APIVersion: "v1",
+					Kind:       "ConfigMap",
+					Name:       linkCM.Name,
+				}},
 			},
 		}
 		Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 
-		// Create MCP (cluster-scoped)
-		mcp := &unstructured.Unstructured{}
-		mcp.SetGroupVersionKind(mcpGVK)
-		mcp.SetName("mcp-linking-1")
-		mcp.Object["spec"] = map[string]interface{}{
-			"sourceNamespace": "default",
-			"manifestCaptureRequestRef": map[string]interface{}{
-				"name":      mcr.GetName(),
-				"namespace": mcr.GetNamespace(),
-				"uid":       string(mcr.GetUID()),
-			},
-		}
-		Expect(k8sClient.Create(ctx, mcp)).To(Succeed())
-
-		// Mark MCR Ready and set checkpointName
-		mcr.Status.CheckpointName = mcp.GetName()
-		mcr.Status.Conditions = []metav1.Condition{{
-			Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted,
-			Message:            "Completed",
-			LastTransitionTime: metav1.Now(),
-		}}
-		Expect(k8sClient.Status().Update(ctx, mcr)).To(Succeed())
-		freshMCR := &storagev1alpha1.ManifestCaptureRequest{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, freshMCR)).To(Succeed())
-		Expect(freshMCR.Status.CheckpointName).To(Equal(mcp.GetName()))
+		mcrKey := types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}
+		var mcpName string
+		Eventually(func(g Gomega) {
+			fresh := &storagev1alpha1.ManifestCaptureRequest{}
+			g.Expect(k8sClient.Get(ctx, mcrKey, fresh)).To(Succeed())
+			g.Expect(fresh.Status.CheckpointName).NotTo(BeEmpty())
+			ready := meta.FindStatusCondition(fresh.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
+			mcpName = fresh.Status.CheckpointName
+		}).WithTimeout(120 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		Expect(mcpName).NotTo(BeEmpty())
 
 		// Simulate domain controller status on Snapshot
 		snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
@@ -173,7 +169,7 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 			if contentStatus == nil {
 				return false
 			}
-			return contentStatus["manifestCheckpointName"] == mcp.GetName()
-		}, "20s", "200ms").Should(BeTrue(), "SnapshotContent should be linked to MCP from MCR")
+			return contentStatus["manifestCheckpointName"] == mcpName
+		}, "30s", "200ms").Should(BeTrue(), "SnapshotContent should be linked to MCP from MCR")
 	})
 })
