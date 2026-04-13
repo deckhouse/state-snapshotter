@@ -314,7 +314,7 @@ spec:
 
 ## 16. Поставка (milestones N0–N5, не `status.phase`)
 
-Имена **N0–N5** — этапы [`implementation-plan.md`](implementation-plan.md) §2.4; **не** поля API. Статус объектов — только **conditions** (§6). Детальный бэклог **N5** — только по ТЗ в `snapshot-rework/`.
+Имена **N0–N5** — этапы [`implementation-plan.md`](implementation-plan.md) §2.4; **не** поля API. Статус объектов — только **conditions** (§6). Детальный бэклог **N5** — только по ТЗ в `snapshot-rework/`. **Декомпозиция N2** (real capture по шагам N2.1–N2.8, DoD, out-of-scope) — **[`implementation-plan.md`](implementation-plan.md) §2.4.1** (SSOT порядка работ; этот §16 остаётся кратким указателем).
 
 ### N0 — Contract / gate
 
@@ -322,21 +322,21 @@ spec:
 2. Сверка apiVersion/group NS и NSC: ТЗ `snapshot-rework` ↔ CRD в репозитории.
 3. Пара **`NamespaceSnapshot` / `NamespaceSnapshotContent`** и **conditions-only** — decisions; root/content binding §4.2; ObjectKeeper — §4.3 + ТЗ.
 
-### N1 — CRD / API
+### N1 — CRD / API / skeleton lifecycle
 
-CRD, типы, codegen; убрать generic `SnapshotContent` как носитель для namespace root.
+✅ Закрыт в поставке кода: CRD, типы, codegen; generic `SnapshotContent` не носитель root; bind/delete; integration (lifecycle, deletion, mismatch, recovery). См. [`implementation-plan.md`](implementation-plan.md) §2.4.
 
-### N2 — Bootstrap + reconciler skeleton
+### N2 — Real capture (первый рабочий runner)
 
-Пара NS/NSC в bootstrap/unified, RBAC, watches; reconciler: finalizer, bind, **ObjectKeeper** (зачатки по ТЗ), fake capture, **conditions**.
+Поэтапно **§2.4.1** в [`implementation-plan.md`](implementation-plan.md): профиль GVR + exclusions, контракт артефакта v1, контракт runner, Job orchestration, реализация capture, **ObjectKeeper** как retention anchor, запись в `NamespaceSnapshotContent.status`, integration. §8 — ориентир по артефакту; детали v1 согласовать с §2.4.1 до кодирования.
 
-### N3 — Envtest
+### N3 — Envtest / hardening
 
-Сценарии §15 (lifecycle, recovery, негативные кейсы).
+Расширение сценариев §15 (в т.ч. recovery после рестарта контроллера); негативные кейсы сверх уже закрытых в N1.
 
-### N4 — Real capture
+### N4 — После N2
 
-Job runner, артефакт, §8.6, лимиты.
+Углублённые лимиты большого namespace (§8.6), таймауты — см. [`implementation-plan.md`](implementation-plan.md) §2.4 и M2.
 
 ### N5 — Полный ТЗ
 

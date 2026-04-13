@@ -25,6 +25,7 @@
 - **R3 ✅ (ядро):** явный слой state в `pkg/unifiedruntime`; интеграционный proof hot-add — `test/integration/unified_runtime_hot_add_test.go`; Prometheus gauges + лог при «stale» active (ключ есть в monotonic active, но выпал из resolved). **Опционально:** доп. proof-сценарии — по плану.
 - **Цель (ядро):** регистрация типов через DSC + **RBACReady** + активация watch без рестарта для новых eligible типов — реализовано для additive-пути; симметричное снятие watch — нет.
 - **Manifest / MCR / ManifestCheckpoint** — отдельный трек от unified registry snapshot-типов; не смешивать с DSC.
+- **NamespaceSnapshot real capture (N2):** поэтапная поставка (профиль GVR, артефакт v1, runner, Job, статусы, ObjectKeeper, тесты) — в [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.1**; при появлении стабильного контракта в API — дополнять этот spec, не дублируя длинные таблицы из design.
 
 ## §2. Ссылки
 

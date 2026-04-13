@@ -38,11 +38,13 @@
 | `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — root удаляется, `NamespaceSnapshotContent` остаётся; Delete — финализатор root снимается только после `NotFound` на content (ожидание удаления CR в API) |
 | `namespacesnapshot_n1_boundary_test.go` | **Формальное закрытие N1:** `ContentRefMismatch` при неверном `namespaceSnapshotRef` на NSC; **recovery** — после сброса `status` при валидном content снова `Bound`+`Ready`; короткая **стабильность** (Consistently) |
 
+**N2 (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1 / N2.8):** happy path (объекты в namespace → Job success → артефакт/result → root ready); fail-closed / нет профиля; **Retain** с ObjectKeeper/артефактом; runner fail (Job failed); smoke **pagination** для list.
+
 ## Планируемые тесты
 
 **Бэклог integration:** T5, T8–T11 и др. — по необходимости. R5 + T4/eligibility — см. [`design/implementation-plan.md`](../design/implementation-plan.md).
 
-**Порядок с M-треком:** сценарии **T6** и прочая нагрузка/расширение **MCR** не являются приоритетом, пока не стабилизированы **NamespaceSnapshot** + **NamespaceSnapshotContent** + **ObjectKeeper** (**N2–N3** после закрытого **N0–N1** API/bootstrap в [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4).
+**Порядок с M-треком:** сценарии **T6** и прочая нагрузка/расширение **MCR** не являются приоритетом, пока не закрыт **real capture N2** (§2.4.1) для пары **NamespaceSnapshot** / **NamespaceSnapshotContent** / retention; см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4–§2.4.1.
 
 | ID | Тест | Связь | Статус |
 |----|------|--------|--------|

@@ -68,12 +68,148 @@
 |---|--------|------------------------|--------|
 | N0 | **Gate:** **Chosen option** в [`namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `NamespaceSnapshot` / `NamespaceSnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §13–§16 | ✅ (scope resolved; group `storage.deckhouse.io/v1alpha1` на этапе N1) |
 | N1 | **CRD + API:** типы `NamespaceSnapshot`, `NamespaceSnapshotContent`, codegen, OpenAPI; **убрать** использование **generic `SnapshotContent`** как носителя результата для namespace root. | decision + design §14 | ✅ **закрыт:** skeleton reconciler; bind + delete (Retain/Delete); `status.boundSnapshotContentName`; integration: lifecycle, deletion, **ref mismatch**, **status recovery**; default exclusions до real capture — §4.1 design; без ObjectKeeper / real capture (**N2**). |
-| N2 | **Bootstrap / unified / RBAC:** пара GVK NS/NSC в `unifiedbootstrap`, watches, шаблоны RBAC; reconciler: finalizer, bind NS↔NSC, **conditions**; зачатки **ObjectKeeper** (корневой NSC, FollowObjectWithTTL — по ТЗ). | design §4.3, §5, §14 | ⬜ |
-| N3 | **Интеграция:** envtest — расширение: delete → recovery после **рестарта** контроллера; доп. негативные кейсы; политика по §15. Базовые mismatch/recovery/status уже в N1 (`namespacesnapshot_n1_boundary_test.go`). | design §15 | ⬜ |
-| N4 | **Реальный capture:** Job runner, артефакт, лимиты большого namespace (§8.6 design). | design §16 N2 | ⬜ |
+| N2 | **Первый real capture** для `NamespaceSnapshot` без child/volume/export/vision-flow: профиль GVR, контракт артефакта v1, контракт runner, Job orchestration, runner (list/sanitize/bundle), запись в `NamespaceSnapshotContent.status`, **ObjectKeeper** как retention anchor, integration. Пошагово — **§2.4.1**. | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) + §2.4.1 ниже | ⬜ |
+| N3 | **Интеграция / hardening:** envtest — recovery после **рестарта** контроллера; доп. негативные кейсы; политика по §15. Базовые mismatch/recovery/status уже в N1 (`namespacesnapshot_n1_boundary_test.go`). | design §15 | ⬜ |
+| N4 | **После закрытого N2:** углублённые лимиты большого namespace, политики таймаутов list/apiserver (пересечение с §8.6 design, M2). | design §8.6, §16 | ⬜ |
 | N5 | **Полный ТЗ:** дочерние снимки, DSC priority, экспорт/импорт, restore — итерациями по [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) без изменения ТЗ из `docs/`. | бэклог | ⬜ |
 
 Трек **N*** и **M1–M2** не смешивать в одном PR без необходимости.
+
+#### 2.4.1 N2 — декомпозиция (приземлённый порядок)
+
+**Цель N2:** первый **реальный** capture состояния namespace для `NamespaceSnapshot` — с runner, сбором объектов, артефактом, retention anchor и понятным lifecycle — **без** дочерних domain snapshots, volume orchestration, export/import и полного vision-flow.
+
+**Уже заложено в N1 (не повторять как «новый N2»):** пара GVK NS/NSC в bootstrap/unified wiring, dedicated reconciler, bind/delete, `status.boundSnapshotContentName`, базовые integration; fail-closed формулировка по exclusions до real capture — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §4.1.
+
+**Вне N2 (следующие пласты):** child snapshots, DSC priority traversal, VM-специфика, PVC/VolumeSnapshot orchestration, export/import API, restore pipeline, полный tree graph.
+
+---
+
+**Рекомендуемый порядок работ**
+
+| Фаза | Содержание |
+|------|------------|
+| **Этап 1 — до кода** | N2.1 capture profile → N2.2 artifact contract v1 → N2.3 runner contract |
+| **Этап 2 — controller + runner** | N2.4 Job orchestration → N2.5 реализация capture в runner → N2.7 запись result в `NamespaceSnapshotContent.status` (+ root conditions) |
+| **Этап 3 — retention** | N2.6 ObjectKeeper |
+| **Этап 4 — тесты** | N2.8 integration вокруг real capture |
+
+---
+
+**N2.1. Минимальный capture profile (зафиксировать до runner)**
+
+Зафиксировать в design (короткий раздел или отдельная заметка, со ссылкой из [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md)):
+
+- **built-in allowlist GVR** для MVP (узкий набор: например core workload/API-объекты namespaced — ConfigMap, Secret, Service, Deployment, StatefulSet, DaemonSet, Job, CronJob, Ingress; при необходимости **metadata-only** для PVC как manifest; плюс явно перечисленные namespaced CR модуля, если нужны с первого дня).
+- **exclusions policy:** всегда исключать служебное: `NamespaceSnapshot`, `NamespaceSnapshotContent`, объекты runner/результата, служебные префиксы snapshotter; при необходимости расширяемый список `excludedKinds` / GVR.
+- **unsupportedKinds:** что сознательно не поддерживается в N2 (документировать, чтобы не разъезжались ожидания).
+- **fail-closed:** профиль не задан / неразрешён → не стартовать capture; `Ready=False` с понятным reason.
+
+Результат: перечислимые **`defaultCaptureProfile`**, **`excludedKinds`**, **`unsupportedKinds`** (имена условные — в документе и коде согласовать).
+
+---
+
+**N2.2. Контракт артефакта v1**
+
+До реализации runner зафиксировать:
+
+- layout (минимум: каталог артефакта с `metadata.json` + `bundle.tar.gz` или эквивалент);
+- обязательные поля `metadata.json` (как минимум: `formatVersion`, `snapshotKind`, `sourceNamespace`, `capturedAt`, `resourceCount`, учёт included/excluded, `partial`, `warningsCount` — уточнить список при записи в design);
+- что считается **успешной** записью артефакта;
+- нужен ли отдельный `warnings.json` в v1.
+
+Результат: контракт, на который опираются runner, запись в `NamespaceSnapshotContent.status` и будущий restore/import.
+
+---
+
+**N2.3. Контракт runner (вход/выход, до Job в коде)**
+
+Решить и задокументировать:
+
+- **Runner shape:** для MVP — **Job** (distroless-friendly: бинарь runner без shell entrypoint).
+- **Вход:** env и/или labels/annotations (как минимум: имя/namespace `NamespaceSnapshot`, имя content, идентификатор/версия capture profile, ref на цель артефакта / repository — уточнить по инфраструктуре модуля).
+- **Выход / наблюдаемость:** для MVP — статус Job + **result object** (например ConfigMap) или запись, которую контроллер надёжно читает; **heartbeat** — опционально позже.
+- **Timeout policy** для Job и для reconcile (явно в design).
+
+---
+
+**N2.4. Job orchestration в reconciler**
+
+Код контроллера:
+
+- создать runner Job **один раз**, находить существующий, не плодить дубликаты;
+- маппинг фаз Job → **conditions** на root (и при необходимости на content): минимально — `Bound=True`, флаг/condition старта capture (`CaptureStarted` или эквивалент), `Ready=False` до завершения Job, `Ready=True` после успеха, `Ready=False` + reason при fail.
+
+---
+
+**N2.5. Реализация capture в runner**
+
+Runner (отдельный бинарь/образ, не shell):
+
+1. Загрузить built-in allowlist GVR.
+2. List с **пагинацией**, применить exclusions.
+3. **Sanitization** manifestов.
+4. Запись bundle (streaming/chunked по мере необходимости).
+5. Запись `metadata.json`, сохранение артефакта по контракту v1.
+6. Запись result marker для контроллера.
+
+**Не делать в N2:** доменные ветки, DSC traversal, VM special handling, children, volume data — только manifest capture namespace.
+
+---
+
+**N2.6. ObjectKeeper / retention anchor**
+
+Минимально для N2 (без тяжёлой retention-математики):
+
+- после **успешного** real capture: создать/обновить **ObjectKeeper** так, чтобы content/артефакт имели **retention anchor** (не «просто cluster content отдельно от root»);
+- связь `NamespaceSnapshotContent` ↔ OK (ownerReference / политика по ТЗ `snapshot-rework` — сверять при реализации);
+- delete root + **Retain** не ломают удержание результата; **FollowObjectWithTTL** / TTL — минимальный вариант по ТЗ, без усложнения в первом merge.
+
+---
+
+**N2.7. Результат в `NamespaceSnapshotContent.status`**
+
+После успешного runner:
+
+- conditions на content, ссылки/метаданные артефакта (location, `formatVersion`, `capturedAt` — по контракту);
+- на root: `Ready=True` отражает **реально сохранённый** артефакт, а не fake capture N1.
+
+---
+
+**N2.8. Integration tests (real capture)**
+
+Минимум:
+
+1. **Happy path:** namespace с несколькими объектами → Job success → артефакт/result → root ready.
+2. **Fail-closed / no profile:** `Ready=False`, понятный reason.
+3. **Retain:** root удалён → content + OK остаются (в духе уже существующих delete-тестов N1, расширить под OK/артефакт).
+4. **Runner fail:** Job failed → snapshot not ready, reason.
+5. **Large namespace:** хотя бы smoke на путь **pagination** (полные лимиты — см. N4 / M2).
+
+---
+
+**Definition of Done (N2 закрыт)**
+
+1. `NamespaceSnapshot` запускает **реальный** capture runner.  
+2. Runner собирает **разрешённый** набор namespaced объектов.  
+3. Артефакт **реально создаётся** и сохраняется по контракту v1.  
+4. `NamespaceSnapshotContent.status` содержит result metadata.  
+5. `Ready=True` означает **persisted artifact**, не placeholder N1.  
+6. **Retain** удерживает результат при независимой судьбе root (через OK / политику).  
+7. Есть integration tests: happy, fail-closed/fail, retain (и smoke pagination).
+
+---
+
+**Практический task-list (копипаст backlog)**
+
+1. Spec/design: built-in GVR allowlist + exclusions + unsupported.  
+2. Spec/design: artifact format v1.  
+3. Spec/design: runner I/O + timeouts.  
+4. Code: Job create/observe + conditions.  
+5. Code: runner capture (pagination, sanitization, bundle + metadata).  
+6. Code: persist artifact + update content (and root) status.  
+7. Code: ObjectKeeper integration.  
+8. Tests: happy / fail / retain (+ pagination smoke).
 
 ### 2.5 Документация и операционка
 
@@ -97,8 +233,8 @@
 
 1. ~~**R5 + feature gates**~~ ✅ — `STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`; Helm `unifiedSnapshotEnabled`, `unifiedBootstrapPairs`.
 2. ~~**Точечные integration-тесты**~~ ✅ — `unified_runtime_rbac_eligibility_test.go`: без RBACReady нет записи в `EligibleFromDSC`; после снятия RBACReady resolved теряет пару, monotonic active сохраняет ключ.
-3. **N0 → N1 → N2 → N3 → N4** — **`NamespaceSnapshot` / `NamespaceSnapshotContent` / ObjectKeeper** по ТЗ `snapshot-rework`; затем **N5** (полный сценарий ТЗ итерациями).
-4. **M1**, затем **M2** — только после стабилизации **N1–N3** (минимум bind + OK + fake capture + тесты).
+3. ~~**N0 → N1**~~ ✅; **N2** — по **§2.4.1** (real capture поэтапно); затем **N3** (restart/hardening), **N4** (лимиты после N2), **N5** (полный сценарий ТЗ `snapshot-rework` итерациями).
+4. **M1**, затем **M2** — только после стабилизации namespace-flow (**N2 закрыт** или явный gate в плане); manifest-трек не смешивать с N2 без необходимости.
 
 *(R5 и M1–M2 не смешивать в одном PR без необходимости.)*
 
