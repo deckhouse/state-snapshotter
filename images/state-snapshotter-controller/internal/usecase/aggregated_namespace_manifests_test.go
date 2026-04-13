@@ -40,6 +40,11 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
+const (
+	pr4TestSnapNamespace = "ns1"
+	pr4TestSnapName      = "snap"
+)
+
 func pr4TestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -63,12 +68,12 @@ func pr4EncodeChunk(objects []map[string]interface{}) (data string, checksum str
 	return encoded, hex.EncodeToString(hash[:])
 }
 
-func pr4CreateChunk(name, cpName string, index int, data, checksum string) *ssv1alpha1.ManifestCheckpointContentChunk {
+func pr4CreateChunk(name, cpName string, data, checksum string) *ssv1alpha1.ManifestCheckpointContentChunk {
 	return &ssv1alpha1.ManifestCheckpointContentChunk{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: ssv1alpha1.ManifestCheckpointContentChunkSpec{
 			CheckpointName: cpName,
-			Index:          index,
+			Index:          0,
 			Data:           data,
 			Checksum:       checksum,
 			ObjectsCount:   1,
@@ -105,7 +110,7 @@ func pr4NotReadyMCP(name, srcNS string, chunks []ssv1alpha1.ChunkInfo, totalObj 
 	return cp
 }
 
-func pr4NSC(name, snapNS, snapName, mcpName string, children ...string) *storagev1alpha1.NamespaceSnapshotContent {
+func pr4NSC(name, mcpName string, children ...string) *storagev1alpha1.NamespaceSnapshotContent {
 	var refs []storagev1alpha1.NamespaceSnapshotContentChildRef
 	for _, c := range children {
 		refs = append(refs, storagev1alpha1.NamespaceSnapshotContentChildRef{Name: c})
@@ -116,8 +121,8 @@ func pr4NSC(name, snapNS, snapName, mcpName string, children ...string) *storage
 			NamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				Kind:       "NamespaceSnapshot",
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Name:       snapName,
-				Namespace:  snapNS,
+				Name:       pr4TestSnapName,
+				Namespace:  pr4TestSnapNamespace,
 			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
@@ -132,9 +137,9 @@ func pr4NSC(name, snapNS, snapName, mcpName string, children ...string) *storage
 	return nsc
 }
 
-func pr4NS(nsName, snapName, bound string) *storagev1alpha1.NamespaceSnapshot {
+func pr4NS(bound string) *storagev1alpha1.NamespaceSnapshot {
 	return &storagev1alpha1.NamespaceSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: nsName},
+		ObjectMeta: metav1.ObjectMeta{Name: pr4TestSnapName, Namespace: pr4TestSnapNamespace},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			BoundSnapshotContentName: bound,
 		},
@@ -151,13 +156,13 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 	d1, c1 := pr4EncodeChunk([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "a", "namespace": "ns1"}},
 	})
-	ch := pr4CreateChunk("ch0", "mcp-root", 0, d1, c1)
+	ch := pr4CreateChunk("ch0", "mcp-root", d1, c1)
 	_ = cl.Create(context.Background(), ch)
 	mcp := pr4ReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
 	_ = cl.Create(context.Background(), mcp)
-	root := pr4NSC("root-nsc", "ns1", "snap", "mcp-root")
+	root := pr4NSC("root-nsc", "mcp-root")
 	_ = cl.Create(context.Background(), root)
-	ns := pr4NS("ns1", "snap", "root-nsc")
+	ns := pr4NS("root-nsc")
 	_ = cl.Create(context.Background(), ns)
 
 	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
@@ -193,21 +198,21 @@ func TestAggregatedNamespaceManifests_ParentTwoChildren_OrderAndDedup(t *testing
 		{"mcp-c", objC},
 	} {
 		d, cs := pr4EncodeChunk(tc.objs)
-		ch := pr4CreateChunk("ch-"+tc.cpName, tc.cpName, 0, d, cs)
+		ch := pr4CreateChunk("ch-"+tc.cpName, tc.cpName, d, cs)
 		_ = cl.Create(context.Background(), ch)
 		mcp := pr4ReadyMCP(tc.cpName, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 		_ = cl.Create(context.Background(), mcp)
 	}
 
 	// child-b before child-c lexicographically
-	childB := pr4NSC("child-b", "ns1", "snap", "mcp-b")
-	childC := pr4NSC("child-c", "ns1", "snap", "mcp-c")
+	childB := pr4NSC("child-b", "mcp-b")
+	childC := pr4NSC("child-c", "mcp-c")
 	_ = cl.Create(context.Background(), childB)
 	_ = cl.Create(context.Background(), childC)
 
-	root := pr4NSC("root-nsc", "ns1", "snap", "mcp-root", "child-c", "child-b") // unsorted input; walk sorts
+	root := pr4NSC("root-nsc", "mcp-root", "child-c", "child-b") // unsorted input; walk sorts
 	_ = cl.Create(context.Background(), root)
-	ns := pr4NS("ns1", "snap", "root-nsc")
+	ns := pr4NS("root-nsc")
 	_ = cl.Create(context.Background(), ns)
 
 	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
@@ -260,9 +265,9 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 	t.Run("mcp not found 404", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
-		root := pr4NSC("root-nsc", "ns1", "snap", "missing-mcp")
+		root := pr4NSC("root-nsc", "missing-mcp")
 		_ = cl.Create(ctx, root)
-		ns := pr4NS("ns1", "snap", "root-nsc")
+		ns := pr4NS("root-nsc")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -273,7 +278,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 
 	t.Run("nsc not found 404", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-			pr4NS("ns1", "snap", "no-such-nsc"),
+			pr4NS("no-such-nsc"),
 		).Build()
 		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
@@ -290,13 +295,13 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		d1, c1 := pr4EncodeChunk([]map[string]interface{}{
 			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "a", "namespace": "ns1"}},
 		})
-		ch := pr4CreateChunk("ch0", "mcp-bad", 0, d1, c1)
+		ch := pr4CreateChunk("ch0", "mcp-bad", d1, c1)
 		_ = cl.Create(ctx, ch)
 		mcp := pr4NotReadyMCP("mcp-bad", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
 		_ = cl.Create(ctx, mcp)
-		root := pr4NSC("root-nsc", "ns1", "snap", "mcp-bad")
+		root := pr4NSC("root-nsc", "mcp-bad")
 		_ = cl.Create(ctx, root)
-		ns := pr4NS("ns1", "snap", "root-nsc")
+		ns := pr4NS("root-nsc")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -314,16 +319,16 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		}
 		for _, name := range []string{"mcp-root", "mcp-child"} {
 			d, cs := pr4EncodeChunk(dupObj)
-			ch := pr4CreateChunk("ch-"+name, name, 0, d, cs)
+			ch := pr4CreateChunk("ch-"+name, name, d, cs)
 			_ = cl.Create(ctx, ch)
 			mcp := pr4ReadyMCP(name, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 			_ = cl.Create(ctx, mcp)
 		}
-		child := pr4NSC("child-nsc", "ns1", "snap", "mcp-child")
+		child := pr4NSC("child-nsc", "mcp-child")
 		_ = cl.Create(ctx, child)
-		root := pr4NSC("root-nsc", "ns1", "snap", "mcp-root", "child-nsc")
+		root := pr4NSC("root-nsc", "mcp-root", "child-nsc")
 		_ = cl.Create(ctx, root)
-		ns := pr4NS("ns1", "snap", "root-nsc")
+		ns := pr4NS("root-nsc")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -340,16 +345,16 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "x", "namespace": "ns1"}},
 		})
 		for _, pair := range []struct{ cp, ch string }{{"mcp-a", "ch-a"}, {"mcp-b", "ch-b"}} {
-			ch := pr4CreateChunk(pair.ch, pair.cp, 0, d, cs)
+			ch := pr4CreateChunk(pair.ch, pair.cp, d, cs)
 			_ = cl.Create(ctx, ch)
 			mcp := pr4ReadyMCP(pair.cp, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 			_ = cl.Create(ctx, mcp)
 		}
-		a := pr4NSC("nsc-a", "ns1", "snap", "mcp-a", "nsc-b")
-		b := pr4NSC("nsc-b", "ns1", "snap", "mcp-b", "nsc-a")
+		a := pr4NSC("nsc-a", "mcp-a", "nsc-b")
+		b := pr4NSC("nsc-b", "mcp-b", "nsc-a")
 		_ = cl.Create(ctx, a)
 		_ = cl.Create(ctx, b)
-		ns := pr4NS("ns1", "snap", "nsc-a")
+		ns := pr4NS("nsc-a")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -361,10 +366,10 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 	t.Run("missing manifestCheckpointName 500", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
-		nsc := pr4NSC("root-nsc", "ns1", "snap", "x")
+		nsc := pr4NSC("root-nsc", "x")
 		nsc.Status.ManifestCheckpointName = ""
 		_ = cl.Create(ctx, nsc)
-		ns := pr4NS("ns1", "snap", "root-nsc")
+		ns := pr4NS("root-nsc")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
