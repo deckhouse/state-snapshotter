@@ -105,6 +105,8 @@
 - **unsupportedKinds:** что сознательно не поддерживается в N2 (документировать, чтобы не разъезжались ожидания).
 - **fail-closed:** профиль не задан / неразрешён → не стартовать capture; `Ready=False` с понятным reason.
 
+**Нормативно для N2:** **runner MUST** собирать объекты **только** из явно зафиксированного built-in allowlist / профиля (один SSOT-список GVR в коде или генерируемый из одного источника, описанного в design). Поведение «снять всё подряд» / ad-hoc расширение списка только в runner **запрещены**.
+
 Результат: перечислимые **`defaultCaptureProfile`**, **`excludedKinds`**, **`unsupportedKinds`** (имена условные — в документе и коде согласовать).
 
 ---
@@ -113,7 +115,8 @@
 
 До реализации runner зафиксировать:
 
-- layout (минимум: каталог артефакта с `metadata.json` + `bundle.tar.gz` или эквивалент);
+- layout: каталог артефакта с **`metadata.json`** + **один бинарный payload-архив**;
+- **Формат архива для artifact v1 (N2):** нормативно **gzip-сжатый tar — файл `bundle.tar.gz`** (расширение и MIME согласовать в модуле). Иной формат (zip, только ref без файла) — **не v1**, а новая `formatVersion` или отдельное ADR/решение, чтобы не плодить «у каждого свой архив».
 - обязательные поля `metadata.json` (как минимум: `formatVersion`, `snapshotKind`, `sourceNamespace`, `capturedAt`, `resourceCount`, учёт included/excluded, `partial`, `warningsCount` — уточнить список при записи в design);
 - что считается **успешной** записью артефакта;
 - нужен ли отдельный `warnings.json` в v1.
@@ -131,6 +134,8 @@
 - **Выход / наблюдаемость:** для MVP — статус Job + **result object** (например ConfigMap) или запись, которую контроллер надёжно читает; **heartbeat** — опционально позже.
 - **Timeout policy** для Job и для reconcile (явно в design).
 
+**Источник истины для готовности (N2):** контроллер **обязан** выводить успех capture (в т.ч. возможность выставить на root **`Ready=True`**) из **устойчиво сохранённого результата runner** (артефакт + `metadata.json` по контракту v1 и/или явный success marker в result object / запись, согласованная в N2.3), после чего обновляется **`NamespaceSnapshotContent.status`** (и затем root). **Одного** факта `Job.status.completionTime` / `Succeeded` **недостаточно** — Job может завершиться без валидного артефакта или до записи result; **MUST NOT** ставить `Ready=True` только потому, что Job завершился успешно.
+
 ---
 
 **N2.4. Job orchestration в reconciler**
@@ -138,7 +143,8 @@
 Код контроллера:
 
 - создать runner Job **один раз**, находить существующий, не плодить дубликаты;
-- маппинг фаз Job → **conditions** на root (и при необходимости на content): минимально — `Bound=True`, флаг/condition старта capture (`CaptureStarted` или эквивалент), `Ready=False` до завершения Job, `Ready=True` после успеха, `Ready=False` + reason при fail.
+- маппинг фаз Job → **conditions** на root (и при необходимости на content): минимально — `Bound=True`, флаг/condition старта capture (`CaptureStarted` или эквивалент), `Ready=False` до подтверждённого persisted result (см. **N2.3**), `Ready=True` только после выполнения критериев N2.3/N2.7, `Ready=False` + reason при fail;
+- не использовать «Job Succeeded ⇒ сразу Ready=True» без проверки артефакта/result.
 
 ---
 
@@ -161,6 +167,7 @@ Runner (отдельный бинарь/образ, не shell):
 
 Минимально для N2 (без тяжёлой retention-математики):
 
+- **ObjectKeeper** в N2 — это **retention anchor** для удержания content/артефакта после удаления root/namespace; **не** слой bind между root и content и **не** замена **`spec.namespaceSnapshotRef`** / **`status.boundSnapshotContentName`** (bind остаётся контрактом NS↔NSC; OK — отдельная ось lifecycle удержания).
 - после **успешного** real capture: создать/обновить **ObjectKeeper** так, чтобы content/артефакт имели **retention anchor** (не «просто cluster content отдельно от root»);
 - связь `NamespaceSnapshotContent` ↔ OK (ownerReference / политика по ТЗ `snapshot-rework` — сверять при реализации);
 - delete root + **Retain** не ломают удержание результата; **FollowObjectWithTTL** / TTL — минимальный вариант по ТЗ, без усложнения в первом merge.
@@ -194,7 +201,7 @@ Runner (отдельный бинарь/образ, не shell):
 2. Runner собирает **разрешённый** набор namespaced объектов.  
 3. Артефакт **реально создаётся** и сохраняется по контракту v1.  
 4. `NamespaceSnapshotContent.status` содержит result metadata.  
-5. `Ready=True` означает **persisted artifact**, не placeholder N1.  
+5. `Ready=True` означает **persisted artifact** и подтверждённый result по **N2.3**, не placeholder N1 и не «только Job Succeeded».  
 6. **Retain** удерживает результат при независимой судьбе root (через OK / политику).  
 7. Есть integration tests: happy, fail-closed/fail, retain (и smoke pagination).
 
