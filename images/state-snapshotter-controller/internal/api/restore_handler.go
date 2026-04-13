@@ -12,62 +12,83 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 type RestoreHandler struct {
-	client  client.Client
-	service *restore.Service
-	logger  logger.LoggerInterface
+	client       client.Client
+	service      *restore.Service
+	logger       logger.LoggerInterface
+	nsAggregated *usecase.AggregatedNamespaceManifests
 }
 
-func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface) *RestoreHandler {
+func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests) *RestoreHandler {
 	return &RestoreHandler{
-		client:  client,
-		service: service,
-		logger:  logger,
+		client:       client,
+		service:      service,
+		logger:       logger,
+		nsAggregated: nsAggregated,
 	}
 }
 
 func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
-	// /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/<ns>/snapshots
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
-		// Extract path after /apis/.../v1alpha1/namespaces/
 		path := strings.TrimPrefix(r.URL.Path, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/")
 		path = strings.TrimSuffix(path, "/")
 		parts := strings.Split(path, "/")
-		if len(parts) < 2 || parts[1] != "snapshots" {
+		if len(parts) < 2 {
 			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
 			return
 		}
 		namespace := parts[0]
-		if len(parts) == 2 {
-			// List snapshots (not implemented, return empty list)
-			if r.Method != http.MethodGet {
-				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported for list")
+		switch parts[1] {
+		case "snapshots":
+			if len(parts) == 2 {
+				if r.Method != http.MethodGet {
+					h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported for list")
+					return
+				}
+				h.HandleListSnapshots(w, r)
 				return
 			}
-			h.HandleListSnapshots(w, r)
-			return
-		}
-		if len(parts) < 4 {
-			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required")
-			return
-		}
-		snapshotName := parts[2]
-		subresource := parts[3]
-		if r.Method != http.MethodGet {
-			h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
-			return
-		}
-		switch subresource {
-		case "manifests":
-			h.HandleGetSnapshotManifests(w, r, namespace, snapshotName)
-		case "manifests-with-data-restoration":
-			h.HandleGetSnapshotManifestsWithDataRestoration(w, r, namespace, snapshotName)
+			if len(parts) < 4 {
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required")
+				return
+			}
+			snapshotName := parts[2]
+			subresource := parts[3]
+			if r.Method != http.MethodGet {
+				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
+				return
+			}
+			switch subresource {
+			case "manifests":
+				h.HandleGetSnapshotManifests(w, r, namespace, snapshotName)
+			case "manifests-with-data-restoration":
+				h.HandleGetSnapshotManifestsWithDataRestoration(w, r, namespace, snapshotName)
+			default:
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
+			}
+		case "namespacesnapshots":
+			if len(parts) != 4 {
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
+				return
+			}
+			if r.Method != http.MethodGet {
+				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
+				return
+			}
+			snapName := parts[2]
+			sub := parts[3]
+			if sub != "manifests" {
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
+				return
+			}
+			h.HandleNamespaceSnapshotAggregatedManifests(w, r, namespace, snapName)
 		default:
-			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
+			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
 		}
 	})
 }
@@ -125,6 +146,30 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned manifests-with-data-restoration", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+}
+
+func (h *RestoreHandler) HandleNamespaceSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
+	start := time.Now()
+	if h.nsAggregated == nil {
+		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "aggregated manifests handler not configured")
+		return
+	}
+	data, err := h.nsAggregated.BuildAggregatedJSON(r.Context(), namespace, snapshotName)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned NamespaceSnapshot aggregated manifests", "namespaceSnapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+}
+
+func (h *RestoreHandler) writeAggregatedError(w http.ResponseWriter, err error) {
+	var st *usecase.AggregatedStatusError
+	if errors.As(err, &st) {
+		h.writeKubernetesErrorResponse(w, st.HTTPStatus, st.Reason, st.Message)
+		return
+	}
+	h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", err.Error())
 }
 
 func (h *RestoreHandler) writeRestoreError(w http.ResponseWriter, err error) {

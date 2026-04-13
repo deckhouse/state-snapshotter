@@ -53,7 +53,8 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	// Create archive handler with directClient for ManifestCheckpoint
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
 	restoreService := restore.NewService(directClient, archiveService)
-	restoreHandler := NewRestoreHandler(directClient, restoreService, logger)
+	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService)
+	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg)
 
 	// Setup routes
 	mux := http.NewServeMux()

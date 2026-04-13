@@ -326,6 +326,11 @@ func TestHandleAPIResourceListDiscovery_SubresourcesOnly(t *testing.T) {
 	if _, exists := resources["snapshots/manifests-with-data-restoration"]; !exists {
 		t.Fatalf("snapshots/manifests-with-data-restoration missing in discovery")
 	}
+	if ns, exists := resources["namespacesnapshots/manifests"]; !exists {
+		t.Fatalf("namespacesnapshots/manifests missing in discovery")
+	} else if !ns.Namespaced || ns.Kind != "NamespaceSnapshot" {
+		t.Fatalf("namespacesnapshots/manifests has wrong discovery: %+v", ns)
+	}
 }
 
 // TestHandleGetManifests_WithoutGzip tests uncompressed JSON response.

@@ -10,7 +10,7 @@ import (
 
 func TestRestoreHandler_RoutingInvalidPaths(t *testing.T) {
 	log, _ := logger.NewLogger("error")
-	handler := NewRestoreHandler(nil, nil, log)
+	handler := NewRestoreHandler(nil, nil, log, nil)
 	mux := http.NewServeMux()
 	handler.SetupRoutes(mux)
 	server := httptest.NewServer(mux)
@@ -37,7 +37,7 @@ func TestRestoreHandler_RoutingInvalidPaths(t *testing.T) {
 
 func TestRestoreHandler_ListSnapshotsMethodNotAllowed(t *testing.T) {
 	log, _ := logger.NewLogger("error")
-	handler := NewRestoreHandler(nil, nil, log)
+	handler := NewRestoreHandler(nil, nil, log, nil)
 	mux := http.NewServeMux()
 	handler.SetupRoutes(mux)
 	server := httptest.NewServer(mux)
