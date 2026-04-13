@@ -72,8 +72,8 @@ run_linters() {
         echo "git apply - <<EOF
 $(git diff)
 EOF"
-        section_end "print_patch" 
-        git checkout -f
+        section_end "print_patch"
+        echo -e "\e[33mWorking tree is dirty (golangci-lint --fix and/or local edits). Review with git diff; commit or revert explicitly. This script no longer runs git checkout -f (that discarded uncommitted work).\e[0m"
         failed='true'
     else
         echo -e "\e[32mLinter doesn't have changes requested for $run_for\e[0m"
