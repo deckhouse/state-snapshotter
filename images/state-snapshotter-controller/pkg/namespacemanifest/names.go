@@ -32,8 +32,9 @@ func NamespaceSnapshotMCRName(uid types.UID) string {
 	return fmt.Sprintf("nss-%s", uid)
 }
 
-// NamespaceSnapshotRootObjectKeeperName is the cluster-scoped ObjectKeeper name for root retention (FollowObject on NamespaceSnapshotContent).
-// Namespace disambiguates same snapshot name in different namespaces; UID validation on existing OK is still required.
+// NamespaceSnapshotRootObjectKeeperName is the cluster-scoped ObjectKeeper name for root lifecycle (FollowObject on NamespaceSnapshotContent).
+// Namespace disambiguates same snapshot name in different namespaces. If the root is recreated with the same name,
+// the controller deletes a stale OK that still follows the previous NSC UID before creating one for the new generation.
 func NamespaceSnapshotRootObjectKeeperName(namespace, snapshotName string) string {
 	return fmt.Sprintf("ret-nssnap-%s-%s", namespace, snapshotName)
 }

@@ -241,7 +241,13 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 		return nil, ctrl.Result{}, err
 	default:
 		if ok.Spec.FollowObjectRef == nil || ok.Spec.FollowObjectRef.UID != string(content.UID) {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s does not follow this NamespaceSnapshotContent", name)
+			// OK name is (namespace, snapshotName); recreating the root reuses the name but gets a new NSC UID.
+			// Drop the previous generation's OK so the NotFound branch can create a follower for this content.
+			if err := r.Client.Delete(ctx, ok); err != nil && !apierrors.IsNotFound(err) {
+				return nil, ctrl.Result{}, fmt.Errorf("delete stale ObjectKeeper %s: %w", name, err)
+			}
+			logger.Info("deleted stale root ObjectKeeper after NamespaceSnapshot recreate", "objectKeeper", name, "contentUID", string(content.UID))
+			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
 		return ok, ctrl.Result{}, nil
 	}
