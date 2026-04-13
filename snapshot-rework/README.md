@@ -14,3 +14,5 @@
 | Прогресс / стадии | [`operations/project-status.md`](../docs/state-snapshotter-rework/operations/project-status.md) |
 
 При смене контракта обновляй **`docs/state-snapshotter-rework/spec/system-spec.md`** и при необходимости соответствующий ADR в этом каталоге.
+
+**N2b PR4 (aggregated manifests download):** человекочитаемое объяснение для митинга — [`2026-04-09-namespace-snapshot-pr4-aggregated-manifests.md`](2026-04-09-namespace-snapshot-pr4-aggregated-manifests.md); нормативный контракт — [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../docs/state-snapshotter-rework/spec/namespace-snapshot-aggregated-manifests-pr4.md).

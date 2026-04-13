@@ -341,7 +341,7 @@
 - **MCP не Ready:** ответ **409 Conflict** с телом Kubernetes **Status** (`checkpoint not ready`) — клиент не считает снимок готовым к выгрузке.
 - **MCP не найден:** **404**.
 - **Нет chunk / checksum mismatch / прочая поломка при склейке:** **500 InternalError** (как сейчас при ошибке `GetArchiveFromCheckpoint`); логирование с деталями. **N2a:** это **не** автоматически снимает **`Ready=True`** на `NamespaceSnapshot`/`NamespaceSnapshotContent` при одном неудачном запросе download (операционный сбой чтения ≠ откат capture). Отдельная condition уровня **ArtifactUnreadable** / reconcile, пересобирающий MCP — **после N2a**, если понадобится.
-- **N2b aggregated download:** новый маршрут или композиция нескольких вызовов к тому же механизму склейки — в реализации N2b; семантика ошибок та же (нет готового child MCP → не включать или fail whole — зафиксировать в N2b PR).
+- **N2b aggregated download (PR4):** нормативный контракт — [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../spec/namespace-snapshot-aggregated-manifests-pr4.md) (endpoint `…/namespaces/{ns}/namespacesnapshots/{name}/manifests`, fail-whole, обход NSC, `ArchiveService`). **N2a** single-MCP путь — без изменений (строка выше).
 
 ---
 

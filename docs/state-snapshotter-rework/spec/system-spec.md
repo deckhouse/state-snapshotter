@@ -29,6 +29,7 @@
 - **N2b — форма графа в статусе (PR1):** опциональные поля **`status.childrenSnapshotRefs`** на **`NamespaceSnapshot`** (элементы JSON: **`name`**, **`namespace`**) и **`status.childrenSnapshotContentRefs`** на **`NamespaceSnapshotContent`** (элемент: **`name`**). В Go типы элементов — **`NamespaceSnapshotChildRef`** / **`NamespaceSnapshotContentChildRef`** (N2b child graph, не универсальные cross-kind refs). Семантика заполнения, orchestration и агрегированный **Ready** — не в PR1; см. **§2.4.2** плана и design **§11**.
 - **N2b PR2 (scaffold в коде):** при аннотации **`state-snapshotter.deckhouse.io/n2b-pr2-synthetic-tree`** на parent контроллер обеспечивает одного synthetic child и запись graph refs; **§11.1** design и **§2.4.2** плана.
 - **N2b PR3:** агрегированный **Ready** parent: собственный persisted MCP **и** required synthetic child **`Ready=True`**; иначе **`ChildSnapshotPending`** или при терминальном провале child — **`ChildSnapshotFailed`** (`pkg/snapshot`); таблица и whitelist — **§11.1** design.
+- **N2b PR4 — aggregated manifests download (HTTP + traversal + errors):** нормативный контракт — **[`spec/namespace-snapshot-aggregated-manifests-pr4.md`](namespace-snapshot-aggregated-manifests-pr4.md)** (endpoint, fail-whole, merge, циклы, дубликаты). Общие принципы N2a/N2b download — по-прежнему [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) **§8.7** (ссылка на PR4 SSOT в **§8.7.1**).
 
 ## §2. Ссылки
 
