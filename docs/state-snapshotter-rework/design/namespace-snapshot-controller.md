@@ -393,6 +393,8 @@ spec:
 - **Child в терминальном сбое** (`Ready=False` / Failed): parent **`Ready=False`** с устойчивым reason, например **`ChildSnapshotFailed`** (имя согласовать с `pkg/snapshot`), с указанием какого child.
 - Список **required** children vs optional — зафиксировать в spec/API при введении N2b (до кода агрегации).
 
+**PR2 (реализованный scaffold, не product flow):** при аннотации **`state-snapshotter.deckhouse.io/n2b-pr2-synthetic-tree: "true"`** на parent `NamespaceSnapshot` контроллер создаёт **ровно одного** synthetic child с именем **`<parent>-child`** в том же namespace, помечает child **label** **`state-snapshotter.deckhouse.io/n2b-synthetic-child=true`** (child **не** порождает следующих детей и идёт обычным **N2a leaf**). Parent пишет **`status.childrenSnapshotRefs`** и **`NamespaceSnapshotContent.status.childrenSnapshotContentRefs`**; **root `Ready=True`** только после **`Ready=True`** у child; пока child не готов — root **`Ready=False`**, reason вроде **`ChildSnapshotPending`**. **Без** aggregated download, **без** domain traversal; до **PR5** это временная проверка графа/reconcile — см. [`implementation-plan.md`](implementation-plan.md) §2.4.2 PR2.
+
 **Ready=True не означает:**
 
 - Что сохранены **данные томов**.

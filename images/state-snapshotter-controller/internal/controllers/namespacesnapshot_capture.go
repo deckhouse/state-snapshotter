@@ -154,6 +154,10 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, err
 	}
 
+	if parentWantsN2bPR2SyntheticTree(nsSnap) {
+		return r.reconcileSyntheticTreePR2(ctx, nsSnap, content)
+	}
+
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 		Type:               snapshot.ConditionReady,

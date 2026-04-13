@@ -74,6 +74,10 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 			&storagev1alpha1.NamespaceSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(mapNamespaceSnapshotContentToNamespaceSnapshot),
 		).
+		Watches(
+			&storagev1alpha1.NamespaceSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(mapSyntheticChildNamespaceSnapshotToParent),
+		).
 		Complete(r)
 }
 
