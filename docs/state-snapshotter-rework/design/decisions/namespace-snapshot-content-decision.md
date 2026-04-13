@@ -1,31 +1,34 @@
-# Decision: NamespaceSnapshot uses generic SnapshotContent in MVP
+# Decision: NamespaceSnapshot paired with NamespaceSnapshotContent (+ ObjectKeeper)
 
 ## Status
 
-Accepted for **MVP** scope described in [`../namespace-snapshot-controller.md`](../namespace-snapshot-controller.md). Revisit if generic `SnapshotContent` proves insufficient for namespace-state payloads or policy.
+**Accepted** — целевая модель внедрения. Детальный поток, поля и примеры — **только** в [`snapshot-rework/`](../../../snapshot-rework/) (файлы в этом каталоге для контракта **не меняем** в пользу `docs/`; инженерные документы здесь только план поставки и ссылки).
 
-**Согласованность:** binding root ↔ content, Ready, artifact ownership, MCR как internal-only — как в основном design (§4.2, §8.5, §10–§11). Отдельный **gate по API scope** (cluster vs namespaced) — [`namespace-snapshot-scope.md`](namespace-snapshot-scope.md); на выбор content kind он не влияет.
+**Согласованность:** binding root ↔ content, Ready, artifact ownership, политика удаления — выводить из ТЗ в `snapshot-rework` и этого design. **Gate по API scope** (cluster vs namespaced root) — [`namespace-snapshot-scope.md`](namespace-snapshot-scope.md).
 
 ## Context
 
-Namespace snapshot нужен как **first-class root** в unified snapshot модели. Публичная модель состояния в MVP: **NamespaceSnapshot → SnapshotContent → artifact metadata** (без обязательного MCR как второго источника правды). Варианты носителя результата:
+Нужен явный носитель результата снимка namespace в паре с **`NamespaceSnapshot`**, по тому же паттерну, что и другие доменные `XxxSnapshot` / `XxxSnapshotContent`. Общий **`SnapshotContent`** (`storage.deckhouse.io`) для **корня** namespace-snapshot **не** используем: целевая пара — **`NamespaceSnapshot` + `NamespaceSnapshotContent`**.
 
-1. Отдельный CRD **`NamespaceSnapshotContent`** (пара 1:1 с NamespaceSnapshot по аналогии с другими доменами).
-2. Общий **`SnapshotContent`** с дискриминатором типа снимка / ссылкой на root и общим shared lifecycle.
-
-В репозитории уже есть **generic** `SnapshotContent` контроллер, тесты на финализаторы, linking, orphaning и т.д. Bootstrap-код исторически мог ссылаться на пару `NamespaceSnapshot` / `NamespaceSnapshotContent` — это создаёт расхождение с выбранным здесь направлением.
+Удержание артефактов и связь с **ObjectKeeper** — как в ТЗ (`snapshot-rework`), без отдельной «миграции» с промежуточной схемы: реализацию **сразу** ведём к NS + NSC + OK.
 
 ## Decision
 
-В **MVP** NamespaceSnapshot **не** вводит отдельный `NamespaceSnapshotContent`. Результат фиксируется в **общем `SnapshotContent`**, с двусторонним binding на root (см. основной design, §4.2).
+1. Публичная пара для namespace snapshot: **`NamespaceSnapshot`** и **`NamespaceSnapshotContent`** (CRD, группа/apiVersion — **как в ТЗ** в `snapshot-rework`, при реализации сверять YAML из ТЗ с фактическим CRD в репозитории).
+2. **ObjectKeeper** связываем с моделью по ТЗ: для корневого content — сценарий с **FollowObjectWithTTL** (и прочие правила из ТЗ); детали не дублировать здесь.
+3. Статус **`NamespaceSnapshot`**: **только `conditions`** (и поля фактов), **без `status.phase`** — [`namespace-snapshot-status-surface.md`](namespace-snapshot-status-surface.md).
 
 ## Consequences
 
-- **Плюсы:** один content-runtime, меньше special-case CRD, быстрее стабилизировать **binding contract** root ↔ content, переиспользование существующих паттернов cleanup/status.
-- **Минусы:** поля `SnapshotContent` должны уметь выражать **namespace-state** artifact (metadata, backend location, тип снимка); возможная конкуренция по «ширине» схемы с другими видами снимков — контролировать версионированием и дискриминатором.
-- **Миграция:** правки `pkg/unifiedbootstrap`, CRD, RBAC, регистрация пары в DSC при необходимости — отдельными изменениями, согласованными с [`../namespace-snapshot-controller.md`](../namespace-snapshot-controller.md) §14.
+- **Bootstrap / unified:** пара GVK `NamespaceSnapshot` / `NamespaceSnapshotContent` в desired list, DSC при необходимости; убрать опору на generic `SnapshotContent` **именно как носитель результата** для этого root.
+- **Код:** новые/обновлённые типы, CRD, reconciler(ы), тесты — под NSC + OK; **не** закладывать миграцию со старого пути через `SnapshotContent` для namespace root.
+- **Документы в `docs/`:** остаются планом поставки и выжимкой; **истина по сценарию** — `snapshot-rework/`.
 
-## Alternatives considered
+## Supersedes
 
-1. **Отдельный NamespaceSnapshotContent** — проще изолировать схему под namespace-only поля, но дублирует lifecycle и внимание оператора на второй kind; отложено за пределы MVP.
-2. **Только MCR/ManifestCheckpoint как публичный результат** — даёт дублирование состояния с root и усложняет модель «один root — один носитель результата»; в MVP MCR не является обязательным публичным контрактом для этого сценария (см. основной design §10).
+Ранее зафиксированный вариант «MVP только через общий `SnapshotContent`» для пары namespace root — **снят** этим решением.
+
+## Alternatives considered (кратко)
+
+1. **Только generic `SnapshotContent`** — отклонено для целевой поставки (остаётся возможным для других видов снимков в unified-модели, но не как носитель для namespace root по текущему ТЗ).
+2. **Миграция с SnapshotContent на NSC** — не требуется: делаем сразу NSC.

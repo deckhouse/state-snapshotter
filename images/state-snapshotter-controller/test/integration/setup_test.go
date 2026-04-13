@@ -42,7 +42,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
@@ -52,11 +53,11 @@ import (
 )
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfg           *rest.Config
+	k8sClient     client.Client
+	testEnv       *envtest.Environment
+	ctx           context.Context
+	cancel        context.CancelFunc
 	mgr           ctrl.Manager
 	scheme        *runtime.Scheme
 	testCfg       *config.Options
@@ -111,6 +112,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = deckhousev1alpha1.AddToScheme(scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = ssv1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	err = storagev1alpha1.AddToScheme(scheme)
@@ -205,7 +209,7 @@ var _ = BeforeSuite(func() {
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"manifestCaptureRequestName": {Type: "string"},
 										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName": {Type: "string"},
+										"boundSnapshotContentName":   {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -355,7 +359,7 @@ var _ = BeforeSuite(func() {
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"manifestCaptureRequestName": {Type: "string"},
 										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName": {Type: "string"},
+										"boundSnapshotContentName":   {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -598,6 +602,8 @@ var _ = BeforeSuite(func() {
 		"registrationtestsnapshotcontents.test.deckhouse.io",
 		"namespacedtestsnapshotcontents.test.deckhouse.io",
 		"backupclasses.storage.deckhouse.io",
+		"namespacesnapshots.storage.deckhouse.io",
+		"snapshotcontents.storage.deckhouse.io",
 	}
 	Eventually(func() bool {
 		for _, n := range crdNamesWaitEstablished {
@@ -641,12 +647,13 @@ var _ = BeforeSuite(func() {
 		merged,
 		ctrl.Log.WithName("integration-unified-bootstrap"),
 	)
+	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
 	snapshotController, err := controllers.NewSnapshotController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		scheme,
 		testCfg,
-		snapGVKs,
+		genericSnapGVKs,
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(snapshotController.SetupWithManager(mgr)).To(Succeed())
@@ -662,6 +669,8 @@ var _ = BeforeSuite(func() {
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())
+
+	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
 
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,

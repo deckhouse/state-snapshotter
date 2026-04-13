@@ -48,6 +48,10 @@ type NamespaceSnapshotSpec struct {
 
 // +k8s:deepcopy-gen=true
 type NamespaceSnapshotStatus struct {
+	// ObservedGeneration is the metadata.generation the controller last reconciled into this status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// BoundSnapshotContentName is the cluster-scoped SnapshotContent for this snapshot.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 

@@ -39,6 +39,8 @@
 
 **Бэклог integration:** T5, T8–T11 и др. — по необходимости. R5 + T4/eligibility — см. [`design/implementation-plan.md`](../design/implementation-plan.md).
 
+**Порядок с M-треком:** сценарии **T6** и прочая нагрузка/расширение **MCR** не являются приоритетом, пока не стабилизированы **NamespaceSnapshot** + **NamespaceSnapshotContent** + **ObjectKeeper** (**N1–N3** в [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4).
+
 | ID | Тест | Связь | Статус |
 |----|------|--------|--------|
 | T1 | Нет production unified CRD в API — wiring без ошибки, ноль watch | S1–S2 | ✅ `unified_bootstrap_t1_test.go`, `pkg/unifiedbootstrap/gvk_test.go` |
@@ -57,7 +59,7 @@
 
 - CI: `go_checks`.
 - **Метрики unified runtime** (controller metrics endpoint): `state_snapshotter_unified_runtime_resolved_snapshot_gvk_count`, `state_snapshotter_unified_runtime_active_monotonic_snapshot_gvk_count`, `state_snapshotter_unified_runtime_stale_active_snapshot_gvk_count` — см. `pkg/unifiedruntime/metrics.go`.
-- Нагрузка: большие MCR после M1.
+- Нагрузка: большие MCR после M1 (M1 — после N-трека по текущему плану).
 
 ## Demo / remote validation
 

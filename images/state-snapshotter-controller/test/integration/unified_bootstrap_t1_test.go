@@ -22,34 +22,40 @@ package integration
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// T1 (plan): production unified GVK pairs from DefaultDesiredUnifiedSnapshotPairs are not installed
-// in this envtest cluster. Controller wiring must still succeed with zero watches.
+// T1 (plan): CSI Snapshot and optional module snapshot CRDs are not installed in this envtest cluster.
+// NamespaceSnapshot + generic SnapshotContent ship with this repo and are present in crds/.
+// Controller wiring must tolerate missing pairs and succeed; optional pairs register no watches.
 var _ = Describe("Integration T1: unified bootstrap without optional snapshot CRDs", func() {
-	It("filters out missing API types and registers zero-watch unified controllers", func() {
+	It("filters out missing API types; envtest exposes NamespaceSnapshot pair when repo CRDs load", func() {
 		pairs := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
 		Expect(pairs).NotTo(BeEmpty())
 
-		snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+		available := unifiedbootstrap.ResolveAvailableUnifiedPairs(
 			mgr.GetRESTMapper(),
 			pairs,
 			ctrl.Log,
 		)
-		Expect(len(snapshotGVKs)).To(Equal(len(snapshotContentGVKs)))
-		Expect(snapshotGVKs).To(BeEmpty(), "envtest does not expose production unified snapshot CRDs used by bootstrap")
-		Expect(snapshotContentGVKs).To(BeEmpty())
+		Expect(available).To(HaveLen(1))
+		Expect(available[0].Snapshot).To(Equal(schema.GroupVersionKind{
+			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot",
+		}))
+		Expect(available[0].SnapshotContent).To(Equal(schema.GroupVersionKind{
+			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent",
+		}))
 
 		snapshotController, err := controllers.NewSnapshotController(
 			k8sClient,
 			mgr.GetAPIReader(),
 			scheme,
 			testCfg,
-			snapshotGVKs,
+			[]schema.GroupVersionKind{},
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(snapshotController.SetupWithManager(mgr)).To(Succeed())
@@ -60,7 +66,7 @@ var _ = Describe("Integration T1: unified bootstrap without optional snapshot CR
 			scheme,
 			mgr.GetRESTMapper(),
 			testCfg,
-			snapshotContentGVKs,
+			[]schema.GroupVersionKind{},
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(contentController.SetupWithManager(mgr)).To(Succeed())

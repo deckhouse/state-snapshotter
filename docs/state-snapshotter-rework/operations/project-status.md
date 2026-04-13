@@ -24,6 +24,6 @@
 
 **Критерий «сделано до M-трека»:** ядро R2/R3, D1–D3, R5, точечные integration (RBAC / eligibility) — в коде; **все тесты зелёные**, включая `go test -tags=integration ./test/integration/...`.
 
-**Текущий фокус:** **M1 → M2** (manifest); опционально расширение integration (полный T5, T9, …). **ValidatingWebhook** — не в ближайшем плане. Детали — [`design/implementation-plan.md`](../design/implementation-plan.md). При смене контракта обновляй [`README.md`](../README.md), [`runbook-degraded-and-unified-runtime.md`](runbook-degraded-and-unified-runtime.md), [`dsc-rbac-and-mcr.md`](dsc-rbac-and-mcr.md).
+**Текущий фокус:** реализация **NamespaceSnapshot** + **`NamespaceSnapshotContent`** + **ObjectKeeper** по ТЗ в [`snapshot-rework/`](../../../snapshot-rework/) (SSOT сценария; файлы там для контракта не меняем из `docs/`). Поставка по **N0–N5** — [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4. **M1/M2 (manifest)** — после **N1–N3**. Опционально — расширение integration (T5, T9, …). **ValidatingWebhook** — не в ближайшем плане. Детали — [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md). При смене контракта обновляй [`README.md`](../README.md), [`runbook-degraded-and-unified-runtime.md`](runbook-degraded-and-unified-runtime.md), [`dsc-rbac-and-mcr.md`](dsc-rbac-and-mcr.md).
 
 **Блокеры / rollout:** см. ADR §3 и plan §5; при критическом изменении обновляй этот файл и при необходимости `design/implementation-plan.md`.

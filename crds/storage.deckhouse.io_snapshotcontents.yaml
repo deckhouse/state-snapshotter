@@ -46,8 +46,11 @@ spec:
                   resolves to a backup repository.
                 type: string
               deletionPolicy:
-                description: DeletionPolicy controls artifact lifecycle (Retain or
-                  Delete).
+                description: DeletionPolicy controls whether the controller may delete
+                  this SnapshotContent when the root snapshot is removed.
+                enum:
+                - Retain
+                - Delete
                 type: string
               snapshotRef:
                 description: SnapshotRef points to the snapshot root (e.g. NamespaceSnapshot).

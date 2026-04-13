@@ -29,6 +29,9 @@ const (
 	// ConditionReady indicates the object is ready for use
 	ConditionReady = "Ready"
 
+	// ConditionBound indicates the snapshot is bound to SnapshotContent.
+	ConditionBound = "Bound"
+
 	// ConditionManifestsReady indicates manifests are ready (MCR Ready=True)
 	ConditionManifestsReady = "ManifestsReady"
 

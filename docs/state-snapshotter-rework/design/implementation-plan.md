@@ -2,7 +2,7 @@
 
 Детальный план работ и таблицы статусов. Высокоуровневый прогресс — в [`operations/project-status.md`](../operations/project-status.md). Обзор линий продукта и ссылки на runbook — [`../README.md`](../README.md).
 
-**Связанные ADR (черновики в корне репозитория):** [`snapshot-rework/`](../../../snapshot-rework/) — например `2026-01-23-unified-snapshots-registry.md`, `unified-origin.md`, `2025-11-30-manifest-capture-checkpoint.md`.
+**Продуктовое ТЗ (SSOT сценария):** [`snapshot-rework/`](../../../snapshot-rework/) — контрактные примеры и потоки **не правятся** из `docs/` в пользу «упрощённого MVP»; план ниже только задаёт поставку кода под ТЗ.
 
 **Техдизайн R2 2b / R3 (runtime registry, diff, additive watch):** [`r2-phase-2b-r3-runtime-registry.md`](r2-phase-2b-r3-runtime-registry.md).
 
@@ -57,20 +57,23 @@
 
 | # | Задача | Зачем | Статус |
 |---|--------|--------|--------|
-| M1 | Расширение **MCR spec** | UX | ⬜ |
-| M2 | Лимиты объёма, таймауты list | Защита apiserver/etcd | ⬜ |
+| M1 | Расширение **MCR spec** | UX | ⬜ **отложено** до стабилизации **NamespaceSnapshot / NamespaceSnapshotContent / ObjectKeeper** (N1–N3) |
+| M2 | Лимиты объёма, таймауты list | Защита apiserver/etcd | ⬜ **после M1** (тот же gate) |
 
-### 2.4 Namespace snapshot (MVP)
+### 2.4 Namespace snapshot + NamespaceSnapshotContent + ObjectKeeper
 
-Отдельный трек от M1/M2: **state/config snapshot namespace** через `NamespaceSnapshot` + общий `SnapshotContent`, без оркестрации volume data и без child domain snapshots в MVP.
+**Цель:** сразу целевая схема **без миграции** с промежуточного generic `SnapshotContent` для корня namespace — см. [`decisions/namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md). Детали сценария — **только** [`snapshot-rework/`](../../../snapshot-rework/). Статус **`NamespaceSnapshot`**: **только `conditions`**, без `status.phase` — [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md).
 
 | # | Задача | Документ / примечание | Статус |
 |---|--------|------------------------|--------|
-| N0 | Contract + decisions (binding, artifact, Ready); **Chosen option** в [`namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) ≠ TBD (gate до N1) | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md), [`decisions/namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md) | ⬜ scope Chosen option = TBD |
-| N1 | Phase 2: CRD, bootstrap/registry/RBAC, reconciler skeleton, fake capture, envtest | **Вход:** scope [`namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) — Chosen option ≠ TBD; content [`namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md) — accepted для MVP. См. §16 [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md). | ⬜ |
-| N2 | Phase 3: Job runner, реальный capture, large-namespace защиты | см. §16 основного design | ⬜ |
+| N0 | **Gate:** **Chosen option** в [`namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `NamespaceSnapshot` / `NamespaceSnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §13–§16 | ⬜ |
+| N1 | **CRD + API:** типы `NamespaceSnapshot`, `NamespaceSnapshotContent`, codegen, OpenAPI; **убрать** использование **generic `SnapshotContent`** как носителя результата для namespace root. | decision + design §14 | ⬜ |
+| N2 | **Bootstrap / unified / RBAC:** пара GVK NS/NSC в `unifiedbootstrap`, watches, шаблоны RBAC; reconciler skeleton: finalizer, bind NS↔NSC, **conditions**; зачатки **ObjectKeeper** (корневой NSC, FollowObjectWithTTL — по ТЗ). | design §4.3, §5, §14 | ⬜ |
+| N3 | **Интеграция:** envtest — create → bind → fake capture → delete → recovery; негативные кейсы ref mismatch / policy. | design §15 | ⬜ |
+| N4 | **Реальный capture:** Job runner, артефакт, лимиты большого namespace (§8.6 design). | design §16 N2 | ⬜ |
+| N5 | **Полный ТЗ:** дочерние снимки, DSC priority, экспорт/импорт, restore — итерациями по [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) без изменения ТЗ из `docs/`. | бэклог | ⬜ |
 
-Трек N0–N2 и M1–M2 не смешивать в одном PR без необходимости.
+Трек **N*** и **M1–M2** не смешивать в одном PR без необходимости.
 
 ### 2.5 Документация и операционка
 
@@ -94,8 +97,8 @@
 
 1. ~~**R5 + feature gates**~~ ✅ — `STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`; Helm `unifiedSnapshotEnabled`, `unifiedBootstrapPairs`.
 2. ~~**Точечные integration-тесты**~~ ✅ — `unified_runtime_rbac_eligibility_test.go`: без RBACReady нет записи в `EligibleFromDSC`; после снятия RBACReady resolved теряет пару, monotonic active сохраняет ключ.
-3. **M1** — отдельный трек (manifest).
-4. **M2** — после M1.
+3. **N0 → N1 → N2 → N3 → N4** — **`NamespaceSnapshot` / `NamespaceSnapshotContent` / ObjectKeeper** по ТЗ `snapshot-rework`; затем **N5** (полный сценарий ТЗ итерациями).
+4. **M1**, затем **M2** — только после стабилизации **N1–N3** (минимум bind + OK + fake capture + тесты).
 
 *(R5 и M1–M2 не смешивать в одном PR без необходимости.)*
 

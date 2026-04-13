@@ -21,6 +21,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// DeletionPolicy values for SnapshotContent.spec.deletionPolicy.
+const (
+	SnapshotContentDeletionPolicyRetain = "Retain"
+	SnapshotContentDeletionPolicyDelete = "Delete"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=stsnapct
@@ -48,16 +54,17 @@ type SnapshotContentSpec struct {
 	// BackupRepositoryName optional; used when snapshot class resolves to a backup repository.
 	BackupRepositoryName string `json:"backupRepositoryName,omitempty"`
 
-	// DeletionPolicy controls artifact lifecycle (Retain or Delete).
+	// DeletionPolicy controls whether the controller may delete this SnapshotContent when the root snapshot is removed.
+	// +kubebuilder:validation:Enum=Retain;Delete
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
 type SnapshotSubjectRef struct {
-	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace,omitempty"`
+	APIVersion string    `json:"apiVersion"`
+	Kind       string    `json:"kind"`
+	Name       string    `json:"name"`
+	Namespace  string    `json:"namespace,omitempty"`
 	UID        types.UID `json:"uid,omitempty"`
 }
 

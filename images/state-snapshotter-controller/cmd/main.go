@@ -45,6 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
@@ -59,6 +60,7 @@ import (
 var (
 	resourcesSchemeFuncs = []func(*apiruntime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
+		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (NamespaceSnapshot, SnapshotContent, …)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
 		extv1.AddToScheme,
@@ -224,12 +226,14 @@ func main() {
 			log.Info("[main] unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
 		}
 
+		genericSnapshotGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
+
 		snapshotController, err := controllers.NewSnapshotController(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
 			mgr.GetScheme(),
 			cfgParams,
-			snapshotGVKs,
+			genericSnapshotGVKs,
 		)
 		if err != nil {
 			log.Error(err, "Failed to create SnapshotController")
@@ -241,7 +245,7 @@ func main() {
 			cancel()
 			os.Exit(1)
 		}
-		log.Info("SnapshotController added to manager", "snapshotGVKs", len(snapshotGVKs))
+		log.Info("SnapshotController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
 		contentController, err := controllers.NewSnapshotContentController(
 			mgr.GetClient(),
@@ -262,6 +266,13 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(snapshotContentGVKs))
+
+		if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams); err != nil {
+			log.Error(err, "Failed to add NamespaceSnapshotController to manager")
+			cancel()
+			os.Exit(1)
+		}
+		log.Info("NamespaceSnapshotController added to manager")
 
 		unifiedSync := unifiedruntime.NewSyncer(
 			mgr,

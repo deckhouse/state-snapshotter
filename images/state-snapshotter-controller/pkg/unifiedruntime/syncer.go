@@ -112,6 +112,9 @@ func (s *Syncer) Sync(ctx context.Context) error {
 
 	for i := range state.ResolvedSnapshotGVKs {
 		snapGVK, contentGVK := state.ResolvedSnapshotGVKs[i], state.ResolvedContentGVKs[i]
+		if unifiedbootstrap.IsDedicatedSnapshotControllerKind(snapGVK.Kind) {
+			continue
+		}
 		if err := s.snap.AddWatchForPair(s.mgr, snapGVK, contentGVK); err != nil {
 			s.log.Error(err, "add Snapshot watch failed", "snapshot", snapGVK.String())
 			continue

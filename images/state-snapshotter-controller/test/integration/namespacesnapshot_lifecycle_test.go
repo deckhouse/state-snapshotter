@@ -38,7 +38,7 @@ import (
 )
 
 var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
-	It("binds SnapshotContent and reaches Ready (Phase 2 skeleton)", func() {
+	It("binds SnapshotContent and reaches Ready via conditions (N1 skeleton)", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -72,6 +72,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 
 			wantContent := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(fresh.UID), "-", ""))
 			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(wantContent))
+			g.Expect(fresh.Status.ObservedGeneration).To(Equal(fresh.Generation))
 
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
@@ -79,6 +80,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 
 			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
+			g.Expect(sc.Spec.DeletionPolicy).To(Equal(storagev1alpha1.SnapshotContentDeletionPolicyRetain))
 			g.Expect(sc.Spec.SnapshotRef.Kind).To(Equal("NamespaceSnapshot"))
 			g.Expect(sc.Spec.SnapshotRef.Name).To(Equal(fresh.Name))
 			g.Expect(sc.Spec.SnapshotRef.Namespace).To(Equal(fresh.Namespace))

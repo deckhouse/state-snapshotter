@@ -22,15 +22,15 @@ set -euo pipefail
 CONTROLLER_GEN_VERSION=v0.18.0
 CONTROLLER_GEN_BIN="$(go env GOPATH)/bin/controller-gen"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-API_DIR="${ROOT_DIR}/api/v1alpha1"
+API_PATHS="${ROOT_DIR}/api/v1alpha1;${ROOT_DIR}/api/storage/v1alpha1"
 
 echo "Ensuring controller-gen ${CONTROLLER_GEN_VERSION}..."
 go install "sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}"
 
 echo "Generating deepcopy code..."
-"${CONTROLLER_GEN_BIN}" object:headerFile="${ROOT_DIR}/hack/boilerplate.txt" paths="${API_DIR}"
+"${CONTROLLER_GEN_BIN}" object:headerFile="${ROOT_DIR}/hack/boilerplate.txt" paths="${API_PATHS}"
 
 echo "Generating CRD manifests..."
-"${CONTROLLER_GEN_BIN}" crd:crdVersions=v1 output:crd:dir="${ROOT_DIR}/crds" paths="${API_DIR}"
+"${CONTROLLER_GEN_BIN}" crd:crdVersions=v1 output:crd:dir="${ROOT_DIR}/crds" paths="${API_PATHS}"
 
 echo "Deepcopy and CRD generation complete."

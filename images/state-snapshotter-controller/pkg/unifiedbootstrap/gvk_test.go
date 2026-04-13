@@ -43,7 +43,7 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 		{Snapshot: snap, SnapshotContent: content},
 		{
 			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshotContent"},
+			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"},
 		},
 	}
 

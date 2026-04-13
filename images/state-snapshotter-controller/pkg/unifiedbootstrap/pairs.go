@@ -87,6 +87,22 @@ func IsDedicatedSnapshotControllerKind(kind string) bool {
 	return false
 }
 
+// FilterGenericSnapshotGVKPairs returns parallel slices with dedicated snapshot kinds removed.
+// SnapshotContentController should still receive the full snapshotContentGVKs from ResolveAvailableUnifiedGVKPairs.
+func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKind) (snapOut, contentOut []schema.GroupVersionKind) {
+	if len(snapGVKs) != len(contentGVKs) {
+		return nil, nil
+	}
+	for i := range snapGVKs {
+		if IsDedicatedSnapshotControllerKind(snapGVKs[i].Kind) {
+			continue
+		}
+		snapOut = append(snapOut, snapGVKs[i])
+		contentOut = append(contentOut, contentGVKs[i])
+	}
+	return snapOut, contentOut
+}
+
 // DedupeSnapshotContentGVKs returns unique SnapshotContent GVKs preserving first-seen order.
 func DedupeSnapshotContentGVKs(pairs []UnifiedGVKPair) []schema.GroupVersionKind {
 	seen := make(map[string]struct{})
