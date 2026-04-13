@@ -56,7 +56,7 @@
 
 - **`conditions` — единственный** нормативный источник жизненного цикла и ошибок для операторов; поля **`status.phase` нет** (см. [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md)).
 - `conditions`: как минимум согласованный набор с unified-паттерном (например Ready, Bound, Progressing; при необходимости CaptureStarted, ArtifactStored; терминальные сбои — через Ready=False и reason).
-- Имя привязанного **`NamespaceSnapshotContent`** — в CRD: **`status.contentName`** (cluster-scoped имя content).
+- Имя привязанного content-объекта snapshot-линии — в CRD: **`status.boundSnapshotContentName`** (cluster-scoped имя; для этой линии фактический kind — **`NamespaceSnapshotContent`**, не выводится из имени поля).
 - `observedGeneration`.
 - `startedAt`, `completedAt` (опционально).
 - Сводные поля прогресса/ошибки по необходимости (без дублирования детального состояния Job).
@@ -65,7 +65,7 @@
 
 **Root → Content**
 
-- В status root — ссылка на созданный **`NamespaceSnapshotContent`** (cluster-scoped имя; точное поле — по CRD, согласованное с ТЗ).
+- В status root — **`status.boundSnapshotContentName`**: cluster-scoped имя привязанного **`NamespaceSnapshotContent`** (единое имя поля для всех snapshot root’ов в модуле).
 
 **Content → Root**
 

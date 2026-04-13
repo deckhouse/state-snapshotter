@@ -24,8 +24,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-func TestNamespaceSnapshot_NoLegacyContentField(t *testing.T) {
-	ns := NamespaceSnapshot{}
+func TestNamespaceSnapshot_UnifiedBindFieldUsesBoundSnapshotContentName(t *testing.T) {
+	ns := NamespaceSnapshot{
+		Status: NamespaceSnapshotStatus{
+			BoundSnapshotContentName: "ns-abc",
+		},
+	}
 
 	data, err := json.Marshal(ns.Status)
 	if err != nil {
@@ -37,8 +41,11 @@ func TestNamespaceSnapshot_NoLegacyContentField(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if _, ok := m["boundSnapshotContentName"]; ok {
-		t.Fatal("legacy field boundSnapshotContentName must not exist on NamespaceSnapshot status JSON")
+	if _, ok := m["contentName"]; ok {
+		t.Fatal("contentName must not be used on NamespaceSnapshot status; use boundSnapshotContentName for all snapshot roots")
+	}
+	if m["boundSnapshotContentName"] != "ns-abc" {
+		t.Fatalf("expected boundSnapshotContentName in JSON, got %v", m["boundSnapshotContentName"])
 	}
 }
 

@@ -68,10 +68,10 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
-			g.Expect(fresh.Status.ContentName).NotTo(BeEmpty())
+			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 
 			wantContent := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(fresh.UID), "-", ""))
-			g.Expect(fresh.Status.ContentName).To(Equal(wantContent))
+			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(wantContent))
 			g.Expect(fresh.Status.ObservedGeneration).To(Equal(fresh.Generation))
 
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
@@ -79,7 +79,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 
 			sc := &storagev1alpha1.NamespaceSnapshotContent{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.ContentName}, sc)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
 			g.Expect(sc.Spec.DeletionPolicy).To(Equal(storagev1alpha1.SnapshotContentDeletionPolicyRetain))
 			g.Expect(sc.Spec.NamespaceSnapshotRef.Kind).To(Equal("NamespaceSnapshot"))
 			g.Expect(sc.Spec.NamespaceSnapshotRef.Name).To(Equal(fresh.Name))

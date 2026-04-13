@@ -153,7 +153,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 		// 6. Wait for Ready=True on Snapshot
 		//
 		// EXPECTED BEHAVIOR:
-		// ✅ Snapshot.status.contentName is set
+		// ✅ Snapshot.status.boundSnapshotContentName is set
 		// ✅ TestSnapshotContent created with correct ownerRef
 		// ✅ Finalizer added on SnapshotContent
 		// ✅ ObjectKeeper created (best-effort check, not hard assertion)

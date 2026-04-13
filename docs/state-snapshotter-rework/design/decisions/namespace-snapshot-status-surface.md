@@ -10,7 +10,7 @@ Accepted for **NamespaceSnapshot** API in this module. Уточнение наб
 
 ## Decision
 
-В **`NamespaceSnapshot.status` не использовать поле `phase`**. Источник истины для жизненного цикла и ошибок — **`conditions`** плюс поля фактов (имя привязанного **`NamespaceSnapshotContent`** — в ТЗ может быть `contentName` или иное согласованное поле, `observedGeneration`, при необходимости временные метки). Агрегаты вроде «готов / не готов» выводятся из **Ready**, **Bound** и прочих согласованных типов.
+В **`NamespaceSnapshot.status` не использовать поле `phase`**. Источник истины для жизненного цикла и ошибок — **`conditions`** плюс поля фактов: **`status.boundSnapshotContentName`** — единое root-level поле привязки для snapshot-линии (имя cluster-scoped content; конкретный content kind задаётся парой GVK / контроллером, не именем JSON-поля), плюс `observedGeneration`, при необходимости временные метки. Агрегаты вроде «готов / не готов» выводятся из **Ready**, **Bound** и прочих согласованных типов.
 
 ## Consequences
 

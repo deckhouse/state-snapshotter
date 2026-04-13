@@ -17,7 +17,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.contentName
+    - jsonPath: .status.boundSnapshotContentName
       name: Content
       type: string
     name: v1alpha1
@@ -52,6 +52,11 @@ spec:
             type: object
           status:
             properties:
+              boundSnapshotContentName:
+                description: |-
+                  BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
+                  The content kind is defined by the snapshot line (e.g. NamespaceSnapshotContent), not by this field name.
+                type: string
               conditions:
                 description: Conditions represent the latest observations (Ready,
                   Bound, Failed, etc.).
@@ -110,10 +115,6 @@ spec:
                   - type
                   type: object
                 type: array
-              contentName:
-                description: ContentName is the cluster-scoped NamespaceSnapshotContent
-                  bound to this root.
-                type: string
               observedGeneration:
                 description: ObservedGeneration is the metadata.generation the controller
                   last reconciled into this status.

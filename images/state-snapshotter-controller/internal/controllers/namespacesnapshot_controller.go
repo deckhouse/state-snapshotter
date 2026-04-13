@@ -106,8 +106,8 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	expectedName := namespaceSnapshotContentName(nsSnap)
 
-	if nsSnap.Status.ContentName != "" && nsSnap.Status.ContentName != expectedName {
-		nsSnap.Status.ContentName = ""
+	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
+		nsSnap.Status.BoundSnapshotContentName = ""
 		meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionBound)
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
@@ -118,8 +118,8 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	content := &storagev1alpha1.NamespaceSnapshotContent{}
 	err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content)
 	if errors.IsNotFound(err) {
-		if nsSnap.Status.ContentName != "" {
-			nsSnap.Status.ContentName = ""
+		if nsSnap.Status.BoundSnapshotContentName != "" {
+			nsSnap.Status.BoundSnapshotContentName = ""
 			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionBound)
 			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionReady)
 			nsSnap.Status.ObservedGeneration = nsSnap.Generation
@@ -139,7 +139,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			}
 			return ctrl.Result{}, err
 		}
-		nsSnap.Status.ContentName = expectedName
+		nsSnap.Status.BoundSnapshotContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionBound,
@@ -179,8 +179,8 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
-	if nsSnap.Status.ContentName == "" {
-		nsSnap.Status.ContentName = expectedName
+	if nsSnap.Status.BoundSnapshotContentName == "" {
+		nsSnap.Status.BoundSnapshotContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionBound,
@@ -228,7 +228,7 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 		}
 		return ctrl.Result{}, nil
 	}
-	nsSnap.Status.ContentName = expectedName
+	nsSnap.Status.BoundSnapshotContentName = expectedName
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 		Type:               snapshot.ConditionBound,
@@ -244,7 +244,7 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 }
 
 func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
-	if nsSnap.Status.ContentName == "" {
+	if nsSnap.Status.BoundSnapshotContentName == "" {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 			if err := r.Client.Update(ctx, nsSnap); err != nil {
 				return ctrl.Result{}, err
@@ -255,7 +255,7 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 	}
 
 	content := &storagev1alpha1.NamespaceSnapshotContent{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Status.ContentName}, content)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Status.BoundSnapshotContentName}, content)
 	if errors.IsNotFound(err) {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 			if err := r.Client.Update(ctx, nsSnap); err != nil {

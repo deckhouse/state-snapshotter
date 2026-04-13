@@ -61,8 +61,7 @@ type SnapshotLike interface {
 	// Contract: Pure function, idempotent, no side effects.
 	GetSpecSnapshotRef() *ObjectRef
 
-	// GetStatusContentName returns the name of the associated content object (SnapshotContent.boundSnapshotContentName
-	// for generic snapshots; NamespaceSnapshot.contentName for namespace flow).
+	// GetStatusContentName returns status.boundSnapshotContentName (unified bind field for snapshot roots; actual content kind is pairing-specific).
 	// Contract: Pure function, idempotent, no side effects.
 	GetStatusContentName() string
 

@@ -235,13 +235,7 @@ func (w *unstructuredSnapshotWrapper) GetStatusContentName() string {
 	if !ok {
 		return ""
 	}
-	if w.obj.GetKind() == "NamespaceSnapshot" {
-		if name, ok := status["contentName"].(string); ok && name != "" {
-			return name
-		}
-		return ""
-	}
-	// Generic Snapshot (and test snapshot kinds): boundSnapshotContentName per CRD schema
+	// Unified bind field for all snapshot root kinds (content GVK comes from pairing / controller, not from the field name).
 	if name, ok := status["boundSnapshotContentName"].(string); ok && name != "" {
 		return name
 	}

@@ -23,7 +23,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=nssnap
-// +kubebuilder:printcolumn:name="Content",type=string,JSONPath=`.status.contentName`
+// +kubebuilder:printcolumn:name="Content",type=string,JSONPath=`.status.boundSnapshotContentName`
 // NamespaceSnapshot requests a namespace state/configuration snapshot (MVP: design namespace-snapshot-controller.md).
 type NamespaceSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -52,8 +52,9 @@ type NamespaceSnapshotStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// ContentName is the cluster-scoped NamespaceSnapshotContent bound to this root.
-	ContentName string `json:"contentName,omitempty"`
+	// BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
+	// The content kind is defined by the snapshot line (e.g. NamespaceSnapshotContent), not by this field name.
+	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
 	// Conditions represent the latest observations (Ready, Bound, Failed, etc.).
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
