@@ -113,6 +113,8 @@
 
 **Инвариант:** связь **NamespaceSnapshot → MCR** не обязана быть ownerRef; MCR создаётся/наблюдается **NamespaceSnapshot controller**; **ManifestCheckpointController** **только** исполняет **MCR → MCP** (+ chunks). Статусы **NS/NSC** пишет **NamespaceSnapshot controller** по наблюдению MCP/MCR.
 
+**N2a technical debt (root OK vs retention):** root OK в **`FollowObject`** на NSC — **не** retention anchor для persisted манифеста; он живёт с NSC и исчезает вместе с ним. Удержание MCP/chunks в N2a опирается на цепочку **MCR→OK→MCP** и **явную политику delete/cancel** в `NamespaceSnapshot` controller (§5.2), а не на «root OK уже как в ТЗ». Полная семантика **Retain / независимость артефакта от root** в терминах **FollowObjectWithTTL** — отдельный этап; не интерпретировать N2a как «ObjectKeeper для результата уже завершён».
+
 **N2a.x:** сверка с кодом зафиксирована в **§4.6**; при изменении `ManifestCheckpointController` обновлять §4.3 и §4.6.
 
 ---
@@ -197,6 +199,8 @@
 
 ### 5.1 Normal flow (логические шаги)
 
+**Watch:** контроллер подписан на **`NamespaceSnapshot`** и на связанный **`NamespaceSnapshotContent`** (enqueue по `spec.namespaceSnapshotRef`), чтобы изменения content (в т.ч. ручной repair) снова прогоняли reconcile root без отдельного события на root.
+
 1. Fetch; при удалении — §5.2.
 2. Ensure finalizer на root.
 3. Validation (namespace существует, class/policy валидна, spec консистентен) — §7.
@@ -211,7 +215,12 @@
 
 **Proposed deletion order (MVP)**
 
-1. **Пока идёт capture (N2a, design lock):** **отмена через удаление MCR** — `NamespaceSnapshot` controller при удалении root (или при входе в deletion while capture) **удаляет** связанный **ManifestCaptureRequest** по детерминированному имени (§4.7); дальше существующая цепочка **MCR → OK(FollowObject) → MCP → chunks** схлопывается через GC/finalizers manifest-контроллера. **Не** ждать бесконечно завершения capture на финализаторе root без попытки отмены. Исключения (например «дождаться терминала») — только при явном ADR и другом продуктовом требовании.
+1. **Отмена capture при удалении root (N2a, зафиксированная политика в коде):**
+   - удалить **ManifestCaptureRequest** по детерминированному имени (§4.7);
+   - **requeue**, пока MCR **исчез** из API;
+   - затем **best-effort `Delete(ManifestCheckpoint)`** — осознанная стратегия контроллера (идемпотентно с цепочкой **MCR→OK→MCP** в production: deckhouse может убрать MCP через OK, но явный Delete не конфликтует и задаёт однозначный cancel);
+   - **chunks** уходят через **ownerReference на MCP**, когда MCP удалён;
+   - **Не** ждать бесконечно завершения capture на финализаторе root без этой отмены. Исключения — только при явном ADR.
 2. Если **deletionPolicy = Delete** (или эквивалент для артефакта): инициировать **удаление объекта в backend**; дождаться подтверждения **или** зафиксировать best-effort + явное условие/событие **Warning** (не оставлять поведение неопределённым в коде без комментария в spec).
 3. Довести **NamespaceSnapshotContent** до согласованного терминального состояния (артефакт удалён или помечен retained согласно политике), снять с content финализаторы, допускающие удаление; согласовать с **ObjectKeeper** по ТЗ.
 4. Снять финализатор с **NamespaceSnapshot**, удалить root.

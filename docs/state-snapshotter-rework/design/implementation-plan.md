@@ -118,6 +118,8 @@
 
 **Нормативно:** набор GVR — **§4.5** + один SSOT в коде; ad-hoc «снять всё подряд» **запрещён**.
 
+**Known N2a limits (не маскировать как «готово»):** root OK = lifecycle helper, не TTL-retention; отмена/delete MCP после MCR — явная политика контроллера ([`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §5.2); list targets без pagination — только N2a, hardening позже (§4.5 / §4.3.2 design).
+
 **Хранилище манифестов N2a:** **ManifestCheckpoint + gzip/json chunks**; выдача — склейка на читании (см. `ArchiveService`, §8.7). Отдельный заранее материализованный **`bundle.tar.gz`** **не обязателен** для N2a.
 
 ---

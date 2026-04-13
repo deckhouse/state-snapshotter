@@ -27,10 +27,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -67,7 +70,25 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.NamespaceSnapshot{}).
+		Watches(
+			&storagev1alpha1.NamespaceSnapshotContent{},
+			handler.EnqueueRequestsFromMapFunc(mapNamespaceSnapshotContentToNamespaceSnapshot),
+		).
 		Complete(r)
+}
+
+// mapNamespaceSnapshotContentToNamespaceSnapshot requeues the NamespaceSnapshot named in
+// spec.namespaceSnapshotRef when cluster-scoped content changes (spec repair, drift injection in tests, etc.).
+func mapNamespaceSnapshotContentToNamespaceSnapshot(_ context.Context, o client.Object) []reconcile.Request {
+	content, ok := o.(*storagev1alpha1.NamespaceSnapshotContent)
+	if !ok {
+		return nil
+	}
+	ref := content.Spec.NamespaceSnapshotRef
+	if ref.Namespace == "" || ref.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}}}
 }
 
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots,verbs=get;list;watch;update;patch
@@ -253,6 +274,11 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 	return ctrl.Result{Requeue: true}, nil
 }
 
+// reconcileDelete implements N2a cancel/cleanup policy when NamespaceSnapshot is deleted (design §5.2):
+// 1) Delete ManifestCaptureRequest (§4.7).
+// 2) Requeue until MCR is gone.
+// 3) Best-effort Delete(ManifestCheckpoint); chunks GC via ownerRef on MCP.
+// 4) NamespaceSnapshotContent + root finalizer per deletion policy.
 func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
 	mcrKey := client.ObjectKey{Namespace: nsSnap.Namespace, Name: namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)}
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
@@ -285,10 +311,7 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 	if mcpName != "" {
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err == nil {
-			// Explicit MCP delete after MCR removal: idempotent cancel/cleanup. In production, removal of the
-			// ret-mcr ObjectKeeper (FollowObject on MCR) normally lets GC delete MCP; this Delete is still valid
-			// best-effort teardown and matches operator cancel intent. Envtest lacks deckhouse-controller, so the
-			// OK→GC chain may not run; the same path unblocks integration without test-only branching.
+			// Step 3 of §5.2 / reconcileDelete policy: explicit MCP delete after MCR is gone (see function doc).
 			if err := r.Client.Delete(ctx, mcp); err != nil && !errors.IsNotFound(err) {
 				return ctrl.Result{}, err
 			}

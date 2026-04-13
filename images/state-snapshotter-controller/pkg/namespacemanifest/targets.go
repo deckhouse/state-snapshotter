@@ -46,10 +46,11 @@ var n2aNamespacedGVR = []schema.GroupVersionResource{
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"},
 }
 
-// BuildManifestCaptureTargets lists namespaced objects per N2a allowlist and returns ManifestCaptureRequest targets.
-// The returned slice is sorted by (APIVersion, Kind, Name) for stable MCR spec and diffs. List calls are not
-// paginated yet (acceptable for N2a / envtest); production-scale pagination belongs to a later hardening stage
-// (see design §8.6 / implementation-plan N4).
+// BuildManifestCaptureTargets is N2a-only: it lists the whole namespace per allowlist without List pagination.
+// Large namespaces are intentionally unsupported until hardening; do not treat this as production-complete
+// capture enumeration (see design namespace-snapshot-controller.md §4.5 / §5.1 and implementation-plan).
+//
+// The returned slice is sorted by (APIVersion, Kind, Name) for stable MCR spec and drift checks.
 func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, namespace string) ([]ManifestTarget, error) {
 	var targets []ManifestTarget
 	seen := make(map[string]struct{})

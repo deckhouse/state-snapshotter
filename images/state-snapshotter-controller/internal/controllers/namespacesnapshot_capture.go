@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -182,6 +183,9 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 	if content != nil && content.Name != "" {
 		fresh := &storagev1alpha1.NamespaceSnapshotContent{}
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
@@ -294,21 +298,33 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 	}
 }
 
+// manifestTargetsEqual compares capture plans in canonical order (APIVersion, Kind, Name).
+// New MCR targets are always sorted; existing spec may be unsorted, so both sides are sorted before compare.
 func manifestTargetsEqual(a, b []ssv1alpha1.ManifestTarget) bool {
-	if len(a) != len(b) {
+	aa := append([]ssv1alpha1.ManifestTarget(nil), a...)
+	bb := append([]ssv1alpha1.ManifestTarget(nil), b...)
+	sortManifestSpecTargets(aa)
+	sortManifestSpecTargets(bb)
+	if len(aa) != len(bb) {
 		return false
 	}
-	// Order may differ; compare as sets.
-	am := make(map[string]struct{}, len(a))
-	for _, t := range a {
-		am[fmt.Sprintf("%s|%s|%s", t.APIVersion, t.Kind, t.Name)] = struct{}{}
-	}
-	for _, t := range b {
-		k := fmt.Sprintf("%s|%s|%s", t.APIVersion, t.Kind, t.Name)
-		if _, ok := am[k]; !ok {
+	for i := range aa {
+		if aa[i].APIVersion != bb[i].APIVersion || aa[i].Kind != bb[i].Kind || aa[i].Name != bb[i].Name {
 			return false
 		}
-		delete(am, k)
 	}
-	return len(am) == 0
+	return true
+}
+
+func sortManifestSpecTargets(ts []ssv1alpha1.ManifestTarget) {
+	sort.Slice(ts, func(i, j int) bool {
+		a, b := ts[i], ts[j]
+		if a.APIVersion != b.APIVersion {
+			return a.APIVersion < b.APIVersion
+		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return a.Name < b.Name
+	})
 }
