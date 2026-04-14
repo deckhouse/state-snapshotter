@@ -156,7 +156,8 @@ func main() {
 	// Create full scheme for API direct client (no informers)
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
-	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group
+	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (NamespaceSnapshot, NamespaceSnapshotContent — PR4 aggregated manifests)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
 	// Create controller manager with full scheme (for informers)
