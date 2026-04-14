@@ -43,6 +43,10 @@ const (
 	DefaultTTL               = 10 * time.Minute // 10 minutes (TZ: defaultTTL)
 	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
+	// EnvNamespaceSnapshotRootOKTTL: root ObjectKeeper uses FollowObjectWithTTL on NamespaceSnapshot (Deckhouse controller).
+	EnvNamespaceSnapshotRootOKTTL = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
+	// EnvOrphanNamespaceSnapshotContentDeleteAfter: after root NamespaceSnapshot deletion (Retain), delete NamespaceSnapshotContent after this delay (smoke).
+	EnvOrphanNamespaceSnapshotContentDeleteAfter = "STATE_SNAPSHOTTER_ORPHAN_NSC_DELETE_AFTER"
 )
 
 type Options struct {
@@ -69,6 +73,11 @@ type Options struct {
 	// See EffectiveUnifiedBootstrapPairs().
 	UnifiedBootstrapMode        UnifiedBootstrapMode
 	UnifiedBootstrapCustomPairs []unifiedbootstrap.UnifiedGVKPair
+
+	// NamespaceSnapshotRootOKTTL: when >0, root ObjectKeeper (ret-nssnap-*) uses FollowObjectWithTTL following the NamespaceSnapshot.
+	NamespaceSnapshotRootOKTTL time.Duration
+	// OrphanNamespaceSnapshotContentDeleteAfter: when >0, retained NamespaceSnapshotContent is deleted this long after root snapshot removal.
+	OrphanNamespaceSnapshotContentDeleteAfter time.Duration
 }
 
 func NewConfig() *Options {
@@ -129,6 +138,21 @@ func NewConfig() *Options {
 	}
 	opts.UnifiedBootstrapMode = mode
 	opts.UnifiedBootstrapCustomPairs = pairs
+
+	if v := strings.TrimSpace(os.Getenv(EnvNamespaceSnapshotRootOKTTL)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			opts.NamespaceSnapshotRootOKTTL = d
+		} else if err != nil {
+			log.Printf("Invalid %s (%q): %v", EnvNamespaceSnapshotRootOKTTL, v, err)
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvOrphanNamespaceSnapshotContentDeleteAfter)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			opts.OrphanNamespaceSnapshotContentDeleteAfter = d
+		} else if err != nil {
+			log.Printf("Invalid %s (%q): %v", EnvOrphanNamespaceSnapshotContentDeleteAfter, v, err)
+		}
+	}
 
 	return &opts
 }

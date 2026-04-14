@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -57,34 +58,66 @@ func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService) *Aggreg
 }
 
 // BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../namespace-snapshot-aggregated-manifests-pr4.md
+// When the NamespaceSnapshot is gone but retained NamespaceSnapshotContent still exists (same spec ref name/namespace), resolves content by listing.
 func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
 	nsSnap := &storagev1alpha1.NamespaceSnapshot{}
-	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, nsSnap); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
-				fmt.Sprintf("NamespaceSnapshot %s/%s not found", namespace, snapshotName))
+	err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, nsSnap)
+	if err == nil {
+		bound := nsSnap.Status.BoundSnapshotContentName
+		if bound == "" {
+			return nil, NewAggregatedStatusError(http.StatusConflict, "Conflict", "boundSnapshotContentName is empty")
 		}
+		return s.marshalAggregatedFromRootNSC(ctx, bound)
+	}
+	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get NamespaceSnapshot: %w", err)
 	}
-
-	bound := nsSnap.Status.BoundSnapshotContentName
-	if bound == "" {
-		return nil, NewAggregatedStatusError(http.StatusConflict, "Conflict", "boundSnapshotContentName is empty")
+	bound, ferr := s.findRetainedRootNSCName(ctx, namespace, snapshotName)
+	if ferr != nil {
+		return nil, ferr
 	}
+	if bound == "" {
+		return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
+			fmt.Sprintf("NamespaceSnapshot %s/%s not found", namespace, snapshotName))
+	}
+	return s.marshalAggregatedFromRootNSC(ctx, bound)
+}
 
+func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootNSC(ctx context.Context, rootNSC string) ([]byte, error) {
 	visited := make(map[string]struct{})
 	seenKeys := make(map[string]struct{})
 	var objects []map[string]interface{}
-
-	if err := s.walkNSC(ctx, bound, visited, &objects, seenKeys); err != nil {
+	if err := s.walkNSC(ctx, rootNSC, visited, &objects, seenKeys); err != nil {
 		return nil, err
 	}
-
 	out, err := json.Marshal(objects)
 	if err != nil {
 		return nil, NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("marshal aggregated manifests: %v", err))
 	}
 	return out, nil
+}
+
+func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Context, namespace, snapshotName string) (string, error) {
+	var list storagev1alpha1.NamespaceSnapshotContentList
+	if err := s.client.List(ctx, &list); err != nil {
+		return "", fmt.Errorf("list NamespaceSnapshotContent: %w", err)
+	}
+	var best string
+	// Use MinInt64 so clients without CreationTimestamp (e.g. envtest/fake) still pick a retained root;
+	// zero metav1.Time encodes as a large negative UnixNano(), which is still > MinInt64.
+	var bestTs int64 = math.MinInt64
+	for i := range list.Items {
+		ref := list.Items[i].Spec.NamespaceSnapshotRef
+		if ref.Namespace != namespace || ref.Name != snapshotName {
+			continue
+		}
+		ts := list.Items[i].CreationTimestamp.UnixNano()
+		if ts >= bestTs {
+			bestTs = ts
+			best = list.Items[i].Name
+		}
+	}
+	return best, nil
 }
 
 func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName string, visited map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {

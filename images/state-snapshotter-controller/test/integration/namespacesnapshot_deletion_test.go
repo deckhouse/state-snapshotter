@@ -169,15 +169,15 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
-	It("N2a §5.2: delete root during manifest capture removes MCR then MCP then clears root finalizer (Retain content)", func() {
+	It("unified retention: deleting NamespaceSnapshot does not remove MCR or ManifestCheckpoint (Retain content)", func() {
 		ctx := context.Background()
 		contentName := ""
 
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "nss-del-cap-",
+				GenerateName: "nss-del-retain-mcp-",
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-delete-during-capture",
+					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-retain-mcp",
 				},
 			},
 		}
@@ -193,7 +193,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		})
 
 		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: "nss-del-cap-cm", Namespace: nsName},
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-del-retain-mcp-cm", Namespace: nsName},
 			Data:       map[string]string{"k": "v"},
 		}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
@@ -210,41 +210,35 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 
 		var rootUID types.UID
 		var mcrKey client.ObjectKey
+		var mcpName string
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
-			g.Expect(fresh.UID).NotTo(BeEmpty())
+			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			rootUID = fresh.UID
 			contentName = fresh.Status.BoundSnapshotContentName
 			mcrKey = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(rootUID)}
 			g.Expect(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{})).To(Succeed())
-		}).WithTimeout(90 * time.Second).WithPolling(40 * time.Millisecond).Should(Succeed())
-
-		mcr := &ssv1alpha1.ManifestCaptureRequest{}
-		Expect(k8sClient.Get(ctx, mcrKey, mcr)).To(Succeed())
-		mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+			mcr := &ssv1alpha1.ManifestCaptureRequest{}
+			g.Expect(k8sClient.Get(ctx, mcrKey, mcr)).To(Succeed())
+			mcpName = namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})).To(Succeed())
+		}).WithTimeout(90 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName},
 		})).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			err := k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{})
-			g.Expect(errors.IsNotFound(err)).To(BeTrue())
-		}).WithTimeout(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
-
-		Eventually(func(g Gomega) {
-			err := k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})
-			g.Expect(errors.IsNotFound(err)).To(BeTrue())
-		}).WithTimeout(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
-
-		Eventually(func(g Gomega) {
 			err := k8sClient.Get(ctx, key, &storagev1alpha1.NamespaceSnapshot{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
-		sc := &storagev1alpha1.NamespaceSnapshotContent{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.NamespaceSnapshotContent{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})).To(Succeed())
 	})
 })

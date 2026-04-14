@@ -22,6 +22,8 @@ const (
 	// Note: This is group/version, not just group, despite the name.
 	DeckhouseAPIVersion = "deckhouse.io/v1alpha1"
 	KindObjectKeeper    = "ObjectKeeper"
+	ObjectKeeperModeFollowObject        = "FollowObject"
+	ObjectKeeperModeFollowObjectWithTTL = "FollowObjectWithTTL"
 )
 
 // Annotation key constants

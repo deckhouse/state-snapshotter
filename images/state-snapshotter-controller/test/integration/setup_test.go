@@ -674,6 +674,7 @@ var _ = BeforeSuite(func() {
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
+	Expect(controllers.AddNamespaceSnapshotContentControllerToManager(mgr, testCfg)).To(Succeed())
 
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,

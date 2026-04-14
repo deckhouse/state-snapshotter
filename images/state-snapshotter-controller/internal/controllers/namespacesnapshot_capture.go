@@ -75,7 +75,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return r.failCapture(ctx, nsSnap, content, "NoCaptureTargets", "namespace has no resources matching the N2a allowlist (see design §4.5)")
 	}
 
-	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, targets)
+	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
 		if errors.Is(err, errManifestCapturePlanDrift) {
 			return r.failCapture(ctx, nsSnap, content, "CapturePlanDrift", err.Error())
@@ -206,15 +206,61 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 	return ctrl.Result{}, nil
 }
 
-// ensureNamespaceSnapshotRootObjectKeeper creates a cluster-scoped ObjectKeeper in FollowObject mode that
-// follows NamespaceSnapshotContent by UID. N2a implementation note (aligned with design §4.3.2): this is a
-// lifecycle helper tied to NSC existence, not FollowObjectWithTTL retention yet — when NSC is deleted, OK is
-// removed with it; TTL-based retention for persisted results is a follow-up (see namespace-snapshot-controller.md §4.3.2).
+// ensureNamespaceSnapshotRootObjectKeeper creates the cluster-scoped ret-nssnap-* ObjectKeeper.
+// When NamespaceSnapshotRootOKTTL>0: FollowObjectWithTTL on NamespaceSnapshot (TTL starts when snapshot is deleted; Deckhouse controller).
+// Otherwise: FollowObject on NamespaceSnapshotContent (legacy behaviour while snapshot exists).
 func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	name := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsSnap.Namespace, nsSnap.Name)
 	ok := &deckhousev1alpha1.ObjectKeeper{}
 	err := r.Client.Get(ctx, client.ObjectKey{Name: name}, ok)
+
+	useTTL := r.Config != nil && r.Config.NamespaceSnapshotRootOKTTL > 0
+	var spec deckhousev1alpha1.ObjectKeeperSpec
+	if useTTL {
+		spec = deckhousev1alpha1.ObjectKeeperSpec{
+			Mode: ObjectKeeperModeFollowObjectWithTTL,
+			FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "NamespaceSnapshot",
+				Namespace:  nsSnap.Namespace,
+				Name:       nsSnap.Name,
+				UID:        string(nsSnap.UID),
+			},
+			TTL: &metav1.Duration{Duration: r.Config.NamespaceSnapshotRootOKTTL},
+		}
+	} else {
+		spec = deckhousev1alpha1.ObjectKeeperSpec{
+			Mode: ObjectKeeperModeFollowObject,
+			FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "NamespaceSnapshotContent",
+				Name:       content.Name,
+				UID:        string(content.UID),
+			},
+		}
+	}
+
+	okMatches := func(o *deckhousev1alpha1.ObjectKeeper) bool {
+		if o.Spec.Mode != spec.Mode {
+			return false
+		}
+		if o.Spec.FollowObjectRef == nil || spec.FollowObjectRef == nil {
+			return false
+		}
+		fr := o.Spec.FollowObjectRef
+		want := spec.FollowObjectRef
+		if fr.APIVersion != want.APIVersion || fr.Kind != want.Kind || fr.Name != want.Name || fr.Namespace != want.Namespace || fr.UID != want.UID {
+			return false
+		}
+		if useTTL {
+			if o.Spec.TTL == nil || spec.TTL == nil || o.Spec.TTL.Duration != spec.TTL.Duration {
+				return false
+			}
+		}
+		return true
+	}
+
 	switch {
 	case apierrors.IsNotFound(err):
 		ok = &deckhousev1alpha1.ObjectKeeper{
@@ -223,15 +269,7 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 				Kind:       KindObjectKeeper,
 			},
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: deckhousev1alpha1.ObjectKeeperSpec{
-				Mode: "FollowObject",
-				FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshotContent",
-					Name:       content.Name,
-					UID:        string(content.UID),
-				},
-			},
+			Spec:       spec,
 		}
 		if err := r.Client.Create(ctx, ok); err != nil {
 			return nil, ctrl.Result{}, fmt.Errorf("create ObjectKeeper %s: %w", name, err)
@@ -239,25 +277,37 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ok); err != nil {
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
-		logger.Info("created root ObjectKeeper for NamespaceSnapshot", "objectKeeper", name)
+		logger.Info("created root ObjectKeeper for NamespaceSnapshot", "objectKeeper", name, "mode", spec.Mode)
 		return ok, ctrl.Result{}, nil
 	case err != nil:
 		return nil, ctrl.Result{}, err
 	default:
-		if ok.Spec.FollowObjectRef == nil || ok.Spec.FollowObjectRef.UID != string(content.UID) {
-			// OK name is (namespace, snapshotName); recreating the root reuses the name but gets a new NSC UID.
-			// Drop the previous generation's OK so the NotFound branch can create a follower for this content.
+		if !okMatches(ok) {
 			if err := r.Client.Delete(ctx, ok); err != nil && !apierrors.IsNotFound(err) {
 				return nil, ctrl.Result{}, fmt.Errorf("delete stale ObjectKeeper %s: %w", name, err)
 			}
-			logger.Info("deleted stale root ObjectKeeper after NamespaceSnapshot recreate", "objectKeeper", name, "contentUID", string(content.UID))
+			logger.Info("deleted stale root ObjectKeeper (spec drift)", "objectKeeper", name)
+			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+		}
+		if useTTL {
+			if ok.Spec.FollowObjectRef == nil || ok.Spec.FollowObjectRef.UID != string(nsSnap.UID) {
+				if err := r.Client.Delete(ctx, ok); err != nil && !apierrors.IsNotFound(err) {
+					return nil, ctrl.Result{}, fmt.Errorf("delete stale ObjectKeeper %s: %w", name, err)
+				}
+				return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
+		} else if ok.Spec.FollowObjectRef == nil || ok.Spec.FollowObjectRef.UID != string(content.UID) {
+			if err := r.Client.Delete(ctx, ok); err != nil && !apierrors.IsNotFound(err) {
+				return nil, ctrl.Result{}, fmt.Errorf("delete stale ObjectKeeper %s: %w", name, err)
+			}
+			logger.Info("deleted stale root ObjectKeeper after NamespaceSnapshotContent UID change", "objectKeeper", name, "contentUID", string(content.UID))
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
 		return ok, ctrl.Result{}, nil
 	}
 }
 
-func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, targets []namespacemanifest.ManifestTarget) (*ssv1alpha1.ManifestCaptureRequest, ctrl.Result, error) {
+func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent, targets []namespacemanifest.ManifestTarget) (*ssv1alpha1.ManifestCaptureRequest, ctrl.Result, error) {
 	name := namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: name}
 
@@ -281,12 +331,15 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 				Labels: map[string]string{
 					labelNamespaceSnapshotUID: string(nsSnap.UID),
 				},
+				Annotations: map[string]string{
+					namespacemanifest.AnnotationBoundNamespaceSnapshotContent: content.Name,
+				},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{Targets: specTargets},
 		}
 		if err := r.Client.Create(ctx, mcr); err != nil {
 			if apierrors.IsAlreadyExists(err) {
-				return r.ensureManifestCaptureRequest(ctx, nsSnap, targets)
+				return r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 			}
 			return nil, ctrl.Result{}, err
 		}
@@ -300,6 +353,17 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 	default:
 		if existing.Labels == nil || existing.Labels[labelNamespaceSnapshotUID] != string(nsSnap.UID) {
 			return nil, ctrl.Result{}, fmt.Errorf("ManifestCaptureRequest %s exists but is not owned by this NamespaceSnapshot (stale or manual)", key.String())
+		}
+		if existing.Annotations == nil || existing.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent] != content.Name {
+			base := existing.DeepCopy()
+			if existing.Annotations == nil {
+				existing.Annotations = map[string]string{}
+			}
+			existing.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent] = content.Name
+			if err := r.Client.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
+				return nil, ctrl.Result{}, err
+			}
+			return nil, ctrl.Result{Requeue: true}, nil
 		}
 		if !manifestTargetsEqual(existing.Spec.Targets, specTargets) {
 			return nil, ctrl.Result{}, fmt.Errorf("%w: ManifestCaptureRequest %s spec.targets differ from current resolved N2a targets; delete the MCR to retry with a fresh plan", errManifestCapturePlanDrift, key.String())

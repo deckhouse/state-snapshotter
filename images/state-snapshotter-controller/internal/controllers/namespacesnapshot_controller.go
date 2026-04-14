@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -175,8 +174,11 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 
 		newContent := &storagev1alpha1.NamespaceSnapshotContent{
-			ObjectMeta: metav1.ObjectMeta{Name: expectedName},
-			Spec:       desiredNamespaceSnapshotContentSpec(nsSnap),
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       expectedName,
+				Finalizers: []string{snapshot.FinalizerParentProtect},
+			},
+			Spec: desiredNamespaceSnapshotContentSpec(nsSnap),
 		}
 		if err := r.Client.Create(ctx, newContent); err != nil {
 			if errors.IsAlreadyExists(err) {
@@ -280,57 +282,9 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 	return ctrl.Result{Requeue: true}, nil
 }
 
-// reconcileDelete implements N2a cancel/cleanup policy when NamespaceSnapshot is deleted (design §5.2):
-// 1) Delete ManifestCaptureRequest (§4.7).
-// 2) Requeue until MCR is gone.
-// 3) Best-effort Delete(ManifestCheckpoint); chunks GC via ownerRef on MCP.
-// 4) NamespaceSnapshotContent + root finalizer per deletion policy.
+// reconcileDelete removes the NamespaceSnapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR:
+// retained artifacts follow NamespaceSnapshotContent and unified-snapshot-deletion-algorithm.md (MCR/VCR lifecycle is separate).
 func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
-	mcrKey := client.ObjectKey{Namespace: nsSnap.Namespace, Name: namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)}
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	var mcpName string
-
-	if err := r.Client.Get(ctx, mcrKey, mcr); err == nil {
-		mcpName = namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
-		if err := r.Client.Delete(ctx, mcr); err != nil && !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-	} else if !errors.IsNotFound(err) {
-		return ctrl.Result{}, err
-	}
-
-	if mcpName == "" && nsSnap.Status.BoundSnapshotContentName != "" {
-		contentForMCP := &storagev1alpha1.NamespaceSnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Status.BoundSnapshotContentName}, contentForMCP); err == nil {
-			mcpName = contentForMCP.Status.ManifestCheckpointName
-		} else if !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-	}
-
-	if err := r.Client.Get(ctx, mcrKey, mcr); err == nil {
-		return ctrl.Result{RequeueAfter: 300 * time.Millisecond}, nil
-	} else if !errors.IsNotFound(err) {
-		return ctrl.Result{}, err
-	}
-
-	if mcpName != "" {
-		mcp := &ssv1alpha1.ManifestCheckpoint{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err == nil {
-			// Step 3 of §5.2 / reconcileDelete policy: explicit MCP delete after MCR is gone (see function doc).
-			if err := r.Client.Delete(ctx, mcp); err != nil && !errors.IsNotFound(err) {
-				return ctrl.Result{}, err
-			}
-		} else if !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err == nil {
-			return ctrl.Result{RequeueAfter: 300 * time.Millisecond}, nil
-		} else if !errors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-	}
-
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
 			if err := r.Client.Update(ctx, nsSnap); err != nil {
@@ -354,6 +308,23 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 	}
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if r.Config != nil && r.Config.OrphanNamespaceSnapshotContentDeleteAfter > 0 &&
+		content.Spec.DeletionPolicy == storagev1alpha1.SnapshotContentDeletionPolicyRetain {
+		base := content.DeepCopy()
+		ann := content.GetAnnotations()
+		if ann == nil {
+			ann = map[string]string{}
+		}
+		if _, ok := ann[namespacemanifest.AnnotationOrphanPurgeAt]; !ok {
+			when := time.Now().UTC().Add(r.Config.OrphanNamespaceSnapshotContentDeleteAfter).Format(time.RFC3339)
+			ann[namespacemanifest.AnnotationOrphanPurgeAt] = when
+			content.SetAnnotations(ann)
+			if err := r.Client.Patch(ctx, content, client.MergeFrom(base)); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 	}
 
 	policy := content.Spec.DeletionPolicy

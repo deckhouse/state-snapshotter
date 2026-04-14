@@ -276,6 +276,13 @@ func main() {
 		}
 		log.Info("NamespaceSnapshotController added to manager")
 
+		if err := controllers.AddNamespaceSnapshotContentControllerToManager(mgr, cfgParams); err != nil {
+			log.Error(err, "Failed to add NamespaceSnapshotContentController to manager")
+			cancel()
+			os.Exit(1)
+		}
+		log.Info("NamespaceSnapshotContentController added to manager")
+
 		unifiedSync := unifiedruntime.NewSyncer(
 			mgr,
 			ctrl.Log,

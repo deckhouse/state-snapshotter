@@ -44,6 +44,7 @@ import (
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
@@ -259,80 +260,107 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			"targets", len(mcr.Spec.Targets))
 	}
 
-	// ADR: Create only ONE ObjectKeeper: ret-mcr-<namespace>-<mcrName>
-	// This ObjectKeeper:
-	// - Uses FollowObject mode to follow MCR (no TTL)
-	// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
-	// - When MCR is deleted, ObjectKeeper is automatically deleted (FollowObject)
-	// - When ObjectKeeper is deleted, GC deletes MCP (via ownerRef)
-	// - TTL and request cleanup are handled by MCR controller, not ObjectKeeper
-	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
-	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
-	// Update Processing message to show progress
-	r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
+	controllerTrue := func() *bool { b := true; return &b }()
 
-	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
-	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
-	switch {
-	case errors.IsNotFound(err):
-		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: DeckhouseAPIVersion,
-				Kind:       KindObjectKeeper,
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: retainerName,
-			},
-			Spec: deckhousev1alpha1.ObjectKeeperSpec{
-				Mode: "FollowObject",
-				FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
-					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
-					Kind:       "ManifestCaptureRequest",
-					Namespace:  mcr.Namespace,
-					Name:       mcr.Name,
-					UID:        string(mcr.UID),
-				},
-			},
+	nscBoundName := ""
+	if mcr.Annotations != nil {
+		nscBoundName = mcr.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent]
+	}
+
+	var mcpOwnerRefs []metav1.OwnerReference
+
+	if nscBoundName != "" {
+		r.Logger.Info("NamespaceSnapshot-bound capture: MCP ownerRef -> NamespaceSnapshotContent",
+			"namespaceSnapshotContent", nscBoundName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		r.updateProcessingMessage(ctx, mcr, "Resolving NamespaceSnapshotContent for checkpoint ownerRef...")
+		boundNSC := &snapstorage.NamespaceSnapshotContent{}
+		if err := r.Get(ctx, client.ObjectKey{Name: nscBoundName}, boundNSC); err != nil {
+			if errors.IsNotFound(err) {
+				msg := fmt.Sprintf("NamespaceSnapshotContent %q not found", nscBoundName)
+				if ferr := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, msg); ferr != nil {
+					if errors.IsNotFound(ferr) {
+						return ctrl.Result{}, nil
+					}
+					return ctrl.Result{}, ferr
+				}
+				return ctrl.Result{}, fmt.Errorf("%s", msg)
+			}
+			return ctrl.Result{}, fmt.Errorf("get NamespaceSnapshotContent %q: %w", nscBoundName, err)
 		}
-		if err := r.Create(ctx, objectKeeper); err != nil {
-			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
-				if errors.IsNotFound(err) {
-					return ctrl.Result{}, nil
+		mcpOwnerRefs = []metav1.OwnerReference{{
+			APIVersion: snapstorage.SchemeGroupVersion.String(),
+			Kind:       "NamespaceSnapshotContent",
+			Name:       boundNSC.Name,
+			UID:        boundNSC.UID,
+			Controller: controllerTrue,
+		}}
+	} else {
+		// ADR: Create only ONE ObjectKeeper: ret-mcr-<namespace>-<mcrName> (generic capture path).
+		retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
+		r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
+
+		objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+		err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
+		switch {
+		case errors.IsNotFound(err):
+			objectKeeper = &deckhousev1alpha1.ObjectKeeper{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: DeckhouseAPIVersion,
+					Kind:       KindObjectKeeper,
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: retainerName,
+				},
+				Spec: deckhousev1alpha1.ObjectKeeperSpec{
+					Mode: "FollowObject",
+					FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+						APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+						Kind:       "ManifestCaptureRequest",
+						Namespace:  mcr.Namespace,
+						Name:       mcr.Name,
+						UID:        string(mcr.UID),
+					},
+				},
+			}
+			if err := r.Create(ctx, objectKeeper); err != nil {
+				r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
+				if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
+					if errors.IsNotFound(err) {
+						return ctrl.Result{}, nil
+					}
+					return ctrl.Result{}, err
 				}
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, err
+			r.Logger.Info("Created ObjectKeeper", "name", retainerName)
+			if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
+			r.Logger.Info("✅ Step 1 complete: Created ObjectKeeper",
+				"objectKeeper", retainerName,
+				"uid", objectKeeper.UID,
+				"checkpoint", checkpointName,
+				"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		case err != nil:
+			return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
+		default:
+			if objectKeeper.Spec.FollowObjectRef == nil {
+				return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
+			}
+			if objectKeeper.Spec.FollowObjectRef.UID != string(mcr.UID) {
+				return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another MCR (UID mismatch: expected %s, got %s)",
+					retainerName, string(mcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
+			}
+			r.Logger.Info("ObjectKeeper already exists, using existing", "objectKeeper", retainerName, "uid", objectKeeper.UID)
 		}
-		r.Logger.Info("Created ObjectKeeper", "name", retainerName)
-		// After create, ensure it's observable via apiserver (UID barrier pattern)
-		// Always read via APIReader (direct API, no cache) to ensure read-after-write consistency
-		// This guarantees that ObjectKeeper is visible in apiserver before proceeding
-		// This is not retry logic - it's handling cache lag after Create()
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-			// UID barrier: if object is not yet observable via APIReader, requeue briefly
-			// This ensures read-after-write consistency for ownerRef UID
-			// This is not retry logic - it's handling cache lag after Create()
-			return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-		}
-		r.Logger.Info("✅ Step 1 complete: Created ObjectKeeper",
-			"objectKeeper", retainerName,
-			"uid", objectKeeper.UID,
-			"checkpoint", checkpointName,
-			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
-	case err != nil:
-		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	default:
-		// ObjectKeeper exists - validate it belongs to this MCR
-		// This protects against race conditions where MCR was deleted and recreated with same name
-		if objectKeeper.Spec.FollowObjectRef == nil {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
-		}
-		if objectKeeper.Spec.FollowObjectRef.UID != string(mcr.UID) {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another MCR (UID mismatch: expected %s, got %s)",
-				retainerName, string(mcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
-		}
-		r.Logger.Info("ObjectKeeper already exists, using existing", "objectKeeper", retainerName, "uid", objectKeeper.UID)
+		mcpOwnerRefs = []metav1.OwnerReference{{
+			APIVersion: DeckhouseAPIVersion,
+			Kind:       KindObjectKeeper,
+			Name:       retainerName,
+			UID:        objectKeeper.UID,
+			Controller: controllerTrue,
+		}}
 	}
 
 	// If checkpoint already exists → finalize MCR (idempotent finalization)
@@ -351,9 +379,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
-	// Create ManifestCheckpoint with ownerRef to ret-mcr-* ObjectKeeper
-	// ADR: Checkpoint MUST have ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
-	// This is the single ObjectKeeper that holds both MCR and MCP
+	// Create ManifestCheckpoint: ownerRef -> NamespaceSnapshotContent (namespace snapshot path) or ObjectKeeper (generic path).
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
@@ -365,16 +391,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				"state-snapshotter.deckhouse.io/source-namespace": mcr.Namespace,
 				"state-snapshotter.deckhouse.io/source-request":   mcr.Name,
 			},
-			// ADR: Checkpoint has ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: DeckhouseAPIVersion,
-					Kind:       KindObjectKeeper,
-					Name:       retainerName, // This is ret-mcr-<namespace>-<mcrName>
-					UID:        objectKeeper.UID,
-					Controller: func() *bool { b := true; return &b }(),
-				},
-			},
+			OwnerReferences: mcpOwnerRefs,
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{
 			SourceNamespace: mcr.Namespace,
@@ -391,8 +408,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		if !errors.IsAlreadyExists(err) {
 			r.Logger.Error(err, "Failed to create ManifestCheckpoint",
 				"checkpoint", checkpointName,
-				"owner", retainerName,
-				"ownerUID", objectKeeper.UID)
+				"ownerRefs", mcpOwnerRefs)
 			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
@@ -436,9 +452,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		r.Logger.Info("✅ Step 2 complete: Created ManifestCheckpoint",
 			"checkpoint", checkpointName,
 			"uid", checkpoint.UID,
-			"ownerRefs", ownerRefDetails,
-			"objectKeeperName", retainerName,
-			"objectKeeperUID", objectKeeper.UID)
+			"ownerRefs", ownerRefDetails)
 		// Set Processing condition on checkpoint immediately after creation
 		now := metav1.Now()
 		setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{

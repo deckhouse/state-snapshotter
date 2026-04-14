@@ -146,6 +146,37 @@ func aggManifestNS(bound string) *storagev1alpha1.NamespaceSnapshot {
 	}
 }
 
+func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+	agg := NewAggregatedNamespaceManifests(cl, arch)
+
+	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "cm1", "namespace": "ns1"}},
+	})
+	ch := aggManifestCreateChunk("ch0", "mcp-root", d1, c1)
+	_ = cl.Create(context.Background(), ch)
+	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
+	_ = cl.Create(context.Background(), mcp)
+	root := aggManifestNSC("root-nsc", "mcp-root")
+	_ = cl.Create(context.Background(), root)
+	// No NamespaceSnapshot object — retained content only.
+
+	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 1 {
+		t.Fatalf("len=%d", len(arr))
+	}
+}
+
 func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
