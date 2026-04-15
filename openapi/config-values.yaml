@@ -22,3 +22,10 @@ properties:
       Literal "empty" (or "none", "dsc-only") = no static bootstrap (DSC-only merge).
       Custom = semicolon-separated pairs "group/version/Kind|group/version/Kind" (snapshot|content).
       Maps to env STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
+  snapshotRootOkTtl:
+    type: string
+    default: ""
+    description: |
+      Optional Go duration for root snapshot ObjectKeeper FollowObjectWithTTL (NamespaceSnapshot + unified XxxxSnapshot), e.g. "24h", "168h".
+      Empty = omit env; controller uses built-in default (currently 1m for TTL-chain debugging; override via env for prod). Maps to STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL.
+      Legacy env STATE_SNAPSHOTTER_NS_ROOT_OK_TTL is still read by the binary when this is unset.

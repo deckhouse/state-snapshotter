@@ -379,7 +379,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
-	// Create ManifestCheckpoint: ownerRef -> NamespaceSnapshotContent (namespace snapshot path) or ObjectKeeper (generic path).
+	// Create ManifestCheckpoint: ownerRef -> NamespaceSnapshotContent (namespace snapshot capture) or ObjectKeeper (generic MCR capture).
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",

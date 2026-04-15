@@ -264,7 +264,7 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 			Type:               snapshot.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             "ContentRefMismatch",
-			Message:            fmt.Sprintf("existing NamespaceSnapshotContent %q is not owned by this NamespaceSnapshot", expectedName),
+			Message:            fmt.Sprintf("existing NamespaceSnapshotContent %q does not reference this NamespaceSnapshot", expectedName),
 			ObservedGeneration: nsSnap.Generation,
 		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -287,8 +287,8 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 	return ctrl.Result{Requeue: true}, nil
 }
 
-// reconcileDelete removes the NamespaceSnapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR:
-// retained artifacts follow NamespaceSnapshotContent and unified-snapshot-deletion-algorithm.md (MCR/VCR lifecycle is separate).
+// reconcileDelete removes the NamespaceSnapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR;
+// retained manifest artifacts follow NamespaceSnapshotContent lifecycle (separate from snapshot object deletion).
 func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
@@ -363,8 +363,8 @@ func namespaceSnapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string 
 	return fmt.Sprintf("ns-%s", uid)
 }
 
-// namespaceSnapshotContentObjectMeta builds metadata for a new NamespaceSnapshotContent, including
-// ownerReferences -> parent NamespaceSnapshotContent for synthetic child snapshots (N2b scaffold).
+// namespaceSnapshotContentObjectMeta builds metadata for a new NamespaceSnapshotContent.
+// Synthetic child snapshots add ownerReferences -> parent NamespaceSnapshotContent (scaffold until domain wiring).
 func (r *NamespaceSnapshotReconciler) namespaceSnapshotContentObjectMeta(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (metav1.ObjectMeta, error) {
 	om := metav1.ObjectMeta{
 		Name:       namespaceSnapshotContentName(nsSnap),

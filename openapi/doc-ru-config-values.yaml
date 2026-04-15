@@ -6,3 +6,7 @@ properties:
     description: Если false — отключаются unified Snapshot/SnapshotContent и runtime Sync; reconciler DSC остаётся (только статусы).
   unifiedBootstrapPairs:
     description: Статический bootstrap списка пар GVK до merge с DSC. Пусто — дефолт из кода; empty/none/dsc-only — только DSC; иначе кастомная строка (см. англ. описание в config-values).
+  snapshotRootOkTtl:
+    description: |
+      Опциональная длительность TTL для корневого ObjectKeeper (FollowObjectWithTTL) у NamespaceSnapshot и unified XxxxSnapshot.
+      Пусто — в Pod не передаётся env, в контроллере действует встроенный дефолт (сейчас 1m для отладки цепочки TTL; для прода задайте значение явно, например 168h). Иначе строка длительности Go.

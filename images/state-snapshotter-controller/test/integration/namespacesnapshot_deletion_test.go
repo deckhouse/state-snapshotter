@@ -35,6 +35,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -44,6 +45,30 @@ func ownerRefToNamespaceSnapshotContent(refs []metav1.OwnerReference, name strin
 		ref := refs[i]
 		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshotContent" &&
 			ref.Name == name && ref.UID == uid {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpOwnerRefToRootNSC is true when ManifestCheckpoint has a controlling ownerRef to the root NamespaceSnapshotContent (namespace-snapshot capture path).
+func mcpOwnerRefToRootNSC(refs []metav1.OwnerReference, name string, uid types.UID) bool {
+	for i := range refs {
+		ref := refs[i]
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshotContent" &&
+			ref.Name == name && ref.UID == uid && ref.Controller != nil && *ref.Controller {
+			return true
+		}
+	}
+	return false
+}
+
+// mcrOwnerRefToNamespaceSnapshot is true when ManifestCaptureRequest has a controlling ownerRef to the root NamespaceSnapshot (same namespace; GC when snapshot is removed).
+func mcrOwnerRefToNamespaceSnapshot(refs []metav1.OwnerReference, name string, uid types.UID) bool {
+	for i := range refs {
+		ref := refs[i]
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshot" &&
+			ref.Name == name && ref.UID == uid && ref.Controller != nil && *ref.Controller {
 			return true
 		}
 	}
@@ -181,7 +206,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
-	It("unified retention: deleting NamespaceSnapshot does not remove MCR or ManifestCheckpoint (Retain content)", func() {
+	It("unified retention: deleting NamespaceSnapshot does not remove ManifestCheckpoint; MCR already gone after capture (Retain content)", func() {
 		ctx := context.Background()
 		contentName := ""
 
@@ -233,15 +258,20 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			rootUID = fresh.UID
 			contentName = fresh.Status.BoundSnapshotContentName
 			mcrKey = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(rootUID)}
-			g.Expect(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{})).To(Succeed())
-			mcr := &ssv1alpha1.ManifestCaptureRequest{}
-			g.Expect(k8sClient.Get(ctx, mcrKey, mcr)).To(Succeed())
-			mcpName = namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
+			sc := &storagev1alpha1.NamespaceSnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
+			mcpName = sc.Status.ManifestCheckpointName
+			g.Expect(mcpName).NotTo(BeEmpty())
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})).To(Succeed())
 		}).WithTimeout(90 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 		nsc := &storagev1alpha1.NamespaceSnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, nsc)).To(Succeed())
+		for i := range nsc.OwnerReferences {
+			Expect(nsc.OwnerReferences[i].Kind).NotTo(Equal("NamespaceSnapshot"),
+				"root NamespaceSnapshotContent must not use ownerReferences to NamespaceSnapshot (bind is spec.namespaceSnapshotRef only)")
+		}
 		ok := &deckhousev1alpha1.ObjectKeeper{}
 		okName := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsName, snap.Name)
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: okName}, ok)).To(Succeed())
@@ -250,11 +280,14 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Expect(ok.Spec.FollowObjectRef.Name).To(Equal(snap.Name))
 		Expect(ok.Spec.FollowObjectRef.Namespace).To(Equal(nsName))
 		Expect(ok.Spec.FollowObjectRef.UID).To(Equal(string(rootUID)))
+		Expect(ok.Spec.Mode).To(Equal("FollowObjectWithTTL"))
+		Expect(ok.Spec.TTL).NotTo(BeNil())
+		Expect(ok.Spec.TTL.Duration).To(Equal(config.DefaultSnapshotRootOKTTL))
 		Expect(ownerRefToNamespaceSnapshotContent(ok.OwnerReferences, contentName, nsc.UID)).To(BeTrue())
 
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, mcp)).To(Succeed())
-		Expect(ownerRefToNamespaceSnapshotContent(mcp.OwnerReferences, contentName, nsc.UID)).To(BeTrue())
+		Expect(mcpOwnerRefToRootNSC(mcp.OwnerReferences, contentName, nsc.UID)).To(BeTrue())
 
 		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName},
@@ -266,7 +299,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		}).WithTimeout(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.NamespaceSnapshotContent{})).To(Succeed())
-		Expect(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{})).To(Succeed())
+		Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})).To(Succeed())
 	})
 
@@ -340,5 +373,67 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		contentName = ""
+	})
+})
+
+var _ = Describe("Integration: NamespaceSnapshot MCR ownerReference (N2a)", func() {
+	It("garbage-collects ManifestCaptureRequest when NamespaceSnapshot is deleted during capture", func() {
+		ctx := context.Background()
+		contentName := ""
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "nss-mcr-own-",
+				Labels: map[string]string{
+					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-mcr-ownerref-gc",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		nsName := ns.Name
+		DeferCleanup(func() {
+			if contentName != "" {
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}})
+			}
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
+		})
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-mcr-own-cm", Namespace: nsName},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+		snap := &storagev1alpha1.NamespaceSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: nsName},
+			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+		}
+		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
+		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
+
+		var mcrKey client.ObjectKey
+		Eventually(func(g Gomega) {
+			fresh := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
+			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
+			contentName = fresh.Status.BoundSnapshotContentName
+			mcrKey = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(fresh.UID)}
+			mcr := &ssv1alpha1.ManifestCaptureRequest{}
+			if err := k8sClient.Get(ctx, mcrKey, mcr); err != nil {
+				g.Expect(errors.IsNotFound(err)).To(BeFalse(), "wait until MCR exists")
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			g.Expect(mcrOwnerRefToNamespaceSnapshot(mcr.OwnerReferences, fresh.Name, fresh.UID)).To(BeTrue())
+		}).WithTimeout(90 * time.Second).WithPolling(25 * time.Millisecond).Should(Succeed())
+
+		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName},
+		})).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, key, &storagev1alpha1.NamespaceSnapshot{})
+			g.Expect(errors.IsNotFound(err)).To(BeTrue())
+			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
+		}).WithTimeout(90 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
 	})
 })

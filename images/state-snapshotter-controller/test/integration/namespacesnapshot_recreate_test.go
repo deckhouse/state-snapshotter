@@ -38,9 +38,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// Must match NamespaceSnapshot controller label on ManifestCaptureRequest (internal/controllers/namespacesnapshot_capture.go).
-const labelNamespaceSnapshotUID = "state-snapshotter.deckhouse.io/namespace-snapshot-uid"
-
 var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", func() {
 	It("after deleting root and creating another with the same name, binds a new NSC and MCR by new UID and reaches Ready", func() {
 		ctx := context.Background()
@@ -91,9 +88,7 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 			uid1 = fresh.UID
 			contentName1 = fresh.Status.BoundSnapshotContentName
 			mcrKey1 = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(uid1)}
-			mcr := &ssv1alpha1.ManifestCaptureRequest{}
-			g.Expect(k8sClient.Get(ctx, mcrKey1, mcr)).To(Succeed())
-			g.Expect(mcr.Labels[labelNamespaceSnapshotUID]).To(Equal(string(uid1)))
+			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
@@ -108,9 +103,8 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		// MCR for the deleted snapshot is not tied to NamespaceSnapshot deletion (retained / separate lifecycle);
-		// the old MCR name is keyed by uid1 and must not block a new snapshot with the same metadata.name.
-		Expect(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{})).To(Succeed())
+		// MCR was removed after first capture success; same metadata.name must still be usable for a new snapshot.
+		Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 
 		snap2 := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: nsName},
@@ -130,9 +124,7 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 			contentName2 = fresh.Status.BoundSnapshotContentName
 			mcrKey2 = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(uid2)}
 			g.Expect(mcrKey2).NotTo(Equal(mcrKey1))
-			mcr := &ssv1alpha1.ManifestCaptureRequest{}
-			g.Expect(k8sClient.Get(ctx, mcrKey2, mcr)).To(Succeed())
-			g.Expect(mcr.Labels[labelNamespaceSnapshotUID]).To(Equal(string(uid2)))
+			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey2, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))

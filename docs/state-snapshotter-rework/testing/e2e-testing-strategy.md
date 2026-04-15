@@ -19,10 +19,27 @@
 
 | Где | Что является контрактом |
 |-----|-------------------------|
-| **Integration** | Структура и поведение **этого модуля**: `ownerReferences` (root ObjectKeeper→NSC, MCP→NSC, child NSC→parent NSC), снятие `snapshot.deckhouse.io/parent-protect` у дочернего NSC при удалении parent content (без `Client.Delete` детей), ручное удаление NSC после удаления root snapshot не блокируется финализаторами. **Не** требовать TTL Deckhouse ObjectKeeper или полного GC MCP/chunks как обязательный проход envtest. |
+| **Integration** | Структура и поведение **этого модуля**: `ownerReferences` (root ObjectKeeper→NSC, **MCR→NamespaceSnapshot** на время capture, MCP→NSC, child NSC→parent NSC), снятие `snapshot.deckhouse.io/parent-protect` у дочернего NSC при удалении parent content (без `Client.Delete` детей), ручное удаление NSC после удаления root snapshot не блокируется финализаторами. **Не** требовать TTL Deckhouse ObjectKeeper или полного GC MCP/chunks как обязательный проход envtest. |
 | **Real cluster** | `hack/pr4-smoke.sh`: retained read, aggregated manifests, **обязательный** контракт root ObjectKeeper (если не `PR4_SMOKE_SKIP_OK_CONTRACT=1`); фаза TTL — наблюдательная по умолчанию, **строгая** только с `PR4_SMOKE_REQUIRE_TTL=1` при реально настроенном TTL. |
 
 Продуктовую модель удаления не менять ради ограничений envtest (см. также `.cursor/rules/controller-envtest-local.mdc`).
+
+### PR4: проверка на реальном кластере (`hack/pr4-smoke.sh`)
+
+**Команда:** из корня репозитория `bash hack/pr4-smoke.sh` (без `PR4_SMOKE_SKIP_OK_CONTRACT`, если в кластере есть `objectkeepers.deckhouse.io`). Лог прогона сохраняйте как артефакт ревью/PR.
+
+**Подтверждено базовым прогоном** (read-path + retained + контракт модуля на живом API server):
+
+- subresource **aggregated manifests** отвечает и отдаёт ожидаемый JSON-массив;
+- **retained read** после удаления `NamespaceSnapshot` продолжает работать (тот же путь агрегации по retained `NamespaceSnapshotContent`);
+- **root ObjectKeeper** (шаг 5b скрипта): `spec.followObjectRef` → `NamespaceSnapshot` (UID root snapshot), в `metadata.ownerReferences` есть ссылка на соответствующий `NamespaceSnapshotContent`;
+- discovery субресурса, опциональный gzip, negative 404 — по сценарию скрипта.
+
+**Не является частью базового прогона** (отдельно: интеграция с Deckhouse ObjectKeeper + GC, не unit/integration модуля):
+
+- **strict TTL cascade:** `PR4_SMOKE_REQUIRE_TTL=1` — скрипт ждёт до `PR4_SMOKE_WAIT_SEC` исчезновения retained `NamespaceSnapshotContent`, затем отсутствия `ManifestCheckpoint`, затем **неуспешный** aggregated GET. Корневой OK создаётся контроллером всегда в **`FollowObjectWithTTL`**; `spec.ttl` — из `STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL` / алиас `STATE_SNAPSHOTTER_NS_ROOT_OK_TTL` или встроенный дефолт (`DefaultSnapshotRootOKTTL` в `pkg/config`; может быть временно уменьшен для отладки, например 1m). Для strict-прогона задайте `PR4_SMOKE_WAIT_SEC` с запасом относительно `spec.ttl`. Без strict-режима шаг 10 остаётся наблюдательным (`sleep` + INFO).
+
+**Итоговая формулировка для PR / чата:** PR4 как **read-path** и **retained-path** на реальном кластере — рабочие; полное доказательство **TTL-удаления** retained артефактов — отдельный прогон на окружении с известным конфигом ObjectKeeper.
 
 ## Уже есть (поддерживать)
 
@@ -44,14 +61,14 @@
 | `unified_runtime_rbac_eligibility_test.go` | **T4 + eligibility:** без RBACReady нет eligible-слоя для RegistrationTest; после снятия RBACReady resolved без пары, monotonic active сохраняет ключ. **`Serial`**; `AfterEach` чистит DSC. |
 | `controller_registration_test.go` | Конструирование контроллеров как в production; **без** повторного `SetupWithManager` на общем `mgr` |
 | `namespacesnapshot_lifecycle_test.go` | **N1 skeleton:** `NamespaceSnapshot` → `NamespaceSnapshotContent`, `status.boundSnapshotContentName` (unified root bind field), Ready через conditions (без ObjectKeeper / полного N2) |
-| `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — snapshot gone, NSC остаётся; Delete policy — root finalizer только после `NotFound` на content; **retained unified** — после delete snapshot остаются NSC+MCR+MCP; проверки контракта root OK (`followObjectRef`→NamespaceSnapshot, `ownerRef`→NSC) и MCP→NSC; узкий сценарий — пользователь удаляет NSC после удаления snapshot (deletion завершается, без контракта GC артефактов) |
+| `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — snapshot gone, NSC остаётся; Delete policy — root finalizer только после `NotFound` на content; **retained unified** — после delete snapshot остаются NSC+MCP (MCR уже снят после capture); проверки контракта root OK (`followObjectRef`→NamespaceSnapshot, `ownerRef`→NSC) и MCP→NSC; **MCR `ownerRef`→NamespaceSnapshot** — после появления MCR удаление root даёт **NotFound** на MCR (GC); узкий сценарий — пользователь удаляет NSC после удаления snapshot (deletion завершается, без контракта GC артефактов) |
 | `namespacesnapshot_n1_boundary_test.go` | **Формальное закрытие N1:** `ContentRefMismatch` при неверном `namespaceSnapshotRef` на NSC; **recovery** — после сброса `status` при валидном content снова `Bound`+`Ready`; короткая **стабильность** (Consistently) |
-| `namespacesnapshot_recreate_test.go` | **§4.7 / отдельный lifecycle MCR:** удаление root **не** удаляет старый MCR (имя `nss-{uid1}`); второй snapshot с тем же `metadata.name` — новый UID, новый NSC + новый MCR (`nss-{uid2}`), **Ready**; старый Retain NSC остаётся; старый MCR остаётся в API и не мешает recreate |
-| `namespacesnapshot_capture_plan_drift_test.go` | **N2a §4.7:** после **Ready** добавление allowlisted объекта в namespace → **CapturePlanDrift** на root и NSC (без молчаливого `Update` **MCR.spec.targets**); **MCR** остаётся в API для ручного удаления / retry |
+| `namespacesnapshot_recreate_test.go` | **§4.7 / отдельный lifecycle MCR:** после первого **Ready** MCR уже снят; удаление root; второй snapshot с тем же `metadata.name` — новый UID, новый NSC + новый MCR (`nss-{uid2}`), **Ready**; старый Retain NSC остаётся; имя MCR зависит от UID, коллизий нет |
+| `namespacesnapshot_capture_plan_drift_test.go` | **N2a §4.7:** после **Ready** добавление allowlisted объекта в namespace → **CapturePlanDrift** на root и NSC (без молчаливого `Update` **MCR.spec.targets**); **MCR** остаётся в API для ручного удаления / retry; пока MCR жив — **`ownerRef`→`NamespaceSnapshot`** |
 | `namespacesnapshot_synthetic_tree_test.go` | **Synthetic child tree (scaffold):** child NS; graph refs; parent ждёт child; **`ChildSnapshotPending`** → **`Completed`**; **контракт каскада:** child NSC имеет `ownerRef`→parent NSC, child с `FinalizerParentProtect`; при delete parent NSC контроллер снимает parent-protect с child (без `Delete` child из этого reconciler) |
 | `namespacesnapshot_synthetic_child_failure_test.go` | **N2b PR3:** искусственный **CapturePlanDrift** только на **MCR child** (лишний target в `spec.targets`); child терминально **`Ready=False`**; parent остаётся с валидным N2a-планом → **`ChildSnapshotFailed`**, message с именем child + причиной child |
 
-**N2a (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1 и [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §4.4–§4.7, §5.2, §8.7):** happy path (namespace → **MCR→ManifestCheckpoint** → persisted result → **Ready** только по MCP/chunks; на NSC **`manifestCheckpointName`**; root **без** MCR в status; MCR name по §4.7); fail-closed / allowlist; **Retain** с **root OK** + execution OK для MCR; провал MCR/MCP; **удаление root во время capture** — отмена через delete MCR (§5.2); download одного снимка (**§8.7.1**, 409 если MCP не Ready, 500 при битой склейке); smoke **pagination** при list в capture-потоке.  
+**N2a (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1 и [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §4.4–§4.7, §5.2, §8.7):** happy path (namespace → **MCR→ManifestCheckpoint** → persisted result → **Ready** только по MCP/chunks; на NSC **`manifestCheckpointName`**; root **без** MCR в status; MCR name по §4.7; **ownerRef MCR→NamespaceSnapshot**); fail-closed / allowlist; **Retain** с **root OK** + execution OK для MCR; провал MCR/MCP; **удаление root при живом MCR** — очистка MCR **GC** по ownerRef после исчезновения root из API (§5.2); download одного снимка (**§8.7.1**, 409 если MCP не Ready, 500 при битой склейке); smoke **pagination** при list в capture-потоке.  
 
 **N2b:** дерево — дочерние NS/NSC, **childrenSnapshotRefs** / **childrenSnapshotContentRefs**, агрегированный **Ready** parent (**§11.1** design), **aggregated manifests download** на чтении; **PR4** — нормативный контракт HTTP/ошибок/обхода: [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../spec/namespace-snapshot-aggregated-manifests-pr4.md); поставка короткими PR — [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.2**; **PR2** — `namespacesnapshot_synthetic_tree_test.go`; **PR3** — матрица parent reason (**`ChildSnapshotPending`** / **`ChildSnapshotFailed`** / **`Completed`**) — `namespacesnapshot_synthetic_tree_test.go` + `namespacesnapshot_synthetic_child_failure_test.go`; далее PR4 по спеке.
 

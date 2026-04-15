@@ -25,9 +25,11 @@ import (
 	"strings"
 	"time"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,6 +87,8 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			// Root NamespaceSnapshot status must not surface internal capture CRs (no MCR/VCR fields in API);
+			// binding and manifest artifact identity go through NamespaceSnapshotContent.
 
 			sc := &storagev1alpha1.NamespaceSnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
@@ -94,12 +98,23 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			g.Expect(sc.Spec.NamespaceSnapshotRef.Namespace).To(Equal(fresh.Namespace))
 
 			mcrName := namespacemanifest.NamespaceSnapshotMCRName(fresh.UID)
-			mcr := &ssv1alpha1.ManifestCaptureRequest{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: mcrName}, mcr)).To(Succeed())
-			wantMCP := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
-			g.Expect(sc.Status.ManifestCheckpointName).To(Equal(wantMCP))
+			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: mcrName}, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
+			wantMCP := sc.Status.ManifestCheckpointName
+			g.Expect(wantMCP).NotTo(BeEmpty())
 			mcp := &ssv1alpha1.ManifestCheckpoint{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: wantMCP}, mcp)).To(Succeed())
+			g.Expect(mcpOwnerRefToRootNSC(mcp.OwnerReferences, fresh.Status.BoundSnapshotContentName, sc.UID)).To(BeTrue())
+			for _, ref := range mcp.OwnerReferences {
+				g.Expect(ref.Kind).NotTo(Equal("ObjectKeeper"), "N2a path must not retain MCP via ret-mcr ObjectKeeper")
+			}
+			g.Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
+			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Namespace).To(Equal(nsName))
+			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Name).To(Equal(mcrName))
+			g.Expect(mcp.Spec.ManifestCaptureRequestRef.UID).NotTo(BeEmpty())
+
+			retMCRKeeper := fmt.Sprintf("ret-mcr-%s-%s", nsName, mcrName)
+			err := k8sClient.Get(ctx, client.ObjectKey{Name: retMCRKeeper}, &deckhousev1alpha1.ObjectKeeper{})
+			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 

@@ -193,6 +193,9 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
 	if err := r.patchParentRootReadyAfterSyntheticChild(ctx, parentKey, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.deleteNamespaceSnapshotManifestCaptureRequest(ctx, nsSnap); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 

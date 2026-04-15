@@ -43,8 +43,19 @@ const (
 	DefaultTTL               = 10 * time.Minute // 10 minutes (TZ: defaultTTL)
 	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
-	// EnvNamespaceSnapshotRootOKTTL: root ObjectKeeper uses FollowObjectWithTTL on NamespaceSnapshot (Deckhouse ObjectKeeper controller).
-	EnvNamespaceSnapshotRootOKTTL = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
+
+	// DefaultSnapshotRootOKTTL is spec.ttl on root ObjectKeeper (ret-nssnap-* and unified ret-* snapshot OK)
+	// when neither STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL nor STATE_SNAPSHOTTER_NS_ROOT_OK_TTL is set.
+	//
+	// DEBUG ONLY (explicit team choice for TTL/smoke iteration): currently 1m so strict cluster smoke
+	// (PR4_SMOKE_REQUIRE_TTL=1) finishes quickly. This MUST NOT ship as the long-term default: before merge
+	// to a production-oriented branch, restore a safe built-in default (e.g. 168*time.Hour) or rely solely
+	// on env in chart/values — otherwise retained root content may disappear far faster than operators expect.
+	DefaultSnapshotRootOKTTL = 1 * time.Minute
+	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try legacy env, then default.
+	EnvSnapshotRootOKTTL = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"
+	// EnvNamespaceSnapshotRootOKTTLLegacy: backwards-compatible alias when EnvSnapshotRootOKTTL is unset or non-positive.
+	EnvNamespaceSnapshotRootOKTTLLegacy = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
 )
 
 type Options struct {
@@ -72,8 +83,9 @@ type Options struct {
 	UnifiedBootstrapMode        UnifiedBootstrapMode
 	UnifiedBootstrapCustomPairs []unifiedbootstrap.UnifiedGVKPair
 
-	// NamespaceSnapshotRootOKTTL: when >0, root ObjectKeeper (ret-nssnap-*) uses FollowObjectWithTTL following the NamespaceSnapshot.
-	NamespaceSnapshotRootOKTTL time.Duration
+	// SnapshotRootOKTTL: duration for root snapshot ObjectKeeper FollowObjectWithTTL (NamespaceSnapshot + unified XxxxSnapshot).
+	// Resolved at startup: env override if >0, else built-in DefaultSnapshotRootOKTTL.
+	SnapshotRootOKTTL time.Duration
 }
 
 func NewConfig() *Options {
@@ -135,14 +147,34 @@ func NewConfig() *Options {
 	opts.UnifiedBootstrapMode = mode
 	opts.UnifiedBootstrapCustomPairs = pairs
 
-	if v := strings.TrimSpace(os.Getenv(EnvNamespaceSnapshotRootOKTTL)); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			opts.NamespaceSnapshotRootOKTTL = d
-		} else if err != nil {
-			log.Printf("Invalid %s (%q): %v", EnvNamespaceSnapshotRootOKTTL, v, err)
-		}
-	}
+	opts.SnapshotRootOKTTL = resolveSnapshotRootOKTTL()
 	return &opts
+}
+
+func resolveSnapshotRootOKTTL() time.Duration {
+	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTL); ok {
+		return d
+	}
+	if d, ok := positiveDurationFromEnv(EnvNamespaceSnapshotRootOKTTLLegacy); ok {
+		return d
+	}
+	return DefaultSnapshotRootOKTTL
+}
+
+func positiveDurationFromEnv(key string) (time.Duration, bool) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Printf("Invalid %s (%q): %v", key, v, err)
+		return 0, false
+	}
+	if d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 // LoadFromConfigMap loads controller configuration from ConfigMap data and updates Options

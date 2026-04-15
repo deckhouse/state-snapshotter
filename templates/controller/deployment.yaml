@@ -131,6 +131,11 @@ spec:
               value: {{ .Values.stateSnapshotter.unifiedSnapshotEnabled | default true | quote }}
             - name: STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS
               value: {{ .Values.stateSnapshotter.unifiedBootstrapPairs | default "" | quote }}
+            {{- $rootOkTtl := .Values.stateSnapshotter.snapshotRootOkTtl | default "" | trim }}
+            {{- if $rootOkTtl }}
+            - name: STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL
+              value: {{ $rootOkTtl | quote }}
+            {{- end }}
       volumes:
         - name: tls
           secret:

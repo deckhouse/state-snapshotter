@@ -576,11 +576,8 @@ func (r *SnapshotController) ensureObjectKeeper(
 
 	switch {
 	case errors.IsNotFound(err):
-		// Create ObjectKeeper
-		// For root snapshots, ObjectKeeper follows the Snapshot and manages TTL for SnapshotContent
-		// TODO: Use FollowObjectWithTTL mode when TTL is implemented
-		// For now, use FollowObject mode
-		gvk := obj.GetObjectKind().GroupVersionKind()
+		// Root snapshot: ObjectKeeper always FollowObjectWithTTL on the snapshot; TTL from config (env or default).
+		wantSpec := r.desiredUnifiedRootObjectKeeperSpec(obj)
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: DeckhouseAPIVersion,
@@ -589,16 +586,7 @@ func (r *SnapshotController) ensureObjectKeeper(
 			ObjectMeta: metav1.ObjectMeta{
 				Name: retainerName,
 			},
-			Spec: deckhousev1alpha1.ObjectKeeperSpec{
-				Mode: "FollowObject", // TODO: Change to FollowObjectWithTTL when TTL is implemented
-				FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
-					APIVersion: gvk.GroupVersion().String(),
-					Kind:       gvk.Kind,
-					Namespace:  obj.GetNamespace(),
-					Name:       obj.GetName(),
-					UID:        string(obj.GetUID()),
-				},
-			},
+			Spec: wantSpec,
 		}
 
 		if err := r.Create(ctx, objectKeeper); err != nil {
@@ -613,7 +601,7 @@ func (r *SnapshotController) ensureObjectKeeper(
 
 		// If SnapshotContent already exists, update its ownerRef to ObjectKeeper
 		if contentName != "" {
-			contentGVK, err := r.getSnapshotContentGVK(gvk)
+			contentGVK, err := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
 			if err != nil {
 				return nil, ctrl.Result{}, fmt.Errorf("failed to resolve SnapshotContent GVK: %w", err)
 			}
@@ -646,16 +634,63 @@ func (r *SnapshotController) ensureObjectKeeper(
 		return nil, ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
 
 	default:
-		// ObjectKeeper exists - validate it belongs to this Snapshot
+		// ObjectKeeper exists — same snapshot UID; align spec (mode/TTL/followRef) with current config.
 		if objectKeeper.Spec.FollowObjectRef == nil {
 			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
 		}
 		if objectKeeper.Spec.FollowObjectRef.UID != string(obj.GetUID()) {
 			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another Snapshot (UID mismatch)", retainerName)
 		}
+		wantSpec := r.desiredUnifiedRootObjectKeeperSpec(obj)
+		if !unifiedRootObjectKeeperSpecMatches(&wantSpec, objectKeeper) {
+			objectKeeper.Spec = wantSpec
+			if err := r.Update(ctx, objectKeeper); err != nil {
+				return nil, ctrl.Result{}, fmt.Errorf("update ObjectKeeper %s (spec drift): %w", retainerName, err)
+			}
+			logger.Info("updated unified root ObjectKeeper spec (TTL/mode drift)", "name", retainerName)
+			if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+				return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
+		}
 		logger.V(1).Info("ObjectKeeper already exists", "name", retainerName)
 		return objectKeeper, ctrl.Result{}, nil
 	}
+}
+
+func (r *SnapshotController) desiredUnifiedRootObjectKeeperSpec(obj *unstructured.Unstructured) deckhousev1alpha1.ObjectKeeperSpec {
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	ttl := config.DefaultSnapshotRootOKTTL
+	if r.Config != nil && r.Config.SnapshotRootOKTTL > 0 {
+		ttl = r.Config.SnapshotRootOKTTL
+	}
+	return deckhousev1alpha1.ObjectKeeperSpec{
+		Mode: ObjectKeeperModeFollowObjectWithTTL,
+		FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+			APIVersion: gvk.GroupVersion().String(),
+			Kind:       gvk.Kind,
+			Namespace:  obj.GetNamespace(),
+			Name:       obj.GetName(),
+			UID:        string(obj.GetUID()),
+		},
+		TTL: &metav1.Duration{Duration: ttl},
+	}
+}
+
+func unifiedRootObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSpec, got *deckhousev1alpha1.ObjectKeeper) bool {
+	if got.Spec.Mode != want.Mode {
+		return false
+	}
+	if got.Spec.FollowObjectRef == nil || want.FollowObjectRef == nil {
+		return false
+	}
+	fr, w := got.Spec.FollowObjectRef, want.FollowObjectRef
+	if fr.APIVersion != w.APIVersion || fr.Kind != w.Kind || fr.Name != w.Name || fr.Namespace != w.Namespace || fr.UID != w.UID {
+		return false
+	}
+	if got.Spec.TTL == nil || want.TTL == nil || got.Spec.TTL.Duration != want.TTL.Duration {
+		return false
+	}
+	return true
 }
 
 // propagateReadyFalseToParent propagates Ready=False to parent Snapshot if:
