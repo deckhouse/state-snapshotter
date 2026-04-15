@@ -36,9 +36,21 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: NamespaceSnapshot N2b synthetic tree (temporary one-child scaffold)", func() {
+func childNamespaceSnapshotContentOwnerRefToParent(refs []metav1.OwnerReference, parentName string, parentUID types.UID) bool {
+	for i := range refs {
+		ref := refs[i]
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshotContent" &&
+			ref.Name == parentName && ref.UID == parentUID {
+			return true
+		}
+	}
+	return false
+}
+
+var _ = Describe("Integration: NamespaceSnapshot content tree (synthetic child scaffold)", func() {
 	It("creates synthetic child, writes graph refs, parent Ready only after child Ready", func() {
 		ctx := context.Background()
+		var childNSCNameForCleanup string
 
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
@@ -51,6 +63,9 @@ var _ = Describe("Integration: NamespaceSnapshot N2b synthetic tree (temporary o
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		nsName := ns.Name
 		DeferCleanup(func() {
+			if childNSCNameForCleanup != "" {
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: childNSCNameForCleanup}})
+			}
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
 
@@ -155,7 +170,29 @@ var _ = Describe("Integration: NamespaceSnapshot N2b synthetic tree (temporary o
 		Expect(parentContent.Status.ChildrenSnapshotContentRefs).To(HaveLen(1))
 		Expect(parentContent.Status.ChildrenSnapshotContentRefs[0].Name).To(Equal(childSnap.Status.BoundSnapshotContentName))
 
-		Expect(childSnap.Status.ChildrenSnapshotRefs).To(BeEmpty())
-		Expect(parentSnap.Status.ChildrenSnapshotRefs).To(HaveLen(1))
+		childContent := &storagev1alpha1.NamespaceSnapshotContent{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: childSnap.Status.BoundSnapshotContentName}, childContent)).To(Succeed())
+		Expect(childNamespaceSnapshotContentOwnerRefToParent(childContent.OwnerReferences, parentContent.Name, parentContent.UID)).To(BeTrue(),
+			"child NamespaceSnapshotContent must reference parent NamespaceSnapshotContent for GC cascade")
+		Expect(snapshot.HasFinalizer(childContent, snapshot.FinalizerParentProtect)).To(BeTrue())
+		childNSCNameForCleanup = childContent.Name
+
+		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{Name: parentContent.Name},
+		})).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			ch := &storagev1alpha1.NamespaceSnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: childContent.Name}, ch)).To(Succeed())
+			g.Expect(snapshot.HasFinalizer(ch, snapshot.FinalizerParentProtect)).To(BeFalse(),
+				"NamespaceSnapshotContentController must strip parent-protect from children when parent content is deleting")
+		}).WithTimeout(90 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+
+		pTree := &storagev1alpha1.NamespaceSnapshot{}
+		Expect(k8sClient.Get(ctx, parentKey, pTree)).To(Succeed())
+		chTree := &storagev1alpha1.NamespaceSnapshot{}
+		Expect(k8sClient.Get(ctx, childKey, chTree)).To(Succeed())
+		Expect(chTree.Status.ChildrenSnapshotRefs).To(BeEmpty())
+		Expect(pTree.Status.ChildrenSnapshotRefs).To(HaveLen(1))
 	})
 })

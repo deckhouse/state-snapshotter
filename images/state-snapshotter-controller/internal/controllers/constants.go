@@ -20,8 +20,8 @@ package controllers
 const (
 	// DeckhouseAPIVersion is the API version for deckhouse.io resources (ObjectKeeper)
 	// Note: This is group/version, not just group, despite the name.
-	DeckhouseAPIVersion = "deckhouse.io/v1alpha1"
-	KindObjectKeeper    = "ObjectKeeper"
+	DeckhouseAPIVersion                 = "deckhouse.io/v1alpha1"
+	KindObjectKeeper                    = "ObjectKeeper"
 	ObjectKeeperModeFollowObject        = "FollowObject"
 	ObjectKeeperModeFollowObjectWithTTL = "FollowObjectWithTTL"
 )

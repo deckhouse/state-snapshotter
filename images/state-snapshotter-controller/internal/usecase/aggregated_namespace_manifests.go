@@ -97,6 +97,11 @@ func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootNSC(ctx context.
 	return out, nil
 }
 
+// findRetainedRootNSCName is a retained-read helper when the NamespaceSnapshot object is already deleted.
+// It lists cluster NamespaceSnapshotContent and picks the newest (by CreationTimestamp) whose
+// spec.namespaceSnapshotRef matches (namespace, snapshotName). If several retained contents exist for the same
+// name (recreated snapshots), this is a best-effort policy for the aggregated manifests subresource only;
+// it is not a strong multi-version product contract.
 func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Context, namespace, snapshotName string) (string, error) {
 	var list storagev1alpha1.NamespaceSnapshotContentList
 	if err := s.client.List(ctx, &list); err != nil {

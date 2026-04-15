@@ -153,6 +153,8 @@ var _ = BeforeSuite(func() {
 												"uid":        {Type: "string"},
 											},
 										},
+										// metav1.Duration in API JSON (FollowObjectWithTTL); matches deckhouse.io ObjectKeeperSpec.
+										"ttl": {Type: "string"},
 									},
 								},
 								"status": {

@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"context"
-	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,12 +29,12 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// NamespaceSnapshotContentReconciler implements unified-snapshot-deletion-algorithm: orphan finalizer,
-// optional scheduled delete of retained content, and child finalizer strip on delete (no Delete(children)).
+// NamespaceSnapshotContentReconciler: orphan parent-protect finalizer when the root NamespaceSnapshot is gone
+// (UID mismatch or NotFound), and strip parent-protect from child NamespaceSnapshotContent on delete.
+// Retained TTL and physical deletion of NamespaceSnapshotContent are owned by Deckhouse ObjectKeeper, not this reconciler.
 type NamespaceSnapshotContentReconciler struct {
 	Client client.Client
 }
@@ -96,16 +95,21 @@ func (r *NamespaceSnapshotContentReconciler) Reconcile(ctx context.Context, req 
 	return r.reconcileLiving(ctx, nsc)
 }
 
-func (r *NamespaceSnapshotContentReconciler) reconcileLiving(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) (ctrl.Result, error) {
+func (r *NamespaceSnapshotContentReconciler) stripParentProtectIfOrphan(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) (ctrl.Result, error) {
 	ref := nsc.Spec.NamespaceSnapshotRef
 	snap := &storagev1alpha1.NamespaceSnapshot{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, snap)
 	orphan := false
-	if errors.IsNotFound(err) {
+	switch {
+	case errors.IsNotFound(err):
 		orphan = true
-	} else if err != nil {
+	case err != nil:
 		return ctrl.Result{}, err
-	} else if string(snap.UID) != string(ref.UID) {
+	case string(snap.UID) != string(ref.UID):
+		orphan = true
+	case snap.DeletionTimestamp != nil:
+		// Root snapshot is being deleted: clear parent-protect so NamespaceSnapshotContent can finish
+		// terminating (e.g. DeletionPolicy=Delete) without waiting for the snapshot object to disappear first.
 		orphan = true
 	}
 	if orphan && snapshot.RemoveFinalizer(nsc, snapshot.FinalizerParentProtect) {
@@ -114,36 +118,19 @@ func (r *NamespaceSnapshotContentReconciler) reconcileLiving(ctx context.Context
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-
-	raw := ""
-	if nsc.Annotations != nil {
-		raw = nsc.Annotations[namespacemanifest.AnnotationOrphanPurgeAt]
-	}
-	if raw == "" {
-		return ctrl.Result{}, nil
-	}
-	t, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return ctrl.Result{}, nil
-	}
-	now := time.Now().UTC()
-	if now.Before(t) {
-		d := time.Until(t)
-		if d < time.Second {
-			d = time.Second
-		}
-		if d > 2*time.Minute {
-			d = 2 * time.Minute
-		}
-		return ctrl.Result{RequeueAfter: d}, nil
-	}
-	if err := r.Client.Delete(ctx, nsc); err != nil && !errors.IsNotFound(err) {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{}, nil
 }
 
+func (r *NamespaceSnapshotContentReconciler) reconcileLiving(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) (ctrl.Result, error) {
+	return r.stripParentProtectIfOrphan(ctx, nsc)
+}
+
+// reconcileDeleting strips parent-protect from listed children so GC can remove them when ownerReferences
+// point to this content; it never calls Client.Delete on child NamespaceSnapshotContent.
 func (r *NamespaceSnapshotContentReconciler) reconcileDeleting(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) (ctrl.Result, error) {
+	if res, err := r.stripParentProtectIfOrphan(ctx, nsc); err != nil || res.Requeue || res.RequeueAfter > 0 {
+		return res, err
+	}
 	for _, ch := range nsc.Status.ChildrenSnapshotContentRefs {
 		if ch.Name == "" {
 			continue

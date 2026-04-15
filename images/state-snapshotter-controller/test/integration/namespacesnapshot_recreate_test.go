@@ -108,10 +108,9 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		Eventually(func(g Gomega) {
-			err := k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{})
-			g.Expect(errors.IsNotFound(err)).To(BeTrue())
-		}).WithTimeout(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		// MCR for the deleted snapshot is not tied to NamespaceSnapshot deletion (retained / separate lifecycle);
+		// the old MCR name is keyed by uid1 and must not block a new snapshot with the same metadata.name.
+		Expect(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{})).To(Succeed())
 
 		snap2 := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: nsName},

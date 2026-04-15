@@ -41,8 +41,9 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// NamespaceSnapshotReconciler implements N1 bind + N2a manifest capture (MCR→MCP); status via conditions only (no status.phase).
-// Binding uses status + spec.namespaceSnapshotRef only (no ownerReference on cluster NamespaceSnapshotContent).
+// NamespaceSnapshotReconciler binds root NamespaceSnapshot to NamespaceSnapshotContent and drives manifest capture (MCR→MCP); status via conditions only (no status.phase).
+// Root NamespaceSnapshotContent is not owned by NamespaceSnapshot (spec.namespaceSnapshotRef + status only).
+// Child NamespaceSnapshotContent in the synthetic tree uses ownerReferences -> parent NamespaceSnapshotContent so GC can cascade the content tree.
 type NamespaceSnapshotReconciler struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -74,7 +75,7 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 			handler.EnqueueRequestsFromMapFunc(mapNamespaceSnapshotContentToNamespaceSnapshot),
 		).
 		// Secondary source: child NamespaceSnapshot status updates → parent reconcile (map only enqueues
-		// for synthetic children with n2b-parent-name / n2b-parent-uid; not redundant with For()).
+		// for labelled synthetic children; not redundant with For()).
 		Watches(
 			&storagev1alpha1.NamespaceSnapshot{},
 			handler.EnqueueRequestsFromMapFunc(mapSyntheticChildSnapshotToParent),
@@ -173,12 +174,13 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{Requeue: true}, nil
 		}
 
+		om, err := r.namespaceSnapshotContentObjectMeta(ctx, nsSnap)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		newContent := &storagev1alpha1.NamespaceSnapshotContent{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:       expectedName,
-				Finalizers: []string{snapshot.FinalizerParentProtect},
-			},
-			Spec: desiredNamespaceSnapshotContentSpec(nsSnap),
+			ObjectMeta: om,
+			Spec:       desiredNamespaceSnapshotContentSpec(nsSnap),
 		}
 		if err := r.Client.Create(ctx, newContent); err != nil {
 			if errors.IsAlreadyExists(err) {
@@ -243,6 +245,9 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureSyntheticChildContentOwnerRef(ctx, nsSnap, content); err != nil {
 		return ctrl.Result{}, err
 	}
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
@@ -310,23 +315,6 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 		return ctrl.Result{}, err
 	}
 
-	if r.Config != nil && r.Config.OrphanNamespaceSnapshotContentDeleteAfter > 0 &&
-		content.Spec.DeletionPolicy == storagev1alpha1.SnapshotContentDeletionPolicyRetain {
-		base := content.DeepCopy()
-		ann := content.GetAnnotations()
-		if ann == nil {
-			ann = map[string]string{}
-		}
-		if _, ok := ann[namespacemanifest.AnnotationOrphanPurgeAt]; !ok {
-			when := time.Now().UTC().Add(r.Config.OrphanNamespaceSnapshotContentDeleteAfter).Format(time.RFC3339)
-			ann[namespacemanifest.AnnotationOrphanPurgeAt] = when
-			content.SetAnnotations(ann)
-			if err := r.Client.Patch(ctx, content, client.MergeFrom(base)); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-	}
-
 	policy := content.Spec.DeletionPolicy
 	if policy == storagev1alpha1.SnapshotContentDeletionPolicyDelete {
 		if err := r.Client.Delete(ctx, content); err != nil && !errors.IsNotFound(err) {
@@ -373,4 +361,72 @@ func snapshotSubjectRefMatches(ref storagev1alpha1.SnapshotSubjectRef, ns *stora
 func namespaceSnapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string {
 	uid := strings.ReplaceAll(string(ns.UID), "-", "")
 	return fmt.Sprintf("ns-%s", uid)
+}
+
+// namespaceSnapshotContentObjectMeta builds metadata for a new NamespaceSnapshotContent, including
+// ownerReferences -> parent NamespaceSnapshotContent for synthetic child snapshots (N2b scaffold).
+func (r *NamespaceSnapshotReconciler) namespaceSnapshotContentObjectMeta(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (metav1.ObjectMeta, error) {
+	om := metav1.ObjectMeta{
+		Name:       namespaceSnapshotContentName(nsSnap),
+		Finalizers: []string{snapshot.FinalizerParentProtect},
+	}
+	if !namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
+		return om, nil
+	}
+	parentName := nsSnap.GetLabels()[namespacemanifest.LabelSyntheticParentName]
+	if parentName == "" {
+		return om, nil
+	}
+	parent := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: parentName}, parent); err != nil {
+		if errors.IsNotFound(err) {
+			return om, fmt.Errorf("synthetic child: parent NamespaceSnapshot %s/%s not found yet", nsSnap.Namespace, parentName)
+		}
+		return om, err
+	}
+	pc := &storagev1alpha1.NamespaceSnapshotContent{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: namespaceSnapshotContentName(parent)}, pc); err != nil {
+		return om, err
+	}
+	om.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "NamespaceSnapshotContent",
+		Name:       pc.Name,
+		UID:        pc.UID,
+	}}
+	return om, nil
+}
+
+// ensureSyntheticChildContentOwnerRef patches an existing child NamespaceSnapshotContent if it lacks ownerRef to the parent content.
+func (r *NamespaceSnapshotReconciler) ensureSyntheticChildContentOwnerRef(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent) error {
+	if !namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
+		return nil
+	}
+	parentName := nsSnap.GetLabels()[namespacemanifest.LabelSyntheticParentName]
+	if parentName == "" {
+		return nil
+	}
+	parent := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: parentName}, parent); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	parentNSCName := namespaceSnapshotContentName(parent)
+	pc := &storagev1alpha1.NamespaceSnapshotContent{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: parentNSCName}, pc); err != nil {
+		return err
+	}
+	want := metav1.OwnerReference{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "NamespaceSnapshotContent",
+		Name:       pc.Name,
+		UID:        pc.UID,
+	}
+	for _, ref := range content.OwnerReferences {
+		if ref.Kind == want.Kind && ref.APIVersion == want.APIVersion && ref.UID == want.UID {
+			return nil
+		}
+	}
+	base := content.DeepCopy()
+	content.OwnerReferences = append(content.OwnerReferences, want)
+	return r.Client.Patch(ctx, content, client.MergeFrom(base))
 }

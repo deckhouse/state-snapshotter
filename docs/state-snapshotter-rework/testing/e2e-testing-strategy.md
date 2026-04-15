@@ -15,6 +15,15 @@
 
 **Примечание:** каталога `tests/e2e-go` в корне нет; канонические тесты — под `images/state-snapshotter-controller/test/`. При необходимости удалённой прогонки на кластере — по согласованию с командой (smoke, CI).
 
+### NamespaceSnapshot retained path: integration (envtest) vs real cluster
+
+| Где | Что является контрактом |
+|-----|-------------------------|
+| **Integration** | Структура и поведение **этого модуля**: `ownerReferences` (root ObjectKeeper→NSC, MCP→NSC, child NSC→parent NSC), снятие `snapshot.deckhouse.io/parent-protect` у дочернего NSC при удалении parent content (без `Client.Delete` детей), ручное удаление NSC после удаления root snapshot не блокируется финализаторами. **Не** требовать TTL Deckhouse ObjectKeeper или полного GC MCP/chunks как обязательный проход envtest. |
+| **Real cluster** | `hack/pr4-smoke.sh`: retained read, aggregated manifests, **обязательный** контракт root ObjectKeeper (если не `PR4_SMOKE_SKIP_OK_CONTRACT=1`); фаза TTL — наблюдательная по умолчанию, **строгая** только с `PR4_SMOKE_REQUIRE_TTL=1` при реально настроенном TTL. |
+
+Продуктовую модель удаления не менять ради ограничений envtest (см. также `.cursor/rules/controller-envtest-local.mdc`).
+
 ## Уже есть (поддерживать)
 
 | Уровень | Назначение |
@@ -22,7 +31,7 @@
 | Unit | Условия, GVK registry, `unifiedbootstrap`, `unifiedruntime` (`layers_test`, `metrics_test`, snapshot registry tests) |
 | Integration | envtest, CRD из `crds/`; **DSC:** см. ниже |
 | E2E (envtest) | Сборка manager |
-| Smoke | Реальный кластер, Snapshot + BackupClass |
+| Smoke | Реальный кластер (`./test-smoke.sh`, `hack/pr4-smoke.sh` для NamespaceSnapshot retained) |
 
 **Integration (DSC + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются DSC reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible DSC на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
 
@@ -35,11 +44,11 @@
 | `unified_runtime_rbac_eligibility_test.go` | **T4 + eligibility:** без RBACReady нет eligible-слоя для RegistrationTest; после снятия RBACReady resolved без пары, monotonic active сохраняет ключ. **`Serial`**; `AfterEach` чистит DSC. |
 | `controller_registration_test.go` | Конструирование контроллеров как в production; **без** повторного `SetupWithManager` на общем `mgr` |
 | `namespacesnapshot_lifecycle_test.go` | **N1 skeleton:** `NamespaceSnapshot` → `NamespaceSnapshotContent`, `status.boundSnapshotContentName` (unified root bind field), Ready через conditions (без ObjectKeeper / полного N2) |
-| `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — root удаляется, `NamespaceSnapshotContent` остаётся; Delete — финализатор root снимается только после `NotFound` на content; **N2a §5.2** — удаление root после появления **MCR** (cancel capture): MCR → `NotFound`, затем **MCP** → `NotFound`, затем root → `NotFound`, NSC Retain остаётся |
+| `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — snapshot gone, NSC остаётся; Delete policy — root finalizer только после `NotFound` на content; **retained unified** — после delete snapshot остаются NSC+MCR+MCP; проверки контракта root OK (`followObjectRef`→NamespaceSnapshot, `ownerRef`→NSC) и MCP→NSC; узкий сценарий — пользователь удаляет NSC после удаления snapshot (deletion завершается, без контракта GC артефактов) |
 | `namespacesnapshot_n1_boundary_test.go` | **Формальное закрытие N1:** `ContentRefMismatch` при неверном `namespaceSnapshotRef` на NSC; **recovery** — после сброса `status` при валидном content снова `Bound`+`Ready`; короткая **стабильность** (Consistently) |
-| `namespacesnapshot_recreate_test.go` | **N2a §4.7:** удаление root → старый **MCR** (`nss-{uid}`) исчезает; новый root с **тем же именем** — новый UID, новый **NSC** + новый **MCR** с корректным label, снова **Ready**; старый NSC (Retain) остаётся с прежним ref |
+| `namespacesnapshot_recreate_test.go` | **§4.7 / отдельный lifecycle MCR:** удаление root **не** удаляет старый MCR (имя `nss-{uid1}`); второй snapshot с тем же `metadata.name` — новый UID, новый NSC + новый MCR (`nss-{uid2}`), **Ready**; старый Retain NSC остаётся; старый MCR остаётся в API и не мешает recreate |
 | `namespacesnapshot_capture_plan_drift_test.go` | **N2a §4.7:** после **Ready** добавление allowlisted объекта в namespace → **CapturePlanDrift** на root и NSC (без молчаливого `Update` **MCR.spec.targets**); **MCR** остаётся в API для ручного удаления / retry |
-| `namespacesnapshot_synthetic_tree_test.go` | **N2b PR2+PR3 (happy):** synthetic child; graph refs; parent ждёт child; промежуточно parent **`ChildSnapshotPending`**, в конце **`Completed`** |
+| `namespacesnapshot_synthetic_tree_test.go` | **Synthetic child tree (scaffold):** child NS; graph refs; parent ждёт child; **`ChildSnapshotPending`** → **`Completed`**; **контракт каскада:** child NSC имеет `ownerRef`→parent NSC, child с `FinalizerParentProtect`; при delete parent NSC контроллер снимает parent-protect с child (без `Delete` child из этого reconciler) |
 | `namespacesnapshot_synthetic_child_failure_test.go` | **N2b PR3:** искусственный **CapturePlanDrift** только на **MCR child** (лишний target в `spec.targets`); child терминально **`Ready=False`**; parent остаётся с валидным N2a-планом → **`ChildSnapshotFailed`**, message с именем child + причиной child |
 
 **N2a (integration — план минимума, см. [`design/implementation-plan.md`](../design/implementation-plan.md) §2.4.1 и [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §4.4–§4.7, §5.2, §8.7):** happy path (namespace → **MCR→ManifestCheckpoint** → persisted result → **Ready** только по MCP/chunks; на NSC **`manifestCheckpointName`**; root **без** MCR в status; MCR name по §4.7); fail-closed / allowlist; **Retain** с **root OK** + execution OK для MCR; провал MCR/MCP; **удаление root во время capture** — отмена через delete MCR (§5.2); download одного снимка (**§8.7.1**, 409 если MCP не Ready, 500 при битой склейке); smoke **pagination** при list в capture-потоке.  

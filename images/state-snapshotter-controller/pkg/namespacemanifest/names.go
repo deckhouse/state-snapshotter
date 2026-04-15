@@ -30,9 +30,6 @@ const CheckpointNamePrefix = "mcp-"
 // AnnotationBoundNamespaceSnapshotContent on ManifestCaptureRequest: ManifestCheckpoint ownerRef targets this NamespaceSnapshotContent.
 const AnnotationBoundNamespaceSnapshotContent = "state-snapshotter.deckhouse.io/bound-namespace-snapshot-content"
 
-// AnnotationOrphanPurgeAt on NamespaceSnapshotContent: RFC3339 time after which retained content may be deleted (root snapshot gone).
-const AnnotationOrphanPurgeAt = "state-snapshotter.deckhouse.io/orphan-purge-at"
-
 // NamespaceSnapshotMCRName returns the deterministic ManifestCaptureRequest name for a NamespaceSnapshot root (design §4.7).
 func NamespaceSnapshotMCRName(uid types.UID) string {
 	return fmt.Sprintf("nss-%s", uid)
