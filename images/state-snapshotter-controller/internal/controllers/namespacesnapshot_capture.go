@@ -293,7 +293,11 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 }
 
 // ensureNamespaceSnapshotRootObjectKeeper creates the cluster-scoped ret-nssnap-* ObjectKeeper.
-// ObjectKeeper metadata.ownerReferences -> root NamespaceSnapshotContent so the OK is garbage-collected when content is removed.
+// Root NamespaceSnapshotContent gets metadata.ownerReferences -> that ObjectKeeper (controller) so that when the
+// Deckhouse ObjectKeeper controller deletes the OK after follow+TTL, Kubernetes GC removes retained root NSC and
+// cascades to MCP / child content. The OK itself must not list NSC in ownerReferences (wrong direction for TTL).
+//
+// Synthetic child NamespaceSnapshotContent keeps ownerReferences -> parent NamespaceSnapshotContent only; no NSC->OK link here.
 //
 // spec.mode is always FollowObjectWithTTL; spec.followObjectRef targets the root NamespaceSnapshot; spec.ttl is
 // SnapshotRootOKTTL from controller config (env override or built-in default). Execution-chain ObjectKeepers (MCR) stay FollowObject without TTL.
@@ -346,8 +350,7 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 				Kind:       KindObjectKeeper,
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:            name,
-				OwnerReferences: []metav1.OwnerReference{namespaceSnapshotRootObjectKeeperOwnerRef(content)},
+				Name: name,
 			},
 			Spec: spec,
 		}
@@ -358,6 +361,13 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
 		logger.Info("created root ObjectKeeper for NamespaceSnapshot", "objectKeeper", name, "mode", spec.Mode)
+		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, nsSnap, content, ok)
+		if err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		if patchRes.Requeue || patchRes.RequeueAfter > 0 {
+			return ok, patchRes, nil
+		}
 		return ok, ctrl.Result{}, nil
 	case err != nil:
 		return nil, ctrl.Result{}, err
@@ -374,37 +384,51 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 				return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 			}
 		}
-		if !objectKeeperHasOwnerRefToContent(ok, content) {
-			base := ok.DeepCopy()
-			ok.OwnerReferences = append(ok.OwnerReferences, namespaceSnapshotRootObjectKeeperOwnerRef(content))
-			if err := r.Client.Patch(ctx, ok, client.MergeFrom(base)); err != nil {
-				return nil, ctrl.Result{}, err
-			}
-			if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ok); err != nil {
-				return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-			}
+		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, nsSnap, content, ok)
+		if err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		if patchRes.Requeue || patchRes.RequeueAfter > 0 {
+			return ok, patchRes, nil
 		}
 		return ok, ctrl.Result{}, nil
 	}
 }
 
-func namespaceSnapshotRootObjectKeeperOwnerRef(content *storagev1alpha1.NamespaceSnapshotContent) metav1.OwnerReference {
-	return metav1.OwnerReference{
-		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-		Kind:       "NamespaceSnapshotContent",
-		Name:       content.Name,
-		UID:        content.UID,
+// ensureRootNamespaceSnapshotContentOwnedByObjectKeeper patches root NamespaceSnapshotContent to reference the root ObjectKeeper.
+// Skipped for synthetic child content (owned by parent NamespaceSnapshotContent only).
+func (r *NamespaceSnapshotReconciler) ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.NamespaceSnapshot,
+	content *storagev1alpha1.NamespaceSnapshotContent,
+	ok *deckhousev1alpha1.ObjectKeeper,
+) (ctrl.Result, error) {
+	if namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
+		return ctrl.Result{}, nil
 	}
-}
-
-func objectKeeperHasOwnerRefToContent(ok *deckhousev1alpha1.ObjectKeeper, content *storagev1alpha1.NamespaceSnapshotContent) bool {
-	for _, ref := range ok.OwnerReferences {
-		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshotContent" &&
-			ref.Name == content.Name && ref.UID == content.UID {
-			return true
+	want := namespaceSnapshotRootContentOwnerReferenceToOK(ok)
+	for _, ref := range content.OwnerReferences {
+		if ref.APIVersion == want.APIVersion && ref.Kind == want.Kind && ref.Name == want.Name && ref.UID == want.UID {
+			return ctrl.Result{}, nil
 		}
 	}
-	return false
+	base := content.DeepCopy()
+	content.OwnerReferences = append(content.OwnerReferences, want)
+	if err := r.Client.Patch(ctx, content, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+func namespaceSnapshotRootContentOwnerReferenceToOK(ok *deckhousev1alpha1.ObjectKeeper) metav1.OwnerReference {
+	b := true
+	return metav1.OwnerReference{
+		APIVersion: DeckhouseAPIVersion,
+		Kind:       KindObjectKeeper,
+		Name:       ok.Name,
+		UID:        ok.UID,
+		Controller: &b,
+	}
 }
 
 // namespaceSnapshotOwnerReferenceForMCR is set on ManifestCaptureRequest so Kubernetes GC removes the

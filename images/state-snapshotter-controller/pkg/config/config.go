@@ -52,10 +52,10 @@ const (
 	// to a production-oriented branch, restore a safe built-in default (e.g. 168*time.Hour) or rely solely
 	// on env in chart/values — otherwise retained root content may disappear far faster than operators expect.
 	DefaultSnapshotRootOKTTL = 1 * time.Minute
-	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try legacy env, then default.
+	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try EnvNamespaceSnapshotRootOKTTLAlt, then default.
 	EnvSnapshotRootOKTTL = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"
-	// EnvNamespaceSnapshotRootOKTTLLegacy: backwards-compatible alias when EnvSnapshotRootOKTTL is unset or non-positive.
-	EnvNamespaceSnapshotRootOKTTLLegacy = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
+	// EnvNamespaceSnapshotRootOKTTLAlt: second env var name for the same duration; read when EnvSnapshotRootOKTTL is unset or non-positive.
+	EnvNamespaceSnapshotRootOKTTLAlt = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
 )
 
 type Options struct {
@@ -155,7 +155,7 @@ func resolveSnapshotRootOKTTL() time.Duration {
 	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTL); ok {
 		return d
 	}
-	if d, ok := positiveDurationFromEnv(EnvNamespaceSnapshotRootOKTTLLegacy); ok {
+	if d, ok := positiveDurationFromEnv(EnvNamespaceSnapshotRootOKTTLAlt); ok {
 		return d
 	}
 	return DefaultSnapshotRootOKTTL

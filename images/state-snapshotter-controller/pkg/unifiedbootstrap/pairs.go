@@ -41,7 +41,7 @@ func ResolveAvailableUnifiedPairs(mapper meta.RESTMapper, pairs []UnifiedGVKPair
 	return out
 }
 
-// PairsFromSnapshotGVKs builds pairs using SnapshotKind+"Content" for the content side (test / legacy wiring).
+// PairsFromSnapshotGVKs builds pairs using SnapshotKind+"Content" for the content side (minimal bootstrap / tests).
 func PairsFromSnapshotGVKs(snapshotGVKs []schema.GroupVersionKind) []UnifiedGVKPair {
 	out := make([]UnifiedGVKPair, 0, len(snapshotGVKs))
 	for _, gvk := range snapshotGVKs {

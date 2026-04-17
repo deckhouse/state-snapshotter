@@ -40,11 +40,26 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-func ownerRefToNamespaceSnapshotContent(refs []metav1.OwnerReference, name string, uid types.UID) bool {
+// objectKeeperHasControllerOwnerRefToNamespaceSnapshotContent is true when ObjectKeeper lists NamespaceSnapshotContent
+// as a controlling ownerReference (OK→NSC). Retained root contract is the opposite: root NamespaceSnapshotContent must
+// depend on ObjectKeeper (NSC→OK) so TTL expiry on OK drives GC of the tree below NSC.
+func objectKeeperHasControllerOwnerRefToNamespaceSnapshotContent(refs []metav1.OwnerReference, nscName string, nscUID types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
 		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshotContent" &&
-			ref.Name == name && ref.UID == uid {
+			ref.Name == nscName && ref.UID == nscUID {
+			return true
+		}
+	}
+	return false
+}
+
+// rootNSCOwnerRefToObjectKeeper is true when root NamespaceSnapshotContent has a controlling ownerRef to the root ObjectKeeper (TTL anchor).
+func rootNSCOwnerRefToObjectKeeper(refs []metav1.OwnerReference, okName string, okUID types.UID) bool {
+	for i := range refs {
+		ref := refs[i]
+		if ref.APIVersion == "deckhouse.io/v1alpha1" && ref.Kind == "ObjectKeeper" &&
+			ref.Name == okName && ref.UID == okUID && ref.Controller != nil && *ref.Controller {
 			return true
 		}
 	}
@@ -283,7 +298,9 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Expect(ok.Spec.Mode).To(Equal("FollowObjectWithTTL"))
 		Expect(ok.Spec.TTL).NotTo(BeNil())
 		Expect(ok.Spec.TTL.Duration).To(Equal(config.DefaultSnapshotRootOKTTL))
-		Expect(ownerRefToNamespaceSnapshotContent(ok.OwnerReferences, contentName, nsc.UID)).To(BeTrue())
+		Expect(objectKeeperHasControllerOwnerRefToNamespaceSnapshotContent(ok.OwnerReferences, contentName, nsc.UID)).To(BeFalse(),
+			"root ObjectKeeper must not list NamespaceSnapshotContent as a controlling ownerRef; retained anchor is NSC→OK")
+		Expect(rootNSCOwnerRefToObjectKeeper(nsc.OwnerReferences, okName, ok.UID)).To(BeTrue())
 
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, mcp)).To(Succeed())
@@ -426,14 +443,29 @@ var _ = Describe("Integration: NamespaceSnapshot MCR ownerReference (N2a)", func
 			g.Expect(mcrOwnerRefToNamespaceSnapshot(mcr.OwnerReferences, fresh.Name, fresh.UID)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(25 * time.Millisecond).Should(Succeed())
 
+		rootSnap := &storagev1alpha1.NamespaceSnapshot{}
+		Expect(k8sClient.Get(ctx, key, rootSnap)).To(Succeed())
+		rootUID := rootSnap.UID
+
+		// Foreground cascading delete would block NamespaceSnapshot removal until kube-controller-manager GC
+		// deletes the dependent MCR; plain envtest has no GC. Background delete matches retained-path semantics
+		// (snapshot object goes away; MCR is collected asynchronously on a real cluster).
 		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName},
-		})).To(Succeed())
+		}, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(ctx, key, &storagev1alpha1.NamespaceSnapshot{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
-			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
+
+		mcr := &ssv1alpha1.ManifestCaptureRequest{}
+		err := k8sClient.Get(ctx, mcrKey, mcr)
+		if errors.IsNotFound(err) {
+			return
+		}
+		Expect(err).NotTo(HaveOccurred())
+		// Without kube-controller-manager, owner-reference GC may not run; ownerRef contract still holds.
+		Expect(mcrOwnerRefToNamespaceSnapshot(mcr.OwnerReferences, snap.Name, rootUID)).To(BeTrue())
 	})
 })

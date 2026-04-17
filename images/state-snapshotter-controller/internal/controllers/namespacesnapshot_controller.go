@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -290,24 +291,32 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 // reconcileDelete removes the NamespaceSnapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR;
 // retained manifest artifacts follow NamespaceSnapshotContent lifecycle (separate from snapshot object deletion).
 func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
-	if nsSnap.Status.BoundSnapshotContentName == "" {
-		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
-			if err := r.Client.Update(ctx, nsSnap); err != nil {
-				return ctrl.Result{}, err
-			}
+	key := client.ObjectKeyFromObject(nsSnap)
+	fresh := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, key, fresh); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if fresh.DeletionTimestamp == nil {
+		return ctrl.Result{}, nil
+	}
+
+	if fresh.Status.BoundSnapshotContentName == "" {
+		if err := r.updateNamespaceSnapshotRemoveFinalizer(ctx, key); err != nil {
+			return ctrl.Result{}, err
 		}
 		log.FromContext(ctx).V(1).Info("namespace snapshot delete reconcile done (no bound content)")
 		return ctrl.Result{}, nil
 	}
 
-	contentKey := client.ObjectKey{Name: nsSnap.Status.BoundSnapshotContentName}
+	contentKey := client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}
 	content := &storagev1alpha1.NamespaceSnapshotContent{}
 	err := r.Client.Get(ctx, contentKey, content)
 	if errors.IsNotFound(err) {
-		if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
-			if err := r.Client.Update(ctx, nsSnap); err != nil {
-				return ctrl.Result{}, err
-			}
+		if err := r.updateNamespaceSnapshotRemoveFinalizer(ctx, key); err != nil {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
@@ -328,13 +337,30 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 		}
 	}
 
-	if snapshot.RemoveFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
-		if err := r.Client.Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.updateNamespaceSnapshotRemoveFinalizer(ctx, key); err != nil {
+		return ctrl.Result{}, err
 	}
 	log.FromContext(ctx).V(1).Info("namespace snapshot delete reconcile done")
 	return ctrl.Result{}, nil
+}
+
+func (r *NamespaceSnapshotReconciler) updateNamespaceSnapshotRemoveFinalizer(ctx context.Context, key client.ObjectKey) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, key, cur); err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if cur.DeletionTimestamp == nil {
+			return nil
+		}
+		if !snapshot.RemoveFinalizer(cur, snapshot.FinalizerNamespaceSnapshot) {
+			return nil
+		}
+		return r.Client.Update(ctx, cur)
+	})
 }
 
 func desiredNamespaceSnapshotContentSpec(nsSnap *storagev1alpha1.NamespaceSnapshot) storagev1alpha1.NamespaceSnapshotContentSpec {

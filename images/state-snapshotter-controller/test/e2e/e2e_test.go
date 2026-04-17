@@ -93,8 +93,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 					_ = k8sClient.Delete(ctx, ok)
 					continue
 				}
-				// Legacy cleanup: Delete any old ObjectKeepers that might have been created with old format
-				// (ret-{checkpointName}) - these should not exist with current ADR implementation
+				// Best-effort cleanup: delete stray ObjectKeepers named ret-{checkpointName} that are not ret-mcr-*.
 				if strings.HasPrefix(ok.Name, "ret-") && !strings.HasPrefix(ok.Name, "ret-mcr-") {
 					// Extract checkpoint name from ObjectKeeper name: "ret-{checkpointName}"
 					checkpointName := strings.TrimPrefix(ok.Name, "ret-")
@@ -103,7 +102,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 					if err := k8sClient.Get(ctx, types.NamespacedName{Name: checkpointName}, cp); err == nil {
 						if cp.Spec.ManifestCaptureRequestRef != nil &&
 							cp.Spec.ManifestCaptureRequestRef.Namespace == testNS {
-							// Legacy ObjectKeeper found - delete it (should not exist with current ADR)
+							// Stray ObjectKeeper for this namespace — delete for a clean test run
 							_ = k8sClient.Delete(ctx, ok)
 						}
 					} else {

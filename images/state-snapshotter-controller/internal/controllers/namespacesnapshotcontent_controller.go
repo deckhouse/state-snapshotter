@@ -34,7 +34,8 @@ import (
 
 // NamespaceSnapshotContentReconciler: orphan parent-protect finalizer when the root NamespaceSnapshot is gone
 // (UID mismatch or NotFound), and strip parent-protect from child NamespaceSnapshotContent on delete.
-// Retained TTL and physical deletion of NamespaceSnapshotContent are owned by Deckhouse ObjectKeeper, not this reconciler.
+// It does not Client.Delete children or ObjectKeeper/ManifestCheckpoint; GC runs after TTL removes the root ObjectKeeper
+// (root NamespaceSnapshotContent ownerReferences -> that OK).
 type NamespaceSnapshotContentReconciler struct {
 	Client client.Client
 }

@@ -23,7 +23,7 @@ func TestTransform_ConvertsPVCToVRR(t *testing.T) {
 				},
 			},
 			"storageClassName": "standard",
-			"volumeName":       "legacy-pv",
+			"volumeName":       "restored-pv",
 			"dataSource": map[string]interface{}{
 				"kind": "VolumeSnapshot",
 				"name": "snap-1",

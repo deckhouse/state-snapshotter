@@ -20,9 +20,10 @@
 #   PR4_SMOKE_SKIP_OK_CONTRACT     1 = skip root ObjectKeeper contract (clusters without deckhouse.io ObjectKeeper)
 #   PR4_SMOKE_REQUIRE_TTL          1 = after TTL wait, require NSC (and MCP if set) gone — fail if still present
 #   PR4_SMOKE_TTL_LOG_EVERY_SEC    progress log interval during strict TTL wait (default 30)
-#   PR4_SMOKE_LEGACY_SNAPSHOT      name for legacy .../snapshots/<name>/manifests in default
+#   PR4_SMOKE_EXTRA_SNAPSHOT       optional second NamespaceSnapshot name under default for extra .../snapshots/<name>/manifests probe
 #
 # Usage: ./hack/pr4-smoke.sh
+# Cleanup retained objects after a run: ./hack/pr4-smoke-cleanup.sh
 
 set -euo pipefail
 
@@ -108,9 +109,13 @@ echo "${disc_json}" | jq -e --arg n "namespacesnapshots/manifests" \
 log "OK discovery"
 
 log "== 2. ConfigMap cm1"
+# Label only when we create it so hack/pr4-smoke-cleanup.sh can remove cm1 without touching a pre-existing cm1.
+PR4_CM_LABEL_KEY="state-snapshotter.deckhouse.io/pr4-smoke"
+PR4_CM_LABEL_VAL="managed"
 if ! kubectl -n "${NS}" get configmap cm1 >/dev/null 2>&1; then
 	kubectl -n "${NS}" create configmap cm1 --from-literal=k=v
-	log "created cm1"
+	kubectl -n "${NS}" label configmap cm1 "${PR4_CM_LABEL_KEY}=${PR4_CM_LABEL_VAL}" --overwrite
+	log "created cm1 (labeled for cleanup)"
 else
 	log "cm1 already exists"
 fi
@@ -170,16 +175,26 @@ else
 		log "ERROR: root ObjectKeeper ${OK_NAME} not found (required when PR4_SMOKE_SKIP_OK_CONTRACT unset)"
 		exit 1
 	}
-	if ! echo "${ok_json}" | jq -e --arg suid "${SNAP_UID}" --arg nsc "${BOUND}" \
+	OK_UID=$(echo "${ok_json}" | jq -r '.metadata.uid')
+	if ! echo "${ok_json}" | jq -e --arg suid "${SNAP_UID}" \
 		'(.spec.mode == "FollowObjectWithTTL")
 			and (.spec.ttl != null)
 			and (.spec.followObjectRef.kind == "NamespaceSnapshot")
 			and (.spec.followObjectRef.uid == $suid)
-			and ([ .metadata.ownerReferences[]? | select(.apiVersion == "storage.deckhouse.io/v1alpha1" and .kind == "NamespaceSnapshotContent" and .name == $nsc) ] | length >= 1)' >/dev/null; then
-		log "ERROR: ObjectKeeper ${OK_NAME} contract mismatch (expect followRef NamespaceSnapshot + ownerRef->NSC ${BOUND})"
+			and ([ .metadata.ownerReferences[]? | select(.kind == "NamespaceSnapshotContent") ] | length == 0)' >/dev/null; then
+		log "ERROR: ObjectKeeper ${OK_NAME} contract mismatch (expect FollowObjectWithTTL on NamespaceSnapshot, no ownerRef to NamespaceSnapshotContent)"
 		exit 1
 	fi
-	log "OK ObjectKeeper followRef=NamespaceSnapshot + ownerRef->NSC"
+	nsc_json=$(kubectl get namespacesnapshotcontent.storage.deckhouse.io "${BOUND}" -o json) || {
+		log "ERROR: NamespaceSnapshotContent ${BOUND} not found"
+		exit 1
+	}
+	if ! echo "${nsc_json}" | jq -e --arg on "${OK_NAME}" --arg ouid "${OK_UID}" \
+		'[ .metadata.ownerReferences[]? | select(.apiVersion == "deckhouse.io/v1alpha1" and .kind == "ObjectKeeper" and .name == $on and .uid == $ouid and .controller == true) ] | length >= 1' >/dev/null; then
+		log "ERROR: NamespaceSnapshotContent ${BOUND} must have controller ownerRef -> ObjectKeeper ${OK_NAME}"
+		exit 1
+	fi
+	log "OK retained root chain: OK follow NamespaceSnapshot; NSC ownerRef -> OK"
 fi
 
 AGG_PATH="/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/namespacesnapshots/${SNAP_NAME}/manifests"
@@ -319,13 +334,13 @@ else
 	log "WARN: unexpected negative output (rc=${neg_rc})"
 fi
 
-log "== 14. Legacy Snapshot manifests (optional)"
-if [[ -z "${PR4_SMOKE_LEGACY_SNAPSHOT:-}" ]]; then
-	log "SKIP: PR4_SMOKE_LEGACY_SNAPSHOT"
+log "== 14. Extra snapshot manifests (optional)"
+if [[ -z "${PR4_SMOKE_EXTRA_SNAPSHOT:-}" ]]; then
+	log "SKIP: PR4_SMOKE_EXTRA_SNAPSHOT"
 else
-	LEG_PATH="/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/snapshots/${PR4_SMOKE_LEGACY_SNAPSHOT}/manifests"
-	kubectl get --raw "${LEG_PATH}" | jq -e 'type == "array"' >/dev/null
-	log "OK legacy manifests array"
+	EXTRA_PATH="/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/snapshots/${PR4_SMOKE_EXTRA_SNAPSHOT}/manifests"
+	kubectl get --raw "${EXTRA_PATH}" | jq -e 'type == "array"' >/dev/null
+	log "OK extra snapshot manifests array"
 fi
 
 log "== PR4 smoke PASSED"

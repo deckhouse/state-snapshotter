@@ -15,7 +15,7 @@
 - `YyyySnapshot.ownerRef` → `XxxxSnapshot` (если дочерние snapshot'ы создаются с ownerRef)
 - `YyyySnapshotContent.ownerRef` → `XxxxSnapshotContent`
 - Артефакты (`ManifestCheckpoint`, `VolumeSnapshotContent`).`ownerRef` → соответствующий `*SnapshotContent`
-- `ObjectKeeper.ownerRef` → `XxxxSnapshotContent` (для GC-удаления ObjectKeeper)
+- **Root retained content** (`XxxxSnapshotContent`, `NamespaceSnapshotContent`): **`ownerRef` → root `ObjectKeeper`** (TTL-якорь); OK следует за root snapshot (`FollowObjectWithTTL`), **без** `ObjectKeeper.ownerReferences` на content — см. design [`namespace-snapshot-controller.md`](../docs/state-snapshotter-rework/design/namespace-snapshot-controller.md) §4.3 для namespace-flow.
 
 ### Финалайзеры должны сниматься только контроллерами
 
@@ -117,9 +117,9 @@ XxxxSnapshot (parent-1)
 - `VolumeSnapshotContent/vsc-1.ownerRef` → `XxxxSnapshotContent/parent-sc-1`
 - `ManifestCheckpoint/mcp-2.ownerRef` → `YyyySnapshotContent/child-sc-1`
 - `VolumeSnapshotContent/vsc-2.ownerRef` → `YyyySnapshotContent/child-sc-1`
-- `ObjectKeeper/keeper-parent-1.ownerRef` → `XxxxSnapshotContent/parent-sc-1`
+- `XxxxSnapshotContent/parent-sc-1.ownerRef` → `ObjectKeeper/keeper-parent-1` (**controller**; якорь TTL; после удаления OK по TTL GC снимает content)
 
-**Важно:** `XxxxSnapshotContent` НЕ имеет `ownerRef` на `XxxxSnapshot`.
+**Важно:** `XxxxSnapshotContent` НЕ имеет `ownerRef` на `XxxxSnapshot` (логическая связь — `spec.snapshotRef` / аналог).
 
 ---
 
@@ -148,9 +148,9 @@ XxxxSnapshot (parent-1)
    - Фиксирует факт удаления и запускает отсчёт TTL для `XxxxSnapshotContent`
    - По истечении TTL инициирует удаление `XxxxSnapshotContent`
 
-**Контракт ObjectKeeper:**
-- `ObjectKeeper.ownerRef` → `XxxxSnapshotContent` (для GC-удаления)
-- Режим `FollowObjectWithTTL` используется только для логики запуска TTL, а не как способ жить без `ownerRef`
+**Контракт ObjectKeeper (root retained):**
+- **`XxxxSnapshotContent.ownerRef` → `ObjectKeeper`** (удаление content каскадом после удаления OK внешним контроллером по TTL)
+- Режим `FollowObjectWithTTL` на root snapshot задаёт TTL-якорь; OK **не** должен ссылаться на content в `ownerReferences` в этой модели
 
 ---
 
@@ -173,7 +173,7 @@ XxxxSnapshot (parent-1)
 
 6. GC инициирует удаление артефактов (MCP, VSC) через `ownerRef`
 
-7. GC завершает удаление Content и инициирует удаление `ObjectKeeper` через `ownerRef`
+7. После удаления `ObjectKeeper` (Deckhouse controller по TTL) GC завершает удаление `XxxxSnapshotContent` как dependent
 
 **Важно:** Порядок удаления критичен:
 - Если `SnapshotContent` удаляется и имеет финалайзер, GC будет ждать
