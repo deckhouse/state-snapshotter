@@ -10,6 +10,7 @@
 | Integration (envtest) | `go test -tags integration ./test/integration/...` или `make test-integration` |
 | E2E (envtest) | `go test -tags e2e ./test/e2e/...` или `make test-e2e` |
 | Smoke (кластер) | `./test-smoke.sh` из корня репозитория |
+| Ручной демо N2a (кластер) | [`namespace-snapshot-manual-demo.md`](namespace-snapshot-manual-demo.md) — YAML + `kubectl` для показа создания снимка, NSC/OK/MCP и aggregated |
 
 Требуется `KUBEBUILDER_ASSETS` для integration/e2e (см. `.cursor/rules/controller-envtest-local.mdc`).
 
