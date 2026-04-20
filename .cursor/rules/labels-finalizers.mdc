@@ -1,0 +1,21 @@
+---
+description: Label and finalizer naming conventions for this repo (state-snapshotter-controller).
+globs: images/state-snapshotter-controller/pkg/snapshot/**/*.go,images/state-snapshotter-controller/internal/controllers/**/*.go
+alwaysApply: false
+---
+
+- Label keys (MUST):
+  - Define label and annotation keys as constants in `pkg/snapshot` (or a single domain package), not string literals in controllers.
+  - Reuse existing prefixes where applicable: `storage.deckhouse.io/`, `snapshot.deckhouse.io/`, `state-snapshotter.deckhouse.io/`.
+  - Do NOT change existing label string values (stability).
+
+- Finalizers (MUST):
+  - Define finalizer strings as constants in `pkg/snapshot` (e.g. next to existing finalizer constants), not as ad-hoc literals in controllers.
+  - Use the repo-wide suffix: `<name>.finalizers.deckhouse.io`.
+  - Do NOT change existing finalizer string values (stability).
+    - Exception: before first release/GA, renaming is allowed.
+    - "Existing" means released/used in production, not merely present in a branch.
+
+- Spec/domain alignment (MUST):
+  - Reasons, states, and condition Types/Reasons MUST be constants in `pkg/snapshot` (or domain package). Do not introduce new keys as inline literals except in constant-definition tests.
+  - If `docs/state-snapshotter-rework/spec/system-spec.md` or API adds a new key, add the corresponding constant in the same change set.

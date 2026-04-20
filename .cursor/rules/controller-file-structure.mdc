@@ -1,0 +1,31 @@
+---
+description: Controller file-structure conventions for this repo. Apply when creating or editing controller files under images/state-snapshotter-controller/internal/controllers/.
+globs: images/state-snapshotter-controller/internal/controllers/**/*.go
+alwaysApply: false
+---
+
+- Controller files (MUST):
+  - Keep per-controller reconciliation logic in a single `<name>_controller.go`.
+  - `Reconcile(...)` and `SetupWithManager(...)` live in the same file.
+
+- In-file sections (SHOULD):
+  - Keep clear sections in `<name>_controller.go`:
+    - `// SetupWithManager` (wiring only: watches/predicates/options).
+    - `// Reconcile` (orchestration).
+    - `// Helpers` (supporting functions).
+
+- Patch-base discipline (MUST):
+  - Before any patch/update, capture a base copy (`base := obj.DeepCopy()`).
+  - Patch using the base to avoid clobbering unrelated fields.
+
+- Job idempotency (MUST):
+  - If the controller creates **Jobs** or similar ephemeral resources, identify them by **labels** (and optional owner refs), not by name alone — names may be deterministic but are not the sole contract.
+  - Cleanup selectors MUST be restart-safe (label-based). Any label keys MUST be constants in `pkg/snapshot` or spec (`docs/state-snapshotter-rework/spec/system-spec.md`).
+
+- Shared code placement (SHOULD):
+  - Shared helpers go to `helpers.go`.
+  - Shared constants go to `constants.go`.
+  - Shared errors go to `errors.go`.
+
+- Avoid structural drift (MUST NOT):
+  - Do NOT introduce a split `controller.go` / `reconciler.go` layout in this repo.

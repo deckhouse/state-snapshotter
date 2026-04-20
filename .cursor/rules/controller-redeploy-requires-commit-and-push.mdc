@@ -1,0 +1,10 @@
+---
+description: Before controller redeploy, require commit and push in current repository.
+alwaysApply: true
+---
+
+- Controller redeploy gate (MUST):
+  - Before redeploying the controller, create a git commit with the required changes.
+  - Commit message MUST be minimal plain text, without any additional tags/trailers/labels.
+  - Before redeploying the controller, push the commit to the remote of the current repository.
+  - Do NOT proceed with controller redeploy if commit or push has not been completed.

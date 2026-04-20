@@ -1,0 +1,9 @@
+---
+description: Kubebuilder marker policy for this repo. Apply when editing kubebuilder markers under api/v*/. XValidation is not supported.
+globs: api/v*/**/*.go
+alwaysApply: false
+---
+
+- XValidation (MUST NOT):
+  - Do NOT use `+kubebuilder:validation:XValidation` in this repo.
+  - Use standard validation markers instead (e.g., `Enum`, `MinLength`, `Minimum`).

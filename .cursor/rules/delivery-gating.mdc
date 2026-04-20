@@ -1,0 +1,17 @@
+---
+description: Stage-driven delivery and test gating for this repo. Apply when planning or implementing any change, and when deciding whether it is acceptable to move to the next stage. Apply when editing relevant files, and when reasoning/planning/answering questions where this rule could influence code decisions (even if matching files are not currently open).
+alwaysApply: true
+---
+
+- Stage-driven development (MUST):
+  - Implement features strictly within the **currently agreed stage model** documented in `docs/state-snapshotter-rework/operations/project-status.md`. Do not hardcode a fixed stage range in rules. Stage list is defined by current project-status and spec.
+  - Each change MUST declare which stage it belongs to (in PR/commit/description).
+  - Do NOT pull features from a later stage into the current change.
+
+- Test gating per stage (MUST):
+  - After codegen (if API touched) and before moving to the next stage, run and pass the full test plan for the current stage.
+  - Do NOT start implementing the next stage if any current-stage tests fail.
+
+- Regression guarantee (MUST):
+  - When working on Stage N, all tests from stages 0..N (per project-status) MUST pass (not only new ones).
+  - Fix regressions in the same change set; no “fix later”.

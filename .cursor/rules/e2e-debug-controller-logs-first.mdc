@@ -1,0 +1,18 @@
+---
+description: When debugging e2e/controller issues, read state-snapshotter-controller logs first.
+alwaysApply: true
+---
+
+# Bug debugging: controller logs first
+
+When investigating bugs in integration/e2e or on a cluster, **start by reading state-snapshotter controller logs**.
+
+- **Namespace (Deckhouse):** `d8-state-snapshotter` (chart template `d8-{{ .Chart.Name }}`; if the module name differs, use the actual namespace).
+- **Access:** `kubectl logs` for the controller pod in that namespace (confirm `app` / `component` labels in the module templates).
+
+**What to do:**
+1. Collect logs for the relevant window (`kubectl logs -n d8-state-snapshotter … --tail=500`).
+2. Look for reconcile lines: Snapshot / SnapshotContent / ManifestCheckpoint, unified-bootstrap / skip GVK, `RESTMapping` / API errors.
+3. Correlate with objects in the cluster (CRDs, statuses, finalizers).
+
+Do not rely on test output alone — get facts from logs and `kubectl describe` first.

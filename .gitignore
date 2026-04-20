@@ -13,6 +13,9 @@
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
 
+# Go build cache when GOCACHE is set inside the repo (e.g. sandbox / local override)
+.gocache/
+
 # vim
 *.swp
 

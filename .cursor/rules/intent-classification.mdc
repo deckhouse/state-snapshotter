@@ -1,0 +1,12 @@
+---
+description: Invalid preconditions → no heavy reconcile path; events optional; spec is source of truth.
+alwaysApply: false
+globs: images/state-snapshotter-controller/internal/controllers/**/*.go,docs/state-snapshotter-rework/spec/**/*.md
+---
+
+# Reconcile gating (unified snapshots / manifest flow)
+
+- Preconditions for progressing unified **Snapshot** / **SnapshotContent** reconcile (domain handled, refs valid, optional CRDs present per design) are defined in **`docs/state-snapshotter-rework/spec/system-spec.md`**, ADR under `snapshot-rework/`, and **`docs/architecture/controller-pattern.md`**.
+- When preconditions are not met: **do not** run the heavy path (artifact creation, status writes that assume readiness); prefer early return or no-op; emit **Warning** Event when it aids operators.
+- **Ambiguous or invalid input:** same rule — no partial inconsistent state; see controller-runtime-conventions for Patch discipline on our CRDs.
+- In code: use **constants** from `pkg/snapshot` for condition types/reasons and finalizers; spec + architecture docs are the source of truth for classification rules.

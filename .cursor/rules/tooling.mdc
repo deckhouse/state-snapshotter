@@ -5,4 +5,4 @@ alwaysApply: true
 
 # Tooling
 
-Allowed without confirmation: `bash hack/generate_code.sh`; `cd api && go test ./...`. When to run codegen, linter, e2e: see api-codegen.mdc, api-change-checklist.mdc, controller-redeploy-and-remote-e2e.mdc. **`./go-lint.sh`:** паритет с CI через `GO_BUILD_TAGS`; порядок commit vs lint и WIP без обёртки — **go-lint-script.mdc** (скрипт **не** делает `git checkout -f`).
+Allowed without confirmation: `bash hack/generate_code.sh`; `cd api && go test ./...`. When to run codegen, linter, e2e: see api-codegen.mdc, api-change-checklist.mdc, controller-redeploy-and-remote-e2e.mdc. **`./go-lint.sh`:** CI parity via `GO_BUILD_TAGS`; commit vs lint order and WIP without the wrapper — **go-lint-script.mdc** (the script does **not** run `git checkout -f`).

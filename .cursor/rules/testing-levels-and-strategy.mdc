@@ -1,0 +1,13 @@
+---
+description: Test levels, when to run which, scenario groups. Execution policy → controller-redeploy-and-remote-e2e.
+alwaysApply: false
+globs: images/state-snapshotter-controller/**/*.go,docs/state-snapshotter-rework/testing/**/*.md
+---
+
+# Testing levels and strategy
+
+- **Execution policy (where, redeploy, local/remote, e2e suite):** see **controller-redeploy-and-remote-e2e**. Do not duplicate it here.
+- **Levels:** Unit (logic), Envtest (controllers), E2E (real cluster). **When:** business logic → unit + envtest; reconcile → unit + envtest + e2e subset; data-path → full e2e.
+- **Orchestration and run model** are defined in `docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`. Unit and envtest-based tests run locally under `images/state-snapshotter-controller/test/`; cluster smoke (`./test-smoke.sh`) when applicable. Remote-only suites — only if documented there or in CI.
+- **Scenario groups:** unified snapshots, manifest/MCR, future DSC/registry, webhooks — as described or added in `e2e-testing-strategy.md`.
+- **Adding tests:** Check e2e-testing-strategy.md; avoid duplicate scenarios; add to the right group. **Removing:** Only if scenario is gone or replaced; then update e2e-testing-strategy.md.

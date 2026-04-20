@@ -1,42 +1,42 @@
 ---
-description: go-lint.sh — GO_BUILD_TAGS для паритета с CI; порядок commit vs lint; безопасное дерево после --fix.
+description: go-lint.sh — GO_BUILD_TAGS parity with CI; commit vs lint order; safe tree after --fix.
 alwaysApply: true
 ---
 
 # go-lint.sh (repo root)
 
-## MUST (агент и разработчик)
+## MUST (agent and developer)
 
-1. **Полный прогон `./go-lint.sh`** (как в CI) делать **после** того, как текущая порция правок **закоммичена** или хотя бы **сохранена в stash**, если вы не готовы к правкам от `--fix` в рабочем дереве.
-2. Если нужна проверка линтером **в процессе** правок без коммита: запускать **`golangci-lint run`** напрямую из нужного модуля (см. ниже), **а не** обёртку `./go-lint.sh`, либо коммитить промежуточный WIP и затем `./go-lint.sh`.
-3. После `./go-lint.sh` при ненулевом выходе или сообщении «Linter requests changes» смотреть **`git diff`**: там могут быть автоправки `--fix`; их нужно **включить в коммит** или откатить вручную — скрипт **не** делает `git checkout -f`.
+1. Run a **full `./go-lint.sh`** (same as CI) **after** the current batch of changes is **committed** or at least **stashed**, if you are not ready for `--fix` edits in the working tree.
+2. If you need linter feedback **while** editing without committing: run **`golangci-lint run`** directly from the relevant module (see below), **not** the `./go-lint.sh` wrapper; or commit an intermediate WIP and then run `./go-lint.sh`.
+3. After `./go-lint.sh` exits non-zero or prints “Linter requests changes”, inspect **`git diff`**: `--fix` may have applied auto-fixes; **commit them** or revert manually — the script does **not** run `git checkout -f`.
 
-## Паритет с CI: `GO_BUILD_TAGS`
+## CI parity: `GO_BUILD_TAGS`
 
-- В **CI** (`.github/workflows/go_checks.yaml`) задано: `GO_BUILD_TAGS: "ce ee se seplus csepro"`.
-- Скрипт `./go-lint.sh` гоняет `golangci-lint` **только** в цикле `for edition in $GO_BUILD_TAGS`.
-- Если переменная **не задана** или пуста, цикл **не выполняется** — линтер по `images/*` фактически **не запускается**, скрипт может завершиться «успешно» без реальной проверки.
+- **CI** (`.github/workflows/go_checks.yaml`) sets: `GO_BUILD_TAGS: "ce ee se seplus csepro"`.
+- `./go-lint.sh` runs `golangci-lint` **only** inside `for edition in $GO_BUILD_TAGS`.
+- If the variable is **unset** or empty, the loop **does not run** — linters for `images/*` effectively **do not run**, and the script may exit “success” without a real check.
 
-**Локально, как в CI:**
+**Locally, same as CI:**
 
 ```bash
 export GO_BUILD_TAGS="ce ee se seplus csepro"
 ./go-lint.sh
 ```
 
-## Линтер без обёртки (WIP, один edition)
+## Linter without the wrapper (WIP, single edition)
 
-Пример для контроллера (путь к бинарнику — как в CI или локальный `golangci-lint`):
+Controller example (binary path as in CI, or local `golangci-lint`):
 
 ```bash
 cd images/state-snapshotter-controller
 golangci-lint run --build-tags ce ./...
 ```
 
-Повторить с другими тегами при необходимости. Так не трогается общий сценарий `go-lint.sh` и не смешиваются неожиданно все editions.
+Repeat with other tags if needed. This avoids changing the global `go-lint.sh` flow and does not unexpectedly mix all editions.
 
-## Раньше: сброс дерева (`git checkout -f`)
+## Previously: tree reset (`git checkout -f`)
 
-Скрипт **больше не вызывает** `git checkout -f`. Раньше при «грязном» `git status` после `--fix` это **безвозвратно стирало** незакоммиченные изменения в отслеживаемых файлах. Сейчас при грязном дереве скрипт только печатает diff, помечает прогон как failed и **оставляет** правки в рабочей копии.
+The script **no longer** invokes `git checkout -f`. Previously, with a “dirty” `git status` after `--fix`, that **irreversibly wiped** uncommitted changes in tracked files. Now, on a dirty tree the script only prints the diff, marks the run failed, and **leaves** edits in the working copy.
 
-**Итог:** если `gci`/`--fix` что-то поменял — просмотреть diff, закоммитить или откатить; при необходимости прогнать `./go-lint.sh` снова, пока после скрипта `git status` (для tracked) чистый.
+**Bottom line:** if `gci` / `--fix` changed something — review the diff, commit or revert; rerun `./go-lint.sh` until `git status` (for tracked files) is clean after the script.

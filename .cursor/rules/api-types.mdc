@@ -1,0 +1,32 @@
+---
+description: API type layout conventions for this repo. Apply when editing api/v*/**/*_types.go, and when deciding type ordering or where helpers belong. Apply when editing relevant files, and when reasoning/planning/answering questions where this rule could influence code decisions (even if matching files are not currently open).
+globs: api/v*/**/*_types.go
+alwaysApply: false
+---
+
+- Type order in `<object>_types.go` (MUST):
+  - `type <Obj> struct`
+  - `type <Obj>List struct`
+  - `type <Obj>Spec struct`
+  - Spec-local types/helpers
+  - `type <Obj>Status struct`
+  - Status-local types/helpers
+
+- List placement (MUST):
+  - `<Obj>List` appears immediately after `<Obj>`.
+
+- Helpers (MUST):
+  - Keep helpers pure and local to the object type.
+  - Non-trivial/domain logic belongs outside `*_types.go`.
+
+- Shared API types (MUST):
+  - If a type is used by more than one API object, it MUST live in `common_types.go`.
+  - Do NOT duplicate shared types across `*_types.go` files.
+
+- Required fields (MUST):
+  - Fields that are required for the API MUST NOT use `omitempty`.
+  - Add kubebuilder validation markers (e.g., `MinLength`, `Enum`) for required scalars.
+
+- Enum constants (MUST):
+  - API-level enums/constants live in the `api` package.
+  - Controller/domain enums live in the `domain` package.
