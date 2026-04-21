@@ -43,6 +43,7 @@
 | [`operations/dsc-rbac-and-mcr.md`](operations/dsc-rbac-and-mcr.md) | DSC, hook, RBAC, отличие от MCR (D2) |
 | [`design/r2-phase-2b-r3-runtime-registry.md`](design/r2-phase-2b-r3-runtime-registry.md) | Техдизайн runtime registry |
 | [`testing/e2e-testing-strategy.md`](testing/e2e-testing-strategy.md) | Уровни тестов и команды |
+| [`design/demo-domain-dsc/README.md`](design/demo-domain-dsc/README.md) | **Proposed:** demo domain nested snapshot (DSC), PVC dedup — дизайн до кода |
 | [`snapshot-rework/`](../../snapshot-rework/) | ADR и длинная история решений |
 
 ---
