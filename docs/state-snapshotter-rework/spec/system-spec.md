@@ -75,6 +75,7 @@
 
 ### §3.7. Ссылки на тесты и дизайн
 
+- Порядок атомарных PR под имплементацию **§3** (без повторения MUST): [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.4**.
 - Концептуальный SSOT дерева / осей: [`design/demo-domain-dsc/08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md).
 - Инварианты графа и generic vs domain: [`design/demo-domain-dsc/05-tree-and-graph-invariants.md`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md).
 - План сценариев: [`testing/demo-domain-dsc-test-plan.md`](../testing/demo-domain-dsc-test-plan.md).

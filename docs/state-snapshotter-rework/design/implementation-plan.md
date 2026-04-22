@@ -160,6 +160,28 @@
 - **Тесты (после кода):** [`testing/demo-domain-dsc-test-plan.md`](../testing/demo-domain-dsc-test-plan.md); уровни — [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md) (раздел Demo domain).
 - **Нормативный каркас PR5+** (логическое дерево по **`children*Refs`**, **INV-REF1** / **INV-REF-C1** / **INV-REF-M1** / **INV-REF-M2**, **INV-S0** / **INV-E1**, запрет DSC/ownerRef как SoT дерева/dedup) — **[`spec/system-spec.md`](../spec/system-spec.md) §3**. Расширение **формы элементов** `children*Refs` (GVK+…) и полная фиксация PR4 traversal в OpenAPI+коде — вместе с реализацией PR5; мотивы, таблицы **`Ready`**/delete — [`demo-domain-dsc/`](demo-domain-dsc/README.md).
 
+#### 2.4.4 Порядок имплементации **[`spec/system-spec.md`](../spec/system-spec.md) §3** (execution plan)
+
+Короткая **нарезка атомарных PR** под контракт **§3**: **что** делать — только в spec; **как** и матрицы — в design / test-plan. Таблица **§2.4.2** выше — поставка N2b по полю API / synthetic / aggregated / gate **PR5**; подраздел ниже — **порядок работ внутри линии generic + граф + dedup + Ready** (может частично пересекаться уже закрытыми N2b PR — тогда этап помечается в PR как выполненный / no-op).
+
+**§3-E1 — базовый graph (write + read)**  
+Запись **`childrenSnapshotRefs`** с **merge-only** (**INV-REF-M1** / **INV-REF-M2**); generic читает только refs (**INV-REF1**, без list-достройки); в этом срезе **не** опираться на **`childrenSnapshotContentRefs`** для обхода; **без** dedup. **Тест:** один child, happy-path.
+
+**§3-E2 — multi-writer / merge correctness**  
+Несколько writers на refs; **RetryOnConflict** / согласованная стратегия patch. **Тесты:** concurrent writers; **нельзя** удалить чужой ref (**INV-REF-M2**).
+
+**§3-E3 — content refs (частично)**  
+Использование **`childrenSnapshotContentRefs`** там, где нужно по spec traversal; generic: **без** list-обхода (**INV-REF-C1**); при выбранном варианте — **явный fallback** только по цепочке **snapshot refs**. **Тест:** отсутствие / пустые content refs → **fail-closed** или задокументированный fallback.
+
+**§3-E4 — traversal / aggregation (если выносится отдельным PR)**  
+Обход дерева **по refs**; подготовка к aggregated операциям (download / restore по политике N2b); **без** расширения матрицы **Ready** в том же PR (если иначе — разнести).
+
+**§3-E5 — dedup / exclude**  
+**INV-S0** / **INV-E1**: вычисление только по дереву текущего run; **fail-closed** при неполных данных.
+
+**§3-E6 — Ready (когда нормы перенесены в spec / закреплены тестами)**  
+Единый контракт чтения состояния дочернего узла; каскад **Ready**; **INV-R4** / согласованный выбор **reason** на родителе (см. [`demo-domain-dsc/07-ready-delete-matrix.md`](demo-domain-dsc/07-ready-delete-matrix.md)) — без дублирования таблиц здесь.
+
 ---
 
 **Definition of Done (N2 целиком = N2a ∧ N2b)**
@@ -172,7 +194,7 @@
 
 **N2a:** CRD §4.4.1 + allowlist §4.5 + §4.7 → NS reconciler → download §8.7.1 → integration.  
 
-**N2b:** по шагам **§2.4.2** (таблица PR в подразделе **2.4.2** выше в этом документе; PR1→PR4, затем PR5 при необходимости).
+**N2b:** по шагам **§2.4.2** (таблица PR в подразделе **2.4.2** выше в этом документе; PR1→PR4, затем PR5 при необходимости). Порядок имплементации контракта **[`spec/system-spec.md`](../spec/system-spec.md) §3** — **§2.4.4**.
 
 **В этой задаче (только план):** не переписывать CRD N1 без отдельного решения; не менять bind/delete skeleton без необходимости; не включать data snapshots и полный export/import/restore.
 
