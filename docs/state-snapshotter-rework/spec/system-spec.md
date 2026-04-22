@@ -47,12 +47,12 @@
 
 ### §3.1. Логическое дерево и источник истины
 
-- **MUST:** логическое дерево snapshot-run задаётся **только** полями **`status.childrenSnapshotRefs`** / **`status.childrenSnapshotContentRefs`** на соответствующих **`XxxxSnapshot`** / **`XxxxSnapshotContent`** вдоль пути от **root** **`NamespaceSnapshot`** этого run.
-- **MUST NOT:** объект считаться узлом этого дерева, если он **не** представлен в **`children*Refs`** на пути от root (даже если существует в API). (**INV-REF1**, см. [`design/demo-domain-dsc/05-tree-and-graph-invariants.md`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
+- **MUST:** логическое дерево snapshot-run задаётся **только** refs-полями **`status`** на **`XxxxSnapshot`** / **`XxxxSnapshotContent`**, **опубликованными** на пути от **root** **`NamespaceSnapshot`** этого run: **`childrenSnapshotRefs`** — **основной** носитель **ребёнка-узла** в дереве; **`childrenSnapshotContentRefs`** — **дополняющий** слой **только** там, где это **нормативно** требует этот spec или согласованный под-документ (traversal, aggregation, политика этапа), **без** подмены SoT, задаваемого **snapshot** refs (см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §2, абзац **Snapshot refs vs content refs**).
+- **MUST NOT:** объект считаться узлом этого дерева, если он **не** представлен в **`children*Refs`** на пути от root (даже если существует в API). (**INV-REF1**, см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
 
 ### §3.2. Ключ merge для элементов refs (до расширения схемы PR5)
 
-- **MUST:** запись в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** — **merge-only** по каноническому ключу элемента: для элементов вида **`NamespaceSnapshotChildRef`** — пара **`(namespace, name)`** дочернего snapshot; для **`NamespaceSnapshotContentChildRef`** на данном родителе — **`name`** дочернего content в namespace родительского content. После расширения схемы элементов до **GVK + namespace + name** канонический ключ **MUST** совпадать с нормативным определением в OpenAPI этого репозитория.
+- **MUST:** запись в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** — **merge-only** по каноническому ключу элемента: для элементов вида **`NamespaceSnapshotChildRef`** — пара **`(namespace, name)`** дочернего snapshot; для **`NamespaceSnapshotContentChildRef`** — **`name`** дочернего **`XxxxSnapshotContent`** в **namespace** родительского **`NamespaceSnapshotContent`**. После расширения схемы элементов до **GVK + namespace + name** канонический ключ **MUST** совпадать с нормативным определением в OpenAPI этого репозитория.
 - **MUST NOT:** заменять список **`children*Refs`** целиком одним write, если этим стираются элементы, записанные другим контроллером; удалять из списка элемент, за который пишущий контроллер **не** несёт ответственности. (**INV-REF-M1**, **INV-REF-M2**, [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
 
 ### §3.3. Удаление элемента из refs
@@ -62,11 +62,11 @@
 ### §3.4. Generic `NamespaceSnapshot` и обход API
 
 - **MUST NOT:** reconciler **`NamespaceSnapshot`** (и общий код exclude/dedup для root capture) **достраивать** логическое дерево или множество узлов из **list/search по namespace** или эвристик без ref на пути от root. (**INV-REF1**.)
-- **MUST NOT:** при отсутствии или пустоте **`childrenSnapshotContentRefs`** там, где поле предусмотрено схемой, **самостоятельно** находить **`*SnapshotContent`** через list API без нормативного правила в этом spec или в согласованном под-документе (например расширение PR4 traversal). Допустимые варианты: **fail-closed** (не продолжать этап), **явный fallback** только из цепочки **snapshot refs** — конкретный вариант **MUST** быть указан в реализации и тестах до включения поведения в релиз. (**INV-REF-C1**.)
+- **MUST NOT:** при отсутствии или пустоте **`childrenSnapshotContentRefs`** там, где поле предусмотрено схемой, **самостоятельно** находить **`*SnapshotContent`** через list API без нормативного правила в этом spec или в согласованном под-документе (например расширение PR4 traversal). **По умолчанию** поведение в такой ситуации — **fail-closed** (не продолжать этап). **Явный fallback** (в т.ч. только из цепочки **snapshot refs**) **допустим только** если он **отдельно** закреплён в этом spec или в согласованном под-документе; иначе list/search «для восстановления content» — **вне** контракта. Конкретный разрешённый вариант **MUST** быть указан в реализации и тестах до включения поведения в релиз. (**INV-REF-C1**.)
 
 ### §3.5. Граница run и fail-closed dedup
 
-- **MUST:** вычисление dedup / exclude для root capture выполнять **только** в пределах дерева **текущего** snapshot-run (обход от root **`NamespaceSnapshot`** по **`children*Refs`**). (**INV-S0**, [`design/demo-domain-dsc/06-coverage-dedup-keys.md`](../design/demo-domain-dsc/06-coverage-dedup-keys.md).)
+- **MUST:** вычисление dedup / exclude для root capture и **сопутствующий** подбор связанных объектов (обнаружение MCP/VS и т.п. **в контексте** покрытия и исключений) выполнять **только** в пределах дерева **текущего** snapshot-run (обход от root **`NamespaceSnapshot`** по **`children*Refs`**), **без** расширения множества узлов за пределы этого обхода под видом «подготовки данных». (**INV-S0**, [`design/demo-domain-dsc/06-coverage-dedup-keys.md`](../design/demo-domain-dsc/06-coverage-dedup-keys.md).)
 - **MUST NOT:** при невозможности **надёжно** построить множества exclude расширять dedup или исключения «по догадке» по неполным данным; поведение **fail-closed** — как в **INV-E1** ([`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md) §4).
 
 ### §3.6. DSC и ownerRef (напоминание)
