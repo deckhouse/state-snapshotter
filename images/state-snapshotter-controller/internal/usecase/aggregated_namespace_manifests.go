@@ -19,10 +19,10 @@ package usecase
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
-	"sort"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -131,74 +131,70 @@ func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Conte
 // It does not list NamespaceSnapshotContent or NamespaceSnapshot to discover children,
 // and does not follow status.childrenSnapshotRefs on NamespaceSnapshot — consistent with
 // system-spec §3.4 (INV-REF-C1): empty or absent content refs mean no further descent from that node.
+//
+// Graph DFS is shared with WalkNamespaceSnapshotContentSubtree (namespacesnapshot_content_graph.go)
+// so domain code and aggregation use the same ref-only walk (§3-E4).
 func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName string, visited map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
-	if _, ok := visited[nscName]; ok {
-		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-			fmt.Sprintf("cycle detected at NamespaceSnapshotContent %q", nscName))
-	}
-	visited[nscName] = struct{}{}
-
-	nsc := &storagev1alpha1.NamespaceSnapshotContent{}
-	if err := s.client.Get(ctx, client.ObjectKey{Name: nscName}, nsc); err != nil {
-		if apierrors.IsNotFound(err) {
-			return NewAggregatedStatusError(http.StatusNotFound, "NotFound",
-				fmt.Sprintf("NamespaceSnapshotContent %q not found", nscName))
-		}
-		return fmt.Errorf("get NamespaceSnapshotContent %q: %w", nscName, err)
-	}
-
-	mcpName := nsc.Status.ManifestCheckpointName
-	if mcpName == "" {
-		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-			fmt.Sprintf("manifestCheckpointName is empty for NamespaceSnapshotContent %q", nscName))
-	}
-
-	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := s.client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
-		if apierrors.IsNotFound(err) {
-			return NewAggregatedStatusError(http.StatusNotFound, "NotFound",
-				fmt.Sprintf("ManifestCheckpoint %q not found", mcpName))
-		}
-		return fmt.Errorf("get ManifestCheckpoint %q: %w", mcpName, err)
-	}
-
-	req := &ArchiveRequest{
-		CheckpointName:  mcpName,
-		CheckpointUID:   string(mcp.UID),
-		SourceNamespace: mcp.Spec.SourceNamespace,
-	}
-	raw, _, err := s.archive.GetArchiveFromCheckpoint(ctx, mcp, req)
-	if err != nil {
-		return classifyAggregatedArchiveError(err)
-	}
-
-	var arr []map[string]interface{}
-	if err := json.Unmarshal(raw, &arr); err != nil {
-		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-			fmt.Sprintf("invalid MCP JSON for %q: %v", mcpName, err))
-	}
-
-	for _, obj := range arr {
-		key, err := aggregatedObjectIdentityKey(obj)
-		if err != nil {
-			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
-		}
-		if _, dup := seenKeys[key]; dup {
+	err := walkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visited, func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
+		mcpName := nsc.Status.ManifestCheckpointName
+		if mcpName == "" {
 			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-				fmt.Sprintf("duplicate object %q", key))
+				fmt.Sprintf("manifestCheckpointName is empty for NamespaceSnapshotContent %q", nsc.Name))
 		}
-		seenKeys[key] = struct{}{}
-		*objects = append(*objects, obj)
-	}
 
-	children := append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), nsc.Status.ChildrenSnapshotContentRefs...)
-	sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
-	for _, ch := range children {
-		if err := s.walkNSC(ctx, ch.Name, visited, objects, seenKeys); err != nil {
-			return err
+		mcp := &ssv1alpha1.ManifestCheckpoint{}
+		if err := s.client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+			if apierrors.IsNotFound(err) {
+				return NewAggregatedStatusError(http.StatusNotFound, "NotFound",
+					fmt.Sprintf("ManifestCheckpoint %q not found", mcpName))
+			}
+			return fmt.Errorf("get ManifestCheckpoint %q: %w", mcpName, err)
 		}
+
+		req := &ArchiveRequest{
+			CheckpointName:  mcpName,
+			CheckpointUID:   string(mcp.UID),
+			SourceNamespace: mcp.Spec.SourceNamespace,
+		}
+		raw, _, err := s.archive.GetArchiveFromCheckpoint(ctx, mcp, req)
+		if err != nil {
+			return classifyAggregatedArchiveError(err)
+		}
+
+		var arr []map[string]interface{}
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
+				fmt.Sprintf("invalid MCP JSON for %q: %v", mcpName, err))
+		}
+
+		for _, obj := range arr {
+			key, err := aggregatedObjectIdentityKey(obj)
+			if err != nil {
+				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
+			}
+			if _, dup := seenKeys[key]; dup {
+				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
+					fmt.Sprintf("duplicate object %q", key))
+			}
+			seenKeys[key] = struct{}{}
+			*objects = append(*objects, obj)
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
 	}
-	return nil
+	if errors.Is(err, ErrNamespaceSnapshotContentCycle) {
+		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
+	}
+	if apierrors.IsNotFound(err) {
+		return NewAggregatedStatusError(http.StatusNotFound, "NotFound", err.Error())
+	}
+	var st *AggregatedStatusError
+	if errors.As(err, &st) {
+		return err
+	}
+	return err
 }
 
 func aggregatedObjectIdentityKey(obj map[string]interface{}) (string, error) {
