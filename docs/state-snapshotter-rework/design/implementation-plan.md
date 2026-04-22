@@ -195,6 +195,8 @@ After merge-gate on demo-domain flow, synthetic scaffold must be removed from co
 **§3-E6 — Ready (когда нормы перенесены в spec / закреплены тестами)**  
 Единый контракт чтения состояния дочернего узла; каскад **Ready**; **INV-R4** / согласованный выбор **reason** на родителе (см. [`demo-domain-dsc/07-ready-delete-matrix.md`](demo-domain-dsc/07-ready-delete-matrix.md)) — без дублирования таблиц здесь.
 
+**Фактический прогресс срезов §3-E в коде** (объём «сделано / не сделано» без повторения таблиц Must) — в [`operations/project-status.md`](../operations/project-status.md) (строка таблицы N2b generic §3 и блок под ней).
+
 ---
 
 **Definition of Done (N2 целиком = N2a ∧ N2b)**
