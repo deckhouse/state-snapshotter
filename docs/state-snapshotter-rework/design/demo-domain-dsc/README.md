@@ -11,7 +11,7 @@ Reference для **heterogeneous** доменного дерева под **те
 - **готовность и деградация** — единый condition **`Ready`**, каскад снизу вверх и обратная деградация с сохранением **`reason`/`message`**;
 - **`NamespaceSnapshot`** — текущий верхний узел архитектуры, **не** отдельный класс правил дерева ([`08`](08-universal-snapshot-tree-model.md) §A.3).
 
-**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; временный тестовый scaffold (исторически «synthetic») **не** задаёт архитектуру пакета — см. [`implementation-plan.md`](../implementation-plan.md) и миграцию тестов на demo flow.
+**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; временный тестовый scaffold (исторически «synthetic») **не** является частью архитектурной модели здесь — см. [`implementation-plan.md`](../implementation-plan.md) и миграцию тестов на demo flow.
 
 ## ADR (кратко)
 

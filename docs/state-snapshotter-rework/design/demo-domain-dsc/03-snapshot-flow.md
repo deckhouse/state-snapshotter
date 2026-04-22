@@ -29,7 +29,7 @@ NamespaceSnapshot (root)
 
 **`VolumeSnapshot`** / **`VolumeSnapshotContent`** — **leaf** слоя данных (CSI); в дереве они появляются как узлы, которые **создаёт и ведёт доменный** контроллер (или согласованная цепочка под ним), **без** регистрации VS в DSC state-snapshotter там, где это не требуется ([`02`](02-dsc-wiring.md)). **Generic** не ветвится по «demo vs CSI»: взаимодействие с таким узлом — **только** через ref в **`children*Refs`** и **тип-агностичный** разбор CSI **status** (маппинг к **`Ready`** / dedup), **без** продуктовой ветки «наш особый VS».
 
-Имена demo kinds — см. [`01-api.md`](01-api.md). **Смысл:** PR5 / real domain wiring — это **heterogeneous snapshot graph**, а не «вложенный** `NamespaceSnapshot` под root» как замена доменному графу (**INV-T1**).
+Имена demo kinds — см. [`01-api.md`](01-api.md). **Смысл:** PR5 / real domain wiring — это **heterogeneous snapshot graph**, а не модель с **вложенным** `NamespaceSnapshot` под root вместо доменного графа (**INV-T1**).
 
 ## Участники
 
