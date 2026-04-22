@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
@@ -118,6 +119,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = storagev1alpha1.AddToScheme(scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = demov1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// Install ObjectKeeper CRD manually
@@ -607,6 +611,9 @@ var _ = BeforeSuite(func() {
 		"namespacesnapshots.storage.deckhouse.io",
 		"namespacesnapshotcontents.storage.deckhouse.io",
 		"snapshotcontents.storage.deckhouse.io",
+		"demovirtualdisks.demo.state-snapshotter.deckhouse.io",
+		"demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+		"demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 	}
 	Eventually(func() bool {
 		for _, n := range crdNamesWaitEstablished {
@@ -677,6 +684,7 @@ var _ = BeforeSuite(func() {
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotContentControllerToManager(mgr, testCfg)).To(Succeed())
+	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr)).To(Succeed())
 
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,

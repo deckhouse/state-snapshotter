@@ -12,7 +12,7 @@ Therefore, it is important to remember to apply go get in all external modules t
 
 ## Regenerating `DeepCopy` and CRD YAML
 
-After changing types under `api/v1alpha1`:
+After changing types under `api/v1alpha1`, `api/storage/v1alpha1`, or `api/demo/v1alpha1`:
 
 ```bash
 ./hack/generate_code.sh

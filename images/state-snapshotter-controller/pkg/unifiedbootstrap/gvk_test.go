@@ -85,6 +85,21 @@ func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T)
 	}
 }
 
+func TestFilterGenericSnapshotGVKPairs_skipsDemoVirtualDiskSnapshot(t *testing.T) {
+	snapGVKs := []schema.GroupVersionKind{
+		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+	}
+	contentGVKs := []schema.GroupVersionKind{
+		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshotContent"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+	}
+	sOut, cOut := FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
+	if len(sOut) != 1 || sOut[0].Kind != "Snapshot" || len(cOut) != 1 || cOut[0].Kind != "SnapshotContent" {
+		t.Fatalf("got snaps=%v contents=%v", sOut, cOut)
+	}
+}
+
 func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing.T) {
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},

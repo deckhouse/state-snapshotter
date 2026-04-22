@@ -1,6 +1,6 @@
 # Demo domain-specific nested snapshot (via DSC)
 
-**Статус:** Proposed — **сначала документы → ревью → только потом код.**
+**Статус:** Proposed — **сначала документы → ревью → только потом код.** **PR5a (минимум в репозитории):** группа **`demo.state-snapshotter.deckhouse.io`**, **`DemoVirtualDiskSnapshot`** / **`DemoVirtualDiskSnapshotContent`**, stub **`DemoVirtualDisk`** под строку DSC, контроллер merge **`children*Refs`** на root **`NamespaceSnapshot`** + на root **`NamespaceSnapshotContent`**; интеграция `demovirtualdisksnapshot_pr5a_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
 
 ## Назначение
 
