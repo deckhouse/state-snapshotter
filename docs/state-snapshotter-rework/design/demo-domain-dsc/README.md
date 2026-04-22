@@ -11,7 +11,7 @@ Reference для **heterogeneous** доменного дерева под **те
 - **готовность и деградация** — единый condition **`Ready`**, каскад снизу вверх и обратная деградация с сохранением **`reason`/`message`**;
 - **`NamespaceSnapshot`** — текущий верхний узел архитектуры, **не** отдельный класс правил дерева ([`08`](08-universal-snapshot-tree-model.md) §A.3).
 
-**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; временный тестовый scaffold в коде (исторически «synthetic») **не** является частью архитектурной модели здесь — см. [`implementation-plan.md`](../implementation-plan.md) **§2.4.2** (блок **«Целевая архитектура vs текущий код»** / **«Снятие synthetic scaffold»**): после **merge-gate** на demo-domain flow scaffold **обязан** быть удалён из кода и тестов **в том же PR5 или следующем cleanup PR**.
+**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; **временный scaffold в коде, не целевая модель PR5** (исторически помечаемый «synthetic») **не** входит в архитектурный narrative здесь — см. [`implementation-plan.md`](../implementation-plan.md) **§2.4.2** (блок **«Целевая архитектура vs текущий код»** / **«Снятие synthetic scaffold»**): после **merge-gate** на demo-domain flow scaffold **обязан** быть удалён из кода и тестов **в том же PR5 или следующем cleanup PR**.
 
 ## ADR (кратко)
 
@@ -19,7 +19,7 @@ Reference для **heterogeneous** доменного дерева под **те
 |--|--|
 | **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`NamespaceSnapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — **реальный** heterogeneous tree на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
 | **Инвариант** | Generic не повторно захватывает ресурс, покрытый subtree; **ownerRef** — только жизненный цикл/GC ([`08`](08-universal-snapshot-tree-model.md) часть B). |
-| **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. Временный synthetic scaffold в репо до merge-gate — только **implementation-plan §2.4.2** (миграция/снятие), не целевая модель здесь. |
+| **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. **Временный scaffold в коде, не целевая модель PR5** (synthetic) до merge-gate описан только в **implementation-plan §2.4.2** (миграция/снятие), не в этом README как цель. |
 
 ## Документы этапа 1 (архитектурный обзор)
 
