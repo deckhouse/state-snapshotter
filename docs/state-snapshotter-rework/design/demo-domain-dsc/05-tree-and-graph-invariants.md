@@ -67,6 +67,8 @@
 | **R3** | **`childrenSnapshotContentRefs`** на **`NamespaceSnapshotContent`** (root) **при необходимости** (политика домена, **traversal**, **aggregation**) могут указывать на content **прямых** детей root (например `DemoVirtualMachineSnapshotContent`). Это **не** жёсткое универсальное требование «всегда полное зеркалирование snapshot→content на NSC»; минимум для этапа задаётся **spec** (PR1/PR5). Без заполнения — обход опирается на snapshot refs и правила разрешения content в spec. |
 | **R4** | Корневой **`NamespaceSnapshotContent`** несёт **`manifestCheckpointName`** для **root** namespace MCP; MCP доменных leaf — на **`DemoVirtualDiskSnapshotContent`** (и при необходимости на VM snapshot content). |
 
+**Snapshot refs vs content refs (для однозначного чтения пакета).** **`childrenSnapshotRefs`** — основной носитель **ребёнка-узла** в логическом дереве. **`childrenSnapshotContentRefs`** (в т.ч. на root **`NamespaceSnapshotContent`**) **дополняют** граф там, где это нужно для **traversal** / **aggregation** или по политике домена (**R3**); они **не** заменяют SoT дерева и **не** разрешают «достраивать» дерево list’ом по namespace. Пока нормативно не зафиксировано иначе: минимальный вход для обхода узлов — **snapshot refs**; **обязательность** заполнения content refs на конкретном родителе/этапе и правило **разрешения** content при пустых content refs на NSC — задаются **единым** текстом normative spec для PR1/PR5 (**не** ветвление `if NSC` в generic «на глаз»).
+
 **Целевая форма элементов refs** (после расширения PR1 → PR5 в spec): достаточно идентифицировать ребёнка в API (**`apiGroup`, `kind`, `namespace`, `name`** или эквивалент); до переноса в CRD дизайн не меняет код.
 
 ---
