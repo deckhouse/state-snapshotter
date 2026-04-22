@@ -15,7 +15,7 @@
 
 - **Given:** namespace с demo workload (VM + диски / standalone disk по дизайну).  
 - **When:** создаётся root `NamespaceSnapshot`.  
-- **Then:** строится **heterogeneous** дерево; все связи родитель→ребёнок отражены через **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** на соответствующих `*Snapshot` / `*SnapshotContent` ([`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §2). **Нет** дочернего `NamespaceSnapshot` под VM/disk.
+- **Then:** строится **heterogeneous** дерево; все связи родитель→ребёнок отражены через **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** на соответствующих `*Snapshot` / `*SnapshotContent` ([`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1–§2). **Нет** дочернего `NamespaceSnapshot` под VM/disk.
 
 ### 2. Ready propagation
 
