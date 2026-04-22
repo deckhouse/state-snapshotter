@@ -2,7 +2,7 @@
 
 Нормативный контракт для реализации и тестов. Полная детализация DSC / registry / RBAC — в ADR [`snapshot-rework/2026-01-23-unified-snapshots-registry.md`](../../../snapshot-rework/2026-01-23-unified-snapshots-registry.md); не дублировать длинные фрагменты здесь без необходимости — обновлять этот файл при изменении контракта.
 
-Нумерация разделов ниже совпадает с бывшим указателем `snapshot-rework/plan/dorabotki-i-testy.md`: **§0** — registry/runtime, **§1** — контекст.
+Нумерация разделов ниже совпадает с бывшим указателем `snapshot-rework/plan/dorabotki-i-testy.md`: **§0** — registry/runtime, **§1** — контекст, **§2** — ссылки, **§3** — граф snapshot-run (PR5+).
 
 ## §0. Registry state и runtime (watch)
 
@@ -26,7 +26,7 @@
 - **Цель (ядро):** регистрация типов через DSC + **RBACReady** + активация watch без рестарта для новых eligible типов — реализовано для additive-пути; симметричное снятие watch — нет.
 - **Manifest / MCR / ManifestCheckpoint** — отдельный трек от unified registry snapshot-типов; не смешивать с DSC.
 - **NamespaceSnapshot manifests-only path (N2):** этапы **N2a** / **N2b** — [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.1**; **декомпозиция поставки N2b по PR** — **§2.4.2** (тот же файл). Публичные поля статуса N2a, allowlist, **временный MCR** (**ownerRef** на root `NamespaceSnapshot` для GC in-flight; удаляется контроллером после успешного capture), **каноническая ссылка на MCP** — `NamespaceSnapshotContent.status.manifestCheckpointName`, delete root / in-flight capture, download API/ошибки, агрегация N2b, OK vs ownerRef — [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) **§4.3–§4.7**, **§5.2**, **§8.7**, **§10–§11**. Data-layer и полный export/restore — за пределами N2. При стабильном контракте в API — дополнять этот spec, не дублируя design.
-- **N2b — форма графа в статусе (PR1):** опциональные поля **`status.childrenSnapshotRefs`** на **`NamespaceSnapshot`** (элементы JSON: **`name`**, **`namespace`**) и **`status.childrenSnapshotContentRefs`** на **`NamespaceSnapshotContent`** (элемент: **`name`**). В Go типы элементов — **`NamespaceSnapshotChildRef`** / **`NamespaceSnapshotContentChildRef`** (N2b child graph, не универсальные cross-kind refs). Семантика заполнения, orchestration и агрегированный **Ready** — не в PR1; см. **§2.4.2** плана и design **§11**.
+- **N2b — форма графа в статусе (PR1):** опциональные поля **`status.childrenSnapshotRefs`** на **`NamespaceSnapshot`** (элементы JSON: **`name`**, **`namespace`**) и **`status.childrenSnapshotContentRefs`** на **`NamespaceSnapshotContent`** (элемент: **`name`**). В Go типы элементов — **`NamespaceSnapshotChildRef`** / **`NamespaceSnapshotContentChildRef`** (N2b child graph, не универсальные cross-kind refs). Семантика заполнения, orchestration и агрегированный **Ready** — не в PR1; см. **§2.4.2** плана и design **§11**. **Инварианты универсального дерева snapshot-run, merge и dedup при PR5+** — нормативно **§3**; дизайн-пакет и мотивы — [`design/demo-domain-dsc/README.md`](../design/demo-domain-dsc/README.md), [`design/demo-domain-dsc/08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md).
 - **N2b PR2 (scaffold в коде):** при аннотации **`state-snapshotter.deckhouse.io/n2b-pr2-synthetic-tree`** на parent контроллер обеспечивает одного synthetic child и запись graph refs; **§11.1** design и **§2.4.2** плана.
 - **N2b PR3:** агрегированный **Ready** parent: собственный persisted MCP **и** required synthetic child **`Ready=True`**; иначе **`ChildSnapshotPending`** или при терминальном провале child — **`ChildSnapshotFailed`** (`pkg/snapshot`); таблица и whitelist — **§11.1** design.
 - **N2b PR4 — aggregated manifests download (HTTP + traversal + errors):** нормативный контракт — **[`spec/namespace-snapshot-aggregated-manifests-pr4.md`](namespace-snapshot-aggregated-manifests-pr4.md)** (endpoint, fail-whole, merge, циклы, дубликаты). Общие принципы N2a/N2b download — по-прежнему [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) **§8.7** (ссылка на PR4 SSOT в **§8.7.1**).
@@ -40,3 +40,41 @@
 - План внедрения и статусы задач: [`design/implementation-plan.md`](../design/implementation-plan.md)
 - Тесты и команды: [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md)
 - Прогресс стадий: [`operations/project-status.md`](../operations/project-status.md)
+
+## §3. Граф snapshot-run: refs, generic, merge, dedup (нормативно для PR5+)
+
+Ниже — **контракт реализации** (MUST / MUST NOT). Расширение полей элементов **`children*Refs`** до полного `{ apiGroup, kind, namespace, name }` — вместе с OpenAPI CRD и кодом; до этого действуют ключи слияния для текущих типов (**§3.2**). Поведение **`Ready`** и каскада — в [`design/demo-domain-dsc/07-ready-delete-matrix.md`](../design/demo-domain-dsc/07-ready-delete-matrix.md); при переносе норм в этот spec — без противоречий **§3** и **§1** (N2b).
+
+### §3.1. Логическое дерево и источник истины
+
+- **MUST:** логическое дерево snapshot-run задаётся **только** полями **`status.childrenSnapshotRefs`** / **`status.childrenSnapshotContentRefs`** на соответствующих **`XxxxSnapshot`** / **`XxxxSnapshotContent`** вдоль пути от **root** **`NamespaceSnapshot`** этого run.
+- **MUST NOT:** объект считаться узлом этого дерева, если он **не** представлен в **`children*Refs`** на пути от root (даже если существует в API). (**INV-REF1**, см. [`design/demo-domain-dsc/05-tree-and-graph-invariants.md`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
+
+### §3.2. Ключ merge для элементов refs (до расширения схемы PR5)
+
+- **MUST:** запись в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** — **merge-only** по каноническому ключу элемента: для элементов вида **`NamespaceSnapshotChildRef`** — пара **`(namespace, name)`** дочернего snapshot; для **`NamespaceSnapshotContentChildRef`** на данном родителе — **`name`** дочернего content в namespace родительского content. После расширения схемы элементов до **GVK + namespace + name** канонический ключ **MUST** совпадать с нормативным определением в OpenAPI этого репозитория.
+- **MUST NOT:** заменять список **`children*Refs`** целиком одним write, если этим стираются элементы, записанные другим контроллером; удалять из списка элемент, за который пишущий контроллер **не** несёт ответственности. (**INV-REF-M1**, **INV-REF-M2**, [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
+
+### §3.3. Удаление элемента из refs
+
+- **MUST:** удаление записи о дочернем узле из **`children*Refs`** родителя выполнять **только** контроллер, который **владеет** соответствующим дочерним объектом (создал и ведёт его), **или** по **явной** политике reconcile родителя, задокументированной в коде модуля и не противоречащей **INV-REF-M2**.
+
+### §3.4. Generic `NamespaceSnapshot` и обход API
+
+- **MUST NOT:** reconciler **`NamespaceSnapshot`** (и общий код exclude/dedup для root capture) **достраивать** логическое дерево или множество узлов из **list/search по namespace** или эвристик без ref на пути от root. (**INV-REF1**.)
+- **MUST NOT:** при отсутствии или пустоте **`childrenSnapshotContentRefs`** там, где поле предусмотрено схемой, **самостоятельно** находить **`*SnapshotContent`** через list API без нормативного правила в этом spec или в согласованном под-документе (например расширение PR4 traversal). Допустимые варианты: **fail-closed** (не продолжать этап), **явный fallback** только из цепочки **snapshot refs** — конкретный вариант **MUST** быть указан в реализации и тестах до включения поведения в релиз. (**INV-REF-C1**.)
+
+### §3.5. Граница run и fail-closed dedup
+
+- **MUST:** вычисление dedup / exclude для root capture выполнять **только** в пределах дерева **текущего** snapshot-run (обход от root **`NamespaceSnapshot`** по **`children*Refs`**). (**INV-S0**, [`design/demo-domain-dsc/06-coverage-dedup-keys.md`](../design/demo-domain-dsc/06-coverage-dedup-keys.md).)
+- **MUST NOT:** при невозможности **надёжно** построить множества exclude расширять dedup или исключения «по догадке» по неполным данным; поведение **fail-closed** — как в **INV-E1** ([`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md) §4).
+
+### §3.6. DSC и ownerRef (напоминание)
+
+- **MUST NOT:** использовать **DSC** или **`ownerReference`** как источник истины **состава** логического дерева или для **dedup**; **DSC** — регистрация типов / runtime watches (**§0**); **`ownerReference`** — lifecycle / GC ([`design/demo-domain-dsc/08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md) часть B).
+
+### §3.7. Ссылки на тесты и дизайн
+
+- Концептуальный SSOT дерева / осей: [`design/demo-domain-dsc/08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md).
+- Инварианты графа и generic vs domain: [`design/demo-domain-dsc/05-tree-and-graph-invariants.md`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md).
+- План сценариев: [`testing/demo-domain-dsc-test-plan.md`](../testing/demo-domain-dsc-test-plan.md).

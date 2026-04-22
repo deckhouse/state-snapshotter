@@ -1,6 +1,6 @@
 # Testing strategy (state-snapshotter)
 
-Оркестрация уровней тестов и идентификаторы сценариев (T1–T11). Нормативные инварианты — в [`spec/system-spec.md`](../spec/system-spec.md).
+Оркестрация уровней тестов и идентификаторы сценариев (T1–T11). Нормативные инварианты — в [`spec/system-spec.md`](../spec/system-spec.md) (в т.ч. **§3** — граф snapshot-run, merge refs, dedup для PR5+).
 
 ## Расположение кода тестов (этот репозиторий)
 

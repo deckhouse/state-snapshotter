@@ -158,7 +158,7 @@
 - Пакет: **[`design/demo-domain-dsc/README.md`](demo-domain-dsc/README.md)** + [`testing/demo-domain-dsc-test-plan.md`](../testing/demo-domain-dsc-test-plan.md).
 - Фиксация: [`05`](demo-domain-dsc/05-tree-and-graph-invariants.md), [`06`](demo-domain-dsc/06-coverage-dedup-keys.md), [`07`](demo-domain-dsc/07-ready-delete-matrix.md), **[`08`](demo-domain-dsc/08-universal-snapshot-tree-model.md)**.
 - **Тесты (после кода):** [`testing/demo-domain-dsc-test-plan.md`](../testing/demo-domain-dsc-test-plan.md); уровни — [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md) (раздел Demo domain).
-- Перенос расширенной семантики **элементов** `children*Refs` + PR4 traversal в **`spec/system-spec.md`** — вместе с реализацией PR5; до этого дизайн-пакет не считается полностью нормативным SSOT кода.
+- **Нормативный каркас PR5+** (логическое дерево по **`children*Refs`**, **INV-REF1** / **INV-REF-C1** / **INV-REF-M1** / **INV-REF-M2**, **INV-S0** / **INV-E1**, запрет DSC/ownerRef как SoT дерева/dedup) — **[`spec/system-spec.md`](../spec/system-spec.md) §3**. Расширение **формы элементов** `children*Refs` (GVK+…) и полная фиксация PR4 traversal в OpenAPI+коде — вместе с реализацией PR5; мотивы, таблицы **`Ready`**/delete — [`demo-domain-dsc/`](demo-domain-dsc/README.md).
 
 ---
 

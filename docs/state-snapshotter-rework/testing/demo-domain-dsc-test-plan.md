@@ -1,7 +1,7 @@
 # Test plan: demo domain DSC nested snapshot
 
 **Статус:** Proposed.  
-**Связь:** [`design/demo-domain-dsc/README.md`](../design/demo-domain-dsc/README.md); универсальная модель дерева и **`Ready`** — [`08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md); инварианты v1 — [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md), [`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md), [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md).
+**Связь:** [`design/demo-domain-dsc/README.md`](../design/demo-domain-dsc/README.md); нормативный каркас дерева/merge/dedup (PR5+) — [`spec/system-spec.md`](../spec/system-spec.md) **§3**; универсальная модель дерева и **`Ready`** — [`08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md); инварианты v1 — [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md), [`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md), [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md).
 
 **Модель:** **heterogeneous** дерево через общие **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**; **один** condition **`Ready`** (каскад успеха и деградации); **dedup вычисляется** из API, **без** persisted `domainCoverage` / **`SubtreeReady`**.
 
