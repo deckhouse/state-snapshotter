@@ -181,3 +181,52 @@ func TestWalkNamespaceSnapshotContentSubtree_SkipsDemoLeavesWithoutCallback(t *t
 		t.Fatalf("nsc order: got %v want %v", nscNames, want)
 	}
 }
+
+func TestWalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves_VMContentThenDisk(t *testing.T) {
+	scheme := graphTestSchemeWithDemo(t)
+	diskLeaf := &demov1alpha1.DemoVirtualDiskSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "diskc-under-vm"}}
+	vmContent := &demov1alpha1.DemoVirtualMachineSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "vmc-parent"},
+		Status: demov1alpha1.DemoVirtualMachineSnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{
+				{Name: "diskc-under-vm"},
+			},
+		},
+	}
+	root := &storagev1alpha1.NamespaceSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root"},
+		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{
+				{Name: "vmc-parent"},
+			},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, vmContent, diskLeaf).Build()
+
+	var vmNames []string
+	var diskNames []string
+	err := WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves(context.Background(), cl, "root",
+		func(_ context.Context, _ *storagev1alpha1.NamespaceSnapshotContent) error {
+			return nil
+		},
+		&DemoSnapshotContentLeaves{
+			MachineContent: func(_ context.Context, m *demov1alpha1.DemoVirtualMachineSnapshotContent) error {
+				vmNames = append(vmNames, m.Name)
+				return nil
+			},
+			DiskContent: func(_ context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error {
+				diskNames = append(diskNames, d.Name)
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(vmNames, []string{"vmc-parent"}) {
+		t.Fatalf("vm content visits: got %v", vmNames)
+	}
+	if !slices.Equal(diskNames, []string{"diskc-under-vm"}) {
+		t.Fatalf("disk content visits: got %v", diskNames)
+	}
+}

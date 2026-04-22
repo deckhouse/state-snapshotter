@@ -85,13 +85,15 @@ func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T)
 	}
 }
 
-func TestFilterGenericSnapshotGVKPairs_skipsDemoVirtualDiskSnapshot(t *testing.T) {
+func TestFilterGenericSnapshotGVKPairs_skipsDemoVirtualDiskAndVMSnapshots(t *testing.T) {
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
+		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"},
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 	}
 	contentGVKs := []schema.GroupVersionKind{
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshotContent"},
+		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshotContent"},
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 	}
 	sOut, cOut := FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)

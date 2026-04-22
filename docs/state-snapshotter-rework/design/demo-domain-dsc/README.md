@@ -1,14 +1,21 @@
 # Demo domain-specific nested snapshot (via DSC)
 
-**Статус:** Proposed — **сначала документы → ревью → только потом код.** **PR5a (минимум в репозитории):** группа **`demo.state-snapshotter.deckhouse.io`**, **`DemoVirtualDiskSnapshot`** / **`DemoVirtualDiskSnapshotContent`**, stub **`DemoVirtualDisk`** под строку DSC, контроллер merge **`children*Refs`** на root **`NamespaceSnapshot`** + на root **`NamespaceSnapshotContent`**; интеграция `demovirtualdisksnapshot_pr5a_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
+**Статус:** Proposed — **сначала документы → ревью → только потом код.** **PR5a/PR5b в репозитории:** группа **`demo.state-snapshotter.deckhouse.io`**, disk (**`DemoVirtualDiskSnapshot`**) и VM (**`DemoVirtualMachineSnapshot`**) + **`*Content`**, stubs **`DemoVirtualDisk`** / **`DemoVirtualMachine`** для DSC; контроллеры merge **`children*Refs`**; интеграции `demovirtualdisksnapshot_pr5a_test.go`, `demovirtualmachinesnapshot_pr5b_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
 
 ### PR5a — что гарантирует / чего пока нет
 
 | Гарантирует | Пока не делает (вне PR5a) |
 |-------------|---------------------------|
-| Привязка к root **`NamespaceSnapshot`** через **`spec.rootNamespaceSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root NS и root NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, MCR/MCP для demo, **`DemoVirtualMachineSnapshot`**, выпил synthetic. |
+| Привязка к root **`NamespaceSnapshot`** через **`spec.rootNamespaceSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root NS и root NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, MCR/MCP для demo, выпил synthetic. |
 | Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
-| Тот же **ref-only DFS**, что и aggregated/N2b: по **`childrenSnapshotContentRefs`** обходятся все **`NamespaceSnapshotContent`**; листья **`DemoVirtualDiskSnapshotContent`** пропускаются при сборе MCP или посещаются отдельным callback (**`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`**). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
+| Тот же **ref-only DFS**, что и aggregated/N2b: по **`childrenSnapshotContentRefs`** обходятся **`NamespaceSnapshotContent`**; узлы **`DemoVirtualMachineSnapshotContent`** ведут к детям (PR5b); листья **`DemoVirtualDiskSnapshotContent`** без MCP в aggregated; callbacks **`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`** / **`WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves`**. | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
+
+### PR5b (минимум в коде)
+
+| Гарантирует | Пока не делает |
+|-------------|----------------|
+| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под root NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD). | **`Ready`**-каскад по детям VM, автосоздание disk snapshots контроллером VM. |
+| **`DemoVirtualDiskSnapshot.spec.parentDemoVirtualMachineSnapshotRef`** — диск под VM при совпадении **`rootNamespaceSnapshotRef`** с родителем (**INV-T2**); merge **`children*Refs`** на VM snapshot и на VM content. | Не валидирует, что у VM «достаточно» дисков; оператор создаёт диск отдельно. |
 
 Поставка demo CRD: манифесты в **`crds/`**; образ **`bundle`** в **`.werf/bundle.yaml`** включает каталог **`crds`** в git-стадию модуля. Факт доставки на кластер проверяется **сборкой и деплоем** модуля (CI / релизный pipeline).
 

@@ -79,6 +79,8 @@ var DedicatedSnapshotControllerKinds = []string{
 	"NamespaceSnapshot",
 	// PR5a demo domain: reconciled by DemoVirtualDiskSnapshotReconciler, not generic SnapshotController.
 	"DemoVirtualDiskSnapshot",
+	// PR5b demo domain: reconciled by DemoVirtualMachineSnapshotReconciler, not generic SnapshotController.
+	"DemoVirtualMachineSnapshot",
 }
 
 // IsDedicatedSnapshotControllerKind reports whether kind is handled by a dedicated reconciler.

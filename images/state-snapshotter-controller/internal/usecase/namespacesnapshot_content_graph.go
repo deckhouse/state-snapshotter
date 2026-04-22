@@ -37,16 +37,30 @@ var ErrNamespaceSnapshotContentCycle = errors.New("NamespaceSnapshotContent grap
 type NamespaceSnapshotContentVisit func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error
 
 // DemoVirtualDiskSnapshotContentLeafVisit is invoked for each DemoVirtualDiskSnapshotContent reached as a leaf
-// via status.childrenSnapshotContentRefs on a NamespaceSnapshotContent (PR5a heterogeneous graph).
+// via status.childrenSnapshotContentRefs (PR5a heterogeneous graph).
 type DemoVirtualDiskSnapshotContentLeafVisit func(ctx context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error
+
+// DemoVirtualMachineSnapshotContentLeafVisit is invoked when entering a DemoVirtualMachineSnapshotContent node
+// before recursing into its status.childrenSnapshotContentRefs (PR5b).
+type DemoVirtualMachineSnapshotContentLeafVisit func(ctx context.Context, m *demov1alpha1.DemoVirtualMachineSnapshotContent) error
+
+// DemoSnapshotContentLeaves optional callbacks for non-NSC content nodes under childrenSnapshotContentRefs.
+type DemoSnapshotContentLeaves struct {
+	DiskContent    DemoVirtualDiskSnapshotContentLeafVisit
+	MachineContent DemoVirtualMachineSnapshotContentLeafVisit
+}
+
+func nscVisitedKey(name string) string { return "nsc:" + name }
+
+func demovmVisitedKey(name string) string { return "demovm:" + name }
 
 // WalkNamespaceSnapshotContentSubtree visits every NamespaceSnapshotContent reachable from rootNSCName
 // following only status.childrenSnapshotContentRefs (see PR4 spec §2.2; system-spec §3.4 INV-REF-C1).
 // It does not list NamespaceSnapshotContent or NamespaceSnapshot to discover children.
 // The same visited set is used for the whole walk (cycle detection).
 //
-// Child refs that name a DemoVirtualDiskSnapshotContent instead of a NamespaceSnapshotContent are skipped
-// (no error) so ref-only walks used for aggregated manifests can coexist with PR5a domain leaves that have no MCP.
+// Child refs that name Demo*SnapshotContent instead of a NamespaceSnapshotContent are skipped for MCP collection
+// (no error) unless optional callbacks are supplied via WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves.
 func WalkNamespaceSnapshotContentSubtree(
 	ctx context.Context,
 	c client.Reader,
@@ -58,17 +72,33 @@ func WalkNamespaceSnapshotContentSubtree(
 }
 
 // WalkNamespaceSnapshotContentSubtreeWithDemoLeaves is like WalkNamespaceSnapshotContentSubtree but invokes
-// demoLeafVisit for each DemoVirtualDiskSnapshotContent child (sorted with NSC children by ref Name).
-// Domain leaves do not recurse further (no childrenSnapshotContentRefs on demo content in PR5a).
+// diskContentVisit for each DemoVirtualDiskSnapshotContent child (sorted with NSC children by ref Name).
 func WalkNamespaceSnapshotContentSubtreeWithDemoLeaves(
 	ctx context.Context,
 	c client.Reader,
 	rootNSCName string,
 	visit NamespaceSnapshotContentVisit,
-	demoLeafVisit DemoVirtualDiskSnapshotContentLeafVisit,
+	diskContentVisit DemoVirtualDiskSnapshotContentLeafVisit,
 ) error {
 	visited := make(map[string]struct{})
-	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, demoLeafVisit)
+	var leaves *DemoSnapshotContentLeaves
+	if diskContentVisit != nil {
+		leaves = &DemoSnapshotContentLeaves{DiskContent: diskContentVisit}
+	}
+	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, leaves)
+}
+
+// WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves is like WalkNamespaceSnapshotContentSubtreeWithDemoLeaves
+// but allows both disk and DemoVirtualMachineSnapshotContent callbacks (PR5b).
+func WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves(
+	ctx context.Context,
+	c client.Reader,
+	rootNSCName string,
+	visit NamespaceSnapshotContentVisit,
+	leaves *DemoSnapshotContentLeaves,
+) error {
+	visited := make(map[string]struct{})
+	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, leaves)
 }
 
 func walkNamespaceSnapshotContentSubtree(
@@ -77,12 +107,13 @@ func walkNamespaceSnapshotContentSubtree(
 	nscName string,
 	visited map[string]struct{},
 	visit NamespaceSnapshotContentVisit,
-	demoLeafVisit DemoVirtualDiskSnapshotContentLeafVisit,
+	leaves *DemoSnapshotContentLeaves,
 ) error {
-	if _, ok := visited[nscName]; ok {
+	key := nscVisitedKey(nscName)
+	if _, ok := visited[key]; ok {
 		return fmt.Errorf("%w at NamespaceSnapshotContent %q", ErrNamespaceSnapshotContentCycle, nscName)
 	}
-	visited[nscName] = struct{}{}
+	visited[key] = struct{}{}
 
 	nsc := &storagev1alpha1.NamespaceSnapshotContent{}
 	if err := c.Get(ctx, client.ObjectKey{Name: nscName}, nsc); err != nil {
@@ -102,7 +133,7 @@ func walkNamespaceSnapshotContentSubtree(
 		if children[i].Name == "" {
 			continue
 		}
-		if err := walkChildSnapshotContentRef(ctx, c, children[i].Name, visited, visit, demoLeafVisit); err != nil {
+		if err := walkChildSnapshotContentRef(ctx, c, children[i].Name, visited, visit, leaves); err != nil {
 			return err
 		}
 	}
@@ -115,28 +146,70 @@ func walkChildSnapshotContentRef(
 	childName string,
 	visited map[string]struct{},
 	visit NamespaceSnapshotContentVisit,
-	demoLeafVisit DemoVirtualDiskSnapshotContentLeafVisit,
+	leaves *DemoSnapshotContentLeaves,
 ) error {
 	childNSC := &storagev1alpha1.NamespaceSnapshotContent{}
 	err := c.Get(ctx, client.ObjectKey{Name: childName}, childNSC)
 	if err == nil {
-		return walkNamespaceSnapshotContentSubtree(ctx, c, childName, visited, visit, demoLeafVisit)
+		return walkNamespaceSnapshotContentSubtree(ctx, c, childName, visited, visit, leaves)
 	}
 	if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get NamespaceSnapshotContent %q: %w", childName, err)
 	}
 
-	demo := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
-	if err2 := c.Get(ctx, client.ObjectKey{Name: childName}, demo); err2 == nil {
-		if demoLeafVisit != nil {
-			if err := demoLeafVisit(ctx, demo); err != nil {
+	demoDisk := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+	if err2 := c.Get(ctx, client.ObjectKey{Name: childName}, demoDisk); err2 == nil {
+		if leaves != nil && leaves.DiskContent != nil {
+			if err := leaves.DiskContent(ctx, demoDisk); err != nil {
 				return err
 			}
 		}
 		return nil
-	} else if apierrors.IsNotFound(err2) {
-		return fmt.Errorf("child ref %q: neither NamespaceSnapshotContent nor DemoVirtualDiskSnapshotContent", childName)
-	} else {
+	} else if !apierrors.IsNotFound(err2) {
 		return fmt.Errorf("get DemoVirtualDiskSnapshotContent %q: %w", childName, err2)
 	}
+
+	demoVM := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+	err3 := c.Get(ctx, client.ObjectKey{Name: childName}, demoVM)
+	if err3 == nil {
+		return walkDemoVirtualMachineSnapshotContentSubtree(ctx, c, childName, demoVM, visited, visit, leaves)
+	}
+	if apierrors.IsNotFound(err3) {
+		return fmt.Errorf("child ref %q: not NamespaceSnapshotContent, DemoVirtualDiskSnapshotContent, or DemoVirtualMachineSnapshotContent", childName)
+	}
+	return fmt.Errorf("get DemoVirtualMachineSnapshotContent %q: %w", childName, err3)
+}
+
+func walkDemoVirtualMachineSnapshotContentSubtree(
+	ctx context.Context,
+	c client.Reader,
+	vmContentName string,
+	vm *demov1alpha1.DemoVirtualMachineSnapshotContent,
+	visited map[string]struct{},
+	visit NamespaceSnapshotContentVisit,
+	leaves *DemoSnapshotContentLeaves,
+) error {
+	key := demovmVisitedKey(vmContentName)
+	if _, ok := visited[key]; ok {
+		return fmt.Errorf("%w at DemoVirtualMachineSnapshotContent %q", ErrNamespaceSnapshotContentCycle, vmContentName)
+	}
+	visited[key] = struct{}{}
+
+	if leaves != nil && leaves.MachineContent != nil {
+		if err := leaves.MachineContent(ctx, vm); err != nil {
+			return err
+		}
+	}
+
+	children := append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), vm.Status.ChildrenSnapshotContentRefs...)
+	sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
+	for i := range children {
+		if children[i].Name == "" {
+			continue
+		}
+		if err := walkChildSnapshotContentRef(ctx, c, children[i].Name, visited, visit, leaves); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -187,7 +187,7 @@ After merge-gate on demo-domain flow, synthetic scaffold must be removed from co
 Использование **`childrenSnapshotContentRefs`** там, где нужно по spec traversal; generic: **без** list-обхода (**INV-REF-C1**); при выбранном варианте — **явный fallback** только по цепочке **snapshot refs**. **Тест:** отсутствие / пустые content refs → **fail-closed** или задокументированный fallback.
 
 **§3-E4 — traversal / aggregation (если выносится отдельным PR)**  
-Обход дерева **по refs**; подготовка к aggregated операциям (download / restore по политике N2b); **без** расширения матрицы **Ready** в том же PR (если иначе — разнести). Общий DFS по **`childrenSnapshotContentRefs`** (сортировка детей, циклы) — в коде **`usecase.WalkNamespaceSnapshotContentSubtree`** (агрегатор PR4 и PR5a используют один и тот же ref-only walk; листья **`DemoVirtualDiskSnapshotContent`** пропускаются в aggregated, опционально посещаются через **`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`**).
+Обход дерева **по refs**; подготовка к aggregated операциям (download / restore по политике N2b); **без** расширения матрицы **Ready** в том же PR (если иначе — разнести). Общий DFS по **`childrenSnapshotContentRefs`** (сортировка детей, циклы) — в коде **`usecase.WalkNamespaceSnapshotContentSubtree`** (агрегатор PR4 и PR5a/PR5b используют один и тот же ref-only walk; **`DemoVirtualDiskSnapshotContent`** / **`DemoVirtualMachineSnapshotContent`** без MCP в aggregated; опционально — **`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`** / **`WithAllDemoLeaves`**).
 
 **§3-E5 — dedup / exclude**  
 **INV-S0** / **INV-E1**: вычисление только по дереву текущего run; **fail-closed** при неполных данных.

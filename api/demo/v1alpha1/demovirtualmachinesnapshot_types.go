@@ -1,0 +1,65 @@
+/*
+Copyright 2025 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+)
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=demovmsnap
+// DemoVirtualMachineSnapshot is an intermediate demo snapshot node (PR5b) under root NamespaceSnapshot; disk snapshots may attach here.
+type DemoVirtualMachineSnapshot struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   DemoVirtualMachineSnapshotSpec   `json:"spec,omitempty"`
+	Status DemoVirtualMachineSnapshotStatus `json:"status,omitempty"`
+}
+
+// DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot.
+// +k8s:deepcopy-gen=true
+type DemoVirtualMachineSnapshotSpec struct {
+	// RootNamespaceSnapshotRef identifies the NamespaceSnapshot run root (same namespace allowed).
+	// +kubebuilder:validation:Required
+	RootNamespaceSnapshotRef storagev1alpha1.SnapshotSubjectRef `json:"rootNamespaceSnapshotRef"`
+
+	// VirtualMachineName is a logical VM identifier for this demo snapshot (PR5b: identity only).
+	// +optional
+	VirtualMachineName string `json:"virtualMachineName,omitempty"`
+}
+
+// DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.
+// +k8s:deepcopy-gen=true
+type DemoVirtualMachineSnapshotStatus struct {
+	// BoundSnapshotContentName is the cluster-scoped DemoVirtualMachineSnapshotContent name, once created.
+	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
+
+	// ChildrenSnapshotRefs lists child snapshot objects (e.g. DemoVirtualDiskSnapshot) under this VM snapshot.
+	// +optional
+	ChildrenSnapshotRefs []storagev1alpha1.NamespaceSnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type DemoVirtualMachineSnapshotList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []DemoVirtualMachineSnapshot `json:"items"`
+}

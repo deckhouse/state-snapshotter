@@ -4,23 +4,23 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
+  name: demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io
 spec:
   group: demo.state-snapshotter.deckhouse.io
   names:
-    kind: DemoVirtualDiskSnapshot
-    listKind: DemoVirtualDiskSnapshotList
-    plural: demovirtualdisksnapshots
+    kind: DemoVirtualMachineSnapshot
+    listKind: DemoVirtualMachineSnapshotList
+    plural: demovirtualmachinesnapshots
     shortNames:
-    - demovdsnap
-    singular: demovirtualdisksnapshot
+    - demovmsnap
+    singular: demovirtualmachinesnapshot
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: DemoVirtualDiskSnapshot is a minimal demo snapshot node (PR5a).
-          Wires into root NamespaceSnapshot via children*Refs.
+        description: DemoVirtualMachineSnapshot is an intermediate demo snapshot node
+          (PR5b) under root NamespaceSnapshot; disk snapshots may attach here.
         properties:
           apiVersion:
             description: |-
@@ -40,38 +40,9 @@ spec:
           metadata:
             type: object
           spec:
-            description: DemoVirtualDiskSnapshotSpec defines the desired state of
-              DemoVirtualDiskSnapshot.
+            description: DemoVirtualMachineSnapshotSpec defines the desired state
+              of DemoVirtualMachineSnapshot.
             properties:
-              parentDemoVirtualMachineSnapshotRef:
-                description: |-
-                  ParentDemoVirtualMachineSnapshotRef, when set, attaches this disk snapshot under that VM snapshot (same namespace).
-                  RootNamespaceSnapshotRef must match the parent's root (PR5b, INV-T2 single parent).
-                properties:
-                  apiVersion:
-                    type: string
-                  kind:
-                    type: string
-                  name:
-                    type: string
-                  namespace:
-                    type: string
-                  uid:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
-                    type: string
-                required:
-                - apiVersion
-                - kind
-                - name
-                type: object
-              persistentVolumeClaimName:
-                description: 'PersistentVolumeClaimName is the PVC name in the same
-                  namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI
-                  wiring yet).'
-                type: string
               rootNamespaceSnapshotRef:
                 description: RootNamespaceSnapshotRef identifies the NamespaceSnapshot
                   run root (same namespace allowed).
@@ -95,17 +66,40 @@ spec:
                 - kind
                 - name
                 type: object
+              virtualMachineName:
+                description: 'VirtualMachineName is a logical VM identifier for this
+                  demo snapshot (PR5b: identity only).'
+                type: string
             required:
             - rootNamespaceSnapshotRef
             type: object
           status:
-            description: DemoVirtualDiskSnapshotStatus defines the observed state
-              of DemoVirtualDiskSnapshot.
+            description: DemoVirtualMachineSnapshotStatus defines the observed state
+              of DemoVirtualMachineSnapshot.
             properties:
               boundSnapshotContentName:
-                description: BoundSnapshotContentName is the cluster-scoped DemoVirtualDiskSnapshotContent
+                description: BoundSnapshotContentName is the cluster-scoped DemoVirtualMachineSnapshotContent
                   name, once created.
                 type: string
+              childrenSnapshotRefs:
+                description: ChildrenSnapshotRefs lists child snapshot objects (e.g.
+                  DemoVirtualDiskSnapshot) under this VM snapshot.
+                items:
+                  description: |-
+                    NamespaceSnapshotChildRef identifies one child NamespaceSnapshot in the N2b manifests-only tree
+                    (element of status.childrenSnapshotRefs). It is not a generic snapshot reference: it does not
+                    carry apiVersion/kind; N2b currently assumes children are NamespaceSnapshot roots in the named
+                    namespace. A future multi-kind child model would require extending or replacing this shape.
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  - namespace
+                  type: object
+                type: array
             type: object
         type: object
     served: true

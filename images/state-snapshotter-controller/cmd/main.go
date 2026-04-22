@@ -293,6 +293,13 @@ func main() {
 		}
 		log.Info("DemoVirtualDiskSnapshotController added to manager")
 
+		if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr); err != nil {
+			log.Error(err, "Failed to add DemoVirtualMachineSnapshotController to manager")
+			cancel()
+			os.Exit(1)
+		}
+		log.Info("DemoVirtualMachineSnapshotController added to manager")
+
 		unifiedSync := unifiedruntime.NewSyncer(
 			mgr,
 			ctrl.Log,

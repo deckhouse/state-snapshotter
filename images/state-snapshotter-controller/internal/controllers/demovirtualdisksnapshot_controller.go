@@ -49,6 +49,8 @@ type DemoVirtualDiskSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=demo.state-snapshotter.deckhouse.io,resources=demovirtualmachinesnapshots,verbs=get;list;watch
+// +kubebuilder:rbac:groups=demo.state-snapshotter.deckhouse.io,resources=demovirtualmachinesnapshots/status,verbs=get;update;patch
 
 func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -92,6 +94,10 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 	if ref.Kind != "" && ref.Kind != "NamespaceSnapshot" {
 		return ctrl.Result{}, fmt.Errorf("spec.rootNamespaceSnapshotRef.kind %q is not supported (only NamespaceSnapshot)", ref.Kind)
+	}
+
+	if s.Spec.ParentDemoVirtualMachineSnapshotRef != nil && s.Spec.ParentDemoVirtualMachineSnapshotRef.Name != "" {
+		return r.reconcileUnderParentVM(ctx, s)
 	}
 
 	rootKey := rootNamespaceSnapshotKey(s)
@@ -159,6 +165,71 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Co
 		},
 	}
 	return r.Client.Create(ctx, content)
+}
+
+func snapshotSubjectRootRefsMatch(a, b storagev1alpha1.SnapshotSubjectRef, defaultNamespace string) bool {
+	nsA, nsB := a.Namespace, b.Namespace
+	if nsA == "" {
+		nsA = defaultNamespace
+	}
+	if nsB == "" {
+		nsB = defaultNamespace
+	}
+	return a.Name == b.Name && nsA == nsB
+}
+
+func (r *DemoVirtualDiskSnapshotReconciler) reconcileUnderParentVM(ctx context.Context, s *demov1alpha1.DemoVirtualDiskSnapshot) (ctrl.Result, error) {
+	pref := s.Spec.ParentDemoVirtualMachineSnapshotRef
+	if pref.Kind != "" && pref.Kind != "DemoVirtualMachineSnapshot" {
+		return ctrl.Result{}, fmt.Errorf("spec.parentDemoVirtualMachineSnapshotRef.kind %q is not supported (only DemoVirtualMachineSnapshot)", pref.Kind)
+	}
+	vmNS := pref.Namespace
+	if vmNS == "" {
+		vmNS = s.Namespace
+	}
+	vmKey := types.NamespacedName{Namespace: vmNS, Name: pref.Name}
+	vm := &demov1alpha1.DemoVirtualMachineSnapshot{}
+	if err := r.Client.Get(ctx, vmKey, vm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if !snapshotSubjectRootRefsMatch(s.Spec.RootNamespaceSnapshotRef, vm.Spec.RootNamespaceSnapshotRef, s.Namespace) {
+		return ctrl.Result{}, fmt.Errorf("spec.rootNamespaceSnapshotRef does not match parent DemoVirtualMachineSnapshot root ref")
+	}
+
+	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
+	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if s.Status.BoundSnapshotContentName != contentName {
+		base := s.DeepCopy()
+		s.Status.BoundSnapshotContentName = contentName
+		if err := r.Client.Status().Patch(ctx, s, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{Namespace: s.Namespace, Name: s.Name}}
+	if err := patchDemoVirtualMachineSnapshotChildRefsMerge(ctx, r.Client, vmKey, wantSnap); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.Client.Get(ctx, vmKey, vm); err != nil {
+		return ctrl.Result{}, err
+	}
+	vmNSC := vm.Status.BoundSnapshotContentName
+	if vmNSC == "" {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	wantContent := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: contentName}}
+	if err := patchDemoVirtualMachineSnapshotContentChildRefsMerge(ctx, r.Client, vmNSC, wantContent); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
 }
 
 func patchRootNamespaceSnapshotChildRefsMerge(

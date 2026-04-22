@@ -35,10 +35,16 @@ type DemoVirtualDiskSnapshot struct {
 }
 
 // DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot.
+// +k8s:deepcopy-gen=true
 type DemoVirtualDiskSnapshotSpec struct {
 	// RootNamespaceSnapshotRef identifies the NamespaceSnapshot run root (same namespace allowed).
 	// +kubebuilder:validation:Required
 	RootNamespaceSnapshotRef storagev1alpha1.SnapshotSubjectRef `json:"rootNamespaceSnapshotRef"`
+
+	// ParentDemoVirtualMachineSnapshotRef, when set, attaches this disk snapshot under that VM snapshot (same namespace).
+	// RootNamespaceSnapshotRef must match the parent's root (PR5b, INV-T2 single parent).
+	// +optional
+	ParentDemoVirtualMachineSnapshotRef *storagev1alpha1.SnapshotSubjectRef `json:"parentDemoVirtualMachineSnapshotRef,omitempty"`
 
 	// PersistentVolumeClaimName is the PVC name in the same namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI wiring yet).
 	// +optional
