@@ -48,6 +48,7 @@
 ### §3.1. Логическое дерево и источник истины
 
 - **MUST:** логическое дерево snapshot-run задаётся **только** refs-полями **`status`** на **`XxxxSnapshot`** / **`XxxxSnapshotContent`**, **опубликованными** на пути от **root** **`NamespaceSnapshot`** этого run: **`childrenSnapshotRefs`** — **основной** носитель **ребёнка-узла** в дереве; **`childrenSnapshotContentRefs`** — **дополняющий** слой **только** там, где это **нормативно** требует этот spec или согласованный под-документ (traversal, aggregation, политика этапа), **без** подмены SoT, задаваемого **snapshot** refs (см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §2, абзац **Snapshot refs vs content refs**).
+- **Область:** **`XxxxSnapshot`** / **`XxxxSnapshotContent`** **могут** существовать в API и reconciler'иться **доменным** (или иным) контроллером **до** появления в **`children*Refs`** данного run или **вне** любого такого run — это **не** запрещает **§3** и не отменяет **DSC** / reconcile зарегистрированных типов (**§0**). **§3** задаёт **только** состав **логического дерева** конкретного run от root **`NamespaceSnapshot`** и обязанности **generic** (обход, dedup/exclude и т.д.) относительно **этого** дерева.
 - **MUST NOT:** объект считаться узлом этого дерева, если он **не** представлен в **`children*Refs`** на пути от root (даже если существует в API). (**INV-REF1**, см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
 
 ### §3.2. Ключ merge для элементов refs (до расширения схемы PR5)
