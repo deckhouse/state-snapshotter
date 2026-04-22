@@ -25,6 +25,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -54,6 +55,56 @@ func namespaceSnapshotChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotChi
 	return true
 }
 
+func namespaceSnapshotChildRefKey(ref storagev1alpha1.NamespaceSnapshotChildRef) string {
+	return ref.Namespace + "\x00" + ref.Name
+}
+
+// mergeNamespaceSnapshotChildRefs returns a new slice: all entries from existing, then each upsert overwrites
+// or appends by key (namespace, name). Result is sorted by (namespace, name) for stable status (spec §3.2 / INV-REF-M1).
+func mergeNamespaceSnapshotChildRefs(existing, upsert []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
+	m := make(map[string]storagev1alpha1.NamespaceSnapshotChildRef, len(existing)+len(upsert))
+	order := make([]string, 0, len(existing)+len(upsert))
+	add := func(ref storagev1alpha1.NamespaceSnapshotChildRef) {
+		k := namespaceSnapshotChildRefKey(ref)
+		if _, ok := m[k]; !ok {
+			order = append(order, k)
+		}
+		m[k] = ref
+	}
+	for i := range existing {
+		add(existing[i])
+	}
+	for i := range upsert {
+		add(upsert[i])
+	}
+	sort.Strings(order)
+	out := make([]storagev1alpha1.NamespaceSnapshotChildRef, 0, len(order))
+	for _, k := range order {
+		out = append(out, m[k])
+	}
+	return out
+}
+
+func namespaceSnapshotChildRefsEqualIgnoreOrder(a, b []storagev1alpha1.NamespaceSnapshotChildRef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa := namespaceSnapshotChildRefsSortedCopy(a)
+	sb := namespaceSnapshotChildRefsSortedCopy(b)
+	return namespaceSnapshotChildRefsEqual(sa, sb)
+}
+
+func namespaceSnapshotChildRefsSortedCopy(src []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
+	cp := append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), src...)
+	sort.Slice(cp, func(i, j int) bool {
+		if cp[i].Namespace != cp[j].Namespace {
+			return cp[i].Namespace < cp[j].Namespace
+		}
+		return cp[i].Name < cp[j].Name
+	})
+	return cp
+}
+
 func namespaceSnapshotContentChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotContentChildRef) bool {
 	if len(a) != len(b) {
 		return false
@@ -64,6 +115,48 @@ func namespaceSnapshotContentChildRefsEqual(a, b []storagev1alpha1.NamespaceSnap
 		}
 	}
 	return true
+}
+
+// mergeNamespaceSnapshotContentChildRefs merges by child content name (key within parent NamespaceSnapshotContent).
+func mergeNamespaceSnapshotContentChildRefs(existing, upsert []storagev1alpha1.NamespaceSnapshotContentChildRef) []storagev1alpha1.NamespaceSnapshotContentChildRef {
+	m := make(map[string]storagev1alpha1.NamespaceSnapshotContentChildRef, len(existing)+len(upsert))
+	order := make([]string, 0, len(existing)+len(upsert))
+	add := func(ref storagev1alpha1.NamespaceSnapshotContentChildRef) {
+		k := ref.Name
+		if _, ok := m[k]; !ok {
+			order = append(order, k)
+		}
+		m[k] = ref
+	}
+	for i := range existing {
+		add(existing[i])
+	}
+	for i := range upsert {
+		add(upsert[i])
+	}
+	sort.Strings(order)
+	out := make([]storagev1alpha1.NamespaceSnapshotContentChildRef, 0, len(order))
+	for _, k := range order {
+		out = append(out, m[k])
+	}
+	return out
+}
+
+func namespaceSnapshotContentChildRefsEqualIgnoreOrder(a, b []storagev1alpha1.NamespaceSnapshotContentChildRef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa := namespaceSnapshotContentChildRefsSortedCopy(a)
+	sb := namespaceSnapshotContentChildRefsSortedCopy(b)
+	return namespaceSnapshotContentChildRefsEqual(sa, sb)
+}
+
+func namespaceSnapshotContentChildRefsSortedCopy(src []storagev1alpha1.NamespaceSnapshotContentChildRef) []storagev1alpha1.NamespaceSnapshotContentChildRef {
+	cp := append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), src...)
+	sort.Slice(cp, func(i, j int) bool {
+		return cp[i].Name < cp[j].Name
+	})
+	return cp
 }
 
 func validateSyntheticChildLabelsForParent(child *storagev1alpha1.NamespaceSnapshot, parent *storagev1alpha1.NamespaceSnapshot) error {
@@ -212,10 +305,11 @@ func (r *NamespaceSnapshotReconciler) patchParentRootChildrenRefsIfNeeded(
 		if err := r.Client.Get(ctx, parentKey, o); err != nil {
 			return err
 		}
-		if namespaceSnapshotChildRefsEqual(o.Status.ChildrenSnapshotRefs, want) {
+		next := mergeNamespaceSnapshotChildRefs(o.Status.ChildrenSnapshotRefs, want)
+		if namespaceSnapshotChildRefsEqualIgnoreOrder(next, o.Status.ChildrenSnapshotRefs) {
 			return nil
 		}
-		o.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), want...)
+		o.Status.ChildrenSnapshotRefs = next
 		o.Status.ObservedGeneration = o.Generation
 		if err := r.Client.Status().Update(ctx, o); err != nil {
 			return err
@@ -237,10 +331,11 @@ func (r *NamespaceSnapshotReconciler) patchParentContentChildRefsIfNeeded(
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, c); err != nil {
 			return err
 		}
-		if namespaceSnapshotContentChildRefsEqual(c.Status.ChildrenSnapshotContentRefs, want) {
+		next := mergeNamespaceSnapshotContentChildRefs(c.Status.ChildrenSnapshotContentRefs, want)
+		if namespaceSnapshotContentChildRefsEqualIgnoreOrder(next, c.Status.ChildrenSnapshotContentRefs) {
 			return nil
 		}
-		c.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), want...)
+		c.Status.ChildrenSnapshotContentRefs = next
 		if err := r.Client.Status().Update(ctx, c); err != nil {
 			return err
 		}

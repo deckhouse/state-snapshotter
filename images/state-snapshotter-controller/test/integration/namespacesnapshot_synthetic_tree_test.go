@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -194,5 +195,74 @@ var _ = Describe("Integration: NamespaceSnapshot content tree (synthetic child s
 		Expect(k8sClient.Get(ctx, childKey, chTree)).To(Succeed())
 		Expect(chTree.Status.ChildrenSnapshotRefs).To(BeEmpty())
 		Expect(pTree.Status.ChildrenSnapshotRefs).To(HaveLen(1))
+	})
+
+	It("merges ChildrenSnapshotRefs without clobbering an extra ref (INV-REF-M1 / spec §3-E1)", func() {
+		ctx := context.Background()
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "nss-n2b-synth-merge-",
+				Labels: map[string]string{
+					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-synthetic-merge",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		nsName := ns.Name
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
+		})
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-synth-merge-cm", Namespace: nsName},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+		parentName := "parent-merge"
+		childName := namespacemanifest.NamespaceSnapshotSyntheticChildName(parentName)
+		parentKey := types.NamespacedName{Namespace: nsName, Name: parentName}
+
+		parent := &storagev1alpha1.NamespaceSnapshot{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      parentName,
+				Namespace: nsName,
+				Annotations: map[string]string{
+					namespacemanifest.AnnotationSyntheticChildTree: "true",
+				},
+			},
+			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
+		}
+		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			p := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
+			g.Expect(p.Status.ChildrenSnapshotRefs).To(HaveLen(1))
+			g.Expect(p.Status.ChildrenSnapshotRefs[0].Name).To(Equal(childName))
+		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			p := &storagev1alpha1.NamespaceSnapshot{}
+			if err := k8sClient.Get(ctx, parentKey, p); err != nil {
+				return err
+			}
+			merged := append(append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), p.Status.ChildrenSnapshotRefs...),
+				storagev1alpha1.NamespaceSnapshotChildRef{Namespace: nsName, Name: "extra-hold"})
+			p.Status.ChildrenSnapshotRefs = merged
+			return k8sClient.Status().Update(ctx, p)
+		})).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			p := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
+			names := make([]string, 0, len(p.Status.ChildrenSnapshotRefs))
+			for _, r := range p.Status.ChildrenSnapshotRefs {
+				names = append(names, r.Name)
+			}
+			g.Expect(names).To(ContainElements(childName, "extra-hold"))
+			g.Expect(p.Status.ChildrenSnapshotRefs).To(HaveLen(2))
+		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 })
