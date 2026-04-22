@@ -125,6 +125,12 @@ func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Conte
 	return best, nil
 }
 
+// walkNSC visits NamespaceSnapshotContent nodes for aggregated manifests (N2b PR4).
+// Traversal uses only status.childrenSnapshotContentRefs on each node (see
+// docs/state-snapshotter-rework/spec/namespace-snapshot-aggregated-manifests-pr4.md §2.2).
+// It does not list NamespaceSnapshotContent or NamespaceSnapshot to discover children,
+// and does not follow status.childrenSnapshotRefs on NamespaceSnapshot — consistent with
+// system-spec §3.4 (INV-REF-C1): empty or absent content refs mean no further descent from that node.
 func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName string, visited map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
 	if _, ok := visited[nscName]; ok {
 		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",

@@ -209,6 +209,57 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 	}
 }
 
+func TestAggregatedNamespaceManifests_UnreferencedChildNSCNotWalked(t *testing.T) {
+	// §3-E3 / INV-REF-C1: an extra NamespaceSnapshotContent+MCP may exist in the cluster, but if the root
+	// content node has empty childrenSnapshotContentRefs, aggregation MUST NOT reach it (no list/search fallback).
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+	agg := NewAggregatedNamespaceManifests(cl, arch)
+
+	objRoot := []map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root", "namespace": "ns1"}}}
+	objOrphan := []map[string]interface{}{{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "orphan", "namespace": "ns1"}}}
+
+	for _, tc := range []struct {
+		cpName string
+		objs   []map[string]interface{}
+	}{
+		{"mcp-root", objRoot},
+		{"mcp-orphan", objOrphan},
+	} {
+		d, cs := aggManifestEncodeChunk(tc.objs)
+		ch := aggManifestCreateChunk("ch-"+tc.cpName, tc.cpName, d, cs)
+		_ = cl.Create(context.Background(), ch)
+		mcp := aggManifestReadyMCP(tc.cpName, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+		_ = cl.Create(context.Background(), mcp)
+	}
+
+	orphan := aggManifestNSC("orphan-nsc", "mcp-orphan")
+	_ = cl.Create(context.Background(), orphan)
+
+	root := aggManifestNSC("root-nsc", "mcp-root") // no childrenSnapshotContentRefs
+	_ = cl.Create(context.Background(), root)
+	ns := aggManifestNS("root-nsc")
+	_ = cl.Create(context.Background(), ns)
+
+	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 1 {
+		t.Fatalf("want only root MCP objects, got %d", len(arr))
+	}
+	meta0 := arr[0]["metadata"].(map[string]interface{})
+	if meta0["name"] != "root" {
+		t.Fatalf("want root object only, got name %v", meta0["name"])
+	}
+}
+
 func TestAggregatedNamespaceManifests_ParentTwoChildren_OrderAndDedup(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
