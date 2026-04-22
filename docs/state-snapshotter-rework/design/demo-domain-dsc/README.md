@@ -17,7 +17,7 @@ Reference для **heterogeneous** доменного дерева под **те
 
 | | |
 |--|--|
-| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенных child **`NamespaceSnapshot`**. PR5 — переход от synthetic к **реальному heterogeneous tree** на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
+| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`NamespaceSnapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — переход от synthetic к **реальному heterogeneous tree** на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
 | **Инвариант** | Generic не повторно захватывает ресурс, покрытый subtree; **ownerRef** — только жизненный цикл/GC ([`08`](08-universal-snapshot-tree-model.md) часть B). |
 | **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. |
 
@@ -25,10 +25,10 @@ Reference для **heterogeneous** доменного дерева под **те
 
 | # | Файл | Содержание |
 |---|------|------------|
-| 1 | [`01-api.md`](01-api.md) | Demo CRD; связь с root **без** child NS. |
+| 1 | [`01-api.md`](01-api.md) | Demo CRD; **v1** без inventory CRD (**self-contained** `spec`); связь с root через **`children*Refs`**; без вложенного NS под root (**INV-T1**). |
 | 2 | [`02-dsc-wiring.md`](02-dsc-wiring.md) | DSC; demo controllers. |
 | 3 | [`03-snapshot-flow.md`](03-snapshot-flow.md) | Поток reconcile; ownerRef ≠ dedup. |
-| 4 | [`04-coverage-dedup.md`](04-coverage-dedup.md) | Data + resource dedup; вычисление. |
+| 4 | [`04-coverage-dedup.md`](04-coverage-dedup.md) | Dedup (вычисляемый): data + resource; граница run (**INV-S0** в `06`); ownerRef ≠ dedup. |
 | — | [`../../testing/demo-domain-dsc-test-plan.md`](../../testing/demo-domain-dsc-test-plan.md) | Сценарии тестов. |
 
 ## Документы этапа 2–3 (фиксация + универсальная модель)

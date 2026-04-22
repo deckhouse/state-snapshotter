@@ -34,7 +34,7 @@
 - heterogeneous дерево через общие **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**;
 - **один** condition **`Ready`** (каскад успеха и деградации снизу вверх, **`reason`/`message`** с первопричиной; **без** `SubtreeReady`);
 - **dedup** — проверка **вычисляемой** логики по фактам API (**без** persisted `domainCoverage`);
-- сценарии удаления chunk/MCP, дочернего snapshot и дочернего content (**§5** test-plan); для **PR5** подсценарии **5a–5c** — **merge-gate** (деградация `Ready` после успеха — DoD, не откладывается).
+- сценарии удаления chunk/MCP, дочернего snapshot и дочернего content (**§5** test-plan: **5a.1**/**5a.2** по путям первичной классификации при поддержке обоих, **5b**, **5c**); для **PR5** они — **merge-gate** (деградация `Ready` после успеха — DoD, не откладывается).
 
 **Минимум:** `go test -tags integration ./test/integration/...`; **опционально** — cluster smoke. Закрытие трека без зелёных тестов по плану — **недопустимо** ([`implementation-plan.md`](../design/implementation-plan.md) §2.4.3).
 
