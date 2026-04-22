@@ -20,6 +20,8 @@
 | **INV-E1** (fail-closed dedup, [`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md)) | **3** при сценариях неполных данных |
 | **Первичная классификация** (§3 [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md): приоритет MCP → content → snapshot) | **5a.1**, **5a.2** (если архитектурно оба пути поддерживаются) |
 | **Политика `reason` / `message`** (стабильный **`reason`**, контекст пути в **`message`**, §3 [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md)) | **5a–5c** (ассерты на **`message`**) |
+| **INV-REF-M1** / **INV-REF-M2** (merge-only запись в **`children*Refs`**, удаление только владельцем / политикой родителя, [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1) | **1** + интеграционные ассерты на patch; при появлении двух writers — отдельный сценарий/негатив |
+| **INV-REF-C1** (нет самовольного восстановления content из list API при пустых **content refs**, [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1) | **1** или негатив после фиксации поведения в spec |
 
 ---
 
@@ -34,6 +36,7 @@
   - **`DemoVirtualMachineSnapshot`** содержит refs на **свои** disk snapshot’ы (и согласованный граф под политику **INV-T2** / [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md));
   - disk snapshot / content и **`VolumeSnapshot`** появляются **без** лишних узлов относительно сценария (нет неожиданного второго пути на тот же PVC в рамках run);
   - объект, **существующий** в API, но **не** попавший в **`children*Refs`** дерева этого run, **не** участвует в обходе как узел дерева (**INV-REF1** / [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md), [`08`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md) A.2).
+  - при наблюдаемости в API: запись в **`children*Refs`** согласована с **merge-only** по элементу (**INV-REF-M1**); generic **не** обогащает граф content’ами через list/search при отсутствии нормативного правила (**INV-REF-C1**).
   - **Нет** **вложенного** `NamespaceSnapshot` под root для VM/disk (**INV-T1**).
 
 ### 2. Ready propagation
