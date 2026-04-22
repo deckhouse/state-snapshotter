@@ -150,6 +150,16 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	_ = ns
 
+	if !namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
+		pr, err := r.pruneSyntheticOwnedGraphRefsIfTreeDisabled(ctx, nsSnap)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if pr.Requeue || pr.RequeueAfter > 0 {
+			return pr, nil
+		}
+	}
+
 	expectedName := namespaceSnapshotContentName(nsSnap)
 
 	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {

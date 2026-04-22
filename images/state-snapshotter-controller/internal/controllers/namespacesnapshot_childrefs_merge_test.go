@@ -45,6 +45,26 @@ func TestMergeNamespaceSnapshotChildRefs(t *testing.T) {
 	}
 }
 
+func TestRemoveNamespaceSnapshotChildRefsByKeys(t *testing.T) {
+	existing := []storagev1alpha1.NamespaceSnapshotChildRef{
+		{Namespace: "ns", Name: "keep"},
+		{Namespace: "ns", Name: "drop"},
+	}
+	remove := []storagev1alpha1.NamespaceSnapshotChildRef{{Namespace: "ns", Name: "drop"}}
+	got := removeNamespaceSnapshotChildRefsByKeys(existing, remove)
+	if len(got) != 1 || got[0].Name != "keep" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestRemoveNamespaceSnapshotContentChildRefsByKeys(t *testing.T) {
+	existing := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "a"}, {Name: "b"}}
+	got := removeNamespaceSnapshotContentChildRefsByKeys(existing, []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "a"}})
+	if len(got) != 1 || got[0].Name != "b" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestMergeNamespaceSnapshotContentChildRefs(t *testing.T) {
 	existing := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "x"}}
 	upsert := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "y"}}

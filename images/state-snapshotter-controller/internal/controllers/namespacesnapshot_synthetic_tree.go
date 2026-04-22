@@ -159,6 +159,44 @@ func namespaceSnapshotContentChildRefsSortedCopy(src []storagev1alpha1.Namespace
 	return cp
 }
 
+// removeNamespaceSnapshotChildRefsByKeys returns existing refs minus any whose (namespace,name) appears in remove (INV-REF-M2: caller must only pass keys it owns).
+func removeNamespaceSnapshotChildRefsByKeys(existing, remove []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
+	if len(remove) == 0 {
+		return namespaceSnapshotChildRefsSortedCopy(existing)
+	}
+	rm := make(map[string]struct{}, len(remove))
+	for i := range remove {
+		rm[namespaceSnapshotChildRefKey(remove[i])] = struct{}{}
+	}
+	var out []storagev1alpha1.NamespaceSnapshotChildRef
+	for i := range existing {
+		if _, drop := rm[namespaceSnapshotChildRefKey(existing[i])]; drop {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return namespaceSnapshotChildRefsSortedCopy(out)
+}
+
+// removeNamespaceSnapshotContentChildRefsByKeys drops child content refs listed in remove (by Name).
+func removeNamespaceSnapshotContentChildRefsByKeys(existing, remove []storagev1alpha1.NamespaceSnapshotContentChildRef) []storagev1alpha1.NamespaceSnapshotContentChildRef {
+	if len(remove) == 0 {
+		return namespaceSnapshotContentChildRefsSortedCopy(existing)
+	}
+	rm := make(map[string]struct{}, len(remove))
+	for i := range remove {
+		rm[remove[i].Name] = struct{}{}
+	}
+	var out []storagev1alpha1.NamespaceSnapshotContentChildRef
+	for i := range existing {
+		if _, drop := rm[existing[i].Name]; drop {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return namespaceSnapshotContentChildRefsSortedCopy(out)
+}
+
 func validateSyntheticChildLabelsForParent(child *storagev1alpha1.NamespaceSnapshot, parent *storagev1alpha1.NamespaceSnapshot) error {
 	if child.Labels[namespacemanifest.LabelSyntheticChild] != "true" {
 		return fmt.Errorf("NamespaceSnapshot %s/%s is not marked as synthetic child", child.Namespace, child.Name)
@@ -343,6 +381,114 @@ func (r *NamespaceSnapshotReconciler) patchParentContentChildRefsIfNeeded(
 		return nil
 	})
 	return didUpdate, err
+}
+
+// patchParentRootChildrenRefsRemoveKeys removes only the listed snapshot ref keys (merge-safe, RetryOnConflict).
+func (r *NamespaceSnapshotReconciler) patchParentRootChildrenRefsRemoveKeys(
+	ctx context.Context,
+	parentKey types.NamespacedName,
+	remove []storagev1alpha1.NamespaceSnapshotChildRef,
+) (bool, error) {
+	if len(remove) == 0 {
+		return false, nil
+	}
+	var didUpdate bool
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, parentKey, o); err != nil {
+			return err
+		}
+		next := removeNamespaceSnapshotChildRefsByKeys(o.Status.ChildrenSnapshotRefs, remove)
+		if namespaceSnapshotChildRefsEqualIgnoreOrder(next, o.Status.ChildrenSnapshotRefs) {
+			return nil
+		}
+		o.Status.ChildrenSnapshotRefs = next
+		o.Status.ObservedGeneration = o.Generation
+		if err := r.Client.Status().Update(ctx, o); err != nil {
+			return err
+		}
+		didUpdate = true
+		return nil
+	})
+	return didUpdate, err
+}
+
+func (r *NamespaceSnapshotReconciler) patchParentContentChildRefsRemoveKeys(
+	ctx context.Context,
+	contentName string,
+	remove []storagev1alpha1.NamespaceSnapshotContentChildRef,
+) (bool, error) {
+	if len(remove) == 0 {
+		return false, nil
+	}
+	var didUpdate bool
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		c := &storagev1alpha1.NamespaceSnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, c); err != nil {
+			return err
+		}
+		next := removeNamespaceSnapshotContentChildRefsByKeys(c.Status.ChildrenSnapshotContentRefs, remove)
+		if namespaceSnapshotContentChildRefsEqualIgnoreOrder(next, c.Status.ChildrenSnapshotContentRefs) {
+			return nil
+		}
+		c.Status.ChildrenSnapshotContentRefs = next
+		if err := r.Client.Status().Update(ctx, c); err != nil {
+			return err
+		}
+		didUpdate = true
+		return nil
+	})
+	return didUpdate, err
+}
+
+// pruneSyntheticOwnedGraphRefsIfTreeDisabled removes only refs this reconciler added for the temporary synthetic
+// scaffold when the parent opts out (spec §3.3 / INV-REF-M2 — do not touch other writers' keys).
+func (r *NamespaceSnapshotReconciler) pruneSyntheticOwnedGraphRefsIfTreeDisabled(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
+	if namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
+		return ctrl.Result{}, nil
+	}
+	if parentRequestsSyntheticChildTree(nsSnap) {
+		return ctrl.Result{}, nil
+	}
+	parentKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	synthRef := storagev1alpha1.NamespaceSnapshotChildRef{
+		Namespace: nsSnap.Namespace,
+		Name:      namespacemanifest.NamespaceSnapshotSyntheticChildName(nsSnap.Name),
+	}
+	updated, err := r.patchParentRootChildrenRefsRemoveKeys(ctx, parentKey, []storagev1alpha1.NamespaceSnapshotChildRef{synthRef})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if updated {
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+	}
+	parentFresh := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, parentKey, parentFresh); err != nil {
+		return ctrl.Result{}, err
+	}
+	if parentFresh.Status.BoundSnapshotContentName == "" {
+		return ctrl.Result{}, nil
+	}
+	childKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: synthRef.Name}
+	child := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, childKey, child); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if child.Status.BoundSnapshotContentName == "" {
+		return ctrl.Result{}, nil
+	}
+	rm := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: child.Status.BoundSnapshotContentName}}
+	updated2, err := r.patchParentContentChildRefsRemoveKeys(ctx, parentFresh.Status.BoundSnapshotContentName, rm)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if updated2 {
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *NamespaceSnapshotReconciler) patchParentRootReadyAfterSyntheticChild(ctx context.Context, parentKey types.NamespacedName, mcpName string) error {
