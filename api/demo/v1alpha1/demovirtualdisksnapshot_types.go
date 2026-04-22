@@ -39,6 +39,10 @@ type DemoVirtualDiskSnapshotSpec struct {
 	// RootNamespaceSnapshotRef identifies the NamespaceSnapshot run root (same namespace allowed).
 	// +kubebuilder:validation:Required
 	RootNamespaceSnapshotRef storagev1alpha1.SnapshotSubjectRef `json:"rootNamespaceSnapshotRef"`
+
+	// PersistentVolumeClaimName is the PVC name in the same namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI wiring yet).
+	// +optional
+	PersistentVolumeClaimName string `json:"persistentVolumeClaimName,omitempty"`
 }
 
 // DemoVirtualDiskSnapshotStatus defines the observed state of DemoVirtualDiskSnapshot.

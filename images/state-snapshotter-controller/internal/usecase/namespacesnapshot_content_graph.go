@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
@@ -35,10 +36,17 @@ var ErrNamespaceSnapshotContentCycle = errors.New("NamespaceSnapshotContent grap
 // (parent before descendants; children sorted lexicographically by ref Name).
 type NamespaceSnapshotContentVisit func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error
 
+// DemoVirtualDiskSnapshotContentLeafVisit is invoked for each DemoVirtualDiskSnapshotContent reached as a leaf
+// via status.childrenSnapshotContentRefs on a NamespaceSnapshotContent (PR5a heterogeneous graph).
+type DemoVirtualDiskSnapshotContentLeafVisit func(ctx context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error
+
 // WalkNamespaceSnapshotContentSubtree visits every NamespaceSnapshotContent reachable from rootNSCName
 // following only status.childrenSnapshotContentRefs (see PR4 spec §2.2; system-spec §3.4 INV-REF-C1).
 // It does not list NamespaceSnapshotContent or NamespaceSnapshot to discover children.
 // The same visited set is used for the whole walk (cycle detection).
+//
+// Child refs that name a DemoVirtualDiskSnapshotContent instead of a NamespaceSnapshotContent are skipped
+// (no error) so ref-only walks used for aggregated manifests can coexist with PR5a domain leaves that have no MCP.
 func WalkNamespaceSnapshotContentSubtree(
 	ctx context.Context,
 	c client.Reader,
@@ -46,7 +54,21 @@ func WalkNamespaceSnapshotContentSubtree(
 	visit NamespaceSnapshotContentVisit,
 ) error {
 	visited := make(map[string]struct{})
-	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit)
+	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, nil)
+}
+
+// WalkNamespaceSnapshotContentSubtreeWithDemoLeaves is like WalkNamespaceSnapshotContentSubtree but invokes
+// demoLeafVisit for each DemoVirtualDiskSnapshotContent child (sorted with NSC children by ref Name).
+// Domain leaves do not recurse further (no childrenSnapshotContentRefs on demo content in PR5a).
+func WalkNamespaceSnapshotContentSubtreeWithDemoLeaves(
+	ctx context.Context,
+	c client.Reader,
+	rootNSCName string,
+	visit NamespaceSnapshotContentVisit,
+	demoLeafVisit DemoVirtualDiskSnapshotContentLeafVisit,
+) error {
+	visited := make(map[string]struct{})
+	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, demoLeafVisit)
 }
 
 func walkNamespaceSnapshotContentSubtree(
@@ -55,6 +77,7 @@ func walkNamespaceSnapshotContentSubtree(
 	nscName string,
 	visited map[string]struct{},
 	visit NamespaceSnapshotContentVisit,
+	demoLeafVisit DemoVirtualDiskSnapshotContentLeafVisit,
 ) error {
 	if _, ok := visited[nscName]; ok {
 		return fmt.Errorf("%w at NamespaceSnapshotContent %q", ErrNamespaceSnapshotContentCycle, nscName)
@@ -79,9 +102,41 @@ func walkNamespaceSnapshotContentSubtree(
 		if children[i].Name == "" {
 			continue
 		}
-		if err := walkNamespaceSnapshotContentSubtree(ctx, c, children[i].Name, visited, visit); err != nil {
+		if err := walkChildSnapshotContentRef(ctx, c, children[i].Name, visited, visit, demoLeafVisit); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func walkChildSnapshotContentRef(
+	ctx context.Context,
+	c client.Reader,
+	childName string,
+	visited map[string]struct{},
+	visit NamespaceSnapshotContentVisit,
+	demoLeafVisit DemoVirtualDiskSnapshotContentLeafVisit,
+) error {
+	childNSC := &storagev1alpha1.NamespaceSnapshotContent{}
+	err := c.Get(ctx, client.ObjectKey{Name: childName}, childNSC)
+	if err == nil {
+		return walkNamespaceSnapshotContentSubtree(ctx, c, childName, visited, visit, demoLeafVisit)
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get NamespaceSnapshotContent %q: %w", childName, err)
+	}
+
+	demo := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+	if err2 := c.Get(ctx, client.ObjectKey{Name: childName}, demo); err2 == nil {
+		if demoLeafVisit != nil {
+			if err := demoLeafVisit(ctx, demo); err != nil {
+				return err
+			}
+		}
+		return nil
+	} else if apierrors.IsNotFound(err2) {
+		return fmt.Errorf("child ref %q: neither NamespaceSnapshotContent nor DemoVirtualDiskSnapshotContent", childName)
+	} else {
+		return fmt.Errorf("get DemoVirtualDiskSnapshotContent %q: %w", childName, err2)
+	}
 }

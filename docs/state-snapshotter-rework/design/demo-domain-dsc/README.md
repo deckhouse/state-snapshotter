@@ -2,6 +2,16 @@
 
 **Статус:** Proposed — **сначала документы → ревью → только потом код.** **PR5a (минимум в репозитории):** группа **`demo.state-snapshotter.deckhouse.io`**, **`DemoVirtualDiskSnapshot`** / **`DemoVirtualDiskSnapshotContent`**, stub **`DemoVirtualDisk`** под строку DSC, контроллер merge **`children*Refs`** на root **`NamespaceSnapshot`** + на root **`NamespaceSnapshotContent`**; интеграция `demovirtualdisksnapshot_pr5a_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
 
+### PR5a — что гарантирует / чего пока нет
+
+| Гарантирует | Пока не делает (вне PR5a) |
+|-------------|---------------------------|
+| Привязка к root **`NamespaceSnapshot`** через **`spec.rootNamespaceSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root NS и root NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, MCR/MCP для demo, **`DemoVirtualMachineSnapshot`**, выпил synthetic. |
+| Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
+| Тот же **ref-only DFS**, что и aggregated/N2b: по **`childrenSnapshotContentRefs`** обходятся все **`NamespaceSnapshotContent`**; листья **`DemoVirtualDiskSnapshotContent`** пропускаются при сборе MCP или посещаются отдельным callback (**`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`**). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
+
+Проверка поставки demo CRD в bundle: скрипт **`hack/verify-module-bundle-includes-demo-crds.sh`** (наличие YAML в `crds/`, строка **`crds`** в `includePaths` образа **`bundle`** в `.werf/bundle.yaml`; при установленном **werf** — `werf build bundle`).
+
 ## Назначение
 
 Reference для **heterogeneous** доменного дерева под **текущим** root **`NamespaceSnapshot`**, на базе **общей** snapshot-модели ([`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md)):

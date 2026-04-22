@@ -43,6 +43,11 @@ spec:
             description: DemoVirtualDiskSnapshotSpec defines the desired state of
               DemoVirtualDiskSnapshot.
             properties:
+              persistentVolumeClaimName:
+                description: 'PersistentVolumeClaimName is the PVC name in the same
+                  namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI
+                  wiring yet).'
+                type: string
               rootNamespaceSnapshotRef:
                 description: RootNamespaceSnapshotRef identifies the NamespaceSnapshot
                   run root (same namespace allowed).

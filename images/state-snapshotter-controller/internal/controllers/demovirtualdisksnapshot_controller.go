@@ -36,7 +36,7 @@ import (
 )
 
 // DemoVirtualDiskSnapshotReconciler wires a demo disk snapshot into the root NamespaceSnapshot graph
-// (merge-only childrenSnapshotRefs / childrenSnapshotContentRefs). PR5a minimal path — no PVC/VolumeSnapshot yet.
+// (merge-only childrenSnapshotRefs / childrenSnapshotContentRefs). PR5a: optional PVC ref in spec (identity only; no CSI).
 type DemoVirtualDiskSnapshotReconciler struct {
 	Client client.Client
 }

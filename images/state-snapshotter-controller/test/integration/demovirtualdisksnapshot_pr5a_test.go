@@ -35,6 +35,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -131,6 +132,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 					Namespace:  nsName,
 					Name:       "root",
 				},
+				PersistentVolumeClaimName: "pr5a-disk-pvc",
 			},
 		}
 		Expect(k8sClient.Create(testCtx, disk)).To(Succeed())
@@ -169,5 +171,21 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			}
 			g.Expect(found).To(BeTrue(), "root NamespaceSnapshotContent should reference demo disk content")
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+
+		var nscVisited []string
+		var demoVisited []string
+		err := usecase.WalkNamespaceSnapshotContentSubtreeWithDemoLeaves(testCtx, k8sClient, rootNSC,
+			func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
+				nscVisited = append(nscVisited, nsc.Name)
+				return nil
+			},
+			func(_ context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error {
+				demoVisited = append(demoVisited, d.Name)
+				return nil
+			},
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(nscVisited).NotTo(BeEmpty())
+		Expect(demoVisited).To(ContainElement(contentName), "ref-only walk should visit DemoVirtualDiskSnapshotContent leaf via same childrenSnapshotContentRefs graph")
 	})
 })
