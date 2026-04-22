@@ -10,7 +10,7 @@
 | Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
 | Тот же **ref-only DFS**, что и aggregated/N2b: по **`childrenSnapshotContentRefs`** обходятся все **`NamespaceSnapshotContent`**; листья **`DemoVirtualDiskSnapshotContent`** пропускаются при сборе MCP или посещаются отдельным callback (**`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`**). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
 
-Проверка поставки demo CRD в bundle: скрипт **`hack/verify-module-bundle-includes-demo-crds.sh`** (наличие YAML в `crds/`, строка **`crds`** в `includePaths` образа **`bundle`** в `.werf/bundle.yaml`; при установленном **werf** — `werf build bundle`).
+Поставка demo CRD: манифесты в **`crds/`**; образ **`bundle`** в **`.werf/bundle.yaml`** включает каталог **`crds`** в git-стадию модуля. Факт доставки на кластер проверяется **сборкой и деплоем** модуля (CI / релизный pipeline).
 
 ## Назначение
 
