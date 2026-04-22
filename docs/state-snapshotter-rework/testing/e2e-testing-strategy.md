@@ -25,6 +25,19 @@
 
 Продуктовую модель удаления не менять ради ограничений envtest (см. также `.cursor/rules/controller-envtest-local.mdc`).
 
+### Demo domain DSC (Proposed)
+
+Пока трек в дизайне — [`design/demo-domain-dsc/README.md`](../design/demo-domain-dsc/README.md); универсальная модель дерева и **`Ready`** — [`design/demo-domain-dsc/08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md).
+
+**После реализации кода** — **[`demo-domain-dsc-test-plan.md`](demo-domain-dsc-test-plan.md)**:
+
+- heterogeneous дерево через общие **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**;
+- **один** condition **`Ready`** (каскад успеха и деградации снизу вверх, **`reason`/`message`** с первопричиной; **без** `SubtreeReady`);
+- **dedup** — проверка **вычисляемой** логики по фактам API (**без** persisted `domainCoverage`);
+- сценарии удаления chunk/MCP, дочернего snapshot и дочернего content (**§5** test-plan); для **PR5** подсценарии **5a–5c** — **merge-gate** (деградация `Ready` после успеха — DoD, не откладывается).
+
+**Минимум:** `go test -tags integration ./test/integration/...`; **опционально** — cluster smoke. Закрытие трека без зелёных тестов по плану — **недопустимо** ([`implementation-plan.md`](../design/implementation-plan.md) §2.4.3).
+
 ### PR4: проверка на реальном кластере (`hack/pr4-smoke.sh`)
 
 **Команда:** из корня репозитория `bash hack/pr4-smoke.sh` (без `PR4_SMOKE_SKIP_OK_CONTRACT`, если в кластере есть `objectkeepers.deckhouse.io`). Лог прогона сохраняйте как артефакт ревью/PR.

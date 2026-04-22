@@ -1,43 +1,53 @@
 # Demo domain-specific nested snapshot (via DSC)
 
-**Статус:** Proposed — **сначала документы → ревью → только потом код.**  
-**Назначение:** reference-модель «как в виртуализации» + **data dedup** (PVC / VolumeSnapshot) и **resource dedup** (доменные объекты не дважды в subtree и не в generic root MCP); замена **synthetic tree** как основного способа проверки дерева.
+**Статус:** Proposed — **сначала документы → ревью → только потом код.**
+
+## Назначение
+
+Reference для **heterogeneous** доменного дерева под **текущим** root **`NamespaceSnapshot`**, на базе **общей** snapshot-модели ([`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md)):
+
+- дерево — **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** для **любых** `XxxxSnapshot` / `XxxxSnapshotContent`, без отдельных `domainChild*` и без «особого» graph API только для namespace;
+- **dedup** — **вычисляется** при reconcile из API, **не** хранится в `status`/аннотациях;
+- **готовность и деградация** — единый condition **`Ready`**, каскад снизу вверх и обратная деградация с сохранением **`reason`/`message`**;
+- **`NamespaceSnapshot`** — текущий верхний узел архитектуры, **не** отдельный класс правил дерева ([`08`](08-universal-snapshot-tree-model.md) §A.3).
+
+**Контекст:** N2a/N2b + PR4; synthetic scaffold не заменяет продуктовый domain wiring и риски **data** + **resource** dedup.
 
 ## ADR (кратко)
 
 | | |
 |--|--|
-| **Контекст** | N2a / N2b + PR4; synthetic scaffold не проверяет реальный domain wiring и риск двойного snapshot **данных** и **доменных объектов**. |
-| **Решение** | Под корневым **`NamespaceSnapshot`** (снимок namespace как **root**) живёт **heterogeneous** дерево **domain-specific snapshot kinds** (например VM/Disk snapshot + при необходимости **VolumeSnapshot** и их `*Content`), подключённых через **DSC** и те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot** где нужно. **Вложенные `NamespaceSnapshot` не порождаются** — это не «PR5 = child NS вместо synthetic», а **реальное дерево разных snapshot kinds**. |
-| **Инвариант** | Generic path **не** повторно захватывает ресурс, уже покрытый более специфичным domain subtree — минимум **PVC-backed data** и **доменные объекты** (например VirtualDisk). См. [`04-coverage-dedup.md`](04-coverage-dedup.md). |
-| **Ограничения** | Demo API отдельно от shipping; код изолирован; **не** код до апрува пакета. Текущий PR4 aggregated / NSC graph — **расширение** под heterogeneous узлы — отдельный шаг в спеке/плане после согласования дерева. |
+| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенных child **`NamespaceSnapshot`**. PR5 — переход от synthetic к **реальному heterogeneous tree** на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
+| **Инвариант** | Generic не повторно захватывает ресурс, покрытый subtree; **ownerRef** — только жизненный цикл/GC ([`08`](08-universal-snapshot-tree-model.md) часть B). |
+| **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. |
 
 ## Документы этапа 1 (архитектурный обзор)
 
 | # | Файл | Содержание |
 |---|------|------------|
-| 1 | [`01-api.md`](01-api.md) | Demo CRD, связь с root NS **без** child NS. |
-| 2 | [`02-dsc-wiring.md`](02-dsc-wiring.md) | DSC; demo controllers; без child NS. |
-| 3 | [`03-snapshot-flow.md`](03-snapshot-flow.md) | Root NS → domain/CSI snapshot tree; reconcile; ownerRef **≠** dedup. |
-| 4 | [`04-coverage-dedup.md`](04-coverage-dedup.md) | Data + resource dedup; coverage/exclude; ownerRef только иерархия/GC. |
+| 1 | [`01-api.md`](01-api.md) | Demo CRD; связь с root **без** child NS. |
+| 2 | [`02-dsc-wiring.md`](02-dsc-wiring.md) | DSC; demo controllers. |
+| 3 | [`03-snapshot-flow.md`](03-snapshot-flow.md) | Поток reconcile; ownerRef ≠ dedup. |
+| 4 | [`04-coverage-dedup.md`](04-coverage-dedup.md) | Data + resource dedup; вычисление. |
 | — | [`../../testing/demo-domain-dsc-test-plan.md`](../../testing/demo-domain-dsc-test-plan.md) | Сценарии тестов. |
 
-## Документы этапа 2 (фиксация перед кодом)
+## Документы этапа 2–3 (фиксация + универсальная модель)
 
 | # | Файл | Содержание |
 |---|------|------------|
-| 5 | [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) | Таблица дерева kinds; **INV-T**/**INV-G**; **refs** `domainChild*`; **generic vs domain**; **ownerRef** по kind. |
-| 6 | [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md) | Ключ **«тот же PVC»** / диск; схема **`status.domainCoverage`**; инварианты **INV-P**/**INV-D**/**INV-C**. |
-| 7 | [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md) | Ready leaf (manifest **и** volume); failed propagation; **delete/finalizers** по kind. |
+| 5 | [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) | Таблица kinds; **общие** `children*Refs`; generic vs domain. |
+| 6 | [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md) | Ключи вычисления; без persisted coverage. |
+| 7 | [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md) | Единый **`Ready`**; каскады; сценарии деградации. |
+| **8** | [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) | **Универсальная** модель дерева, `Ready`, dedup, **ownerRef** (части A и B). |
 
-**Минимальный API v1** зафиксирован в **§0** файла [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md).
+**Минимальный API v1:** §0 в [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md).
 
 ## Связь с существующими SSOT
 
-- Namespace / N2: [`namespace-snapshot-controller.md`](../namespace-snapshot-controller.md), [`implementation-plan.md`](../implementation-plan.md) §2.4, [`spec/system-spec.md`](../../spec/system-spec.md).
-- Aggregated manifests сегодня завязаны на обход **NSC**-графа; для heterogeneous kinds потребуется **согласованное расширение** — после фиксации модели: [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../../spec/namespace-snapshot-aggregated-manifests-pr4.md) + план.
-- DSC / RBAC: [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md).
+- [`namespace-snapshot-controller.md`](../namespace-snapshot-controller.md), [`implementation-plan.md`](../implementation-plan.md) §2.4, [`spec/system-spec.md`](../../spec/system-spec.md).
+- PR4: [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../../spec/namespace-snapshot-aggregated-manifests-pr4.md) — при heterogeneous обходе опираться на **ту же** модель refs после обновления spec.
+- DSC: [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md).
 
 ## Synthetic tree
 
-- **Не** основной механизм для нового трека; scaffold остаётся для регрессии до миграции тестов.
+Не основной путь; scaffold — регрессия до миграции тестов на demo flow.

@@ -1,52 +1,70 @@
 # Test plan: demo domain DSC nested snapshot
 
 **Статус:** Proposed.  
-**Связь:** [`design/demo-domain-dsc/README.md`](../design/demo-domain-dsc/README.md); инварианты v1 — [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md), [`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md), [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md).  
-**Модель дерева:** под root **`NamespaceSnapshot`** — **heterogeneous** узлы (**DemoVirtualMachineSnapshot**, **DemoVirtualDiskSnapshot**, **VolumeSnapshot** + `*Content`); **без** вложенных **`NamespaceSnapshot`**.  
-**Уровни:** unit / integration (`-tags integration`) / cluster smoke — см. [`e2e-testing-strategy.md`](e2e-testing-strategy.md).
+**Связь:** [`design/demo-domain-dsc/README.md`](../design/demo-domain-dsc/README.md); универсальная модель дерева и **`Ready`** — [`08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md); инварианты v1 — [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md), [`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md), [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md).
+
+**Модель:** **heterogeneous** дерево через общие **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**; **один** condition **`Ready`** (каскад успеха и деградации); **dedup вычисляется** из API, **без** persisted `domainCoverage` / **`SubtreeReady`**.
+
+**Уровни:** `go test -tags integration ./test/integration/...` / при необходимости cluster smoke — [`e2e-testing-strategy.md`](e2e-testing-strategy.md).
+
+---
 
 ## Обязательные сценарии
 
 ### 1. Tree creation
 
-- **Given:** namespace с `DemoVirtualMachine` + `DemoVirtualDisk` + PVC.  
+- **Given:** namespace с demo workload (VM + диски / standalone disk по дизайну).  
 - **When:** создаётся root `NamespaceSnapshot`.  
-- **Then:** появляются **DemoVirtualMachineSnapshot** (и далее disk snapshots / VS / content) с согласованными **refs с root**; **нет** дочерних `NamespaceSnapshot` под VM/disk. Граф на root NSC соответствует [`03-snapshot-flow.md`](../design/demo-domain-dsc/03-snapshot-flow.md).
+- **Then:** строится **heterogeneous** дерево; все связи родитель→ребёнок отражены через **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** на соответствующих `*Snapshot` / `*SnapshotContent` ([`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §2). **Нет** дочернего `NamespaceSnapshot` под VM/disk.
 
 ### 2. Ready propagation
 
-- Disk / VS / MCP leaf переходят в **Ready**; VM snapshot агрегирует; root `NamespaceSnapshot` получает **`Ready=True`** только при согласованной политике (расширение §11.1 под heterogeneous children — после spec).
+- **`Ready`** выставляется **снизу вверх**: leaf (disk + VS + MCP) → VM snapshot → root NS.  
+- Родитель **`Ready=True`** только когда все обязательные дети **`Ready=True`** и собственные зависимости готовы ([`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §1).
 
-### 3. Aggregated manifests
+### 3. PVC / data dedup
 
-- Несколько MCP в поддереве (root NSC + domain contents) → один вызов **aggregated** по обновлённому контракту traversal; до мержи спека — сценарий помечается как **зависимый от расширения PR4**.
+- **Given:** PVC подключён к диску домена.  
+- **When:** отрабатывают доменный путь и generic root capture (**вычисляемый** exclude по [`06`](../design/demo-domain-dsc/06-coverage-dedup-keys.md) §4).  
+- **Then:** **нет** второго `VolumeSnapshot` на тот же PVC; проверка по фактам API, не по полю в CR.
 
-### 4. Delete cascade
+### 4. Resource dedup (VirtualDisk / logical disk)
 
-- Удаление root `NamespaceSnapshot` → согласованная уборка доменного дерева (ownerRef/finalizers) + root NSC/MCP; **не** «каскад дочерних NamespaceSnapshot».
+- **Given:** диск участвует в VM и потенциально виден как standalone.  
+- **Then:** один согласованный snapshot-path; нет двойного доменного пути; в aggregated / root MCP нет дублирующего представления ([`04`](../design/demo-domain-dsc/04-coverage-dedup.md)).
 
-### 5. PVC / data dedup (**критично**)
+### 5. Degradation after success (`Ready` каскадом вверх)
 
-- **Given:** PVC подключён к диску; ровно один **VolumeSnapshot** на PVC в рамках root run.  
-- **When:** root namespace manifest / data path отрабатывает.  
-- **Then:** **нет** второго VolumeSnapshot; проверка по [`04-coverage-dedup.md`](../design/demo-domain-dsc/04-coverage-dedup.md) (coverage, не ownerRef).
+Подсценарии (все **обязательны** для полного закрытия поведения `Ready`):
 
-### 6. Resource dedup — VirtualDisk (**критично**)
+**5a. Chunk / MCP**
 
-- **Given:** один **DemoVirtualDisk** входит в состав **DemoVirtualMachine** и одновременно существует как объект в namespace (standalone «видимость» в list).  
-- **When:** создаётся root snapshot и отрабатывает доменное дерево.  
-- **Then:** **один** согласованный domain snapshot path для этого диска (нет двух противоречивых **DemoVirtualDiskSnapshot** за одним run без явной политики); в **aggregated** / root MCP **нет** дублирующего представления диска (см. resource dedup в [`04-coverage-dedup.md`](../design/demo-domain-dsc/04-coverage-dedup.md)).
+- После успеха удалена **chunk** или сломан **MCP** → reconcile → ближайший узел **`Ready=False`**, `reason` вроде **`ManifestChunkMissing`** / **`ManifestCheckpointMissing`** → каскад до root, **причина сохраняется** ([`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §4.1).
 
-## Негативные сценарии
+**5b. Удалён дочерний Snapshot**
 
-- Частичный провал disk snapshot → VM и root **Ready=False** с ожидаемой причиной.
-- DSC без RBACReady → demo kinds не активируются; без panic.
+- Удалён дочерний **`DemoVirtualDiskSnapshot`** (или другой обязательный child) → родитель и выше **`Ready=False`**, **`ChildSnapshotMissing`** (или согласованный код) ([`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §4.2).
+
+**5c. Удалён дочерний SnapshotContent**
+
+- Удалён **`DemoVirtualDiskSnapshotContent`** (или другой обязательный content) → родительский snapshot **`Ready=False`**, **`ChildSnapshotContentMissing`** → каскад вверх ([`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §4.3).
+
+**INV:** root **не** остаётся **`Ready=True`**, если subtree физически повреждён (**[`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) INV-R0**).
+
+### 6. Delete cascade
+
+- Удаление root `NamespaceSnapshot` → согласованный каскад по **ownerRef** / финализаторам; согласование с [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §6 и [`08`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md) часть B.
+
+## Негативные сценарии (дополнительно)
+
+- Частичный провал disk → VM и root **`Ready=False`** с ожидаемым **`reason`**.  
+- DSC без RBACReady → корректная деградация без panic.
 
 ## Команды (после реализации)
 
-- `go test -tags integration ./test/integration/...` — новые тесты с префиксом по согласованию ревью.
-- Cluster smoke — отдельные env-флаги при необходимости.
+- `go test -tags integration ./test/integration/...`  
+- При необходимости — cluster smoke по согласованию.
 
 ## Критерии приёмки
 
-Пункты 1–6; **merge gate** для реализации: **5** (PVC) и **6** (VirtualDisk resource dedup).
+**Merge gate (PR5 / demo-domain):** сценарии **1–4** и **6** — обязательны при закрытии трека. **Каскад `Ready` и деградация после успеха — часть DoD PR5, не «потом»:** подсценарии **5a**, **5b**, **5c** (**chunk/MCP**, **удалён дочерний Snapshot**, **удалён дочерний SnapshotContent**) — каждый **merge-gate**; закрытие PR5 без зелёных **5a–5c** недопустимо при принятой модели единого **`Ready`** ([`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §3–§4, **INV-R2**).

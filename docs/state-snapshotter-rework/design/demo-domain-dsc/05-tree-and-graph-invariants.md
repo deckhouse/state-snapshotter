@@ -1,7 +1,11 @@
-# Дерево snapshot kinds, граф на root и ownerRef (инварианты v1)
+# Дерево snapshot kinds и инварианты demo v1
 
 **Статус:** Proposed — **зафиксировано для согласования перед кодом.**  
-**Область:** только demo-domain трек; shipping `childrenSnapshotRefs` (только child **NamespaceSnapshot**) не меняем семантически — добавляем **параллельное** представление графа.
+**Базовая модель дерева, `Ready`, dedup, ownerRef:** [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md).
+
+**Не вводить** отдельных полей `domainChild*Refs`, `domainCoverage`, `domainSubtreeSummary` и отдельного condition `SubtreeReady` — используются **общие** **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** и единый **`Ready`**.
+
+**Лоб:** **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** — это **универсальная** модель дерева для **любого** `XxxxSnapshot` / `XxxxSnapshotContent` в системе, **не** namespace-specific и **не** demo-only механизм; `NamespaceSnapshot` — один из типов узла, использующий те же поля.
 
 ---
 
@@ -9,86 +13,87 @@
 
 | Решение | Значение |
 |---------|----------|
-| **Inventory CRD** (`DemoVirtualMachine`, `DemoVirtualDisk`) | **Не входят в v1.** Источник правды для состава VM — поля **`DemoVirtualMachineSnapshot.spec`** (имя/идентификатор логической VM + список дисков с **`pvcRef`**). Отдельные inventory CRD — **v1.1+**, если понадобится ближе к продукту. |
-| **`DemoVirtualMachineSnapshotContent`** | **Да, в v1** — отдельный kind (DSC-пара к VM snapshot): хранение ссылок на MCP / агрегат состояния VM-ветки. |
-| **`DemoVirtualDiskSnapshotContent`** | **Да, в v1** — leaf content для MCP диска + связь с **VolumeSnapshot**. |
-
-Итого **обязательные** demo snapshot kinds в v1: **`DemoVirtualMachineSnapshot`**, **`DemoVirtualMachineSnapshotContent`**, **`DemoVirtualDiskSnapshot`**, **`DemoVirtualDiskSnapshotContent`**. Плюс стандартные **VolumeSnapshot** / **VolumeSnapshotContent** (CSI API).
+| **Inventory CRD** (`DemoVirtualMachine`, `DemoVirtualDisk`) | **Не входят в v1.** Состав VM — в **`DemoVirtualMachineSnapshot.spec`** (+ `pvcRef` на диски). |
+| **`DemoVirtualMachineSnapshotContent`** / **`DemoVirtualDiskSnapshotContent`** | **Да, в v1** (DSC-пары). |
+| **Дерево** | Связи только через **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на соответствующих **`XxxxSnapshot` / `XxxxSnapshotContent`** (см. §2 и [`08`](08-universal-snapshot-tree-model.md) A.2). |
 
 ---
 
-## 1. Кто чей ребёнок (единственная таблица)
+## 1. Кто чей ребёнок (логическая таблица kinds)
 
-**INV-T1.** Под **root `NamespaceSnapshot`** **не** создаётся ни одного дочернего **`NamespaceSnapshot`**.
+**INV-T1.** Под **root `NamespaceSnapshot`** **не** создаётся дочерний **`NamespaceSnapshot`** (в этом треке).
 
-| Родитель (логический узел) | Допустимые дети (kinds) | Примечание |
-|---------------------------|-------------------------|------------|
-| **`NamespaceSnapshot`** (root) | `DemoVirtualMachineSnapshot` | 0..N (для v1 достаточно 0..1). |
-| **`NamespaceSnapshot`** (root) | `DemoVirtualDiskSnapshot` | **Только standalone** диск: диск **не** входит ни в одну VM из `spec` текущего root run (см. **INV-T2**). |
-| **`DemoVirtualMachineSnapshot`** | `DemoVirtualDiskSnapshot` | По списку дисков из `spec` VM snapshot. |
-| **`DemoVirtualMachineSnapshot`** | `DemoVirtualMachineSnapshotContent` | Ровно **1:1** с VM snapshot (как пара snapshot/content). |
-| **`DemoVirtualDiskSnapshot`** | `DemoVirtualDiskSnapshotContent` | Ровно **1:1**. |
-| **`DemoVirtualDiskSnapshot`** | `VolumeSnapshot` | Ровно **один** VS на дисковый snapshot в v1 (PVC). |
-| **`VolumeSnapshot`** | *(нет детей в этом дереве)* | Leaf данных. |
+| Родитель | Допустимые дети (kinds) | Примечание |
+|----------|-------------------------|------------|
+| **`NamespaceSnapshot`** (root) | `DemoVirtualMachineSnapshot` | 0..N (v1: достаточно 0..1). |
+| **`NamespaceSnapshot`** (root) | `DemoVirtualDiskSnapshot` | Только **standalone** диск (**INV-T2**). |
+| **`DemoVirtualMachineSnapshot`** | `DemoVirtualDiskSnapshot`, `DemoVirtualMachineSnapshotContent` | Диски по spec VM; content **1:1**. |
+| **`DemoVirtualDiskSnapshot`** | `DemoVirtualDiskSnapshotContent`, `VolumeSnapshot` | Content **1:1**; один VS на PVC в v1. |
+| **`VolumeSnapshot`** | — | Leaf данных. |
 
-**INV-T2. Взаимоисключающая роль `DemoVirtualDiskSnapshot`.** У каждого объекта **`DemoVirtualDiskSnapshot`** — **ровно один** родитель-контейнер снимка:
-
-- либо **`spec.parentRef` указывает на `DemoVirtualMachineSnapshot`** (диск под VM),
-- либо **`spec.parentRef` указывает на root `NamespaceSnapshot`** (standalone диск),
-
-**но не оба.** Один и тот же **логический диск** (тот же `pvcRef` / тот же ключ инвентаря из [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md)) **не** может иметь **два** активных `DemoVirtualDiskSnapshot` в рамках одного root run (resource dedup).
+**INV-T2.** У **`DemoVirtualDiskSnapshot`** ровно один родательский контейнер: либо **`DemoVirtualMachineSnapshot`**, либо **root `NamespaceSnapshot`** (`spec.parentRef` oneOf). Один **`pvcUID`** — не два активных disk snapshot в одном root run.
 
 ---
 
-## 2. Отражение в refs на `NamespaceSnapshot` / `NamespaceSnapshotContent`
+## 2. Отражение в `childrenSnapshotRefs` / `childrenSnapshotContentRefs`
 
-Существующие **`status.childrenSnapshotRefs`** / **`status.childrenSnapshotContentRefs`** в shipping API остаются для **child NamespaceSnapshot** (N2b legacy). Для heterogeneous v1 вводится **отдельное** поле (черновое имя — согласовать в CRD bump):
+Эти поля — **универсальная** модель дерева для **любого** `XxxxSnapshot` / `XxxxSnapshotContent`, не специфичны для namespace и не требуют отдельных demo-полей.
 
-| Поле (черновик) | Ресурс | Содержимое элемента |
-|-----------------|--------|---------------------|
-| **`status.domainChildSnapshotRefs`** | `NamespaceSnapshot` | `{ "apiGroup", "kind", "namespace", "name" }` — только прямые дети root: VM snapshot(s) и **только standalone** disk snapshot(s). |
-| **`status.domainChildSnapshotContentRefs`** | `NamespaceSnapshotContent` (root) | `{ "apiGroup", "kind", "namespace", "name" }` — content объекты, соответствующие **прямым** детям (например `DemoVirtualMachineSnapshotContent`, `DemoVirtualDiskSnapshotContent` для standalone дисков). |
+| Правило | Содержание |
+|---------|------------|
+| **R1** | На **`NamespaceSnapshot.status.childrenSnapshotRefs`** перечисляются **прямые** дочерние snapshot’ы **любых** поддерживаемых типов (в demo v1 — VM snapshot и **только standalone** disk snapshot). |
+| **R2** | Диски под VM **не** дублируются в refs root NS: они перечислены в **`DemoVirtualMachineSnapshot.status.childrenSnapshotRefs`**. Обход дерева для aggregated / dedup / агрегации **`Ready`** — от корня по **единой** модели refs. |
+| **R3** | **`childrenSnapshotContentRefs`** на соответствующем **`NamespaceSnapshotContent`** (root) указывают на content дочерних snapshot’ов **прямых** детей root (в т.ч. `DemoVirtualMachineSnapshotContent`, `DemoVirtualDiskSnapshotContent` для standalone диска). |
+| **R4** | Корневой **`NamespaceSnapshotContent`** несёт **`manifestCheckpointName`** для **root** namespace MCP; MCP доменных leaf — на **`DemoVirtualDiskSnapshotContent`** (и при необходимости на VM snapshot content). |
 
-**INV-G1.** Дети VM-ветки (**`DemoVirtualDiskSnapshot`** под **`DemoVirtualMachineSnapshot`**) **не** дублируются в **`domainChildSnapshotRefs`** root NS — они видны через обход от VM snapshot (aggregated / readiness — см. [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md)).
-
-**INV-G2.** Корневой **`NamespaceSnapshotContent`** по-прежнему несёт **`manifestCheckpointName`** для **root namespace MCP**; MCP доменных leaf остаются на **`DemoVirtualDiskSnapshotContent`** (и при необходимости на VM snapshot content).
-
-**Имя полей** (`domainChild*` vs другое) — финализировать в OpenAPI при реализации; до смены CRD допустима **временная** сериализованная аннотация **только для demo** — явно пометить как tech debt в PR.
+**Целевая форма элементов refs** (после расширения PR1 → PR5 в spec): достаточно идентифицировать ребёнка в API (**`apiGroup`, `kind`, `namespace`, `name`** или эквивалент); до переноса в CRD дизайн не меняет код.
 
 ---
 
-## 3. Граница generic vs domain (контракт для PR5)
+## 3. Граница generic vs domain
 
-### Generic `NamespaceSnapshot` controller **обязан** уметь (без импорта demo-пакетов / без `if Demo*`):
+### Generic controller (например `NamespaceSnapshot`)
 
 | # | Обязанность |
 |---|-------------|
-| G1 | Bind **одного** root **`NamespaceSnapshotContent`**; root MCR→MCP; статусы N2a/N2b для **root** MCP. |
-| G2 | Читать с **root `NamespaceSnapshot`** (или связанного объекта по согласованному контракту) **только** структурированные данные: **`status.domainCoverage`** (или эквивалент — см. [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md)) = списки ключей **исключения** из generic manifest/volume capture. Формат — **стабильный JSON**, версия схемы поля при необходимости. |
-| G3 | Агрегировать **`Ready` / `Ready=False`** root по **таблице** в [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md), читая **абстрактные** условия с дочерних узлов (через поле **`status.domainSubtreeSummary`** на root или через существующие `conditions` — выбрать один канал в реализации, **не два**). |
-| G4 | Не создавать **child `NamespaceSnapshot`**; не создавать **Demo*** CRD. |
+| G1 | Работает через **общую модель дерева**: читает **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, обходит детей **без** знания конкретных demo GVK «по имени» (достаточно типа+ссылки из refs и общих правил conditions). |
+| G2 | Перед root manifest/volume capture — **вычисляет** dedup из **живого API** по обходу дерева из §2 + VS/MCP/chunks ([`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md) §4). **Не** хранить и **не** читать coverage в CR. |
+| G3 | Агрегирует **`Ready`** на root **только** из **`Ready`** детей (каскад §1 в [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md)) и собственных зависимостей root MCP. **Без** отдельных summary-полей и **без** `SubtreeReady`. |
+| G4 | Не создаёт child **`NamespaceSnapshot`**; не создаёт **Demo*** CRD. |
 
-### Только demo controllers **могут**:
+### Только demo controllers
 
 | # | Обязанность |
 |---|-------------|
-| D1 | Создавать/обновлять **`DemoVirtualMachineSnapshot`**, **`DemoVirtualDiskSnapshot`**, оба `*SnapshotContent`, **VolumeSnapshot**. |
-| D2 | Заполнять **`domainChild*Refs`** на root NS/NSC и **`domainCoverage`** (ключи dedup). |
-| D3 | Вычислять **standalone vs under-VM** для диска и **INV-T2**. |
+| D1 | Создают demo snapshot/content, VS, MCP; заполняют **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на своих и родительских узлах по правилам §2. |
+| D2 | Обеспечивают, чтобы по API было видно VS/MCP (**лейблы** и при необходимости **ownerRef** — только lifecycle/видимость по [`08`](08-universal-snapshot-tree-model.md) часть B), для детерминированного **вычисления** dedup по дереву refs (**не** выводить dedup из ownerRef). |
+| D3 | Соблюдают **INV-T2** (standalone vs под VM). |
 
-**Контракт «общий для generic»:** только **`domainCoverage`** + **`domainSubtreeSummary`** (имена черновые) + **`domainChild*Refs`**. Любая другая связь generic ↔ demo **запрещена** без обновления этого документа.
+**Контракт:** дерево — **только** общие refs; dedup — **вычисление**; готовность — **единый `Ready`**; **без** domain-специфичных полей в CR.
+
+**Три оси (не смешивать):**
+
+| Ось | Источник истины |
+|-----|-----------------|
+| Логическое дерево | **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** |
+| Lifecycle / GC / delete cascade | **`ownerReference`** (и финализаторы), см. §4 и [`08` часть B](08-universal-snapshot-tree-model.md) |
+| Готовность / деградация | Condition **`Ready`** по детям из refs + зависимостям узла, **не** по ownerRef |
+
+Обход **refs** нужен и для dedup/aggregated, и как вход для агрегации **`Ready`**; **ownerRef** для этого **не** подменяет refs и **не** определяет dedup (**INV-O1**).
 
 ---
 
-## 4. OwnerRef (иерархия / GC), не dedup
+## 4. ownerRef по kind (кратко)
 
-| Объект | `ownerReferences` (контроллер / блокирующий GC) |
-|--------|-----------------------------------------------|
-| `DemoVirtualMachineSnapshot` | **Root** `NamespaceSnapshot` (UID). |
-| `DemoVirtualMachineSnapshotContent` | `DemoVirtualMachineSnapshot`. |
-| `DemoVirtualDiskSnapshot` (под VM) | `DemoVirtualMachineSnapshot`. |
-| `DemoVirtualDiskSnapshot` (standalone) | **Root** `NamespaceSnapshot`. |
-| `DemoVirtualDiskSnapshotContent` | `DemoVirtualDiskSnapshot`. |
-| `VolumeSnapshot` | **Рекомендация v1:** `ownerReference` на **`DemoVirtualDiskSnapshot`** (controller=false или по политике CR); если политика кластера запрещает — **обязательные** лейблы `state-snapshotter.deckhouse.io/root-namespace-snapshot-uid` + `.../demo-virtual-disk-snapshot-name` + финализаторы (см. [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md)). |
+Детали и ограничения — **[`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) часть B**. Краткая таблица для demo v1:
 
-**INV-O1.** **Dedup** не выводится из наличия ownerRef: см. [`04-coverage-dedup.md`](04-coverage-dedup.md) и [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md).
+| Объект | ownerRef → |
+|--------|------------|
+| `DemoVirtualMachineSnapshot` | root `NamespaceSnapshot` |
+| `DemoVirtualMachineSnapshotContent` | `DemoVirtualMachineSnapshot` |
+| `DemoVirtualDiskSnapshot` (под VM) | `DemoVirtualMachineSnapshot` |
+| `DemoVirtualDiskSnapshot` (standalone) | root `NamespaceSnapshot` |
+| `DemoVirtualDiskSnapshotContent` | `DemoVirtualDiskSnapshot` |
+| `VolumeSnapshot` | предпочтительно `DemoVirtualDiskSnapshot`; иначе лейблы + финализаторы ([`08`](08-universal-snapshot-tree-model.md) B.6–B.7). |
+
+**INV-O1.** Dedup **не** выводится из ownerRef — см. [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md).

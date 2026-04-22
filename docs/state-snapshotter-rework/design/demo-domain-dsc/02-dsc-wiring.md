@@ -6,7 +6,7 @@
 
 **`DomainSpecificSnapshotController` (DSC)** — декларативная регистрация пар **snapshot / snapshot content** для доменных kinds, чтобы они участвовали в **unified registry** и runtime watches по существующим правилам (см. [`spec/system-spec.md`](../../spec/system-spec.md) §0, [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md)).
 
-Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKind`: он ведёт **root** namespace capture и читает только **обобщённые** сигналы (например **coverage / exclude list** на root объекте — см. [`04-coverage-dedup.md`](04-coverage-dedup.md)), без знания про конкретный demo GVK.
+Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKind`: он ведёт **root** namespace capture и опирается на **универсальную** модель дерева — **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, единый **`Ready`**, и **вычисляемый** exclude для generic capture (без persisted «domain summary»; см. [`04-coverage-dedup.md`](04-coverage-dedup.md), [`08`](08-universal-snapshot-tree-model.md)).
 
 ## Объекты DSC (черновик)
 
@@ -25,7 +25,7 @@ Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKin
 |-----------|---------|
 | Пользователь / CI | **Root** `NamespaceSnapshot` (и далее стандартный bind **одного** root `NamespaceSnapshotContent`). |
 | **Demo domain controllers** | `DemoVirtualMachineSnapshot`, `DemoVirtualDiskSnapshot`, их **Content**, **VolumeSnapshot** / VCR, **MCR/MCP** по политике leaf — **не** вложенные **`NamespaceSnapshot`**. |
-| Generic NS controller | Root MCR→MCP pipeline, обновление root NSC/NS статусов, учёт **exclude/coverage** для generic capture. |
+| Generic NS controller | Root MCR→MCP pipeline, обновление root NSC/NS статусов, **вычисление** exclude для generic capture по фактам API и дереву refs. |
 
 **Demo orchestrator** (если выделяется отдельным бинарником/пакетом) синхронизирует жизненный цикл доменного дерева с **root** `NamespaceSnapshot` (refs, readiness агрегация на root — по согласованной схеме), но **не** подменяет модель «снимок VM = ещё один NamespaceSnapshot».
 
@@ -41,7 +41,7 @@ Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKin
 
 ## RBAC
 
-- Demo controllers: чтение VM/Disk, создание/обновление **demo snapshot** CRD, **VolumeSnapshot**, **ManifestCaptureRequest**, запись **coverage** на root `NamespaceSnapshot` (или согласованный канал). **Не** требуется право создавать **дочерние** `NamespaceSnapshot` для VM/disk (их нет в модели).
+- Demo controllers: чтение VM/Disk, создание/обновление **demo snapshot** CRD, **VolumeSnapshot**, **ManifestCaptureRequest**; обновление **refs** на root по общей модели дерева. **Не** требуется право создавать **дочерние** `NamespaceSnapshot` для VM/disk (их нет в модели). **Не** предполагать запись persisted coverage в status root.
 
 ## Не делать
 
