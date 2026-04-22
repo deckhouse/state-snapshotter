@@ -11,15 +11,15 @@ Reference для **heterogeneous** доменного дерева под **те
 - **готовность и деградация** — единый condition **`Ready`**, каскад снизу вверх и обратная деградация с сохранением **`reason`/`message`**;
 - **`NamespaceSnapshot`** — текущий верхний узел архитектуры, **не** отдельный класс правил дерева ([`08`](08-universal-snapshot-tree-model.md) §A.3).
 
-**Контекст:** N2a/N2b + PR4; synthetic scaffold не заменяет продуктовый domain wiring и риски **data** + **resource** dedup.
+**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; временный тестовый scaffold (исторически «synthetic») **не** задаёт архитектуру пакета — см. [`implementation-plan.md`](../implementation-plan.md) и миграцию тестов на demo flow.
 
 ## ADR (кратко)
 
 | | |
 |--|--|
-| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`NamespaceSnapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — переход от synthetic к **реальному heterogeneous tree** на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
+| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`NamespaceSnapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — **реальный** heterogeneous tree на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
 | **Инвариант** | Generic не повторно захватывает ресурс, покрытый subtree; **ownerRef** — только жизненный цикл/GC ([`08`](08-universal-snapshot-tree-model.md) часть B). |
-| **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. |
+| **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. Временный тестовый scaffold до миграции на demo flow — в **implementation-plan**, не целевая модель здесь. |
 
 ## Документы этапа 1 (архитектурный обзор)
 
@@ -47,7 +47,3 @@ Reference для **heterogeneous** доменного дерева под **те
 - [`namespace-snapshot-controller.md`](../namespace-snapshot-controller.md), [`implementation-plan.md`](../implementation-plan.md) §2.4, [`spec/system-spec.md`](../../spec/system-spec.md).
 - PR4: [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../../spec/namespace-snapshot-aggregated-manifests-pr4.md) — при heterogeneous обходе опираться на **ту же** модель refs после обновления spec.
 - DSC: [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md).
-
-## Synthetic tree
-
-Не основной путь; scaffold — регрессия до миграции тестов на demo flow.

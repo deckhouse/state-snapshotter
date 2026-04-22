@@ -19,7 +19,7 @@ Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKin
 | A | `DemoVirtualMachineSnapshot` | `DemoVirtualMachineSnapshotContent` (имя на ревью) | VM |
 | B | `DemoVirtualDiskSnapshot` | `DemoVirtualDiskSnapshotContent` | Нижний доменный disk-узел |
 
-**VolumeSnapshot** / **VolumeSnapshotContent** — обычно CSI API group; для участия в дереве под root **не** требуется DSC state-snapshotter (если драйвер стандартный). Generic **не** регистрирует VS через DSC, но при обходе refs **ожидает** стандартный контракт готовности CSI (например **ReadyToUse**), маппируемый в общую логику **`Ready`** / dedup **без** знания «demo» — унифицированно по полям статуса API (детали реализации — адаптер/правила reconcile, не `if VolumeSnapshot` в смысле продукта). Связь логического узла дерева с VS — [`03-snapshot-flow.md`](03-snapshot-flow.md).
+**VolumeSnapshot** / **VolumeSnapshotContent** — обычно CSI API group; для участия в дереве под root **не** требуется DSC state-snapshotter (если драйвер стандартный). Generic **не** регистрирует VS через DSC, но при обходе refs **ожидает** стандартный контракт готовности CSI (например **ReadyToUse**), маппируемый в общую логику **`Ready`** / dedup **без** знания «demo»: это **тип-агностичный** разбор полей CSI **status** API (адаптер / правила reconcile), **не** продуктовая ветка вида «если это наш демо-VS». Связь логического узла дерева с VS — [`03-snapshot-flow.md`](03-snapshot-flow.md).
 
 ## Кто что создаёт
 
