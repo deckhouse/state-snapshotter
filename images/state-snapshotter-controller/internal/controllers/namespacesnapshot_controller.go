@@ -37,9 +37,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	liblogger "github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // NamespaceSnapshotReconciler binds root NamespaceSnapshot to NamespaceSnapshotContent and drives manifest capture (MCR→MCP); status via conditions only (no status.phase).
@@ -51,6 +53,7 @@ type NamespaceSnapshotReconciler struct {
 	Dynamic   dynamic.Interface
 	Scheme    *runtime.Scheme
 	Config    *config.Options
+	Archive   *usecase.ArchiveService
 }
 
 // AddNamespaceSnapshotControllerToManager registers the NamespaceSnapshot reconciler.
@@ -62,12 +65,14 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 	if err != nil {
 		return fmt.Errorf("namespace snapshot controller: dynamic client: %w", err)
 	}
+	logImpl, _ := liblogger.NewLogger("error")
 	r := &NamespaceSnapshotReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Dynamic:   dyn,
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
+		Archive:   usecase.NewArchiveService(mgr.GetClient(), mgr.GetClient(), logImpl),
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.NamespaceSnapshot{}).

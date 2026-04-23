@@ -190,7 +190,7 @@ After merge-gate on demo-domain flow, synthetic scaffold must be removed from co
 Обход дерева **по refs**; подготовка к aggregated операциям (download / restore по политике N2b); **без** расширения матрицы **Ready** в том же PR (если иначе — разнести). Общий DFS по **`childrenSnapshotContentRefs`** (сортировка детей, циклы) — в коде **`usecase.WalkNamespaceSnapshotContentSubtree`** (агрегатор PR4 и PR5a/PR5b используют один и тот же ref-only walk; **`DemoVirtualDiskSnapshotContent`** / **`DemoVirtualMachineSnapshotContent`** без MCP в aggregated; опционально — **`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`** / **`WithAllDemoLeaves`**).
 
 **§3-E5 — dedup / exclude**  
-**INV-S0** / **INV-E1**: вычисление только по дереву текущего run; **fail-closed** при неполных данных.
+**INV-S0** / **INV-E1**: вычисление только по дереву текущего run; **fail-closed** при неполных данных. **В коде (root capture):** `usecase.BuildRootNamespaceManifestCaptureTargets` + `collectRunSubtreeManifestExcludeKeys` (обход только **`childrenSnapshotContentRefs`** / demo leaves, без list subtree); **`namespacemanifest.FilterManifestTargets`**; wiring в **`namespacesnapshot_capture.go`** + **`ArchiveService`** на **`NamespaceSnapshotReconciler`**.
 
 **§3-E6 — Ready (когда нормы перенесены в spec / закреплены тестами)**  
 Единый контракт чтения состояния дочернего узла; каскад **Ready**; **INV-R4** / согласованный выбор **reason** на родителе (см. [`demo-domain-dsc/07-ready-delete-matrix.md`](demo-domain-dsc/07-ready-delete-matrix.md)) — без дублирования таблиц здесь.
