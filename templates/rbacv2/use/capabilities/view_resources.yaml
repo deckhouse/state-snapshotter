@@ -4,7 +4,7 @@ metadata:
   labels:
     heritage: deckhouse
     module: state-snapshotter
-    rbac.deckhouse.io/aggregate-to-state-snapshotter-as: viewer
+    rbac.deckhouse.io/aggregate-to-storage-as: viewer
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:state-snapshotter:view_resources
 rules:

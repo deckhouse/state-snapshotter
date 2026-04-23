@@ -4,11 +4,11 @@ metadata:
   labels:
     heritage: deckhouse
     module: state-snapshotter
-    rbac.deckhouse.io/aggregate-to-state-snapshotter-as: manager
+    rbac.deckhouse.io/aggregate-to-storage-as: manager
     rbac.deckhouse.io/kind: manage
     rbac.deckhouse.io/level: module
     rbac.deckhouse.io/namespace: d8-state-snapshotter
-  name: d8:manage:permission:subsystem:state-snapshotter:manage_resources
+  name: d8:manage:permission:module:state-snapshotter:manage_resources
 rules:
   - apiGroups:
       - state-snapshotter.deckhouse.io
