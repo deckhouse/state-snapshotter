@@ -48,21 +48,23 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 var (
-	cfg           *rest.Config
-	k8sClient     client.Client
-	testEnv       *envtest.Environment
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mgr           ctrl.Manager
-	scheme        *runtime.Scheme
-	testCfg       *config.Options
-	unifiedSyncer *unifiedruntime.Syncer
+	cfg                         *rest.Config
+	k8sClient                   client.Client
+	testEnv                     *envtest.Environment
+	ctx                         context.Context
+	cancel                      context.CancelFunc
+	mgr                         ctrl.Manager
+	scheme                      *runtime.Scheme
+	testCfg                     *config.Options
+	unifiedSyncer               *unifiedruntime.Syncer
+	integrationGraphGVKRegistry *snapshot.GVKRegistry
 )
 
 func TestIntegration(t *testing.T) {
@@ -662,6 +664,9 @@ var _ = BeforeSuite(func() {
 	)
 	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
 	genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
+	var errGraph error
+	integrationGraphGVKRegistry, errGraph = snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
+	Expect(errGraph).NotTo(HaveOccurred())
 	snapshotController, err := controllers.NewSnapshotController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
@@ -685,7 +690,7 @@ var _ = BeforeSuite(func() {
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
-	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
+	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg, integrationGraphGVKRegistry)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotContentControllerToManager(mgr, testCfg)).To(Succeed())
 	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr)).To(Succeed())
 	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr)).To(Succeed())

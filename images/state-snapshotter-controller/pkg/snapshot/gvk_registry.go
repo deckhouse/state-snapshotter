@@ -18,6 +18,7 @@ package snapshot
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -244,6 +245,53 @@ func (r *GVKRegistry) registerDefaultContentMapping(contentGVK schema.GroupVersi
 
 func groupKindKey(gvk schema.GroupVersionKind) string {
 	return fmt.Sprintf("%s/%s", gvk.Group, gvk.Kind)
+}
+
+// NewGVKRegistryFromParallelSnapshotContentPairs registers each snapshot↔content pair from merged bootstrap/DSC
+// discovery (parallel slices). Uses RegisterSnapshotContentMapping so non-default Content kind names work.
+func NewGVKRegistryFromParallelSnapshotContentPairs(snapshotGVKs, contentGVKs []schema.GroupVersionKind) (*GVKRegistry, error) {
+	if len(snapshotGVKs) != len(contentGVKs) {
+		return nil, fmt.Errorf("snapshot and content GVK slice length mismatch: %d vs %d", len(snapshotGVKs), len(contentGVKs))
+	}
+	if len(snapshotGVKs) == 0 {
+		return NewGVKRegistry(), nil
+	}
+	r := NewGVKRegistry()
+	for i := range snapshotGVKs {
+		sk, ck := snapshotGVKs[i], contentGVKs[i]
+		if err := r.RegisterSnapshotContentMapping(
+			sk.Kind, sk.GroupVersion().String(),
+			ck.Kind, ck.GroupVersion().String(),
+		); err != nil {
+			return nil, fmt.Errorf("register pair %s -> %s: %w", sk.String(), ck.String(), err)
+		}
+	}
+	return r, nil
+}
+
+// RegisteredContentGVKs returns registered SnapshotContent GVKs sorted by Kind then Group (stable iteration).
+func (r *GVKRegistry) RegisteredContentGVKs() []schema.GroupVersionKind {
+	out := make([]schema.GroupVersionKind, 0, len(r.contentGVKs))
+	for _, gvk := range r.contentGVKs {
+		out = append(out, gvk)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].Group < out[j].Group
+	})
+	return out
+}
+
+// RegisteredSnapshotKinds returns registered snapshot kinds sorted lexicographically.
+func (r *GVKRegistry) RegisteredSnapshotKinds() []string {
+	kinds := make([]string, 0, len(r.snapshotGVKs))
+	for k := range r.snapshotGVKs {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	return kinds
 }
 
 // parseGVK parses GVK from kind and apiVersion

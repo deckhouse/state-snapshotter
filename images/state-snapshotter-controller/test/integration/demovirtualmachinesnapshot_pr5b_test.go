@@ -28,6 +28,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -232,20 +234,22 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 
 		var vmVisited []string
 		var diskVisited []string
-		err := usecase.WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves(testCtx, k8sClient, rootNSC,
-			func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
+		hooks := &usecase.DedicatedContentVisitHooks{
+			Visit: func(_ context.Context, gvk schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
+				switch gvk.Kind {
+				case "DemoVirtualMachineSnapshotContent":
+					vmVisited = append(vmVisited, contentName)
+				case "DemoVirtualDiskSnapshotContent":
+					diskVisited = append(diskVisited, contentName)
+				}
 				return nil
 			},
-			&usecase.DemoSnapshotContentLeaves{
-				MachineContent: func(_ context.Context, m *demov1alpha1.DemoVirtualMachineSnapshotContent) error {
-					vmVisited = append(vmVisited, m.Name)
-					return nil
-				},
-				DiskContent: func(_ context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error {
-					diskVisited = append(diskVisited, d.Name)
-					return nil
-				},
+		}
+		err := usecase.WalkNamespaceSnapshotContentSubtreeWithRegistry(testCtx, k8sClient, rootNSC,
+			func(_ context.Context, _ *storagev1alpha1.NamespaceSnapshotContent) error {
+				return nil
 			},
+			integrationGraphGVKRegistry, hooks,
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(vmVisited).To(ContainElement(vmContentName))

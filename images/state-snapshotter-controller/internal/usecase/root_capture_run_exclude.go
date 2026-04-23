@@ -23,21 +23,28 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // Run-graph errors for root manifest capture (INV-S0 / INV-E1, E5).
 var (
-	ErrRunGraphChildSnapshotNotFound = errors.New("child snapshot object not found for status.childrenSnapshotRefs entry")
-	ErrRunGraphChildNotBound         = errors.New("child snapshot has empty boundSnapshotContentName")
-	ErrRunGraphChildNotReachable     = errors.New("child snapshot content not reachable from root NamespaceSnapshotContent via childrenSnapshotContentRefs graph")
+	ErrRunGraphChildSnapshotNotFound     = errors.New("child snapshot object not found for status.childrenSnapshotRefs entry")
+	ErrRunGraphChildNotBound             = errors.New("child snapshot has empty boundSnapshotContentName")
+	ErrRunGraphChildNotReachable         = errors.New("child snapshot content not reachable from root NamespaceSnapshotContent via childrenSnapshotContentRefs graph")
+	ErrRunGraphAmbiguousChildSnapshotRef = errors.New("ambiguous child snapshot ref: multiple registered snapshot kinds match")
+	// ErrSubtreeManifestCapturePending is returned when exclude cannot be computed yet because a descendant
+	// NamespaceSnapshotContent has no MCP link or the MCP is not Ready (fail-closed: do not create root MCR with an incomplete exclude set).
+	ErrSubtreeManifestCapturePending = errors.New("subtree manifest capture pending for root exclude")
 )
 
 // BuildRootNamespaceManifestCaptureTargets lists namespace allowlist targets then, when the root
@@ -45,19 +52,21 @@ var (
 // in descendant NamespaceSnapshotContent ManifestCheckpoints reachable only via that ref graph.
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
 //
-// Current slice limitations (not final universal contract):
-//   - When status.childrenSnapshotRefs is empty, behavior matches legacy root capture: full namespace
-//     allowlist without subtree exclude (transition mode; not graph-first for that case).
-//   - resolveChildSnapshotContentName is hardcoded to NamespaceSnapshot, DemoVirtualDiskSnapshot, and
-//     DemoVirtualMachineSnapshot until a generic child resolution exists in API/spec.
+// reg must list all snapshot↔content pairs from DSC/bootstrap (see pkg/snapshot.GVKRegistry). Child
+// snapshot refs (name+namespace only) are resolved only against registered snapshot kinds — generic
+// code does not import domain CRD packages.
 //
-// If a root MCR was created before a descendant MCP became readable, spec.targets may be stale until the
-// operator deletes the MCR (CapturePlanDrift); exclude is applied on the next create from a fresh plan.
+// When status.childrenSnapshotRefs is empty, behavior matches legacy root capture: full namespace
+// allowlist without subtree exclude.
+//
+// While childrenSnapshotRefs is non-empty, descendant NamespaceSnapshotContent nodes reached from the root
+// must publish a Ready ManifestCheckpoint before exclude keys are derived; otherwise ErrSubtreeManifestCapturePending.
 func BuildRootNamespaceManifestCaptureTargets(
 	ctx context.Context,
 	arch *ArchiveService,
 	dyn dynamic.Interface,
 	c client.Reader,
+	reg *snapshot.GVKRegistry,
 	rootNS *storagev1alpha1.NamespaceSnapshot,
 	rootNSCName string,
 ) ([]namespacemanifest.ManifestTarget, error) {
@@ -71,7 +80,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if len(rootNS.Status.ChildrenSnapshotRefs) == 0 {
 		return base, nil
 	}
-	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootNSCName)
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, reg, rootNS, rootNSCName)
 	if err != nil {
 		return nil, err
 	}
@@ -82,16 +91,24 @@ func collectRunSubtreeManifestExcludeKeys(
 	ctx context.Context,
 	arch *ArchiveService,
 	c client.Reader,
+	reg *snapshot.GVKRegistry,
 	rootNS *storagev1alpha1.NamespaceSnapshot,
 	rootNSCName string,
 ) (map[string]struct{}, error) {
+	if reg == nil {
+		return nil, fmt.Errorf("GVK registry is required when status.childrenSnapshotRefs is non-empty")
+	}
 	visited := make(map[string]struct{})
 	exclude := make(map[string]struct{})
 
 	visitNSC := func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
 		visited[nsc.Name] = struct{}{}
-		if nsc.Name == rootNSCName || nsc.Status.ManifestCheckpointName == "" {
+		if nsc.Name == rootNSCName {
 			return nil
+		}
+		if nsc.Status.ManifestCheckpointName == "" {
+			return fmt.Errorf("%w: NamespaceSnapshotContent %q has empty manifestCheckpointName (subtree capture not finished)",
+				ErrSubtreeManifestCapturePending, nsc.Name)
 		}
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
 		if err := c.Get(ctx, client.ObjectKey{Name: nsc.Status.ManifestCheckpointName}, mcp); err != nil {
@@ -100,6 +117,11 @@ func collectRunSubtreeManifestExcludeKeys(
 					nsc.Status.ManifestCheckpointName, nsc.Name, err)
 			}
 			return fmt.Errorf("get ManifestCheckpoint %q: %w", nsc.Status.ManifestCheckpointName, err)
+		}
+		readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+		if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
+			return fmt.Errorf("%w: ManifestCheckpoint %q for NamespaceSnapshotContent %q is not Ready (exclude set would be incomplete)",
+				ErrSubtreeManifestCapturePending, nsc.Status.ManifestCheckpointName, nsc.Name)
 		}
 		req := &ArchiveRequest{
 			CheckpointName:  nsc.Status.ManifestCheckpointName,
@@ -124,18 +146,14 @@ func collectRunSubtreeManifestExcludeKeys(
 		return nil
 	}
 
-	leaves := &DemoSnapshotContentLeaves{
-		DiskContent: func(ctx context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error {
-			visited[d.Name] = struct{}{}
-			return nil
-		},
-		MachineContent: func(ctx context.Context, m *demov1alpha1.DemoVirtualMachineSnapshotContent) error {
-			visited[m.Name] = struct{}{}
+	hooks := &DedicatedContentVisitHooks{
+		Visit: func(_ context.Context, _ schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
+			visited[contentName] = struct{}{}
 			return nil
 		},
 	}
 
-	if err := WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves(ctx, c, rootNSCName, visitNSC, leaves); err != nil {
+	if err := WalkNamespaceSnapshotContentSubtreeWithRegistry(ctx, c, rootNSCName, visitNSC, reg, hooks); err != nil {
 		return nil, err
 	}
 
@@ -145,7 +163,7 @@ func collectRunSubtreeManifestExcludeKeys(
 		if ns == "" {
 			ns = rootNS.Namespace
 		}
-		resolved, err := resolveChildSnapshotContentName(ctx, c, ns, ch.Name)
+		resolved, err := ResolveChildSnapshotToBoundContentName(ctx, c, reg, ns, ch.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -156,42 +174,6 @@ func collectRunSubtreeManifestExcludeKeys(
 	}
 
 	return exclude, nil
-}
-
-func resolveChildSnapshotContentName(ctx context.Context, c client.Reader, childNS, childName string) (string, error) {
-	key := types.NamespacedName{Namespace: childNS, Name: childName}
-
-	nsChild := &storagev1alpha1.NamespaceSnapshot{}
-	if err := c.Get(ctx, key, nsChild); err == nil {
-		if nsChild.Status.BoundSnapshotContentName == "" {
-			return "", fmt.Errorf("%s/%s: %w", childNS, childName, ErrRunGraphChildNotBound)
-		}
-		return nsChild.Status.BoundSnapshotContentName, nil
-	} else if !apierrors.IsNotFound(err) {
-		return "", err
-	}
-
-	disk := &demov1alpha1.DemoVirtualDiskSnapshot{}
-	if err := c.Get(ctx, key, disk); err == nil {
-		if disk.Status.BoundSnapshotContentName == "" {
-			return "", fmt.Errorf("%s/%s: %w", childNS, childName, ErrRunGraphChildNotBound)
-		}
-		return disk.Status.BoundSnapshotContentName, nil
-	} else if !apierrors.IsNotFound(err) {
-		return "", err
-	}
-
-	vm := &demov1alpha1.DemoVirtualMachineSnapshot{}
-	if err := c.Get(ctx, key, vm); err == nil {
-		if vm.Status.BoundSnapshotContentName == "" {
-			return "", fmt.Errorf("%s/%s: %w", childNS, childName, ErrRunGraphChildNotBound)
-		}
-		return vm.Status.BoundSnapshotContentName, nil
-	} else if !apierrors.IsNotFound(err) {
-		return "", err
-	}
-
-	return "", fmt.Errorf("%s/%s: %w", childNS, childName, ErrRunGraphChildSnapshotNotFound)
 }
 
 func manifestObjectIdentityKeyFromMap(obj map[string]interface{}) (string, error) {

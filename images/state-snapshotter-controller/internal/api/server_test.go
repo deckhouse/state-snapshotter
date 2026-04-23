@@ -132,7 +132,7 @@ var _ = Describe("NewServer", func() {
 
 	Describe("mTLS is mandatory", func() {
 		It("should fail to create server when CA is not provided", func() {
-			server := NewServer(":8443", fakeClient, fakeClient, log, serverCertFile, serverKeyFile, nil, nil)
+			server := NewServer(":8443", fakeClient, fakeClient, log, nil, serverCertFile, serverKeyFile, nil, nil)
 			Expect(server).To(BeNil())
 		})
 	})
@@ -141,7 +141,7 @@ var _ = Describe("NewServer", func() {
 		It("should create server in mTLS mode when CA is provided", func() {
 			caCertBytes, err := os.ReadFile(caCertFile)
 			Expect(err).NotTo(HaveOccurred())
-			server := NewServer(":8443", fakeClient, fakeClient, log, serverCertFile, serverKeyFile, caCertBytes, []string{"system:kube-apiserver"})
+			server := NewServer(":8443", fakeClient, fakeClient, log, nil, serverCertFile, serverKeyFile, caCertBytes, []string{"system:kube-apiserver"})
 			Expect(server).NotTo(BeNil())
 			Expect(server.server.TLSConfig).NotTo(BeNil())
 			Expect(server.server.TLSConfig.ClientAuth).To(Equal(tls.RequireAndVerifyClientCert))
@@ -150,14 +150,14 @@ var _ = Describe("NewServer", func() {
 
 		It("should fail to create server when CA is invalid", func() {
 			invalidCA := []byte("invalid certificate data")
-			server := NewServer(":8443", fakeClient, fakeClient, log, serverCertFile, serverKeyFile, invalidCA, []string{"system:kube-apiserver"})
+			server := NewServer(":8443", fakeClient, fakeClient, log, nil, serverCertFile, serverKeyFile, invalidCA, []string{"system:kube-apiserver"})
 			Expect(server).To(BeNil())
 		})
 
 		It("should apply mTLS middleware when CA and allowed CNs are provided", func() {
 			caCertBytes, err := os.ReadFile(caCertFile)
 			Expect(err).NotTo(HaveOccurred())
-			server := NewServer(":8443", fakeClient, fakeClient, log, serverCertFile, serverKeyFile, caCertBytes, []string{"system:kube-apiserver"})
+			server := NewServer(":8443", fakeClient, fakeClient, log, nil, serverCertFile, serverKeyFile, caCertBytes, []string{"system:kube-apiserver"})
 			Expect(server).NotTo(BeNil())
 			// Middleware is applied, we can't directly check it, but we can test via HTTP requests
 		})

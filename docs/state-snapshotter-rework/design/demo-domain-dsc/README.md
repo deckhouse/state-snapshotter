@@ -30,6 +30,8 @@ Reference для **heterogeneous** доменного дерева под **те
 
 **Слой PR5 vs generic §3-E*:** код и тесты **демо-доменного контроллера** (первый реальный writer **`children*Refs`** в heterogeneous flow) — это **PR5** таблицы **[`implementation-plan.md`](../implementation-plan.md) §2.4.2** и этот пакет документов; это **не** отдельный этап **§3-E1…E6** того же плана (**E1–E6** готовят **generic** контракт и реализацию в модуле, **PR5** впервые использует контракт в **domain flow**). Порядок и нарезка PR5a/PR5b — в **§2.4.4** плана.
 
+**Граница generic / demo (имплементация):** reconciler **`NamespaceSnapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshot.GVKRegistry`** (merge bootstrap ∪ eligible DSC) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
+
 **Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; **временный scaffold в коде, не целевая модель PR5** (исторически помечаемый «synthetic») **не** входит в архитектурный narrative здесь — см. [`implementation-plan.md`](../implementation-plan.md) **§2.4.2** (блок **«Целевая архитектура vs текущий код»** / **«Снятие synthetic scaffold»**): после **merge-gate** на demo-domain flow scaffold **обязан** быть удалён из кода и тестов **в том же PR5 или следующем cleanup PR**.
 
 ## ADR (кратко)

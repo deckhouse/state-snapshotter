@@ -23,11 +23,13 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func graphTestScheme(t *testing.T) *runtime.Scheme {
@@ -39,13 +41,68 @@ func graphTestScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func graphTestSchemeWithDemo(t *testing.T) *runtime.Scheme {
+func registryGenericLeafPair(t *testing.T) *snapshot.GVKRegistry {
 	t.Helper()
-	s := graphTestScheme(t)
-	if err := demov1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("AddToScheme demo: %v", err)
+	r := snapshot.NewGVKRegistry()
+	if err := r.RegisterSnapshotContentMapping(
+		"GenericLeafSnapshot", "generic.state-snapshotter.test/v1",
+		"GenericLeafSnapshotContent", "generic.state-snapshotter.test/v1",
+	); err != nil {
+		t.Fatalf("register pair: %v", err)
 	}
-	return s
+	return r
+}
+
+func unstructuredDedicatedContent(name string, childNames ...string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "generic.state-snapshotter.test",
+		Version: "v1",
+		Kind:    "GenericLeafSnapshotContent",
+	})
+	u.SetName(name)
+	if len(childNames) > 0 {
+		refs := make([]interface{}, 0, len(childNames))
+		for _, n := range childNames {
+			refs = append(refs, map[string]interface{}{"name": n})
+		}
+		_ = unstructured.SetNestedSlice(u.Object, refs, "status", "childrenSnapshotContentRefs")
+	}
+	return u
+}
+
+func registryAcmeNestedPair(t *testing.T) *snapshot.GVKRegistry {
+	t.Helper()
+	r := snapshot.NewGVKRegistry()
+	if err := r.RegisterSnapshotContentMapping(
+		"AcmeMachineSnapshot", "acme.test/v1",
+		"AcmeMachineSnapshotContent", "acme.test/v1",
+	); err != nil {
+		t.Fatalf("register machine: %v", err)
+	}
+	if err := r.RegisterSnapshotContentMapping(
+		"AcmeDiskSnapshot", "acme.test/v1",
+		"AcmeDiskSnapshotContent", "acme.test/v1",
+	); err != nil {
+		t.Fatalf("register disk: %v", err)
+	}
+	return r
+}
+
+func unstructuredAcmeMachineContent(name string, diskChild string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "acme.test", Version: "v1", Kind: "AcmeMachineSnapshotContent"})
+	u.SetName(name)
+	refs := []interface{}{map[string]interface{}{"name": diskChild}}
+	_ = unstructured.SetNestedSlice(u.Object, refs, "status", "childrenSnapshotContentRefs")
+	return u
+}
+
+func unstructuredAcmeDiskContent(name string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "acme.test", Version: "v1", Kind: "AcmeDiskSnapshotContent"})
+	u.SetName(name)
+	return u
 }
 
 func TestWalkNamespaceSnapshotContentSubtree_Order(t *testing.T) {
@@ -112,50 +169,55 @@ func TestWalkNamespaceSnapshotContentSubtree_Cycle(t *testing.T) {
 	}
 }
 
-func TestWalkNamespaceSnapshotContentSubtreeWithDemoLeaves_VisitsDemoLeaf(t *testing.T) {
-	scheme := graphTestSchemeWithDemo(t)
-	demoLeaf := &demov1alpha1.DemoVirtualDiskSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "diskc-leaf"}}
+func TestWalkNamespaceSnapshotContentSubtreeWithRegistry_VisitsDedicatedLeaf(t *testing.T) {
+	scheme := graphTestScheme(t)
+	reg := registryGenericLeafPair(t)
+	dedicatedLeaf := unstructuredDedicatedContent("diskc-leaf")
 	childNSC := &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "nsc-child"}}
 	root := &storagev1alpha1.NamespaceSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root"},
 		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
 			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{
-				{Name: "nsc-child"},
 				{Name: "diskc-leaf"},
+				{Name: "nsc-child"},
 			},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, childNSC, demoLeaf).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, childNSC, dedicatedLeaf).Build()
 
 	var nscNames []string
-	var demoNames []string
-	err := WalkNamespaceSnapshotContentSubtreeWithDemoLeaves(context.Background(), cl, "root",
+	var dedicatedNames []string
+	hooks := &DedicatedContentVisitHooks{
+		Visit: func(_ context.Context, gvk schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
+			if gvk.Kind == "GenericLeafSnapshotContent" {
+				dedicatedNames = append(dedicatedNames, contentName)
+			}
+			return nil
+		},
+	}
+	err := WalkNamespaceSnapshotContentSubtreeWithRegistry(context.Background(), cl, "root",
 		func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
 			nscNames = append(nscNames, nsc.Name)
 			return nil
 		},
-		func(_ context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error {
-			demoNames = append(demoNames, d.Name)
-			return nil
-		},
+		reg, hooks,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Children sorted by Name: diskc-leaf before nsc-child; demo is a leaf, then NSC subtree.
 	wantNSC := []string{"root", "nsc-child"}
 	if !slices.Equal(nscNames, wantNSC) {
 		t.Fatalf("nsc order: got %v want %v", nscNames, wantNSC)
 	}
-	wantDemo := []string{"diskc-leaf"}
-	if !slices.Equal(demoNames, wantDemo) {
-		t.Fatalf("demo leaves: got %v want %v", demoNames, wantDemo)
+	wantDedicated := []string{"diskc-leaf"}
+	if !slices.Equal(dedicatedNames, wantDedicated) {
+		t.Fatalf("dedicated leaves: got %v want %v", dedicatedNames, wantDedicated)
 	}
 }
 
-func TestWalkNamespaceSnapshotContentSubtree_SkipsDemoLeavesWithoutCallback(t *testing.T) {
-	scheme := graphTestSchemeWithDemo(t)
-	demoLeaf := &demov1alpha1.DemoVirtualDiskSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "diskc-leaf"}}
+func TestWalkNamespaceSnapshotContentSubtree_ErrorsOnDedicatedRefWithoutRegistry(t *testing.T) {
+	scheme := graphTestScheme(t)
+	dedicatedLeaf := unstructuredDedicatedContent("diskc-leaf")
 	childNSC := &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "nsc-child"}}
 	root := &storagev1alpha1.NamespaceSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root"},
@@ -166,13 +228,40 @@ func TestWalkNamespaceSnapshotContentSubtree_SkipsDemoLeavesWithoutCallback(t *t
 			},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, childNSC, demoLeaf).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, childNSC, dedicatedLeaf).Build()
 
-	var nscNames []string
-	err := WalkNamespaceSnapshotContentSubtree(context.Background(), cl, "root", func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
-		nscNames = append(nscNames, nsc.Name)
+	err := WalkNamespaceSnapshotContentSubtree(context.Background(), cl, "root", func(_ context.Context, _ *storagev1alpha1.NamespaceSnapshotContent) error {
 		return nil
 	})
+	if err == nil {
+		t.Fatal("expected error for heterogeneous childrenSnapshotContentRefs without GVK registry")
+	}
+}
+
+func TestWalkNamespaceSnapshotContentSubtreeWithRegistry_NoHooksStillWalksDedicatedThenNSC(t *testing.T) {
+	scheme := graphTestScheme(t)
+	reg := registryGenericLeafPair(t)
+	dedicatedLeaf := unstructuredDedicatedContent("diskc-leaf")
+	childNSC := &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "nsc-child"}}
+	root := &storagev1alpha1.NamespaceSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root"},
+		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{
+				{Name: "diskc-leaf"},
+				{Name: "nsc-child"},
+			},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, childNSC, dedicatedLeaf).Build()
+
+	var nscNames []string
+	err := WalkNamespaceSnapshotContentSubtreeWithRegistry(context.Background(), cl, "root",
+		func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
+			nscNames = append(nscNames, nsc.Name)
+			return nil
+		},
+		reg, nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,17 +271,11 @@ func TestWalkNamespaceSnapshotContentSubtree_SkipsDemoLeavesWithoutCallback(t *t
 	}
 }
 
-func TestWalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves_VMContentThenDisk(t *testing.T) {
-	scheme := graphTestSchemeWithDemo(t)
-	diskLeaf := &demov1alpha1.DemoVirtualDiskSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "diskc-under-vm"}}
-	vmContent := &demov1alpha1.DemoVirtualMachineSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "vmc-parent"},
-		Status: demov1alpha1.DemoVirtualMachineSnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{
-				{Name: "diskc-under-vm"},
-			},
-		},
-	}
+func TestWalkNamespaceSnapshotContentSubtreeWithRegistry_NestedDedicatedContent(t *testing.T) {
+	scheme := graphTestScheme(t)
+	reg := registryAcmeNestedPair(t)
+	diskLeaf := unstructuredAcmeDiskContent("diskc-under-vm")
+	vmContent := unstructuredAcmeMachineContent("vmc-parent", "diskc-under-vm")
 	root := &storagev1alpha1.NamespaceSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root"},
 		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
@@ -203,28 +286,30 @@ func TestWalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves_VMContentThenDisk(
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, vmContent, diskLeaf).Build()
 
-	var vmNames []string
+	var machineNames []string
 	var diskNames []string
-	err := WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves(context.Background(), cl, "root",
+	hooks := &DedicatedContentVisitHooks{
+		Visit: func(_ context.Context, gvk schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
+			switch gvk.Kind {
+			case "AcmeMachineSnapshotContent":
+				machineNames = append(machineNames, contentName)
+			case "AcmeDiskSnapshotContent":
+				diskNames = append(diskNames, contentName)
+			}
+			return nil
+		},
+	}
+	err := WalkNamespaceSnapshotContentSubtreeWithRegistry(context.Background(), cl, "root",
 		func(_ context.Context, _ *storagev1alpha1.NamespaceSnapshotContent) error {
 			return nil
 		},
-		&DemoSnapshotContentLeaves{
-			MachineContent: func(_ context.Context, m *demov1alpha1.DemoVirtualMachineSnapshotContent) error {
-				vmNames = append(vmNames, m.Name)
-				return nil
-			},
-			DiskContent: func(_ context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error {
-				diskNames = append(diskNames, d.Name)
-				return nil
-			},
-		},
+		reg, hooks,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(vmNames, []string{"vmc-parent"}) {
-		t.Fatalf("vm content visits: got %v", vmNames)
+	if !slices.Equal(machineNames, []string{"vmc-parent"}) {
+		t.Fatalf("machine content visits: got %v", machineNames)
 	}
 	if !slices.Equal(diskNames, []string{"diskc-under-vm"}) {
 		t.Fatalf("disk content visits: got %v", diskNames)

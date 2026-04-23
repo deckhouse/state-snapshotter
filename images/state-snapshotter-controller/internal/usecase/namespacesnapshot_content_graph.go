@@ -23,10 +23,12 @@ import (
 	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // ErrNamespaceSnapshotContentCycle is returned when childrenSnapshotContentRefs form a cycle.
@@ -36,31 +38,24 @@ var ErrNamespaceSnapshotContentCycle = errors.New("NamespaceSnapshotContent grap
 // (parent before descendants; children sorted lexicographically by ref Name).
 type NamespaceSnapshotContentVisit func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error
 
-// DemoVirtualDiskSnapshotContentLeafVisit is invoked for each DemoVirtualDiskSnapshotContent reached as a leaf
-// via status.childrenSnapshotContentRefs (PR5a heterogeneous graph).
-type DemoVirtualDiskSnapshotContentLeafVisit func(ctx context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error
-
-// DemoVirtualMachineSnapshotContentLeafVisit is invoked when entering a DemoVirtualMachineSnapshotContent node
-// before recursing into its status.childrenSnapshotContentRefs (PR5b).
-type DemoVirtualMachineSnapshotContentLeafVisit func(ctx context.Context, m *demov1alpha1.DemoVirtualMachineSnapshotContent) error
-
-// DemoSnapshotContentLeaves optional callbacks for non-NSC content nodes under childrenSnapshotContentRefs.
-type DemoSnapshotContentLeaves struct {
-	DiskContent    DemoVirtualDiskSnapshotContentLeafVisit
-	MachineContent DemoVirtualMachineSnapshotContentLeafVisit
+// DedicatedContentVisitHooks optional callbacks for non-NamespaceSnapshotContent nodes under
+// status.childrenSnapshotContentRefs (domain snapshot content registered via DSC/bootstrap).
+// Leaf is true when the node has no (or empty) status.childrenSnapshotContentRefs.
+type DedicatedContentVisitHooks struct {
+	Visit func(ctx context.Context, gvk schema.GroupVersionKind, contentName string, u *unstructured.Unstructured, leaf bool) error
 }
 
 func nscVisitedKey(name string) string { return "nsc:" + name }
 
-func demovmVisitedKey(name string) string { return "demovm:" + name }
+func dedicatedContentVisitedKey(gvk schema.GroupVersionKind, name string) string {
+	return fmt.Sprintf("content:%s/%s/%s", gvk.Group, gvk.Kind, name)
+}
 
 // WalkNamespaceSnapshotContentSubtree visits every NamespaceSnapshotContent reachable from rootNSCName
 // following only status.childrenSnapshotContentRefs (see PR4 spec §2.2; system-spec §3.4 INV-REF-C1).
 // It does not list NamespaceSnapshotContent or NamespaceSnapshot to discover children.
-// The same visited set is used for the whole walk (cycle detection).
-//
-// Child refs that name Demo*SnapshotContent instead of a NamespaceSnapshotContent are skipped for MCP collection
-// (no error) unless optional callbacks are supplied via WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves.
+// Child refs must name other NamespaceSnapshotContent objects only; dedicated domain content requires
+// WalkNamespaceSnapshotContentSubtreeWithRegistry.
 func WalkNamespaceSnapshotContentSubtree(
 	ctx context.Context,
 	c client.Reader,
@@ -68,37 +63,25 @@ func WalkNamespaceSnapshotContentSubtree(
 	visit NamespaceSnapshotContentVisit,
 ) error {
 	visited := make(map[string]struct{})
-	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, nil)
+	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, nil, nil)
 }
 
-// WalkNamespaceSnapshotContentSubtreeWithDemoLeaves is like WalkNamespaceSnapshotContentSubtree but invokes
-// diskContentVisit for each DemoVirtualDiskSnapshotContent child (sorted with NSC children by ref Name).
-func WalkNamespaceSnapshotContentSubtreeWithDemoLeaves(
+// WalkNamespaceSnapshotContentSubtreeWithRegistry is like WalkNamespaceSnapshotContentSubtree but resolves
+// child refs to any SnapshotContent GVK registered in reg (DSC/bootstrap), using unstructured reads for
+// status.childrenSnapshotContentRefs. Generic code does not import domain CRD packages.
+func WalkNamespaceSnapshotContentSubtreeWithRegistry(
 	ctx context.Context,
 	c client.Reader,
 	rootNSCName string,
 	visit NamespaceSnapshotContentVisit,
-	diskContentVisit DemoVirtualDiskSnapshotContentLeafVisit,
+	reg *snapshot.GVKRegistry,
+	hooks *DedicatedContentVisitHooks,
 ) error {
-	visited := make(map[string]struct{})
-	var leaves *DemoSnapshotContentLeaves
-	if diskContentVisit != nil {
-		leaves = &DemoSnapshotContentLeaves{DiskContent: diskContentVisit}
+	if reg == nil {
+		return fmt.Errorf("WalkNamespaceSnapshotContentSubtreeWithRegistry requires non-nil GVK registry")
 	}
-	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, leaves)
-}
-
-// WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves is like WalkNamespaceSnapshotContentSubtreeWithDemoLeaves
-// but allows both disk and DemoVirtualMachineSnapshotContent callbacks (PR5b).
-func WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves(
-	ctx context.Context,
-	c client.Reader,
-	rootNSCName string,
-	visit NamespaceSnapshotContentVisit,
-	leaves *DemoSnapshotContentLeaves,
-) error {
 	visited := make(map[string]struct{})
-	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, leaves)
+	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, reg, hooks)
 }
 
 func walkNamespaceSnapshotContentSubtree(
@@ -107,7 +90,8 @@ func walkNamespaceSnapshotContentSubtree(
 	nscName string,
 	visited map[string]struct{},
 	visit NamespaceSnapshotContentVisit,
-	leaves *DemoSnapshotContentLeaves,
+	reg *snapshot.GVKRegistry,
+	hooks *DedicatedContentVisitHooks,
 ) error {
 	key := nscVisitedKey(nscName)
 	if _, ok := visited[key]; ok {
@@ -133,7 +117,7 @@ func walkNamespaceSnapshotContentSubtree(
 		if children[i].Name == "" {
 			continue
 		}
-		if err := walkChildSnapshotContentRef(ctx, c, children[i].Name, visited, visit, leaves); err != nil {
+		if err := walkChildSnapshotContentRef(ctx, c, children[i].Name, visited, visit, reg, hooks); err != nil {
 			return err
 		}
 	}
@@ -146,70 +130,97 @@ func walkChildSnapshotContentRef(
 	childName string,
 	visited map[string]struct{},
 	visit NamespaceSnapshotContentVisit,
-	leaves *DemoSnapshotContentLeaves,
+	reg *snapshot.GVKRegistry,
+	hooks *DedicatedContentVisitHooks,
 ) error {
 	childNSC := &storagev1alpha1.NamespaceSnapshotContent{}
 	err := c.Get(ctx, client.ObjectKey{Name: childName}, childNSC)
 	if err == nil {
-		return walkNamespaceSnapshotContentSubtree(ctx, c, childName, visited, visit, leaves)
+		return walkNamespaceSnapshotContentSubtree(ctx, c, childName, visited, visit, reg, hooks)
 	}
 	if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get NamespaceSnapshotContent %q: %w", childName, err)
 	}
 
-	demoDisk := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
-	if err2 := c.Get(ctx, client.ObjectKey{Name: childName}, demoDisk); err2 == nil {
-		if leaves != nil && leaves.DiskContent != nil {
-			if err := leaves.DiskContent(ctx, demoDisk); err != nil {
-				return err
-			}
-		}
-		return nil
-	} else if !apierrors.IsNotFound(err2) {
-		return fmt.Errorf("get DemoVirtualDiskSnapshotContent %q: %w", childName, err2)
+	if reg == nil {
+		return fmt.Errorf("child ref %q: not NamespaceSnapshotContent; heterogeneous graph requires GVK registry (DSC/bootstrap pairs)", childName)
 	}
 
-	demoVM := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
-	err3 := c.Get(ctx, client.ObjectKey{Name: childName}, demoVM)
-	if err3 == nil {
-		return walkDemoVirtualMachineSnapshotContentSubtree(ctx, c, childName, demoVM, visited, visit, leaves)
+	nscGVK := NamespaceSnapshotContentGVK()
+	for _, contentGVK := range reg.RegisteredContentGVKs() {
+		if contentGVK.Group == nscGVK.Group && contentGVK.Version == nscGVK.Version && contentGVK.Kind == nscGVK.Kind {
+			continue
+		}
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(contentGVK)
+		if err2 := c.Get(ctx, client.ObjectKey{Name: childName}, u); err2 != nil {
+			if apierrors.IsNotFound(err2) {
+				continue
+			}
+			return fmt.Errorf("get %s %q: %w", contentGVK.String(), childName, err2)
+		}
+		return walkDedicatedSnapshotContentSubtree(ctx, c, childName, contentGVK, u, visited, visit, reg, hooks)
 	}
-	if apierrors.IsNotFound(err3) {
-		return fmt.Errorf("child ref %q: not NamespaceSnapshotContent, DemoVirtualDiskSnapshotContent, or DemoVirtualMachineSnapshotContent", childName)
-	}
-	return fmt.Errorf("get DemoVirtualMachineSnapshotContent %q: %w", childName, err3)
+	return fmt.Errorf("child ref %q: not a registered NamespaceSnapshotContent or SnapshotContent type", childName)
 }
 
-func walkDemoVirtualMachineSnapshotContentSubtree(
+func walkDedicatedSnapshotContentSubtree(
 	ctx context.Context,
 	c client.Reader,
-	vmContentName string,
-	vm *demov1alpha1.DemoVirtualMachineSnapshotContent,
+	contentName string,
+	gvk schema.GroupVersionKind,
+	u *unstructured.Unstructured,
 	visited map[string]struct{},
 	visit NamespaceSnapshotContentVisit,
-	leaves *DemoSnapshotContentLeaves,
+	reg *snapshot.GVKRegistry,
+	hooks *DedicatedContentVisitHooks,
 ) error {
-	key := demovmVisitedKey(vmContentName)
+	key := dedicatedContentVisitedKey(gvk, contentName)
 	if _, ok := visited[key]; ok {
-		return fmt.Errorf("%w at DemoVirtualMachineSnapshotContent %q", ErrNamespaceSnapshotContentCycle, vmContentName)
+		return fmt.Errorf("%w at %s %q", ErrNamespaceSnapshotContentCycle, gvk.String(), contentName)
 	}
 	visited[key] = struct{}{}
 
-	if leaves != nil && leaves.MachineContent != nil {
-		if err := leaves.MachineContent(ctx, vm); err != nil {
+	childNames, err := unstructuredChildrenSnapshotContentRefNames(u)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", gvk.String(), contentName, err)
+	}
+	leaf := len(childNames) == 0
+	if hooks != nil && hooks.Visit != nil {
+		if err := hooks.Visit(ctx, gvk, contentName, u, leaf); err != nil {
 			return err
 		}
 	}
-
-	children := append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), vm.Status.ChildrenSnapshotContentRefs...)
-	sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
-	for i := range children {
-		if children[i].Name == "" {
-			continue
-		}
-		if err := walkChildSnapshotContentRef(ctx, c, children[i].Name, visited, visit, leaves); err != nil {
+	if leaf {
+		return nil
+	}
+	for _, ch := range childNames {
+		if err := walkChildSnapshotContentRef(ctx, c, ch, visited, visit, reg, hooks); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func unstructuredChildrenSnapshotContentRefNames(u *unstructured.Unstructured) ([]string, error) {
+	refs, found, err := unstructured.NestedSlice(u.Object, "status", "childrenSnapshotContentRefs")
+	if err != nil {
+		return nil, fmt.Errorf("read status.childrenSnapshotContentRefs: %w", err)
+	}
+	if !found || refs == nil {
+		return nil, nil
+	}
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		m, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }

@@ -47,7 +47,7 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := usecase.NewArchiveService(cl, cl, log)
-	agg := usecase.NewAggregatedNamespaceManifests(cl, arch)
+	agg := usecase.NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	data1, checksum1 := encodeTestChunkData([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "a", "namespace": "ns1"}},
@@ -136,7 +136,7 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := usecase.NewArchiveService(cl, cl, log)
-	agg := usecase.NewAggregatedNamespaceManifests(cl, arch)
+	agg := usecase.NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	data1, checksum1 := encodeTestChunkData([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "a", "namespace": "ns1"}},

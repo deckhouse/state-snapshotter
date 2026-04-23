@@ -30,6 +30,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // AggregatedStatusError carries HTTP status for NamespaceSnapshot aggregated manifests (see spec doc linked on BuildAggregatedJSON).
@@ -48,13 +49,15 @@ func NewAggregatedStatusError(httpStatus int, reason, message string) *Aggregate
 
 // AggregatedNamespaceManifests builds a single JSON array of manifest objects for a NamespaceSnapshot subtree.
 type AggregatedNamespaceManifests struct {
-	client  client.Client
-	archive *ArchiveService
+	client   client.Client
+	archive  *ArchiveService
+	graphReg *snapshot.GVKRegistry
 }
 
 // NewAggregatedNamespaceManifests creates an aggregated-manifests service for the manifests subresource.
-func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService) *AggregatedNamespaceManifests {
-	return &AggregatedNamespaceManifests{client: c, archive: a}
+// graphReg lists DSC/bootstrap snapshot↔content pairs so heterogeneous childrenSnapshotContentRefs can be traversed without domain imports.
+func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphReg *snapshot.GVKRegistry) *AggregatedNamespaceManifests {
+	return &AggregatedNamespaceManifests{client: c, archive: a, graphReg: graphReg}
 }
 
 // BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../namespace-snapshot-aggregated-manifests-pr4.md
@@ -132,11 +135,12 @@ func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Conte
 // and does not follow status.childrenSnapshotRefs on NamespaceSnapshot — consistent with
 // system-spec §3.4 (INV-REF-C1): empty or absent content refs mean no further descent from that node.
 //
-// Graph DFS is shared with WalkNamespaceSnapshotContentSubtree (namespacesnapshot_content_graph.go)
-// so domain code and aggregation use the same ref-only walk (§3-E4). Demo*SnapshotContent nodes under
-// childrenSnapshotContentRefs have no MCP on this path (disk leaf or VM intermediate); see namespacesnapshot_content_graph.go.
+// Graph DFS is shared with WalkNamespaceSnapshotContentSubtree / WalkNamespaceSnapshotContentSubtreeWithRegistry
+// (namespacesnapshot_content_graph.go) so domain code and aggregation use the same ref-only walk (§3-E4).
+// Dedicated snapshot content nodes under childrenSnapshotContentRefs have no MCP on this aggregated path;
+// see namespacesnapshot_content_graph.go.
 func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName string, visited map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
-	err := walkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visited, func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
+	visit := func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
 		mcpName := nsc.Status.ManifestCheckpointName
 		if mcpName == "" {
 			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
@@ -181,7 +185,13 @@ func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName stri
 			*objects = append(*objects, obj)
 		}
 		return nil
-	}, nil)
+	}
+	var err error
+	if s.graphReg != nil {
+		err = walkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visited, visit, s.graphReg, nil)
+	} else {
+		err = WalkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visit)
+	}
 	if err == nil {
 		return nil
 	}

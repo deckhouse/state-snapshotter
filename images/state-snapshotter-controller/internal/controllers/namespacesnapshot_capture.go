@@ -93,7 +93,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return res, err
 	}
 
-	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, nsSnap, content.Name)
+	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, r.SnapshotGraphGVKReg, nsSnap, content.Name)
 	if err != nil {
 		return r.failCapture(ctx, nsSnap, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}

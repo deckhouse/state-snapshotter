@@ -151,7 +151,7 @@ func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
-	agg := NewAggregatedNamespaceManifests(cl, arch)
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "cm1", "namespace": "ns1"}},
@@ -182,7 +182,7 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
-	agg := NewAggregatedNamespaceManifests(cl, arch)
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "a", "namespace": "ns1"}},
@@ -216,7 +216,7 @@ func TestAggregatedNamespaceManifests_UnreferencedChildNSCNotWalked(t *testing.T
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
-	agg := NewAggregatedNamespaceManifests(cl, arch)
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	objRoot := []map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root", "namespace": "ns1"}}}
 	objOrphan := []map[string]interface{}{{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "orphan", "namespace": "ns1"}}}
@@ -265,7 +265,7 @@ func TestAggregatedNamespaceManifests_ParentTwoChildren_OrderAndDedup(t *testing
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
-	agg := NewAggregatedNamespaceManifests(cl, arch)
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	objRoot := []map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root", "namespace": "ns1"}}}
 	objB := []map[string]interface{}{{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "b", "namespace": "ns1"}}}
@@ -324,7 +324,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 
 	t.Run("ns not found", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
+		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns", "snap")
 		var st *AggregatedStatusError
 		if !errors.As(err, &st) || st.HTTPStatus != http.StatusNotFound {
@@ -336,7 +336,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 			&storagev1alpha1.NamespaceSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns"}},
 		).Build()
-		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
+		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns", "snap")
 		var st *AggregatedStatusError
 		if !errors.As(err, &st) || st.HTTPStatus != http.StatusConflict {
@@ -346,7 +346,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 
 	t.Run("mcp not found 404", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
+		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
 		root := aggManifestNSC("root-nsc", "missing-mcp")
 		_ = cl.Create(ctx, root)
 		ns := aggManifestNS("root-nsc")
@@ -362,7 +362,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 			aggManifestNS("no-such-nsc"),
 		).Build()
-		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
+		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
 		if !errors.As(err, &st) || st.HTTPStatus != http.StatusNotFound {
@@ -373,7 +373,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 	t.Run("mcp not ready 409", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		arch := NewArchiveService(cl, cl, log)
-		agg := NewAggregatedNamespaceManifests(cl, arch)
+		agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 		d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
 			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "a", "namespace": "ns1"}},
 		})
@@ -395,7 +395,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 	t.Run("duplicate 500", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		arch := NewArchiveService(cl, cl, log)
-		agg := NewAggregatedNamespaceManifests(cl, arch)
+		agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 		dupObj := []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "same", "namespace": "ns1"}},
 		}
@@ -422,7 +422,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 	t.Run("cycle 500", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		arch := NewArchiveService(cl, cl, log)
-		agg := NewAggregatedNamespaceManifests(cl, arch)
+		agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 		d, cs := aggManifestEncodeChunk([]map[string]interface{}{
 			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "x", "namespace": "ns1"}},
 		})
@@ -447,7 +447,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 
 	t.Run("missing manifestCheckpointName 500", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log))
+		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
 		nsc := aggManifestNSC("root-nsc", "x")
 		nsc.Status.ManifestCheckpointName = ""
 		_ = cl.Create(ctx, nsc)

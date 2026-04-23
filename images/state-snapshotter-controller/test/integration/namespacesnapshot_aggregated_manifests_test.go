@@ -130,7 +130,7 @@ func aggregatedManifestsIntegrationStartServer() *httptest.Server {
 	log, err := logger.NewLogger("error")
 	Expect(err).NotTo(HaveOccurred())
 	arch := usecase.NewArchiveService(k8sClient, k8sClient, log)
-	agg := usecase.NewAggregatedNamespaceManifests(k8sClient, arch)
+	agg := usecase.NewAggregatedNamespaceManifests(k8sClient, arch, nil)
 	ah := api.NewArchiveHandler(k8sClient, arch, log)
 	rs := restore.NewService(k8sClient, arch)
 	rh := api.NewRestoreHandler(k8sClient, rs, log, agg)

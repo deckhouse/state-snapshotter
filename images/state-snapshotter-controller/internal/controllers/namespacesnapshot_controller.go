@@ -48,16 +48,18 @@ import (
 // Root NamespaceSnapshotContent is not owned by NamespaceSnapshot (spec.namespaceSnapshotRef + status only).
 // Child NamespaceSnapshotContent in the synthetic tree uses ownerReferences -> parent NamespaceSnapshotContent so GC can cascade the content tree.
 type NamespaceSnapshotReconciler struct {
-	Client    client.Client
-	APIReader client.Reader
-	Dynamic   dynamic.Interface
-	Scheme    *runtime.Scheme
-	Config    *config.Options
-	Archive   *usecase.ArchiveService
+	Client              client.Client
+	APIReader           client.Reader
+	Dynamic             dynamic.Interface
+	Scheme              *runtime.Scheme
+	Config              *config.Options
+	Archive             *usecase.ArchiveService
+	SnapshotGraphGVKReg *snapshot.GVKRegistry
 }
 
 // AddNamespaceSnapshotControllerToManager registers the NamespaceSnapshot reconciler.
-func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
+// snapshotGraphGVKReg lists DSC/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
+func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphGVKReg *snapshot.GVKRegistry) error {
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}
@@ -67,12 +69,13 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 	}
 	logImpl, _ := liblogger.NewLogger("error")
 	r := &NamespaceSnapshotReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Dynamic:   dyn,
-		Scheme:    mgr.GetScheme(),
-		Config:    cfg,
-		Archive:   usecase.NewArchiveService(mgr.GetClient(), mgr.GetClient(), logImpl),
+		Client:              mgr.GetClient(),
+		APIReader:           mgr.GetAPIReader(),
+		Dynamic:             dyn,
+		Scheme:              mgr.GetScheme(),
+		Config:              cfg,
+		Archive:             usecase.NewArchiveService(mgr.GetClient(), mgr.GetClient(), logImpl),
+		SnapshotGraphGVKReg: snapshotGraphGVKReg,
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.NamespaceSnapshot{}).

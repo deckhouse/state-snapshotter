@@ -23,10 +23,11 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
@@ -43,16 +44,51 @@ func rootCaptureTestScheme(t *testing.T) *runtime.Scheme {
 	if err := storagev1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("AddToScheme storage: %v", err)
 	}
-	if err := demov1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("AddToScheme demo: %v", err)
-	}
 	return s
+}
+
+// graphRegistryForRootCapture registers unified NamespaceSnapshot↔NamespaceSnapshotContent so
+// generic E5 resolve can map status.childrenSnapshotRefs without domain CRD imports.
+func graphRegistryForRootCapture(t *testing.T) *snapshot.GVKRegistry {
+	t.Helper()
+	r := snapshot.NewGVKRegistry()
+	gv := storagev1alpha1.APIGroup + "/" + storagev1alpha1.APIVersion
+	if err := r.RegisterSnapshotContentMapping("NamespaceSnapshot", gv, "NamespaceSnapshotContent", gv); err != nil {
+		t.Fatalf("RegisterSnapshotContentMapping: %v", err)
+	}
+	return r
+}
+
+func syntheticSnapshotUnstructured(ns, name, boundContent string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "generic.state-snapshotter.test",
+		Version: "v1",
+		Kind:    "SyntheticDomainSnapshot",
+	})
+	u.SetNamespace(ns)
+	u.SetName(name)
+	_ = unstructured.SetNestedField(u.Object, boundContent, "status", "boundSnapshotContentName")
+	return u
+}
+
+func graphRegistryWithSyntheticDomain(t *testing.T) *snapshot.GVKRegistry {
+	t.Helper()
+	r := snapshot.NewGVKRegistry()
+	if err := r.RegisterSnapshotContentMapping(
+		"SyntheticDomainSnapshot", "generic.state-snapshotter.test/v1",
+		"SyntheticDomainSnapshotContent", "generic.state-snapshotter.test/v1",
+	); err != nil {
+		t.Fatalf("RegisterSnapshotContentMapping: %v", err)
+	}
+	return r
 }
 
 func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testing.T) {
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
+	reg := graphRegistryForRootCapture(t)
 
 	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "covered", "namespace": "ns1"}},
@@ -114,7 +150,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 	).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, reg, rootNS, "root-nsc")
 	if err != nil {
 		t.Fatalf("collectRunSubtreeManifestExcludeKeys: %v", err)
 	}
@@ -136,17 +172,13 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
+	reg := graphRegistryWithSyntheticDomain(t)
 
 	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
 		Status:     storagev1alpha1.NamespaceSnapshotContentStatus{},
 	}
-	disk := &demov1alpha1.DemoVirtualDiskSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
-		Status: demov1alpha1.DemoVirtualDiskSnapshotStatus{
-			BoundSnapshotContentName: "missing-from-graph",
-		},
-	}
+	disk := syntheticSnapshotUnstructured("ns1", "disk-a", "missing-from-graph")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
@@ -158,7 +190,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, disk, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, reg, rootNS, "root-nsc")
 	if err == nil {
 		t.Fatal("expected error when child content is not linked from root NSC graph")
 	}
@@ -171,6 +203,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
+	reg := graphRegistryWithSyntheticDomain(t)
 
 	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
@@ -187,12 +220,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	meta.SetStatusCondition(&nscChild.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	disk := &demov1alpha1.DemoVirtualDiskSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
-		Status: demov1alpha1.DemoVirtualDiskSnapshotStatus{
-			BoundSnapshotContentName: "child-nsc",
-		},
-	}
+	disk := syntheticSnapshotUnstructured("ns1", "disk-a", "child-nsc")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
@@ -204,7 +232,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, nscChild, disk, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, reg, rootNS, "root-nsc")
 	if err == nil {
 		t.Fatal("expected error when ManifestCheckpoint is missing / not readable")
 	}

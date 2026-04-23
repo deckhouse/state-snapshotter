@@ -28,6 +28,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -174,15 +176,20 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 
 		var nscVisited []string
 		var demoVisited []string
-		err := usecase.WalkNamespaceSnapshotContentSubtreeWithDemoLeaves(testCtx, k8sClient, rootNSC,
+		hooks := &usecase.DedicatedContentVisitHooks{
+			Visit: func(_ context.Context, gvk schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
+				if gvk.Kind == "DemoVirtualDiskSnapshotContent" {
+					demoVisited = append(demoVisited, contentName)
+				}
+				return nil
+			},
+		}
+		err := usecase.WalkNamespaceSnapshotContentSubtreeWithRegistry(testCtx, k8sClient, rootNSC,
 			func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
 				nscVisited = append(nscVisited, nsc.Name)
 				return nil
 			},
-			func(_ context.Context, d *demov1alpha1.DemoVirtualDiskSnapshotContent) error {
-				demoVisited = append(demoVisited, d.Name)
-				return nil
-			},
+			integrationGraphGVKRegistry, hooks,
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(nscVisited).NotTo(BeEmpty())
