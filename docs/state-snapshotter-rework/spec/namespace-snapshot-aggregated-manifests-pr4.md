@@ -7,7 +7,7 @@ Normative contract for implementation and tests. **SSOT** for this HTTP surface;
 **In scope**
 
 - Read-time aggregation of manifests
-- Traversal of snapshot tree via `NamespaceSnapshotContent`
+- Traversal of the **already materialized** manifests-only subgraph: follow **only** persisted `NamespaceSnapshotContent` edges (no list-based reconstruction of the tree; two-stage model in [`system-spec.md`](system-spec.md) **§3.0**)
 - HTTP endpoint for aggregated manifests
 - Error semantics (fail-whole)
 - Output format
@@ -17,7 +17,8 @@ Normative contract for implementation and tests. **SSOT** for this HTTP surface;
 - Data layer (PVC, VolumeSnapshot, etc.)
 - Export/import workflows
 - Pre-materialized archives
-- Domain-specific traversal (PR5)
+- **Capture-time** domain expansion (which objects belong in the snapshot, child `YyyySnapshot` wiring) — domain controllers; not this SSOT
+- Heterogeneous **domain** edges beyond what this document normatively interprets for the NSC read-path (see PR5 / system-spec **§3**)
 
 ## 2. Source of truth
 
@@ -37,6 +38,8 @@ If `boundSnapshotContentName` is empty → **409 Conflict**.
 
 ### 2.2 Traversal graph
 
+This read-path assumes the snapshot graph for the run has **already** been built and published in **`status`** (system-spec **§3.0** stage 1). The handler **must not** infer subtree membership by listing API objects.
+
 Traversal is performed **only** via:
 
 `NamespaceSnapshotContent.status.childrenSnapshotContentRefs[]`
@@ -45,12 +48,12 @@ Each ref contains **`name`** (cluster-scoped `NamespaceSnapshotContent`).
 
 **Important**
 
-- `childrenSnapshotRefs` (on `NamespaceSnapshot`) are **not** used for traversal.
-- Only the `NamespaceSnapshotContent` graph is canonical.
+- `childrenSnapshotRefs` (on `NamespaceSnapshot`) are **not** used for this aggregated-manifests traversal.
+- Only the persisted `NamespaceSnapshotContent` ref graph is canonical for this endpoint.
 
 ## 3. Traversal algorithm
 
-Traversal is recursive (**DFS** or **BFS**) over `NamespaceSnapshotContent`.
+Recursive (**DFS** or **BFS**) walk over **`NamespaceSnapshotContent`** nodes linked by **`childrenSnapshotContentRefs`** only (no other discovery rule in this contract).
 
 ### 3.1 Node processing
 
@@ -179,7 +182,7 @@ Implementation requires:
 
 - New use case: aggregated namespace manifests
 - New HTTP handler
-- Graph traversal logic (NS → NSC tree)
+- Read-path logic: walk persisted **`NamespaceSnapshotContent`** edges only (system-spec **§3.0** stage 2)
 
 ### 10.3 Readiness checks
 

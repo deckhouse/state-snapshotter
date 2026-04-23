@@ -29,7 +29,7 @@
 - **N2b — форма графа в статусе (PR1):** опциональные поля **`status.childrenSnapshotRefs`** на **`NamespaceSnapshot`** (элементы JSON: **`name`**, **`namespace`**) и **`status.childrenSnapshotContentRefs`** на **`NamespaceSnapshotContent`** (элемент: **`name`**). В Go типы элементов — **`NamespaceSnapshotChildRef`** / **`NamespaceSnapshotContentChildRef`** (N2b child graph, не универсальные cross-kind refs). Семантика заполнения, orchestration и агрегированный **Ready** — не в PR1; см. **§2.4.2** плана и design **§11**. **Инварианты универсального дерева snapshot-run, merge и dedup при PR5+** — нормативно **§3**; дизайн-пакет и мотивы — [`design/demo-domain-dsc/README.md`](../design/demo-domain-dsc/README.md), [`design/demo-domain-dsc/08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md).
 - **N2b PR2 (временный scaffold в коде, не целевая модель PR5):** при аннотации **`state-snapshotter.deckhouse.io/n2b-pr2-synthetic-tree`** на parent контроллер обеспечивает одного synthetic child и запись graph refs; **§11.1** design и **§2.4.2** плана. **Не** часть целевой heterogeneous-архитектуры; **снятие** из кода и тестов — сразу после **merge-gate** на demo-domain flow, см. **§2.4.2** того же плана (правило **«Снятие synthetic scaffold»**).
 - **N2b PR3** (**временный scaffold в коде, не целевая модель PR5**): агрегированный **Ready** parent при использовании synthetic required child (тот же scaffold, что PR2): собственный persisted MCP **и** required child **`Ready=True`**; иначе **`ChildSnapshotPending`** или при терминальном провале child — **`ChildSnapshotFailed`** (`pkg/snapshot`); таблица и whitelist — **§11.1** design. **Снятие** scaffold — как для PR2.
-- **N2b PR4 — aggregated manifests download (HTTP + traversal + errors):** нормативный контракт — **[`spec/namespace-snapshot-aggregated-manifests-pr4.md`](namespace-snapshot-aggregated-manifests-pr4.md)** (endpoint, fail-whole, merge, циклы, дубликаты). Общие принципы N2a/N2b download — по-прежнему [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) **§8.7** (ссылка на PR4 SSOT в **§8.7.1**).
+- **N2b PR4 — aggregated manifests download (HTTP + read-path по сохранённому графу + errors):** нормативный контракт — **[`spec/namespace-snapshot-aggregated-manifests-pr4.md`](namespace-snapshot-aggregated-manifests-pr4.md)** (endpoint, обход **только** по опубликованным content-refs, fail-whole, merge, циклы, дубликаты); двухстадийная модель **§3.0** этого spec. Общие принципы N2a/N2b download — по-прежнему [`design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) **§8.7** (ссылка на PR4 SSOT в **§8.7.1**).
 
 ## §2. Ссылки
 
@@ -45,9 +45,24 @@
 
 Ниже — **контракт реализации** (MUST / MUST NOT). Расширение полей элементов **`children*Refs`** до полного `{ apiGroup, kind, namespace, name }` — вместе с OpenAPI CRD и кодом; до этого действуют ключи слияния для текущих типов (**§3.2**). Поведение **`Ready`** и каскада — в [`design/demo-domain-dsc/07-ready-delete-matrix.md`](../design/demo-domain-dsc/07-ready-delete-matrix.md); при переносе норм в этот spec — без противоречий **§3** и **§1** (N2b).
 
+### §3.0. Две стадии: capture-time domain expansion и обход сохранённого графа
+
+Контракт **§3** разделяет **кто** определяет состав дерева и **как** по нему ходит общий код.
+
+**1) Capture-time domain expansion (построение дерева снимка).** При создании пользователем **`XxxxSnapshot`** **доменный** контроллер соответствующего типа определяет **snapshot scope** для этого ресурса и то, **как** каждый охваченный объект представлен в дереве run, в частности:
+- обычные Kubernetes-ресурсы → **manifest capture** данного узла (MCP / MCR и пр. — по нормативам N2a/N2b и согласованным design);
+- ресурсы **volume / data** → отдельные snapshot/data-операции (вне manifests-only подграфа или по отдельным под-документам);
+- объекты, для которых предусмотрен **другой** доменный snapshot (другой **`YyyySnapshot`** / контроллер) → оформляются как **явные дочерние** **`YyyySnapshot`** (и связанный **`YyyySnapshotContent`**), с публикацией рёбер в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** по политике родительского узла.
+
+**Логическое дерево** snapshot-run материализуется **сверху вниз** на этом этапе. **Generic**-код **не** выводит состав дерева из инвентаря API и **не** подменяет решение домена; он **использует только уже записанные** в **`status`** refs (**§3.1**, **INV-REF1**).
+
+**2) Traversal уже построенного snapshot-графа (read-path / generic).** После публикации refs **generic** и сценарии **aggregate / download** обходят узлы **только** по разрешённым цепочкам **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** (этот spec или согласованный под-документ). На этой стадии **MUST NOT:** заново **обнаруживать** (discovery), какие объекты кластера «входят в снимок», и **MUST NOT:** **восстанавливать** или **достраивать** дерево **list-перечислением**, фильтрами по namespace или иными эвристиками **вместо** или **в обход** недостающих или неполных refs.
+
+**INV-REF-C1**, **§3.4** и **§3.5** относятся к стадии **(2)** и к обязанности считать границу run **замкнутой** по сохранённому графу.
+
 ### §3.1. Логическое дерево и источник истины
 
-- **MUST:** логическое дерево snapshot-run задаётся **только** refs-полями **`status`** на **`XxxxSnapshot`** / **`XxxxSnapshotContent`**, **опубликованными** на пути от **root** **`NamespaceSnapshot`** этого run: **`childrenSnapshotRefs`** — **основной** носитель **ребёнка-узла** в дереве; **`childrenSnapshotContentRefs`** — **дополняющий** слой **только** там, где это **нормативно** требует этот spec или согласованный под-документ (traversal, aggregation, политика этапа), **без** подмены SoT, задаваемого **snapshot** refs (см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §2, абзац **Snapshot refs vs content refs**).
+- **MUST:** логическое дерево snapshot-run задаётся **только** refs-полями **`status`** на **`XxxxSnapshot`** / **`XxxxSnapshotContent`**, **опубликованными** на пути от **root** **`NamespaceSnapshot`** этого run (материализация дерева — **§3.0** п. 1; обход без расширения scope — **§3.0** п. 2): **`childrenSnapshotRefs`** — **основной** носитель **ребёнка-узла** в дереве; **`childrenSnapshotContentRefs`** — **дополняющий** слой **только** там, где это **нормативно** требует этот spec или согласованный под-документ (read-path по графу, aggregation, политика этапа), **без** подмены SoT, задаваемого **snapshot** refs (см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §2, абзац **Snapshot refs vs content refs**).
 - **Область:** **`XxxxSnapshot`** / **`XxxxSnapshotContent`** **могут** существовать в API и reconciler'иться **доменным** (или иным) контроллером **до** появления в **`children*Refs`** данного run или **вне** любого такого run — это **не** запрещает **§3** и не отменяет **DSC** / reconcile зарегистрированных типов (**§0**). **§3** задаёт **только** состав **логического дерева** конкретного run от root **`NamespaceSnapshot`** и обязанности **generic** (обход, dedup/exclude и т.д.) относительно **этого** дерева.
 - **MUST NOT:** объект считаться узлом этого дерева, если он **не** представлен в **`children*Refs`** на пути от root (даже если существует в API). (**INV-REF1**, см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
 
@@ -60,10 +75,12 @@
 
 - **MUST:** удаление записи о дочернем узле из **`children*Refs`** родителя выполнять **только** контроллер, который **владеет** соответствующим дочерним объектом (создал и ведёт его), **или** по **явной** политике reconcile родителя, задокументированной в коде модуля и не противоречащей **INV-REF-M2**.
 
-### §3.4. Generic `NamespaceSnapshot` и обход API
+### §3.4. Generic `NamespaceSnapshot` и read-path по API (только стадия 2)
+
+Обязанности generic здесь — **не** domain expansion (**§3.0** п. 1), а **обход уже опубликованного** графа и сопутствующие правила fail-closed (**§3.0** п. 2).
 
 - **MUST NOT:** reconciler **`NamespaceSnapshot`** (и общий код exclude/dedup для root capture) **достраивать** логическое дерево или множество узлов из **list/search по namespace** или эвристик без ref на пути от root. (**INV-REF1**.)
-- **MUST NOT:** при отсутствии или пустоте **`childrenSnapshotContentRefs`** там, где поле предусмотрено схемой, **самостоятельно** находить **`*SnapshotContent`** через list API без нормативного правила в этом spec или в согласованном под-документе (например расширение PR4 traversal). **По умолчанию** поведение в такой ситуации — **fail-closed** (не продолжать этап). **Явный fallback** (в т.ч. только из цепочки **snapshot refs**) **допустим только** если он **отдельно** закреплён в этом spec или в согласованном под-документе; иначе list/search «для восстановления content» — **вне** контракта. Конкретный разрешённый вариант **MUST** быть указан в реализации и тестах до включения поведения в релиз. (**INV-REF-C1**.)
+- **MUST NOT:** при отсутствии или пустоте **`childrenSnapshotContentRefs`** там, где поле предусмотрено схемой, **самостоятельно** находить **`*SnapshotContent`** через list API без нормативного правила в этом spec или в согласованном под-документе (например расширение PR4 read-path). **По умолчанию** поведение в такой ситуации — **fail-closed** (не продолжать этап). **Явный fallback** (в т.ч. только из цепочки **snapshot refs**) **допустим только** если он **отдельно** закреплён в этом spec или в согласованном под-документе; иначе list/search «для восстановления content» — **вне** контракта. Конкретный разрешённый вариант **MUST** быть указан в реализации и тестах до включения поведения в релиз. (**INV-REF-C1**.)
 
 ### §3.5. Граница run и fail-closed dedup
 

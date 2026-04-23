@@ -21,7 +21,7 @@
 
 ## 1. Формирование дерева (через контроллеры, не через allowlist)
 
-**Принцип:** состав дочерних узлов **не** задаётся статическим «разрешённым списком kinds» в generic и **не** сводится к `if kind == VM → создать Disk`. **Логическое дерево** задают **контроллеры** (доменные через **DSC** и политику **`spec`**, generic — root namespace capture), **отражая** связи в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**. **Generic** при обходе для dedup / **`Ready`** / aggregated **опирается только на это отражение**, а не на «все подходящие объекты в API» как на дерево.
+**Принцип:** состав дочерних узлов **не** задаётся статическим «разрешённым списком kinds» в generic и **не** сводится к `if kind == VM → создать Disk`. **Логическое дерево** задают **контроллеры** (доменные через **DSC** и политику **`spec`**, generic — root namespace capture), **отражая** связи в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**. **Generic** при обходе для dedup / **`Ready`** / aggregated **опирается только на это отражение**, а не на «все подходящие объекты в API» как на дерево. Нормативное разделение **capture-time domain expansion** vs **traversal сохранённого графа** — **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0**.
 
 **INV-T1.** Под **root `NamespaceSnapshot`** **не** создаётся **вложенный** **`NamespaceSnapshot`** (дети — **heterogeneous** kinds). Это **политика** demo/PR5-трека, **не** утверждение, что `NamespaceSnapshot` отличается от других `XxxxSnapshot` по модели узла; «root» — текущий продуктовый потолок, а не отдельный kube-тип «доменного контроллера».
 

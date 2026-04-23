@@ -8,7 +8,7 @@
 |-------------|---------------------------|
 | Привязка к root **`NamespaceSnapshot`** через **`spec.rootNamespaceSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root NS и root NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, MCR/MCP для demo, выпил synthetic. |
 | Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
-| Тот же **ref-only DFS**, что и aggregated/N2b: по **`childrenSnapshotContentRefs`** обходятся **`NamespaceSnapshotContent`**; узлы **`DemoVirtualMachineSnapshotContent`** ведут к детям (PR5b); листья **`DemoVirtualDiskSnapshotContent`** без MCP в aggregated; callbacks **`WalkNamespaceSnapshotContentSubtreeWithDemoLeaves`** / **`WalkNamespaceSnapshotContentSubtreeWithAllDemoLeaves`**. | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
+| **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья без MCP в aggregated) **появляются в обходе**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
 
 ### PR5b (минимум в коде)
 
