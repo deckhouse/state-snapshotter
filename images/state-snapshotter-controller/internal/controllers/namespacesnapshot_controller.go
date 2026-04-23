@@ -55,12 +55,12 @@ type NamespaceSnapshotReconciler struct {
 	Scheme                *runtime.Scheme
 	Config                *config.Options
 	Archive               *usecase.ArchiveService
-	SnapshotGraphRegistry snapshotgraphregistry.Reader
+	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
 }
 
 // AddNamespaceSnapshotControllerToManager registers the NamespaceSnapshot reconciler.
 // snapshotGraphRegistry provides DSC/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
-func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.Reader) error {
+func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}

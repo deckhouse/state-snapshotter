@@ -29,10 +29,17 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
 // ErrNamespaceSnapshotContentCycle is returned when childrenSnapshotContentRefs form a cycle.
 var ErrNamespaceSnapshotContentCycle = errors.New("NamespaceSnapshotContent graph cycle")
+
+// ErrChildRefNotRegistered is returned when a ref is not a NamespaceSnapshotContent name and no registered
+// dedicated SnapshotContent GVK matches that name. If a DSC is deleted or becomes ineligible, kinds drop out
+// of the registry and an existing heterogeneous graph may become unreadable — generic code stays fail-closed
+// (no list-based inference of types).
+var ErrChildRefNotRegistered = errors.New("child snapshot content ref not registered for heterogeneous traversal")
 
 // NamespaceSnapshotContentVisit is invoked once per NamespaceSnapshotContent in DFS order
 // (parent before descendants; children sorted lexicographically by ref Name).
@@ -82,6 +89,47 @@ func WalkNamespaceSnapshotContentSubtreeWithRegistry(
 	}
 	visited := make(map[string]struct{})
 	return walkNamespaceSnapshotContentSubtree(ctx, c, rootNSCName, visited, visit, reg, hooks)
+}
+
+// WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh is like WalkNamespaceSnapshotContentSubtreeWithRegistry
+// but performs at most one TryRefresh when traversal fails with ErrChildRefNotRegistered (e.g. CRD appeared
+// after the last DSC reconcile). At most one refresh and one retry per call — no polling loop.
+func WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh(
+	ctx context.Context,
+	c client.Reader,
+	rootNSCName string,
+	visit NamespaceSnapshotContentVisit,
+	live snapshotgraphregistry.LiveReader,
+	hooks *DedicatedContentVisitHooks,
+) error {
+	if live == nil {
+		return fmt.Errorf("WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh requires non-nil LiveReader")
+	}
+	reg := live.Current()
+	if reg == nil {
+		if err := live.TryRefresh(ctx); err != nil && !errors.Is(err, snapshotgraphregistry.ErrRefreshNotConfigured) {
+			return err
+		}
+		reg = live.Current()
+	}
+	if reg == nil {
+		return fmt.Errorf("%w: snapshot graph registry is nil or not ready after refresh attempt", snapshotgraphregistry.ErrGraphRegistryNotReady)
+	}
+	err := WalkNamespaceSnapshotContentSubtreeWithRegistry(ctx, c, rootNSCName, visit, reg, hooks)
+	if err == nil || !errors.Is(err, ErrChildRefNotRegistered) {
+		return err
+	}
+	if err2 := live.TryRefresh(ctx); err2 != nil {
+		if errors.Is(err2, snapshotgraphregistry.ErrRefreshNotConfigured) {
+			return err
+		}
+		return fmt.Errorf("%w: refresh: %w", err, err2)
+	}
+	reg2 := live.Current()
+	if reg2 == nil {
+		return err
+	}
+	return WalkNamespaceSnapshotContentSubtreeWithRegistry(ctx, c, rootNSCName, visit, reg2, hooks)
 }
 
 func walkNamespaceSnapshotContentSubtree(
@@ -161,7 +209,7 @@ func walkChildSnapshotContentRef(
 		}
 		return walkDedicatedSnapshotContentSubtree(ctx, c, childName, contentGVK, u, visited, visit, reg, hooks)
 	}
-	return fmt.Errorf("child ref %q: not a registered NamespaceSnapshotContent or SnapshotContent type", childName)
+	return fmt.Errorf("%w: child ref %q", ErrChildRefNotRegistered, childName)
 }
 
 func walkDedicatedSnapshotContentSubtree(

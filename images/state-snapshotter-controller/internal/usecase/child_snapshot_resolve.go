@@ -18,6 +18,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,12 +28,55 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
 // ResolveChildSnapshotToBoundContentName resolves status.childrenSnapshotRefs (namespace+name only) to
 // status.boundSnapshotContentName using only snapshot kinds registered in reg (DSC/bootstrap). Generic code
-// does not hardcode domain snapshot CRDs.
+// does not hardcode domain snapshot CRDs. For dynamic refresh-on-miss use ResolveChildSnapshotToBoundContentNameLive.
 func ResolveChildSnapshotToBoundContentName(ctx context.Context, c client.Reader, reg *snapshot.GVKRegistry, childNS, childName string) (string, error) {
+	return ResolveChildSnapshotToBoundContentNameLive(ctx, c, snapshotgraphregistry.NewStatic(reg), childNS, childName)
+}
+
+// ResolveChildSnapshotToBoundContentNameLive is like ResolveChildSnapshotToBoundContentName but uses a
+// LiveReader. When resolution fails because no registered snapshot kind matches (e.g. registry stale vs
+// RESTMapper), performs at most one TryRefresh and retries resolution once. Ambiguous matches and
+// missing boundSnapshotContentName are not retried.
+func ResolveChildSnapshotToBoundContentNameLive(ctx context.Context, c client.Reader, live snapshotgraphregistry.LiveReader, childNS, childName string) (string, error) {
+	if live == nil {
+		return "", fmt.Errorf("snapshot graph registry is required to resolve child snapshot %s/%s", childNS, childName)
+	}
+	reg := live.Current()
+	if reg == nil {
+		if err := live.TryRefresh(ctx); err != nil && !errors.Is(err, snapshotgraphregistry.ErrRefreshNotConfigured) {
+			return "", err
+		}
+		reg = live.Current()
+	}
+	if reg == nil {
+		return "", fmt.Errorf("GVK registry is required to resolve child snapshot %s/%s (still nil after refresh attempt)", childNS, childName)
+	}
+	out, err := resolveChildSnapshotToBoundContentNameOnce(ctx, c, reg, childNS, childName)
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, ErrRunGraphChildSnapshotNotFound) {
+		return "", err
+	}
+	if err2 := live.TryRefresh(ctx); err2 != nil {
+		if errors.Is(err2, snapshotgraphregistry.ErrRefreshNotConfigured) {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: refresh: %w", err, err2)
+	}
+	reg2 := live.Current()
+	if reg2 == nil {
+		return "", err
+	}
+	return resolveChildSnapshotToBoundContentNameOnce(ctx, c, reg2, childNS, childName)
+}
+
+func resolveChildSnapshotToBoundContentNameOnce(ctx context.Context, c client.Reader, reg *snapshot.GVKRegistry, childNS, childName string) (string, error) {
 	if reg == nil {
 		return "", fmt.Errorf("GVK registry is required to resolve child snapshot %s/%s", childNS, childName)
 	}

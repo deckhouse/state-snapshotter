@@ -9,7 +9,7 @@
 | Unit | `cd images/state-snapshotter-controller && go test ./pkg/... ./internal/...` |
 | Integration (envtest) | `go test -tags integration ./test/integration/...` или `make test-integration` |
 | E2E (envtest) | `go test -tags e2e ./test/e2e/...` или `make test-e2e` |
-| Smoke (кластер) | `./test-smoke.sh` из корня репозитория |
+| Smoke (кластер) | `./test-smoke.sh` из корня репозитория; **`hack/snapshot-graph-registry-smoke.sh`** — health модуля + опционально create/delete DSC (demo CRD), scan логов на panic/fatal |
 | Ручной демо N2a (кластер) | [`namespace-snapshot-manual-demo.md`](namespace-snapshot-manual-demo.md) — YAML + `kubectl` для показа создания снимка, NSC/OK/MCP и aggregated |
 
 Требуется `KUBEBUILDER_ASSETS` для integration/e2e (см. `.cursor/rules/controller-envtest-local.mdc`).

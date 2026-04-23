@@ -33,7 +33,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
 // Run-graph errors for root manifest capture (INV-S0 / INV-E1, E5).
@@ -55,9 +55,10 @@ var (
 // in descendant NamespaceSnapshotContent ManifestCheckpoints reachable only via that ref graph.
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
 //
-// reg must list all snapshot↔content pairs from DSC/bootstrap (see pkg/snapshot.GVKRegistry). Child
-// snapshot refs (name+namespace only) are resolved only against registered snapshot kinds — generic
-// code does not import domain CRD packages.
+// live supplies the current GVKRegistry (see pkg/snapshot.GVKRegistry) and optional TryRefresh when the
+// registry may be stale vs RESTMapper (CRD appeared after last DSC reconcile). Child snapshot refs
+// (name+namespace only) are resolved only against registered snapshot kinds — generic code does not import
+// domain CRD packages.
 //
 // When status.childrenSnapshotRefs is empty, behavior matches legacy root capture: full namespace
 // allowlist without subtree exclude.
@@ -69,7 +70,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 	arch *ArchiveService,
 	dyn dynamic.Interface,
 	c client.Reader,
-	reg *snapshot.GVKRegistry,
+	live snapshotgraphregistry.LiveReader,
 	rootNS *storagev1alpha1.NamespaceSnapshot,
 	rootNSCName string,
 ) ([]namespacemanifest.ManifestTarget, error) {
@@ -83,7 +84,10 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if len(rootNS.Status.ChildrenSnapshotRefs) == 0 {
 		return base, nil
 	}
-	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, reg, rootNS, rootNSCName)
+	if live == nil {
+		return nil, fmt.Errorf("snapshot graph registry is required when status.childrenSnapshotRefs is non-empty")
+	}
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, live, rootNS, rootNSCName)
 	if err != nil {
 		return nil, err
 	}
@@ -94,12 +98,19 @@ func collectRunSubtreeManifestExcludeKeys(
 	ctx context.Context,
 	arch *ArchiveService,
 	c client.Reader,
-	reg *snapshot.GVKRegistry,
+	live snapshotgraphregistry.LiveReader,
 	rootNS *storagev1alpha1.NamespaceSnapshot,
 	rootNSCName string,
 ) (map[string]struct{}, error) {
+	reg := live.Current()
 	if reg == nil {
-		return nil, fmt.Errorf("GVK registry is required when status.childrenSnapshotRefs is non-empty (graph registry not ready or DSC/bootstrap pairs not merged yet)")
+		if err := live.TryRefresh(ctx); err != nil && !errors.Is(err, snapshotgraphregistry.ErrRefreshNotConfigured) {
+			return nil, err
+		}
+		reg = live.Current()
+	}
+	if reg == nil {
+		return nil, fmt.Errorf("%w: GVK registry is required when status.childrenSnapshotRefs is non-empty (graph registry not ready or DSC/bootstrap pairs not merged yet)", snapshotgraphregistry.ErrGraphRegistryNotReady)
 	}
 	visited := make(map[string]struct{})
 	exclude := make(map[string]struct{})
@@ -161,7 +172,7 @@ func collectRunSubtreeManifestExcludeKeys(
 		},
 	}
 
-	if err := WalkNamespaceSnapshotContentSubtreeWithRegistry(ctx, c, rootNSCName, visitNSC, reg, hooks); err != nil {
+	if err := WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh(ctx, c, rootNSCName, visitNSC, live, hooks); err != nil {
 		return nil, err
 	}
 
@@ -171,7 +182,7 @@ func collectRunSubtreeManifestExcludeKeys(
 		if ns == "" {
 			ns = rootNS.Namespace
 		}
-		resolved, err := ResolveChildSnapshotToBoundContentName(ctx, c, reg, ns, ch.Name)
+		resolved, err := ResolveChildSnapshotToBoundContentNameLive(ctx, c, live, ns, ch.Name)
 		if err != nil {
 			return nil, err
 		}

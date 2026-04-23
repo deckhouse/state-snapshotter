@@ -38,6 +38,7 @@ func TestProductionSourcesDoNotNameDemoSnapshotKinds(t *testing.T) {
 		".",
 		filepath.Join("..", "controllers"),
 		filepath.Join("..", "api"),
+		filepath.Join("..", "..", "pkg", "snapshotgraphregistry"),
 	}
 	for _, root := range roots {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {

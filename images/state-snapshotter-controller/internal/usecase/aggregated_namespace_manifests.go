@@ -49,15 +49,16 @@ func NewAggregatedStatusError(httpStatus int, reason, message string) *Aggregate
 
 // AggregatedNamespaceManifests builds a single JSON array of manifest objects for a NamespaceSnapshot subtree.
 type AggregatedNamespaceManifests struct {
-	client      client.Client
-	archive     *ArchiveService
-	graphReader snapshotgraphregistry.Reader
+	client    client.Client
+	archive   *ArchiveService
+	graphLive snapshotgraphregistry.LiveReader
 }
 
 // NewAggregatedNamespaceManifests creates an aggregated-manifests service for the manifests subresource.
-// graphReader supplies DSC/bootstrap snapshot↔content pairs so heterogeneous childrenSnapshotContentRefs can be traversed without domain imports.
-func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphReader snapshotgraphregistry.Reader) *AggregatedNamespaceManifests {
-	return &AggregatedNamespaceManifests{client: c, archive: a, graphReader: graphReader}
+// graphLive supplies DSC/bootstrap snapshot↔content pairs so heterogeneous childrenSnapshotContentRefs can be traversed without domain imports,
+// with at most one TryRefresh on an unregistered dedicated-content ref (same contract as E5 subtree walk).
+func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphLive snapshotgraphregistry.LiveReader) *AggregatedNamespaceManifests {
+	return &AggregatedNamespaceManifests{client: c, archive: a, graphLive: graphLive}
 }
 
 // BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../namespace-snapshot-aggregated-manifests-pr4.md
@@ -188,18 +189,16 @@ func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName stri
 	}
 	var err error
 	switch {
-	case s.graphReader != nil:
-		reg := s.graphReader.Current()
-		if reg == nil {
-			return NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady",
-				"snapshot graph registry is not ready yet; retry after DSC/bootstrap registry refresh")
-		}
-		err = walkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visited, visit, reg, nil)
+	case s.graphLive != nil:
+		err = WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh(ctx, s.client, nscName, visit, s.graphLive, nil)
 	default:
 		err = WalkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visit)
 	}
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady) {
+		return NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady", err.Error())
 	}
 	if errors.Is(err, ErrNamespaceSnapshotContentCycle) {
 		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())

@@ -19,6 +19,7 @@ package snapshotgraphregistry
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
@@ -36,13 +37,17 @@ type Reader interface {
 }
 
 // Provider holds the latest graph GVK registry, rebuilt on Refresh (e.g. after DSC reconcile).
+// Current() is lock-free and always returns a fully built *GVKRegistry pointer or nil (atomic load).
+// Refresh/TryRefresh serialize concurrent rebuilds (singleflight-style mutex); the new registry is
+// swapped atomically so readers never observe a half-written registry.
 type Provider struct {
 	cfg    *config.Options
 	mapper meta.RESTMapper
 	reader client.Reader
 	log    logr.Logger
 
-	reg atomic.Pointer[snapshot.GVKRegistry]
+	refreshMu sync.Mutex
+	reg       atomic.Pointer[snapshot.GVKRegistry]
 }
 
 // NewProvider constructs a provider. Call Refresh before relying on Current(); until then Current() may be nil.
@@ -75,6 +80,17 @@ func (p *Provider) Current() *snapshot.GVKRegistry {
 
 // Refresh rebuilds the registry from bootstrap + eligible DSC + RESTMapper and atomically swaps Current().
 func (p *Provider) Refresh(ctx context.Context) error {
+	return p.refresh(ctx)
+}
+
+// TryRefresh implements LiveReader; same semantics as Refresh (one full rebuild, atomic swap).
+func (p *Provider) TryRefresh(ctx context.Context) error {
+	return p.refresh(ctx)
+}
+
+func (p *Provider) refresh(ctx context.Context) error {
+	p.refreshMu.Lock()
+	defer p.refreshMu.Unlock()
 	reg, err := BuildRegistry(ctx, p.mapper, p.reader, p.cfg, p.log)
 	if err != nil {
 		return err
@@ -85,5 +101,7 @@ func (p *Provider) Refresh(ctx context.Context) error {
 
 // ReplaceCurrent swaps the registry without rebuilding (integration tests that augment pairs after Refresh).
 func (p *Provider) ReplaceCurrent(reg *snapshot.GVKRegistry) {
+	p.refreshMu.Lock()
+	defer p.refreshMu.Unlock()
 	p.reg.Store(reg)
 }

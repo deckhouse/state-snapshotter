@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,6 +43,13 @@ import (
 
 const labelNamespaceSnapshotUID = "state-snapshotter.deckhouse.io/namespace-snapshot-uid"
 
+// annotationMCRDriftRecoveryCount counts automatic MCR deletions after CapturePlanDrift in subtree (E5) mode
+// to avoid a tight reconcile loop if exclude never converges.
+const (
+	annotationMCRDriftRecoveryCount = "state-snapshotter.deckhouse.io/mcr-drift-recovery-count"
+	maxMCRDriftRecoveryAttempts     = 8
+)
+
 // errManifestCapturePlanDrift is returned when an existing MCR for this NamespaceSnapshot has a different
 // target set than the current namespace listing; MCR spec is not silently rewritten.
 var errManifestCapturePlanDrift = errors.New("manifest capture plan drift")
@@ -61,6 +69,24 @@ func (r *NamespaceSnapshotReconciler) deleteNamespaceSnapshotManifestCaptureRequ
 		return fmt.Errorf("delete ManifestCaptureRequest %s: %w", key.String(), err)
 	}
 	return nil
+}
+
+// clearMCRDriftRecoveryCountIfPresent removes the drift-recovery counter after a successful exclude/target build
+// so a later unrelated drift episode gets a fresh budget.
+func (r *NamespaceSnapshotReconciler) clearMCRDriftRecoveryCountIfPresent(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) error {
+	fresh := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, fresh); err != nil {
+		return err
+	}
+	if fresh.Annotations == nil || fresh.Annotations[annotationMCRDriftRecoveryCount] == "" {
+		return nil
+	}
+	base := fresh.DeepCopy()
+	delete(fresh.Annotations, annotationMCRDriftRecoveryCount)
+	if len(fresh.Annotations) == 0 {
+		fresh.Annotations = nil
+	}
+	return r.Client.Patch(ctx, fresh, client.MergeFrom(base))
 }
 
 // reconcileCaptureN2a drives manifest capture via MCR→ManifestCheckpoint after root NamespaceSnapshotContent is bound.
@@ -93,11 +119,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return res, err
 	}
 
-	var graphReg *snapshot.GVKRegistry
-	if r.SnapshotGraphRegistry != nil {
-		graphReg = r.SnapshotGraphRegistry.Current()
-	}
-	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, graphReg, nsSnap, content.Name)
+	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, r.SnapshotGraphRegistry, nsSnap, content.Name)
 	if err != nil {
 		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding
 		// (N2b synthetic scaffold); do not fail capture as ListFailed — requeue like ChildSnapshotPending.
@@ -134,6 +156,9 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	if len(targets) == 0 {
 		return r.failCapture(ctx, nsSnap, content, "NoCaptureTargets", "namespace has no resources matching the manifest capture allowlist (see design §4.5)")
 	}
+	if err := r.clearMCRDriftRecoveryCountIfPresent(ctx, nsSnap); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
@@ -141,6 +166,23 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 			// E5 subtree exclude: stale MCR from before exclude set converged — delete and requeue (no manual delete).
 			// Plain N2a namespace drift (no childrenSnapshotRefs) keeps terminal CapturePlanDrift for operator visibility.
 			if len(nsSnap.Status.ChildrenSnapshotRefs) > 0 {
+				fresh := &storagev1alpha1.NamespaceSnapshot{}
+				if err := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, fresh); err != nil {
+					return ctrl.Result{}, err
+				}
+				n, _ := strconv.Atoi(fresh.Annotations[annotationMCRDriftRecoveryCount])
+				if n >= maxMCRDriftRecoveryAttempts {
+					return r.failCapture(ctx, nsSnap, content, "MCRDriftLoop",
+						fmt.Sprintf("automatic MCR drift recovery exceeded %d attempts; inspect subtree exclude readiness or delete NamespaceSnapshot/MCR manually", maxMCRDriftRecoveryAttempts))
+				}
+				base := fresh.DeepCopy()
+				if fresh.Annotations == nil {
+					fresh.Annotations = map[string]string{}
+				}
+				fresh.Annotations[annotationMCRDriftRecoveryCount] = strconv.Itoa(n + 1)
+				if err := r.Client.Patch(ctx, fresh, client.MergeFrom(base)); err != nil {
+					return ctrl.Result{}, err
+				}
 				if delErr := r.deleteNamespaceSnapshotManifestCaptureRequest(ctx, nsSnap); delErr != nil {
 					return ctrl.Result{}, delErr
 				}
