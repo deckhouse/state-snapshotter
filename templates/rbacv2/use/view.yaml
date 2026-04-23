@@ -4,17 +4,15 @@ metadata:
   labels:
     heritage: deckhouse
     module: state-snapshotter
-    rbac.deckhouse.io/aggregate-to-kubernetes-as: manager
+    rbac.deckhouse.io/aggregate-to-kubernetes-as: viewer
     rbac.deckhouse.io/kind: use
-  name: d8:use:capability:state-snapshotter:manage_resources
+  name: d8:use:capability:module:state-snapshotter:view
 rules:
   - apiGroups:
       - state-snapshotter.deckhouse.io
     resources:
       - manifestcapturerequests
     verbs:
-      - create
-      - update
-      - patch
-      - delete
-      - deletecollection
+      - get
+      - list
+      - watch

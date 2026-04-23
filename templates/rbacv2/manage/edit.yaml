@@ -8,7 +8,7 @@ metadata:
     rbac.deckhouse.io/kind: manage
     rbac.deckhouse.io/level: module
     rbac.deckhouse.io/namespace: d8-state-snapshotter
-  name: d8:manage:permission:module:state-snapshotter:manage_resources
+  name: d8:manage:permission:module:state-snapshotter:edit
 rules:
   - apiGroups:
       - state-snapshotter.deckhouse.io
