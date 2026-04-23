@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    rbac.deckhouse.io/aggregate-to-storage-as: manager
+    rbac.deckhouse.io/kind: manage
+    rbac.deckhouse.io/level: module
+    rbac.deckhouse.io/namespace: d8-state-snapshotter
+  name: d8:manage:permission:module:state-snapshotter:edit
+rules:
+  - apiGroups:
+      - state-snapshotter.deckhouse.io
+    resources:
+      - manifestcheckpoints
+      - manifestcheckpointcontentchunks
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
