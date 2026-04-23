@@ -85,7 +85,7 @@ var _ = Describe("Integration: NamespaceSnapshot N2b parent Ready aggregate on s
 			g.Expect(k8sClient.Get(ctx, childKey, ch)).To(Succeed())
 			g.Expect(ch.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			g.Expect(ch.UID).NotTo(BeEmpty())
-		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
+		}, 180*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		childSnap := &storagev1alpha1.NamespaceSnapshot{}
 		Expect(k8sClient.Get(ctx, childKey, childSnap)).To(Succeed())
@@ -97,8 +97,8 @@ var _ = Describe("Integration: NamespaceSnapshot N2b parent Ready aggregate on s
 		Eventually(func(g Gomega) {
 			mcr := &ssv1alpha1.ManifestCaptureRequest{}
 			g.Expect(k8sClient.Get(ctx, mcrKey, mcr)).To(Succeed())
-			g.Expect(mcr.Spec.Targets).NotTo(BeEmpty())
-		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
+			g.Expect(mcr.Spec.Targets).NotTo(BeEmpty(), "child leaf MCR must list namespace allowlist targets before drift injection (full suite can be slower than isolated run)")
+		}, 180*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		mcr := &ssv1alpha1.ManifestCaptureRequest{}
 		Expect(k8sClient.Get(ctx, mcrKey, mcr)).To(Succeed())

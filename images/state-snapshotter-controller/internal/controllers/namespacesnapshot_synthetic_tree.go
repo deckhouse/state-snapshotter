@@ -229,24 +229,29 @@ func mapSyntheticChildSnapshotToParent(_ context.Context, o client.Object) []rec
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: parentName}}}
 }
 
-// reconcileSyntheticChildTree runs after parent N2a manifest capture has persisted (MCP on parent NSC).
-// It does not alter N2a capture itself; it only adds graph + readiness gating on the parent root.
-func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
+// ensureSyntheticChildSubtreeScaffold creates the temporary synthetic child NamespaceSnapshot (if needed) and
+// wires status.childrenSnapshotRefs plus root NamespaceSnapshotContent.status.childrenSnapshotContentRefs before
+// the first root ManifestCaptureRequest. That way E5 subtree exclude applies to the first capture plan instead of
+// relying on post–MCP drift. Idempotent.
+//
+// Returns (proceedWithCapture, result, err): when proceedWithCapture is false, the caller must return result.
+func (r *NamespaceSnapshotReconciler) ensureSyntheticChildSubtreeScaffold(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
 	parentContent *storagev1alpha1.NamespaceSnapshotContent,
-) (ctrl.Result, error) {
+) (proceedWithCapture bool, res ctrl.Result, err error) {
+	if !parentRequestsSyntheticChildTree(nsSnap) {
+		return true, ctrl.Result{}, nil
+	}
 	logger := log.FromContext(ctx)
-	mcpName := parentContent.Status.ManifestCheckpointName
 	parentKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-
 	childName := namespacemanifest.NamespaceSnapshotSyntheticChildName(nsSnap.Name)
 	childKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: childName}
 	child := &storagev1alpha1.NamespaceSnapshot{}
 
-	err := r.Client.Get(ctx, childKey, child)
+	getErr := r.Client.Get(ctx, childKey, child)
 	switch {
-	case apierrors.IsNotFound(err):
+	case apierrors.IsNotFound(getErr):
 		child = &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      childName,
@@ -261,17 +266,17 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
 		}
 		if err := r.Client.Create(ctx, child); err != nil {
 			if apierrors.IsAlreadyExists(err) {
-				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+				return false, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 			}
-			return ctrl.Result{}, err
+			return false, ctrl.Result{}, err
 		}
 		logger.Info("created synthetic child NamespaceSnapshot (temporary N2b tree scaffold)", "parent", nsSnap.Name, "child", childName)
-		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-	case err != nil:
-		return ctrl.Result{}, err
+		return false, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+	case getErr != nil:
+		return false, ctrl.Result{}, getErr
 	default:
 		if err := validateSyntheticChildLabelsForParent(child, nsSnap); err != nil {
-			return ctrl.Result{}, err
+			return false, ctrl.Result{}, err
 		}
 	}
 
@@ -280,21 +285,22 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
 	}
 	updated, err := r.patchParentRootChildrenRefsIfNeeded(ctx, parentKey, wantRootRefs)
 	if err != nil {
-		return ctrl.Result{}, err
+		return false, ctrl.Result{}, err
 	}
 	if updated {
-		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+		return false, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	}
 
 	if err := r.Client.Get(ctx, childKey, child); err != nil {
-		return ctrl.Result{}, err
+		return false, ctrl.Result{}, err
 	}
 	if err := validateSyntheticChildLabelsForParent(child, nsSnap); err != nil {
-		return ctrl.Result{}, err
+		return false, ctrl.Result{}, err
 	}
 	if child.Status.BoundSnapshotContentName == "" {
 		agg := evaluateSyntheticRequiredChildState(child)
-		return r.patchParentSyntheticChildAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
+		res, err := r.patchParentSyntheticChildAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
+		return false, res, err
 	}
 
 	wantContentRefs := []storagev1alpha1.NamespaceSnapshotContentChildRef{
@@ -303,12 +309,36 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
 	contentName := parentContent.Name
 	updated, err = r.patchParentContentChildRefsIfNeeded(ctx, contentName, wantContentRefs)
 	if err != nil {
-		return ctrl.Result{}, err
+		return false, ctrl.Result{}, err
 	}
 	if updated {
-		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+		return false, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	}
 
+	return true, ctrl.Result{}, nil
+}
+
+// reconcileSyntheticChildTree runs after parent N2a manifest capture has persisted (MCP on parent NSC).
+// It does not alter N2a capture itself; it only adds graph + readiness gating on the parent root.
+func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.NamespaceSnapshot,
+	parentContent *storagev1alpha1.NamespaceSnapshotContent,
+) (ctrl.Result, error) {
+	mcpName := parentContent.Status.ManifestCheckpointName
+	parentKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+
+	proceed, res, err := r.ensureSyntheticChildSubtreeScaffold(ctx, nsSnap, parentContent)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !proceed {
+		return res, nil
+	}
+
+	childName := namespacemanifest.NamespaceSnapshotSyntheticChildName(nsSnap.Name)
+	childKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: childName}
+	child := &storagev1alpha1.NamespaceSnapshot{}
 	if err := r.Client.Get(ctx, childKey, child); err != nil {
 		return ctrl.Result{}, err
 	}

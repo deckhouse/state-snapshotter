@@ -202,15 +202,24 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 	}
 
-	// Validate targets
+	// Validate targets: a generic MCR with no targets is invalid. NamespaceSnapshot-bound capture may
+	// legitimately have an empty target list after E5 subtree exclude (child MCP already captured the whole allowlist).
 	if len(mcr.Spec.Targets) == 0 {
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, "No targets specified"); err != nil {
-			if errors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, err
+		boundNSC := ""
+		if mcr.Annotations != nil {
+			boundNSC = mcr.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent]
 		}
-		return ctrl.Result{}, nil
+		if boundNSC == "" {
+			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, "No targets specified"); err != nil {
+				if errors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		r.Logger.Info("ManifestCaptureRequest has zero targets for NamespaceSnapshot-bound capture (subtree exclude); creating empty checkpoint",
+			"mcr", client.ObjectKeyFromObject(mcr).String(), "boundNamespaceSnapshotContent", boundNSC)
 	}
 
 	// Collect all target objects

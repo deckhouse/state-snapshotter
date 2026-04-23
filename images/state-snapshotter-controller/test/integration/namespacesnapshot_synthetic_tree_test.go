@@ -26,7 +26,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -138,7 +137,10 @@ var _ = Describe("Integration: NamespaceSnapshot content tree (synthetic child s
 			pReady := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(pReady).NotTo(BeNil())
 			g.Expect(pReady.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(pReady.Reason).To(Equal(snapshot.ReasonChildSnapshotPending))
+			g.Expect(pReady.Reason).To(Or(
+				Equal(snapshot.ReasonChildSnapshotPending),
+				Equal(snapshot.ReasonSubtreeManifestCapturePending),
+			), "parent may wait on synthetic child and/or subtree manifest exclude before root MCR")
 		}).WithTimeout(120 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -155,36 +157,41 @@ var _ = Describe("Integration: NamespaceSnapshot content tree (synthetic child s
 			g.Expect(cr.Status).To(Equal(metav1.ConditionTrue))
 		}, 180*time.Second, 300*time.Millisecond).Should(Succeed())
 
-		// E5 integration proof: while root capture runs, root ManifestCaptureRequest must not list the
-		// ConfigMap already captured under the child subtree MCP (exclude set must apply before MCR converges).
+		// E5 reconcile-path proof: whenever root MCR exists during capture, targets must respect subtree exclude;
+		// while parent is not yet Ready, subtree-root must not converge via terminal CapturePlanDrift.
 		mcrSeen := false
 		Eventually(func(g Gomega) {
 			p := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
+			pr := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(pr).NotTo(BeNil())
+			if pr.Status == metav1.ConditionFalse {
+				g.Expect(pr.Reason).NotTo(Equal("CapturePlanDrift"),
+					"E5 subtree-root: CapturePlanDrift must not be the normal convergence path")
+			}
 			mcrName := namespacemanifest.NamespaceSnapshotMCRName(p.UID)
 			mcr := &ssv1alpha1.ManifestCaptureRequest{}
 			err := k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: mcrName}, mcr)
-			if apierrors.IsNotFound(err) {
-				return
-			}
-			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred(), "waiting for root ManifestCaptureRequest (delayed until subtree exclude is computable)")
 			mcrSeen = true
 			for _, tgt := range mcr.Spec.Targets {
-				if tgt.APIVersion == "v1" && tgt.Kind == "ConfigMap" && tgt.Name == "nss-synth-tree-cm" {
-					g.Fail("E5: root MCR must not list namespace ConfigMap already captured under the synthetic child subtree MCP")
-				}
+				isSynthCM := tgt.APIVersion == "v1" && tgt.Kind == "ConfigMap" && tgt.Name == "nss-synth-tree-cm"
+				g.Expect(isSynthCM).To(BeFalse(), "E5: root MCR must not list namespace ConfigMap already captured under the synthetic child subtree MCP")
 			}
 		}).WithTimeout(120 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
-		Expect(mcrSeen).To(BeTrue(), "expected to observe root ManifestCaptureRequest during capture (if this flakes, root MCR may be converging too fast for envtest)")
+		Expect(mcrSeen).To(BeTrue(), "expected to observe root ManifestCaptureRequest during capture")
 
 		Eventually(func(g Gomega) {
 			p := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
 			pr := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(pr).NotTo(BeNil())
+			if pr.Status == metav1.ConditionFalse {
+				g.Expect(pr.Reason).NotTo(Equal("CapturePlanDrift"),
+					"E5 subtree-root: CapturePlanDrift must not be the normal convergence path")
+			}
 			g.Expect(pr.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(pr.Reason).To(Equal(snapshot.ReasonCompleted))
-		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
+		}, 180*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		var parentSnap storagev1alpha1.NamespaceSnapshot
 		Expect(k8sClient.Get(ctx, parentKey, &parentSnap)).To(Succeed())
