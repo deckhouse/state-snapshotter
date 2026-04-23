@@ -44,6 +44,15 @@ var (
 // NamespaceSnapshot has status.childrenSnapshotRefs, subtracts manifest objects already captured
 // in descendant NamespaceSnapshotContent ManifestCheckpoints reachable only via that ref graph.
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
+//
+// Current slice limitations (not final universal contract):
+//   - When status.childrenSnapshotRefs is empty, behavior matches legacy root capture: full namespace
+//     allowlist without subtree exclude (transition mode; not graph-first for that case).
+//   - resolveChildSnapshotContentName is hardcoded to NamespaceSnapshot, DemoVirtualDiskSnapshot, and
+//     DemoVirtualMachineSnapshot until a generic child resolution exists in API/spec.
+//
+// If a root MCR was created before a descendant MCP became readable, spec.targets may be stale until the
+// operator deletes the MCR (CapturePlanDrift); exclude is applied on the next create from a fresh plan.
 func BuildRootNamespaceManifestCaptureTargets(
 	ctx context.Context,
 	arch *ArchiveService,
