@@ -53,7 +53,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
-	snapreg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -83,29 +83,6 @@ func init() {
 	flag.StringVar(&apiTLSCertFile, "api-tls-cert-file", "", "Path to TLS certificate file for API server")
 	flag.StringVar(&apiTLSKeyFile, "api-tls-private-key-file", "", "Path to TLS private key file for API server")
 	flag.StringVar(&apiAllowedClientCNs, "api-allowed-client-cns", "system:kube-apiserver,kubernetes,front-proxy-client", "Comma-separated list of allowed client certificate CNs for mTLS")
-}
-
-// buildSnapshotGraphGVKRegistryOrNil builds a GVK registry from bootstrap + eligible DSC pairs for generic
-// NamespaceSnapshot graph / E5 resolution (no hardcoded domain snapshot types in usecase).
-func buildSnapshotGraphGVKRegistryOrNil(ctx context.Context, kConfig *rest.Config, scheme *runtime.Scheme, mgr ctrl.Manager, cfgParams *config.Options, log logger.LoggerInterface) *snapreg.GVKRegistry {
-	bootstrapClient, err := client.New(kConfig, client.Options{Scheme: scheme, Mapper: mgr.GetRESTMapper()})
-	if err != nil {
-		log.Error(err, "[main] graph registry: client.New")
-		return nil
-	}
-	dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, bootstrapClient)
-	if err != nil {
-		log.Info("[main] graph registry: DSC list failed; bootstrap-only merge", "error", err)
-		dscPairs = nil
-	}
-	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(cfgParams.EffectiveUnifiedBootstrapPairs(), dscPairs)
-	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(mgr.GetRESTMapper(), merged, ctrl.Log.WithName("snapshot-graph-registry"))
-	reg, err := snapreg.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
-	if err != nil {
-		log.Error(err, "[main] graph registry: NewGVKRegistryFromParallelSnapshotContentPairs")
-		return nil
-	}
-	return reg
 }
 
 func main() {
@@ -208,7 +185,15 @@ func main() {
 	}
 	log.Info("[main] successfully created kubernetes manager")
 
-	graphGVKRegistry := buildSnapshotGraphGVKRegistryOrNil(ctx, kConfig, scheme, mgr, cfgParams, log)
+	graphRegProvider, err := snapshotgraphregistry.NewProvider(cfgParams, mgr.GetRESTMapper(), mgr.GetAPIReader(), ctrl.Log.WithName("snapshot-graph-registry"))
+	if err != nil {
+		log.Error(err, "[main] snapshot graph registry provider")
+		cancel()
+		os.Exit(1)
+	}
+	if err := graphRegProvider.Refresh(ctx); err != nil {
+		log.Warning("initial snapshot graph registry refresh failed (generic graph may be empty until DSC reconcile)", "error", err)
+	}
 
 	// Add controllers
 	if err := controllers.AddManifestCheckpointControllerToManager(mgr, log, cfgParams); err != nil {
@@ -298,7 +283,7 @@ func main() {
 		}
 		log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(genericContentGVKs))
 
-		if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams, graphGVKRegistry); err != nil {
+		if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
 			log.Error(err, "Failed to add NamespaceSnapshotController to manager")
 			cancel()
 			os.Exit(1)
@@ -337,7 +322,7 @@ func main() {
 		unifiedSyncFn = unifiedSync.Sync
 	}
 
-	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams, unifiedSyncFn); err != nil {
+	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams, unifiedSyncFn, graphRegProvider.Refresh); err != nil {
 		log.Error(err, "Failed to add DomainSpecificSnapshotController reconciler to manager")
 		cancel()
 		os.Exit(1)
@@ -446,7 +431,7 @@ func main() {
 		}
 	}
 
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphGVKRegistry, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList)
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList)
 	if apiServer == nil {
 		log.Error(nil, "[main] Failed to create API server (mTLS configuration failed)")
 		cancel() // Ensure cleanup before exit

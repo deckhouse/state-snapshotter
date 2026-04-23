@@ -64,7 +64,7 @@
 | E2E (envtest) | Сборка manager |
 | Smoke | Реальный кластер (`./test-smoke.sh`, `hack/pr4-smoke.sh` для NamespaceSnapshot retained) |
 
-**Integration (DSC + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются DSC reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible DSC на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
+**Integration (DSC + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются DSC reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible DSC на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync, graphRegistryRefresh)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
 
 | Файл | Что проверяет |
 |------|----------------|

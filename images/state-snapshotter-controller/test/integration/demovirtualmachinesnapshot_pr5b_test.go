@@ -249,7 +249,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			func(_ context.Context, _ *storagev1alpha1.NamespaceSnapshotContent) error {
 				return nil
 			},
-			integrationGraphGVKRegistry, hooks,
+			integrationGraphRegProvider.Current(), hooks,
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(vmVisited).To(ContainElement(vmContentName))

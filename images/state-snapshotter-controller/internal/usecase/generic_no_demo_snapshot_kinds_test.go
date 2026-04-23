@@ -34,25 +34,38 @@ func TestProductionSourcesDoNotNameDemoSnapshotKinds(t *testing.T) {
 		"DemoVirtualDiskSnapshotContent",
 		"DemoVirtualMachineSnapshotContent",
 	}
-	err := filepath.Walk(".", func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil || info.IsDir() {
-			return walkErr
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		b, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
-		}
-		for _, f := range forbidden {
-			if bytes.Contains(b, []byte(f)) {
-				t.Errorf("%s must not contain demo-only snapshot identifier %q", path, f)
+	roots := []string{
+		".",
+		filepath.Join("..", "controllers"),
+		filepath.Join("..", "api"),
+	}
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil || info.IsDir() {
+				return walkErr
 			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			if strings.Contains(path, string(filepath.Separator)+"controllers"+string(filepath.Separator)) {
+				base := filepath.Base(path)
+				if !strings.HasPrefix(base, "namespacesnapshot_") {
+					return nil
+				}
+			}
+			b, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			for _, f := range forbidden {
+				if bytes.Contains(b, []byte(f)) {
+					t.Errorf("%s must not contain demo-only snapshot identifier %q", path, f)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 }

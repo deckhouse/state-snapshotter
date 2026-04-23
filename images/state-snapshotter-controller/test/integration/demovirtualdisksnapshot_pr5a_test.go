@@ -189,7 +189,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 				nscVisited = append(nscVisited, nsc.Name)
 				return nil
 			},
-			integrationGraphGVKRegistry, hooks,
+			integrationGraphRegProvider.Current(), hooks,
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(nscVisited).NotTo(BeEmpty())

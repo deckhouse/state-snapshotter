@@ -30,7 +30,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
 // AggregatedStatusError carries HTTP status for NamespaceSnapshot aggregated manifests (see spec doc linked on BuildAggregatedJSON).
@@ -49,15 +49,15 @@ func NewAggregatedStatusError(httpStatus int, reason, message string) *Aggregate
 
 // AggregatedNamespaceManifests builds a single JSON array of manifest objects for a NamespaceSnapshot subtree.
 type AggregatedNamespaceManifests struct {
-	client   client.Client
-	archive  *ArchiveService
-	graphReg *snapshot.GVKRegistry
+	client      client.Client
+	archive     *ArchiveService
+	graphReader snapshotgraphregistry.Reader
 }
 
 // NewAggregatedNamespaceManifests creates an aggregated-manifests service for the manifests subresource.
-// graphReg lists DSC/bootstrap snapshot↔content pairs so heterogeneous childrenSnapshotContentRefs can be traversed without domain imports.
-func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphReg *snapshot.GVKRegistry) *AggregatedNamespaceManifests {
-	return &AggregatedNamespaceManifests{client: c, archive: a, graphReg: graphReg}
+// graphReader supplies DSC/bootstrap snapshot↔content pairs so heterogeneous childrenSnapshotContentRefs can be traversed without domain imports.
+func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphReader snapshotgraphregistry.Reader) *AggregatedNamespaceManifests {
+	return &AggregatedNamespaceManifests{client: c, archive: a, graphReader: graphReader}
 }
 
 // BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../namespace-snapshot-aggregated-manifests-pr4.md
@@ -187,9 +187,15 @@ func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName stri
 		return nil
 	}
 	var err error
-	if s.graphReg != nil {
-		err = walkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visited, visit, s.graphReg, nil)
-	} else {
+	switch {
+	case s.graphReader != nil:
+		reg := s.graphReader.Current()
+		if reg == nil {
+			return NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady",
+				"snapshot graph registry is not ready yet; retry after DSC/bootstrap registry refresh")
+		}
+		err = walkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visited, visit, reg, nil)
+	default:
 		err = WalkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visit)
 	}
 	if err == nil {

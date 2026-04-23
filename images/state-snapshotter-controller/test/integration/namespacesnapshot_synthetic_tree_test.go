@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -127,12 +129,10 @@ var _ = Describe("Integration: NamespaceSnapshot content tree (synthetic child s
 			g.Expect(bound.Status).To(Equal(metav1.ConditionTrue))
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
+		// Parent must report ChildSnapshotPending while the subtree is in flight. Do not require the child to
+		// still be non-Ready in the same poll: reconcile can be fast enough that the child flips to Ready before
+		// the test observes the conjunction (race under envtest).
 		Eventually(func(g Gomega) {
-			c := &storagev1alpha1.NamespaceSnapshot{}
-			g.Expect(k8sClient.Get(ctx, childKey, c)).To(Succeed())
-			g.Expect(c.Status.BoundSnapshotContentName).NotTo(BeEmpty())
-			cReady := meta.FindStatusCondition(c.Status.Conditions, snapshot.ConditionReady)
-			g.Expect(cReady == nil || cReady.Status != metav1.ConditionTrue).To(BeTrue())
 			p := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
 			pReady := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
@@ -144,10 +144,38 @@ var _ = Describe("Integration: NamespaceSnapshot content tree (synthetic child s
 		Eventually(func(g Gomega) {
 			c := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, childKey, c)).To(Succeed())
+			g.Expect(c.Status.BoundSnapshotContentName).NotTo(BeEmpty())
+		}, 30*time.Second, 100*time.Millisecond).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			c := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, childKey, c)).To(Succeed())
 			cr := meta.FindStatusCondition(c.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(cr).NotTo(BeNil())
 			g.Expect(cr.Status).To(Equal(metav1.ConditionTrue))
 		}, 180*time.Second, 300*time.Millisecond).Should(Succeed())
+
+		// E5 integration proof: while root capture runs, root ManifestCaptureRequest must not list the
+		// ConfigMap already captured under the child subtree MCP (exclude set must apply before MCR converges).
+		mcrSeen := false
+		Eventually(func(g Gomega) {
+			p := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
+			mcrName := namespacemanifest.NamespaceSnapshotMCRName(p.UID)
+			mcr := &ssv1alpha1.ManifestCaptureRequest{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: mcrName}, mcr)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+			mcrSeen = true
+			for _, tgt := range mcr.Spec.Targets {
+				if tgt.APIVersion == "v1" && tgt.Kind == "ConfigMap" && tgt.Name == "nss-synth-tree-cm" {
+					g.Fail("E5: root MCR must not list namespace ConfigMap already captured under the synthetic child subtree MCP")
+				}
+			}
+		}).WithTimeout(120 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Expect(mcrSeen).To(BeTrue(), "expected to observe root ManifestCaptureRequest during capture (if this flakes, root MCR may be converging too fast for envtest)")
 
 		Eventually(func(g Gomega) {
 			p := &storagev1alpha1.NamespaceSnapshot{}

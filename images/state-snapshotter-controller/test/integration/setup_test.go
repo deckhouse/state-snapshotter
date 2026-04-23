@@ -21,15 +21,18 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,6 +52,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -64,8 +68,74 @@ var (
 	scheme                      *runtime.Scheme
 	testCfg                     *config.Options
 	unifiedSyncer               *unifiedruntime.Syncer
-	integrationGraphGVKRegistry *snapshot.GVKRegistry
+	integrationGraphRegProvider *snapshotgraphregistry.Provider
+	integrationGraphAppendDemo  = true
 )
+
+// integrationParallelSnapshotGraphGVKs returns resolved snapshot↔content GVK slices merged from bootstrap,
+// eligible DSC, RESTMapper, and (when integrationGraphAppendDemo) demo pairs for envtest parity.
+func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
+	dscPairs, derr := dscregistry.EligibleUnifiedGVKPairs(ctx, mgr.GetAPIReader())
+	if derr != nil {
+		dscPairs = nil
+	}
+	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(testCfg.EffectiveUnifiedBootstrapPairs(), dscPairs)
+	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+		mgr.GetRESTMapper(),
+		merged,
+		ctrl.Log.WithName("integration-unified-bootstrap"),
+	)
+	if integrationGraphAppendDemo {
+		snapGVKs, contentGVKs = appendResolvedDemoSnapshotGraphPairs(mgr.GetRESTMapper(), snapGVKs, contentGVKs)
+	}
+	return snapGVKs, contentGVKs, nil
+}
+
+// integrationSnapshotGraphRegistryRefresh rebuilds the integration graph registry (same hook as production DSC→refresh).
+func integrationSnapshotGraphRegistryRefresh(ctx context.Context) error {
+	if integrationGraphRegProvider == nil {
+		return fmt.Errorf("integration graph registry provider is nil")
+	}
+	snapGVKs, contentGVKs, err := integrationParallelSnapshotGraphGVKs(ctx)
+	if err != nil {
+		return err
+	}
+	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
+	if err != nil {
+		return err
+	}
+	integrationGraphRegProvider.ReplaceCurrent(reg)
+	return nil
+}
+
+// appendResolvedDemoSnapshotGraphPairs merges demo snapshot↔content GVK pairs into the parallel
+// slices used for integrationGraphRegProvider. Production gets these from DSC merge; BeforeSuite
+// runs before per-test DSC objects exist, so demo CRDs alone are not enough for ResolveAvailableUnifiedGVKPairs.
+func appendResolvedDemoSnapshotGraphPairs(mapper meta.RESTMapper, snapGVKs, contentGVKs []schema.GroupVersionKind) ([]schema.GroupVersionKind, []schema.GroupVersionKind) {
+	gv := demov1alpha1.SchemeGroupVersion
+	demoPairs := []unifiedbootstrap.UnifiedGVKPair{
+		{
+			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualDiskSnapshot"},
+			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualDiskSnapshotContent"},
+		},
+		{
+			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualMachineSnapshot"},
+			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualMachineSnapshotContent"},
+		},
+	}
+	s2, c2 := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(mapper, demoPairs, logr.Discard())
+outer:
+	for i := range s2 {
+		for _, ex := range snapGVKs {
+			if ex == s2[i] {
+				continue outer
+			}
+		}
+		snapGVKs = append(snapGVKs, s2[i])
+		contentGVKs = append(contentGVKs, c2[i])
+	}
+	return snapGVKs, contentGVKs
+}
 
 func TestIntegration(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -647,26 +717,15 @@ var _ = BeforeSuite(func() {
 	integrationLog, err := logger.NewLogger("error")
 	Expect(err).NotTo(HaveOccurred())
 
-	dscListingClient, err := client.New(cfg, client.Options{
-		Scheme: scheme,
-		Mapper: mgr.GetRESTMapper(),
-	})
-	Expect(err).NotTo(HaveOccurred())
-	dscPairs, derr := dscregistry.EligibleUnifiedGVKPairs(testCtx, dscListingClient)
-	if derr != nil {
-		dscPairs = nil
-	}
-	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(testCfg.EffectiveUnifiedBootstrapPairs(), dscPairs)
-	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
-		mgr.GetRESTMapper(),
-		merged,
-		ctrl.Log.WithName("integration-unified-bootstrap"),
-	)
+	var errProv error
+	integrationGraphRegProvider, errProv = snapshotgraphregistry.NewProvider(testCfg, mgr.GetRESTMapper(), mgr.GetAPIReader(), ctrl.Log.WithName("integration-graph-registry"))
+	Expect(errProv).NotTo(HaveOccurred())
+	Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())
+
+	snapGVKs, contentGVKs, errPair := integrationParallelSnapshotGraphGVKs(testCtx)
+	Expect(errPair).NotTo(HaveOccurred())
 	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
 	genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
-	var errGraph error
-	integrationGraphGVKRegistry, errGraph = snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
-	Expect(errGraph).NotTo(HaveOccurred())
 	snapshotController, err := controllers.NewSnapshotController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
@@ -690,7 +749,7 @@ var _ = BeforeSuite(func() {
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
-	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg, integrationGraphGVKRegistry)).To(Succeed())
+	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotContentControllerToManager(mgr, testCfg)).To(Succeed())
 	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr)).To(Succeed())
 	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr)).To(Succeed())
@@ -703,7 +762,7 @@ var _ = BeforeSuite(func() {
 		snapshotController,
 		contentController,
 	)
-	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg, unifiedSyncer.Sync)).To(Succeed())
+	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg, unifiedSyncer.Sync, integrationSnapshotGraphRegistryRefresh)).To(Succeed())
 
 	// Create context
 	ctx, cancel = context.WithCancel(testCtx)

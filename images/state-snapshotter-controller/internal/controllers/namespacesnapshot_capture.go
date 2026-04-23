@@ -93,8 +93,42 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return res, err
 	}
 
-	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, r.SnapshotGraphGVKReg, nsSnap, content.Name)
+	var graphReg *snapshot.GVKRegistry
+	if r.SnapshotGraphRegistry != nil {
+		graphReg = r.SnapshotGraphRegistry.Current()
+	}
+	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, graphReg, nsSnap, content.Name)
 	if err != nil {
+		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding
+		// (N2b synthetic scaffold); do not fail capture as ListFailed — requeue like ChildSnapshotPending.
+		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
+			errors.Is(err, usecase.ErrRunGraphChildNotBound) ||
+			errors.Is(err, usecase.ErrRunGraphChildSnapshotNotFound) ||
+			(errors.Is(err, usecase.ErrRunGraphChildNotReachable) &&
+				namespacemanifest.SyntheticChildTreeAnnotationEnabled(nsSnap.Annotations))
+		if transientChildGraph {
+			cur := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshot.ConditionReady)
+			if cur != nil && cur.Reason == snapshot.ReasonChildSnapshotFailed {
+				// Synthetic / N2b aggregate already recorded terminal child failure; do not clobber with capture pending.
+				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+			}
+			meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
+				Type:               snapshot.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             snapshot.ReasonChildSnapshotPending,
+				Message:            err.Error(),
+				ObservedGeneration: nsSnap.Generation,
+			})
+			if uerr := r.Client.Status().Update(ctx, nsSnap); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
+		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) &&
+			namespacemanifest.SyntheticChildTreeAnnotationEnabled(nsSnap.Annotations) {
+			// Let synthetic-child aggregate (ChildSnapshotFailed) own Ready; do not overwrite with ListFailed.
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
 		return r.failCapture(ctx, nsSnap, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}
 	if len(targets) == 0 {
@@ -104,6 +138,14 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
 		if errors.Is(err, errManifestCapturePlanDrift) {
+			// E5 subtree exclude: stale MCR from before exclude set converged — delete and requeue (no manual delete).
+			// Plain N2a namespace drift (no childrenSnapshotRefs) keeps terminal CapturePlanDrift for operator visibility.
+			if len(nsSnap.Status.ChildrenSnapshotRefs) > 0 {
+				if delErr := r.deleteNamespaceSnapshotManifestCaptureRequest(ctx, nsSnap); delErr != nil {
+					return ctrl.Result{}, delErr
+				}
+				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
 			return r.failCapture(ctx, nsSnap, content, "CapturePlanDrift", err.Error())
 		}
 		return ctrl.Result{}, err

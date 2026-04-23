@@ -63,11 +63,14 @@ func AddManifestCheckpointControllerToManager(
 
 // AddDomainSpecificSnapshotControllerToManager registers the DSC reconciler (registry/status).
 // unifiedRuntimeSync is optional; when set, it runs after each successful full DSC reconcile (additive unified watches).
+// graphRegistryRefresh is optional; when set, it runs after reconcileAll and before unifiedRuntimeSync so generic
+// graph code picks up new eligible DSC pairs without restarting the pod.
 func AddDomainSpecificSnapshotControllerToManager(
 	mgr ctrl.Manager,
 	log logger.LoggerInterface,
 	cfg *config.Options,
 	unifiedRuntimeSync func(context.Context) error,
+	graphRegistryRefresh func(context.Context) error,
 ) error {
 	rec, err := NewDomainSpecificSnapshotControllerReconciler(
 		mgr.GetClient(),
@@ -79,5 +82,6 @@ func AddDomainSpecificSnapshotControllerToManager(
 		return err
 	}
 	rec.UnifiedRuntimeSync = unifiedRuntimeSync
+	rec.GraphRegistryRefresh = graphRegistryRefresh
 	return rec.SetupWithManager(mgr)
 }

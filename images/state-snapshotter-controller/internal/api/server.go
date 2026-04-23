@@ -27,7 +27,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -46,7 +46,7 @@ type Server struct {
 // caCert: optional CA certificate bytes for mTLS (if provided, mTLS is mandatory - no fallback)
 // allowedClientCNs: list of allowed client certificate CNs for mTLS (comma-separated)
 // Returns nil if caCert is specified but cannot be parsed
-func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphGVKRegistry *snapshot.GVKRegistry, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string) *Server {
+func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.Reader, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string) *Server {
 	// Create archive service with directClient for all operations
 	// directClient is used for both ManifestCheckpoint and chunks to avoid informer requirements
 	archiveService := usecase.NewArchiveService(directClient, directClient, logger)
@@ -54,7 +54,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	// Create archive handler with directClient for ManifestCheckpoint
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
 	restoreService := restore.NewService(directClient, archiveService)
-	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphGVKRegistry)
+	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
 	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg)
 
 	// Setup routes

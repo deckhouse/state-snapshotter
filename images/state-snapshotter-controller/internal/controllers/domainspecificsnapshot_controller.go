@@ -66,6 +66,9 @@ type DomainSpecificSnapshotControllerReconciler struct {
 
 	// UnifiedRuntimeSync runs after a successful full DSC reconcile (optional). Used for R2 2b/R3 additive watches.
 	UnifiedRuntimeSync func(context.Context) error
+
+	// GraphRegistryRefresh rebuilds the generic NamespaceSnapshot graph GVK registry (optional).
+	GraphRegistryRefresh func(context.Context) error
 }
 
 func NewDomainSpecificSnapshotControllerReconciler(
@@ -100,6 +103,11 @@ func (r *DomainSpecificSnapshotControllerReconciler) Reconcile(ctx context.Conte
 	if err := r.reconcileAll(ctx, list.Items); err != nil {
 		r.Logger.Error(err, "DSC reconcileAll failed")
 		return ctrl.Result{}, err
+	}
+	if r.GraphRegistryRefresh != nil {
+		if err := r.GraphRegistryRefresh(ctx); err != nil {
+			r.Logger.Warning("snapshot graph registry refresh after DSC reconcile failed", "error", err)
+		}
 	}
 	if r.UnifiedRuntimeSync != nil {
 		if err := r.UnifiedRuntimeSync(ctx); err != nil {

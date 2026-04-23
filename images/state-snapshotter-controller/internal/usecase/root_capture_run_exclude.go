@@ -45,6 +45,9 @@ var (
 	// ErrSubtreeManifestCapturePending is returned when exclude cannot be computed yet because a descendant
 	// NamespaceSnapshotContent has no MCP link or the MCP is not Ready (fail-closed: do not create root MCR with an incomplete exclude set).
 	ErrSubtreeManifestCapturePending = errors.New("subtree manifest capture pending for root exclude")
+	// ErrSubtreeManifestCaptureFailed is returned when a descendant ManifestCheckpoint is terminally Failed
+	// (distinct from pending / not Ready yet).
+	ErrSubtreeManifestCaptureFailed = errors.New("subtree manifest capture failed for root exclude")
 )
 
 // BuildRootNamespaceManifestCaptureTargets lists namespace allowlist targets then, when the root
@@ -96,7 +99,7 @@ func collectRunSubtreeManifestExcludeKeys(
 	rootNSCName string,
 ) (map[string]struct{}, error) {
 	if reg == nil {
-		return nil, fmt.Errorf("GVK registry is required when status.childrenSnapshotRefs is non-empty")
+		return nil, fmt.Errorf("GVK registry is required when status.childrenSnapshotRefs is non-empty (graph registry not ready or DSC/bootstrap pairs not merged yet)")
 	}
 	visited := make(map[string]struct{})
 	exclude := make(map[string]struct{})
@@ -119,6 +122,11 @@ func collectRunSubtreeManifestExcludeKeys(
 			return fmt.Errorf("get ManifestCheckpoint %q: %w", nsc.Status.ManifestCheckpointName, err)
 		}
 		readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
+			readyCond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed {
+			return fmt.Errorf("%w: ManifestCheckpoint %q for NamespaceSnapshotContent %q: %s",
+				ErrSubtreeManifestCaptureFailed, nsc.Status.ManifestCheckpointName, nsc.Name, readyCond.Message)
+		}
 		if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
 			return fmt.Errorf("%w: ManifestCheckpoint %q for NamespaceSnapshotContent %q is not Ready (exclude set would be incomplete)",
 				ErrSubtreeManifestCapturePending, nsc.Status.ManifestCheckpointName, nsc.Name)
