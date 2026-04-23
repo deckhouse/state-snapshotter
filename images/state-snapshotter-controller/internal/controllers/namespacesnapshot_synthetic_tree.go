@@ -298,9 +298,19 @@ func (r *NamespaceSnapshotReconciler) ensureSyntheticChildSubtreeScaffold(
 		return false, ctrl.Result{}, err
 	}
 	if child.Status.BoundSnapshotContentName == "" {
-		agg := evaluateSyntheticRequiredChildState(child)
-		res, err := r.patchParentSyntheticChildAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
-		return false, res, err
+		parentForE6 := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, parentKey, parentForE6); err != nil {
+			return false, ctrl.Result{}, err
+		}
+		allClear, res, err := r.reconcileChildrenRefsE6ParentReadyOrPatch(ctx, parentForE6, false, "", false)
+		if err != nil {
+			return false, ctrl.Result{}, err
+		}
+		if !allClear {
+			return false, res, nil
+		}
+		// Child not bound but E6 sees no pending refs (e.g. refs not yet written); keep converging.
+		return false, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	}
 
 	wantContentRefs := []storagev1alpha1.NamespaceSnapshotContentChildRef{
@@ -346,9 +356,16 @@ func (r *NamespaceSnapshotReconciler) reconcileSyntheticChildTree(
 		return ctrl.Result{}, err
 	}
 
-	agg := evaluateSyntheticRequiredChildState(child)
-	if agg.Phase != syntheticChildAggregateReady {
-		return r.patchParentSyntheticChildAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
+	parentFresh := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, parentKey, parentFresh); err != nil {
+		return ctrl.Result{}, err
+	}
+	allClear, res, err := r.reconcileChildrenRefsE6ParentReadyOrPatch(ctx, parentFresh, false, "", true)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !allClear {
+		return res, nil
 	}
 
 	if err := r.patchParentRootReadyAfterSyntheticChild(ctx, parentKey, mcpName); err != nil {

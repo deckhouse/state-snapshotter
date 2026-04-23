@@ -60,14 +60,14 @@ func graphRegistryForRootCapture(t *testing.T) *snapshot.GVKRegistry {
 	return r
 }
 
-func syntheticSnapshotUnstructured(ns, name, boundContent string) *unstructured.Unstructured {
+func syntheticSnapshotUnstructured(name, boundContent string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "generic.state-snapshotter.test",
 		Version: "v1",
 		Kind:    "SyntheticDomainSnapshot",
 	})
-	u.SetNamespace(ns)
+	u.SetNamespace("ns1")
 	u.SetName(name)
 	_ = unstructured.SetNestedField(u.Object, boundContent, "status", "boundSnapshotContentName")
 	return u
@@ -179,7 +179,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
 		Status:     storagev1alpha1.NamespaceSnapshotContentStatus{},
 	}
-	disk := syntheticSnapshotUnstructured("ns1", "disk-a", "missing-from-graph")
+	disk := syntheticSnapshotUnstructured("disk-a", "missing-from-graph")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
@@ -221,7 +221,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	meta.SetStatusCondition(&nscChild.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	disk := syntheticSnapshotUnstructured("ns1", "disk-a", "child-nsc")
+	disk := syntheticSnapshotUnstructured("disk-a", "child-nsc")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{

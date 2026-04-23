@@ -44,9 +44,9 @@ func TestResolveChildSnapshotToBoundContentName_Ambiguous(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := syntheticSnapshotUnstructured("ns1", "same-name", "content-a")
+	a := syntheticSnapshotUnstructured("same-name", "content-a")
 	a.SetGroupVersionKind(schema.GroupVersionKind{Group: "generic.state-snapshotter.test", Version: "v1", Kind: "SyntheticDomainSnapshotA"})
-	b := syntheticSnapshotUnstructured("ns1", "same-name", "content-b")
+	b := syntheticSnapshotUnstructured("same-name", "content-b")
 	b.SetGroupVersionKind(schema.GroupVersionKind{Group: "generic.state-snapshotter.test", Version: "v1", Kind: "SyntheticDomainSnapshotB"})
 
 	cl := fake.NewClientBuilder().WithRuntimeObjects(a, b).Build()

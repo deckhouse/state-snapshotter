@@ -130,12 +130,29 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
-			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
-			g.Expect(rc).NotTo(BeNil())
-			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
+			b := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionBound)
+			g.Expect(b).NotTo(BeNil())
+			g.Expect(b.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(r.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			rootNSC = r.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
+
+		// Domain merge uses NamespaceSnapshotChildRef.name = DemoVirtualMachineSnapshot name ("vm-run").
+		// E6 aggregates typed child NamespaceSnapshot objects only — create the leaf NSS before the demo VM
+		// so root can reach Ready=True/Completed after refs are merged (same name, different kinds).
+		vmLeafNSS := &storagev1alpha1.NamespaceSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "vm-run", Namespace: nsName},
+			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+		}
+		Expect(k8sClient.Create(testCtx, vmLeafNSS)).To(Succeed())
+		Eventually(func(g Gomega) {
+			ch := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "vm-run"}, ch)).To(Succeed())
+			rc := meta.FindStatusCondition(ch.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(rc).NotTo(BeNil())
+			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(rc.Reason).To(Equal(snapshot.ReasonCompleted))
+		}).WithTimeout(180 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		vmSnap := &demov1alpha1.DemoVirtualMachineSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "vm-run", Namespace: nsName},
@@ -254,5 +271,16 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Expect(err).NotTo(HaveOccurred())
 		Expect(vmVisited).To(ContainElement(vmContentName))
 		Expect(diskVisited).To(ContainElement(diskContentName))
+
+		// E6: after domain wiring adds childrenSnapshotRefs, root NamespaceSnapshot becomes Ready=True only when
+		// all referenced child NamespaceSnapshots (e.g. vm-run) are ready — not immediately at first capture.
+		Eventually(func(g Gomega) {
+			r := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
+			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(rc).NotTo(BeNil())
+			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(rc.Reason).To(Equal(snapshot.ReasonCompleted))
+		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 })

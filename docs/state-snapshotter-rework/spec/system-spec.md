@@ -99,3 +99,10 @@
 - Концептуальный SSOT дерева / осей: [`design/demo-domain-dsc/08-universal-snapshot-tree-model.md`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md).
 - Инварианты графа и generic vs domain: [`design/demo-domain-dsc/05-tree-and-graph-invariants.md`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md).
 - План сценариев: [`testing/demo-domain-dsc-test-plan.md`](../testing/demo-domain-dsc-test-plan.md).
+
+### §3.8. Parent `NamespaceSnapshot`: агрегированный `Ready` по `childrenSnapshotRefs` (E6)
+
+Когда **`status.childrenSnapshotRefs`** **не пуст**, generic reconcile **`NamespaceSnapshot`** **MUST** выводить **`Ready`** родителя из **состояния каждого** указанного дочернего **`NamespaceSnapshot`** (тот же API group **`storage.deckhouse.io`**, без импорта доменных CRD в generic usecase). **MUST NOT:** подменять этот путь ad-hoc ветками под конкретные demo kinds.
+
+- **MUST:** классифицировать каждого child как **успех** (bound + **`Ready=True`**), **ожидание** (в т.ч. объект ещё **NotFound** при уже записанном ref — transient ordering), или **терминальный провал** (**`Ready=False`** с причиной из согласованного набора terminal capture / fail-closed для child state). Расширенные мотивы и delete-ось — [`design/demo-domain-dsc/07-ready-delete-matrix.md`](../design/demo-domain-dsc/07-ready-delete-matrix.md).
+- **MUST:** при одновременном наличии нескольких причин на parent выбирать **одну** итоговую причину **`Ready=False`** в **строгом приоритете:** **`ChildSnapshotFailed`** > **`SubtreeManifestCapturePending`** > **`ChildSnapshotPending`**. **`Ready=True`** с **`Reason=Completed`** на parent **только** если собственный root capture завершён успешно по контракту N2a/N2b **и** все required children в классе успеха **и** нет блокирующего subtree-pending (**E5**).

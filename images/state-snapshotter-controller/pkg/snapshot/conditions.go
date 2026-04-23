@@ -55,15 +55,16 @@ const (
 	ReasonArtifactMissing      = "ArtifactMissing"
 	ReasonDeleting             = "Deleting"
 
-	// ReasonChildSnapshotPending is set on an N2b parent NamespaceSnapshot while a required synthetic child
-	// is not yet bound, not yet Ready, or Ready=False with a non-terminal (in-progress) child reason.
+	// ReasonChildSnapshotPending is set on a parent NamespaceSnapshot (E6) while a required child NamespaceSnapshot
+	// in status.childrenSnapshotRefs is not yet bound, has no Ready condition, Ready=False with a non-terminal reason,
+	// or root capture is not complete yet (no higher-priority reason applies).
 	ReasonChildSnapshotPending = "ChildSnapshotPending"
 	// ReasonSubtreeManifestCapturePending is set on root NamespaceSnapshot (and root NamespaceSnapshotContent)
 	// while status.childrenSnapshotRefs is non-empty but the subtree exclude set cannot be computed yet
 	// (E5: no root ManifestCaptureRequest until exclude is complete — distinct from ChildSnapshotPending / ListFailed).
 	ReasonSubtreeManifestCapturePending = "SubtreeManifestCapturePending"
-	// ReasonChildSnapshotFailed is set on an N2b parent when a required child has a terminal Ready=False
-	// (N2a terminal reasons; whitelist next to evaluateSyntheticRequiredChildState in controller code).
+	// ReasonChildSnapshotFailed is set on a parent NamespaceSnapshot (E6) when any required child has a terminal
+	// Ready=False (see usecase.NamespaceSnapshotChildTerminalReadyReasons).
 	ReasonChildSnapshotFailed = "ChildSnapshotFailed"
 )
 

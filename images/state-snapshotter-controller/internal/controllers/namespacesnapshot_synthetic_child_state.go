@@ -20,12 +20,8 @@ limitations under the License.
 package controllers
 
 import (
-	"fmt"
-
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -46,33 +42,6 @@ type syntheticChildAggregateResult struct {
 	Message string
 }
 
-// syntheticChildTerminalReadyReasons is the allowlist: child NamespaceSnapshot Ready=False reasons
-// that N2a treats as terminal capture failure. Include only reasons after which the child is not expected
-// to return to Ready=True without external intervention (fix spec, delete MCR, recreate root, etc.); do not
-// add transient or ambiguous reasons or the parent will falsely report ChildSnapshotFailed. Any other
-// Ready=False on the child keeps the parent pending (in-progress / MCP pending / unknown). Extend only
-// together with N2a fail paths and design §11.1.
-var syntheticChildTerminalReadyReasons = map[string]struct{}{
-	"ListFailed":               {},
-	"NoCaptureTargets":         {},
-	"CapturePlanDrift":         {},
-	"ManifestCheckpointFailed": {},
-	"ContentRefMismatch":       {},
-	"NamespaceNotFound":        {},
-}
-
-func isSyntheticChildTerminalReadyFailure(reason string) bool {
-	_, ok := syntheticChildTerminalReadyReasons[reason]
-	return ok
-}
-
-func formatSyntheticChildPendingUntilReadyMessage(childKey, childReason, childMsg string) string {
-	if childMsg != "" {
-		return fmt.Sprintf("waiting for synthetic child %s Ready=True: child reason=%s, message=%s", childKey, childReason, childMsg)
-	}
-	return fmt.Sprintf("waiting for synthetic child %s Ready=True: child reason=%s", childKey, childReason)
-}
-
 // evaluateSyntheticRequiredChildState maps one synthetic child's status to parent aggregate state.
 //
 // Preconditions (enforced by call site, not this function): the parent must already have completed N2a
@@ -80,43 +49,17 @@ func formatSyntheticChildPendingUntilReadyMessage(childKey, childReason, childMs
 // reconcileSyntheticChildTree runs only after that stage. Do not call this helper earlier or the parent
 // Ready semantics will be wrong.
 func evaluateSyntheticRequiredChildState(child *storagev1alpha1.NamespaceSnapshot) syntheticChildAggregateResult {
-	childKey := fmt.Sprintf("%s/%s", child.Namespace, child.Name)
-	if child.Status.BoundSnapshotContentName == "" {
-		return syntheticChildAggregateResult{
-			Phase:   syntheticChildAggregatePending,
-			Reason:  snapshot.ReasonChildSnapshotPending,
-			Message: fmt.Sprintf("waiting for synthetic child %s to bind NamespaceSnapshotContent", childKey),
-		}
-	}
-	rc := meta.FindStatusCondition(child.Status.Conditions, snapshot.ConditionReady)
-	if rc == nil {
-		return syntheticChildAggregateResult{
-			Phase:   syntheticChildAggregatePending,
-			Reason:  snapshot.ReasonChildSnapshotPending,
-			Message: fmt.Sprintf("waiting for synthetic child %s Ready condition", childKey),
-		}
-	}
-	switch rc.Status {
-	case metav1.ConditionTrue:
+	c, msg := usecase.ClassifyNamespaceSnapshotChildReady(child)
+	switch c {
+	case usecase.NamespaceSnapshotChildReadyClassCompleted:
 		return syntheticChildAggregateResult{Phase: syntheticChildAggregateReady}
-	case metav1.ConditionFalse:
-		if isSyntheticChildTerminalReadyFailure(rc.Reason) {
-			return syntheticChildAggregateResult{
-				Phase:   syntheticChildAggregateFailed,
-				Reason:  snapshot.ReasonChildSnapshotFailed,
-				Message: fmt.Sprintf("synthetic child %s failed: reason=%s message=%s", childKey, rc.Reason, rc.Message),
-			}
-		}
+	case usecase.NamespaceSnapshotChildReadyClassFailed:
 		return syntheticChildAggregateResult{
-			Phase:   syntheticChildAggregatePending,
-			Reason:  snapshot.ReasonChildSnapshotPending,
-			Message: formatSyntheticChildPendingUntilReadyMessage(childKey, rc.Reason, rc.Message),
+			Phase:   syntheticChildAggregateFailed,
+			Reason:  snapshot.ReasonChildSnapshotFailed,
+			Message: msg,
 		}
 	default:
-		msg := fmt.Sprintf("waiting for synthetic child %s Ready (child Ready status Unknown)", childKey)
-		if rc.Message != "" {
-			msg = fmt.Sprintf("%s: child message=%s", msg, rc.Message)
-		}
 		return syntheticChildAggregateResult{
 			Phase:   syntheticChildAggregatePending,
 			Reason:  snapshot.ReasonChildSnapshotPending,

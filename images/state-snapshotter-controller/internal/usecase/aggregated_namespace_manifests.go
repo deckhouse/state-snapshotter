@@ -140,7 +140,7 @@ func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Conte
 // (namespacesnapshot_content_graph.go) so domain code and aggregation use the same ref-only walk (§3-E4).
 // Dedicated snapshot content nodes under childrenSnapshotContentRefs have no MCP on this aggregated path;
 // see namespacesnapshot_content_graph.go.
-func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName string, visited map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
+func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName string, _ map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
 	visit := func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
 		mcpName := nsc.Status.ManifestCheckpointName
 		if mcpName == "" {

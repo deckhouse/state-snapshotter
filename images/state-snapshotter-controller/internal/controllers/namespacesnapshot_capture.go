@@ -81,6 +81,41 @@ func (r *NamespaceSnapshotReconciler) mirrorSubtreeManifestCapturePendingOnConte
 	return r.Client.Status().Update(ctx, fresh)
 }
 
+// reconcileChildrenRefsE6ParentReadyOrPatch applies E6 aggregation for status.childrenSnapshotRefs (typed child
+// NamespaceSnapshots). Returns (allChildrenAllowParentSuccess, result, err): when false, result is from
+// patchParentSyntheticChildAggregateReady and the caller must return it; when true, caller may mark root capture complete.
+func (r *NamespaceSnapshotReconciler) reconcileChildrenRefsE6ParentReadyOrPatch(
+	ctx context.Context,
+	parent *storagev1alpha1.NamespaceSnapshot,
+	subtreePending bool,
+	subtreeMsg string,
+	selfCaptureComplete bool,
+) (allChildrenAllowParentSuccess bool, res ctrl.Result, err error) {
+	if len(parent.Status.ChildrenSnapshotRefs) == 0 {
+		return true, ctrl.Result{}, nil
+	}
+	sum, err := usecase.SummarizeNamespaceSnapshotChildrenRefsWithDefaultNamespace(ctx, r.Client, parent.Status.ChildrenSnapshotRefs, parent.Namespace)
+	if err != nil {
+		return false, ctrl.Result{}, err
+	}
+	in := usecase.E6ParentReadyPickInput{
+		HasChildFailed:                sum.HasFailed,
+		ChildFailedMessage:            usecase.JoinNonEmpty(sum.FailedMessages, "; "),
+		SubtreeManifestCapturePending: subtreePending,
+		SubtreeMessage:                subtreeMsg,
+		HasChildPending:               sum.HasPending,
+		ChildPendingMessage:           usecase.JoinNonEmpty(sum.PendingParts, "; "),
+		SelfCaptureComplete:           selfCaptureComplete,
+	}
+	out := usecase.PickParentReadyReasonE6(in)
+	if out.Ready {
+		return true, ctrl.Result{}, nil
+	}
+	parentKey := types.NamespacedName{Namespace: parent.Namespace, Name: parent.Name}
+	res, err = r.patchParentSyntheticChildAggregateReady(ctx, parentKey, out.Reason, out.Message)
+	return false, res, err
+}
+
 // reconcileCaptureN2a drives manifest capture via MCR→ManifestCheckpoint after root NamespaceSnapshotContent is bound.
 func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	ctx context.Context,
@@ -147,20 +182,31 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 				// Synthetic / N2b aggregate already recorded terminal child failure; do not clobber with capture pending.
 				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 			}
-			// Root exclude may still wait on child MCP while the synthetic child is already in a terminal capture
-			// failure (e.g. CapturePlanDrift before MCP is linked). Surface ChildSnapshotFailed instead of subtree pending.
-			if namespacemanifest.SyntheticChildTreeAnnotationEnabled(freshParent.Annotations) {
-				chName := namespacemanifest.NamespaceSnapshotSyntheticChildName(freshParent.Name)
-				childSnap := &storagev1alpha1.NamespaceSnapshot{}
-				if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: freshParent.Namespace, Name: chName}, childSnap); gerr == nil {
-					if valErr := validateSyntheticChildLabelsForParent(childSnap, freshParent); valErr == nil {
-						agg := evaluateSyntheticRequiredChildState(childSnap)
-						if agg.Phase == syntheticChildAggregateFailed {
-							parentKey := types.NamespacedName{Namespace: freshParent.Namespace, Name: freshParent.Name}
-							return r.patchParentSyntheticChildAggregateReady(ctx, parentKey, agg.Reason, agg.Message)
-						}
-					}
+			var reason string
+			var msg string
+			if hasSubtree {
+				sum, serr := usecase.SummarizeNamespaceSnapshotChildrenRefsWithDefaultNamespace(ctx, r.Client, freshParent.Status.ChildrenSnapshotRefs, freshParent.Namespace)
+				if serr != nil {
+					return ctrl.Result{}, serr
 				}
+				out := usecase.PickParentReadyReasonE6(usecase.E6ParentReadyPickInput{
+					HasChildFailed:                sum.HasFailed,
+					ChildFailedMessage:            usecase.JoinNonEmpty(sum.FailedMessages, "; "),
+					SubtreeManifestCapturePending: true,
+					SubtreeMessage:                err.Error(),
+					HasChildPending:               sum.HasPending,
+					ChildPendingMessage:           usecase.JoinNonEmpty(sum.PendingParts, "; "),
+					SelfCaptureComplete:           false,
+				})
+				if out.Reason == snapshot.ReasonChildSnapshotFailed {
+					parentKey := types.NamespacedName{Namespace: freshParent.Namespace, Name: freshParent.Name}
+					return r.patchParentSyntheticChildAggregateReady(ctx, parentKey, out.Reason, out.Message)
+				}
+				reason = out.Reason
+				msg = out.Message
+			} else {
+				reason = snapshot.ReasonChildSnapshotPending
+				msg = err.Error()
 			}
 			// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
 			if hasSubtree {
@@ -168,22 +214,18 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 					return ctrl.Result{}, delErr
 				}
 			}
-			reason := snapshot.ReasonChildSnapshotPending
-			if hasSubtree {
-				reason = snapshot.ReasonSubtreeManifestCapturePending
-			}
 			meta.SetStatusCondition(&freshParent.Status.Conditions, metav1.Condition{
 				Type:               snapshot.ConditionReady,
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
-				Message:            err.Error(),
+				Message:            msg,
 				ObservedGeneration: freshParent.Generation,
 			})
 			if uerr := r.Client.Status().Update(ctx, freshParent); uerr != nil {
 				return ctrl.Result{}, uerr
 			}
-			if hasSubtree {
-				if uerr := r.mirrorSubtreeManifestCapturePendingOnContent(ctx, content.Name, err.Error()); uerr != nil {
+			if hasSubtree && reason == snapshot.ReasonSubtreeManifestCapturePending {
+				if uerr := r.mirrorSubtreeManifestCapturePendingOnContent(ctx, content.Name, msg); uerr != nil {
 					return ctrl.Result{}, uerr
 				}
 			}
@@ -358,6 +400,13 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyWithoutSynthetic(
 	fresh := &storagev1alpha1.NamespaceSnapshot{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, fresh); err != nil {
 		return ctrl.Result{}, err
+	}
+	allClear, res, err := r.reconcileChildrenRefsE6ParentReadyOrPatch(ctx, fresh, false, "", true)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !allClear {
+		return res, nil
 	}
 	ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
