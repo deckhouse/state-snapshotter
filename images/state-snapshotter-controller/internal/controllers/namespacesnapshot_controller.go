@@ -205,10 +205,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		om, err := r.namespaceSnapshotContentObjectMeta(ctx, nsSnap)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+		om := namespaceSnapshotContentObjectMeta(nsSnap)
 		newContent := &storagev1alpha1.NamespaceSnapshotContent{
 			ObjectMeta: om,
 			Spec:       desiredNamespaceSnapshotContentSpec(nsSnap),
@@ -417,10 +414,9 @@ func namespaceSnapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string 
 }
 
 // namespaceSnapshotContentObjectMeta builds metadata for a new NamespaceSnapshotContent.
-func (r *NamespaceSnapshotReconciler) namespaceSnapshotContentObjectMeta(_ context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (metav1.ObjectMeta, error) {
-	_ = r
+func namespaceSnapshotContentObjectMeta(nsSnap *storagev1alpha1.NamespaceSnapshot) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:       namespaceSnapshotContentName(nsSnap),
 		Finalizers: []string{snapshot.FinalizerParentProtect},
-	}, nil
+	}
 }

@@ -159,7 +159,7 @@ func patchDemoVirtualMachineSnapshotReadyStub(ctx context.Context, c client.Clie
 		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionReady); rc != nil && rc.Status == metav1.ConditionTrue {
 			return nil
 		}
-		// Demo CRDs enable spec.subresources.status; writing .status via the main object Patch is ignored.
+		// Demo*Snapshot CRDs use status subresource, so status.conditions must be written via Status().Patch/Update.
 		stBase := o.DeepCopy()
 		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionReady,

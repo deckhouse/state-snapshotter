@@ -542,7 +542,7 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
 		logger.Info("created root ObjectKeeper for NamespaceSnapshot", "objectKeeper", name, "mode", spec.Mode)
-		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, nsSnap, content, ok)
+		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
 		if err != nil {
 			return nil, ctrl.Result{}, err
 		}
@@ -565,7 +565,7 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 				return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 			}
 		}
-		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, nsSnap, content, ok)
+		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
 		if err != nil {
 			return nil, ctrl.Result{}, err
 		}
@@ -579,7 +579,6 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 // ensureRootNamespaceSnapshotContentOwnedByObjectKeeper patches root NamespaceSnapshotContent to reference the root ObjectKeeper.
 func (r *NamespaceSnapshotReconciler) ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(
 	ctx context.Context,
-	nsSnap *storagev1alpha1.NamespaceSnapshot,
 	content *storagev1alpha1.NamespaceSnapshotContent,
 	ok *deckhousev1alpha1.ObjectKeeper,
 ) (ctrl.Result, error) {
