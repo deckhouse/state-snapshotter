@@ -34,6 +34,9 @@ func TestProductionSourcesDoNotNameDemoSnapshotKinds(t *testing.T) {
 		"DemoVirtualDiskSnapshotContent",
 		"DemoVirtualMachineSnapshotContent",
 	}
+	forbiddenImports := []string{
+		"github.com/deckhouse/state-snapshotter/api/demo",
+	}
 	roots := []string{
 		".",
 		filepath.Join("..", "controllers"),
@@ -61,6 +64,11 @@ func TestProductionSourcesDoNotNameDemoSnapshotKinds(t *testing.T) {
 			for _, f := range forbidden {
 				if bytes.Contains(b, []byte(f)) {
 					t.Errorf("%s must not contain demo-only snapshot identifier %q", path, f)
+				}
+			}
+			for _, imp := range forbiddenImports {
+				if bytes.Contains(b, []byte(imp)) {
+					t.Errorf("%s must not import demo API %q (keep generic layers domain-free)", path, imp)
 				}
 			}
 			return nil

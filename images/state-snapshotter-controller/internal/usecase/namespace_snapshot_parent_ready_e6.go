@@ -14,28 +14,32 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// E6: generic NamespaceSnapshot parent readiness aggregation from child NamespaceSnapshot refs
-// (typed storage API only — no domain CRD imports).
+// E6: generic NamespaceSnapshot parent readiness aggregation from status.childrenSnapshotRefs.
+// Each ref carries explicit apiVersion/kind/name; the child object is loaded with a single Get (no registry scan).
+// Ref namespace must be empty or equal to the parent NamespaceSnapshot namespace (namespace-local run tree).
 
 package usecase
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// NamespaceSnapshotChildTerminalReadyReasons lists child NamespaceSnapshot Ready=False reasons treated as
-// terminal capture failure for parent aggregation (E6). Extend only with N2a terminal paths.
-var NamespaceSnapshotChildTerminalReadyReasons = map[string]struct{}{
+// ChildSnapshotTerminalReadyReasons lists child snapshot Ready=False reasons treated as terminal capture
+// failure for parent aggregation (E6). Extend only with N2a-equivalent terminal paths shared across snapshot kinds.
+var ChildSnapshotTerminalReadyReasons = map[string]struct{}{
 	"ListFailed":               {},
 	"NoCaptureTargets":         {},
 	"CapturePlanDrift":         {},
@@ -44,35 +48,66 @@ var NamespaceSnapshotChildTerminalReadyReasons = map[string]struct{}{
 	"NamespaceNotFound":        {},
 }
 
-// NamespaceSnapshotChildReadyClass is the E6 classification of one child NamespaceSnapshot.
+// NamespaceSnapshotChildReadyClass is the E6 classification of one resolved child snapshot object.
 type NamespaceSnapshotChildReadyClass int
 
 const (
 	// NamespaceSnapshotChildReadyClassCompleted — child bound and Ready=True.
 	NamespaceSnapshotChildReadyClassCompleted NamespaceSnapshotChildReadyClass = iota
-	// NamespaceSnapshotChildReadyClassPending — child not bound, no Ready, Ready=False non-terminal, or Unknown.
+	// NamespaceSnapshotChildReadyClassPending — not bound, no Ready, Ready=False non-terminal, or Unknown.
 	NamespaceSnapshotChildReadyClassPending
-	// NamespaceSnapshotChildReadyClassFailed — child missing, or Ready=False with terminal reason.
+	// NamespaceSnapshotChildReadyClassFailed — Ready=False with terminal reason, or invalid ref fields.
 	NamespaceSnapshotChildReadyClassFailed
 )
 
 // IsNamespaceSnapshotChildTerminalReadyFailure reports whether a child Ready=False reason is terminal for parent aggregation.
 func IsNamespaceSnapshotChildTerminalReadyFailure(reason string) bool {
-	_, ok := NamespaceSnapshotChildTerminalReadyReasons[reason]
+	_, ok := ChildSnapshotTerminalReadyReasons[reason]
 	return ok
 }
 
-// ClassifyNamespaceSnapshotChildReady maps one child NamespaceSnapshot to E6 class and a human message (parent-facing detail).
-func ClassifyNamespaceSnapshotChildReady(ch *storagev1alpha1.NamespaceSnapshot) (NamespaceSnapshotChildReadyClass, string) {
-	childKey := fmt.Sprintf("%s/%s", ch.Namespace, ch.Name)
-	if ch.Status.BoundSnapshotContentName == "" {
-		return NamespaceSnapshotChildReadyClassPending,
-			fmt.Sprintf("waiting for child NamespaceSnapshot %s to bind NamespaceSnapshotContent", childKey)
+// readyConditionFromSnapshotUnstructured reads the Ready status condition from a snapshot object's unstructured status.
+// It unmarshals the whole status map via JSON so conditions survive listType=map / typed JSON shapes that do not
+// always round-trip as []interface{} in unstructured.NestedSlice.
+func readyConditionFromSnapshotUnstructured(u *unstructured.Unstructured) *metav1.Condition {
+	if u == nil {
+		return nil
 	}
-	rc := meta.FindStatusCondition(ch.Status.Conditions, snapshot.ConditionReady)
+	st, found, err := unstructured.NestedMap(u.Object, "status")
+	if !found || err != nil || len(st) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return nil
+	}
+	var parsed struct {
+		Conditions []metav1.Condition `json:"conditions,omitempty"`
+	}
+	if err := json.Unmarshal(b, &parsed); err != nil {
+		return nil
+	}
+	for i := range parsed.Conditions {
+		if parsed.Conditions[i].Type == snapshot.ConditionReady {
+			c := parsed.Conditions[i]
+			return &c
+		}
+	}
+	return nil
+}
+
+// ClassifyGenericChildSnapshotReady classifies one resolved child snapshot (unstructured + GVK) for parent E6 aggregation.
+func ClassifyGenericChildSnapshotReady(u *unstructured.Unstructured, gvk schema.GroupVersionKind, childNS, childName string) (NamespaceSnapshotChildReadyClass, string) {
+	childKey := fmt.Sprintf("%s/%s/%s", gvk.String(), childNS, childName)
+	bound, foundBound, err := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
+	if err != nil || !foundBound || bound == "" {
+		return NamespaceSnapshotChildReadyClassPending,
+			fmt.Sprintf("waiting for child snapshot %s to bind snapshot content", childKey)
+	}
+	rc := readyConditionFromSnapshotUnstructured(u)
 	if rc == nil {
 		return NamespaceSnapshotChildReadyClassPending,
-			fmt.Sprintf("waiting for child NamespaceSnapshot %s Ready condition", childKey)
+			fmt.Sprintf("waiting for child snapshot %s Ready condition", childKey)
 	}
 	switch rc.Status {
 	case metav1.ConditionTrue:
@@ -80,16 +115,16 @@ func ClassifyNamespaceSnapshotChildReady(ch *storagev1alpha1.NamespaceSnapshot) 
 	case metav1.ConditionFalse:
 		if IsNamespaceSnapshotChildTerminalReadyFailure(rc.Reason) {
 			return NamespaceSnapshotChildReadyClassFailed,
-				fmt.Sprintf("child NamespaceSnapshot %s failed: reason=%s message=%s", childKey, rc.Reason, rc.Message)
+				fmt.Sprintf("child snapshot %s failed: reason=%s message=%s", childKey, rc.Reason, rc.Message)
 		}
 		if rc.Message != "" {
 			return NamespaceSnapshotChildReadyClassPending,
-				fmt.Sprintf("waiting for child NamespaceSnapshot %s Ready=True: child reason=%s, message=%s", childKey, rc.Reason, rc.Message)
+				fmt.Sprintf("waiting for child snapshot %s Ready=True: child reason=%s, message=%s", childKey, rc.Reason, rc.Message)
 		}
 		return NamespaceSnapshotChildReadyClassPending,
-			fmt.Sprintf("waiting for child NamespaceSnapshot %s Ready=True: child reason=%s", childKey, rc.Reason)
+			fmt.Sprintf("waiting for child snapshot %s Ready=True: child reason=%s", childKey, rc.Reason)
 	default:
-		msg := fmt.Sprintf("waiting for child NamespaceSnapshot %s Ready (child Ready status Unknown)", childKey)
+		msg := fmt.Sprintf("waiting for child snapshot %s Ready (child Ready status Unknown)", childKey)
 		if rc.Message != "" {
 			msg = fmt.Sprintf("%s: child message=%s", msg, rc.Message)
 		}
@@ -97,7 +132,19 @@ func ClassifyNamespaceSnapshotChildReady(ch *storagev1alpha1.NamespaceSnapshot) 
 	}
 }
 
-// NamespaceSnapshotChildrenRefsSummary aggregates E6 state across status.childrenSnapshotRefs (each ref is a NamespaceSnapshot).
+// ClassifyNamespaceSnapshotChildReady maps a typed NamespaceSnapshot to the same E6 class as generic resolution
+// (typed storage NamespaceSnapshot path; same status shape as other snapshot kinds).
+func ClassifyNamespaceSnapshotChildReady(ch *storagev1alpha1.NamespaceSnapshot) (NamespaceSnapshotChildReadyClass, string) {
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(ch)
+	if err != nil {
+		return NamespaceSnapshotChildReadyClassFailed, fmt.Sprintf("internal: convert NamespaceSnapshot: %v", err)
+	}
+	u := &unstructured.Unstructured{Object: raw}
+	gvk := storagev1alpha1.SchemeGroupVersion.WithKind("NamespaceSnapshot")
+	return ClassifyGenericChildSnapshotReady(u, gvk, ch.Namespace, ch.Name)
+}
+
+// NamespaceSnapshotChildrenRefsSummary aggregates E6 state across status.childrenSnapshotRefs.
 type NamespaceSnapshotChildrenRefsSummary struct {
 	HasFailed      bool
 	FailedMessages []string
@@ -106,8 +153,9 @@ type NamespaceSnapshotChildrenRefsSummary struct {
 	AllCompleted   bool
 }
 
-// SummarizeNamespaceSnapshotChildrenRefsWithDefaultNamespace resolves empty ref.Namespace as parentSnapshotNamespace.
-func SummarizeNamespaceSnapshotChildrenRefsWithDefaultNamespace(ctx context.Context, c client.Reader, refs []storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (*NamespaceSnapshotChildrenRefsSummary, error) {
+// SummarizeChildrenSnapshotRefsForParentReadyE6 aggregates parent child readiness from strict refs (apiVersion/kind/name).
+// Ref namespace defaults to parentSnapshotNamespace when empty.
+func SummarizeChildrenSnapshotRefsForParentReadyE6(ctx context.Context, c client.Reader, refs []storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (*NamespaceSnapshotChildrenRefsSummary, error) {
 	if len(refs) == 0 {
 		return &NamespaceSnapshotChildrenRefsSummary{AllCompleted: true}, nil
 	}
@@ -117,19 +165,27 @@ func SummarizeNamespaceSnapshotChildrenRefsWithDefaultNamespace(ctx context.Cont
 		if ns == "" {
 			ns = parentSnapshotNamespace
 		}
-		key := client.ObjectKey{Namespace: ns, Name: ref.Name}
-		child := &storagev1alpha1.NamespaceSnapshot{}
-		if err := c.Get(ctx, key, child); err != nil {
-			if apierrors.IsNotFound(err) {
-				// Ref can be merged before the child NamespaceSnapshot object exists (e.g. domain wiring); treat as pending.
+		if _, err := RefGVK(ref); err != nil {
+			sum.HasFailed = true
+			sum.FailedMessages = append(sum.FailedMessages, err.Error())
+			continue
+		}
+		u, gvk, resErr := GetChildSnapshot(ctx, c, ref, parentSnapshotNamespace)
+		if resErr != nil {
+			if errors.Is(resErr, ErrRunGraphChildSnapshotNotFound) {
 				sum.HasPending = true
 				sum.PendingParts = append(sum.PendingParts,
-					fmt.Sprintf("child NamespaceSnapshot %s/%s not found yet (waiting for object)", ns, ref.Name))
+					fmt.Sprintf("child snapshot %s/%s/%s not found yet", ref.APIVersion, ref.Kind, ns+"/"+ref.Name))
 				continue
 			}
-			return nil, fmt.Errorf("get child NamespaceSnapshot %s/%s: %w", ns, ref.Name, err)
+			if errors.Is(resErr, ErrInvalidChildSnapshotRefNamespace) {
+				sum.HasFailed = true
+				sum.FailedMessages = append(sum.FailedMessages, resErr.Error())
+				continue
+			}
+			return nil, resErr
 		}
-		cls, msg := ClassifyNamespaceSnapshotChildReady(child)
+		cls, msg := ClassifyGenericChildSnapshotReady(u, gvk, ns, ref.Name)
 		switch cls {
 		case NamespaceSnapshotChildReadyClassFailed:
 			sum.HasFailed = true
@@ -182,7 +238,7 @@ func PickParentReadyReasonE6(in E6ParentReadyPickInput) E6ParentReadyPickOutput 
 	if in.HasChildFailed {
 		msg := in.ChildFailedMessage
 		if msg == "" {
-			msg = "one or more child NamespaceSnapshots failed"
+			msg = "one or more child snapshots failed"
 		}
 		return E6ParentReadyPickOutput{
 			Ready: false, Reason: snapshot.ReasonChildSnapshotFailed, Message: msg,
@@ -200,7 +256,7 @@ func PickParentReadyReasonE6(in E6ParentReadyPickInput) E6ParentReadyPickOutput 
 	if in.HasChildPending {
 		msg := in.ChildPendingMessage
 		if msg == "" {
-			msg = "waiting for child NamespaceSnapshots"
+			msg = "waiting for child snapshots"
 		}
 		return E6ParentReadyPickOutput{
 			Ready: false, Reason: snapshot.ReasonChildSnapshotPending, Message: msg,
@@ -208,7 +264,7 @@ func PickParentReadyReasonE6(in E6ParentReadyPickInput) E6ParentReadyPickOutput 
 	}
 	if in.SelfCaptureComplete {
 		return E6ParentReadyPickOutput{
-			Ready: true, Reason: snapshot.ReasonCompleted, Message: "all required child NamespaceSnapshots are ready",
+			Ready: true, Reason: snapshot.ReasonCompleted, Message: "all required child snapshots are ready",
 		}
 	}
 	return E6ParentReadyPickOutput{

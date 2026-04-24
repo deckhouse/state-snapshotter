@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -81,9 +82,9 @@ func (r *NamespaceSnapshotReconciler) mirrorSubtreeManifestCapturePendingOnConte
 	return r.Client.Status().Update(ctx, fresh)
 }
 
-// reconcileChildrenRefsE6ParentReadyOrPatch applies E6 aggregation for status.childrenSnapshotRefs (typed child
-// NamespaceSnapshots). Returns (allChildrenAllowParentSuccess, result, err): when false, result is from
-// patchParentSyntheticChildAggregateReady and the caller must return it; when true, caller may mark root capture complete.
+// reconcileChildrenRefsE6ParentReadyOrPatch applies E6 aggregation for status.childrenSnapshotRefs (strict
+// apiVersion/kind/name refs; single Get per child). Returns (allChildrenAllowParentSuccess, result, err):
+// when false, result is from patchNamespaceSnapshotReadyFromE6 and the caller must return it; when true, caller may mark root capture complete.
 func (r *NamespaceSnapshotReconciler) reconcileChildrenRefsE6ParentReadyOrPatch(
 	ctx context.Context,
 	parent *storagev1alpha1.NamespaceSnapshot,
@@ -94,7 +95,7 @@ func (r *NamespaceSnapshotReconciler) reconcileChildrenRefsE6ParentReadyOrPatch(
 	if len(parent.Status.ChildrenSnapshotRefs) == 0 {
 		return true, ctrl.Result{}, nil
 	}
-	sum, err := usecase.SummarizeNamespaceSnapshotChildrenRefsWithDefaultNamespace(ctx, r.Client, parent.Status.ChildrenSnapshotRefs, parent.Namespace)
+	sum, err := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.e6ChildStatusReader(), parent.Status.ChildrenSnapshotRefs, parent.Namespace)
 	if err != nil {
 		return false, ctrl.Result{}, err
 	}
@@ -112,7 +113,7 @@ func (r *NamespaceSnapshotReconciler) reconcileChildrenRefsE6ParentReadyOrPatch(
 		return true, ctrl.Result{}, nil
 	}
 	parentKey := types.NamespacedName{Namespace: parent.Namespace, Name: parent.Name}
-	res, err = r.patchParentSyntheticChildAggregateReady(ctx, parentKey, out.Reason, out.Message)
+	res, err = r.patchNamespaceSnapshotReadyFromE6(ctx, parentKey, out.Reason, out.Message)
 	return false, res, err
 }
 
@@ -142,21 +143,6 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	if parentRequestsSyntheticChildTree(nsSnap) {
-		proceed, synRes, synErr := r.ensureSyntheticChildSubtreeScaffold(ctx, nsSnap, content)
-		if synErr != nil {
-			return ctrl.Result{}, synErr
-		}
-		if !proceed {
-			return synRes, nil
-		}
-		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
 	if done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content); done {
 		return res, err
 	}
@@ -168,24 +154,22 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 			return ctrl.Result{}, gerr
 		}
 		hasSubtree := len(freshParent.Status.ChildrenSnapshotRefs) > 0
-		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding
-		// (N2b synthetic scaffold); do not fail capture as ListFailed — requeue like ChildSnapshotPending.
+		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding;
+		// do not fail capture as ListFailed — requeue like ChildSnapshotPending.
 		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
 			errors.Is(err, usecase.ErrRunGraphChildNotBound) ||
 			errors.Is(err, usecase.ErrRunGraphChildSnapshotNotFound) ||
-			(errors.Is(err, usecase.ErrRunGraphChildNotReachable) &&
-				namespacemanifest.SyntheticChildTreeAnnotationEnabled(freshParent.Annotations)) ||
+			(hasSubtree && errors.Is(err, usecase.ErrRunGraphChildNotReachable)) ||
 			(hasSubtree && errors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady))
 		if transientChildGraph {
 			cur := meta.FindStatusCondition(freshParent.Status.Conditions, snapshot.ConditionReady)
 			if cur != nil && cur.Reason == snapshot.ReasonChildSnapshotFailed {
-				// Synthetic / N2b aggregate already recorded terminal child failure; do not clobber with capture pending.
 				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 			}
 			var reason string
 			var msg string
 			if hasSubtree {
-				sum, serr := usecase.SummarizeNamespaceSnapshotChildrenRefsWithDefaultNamespace(ctx, r.Client, freshParent.Status.ChildrenSnapshotRefs, freshParent.Namespace)
+				sum, serr := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.e6ChildStatusReader(), freshParent.Status.ChildrenSnapshotRefs, freshParent.Namespace)
 				if serr != nil {
 					return ctrl.Result{}, serr
 				}
@@ -200,7 +184,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 				})
 				if out.Reason == snapshot.ReasonChildSnapshotFailed {
 					parentKey := types.NamespacedName{Namespace: freshParent.Namespace, Name: freshParent.Name}
-					return r.patchParentSyntheticChildAggregateReady(ctx, parentKey, out.Reason, out.Message)
+					return r.patchNamespaceSnapshotReadyFromE6(ctx, parentKey, out.Reason, out.Message)
 				}
 				reason = out.Reason
 				msg = out.Message
@@ -231,10 +215,8 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 			}
 			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 		}
-		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) &&
-			namespacemanifest.SyntheticChildTreeAnnotationEnabled(freshParent.Annotations) {
-			// Let synthetic-child aggregate (ChildSnapshotFailed) own Ready; do not overwrite with ListFailed.
-			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
+			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())
 		}
 		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}
@@ -342,12 +324,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, err
 	}
 
-	if parentRequestsSyntheticChildTree(nsSnap) {
-		res, err := r.reconcileSyntheticChildTree(ctx, nsSnap, content)
-		return res, err
-	}
-
-	return r.reconcileN2aRootReadyWithoutSynthetic(ctx, nsSnap, mcpName)
+	return r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
 }
 
 // reconcileIfRootManifestCheckpointAlreadyReady handles idempotent steady state: MCP name on NSC, MCP Ready,
@@ -378,28 +355,54 @@ func (r *NamespaceSnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyRe
 	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)}
 	staleMCR := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := r.Client.Get(ctx, mcrKey, staleMCR); err == nil {
-		return false, ctrl.Result{}, nil
+		// MCR can remain while E6 was !allClear (children not ready). MCP is already Ready — retry E6 so
+		// child-driven reconciles can finish without requiring another MCP completion cycle.
+		res, err := r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+		if err != nil {
+			return true, res, err
+		}
+		freshNS := &storagev1alpha1.NamespaceSnapshot{}
+		nsKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+		var gerr error
+		if r.APIReader != nil {
+			gerr = r.APIReader.Get(ctx, nsKey, freshNS)
+		} else {
+			gerr = r.Client.Get(ctx, nsKey, freshNS)
+		}
+		if gerr != nil {
+			return true, ctrl.Result{}, gerr
+		}
+		rc := meta.FindStatusCondition(freshNS.Status.Conditions, snapshot.ConditionReady)
+		if rc != nil && rc.Status == metav1.ConditionTrue && rc.Reason == snapshot.ReasonCompleted {
+			return true, res, nil
+		}
+		// MCP is already Ready while MCR still exists (E6 gate). Do not fall through to
+		// BuildRootNamespaceManifestCaptureTargets — that path treats the subtree as capture-pending
+		// and prevents E6 from converging. Return done=true so this reconcile ends after E6/requeue.
+		return true, res, nil
 	} else if !apierrors.IsNotFound(err) {
 		return true, ctrl.Result{}, err
 	}
 
-	if parentRequestsSyntheticChildTree(nsSnap) {
-		res, err := r.reconcileSyntheticChildTree(ctx, nsSnap, content)
-		return true, res, err
-	}
-
-	res, err = r.reconcileN2aRootReadyWithoutSynthetic(ctx, nsSnap, mcpName)
+	res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
 	return true, res, err
 }
 
-func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyWithoutSynthetic(
+func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
 	mcpName string,
 ) (ctrl.Result, error) {
 	fresh := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, fresh); err != nil {
-		return ctrl.Result{}, err
+	nsKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	var gerr error
+	if r.APIReader != nil {
+		gerr = r.APIReader.Get(ctx, nsKey, fresh)
+	} else {
+		gerr = r.Client.Get(ctx, nsKey, fresh)
+	}
+	if gerr != nil {
+		return ctrl.Result{}, gerr
 	}
 	allClear, res, err := r.reconcileChildrenRefsE6ParentReadyOrPatch(ctx, fresh, false, "", true)
 	if err != nil {
@@ -410,19 +413,29 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyWithoutSynthetic(
 	}
 	ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
-		fresh.Status.ObservedGeneration = fresh.Generation
-		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             snapshot.ReasonCompleted,
-			Message:            fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s)", mcpName),
-			ObservedGeneration: fresh.Generation,
-		})
-		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur := &storagev1alpha1.NamespaceSnapshot{}
+			if err := r.Client.Get(ctx, nsKey, cur); err != nil {
+				return err
+			}
+			cur.Status.ObservedGeneration = cur.Generation
+			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+				Type:               snapshot.ConditionReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             snapshot.ReasonCompleted,
+				Message:            fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s)", mcpName),
+				ObservedGeneration: cur.Generation,
+			})
+			return r.Client.Status().Update(ctx, cur)
+		}); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.deleteNamespaceSnapshotManifestCaptureRequest(ctx, fresh); err != nil {
+	post := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, nsKey, post); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteNamespaceSnapshotManifestCaptureRequest(ctx, post); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -466,8 +479,6 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 // Root NamespaceSnapshotContent gets metadata.ownerReferences -> that ObjectKeeper (controller) so that when the
 // Deckhouse ObjectKeeper controller deletes the OK after follow+TTL, Kubernetes GC removes retained root NSC and
 // cascades to MCP / child content. The OK itself must not list NSC in ownerReferences (wrong direction for TTL).
-//
-// Synthetic child NamespaceSnapshotContent keeps ownerReferences -> parent NamespaceSnapshotContent only; no NSC->OK link here.
 //
 // spec.mode is always FollowObjectWithTTL; spec.followObjectRef targets the root NamespaceSnapshot; spec.ttl is
 // SnapshotRootOKTTL from controller config (env override or built-in default). Execution-chain ObjectKeepers (MCR) stay FollowObject without TTL.
@@ -566,16 +577,12 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 }
 
 // ensureRootNamespaceSnapshotContentOwnedByObjectKeeper patches root NamespaceSnapshotContent to reference the root ObjectKeeper.
-// Skipped for synthetic child content (owned by parent NamespaceSnapshotContent only).
 func (r *NamespaceSnapshotReconciler) ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
 	content *storagev1alpha1.NamespaceSnapshotContent,
 	ok *deckhousev1alpha1.ObjectKeeper,
 ) (ctrl.Result, error) {
-	if namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
-		return ctrl.Result{}, nil
-	}
 	want := namespaceSnapshotRootContentOwnerReferenceToOK(ok)
 	for _, ref := range content.OwnerReferences {
 		if ref.APIVersion == want.APIVersion && ref.Kind == want.Kind && ref.Name == want.Name && ref.UID == want.UID {

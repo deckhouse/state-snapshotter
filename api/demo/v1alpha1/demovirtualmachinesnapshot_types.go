@@ -52,6 +52,12 @@ type DemoVirtualMachineSnapshotStatus struct {
 	// BoundSnapshotContentName is the cluster-scoped DemoVirtualMachineSnapshotContent name, once created.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
+	// Conditions report readiness (e.g. Ready=True for generic parent E6 aggregation).
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
 	// ChildrenSnapshotRefs lists child snapshot objects (e.g. DemoVirtualDiskSnapshot) under this VM snapshot.
 	// +optional
 	ChildrenSnapshotRefs []storagev1alpha1.NamespaceSnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`

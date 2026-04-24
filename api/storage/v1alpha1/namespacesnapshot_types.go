@@ -56,8 +56,9 @@ type NamespaceSnapshotStatus struct {
 	// The content kind is defined by the snapshot line (e.g. NamespaceSnapshotContent), not by this field name.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
-	// ChildrenSnapshotRefs lists child NamespaceSnapshot roots in the manifests-only tree (N2b).
-	// Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
+	// ChildrenSnapshotRefs lists child snapshot objects (namespace+name) in the N2b run tree.
+	// Generic reconcile resolves each ref to a registered snapshot kind (GVKRegistry); it is not
+	// limited to NamespaceSnapshot. Populated by domain controllers or merge helpers that own edges.
 	// +optional
 	ChildrenSnapshotRefs []NamespaceSnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 

@@ -198,7 +198,7 @@
 
 **После успешного capture (стабильное состояние N2a):**
 
-5. **Порядок в коде:** MCP готов → на **NSC** записан **`status.manifestCheckpointName`**, условия NSC/NS согласованы, **`Ready=True`** на root (для parent с **временным scaffold в коде** — аннотация **`n2b-pr2-synthetic-tree`**, после шага дерева, см. §11.1) → **`Delete(ManifestCaptureRequest)`** по имени из п.1 (**NotFound** считается успехом). **MCP и chunks не удаляются** этим шагом. **`spec.manifestCaptureRequestRef`** на MCP может сохранять имя/uid **удалённого** MCR как исторический ref — на жизнь MCP это не влияет при ownerRef на NSC.
+5. **Порядок в коде:** MCP готов → на **NSC** записан **`status.manifestCheckpointName`**, условия NSC/NS согласованы, **`Ready=True`** на root (в т.ч. после **E6** при непустых **`childrenSnapshotRefs`**, см. §11.1 и **[`spec/system-spec.md`](../spec/system-spec.md) §3.8**) → **`Delete(ManifestCaptureRequest)`** по имени из п.1 (**NotFound** считается успехом). **MCP и chunks не удаляются** этим шагом. **`spec.manifestCaptureRequestRef`** на MCP может сохранять имя/uid **удалённого** MCR как исторический ref — на жизнь MCP это не влияет при ownerRef на NSC.
 6. **Идемпотентность / гонки:** повторный reconcile не должен **пересоздавать** MCR, если на NSC уже зафиксирован готовый MCP (см. логику в `namespacesnapshot_capture.go`: быстрый путь только при **отсутствии** MCR в API; при `NotFound` MCR и уже сохранённом MCP — не создавать новый request).
 
 **Поведение до завершения capture:**
@@ -220,7 +220,7 @@
 3. Validation (namespace существует, class/policy валидна, spec консистентен) — §7.
 4. Ensure **NamespaceSnapshotContent** + запись bind в status root и ссылки root↔content — §4.2; ensure **ObjectKeeper** по ТЗ — §4.3 (**N2a+**).
 5. **Reconcile capture** (N2a): ensure временного **MCR** → observe **MCP** через manifest-линию; при альтернативной реализации — Job/runner по [`implementation-plan.md`](implementation-plan.md) §2.4.1.
-6. По успеху: записать **`manifestCheckpointName`** и условия на **NSC**, **`Ready`** на root (и при **временном scaffold в коде** N2b — см. §11.1), затем **удалить MCR** (§4.7).
+6. По успеху: записать **`manifestCheckpointName`** и условия на **NSC**, **`Ready`** на root (включая агрегацию по **`childrenSnapshotRefs`**, §11.1), затем **удалить MCR** (§4.7).
 7. Не выполнять тяжёлую работу list/watch namespace в горячем пути, если она перенесена в MCR/controller capture path (политика ресурсов apiserver).
 
 ### 5.2 Deletion flow
@@ -406,13 +406,11 @@ spec:
 - **Child в процессе** (не bound, нет `Ready`, `Ready=False` с не-терминальной причиной N2a): parent **`Ready=False`**, reason **`ChildSnapshotPending`** (`pkg/snapshot.ReasonChildSnapshotPending`); message поясняет этап (ожидание bind child content / ожидание `Ready=True` у child; при не-терминальном **`Ready=False`** у child в message передаются **reason и при наличии message** child для observability).
 - **Child в терминальном сбое** N2a (`Ready=False` с причиной из allowlist терминальных root-capture ошибок): parent **`Ready=False`**, reason **`ChildSnapshotFailed`** (`pkg/snapshot.ReasonChildSnapshotFailed`); message содержит имя child и reason/message child.
 - Успешный parent после агрегации: **`Ready=True`**, reason **`Completed`** (`pkg/snapshot.ReasonCompleted`), как у N2a leaf после MCP.
-- Список **required** children vs optional — зафиксировать в spec/API при полном N2b (до расширения beyond **временного scaffold в коде**, не целевая модель PR5).
+- Список **required** children vs optional — зафиксировать в spec/API при полном N2b.
 
-**PR2–PR3** (**временный scaffold в коде, не целевая модель PR5**; synthetic one-child, не product domain flow): при аннотации **`state-snapshotter.deckhouse.io/n2b-pr2-synthetic-tree: "true"`** на parent контроллер создаёт **ровно одного** synthetic child **`<parent>-child`** в том же namespace, label **`state-snapshotter.deckhouse.io/n2b-synthetic-child=true`**, **`n2b-parent-uid`**. Child — **N2a leaf** без opt-in аннотации synthetic tree. Parent пишет graph refs с **`RetryOnConflict`**. Агрегация parent **`Ready`** вынесена в helper **`evaluateSyntheticRequiredChildState`** (код): **контракт вызова** — helper вызывается только после того, как у parent уже **persisted** manifest-результат на **`NamespaceSnapshotContent`** (порядок в `reconcileCaptureN2a` → `reconcileSyntheticChildTree`); сам helper **parent MCP не проверяет**. **MCR родителя** удаляется только после **`Ready=True`** у parent (в конце `reconcileSyntheticChildTree`), а **MCR child** — по обычным правилам N2a leaf после готовности child (§4.7). Терминальный провал child — whitelist N2a только для причин, после которых child **не ожидается** самовосстановиться без внешнего вмешательства (`ListFailed`, `NoCaptureTargets`, `CapturePlanDrift`, `ManifestCheckpointFailed`, `ContentRefMismatch`, `NamespaceNotFound`); любая другая **`Ready=False`** у child оставляет parent в **`ChildSnapshotPending`**. **Без** aggregated download (PR4), **без** domain traversal (PR5) — см. [`implementation-plan.md`](implementation-plan.md) §2.4.2.
+**Имплементация (generic):** parent **`Ready`** по **`status.childrenSnapshotRefs`** — **`reconcileChildrenRefsE6ParentReadyOrPatch`** + **`SummarizeChildrenSnapshotRefsForParentReadyE6`** / **`PickParentReadyReasonE6`** (резолв через **`GVKRegistry`**, **`unstructured`**); дочерний **`NamespaceSnapshot`** в графе — обычный зарегистрированный snapshot-тип, не отдельный «scaffold»-путь. Исторический временный in-repo scaffold (PR2–PR3 в старых версиях плана) **удалён**; контракт и тесты — **[`spec/system-spec.md`](../spec/system-spec.md) §3.8**, **`namespacesnapshot_graph_e5_e6_integration_test.go`**, **PR5b**.
 
-**Снятие scaffold:** после того как heterogeneous / demo-domain flow и **merge-gate** покрывают тот же контракт, scaffold **удаляется** из кода и тестов **в том же PR5 или немедленно следующим cleanup PR** — жёсткое правило в [`implementation-plan.md`](implementation-plan.md) §2.4.2 (*After merge-gate on demo-domain flow, synthetic scaffold must be removed…*).
-
-| Child state (синтетический required child) | Parent `Ready` | Parent `Ready` reason |
+| Child state (resolved child snapshot по ref) | Parent `Ready` | Parent `Ready` reason |
 |-------------------------------------------|----------------|------------------------|
 | Нет привязанного `NamespaceSnapshotContent` / child reconcile в процессе | `False` | `ChildSnapshotPending` |
 | `Ready` отсутствует или `Unknown` | `False` | `ChildSnapshotPending` |

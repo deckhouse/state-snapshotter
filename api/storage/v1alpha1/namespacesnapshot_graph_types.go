@@ -16,15 +16,21 @@ limitations under the License.
 
 package v1alpha1
 
-// NamespaceSnapshotChildRef identifies one child NamespaceSnapshot in the N2b manifests-only tree
-// (element of status.childrenSnapshotRefs). It is not a generic snapshot reference: it does not
-// carry apiVersion/kind; N2b currently assumes children are NamespaceSnapshot roots in the named
-// namespace. A future multi-kind child model would require extending or replacing this shape.
+// NamespaceSnapshotChildRef identifies one child snapshot object in the run tree (element of
+// status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
+// generic code resolves the object with a single client Get — no registry scan and no ambiguity.
+//
+// Snapshot-run tree is namespace-local to the root NamespaceSnapshot: the child object MUST live
+// in the same namespace as that parent. Namespace, when set, MUST equal the parent NamespaceSnapshot
+// namespace; when empty it defaults to the parent namespace. Cross-namespace refs are invalid and
+// rejected fail-closed by generic reconcile (E6 / exclude resolution).
 //
 // +k8s:deepcopy-gen=true
 type NamespaceSnapshotChildRef struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace,omitempty"`
 }
 
 // NamespaceSnapshotContentChildRef identifies one child NamespaceSnapshotContent in the N2b graph

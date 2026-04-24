@@ -60,12 +60,12 @@ func graphRegistryForRootCapture(t *testing.T) *snapshot.GVKRegistry {
 	return r
 }
 
-func syntheticSnapshotUnstructured(name, boundContent string) *unstructured.Unstructured {
+func fixtureSnapshotUnstructured(name, boundContent string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "generic.state-snapshotter.test",
 		Version: "v1",
-		Kind:    "SyntheticDomainSnapshot",
+		Kind:    "FixtureDomainSnapshot",
 	})
 	u.SetNamespace("ns1")
 	u.SetName(name)
@@ -73,12 +73,12 @@ func syntheticSnapshotUnstructured(name, boundContent string) *unstructured.Unst
 	return u
 }
 
-func graphRegistryWithSyntheticDomain(t *testing.T) *snapshot.GVKRegistry {
+func graphRegistryWithFixtureDomain(t *testing.T) *snapshot.GVKRegistry {
 	t.Helper()
 	r := snapshot.NewGVKRegistry()
 	if err := r.RegisterSnapshotContentMapping(
-		"SyntheticDomainSnapshot", "generic.state-snapshotter.test/v1",
-		"SyntheticDomainSnapshotContent", "generic.state-snapshotter.test/v1",
+		"FixtureDomainSnapshot", "generic.state-snapshotter.test/v1",
+		"FixtureDomainSnapshotContent", "generic.state-snapshotter.test/v1",
 	); err != nil {
 		t.Fatalf("RegisterSnapshotContentMapping: %v", err)
 	}
@@ -130,7 +130,12 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{Namespace: "ns1", Name: "ch1"},
+				{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "NamespaceSnapshot",
+					Namespace:  "ns1",
+					Name:       "ch1",
+				},
 			},
 		},
 	}
@@ -173,18 +178,23 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
-	reg := graphRegistryWithSyntheticDomain(t)
+	reg := graphRegistryWithFixtureDomain(t)
 
 	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
 		Status:     storagev1alpha1.NamespaceSnapshotContentStatus{},
 	}
-	disk := syntheticSnapshotUnstructured("disk-a", "missing-from-graph")
+	disk := fixtureSnapshotUnstructured("disk-a", "missing-from-graph")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{Namespace: "ns1", Name: "disk-a"},
+				{
+					APIVersion: "generic.state-snapshotter.test/v1",
+					Kind:       "FixtureDomainSnapshot",
+					Namespace:  "ns1",
+					Name:       "disk-a",
+				},
 			},
 		},
 	}
@@ -204,7 +214,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
-	reg := graphRegistryWithSyntheticDomain(t)
+	reg := graphRegistryWithFixtureDomain(t)
 
 	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
@@ -221,12 +231,17 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	meta.SetStatusCondition(&nscChild.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	disk := syntheticSnapshotUnstructured("disk-a", "child-nsc")
+	disk := fixtureSnapshotUnstructured("disk-a", "child-nsc")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{Namespace: "ns1", Name: "disk-a"},
+				{
+					APIVersion: "generic.state-snapshotter.test/v1",
+					Kind:       "FixtureDomainSnapshot",
+					Namespace:  "ns1",
+					Name:       "disk-a",
+				},
 			},
 		},
 	}

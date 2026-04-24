@@ -24,6 +24,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -33,6 +34,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // DemoVirtualDiskSnapshotReconciler wires a demo disk snapshot into the root NamespaceSnapshot graph
@@ -122,7 +124,12 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		}
 	}
 
-	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{Namespace: s.Namespace, Name: s.Name}}
+	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       "DemoVirtualDiskSnapshot",
+		Namespace:  s.Namespace,
+		Name:       s.Name,
+	}}
 	if err := patchRootNamespaceSnapshotChildRefsMerge(ctx, r.Client, rootKey, wantSnap); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -139,7 +146,51 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
+	if err := patchDemoVirtualDiskSnapshotReadyStub(ctx, r.Client, req.NamespacedName); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
+}
+
+// patchDemoVirtualDiskSnapshotReadyStub sets Ready=True as a minimal demo stub so generic E6 can
+// observe success on the registered DemoVirtualDiskSnapshot kind (not product capture/MCP).
+func patchDemoVirtualDiskSnapshotReadyStub(ctx context.Context, c client.Client, diskKey types.NamespacedName) error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		if err := c.Get(ctx, diskKey, o); err != nil {
+			return err
+		}
+		if o.Status.BoundSnapshotContentName == "" {
+			return nil
+		}
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionReady); rc != nil && rc.Status == metav1.ConditionTrue {
+			return nil
+		}
+		stBase := o.DeepCopy()
+		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             snapshot.ReasonCompleted,
+			Message:            "demo disk snapshot graph wiring complete (stub)",
+			ObservedGeneration: o.Generation,
+		})
+		if err := c.Status().Patch(ctx, o, client.MergeFrom(stBase)); err != nil {
+			return err
+		}
+		if err := c.Get(ctx, diskKey, o); err != nil {
+			return err
+		}
+		if o.Annotations != nil && o.Annotations["snapshot.deckhouse.io/demo-stub"] == "true" {
+			return nil
+		}
+		metaBase := o.DeepCopy()
+		if o.Annotations == nil {
+			o.Annotations = map[string]string{}
+		}
+		o.Annotations["snapshot.deckhouse.io/demo-stub"] = "true"
+		return c.Patch(ctx, o, client.MergeFrom(metaBase))
+	})
+	return err
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *demov1alpha1.DemoVirtualDiskSnapshot, contentName string) error {
@@ -212,7 +263,12 @@ func (r *DemoVirtualDiskSnapshotReconciler) reconcileUnderParentVM(ctx context.C
 		}
 	}
 
-	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{Namespace: s.Namespace, Name: s.Name}}
+	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       "DemoVirtualDiskSnapshot",
+		Namespace:  s.Namespace,
+		Name:       s.Name,
+	}}
 	if err := patchDemoVirtualMachineSnapshotChildRefsMerge(ctx, r.Client, vmKey, wantSnap); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -229,6 +285,9 @@ func (r *DemoVirtualDiskSnapshotReconciler) reconcileUnderParentVM(ctx context.C
 		return ctrl.Result{}, err
 	}
 
+	if err := patchDemoVirtualDiskSnapshotReadyStub(ctx, r.Client, types.NamespacedName{Namespace: s.Namespace, Name: s.Name}); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 

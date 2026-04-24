@@ -54,7 +54,12 @@ func TestCollectRunSubtreeManifestExcludeKeys_GraphRegistryNotReady(t *testing.T
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{Namespace: "ns1", Name: "ch1"},
+				{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "NamespaceSnapshot",
+					Namespace:  "ns1",
+					Name:       "ch1",
+				},
 			},
 		},
 	}
@@ -96,7 +101,12 @@ func TestCollectRunSubtreeManifestExcludeKeys_DescendantNSCWithoutMCPPends(t *te
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{Namespace: "ns1", Name: "ch1"},
+				{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "NamespaceSnapshot",
+					Namespace:  "ns1",
+					Name:       "ch1",
+				},
 			},
 		},
 	}
@@ -130,7 +140,12 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotBoundNoExclude(t *testing.
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{Namespace: "ns1", Name: "ch1"},
+				{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "NamespaceSnapshot",
+					Namespace:  "ns1",
+					Name:       "ch1",
+				},
 			},
 		},
 	}

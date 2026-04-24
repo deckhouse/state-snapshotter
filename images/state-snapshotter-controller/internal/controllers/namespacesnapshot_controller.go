@@ -39,7 +39,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	liblogger "github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -47,7 +46,6 @@ import (
 
 // NamespaceSnapshotReconciler binds root NamespaceSnapshot to NamespaceSnapshotContent and drives manifest capture (MCR→MCP); status via conditions only (no status.phase).
 // Root NamespaceSnapshotContent is not owned by NamespaceSnapshot (spec.namespaceSnapshotRef + status only).
-// Child NamespaceSnapshotContent in the synthetic tree uses ownerReferences -> parent NamespaceSnapshotContent so GC can cascade the content tree.
 type NamespaceSnapshotReconciler struct {
 	Client                client.Client
 	APIReader             client.Reader
@@ -56,10 +54,31 @@ type NamespaceSnapshotReconciler struct {
 	Config                *config.Options
 	Archive               *usecase.ArchiveService
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
+	Mgr                   ctrl.Manager
+	childWatchMgr         *namespaceSnapshotDynamicWatchManager
+}
+
+// e6ChildStatusReader returns the client used for E6 child snapshot reads.
+// The split-client cache is invalidated by watch-driven updates in the same manager process; using the
+// API reader here can return unstructured objects whose status shape is harder to parse consistently
+// for demo CRDs in envtest.
+func (r *NamespaceSnapshotReconciler) e6ChildStatusReader() client.Reader {
+	return r.Client
+}
+
+// namespaceSnapshotReader returns a reader that prefers the API reader for NamespaceSnapshot reads.
+// Domain controllers merge status.childrenSnapshotRefs via their own writers; the split client cache
+// can lag and a subsequent Status().Update from this reconciler would otherwise wipe those refs.
+func (r *NamespaceSnapshotReconciler) namespaceSnapshotReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // AddNamespaceSnapshotControllerToManager registers the NamespaceSnapshot reconciler.
 // snapshotGraphRegistry provides DSC/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
+// Child snapshot watches are registered dynamically from the live registry (see namespaceSnapshotDynamicWatchManager).
 func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
@@ -77,20 +96,16 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 		Config:                cfg,
 		Archive:               usecase.NewArchiveService(mgr.GetClient(), mgr.GetClient(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
+		Mgr:                   mgr,
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	r.childWatchMgr = newNamespaceSnapshotDynamicWatchManager(mgr, r)
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.NamespaceSnapshot{}).
 		Watches(
 			&storagev1alpha1.NamespaceSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(mapNamespaceSnapshotContentToNamespaceSnapshot),
-		).
-		// Secondary source: child NamespaceSnapshot status updates → parent reconcile (map only enqueues
-		// for labelled synthetic children; not redundant with For()).
-		Watches(
-			&storagev1alpha1.NamespaceSnapshot{},
-			handler.EnqueueRequestsFromMapFunc(mapSyntheticChildSnapshotToParent),
-		).
-		Complete(r)
+		)
+	return b.Complete(r)
 }
 
 // mapNamespaceSnapshotContentToNamespaceSnapshot requeues the NamespaceSnapshot named in
@@ -121,11 +136,17 @@ func mapNamespaceSnapshotContentToNamespaceSnapshot(_ context.Context, o client.
 func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log.FromContext(ctx).V(1).Info("reconcile NamespaceSnapshot", "namespaceSnapshot", req.NamespacedName)
 	nsSnap := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, req.NamespacedName, nsSnap); err != nil {
+	if err := r.namespaceSnapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if r.childWatchMgr != nil && r.SnapshotGraphRegistry != nil {
+		if err := r.childWatchMgr.EnsureWatches(ctx, r.SnapshotGraphRegistry); err != nil {
+			log.FromContext(ctx).Error(err, "ensure dynamic child snapshot watches")
+		}
 	}
 
 	if nsSnap.DeletionTimestamp != nil {
@@ -158,16 +179,6 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 	_ = ns
-
-	if !namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
-		pr, err := r.pruneSyntheticOwnedGraphRefsIfTreeDisabled(ctx, nsSnap)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if pr.Requeue || pr.RequeueAfter > 0 {
-			return pr, nil
-		}
-	}
 
 	expectedName := namespaceSnapshotContentName(nsSnap)
 
@@ -265,9 +276,6 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.ensureSyntheticChildContentOwnerRef(ctx, nsSnap, content); err != nil {
 		return ctrl.Result{}, err
 	}
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
@@ -409,69 +417,10 @@ func namespaceSnapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string 
 }
 
 // namespaceSnapshotContentObjectMeta builds metadata for a new NamespaceSnapshotContent.
-// Synthetic child snapshots add ownerReferences -> parent NamespaceSnapshotContent (scaffold until domain wiring).
-func (r *NamespaceSnapshotReconciler) namespaceSnapshotContentObjectMeta(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (metav1.ObjectMeta, error) {
-	om := metav1.ObjectMeta{
+func (r *NamespaceSnapshotReconciler) namespaceSnapshotContentObjectMeta(_ context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (metav1.ObjectMeta, error) {
+	_ = r
+	return metav1.ObjectMeta{
 		Name:       namespaceSnapshotContentName(nsSnap),
 		Finalizers: []string{snapshot.FinalizerParentProtect},
-	}
-	if !namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
-		return om, nil
-	}
-	parentName := nsSnap.GetLabels()[namespacemanifest.LabelSyntheticParentName]
-	if parentName == "" {
-		return om, nil
-	}
-	parent := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: parentName}, parent); err != nil {
-		if errors.IsNotFound(err) {
-			return om, fmt.Errorf("synthetic child: parent NamespaceSnapshot %s/%s not found yet", nsSnap.Namespace, parentName)
-		}
-		return om, err
-	}
-	pc := &storagev1alpha1.NamespaceSnapshotContent{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: namespaceSnapshotContentName(parent)}, pc); err != nil {
-		return om, err
-	}
-	om.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-		Kind:       "NamespaceSnapshotContent",
-		Name:       pc.Name,
-		UID:        pc.UID,
-	}}
-	return om, nil
-}
-
-// ensureSyntheticChildContentOwnerRef patches an existing child NamespaceSnapshotContent if it lacks ownerRef to the parent content.
-func (r *NamespaceSnapshotReconciler) ensureSyntheticChildContentOwnerRef(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent) error {
-	if !namespacemanifest.IsSyntheticChildNamespaceSnapshot(nsSnap.GetLabels()) {
-		return nil
-	}
-	parentName := nsSnap.GetLabels()[namespacemanifest.LabelSyntheticParentName]
-	if parentName == "" {
-		return nil
-	}
-	parent := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: parentName}, parent); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	parentNSCName := namespaceSnapshotContentName(parent)
-	pc := &storagev1alpha1.NamespaceSnapshotContent{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: parentNSCName}, pc); err != nil {
-		return err
-	}
-	want := metav1.OwnerReference{
-		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-		Kind:       "NamespaceSnapshotContent",
-		Name:       pc.Name,
-		UID:        pc.UID,
-	}
-	for _, ref := range content.OwnerReferences {
-		if ref.Kind == want.Kind && ref.APIVersion == want.APIVersion && ref.UID == want.UID {
-			return nil
-		}
-	}
-	base := content.DeepCopy()
-	content.OwnerReferences = append(content.OwnerReferences, want)
-	return r.Client.Patch(ctx, content, client.MergeFrom(base))
+	}, nil
 }

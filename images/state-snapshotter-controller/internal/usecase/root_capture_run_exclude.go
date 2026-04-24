@@ -38,10 +38,9 @@ import (
 
 // Run-graph errors for root manifest capture (INV-S0 / INV-E1, E5).
 var (
-	ErrRunGraphChildSnapshotNotFound     = errors.New("child snapshot object not found for status.childrenSnapshotRefs entry")
-	ErrRunGraphChildNotBound             = errors.New("child snapshot has empty boundSnapshotContentName")
-	ErrRunGraphChildNotReachable         = errors.New("child snapshot content not reachable from root NamespaceSnapshotContent via childrenSnapshotContentRefs graph")
-	ErrRunGraphAmbiguousChildSnapshotRef = errors.New("ambiguous child snapshot ref: multiple registered snapshot kinds match")
+	ErrRunGraphChildSnapshotNotFound = errors.New("child snapshot object not found for status.childrenSnapshotRefs entry")
+	ErrRunGraphChildNotBound         = errors.New("child snapshot has empty boundSnapshotContentName")
+	ErrRunGraphChildNotReachable     = errors.New("child snapshot content not reachable from root NamespaceSnapshotContent via childrenSnapshotContentRefs graph")
 	// ErrSubtreeManifestCapturePending is returned when exclude cannot be computed yet because a descendant
 	// NamespaceSnapshotContent has no MCP link or the MCP is not Ready (fail-closed: do not create root MCR with an incomplete exclude set).
 	ErrSubtreeManifestCapturePending = errors.New("subtree manifest capture pending for root exclude")
@@ -56,9 +55,8 @@ var (
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
 //
 // live supplies the current GVKRegistry (see pkg/snapshot.GVKRegistry) and optional TryRefresh when the
-// registry may be stale vs RESTMapper (CRD appeared after last DSC reconcile). Child snapshot refs
-// (name+namespace only) are resolved only against registered snapshot kinds — generic code does not import
-// domain CRD packages.
+// registry may be stale vs RESTMapper (CRD appeared after last DSC reconcile). Child snapshot refs carry
+// explicit apiVersion/kind/name (strict); subtree traversal still uses the registry for snapshot↔content mapping.
 //
 // When status.childrenSnapshotRefs is empty, behavior matches legacy root capture: full namespace
 // allowlist without subtree exclude.
@@ -178,13 +176,13 @@ func collectRunSubtreeManifestExcludeKeys(
 
 	for i := range rootNS.Status.ChildrenSnapshotRefs {
 		ch := rootNS.Status.ChildrenSnapshotRefs[i]
+		resolved, err := ResolveChildSnapshotRefToBoundContentName(ctx, c, ch, rootNS.Namespace)
+		if err != nil {
+			return nil, err
+		}
 		ns := ch.Namespace
 		if ns == "" {
 			ns = rootNS.Namespace
-		}
-		resolved, err := ResolveChildSnapshotToBoundContentNameLive(ctx, c, live, ns, ch.Name)
-		if err != nil {
-			return nil, err
 		}
 		if _, ok := visited[resolved]; !ok {
 			return nil, fmt.Errorf("%w: childrenSnapshotRefs %s/%s -> %q not visited from root NamespaceSnapshotContent %q",

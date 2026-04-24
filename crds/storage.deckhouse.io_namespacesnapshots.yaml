@@ -59,22 +59,28 @@ spec:
                 type: string
               childrenSnapshotRefs:
                 description: |-
-                  ChildrenSnapshotRefs lists child NamespaceSnapshot roots in the manifests-only tree (N2b).
-                  Populated by the controller in PR2+; PR1 adds the field only (implementation-plan §2.4.2).
+                  ChildrenSnapshotRefs lists child snapshot objects (namespace+name) in the N2b run tree.
+                  Generic reconcile resolves each ref to a registered snapshot kind (GVKRegistry); it is not
+                  limited to NamespaceSnapshot. Populated by domain controllers or merge helpers that own edges.
                 items:
                   description: |-
-                    NamespaceSnapshotChildRef identifies one child NamespaceSnapshot in the N2b manifests-only tree
-                    (element of status.childrenSnapshotRefs). It is not a generic snapshot reference: it does not
-                    carry apiVersion/kind; N2b currently assumes children are NamespaceSnapshot roots in the named
-                    namespace. A future multi-kind child model would require extending or replacing this shape.
+                    NamespaceSnapshotChildRef identifies one child snapshot object in the run tree (element of
+                    status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
+                    generic code resolves the object with a single client Get — no registry scan and no ambiguity.
+                    Namespace defaults to the parent NamespaceSnapshot namespace when empty.
                   properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
                     name:
                       type: string
                     namespace:
                       type: string
                   required:
+                  - apiVersion
+                  - kind
                   - name
-                  - namespace
                   type: object
                 type: array
               conditions:

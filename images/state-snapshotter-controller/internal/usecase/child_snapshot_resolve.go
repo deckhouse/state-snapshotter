@@ -31,95 +31,85 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
-// ResolveChildSnapshotToBoundContentName resolves status.childrenSnapshotRefs (namespace+name only) to
-// status.boundSnapshotContentName using only snapshot kinds registered in reg (DSC/bootstrap). Generic code
-// does not hardcode domain snapshot CRDs. For dynamic refresh-on-miss use ResolveChildSnapshotToBoundContentNameLive.
-func ResolveChildSnapshotToBoundContentName(ctx context.Context, c client.Reader, reg *snapshot.GVKRegistry, childNS, childName string) (string, error) {
-	return ResolveChildSnapshotToBoundContentNameLive(ctx, c, snapshotgraphregistry.NewStatic(reg), childNS, childName)
+// ErrInvalidChildSnapshotRefNamespace is returned when status.childrenSnapshotRefs[].namespace is
+// non-empty and not equal to the parent NamespaceSnapshot namespace (namespace-local run tree; no cross-namespace graph).
+var ErrInvalidChildSnapshotRefNamespace = errors.New("childrenSnapshotRefs entry namespace must be empty or match the parent NamespaceSnapshot namespace")
+
+// RefGVK parses apiVersion/kind from a NamespaceSnapshotChildRef (strict; no registry).
+func RefGVK(ref storagev1alpha1.NamespaceSnapshotChildRef) (schema.GroupVersionKind, error) {
+	if ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
+		return schema.GroupVersionKind{}, fmt.Errorf("childrenSnapshotRefs entry must set apiVersion, kind, and name")
+	}
+	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+	if gvk.Kind == "" || gvk.Version == "" {
+		return schema.GroupVersionKind{}, fmt.Errorf("childrenSnapshotRefs apiVersion/kind: unresolved GVK from apiVersion=%q kind=%q", ref.APIVersion, ref.Kind)
+	}
+	return gvk, nil
 }
 
-// ResolveChildSnapshotToBoundContentNameLive is like ResolveChildSnapshotToBoundContentName but uses a
-// LiveReader. When resolution fails because no registered snapshot kind matches (e.g. registry stale vs
-// RESTMapper), performs at most one TryRefresh and retries resolution once. Ambiguous matches and
-// missing boundSnapshotContentName are not retried.
-func ResolveChildSnapshotToBoundContentNameLive(ctx context.Context, c client.Reader, live snapshotgraphregistry.LiveReader, childNS, childName string) (string, error) {
+// GetChildSnapshot resolves one status.childrenSnapshotRefs entry with a single Get (strict GVK).
+// parentSnapshotNamespace is used when ref.Namespace is empty (namespaced children).
+// If ref.Namespace is set, it must equal parentSnapshotNamespace (namespace-local snapshot run).
+func GetChildSnapshot(ctx context.Context, c client.Reader, ref storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (*unstructured.Unstructured, schema.GroupVersionKind, error) {
+	gvk, err := RefGVK(ref)
+	if err != nil {
+		return nil, schema.GroupVersionKind{}, err
+	}
+	if ref.Namespace != "" && ref.Namespace != parentSnapshotNamespace {
+		return nil, gvk, fmt.Errorf("%w: ref.namespace=%q parent.namespace=%q", ErrInvalidChildSnapshotRefNamespace, ref.Namespace, parentSnapshotNamespace)
+	}
+	ns := ref.Namespace
+	if ns == "" {
+		ns = parentSnapshotNamespace
+	}
+	key := client.ObjectKey{Namespace: ns, Name: ref.Name}
+	if ns == "" {
+		key = client.ObjectKey{Name: ref.Name}
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	if err := c.Get(ctx, key, u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, gvk, fmt.Errorf("%w: get %s %s", ErrRunGraphChildSnapshotNotFound, gvk.String(), key.String())
+		}
+		return nil, gvk, fmt.Errorf("get child snapshot %s: %w", key.String(), err)
+	}
+	return u, gvk, nil
+}
+
+// ResolveChildSnapshotRefToBoundContentName returns status.boundSnapshotContentName for a strict child ref.
+func ResolveChildSnapshotRefToBoundContentName(ctx context.Context, c client.Reader, ref storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (string, error) {
+	u, gvk, err := GetChildSnapshot(ctx, c, ref, parentSnapshotNamespace)
+	if err != nil {
+		return "", err
+	}
+	bound, found, err := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
+	if err != nil {
+		return "", fmt.Errorf("read status.boundSnapshotContentName from %s %s/%s: %w", gvk.String(), u.GetNamespace(), u.GetName(), err)
+	}
+	if !found || bound == "" {
+		return "", fmt.Errorf("%s/%s: %w", ref.Namespace, ref.Name, ErrRunGraphChildNotBound)
+	}
+	return bound, nil
+}
+
+// EnsureGVKRegistryFromLive returns live.Current(), attempting TryRefresh once when nil (same contract as
+// ResolveChildSnapshotToBoundContentNameLive).
+func EnsureGVKRegistryFromLive(ctx context.Context, live snapshotgraphregistry.LiveReader) (*snapshot.GVKRegistry, error) {
 	if live == nil {
-		return "", fmt.Errorf("snapshot graph registry is required to resolve child snapshot %s/%s", childNS, childName)
+		return nil, fmt.Errorf("snapshot graph registry reader is nil")
 	}
 	reg := live.Current()
 	if reg == nil {
 		if err := live.TryRefresh(ctx); err != nil && !errors.Is(err, snapshotgraphregistry.ErrRefreshNotConfigured) {
-			return "", err
+			return nil, err
 		}
 		reg = live.Current()
 	}
 	if reg == nil {
-		return "", fmt.Errorf("GVK registry is required to resolve child snapshot %s/%s (still nil after refresh attempt)", childNS, childName)
+		return nil, snapshotgraphregistry.ErrGraphRegistryNotReady
 	}
-	out, err := resolveChildSnapshotToBoundContentNameOnce(ctx, c, reg, childNS, childName)
-	if err == nil {
-		return out, nil
-	}
-	if !errors.Is(err, ErrRunGraphChildSnapshotNotFound) {
-		return "", err
-	}
-	if err2 := live.TryRefresh(ctx); err2 != nil {
-		if errors.Is(err2, snapshotgraphregistry.ErrRefreshNotConfigured) {
-			return "", err
-		}
-		return "", fmt.Errorf("%w: refresh: %w", err, err2)
-	}
-	reg2 := live.Current()
-	if reg2 == nil {
-		return "", err
-	}
-	return resolveChildSnapshotToBoundContentNameOnce(ctx, c, reg2, childNS, childName)
-}
-
-func resolveChildSnapshotToBoundContentNameOnce(ctx context.Context, c client.Reader, reg *snapshot.GVKRegistry, childNS, childName string) (string, error) {
-	if reg == nil {
-		return "", fmt.Errorf("GVK registry is required to resolve child snapshot %s/%s", childNS, childName)
-	}
-	key := client.ObjectKey{Namespace: childNS, Name: childName}
-
-	var (
-		match    *unstructured.Unstructured
-		matchGVK schema.GroupVersionKind
-	)
-
-	for _, sk := range reg.RegisteredSnapshotKinds() {
-		snapGVK, err := reg.ResolveSnapshotGVK(sk)
-		if err != nil {
-			continue
-		}
-		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(snapGVK)
-		if err := c.Get(ctx, key, u); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return "", fmt.Errorf("get %s %s/%s: %w", snapGVK.String(), childNS, childName, err)
-		}
-		if match != nil {
-			return "", fmt.Errorf("%s/%s: %w: multiple registered snapshot kinds match (first %s, also %s)",
-				childNS, childName, ErrRunGraphAmbiguousChildSnapshotRef, matchGVK.String(), snapGVK.String())
-		}
-		match = u
-		matchGVK = snapGVK
-	}
-	if match == nil {
-		return "", fmt.Errorf("%s/%s: %w: no registered snapshot kind matches this name in namespace (registered kinds: %v)",
-			childNS, childName, ErrRunGraphChildSnapshotNotFound, reg.RegisteredSnapshotKinds())
-	}
-
-	bound, found, err := unstructured.NestedString(match.Object, "status", "boundSnapshotContentName")
-	if err != nil {
-		return "", fmt.Errorf("read status.boundSnapshotContentName from %s %s/%s: %w", matchGVK.String(), childNS, childName, err)
-	}
-	if !found || bound == "" {
-		return "", fmt.Errorf("%s/%s: %w", childNS, childName, ErrRunGraphChildNotBound)
-	}
-	return bound, nil
+	return reg, nil
 }
 
 // NamespaceSnapshotContentGVK returns the GVK for NamespaceSnapshotContent (storage API).

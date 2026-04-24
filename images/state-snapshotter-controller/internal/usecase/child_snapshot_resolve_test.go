@@ -21,40 +21,66 @@ import (
 	"errors"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-func TestResolveChildSnapshotToBoundContentName_Ambiguous(t *testing.T) {
-	t.Helper()
+func TestResolveChildSnapshotRefToBoundContentName_SameNameDifferentKinds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	reg := snapshot.NewGVKRegistry()
-	if err := reg.RegisterSnapshotContentMapping(
-		"SyntheticDomainSnapshotA", "generic.state-snapshotter.test/v1",
-		"SyntheticDomainSnapshotContentA", "generic.state-snapshotter.test/v1",
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := reg.RegisterSnapshotContentMapping(
-		"SyntheticDomainSnapshotB", "generic.state-snapshotter.test/v1",
-		"SyntheticDomainSnapshotContentB", "generic.state-snapshotter.test/v1",
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	a := syntheticSnapshotUnstructured("same-name", "content-a")
-	a.SetGroupVersionKind(schema.GroupVersionKind{Group: "generic.state-snapshotter.test", Version: "v1", Kind: "SyntheticDomainSnapshotA"})
-	b := syntheticSnapshotUnstructured("same-name", "content-b")
-	b.SetGroupVersionKind(schema.GroupVersionKind{Group: "generic.state-snapshotter.test", Version: "v1", Kind: "SyntheticDomainSnapshotB"})
-
+	ns := "ns1"
+	name := "same-name"
+	gvkA := schema.GroupVersionKind{Group: "generic.state-snapshotter.test", Version: "v1", Kind: "FixtureDomainSnapshotA"}
+	gvkB := schema.GroupVersionKind{Group: "generic.state-snapshotter.test", Version: "v1", Kind: "FixtureDomainSnapshotB"}
+	a := childSnapUnstructured(ns, name, gvkA, "content-a")
+	b := childSnapUnstructured(ns, name, gvkB, "content-b")
 	cl := fake.NewClientBuilder().WithRuntimeObjects(a, b).Build()
-	_, err := ResolveChildSnapshotToBoundContentName(ctx, cl, reg, "ns1", "same-name")
-	if err == nil {
-		t.Fatal("expected ambiguous error")
+
+	refA := storagev1alpha1.NamespaceSnapshotChildRef{
+		APIVersion: "generic.state-snapshotter.test/v1",
+		Kind:       "FixtureDomainSnapshotA",
+		Namespace:  ns,
+		Name:       name,
 	}
-	if !errors.Is(err, ErrRunGraphAmbiguousChildSnapshotRef) {
-		t.Fatalf("expected ErrRunGraphAmbiguousChildSnapshotRef, got %v", err)
+	out, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, refA, ns)
+	if err != nil || out != "content-a" {
+		t.Fatalf("ref A: got %q err=%v", out, err)
 	}
+	refB := storagev1alpha1.NamespaceSnapshotChildRef{
+		APIVersion: "generic.state-snapshotter.test/v1",
+		Kind:       "FixtureDomainSnapshotB",
+		Namespace:  ns,
+		Name:       name,
+	}
+	outB, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, refB, ns)
+	if err != nil || outB != "content-b" {
+		t.Fatalf("ref B: got %q err=%v", outB, err)
+	}
+}
+
+func TestResolveChildSnapshotRefToBoundContentName_RejectsCrossNamespaceRef(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cl := fake.NewClientBuilder().Build()
+	_, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, storagev1alpha1.NamespaceSnapshotChildRef{
+		APIVersion: "generic.state-snapshotter.test/v1",
+		Kind:       "FixtureDomainSnapshotA",
+		Namespace:  "other-ns",
+		Name:       "x",
+	}, "parent-ns")
+	if err == nil || !errors.Is(err, ErrInvalidChildSnapshotRefNamespace) {
+		t.Fatalf("expected ErrInvalidChildSnapshotRefNamespace, got %v", err)
+	}
+}
+
+func childSnapUnstructured(ns, name string, gvk schema.GroupVersionKind, boundContent string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	u.SetNamespace(ns)
+	u.SetName(name)
+	_ = unstructured.SetNestedField(u.Object, boundContent, "status", "boundSnapshotContentName")
+	return u
 }

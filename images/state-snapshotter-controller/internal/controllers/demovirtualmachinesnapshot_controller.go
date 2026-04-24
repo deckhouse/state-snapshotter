@@ -24,6 +24,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -33,6 +34,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // DemoVirtualMachineSnapshotReconciler wires a demo VM snapshot into the root NamespaceSnapshot graph (PR5b).
@@ -115,7 +117,12 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		}
 	}
 
-	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{Namespace: s.Namespace, Name: s.Name}}
+	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       "DemoVirtualMachineSnapshot",
+		Namespace:  s.Namespace,
+		Name:       s.Name,
+	}}
 	if err := patchRootNamespaceSnapshotChildRefsMerge(ctx, r.Client, rootKey, wantSnap); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -132,7 +139,52 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 
+	if err := patchDemoVirtualMachineSnapshotReadyStub(ctx, r.Client, req.NamespacedName); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
+}
+
+// patchDemoVirtualMachineSnapshotReadyStub sets Ready=True so generic E6 parent aggregation can observe terminal success
+// on the registered DemoVirtualMachineSnapshot kind (minimal demo stub; real domains drive this from capture/MCP).
+func patchDemoVirtualMachineSnapshotReadyStub(ctx context.Context, c client.Client, vmKey types.NamespacedName) error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
+		if err := c.Get(ctx, vmKey, o); err != nil {
+			return err
+		}
+		if o.Status.BoundSnapshotContentName == "" {
+			return nil
+		}
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionReady); rc != nil && rc.Status == metav1.ConditionTrue {
+			return nil
+		}
+		// Demo CRDs enable spec.subresources.status; writing .status via the main object Patch is ignored.
+		stBase := o.DeepCopy()
+		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             snapshot.ReasonCompleted,
+			Message:            "demo VM snapshot graph wiring complete (stub)",
+			ObservedGeneration: o.Generation,
+		})
+		if err := c.Status().Patch(ctx, o, client.MergeFrom(stBase)); err != nil {
+			return err
+		}
+		if err := c.Get(ctx, vmKey, o); err != nil {
+			return err
+		}
+		if o.Annotations != nil && o.Annotations["snapshot.deckhouse.io/demo-stub"] == "true" {
+			return nil
+		}
+		metaBase := o.DeepCopy()
+		if o.Annotations == nil {
+			o.Annotations = map[string]string{}
+		}
+		o.Annotations["snapshot.deckhouse.io/demo-stub"] = "true"
+		return c.Patch(ctx, o, client.MergeFrom(metaBase))
+	})
+	return err
 }
 
 func (r *DemoVirtualMachineSnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *demov1alpha1.DemoVirtualMachineSnapshot, contentName string) error {

@@ -6,7 +6,7 @@
 
 | Гарантирует | Пока не делает (вне PR5a) |
 |-------------|---------------------------|
-| Привязка к root **`NamespaceSnapshot`** через **`spec.rootNamespaceSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root NS и root NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, MCR/MCP для demo, выпил synthetic. |
+| Привязка к root **`NamespaceSnapshot`** через **`spec.rootNamespaceSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root NS и root NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, полный MCR/MCP для demo kinds. |
 | Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
 | **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья без MCP в aggregated) **появляются в обходе**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
 
@@ -32,7 +32,7 @@ Reference для **heterogeneous** доменного дерева под **те
 
 **Граница generic / demo (имплементация):** reconciler **`NamespaceSnapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge bootstrap ∪ eligible DSC, **refresh после reconcile DSC**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
 
-**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; **временный scaffold в коде, не целевая модель PR5** (исторически помечаемый «synthetic») **не** входит в архитектурный narrative здесь — см. [`implementation-plan.md`](../implementation-plan.md) **§2.4.2** (блок **«Целевая архитектура vs текущий код»** / **«Снятие synthetic scaffold»**): после **merge-gate** на demo-domain flow scaffold **обязан** быть удалён из кода и тестов **в том же PR5 или следующем cleanup PR**.
+**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; generic **E5/E6** и доменные **PR5a/PR5b** в коде опираются на registry и **`children*Refs`**, без отдельного временного child-**NamespaceSnapshot** scaffold в runtime (см. **[`spec/system-spec.md`](../../spec/system-spec.md) §3.8** и **§2.4.2**/**§2.4.4** [`implementation-plan.md`](../implementation-plan.md)).
 
 ## ADR (кратко)
 
@@ -40,7 +40,7 @@ Reference для **heterogeneous** доменного дерева под **те
 |--|--|
 | **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`NamespaceSnapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — **реальный** heterogeneous tree на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
 | **Инвариант** | Generic не повторно захватывает ресурс, покрытый subtree; **ownerRef** — только жизненный цикл/GC ([`08`](08-universal-snapshot-tree-model.md) часть B). |
-| **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. **Временный scaffold в коде, не целевая модель PR5** (synthetic) до merge-gate описан только в **implementation-plan §2.4.2** (миграция/снятие), не в этом README как цель. |
+| **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. |
 
 ## Документы этапа 1 (архитектурный обзор)
 

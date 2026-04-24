@@ -28,8 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -37,13 +35,15 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// PR5a: one demo kind, merge-safe refs on root NamespaceSnapshot + root NamespaceSnapshotContent, plus one DSC row for registration smoke.
-var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Serial, func() {
-	const dscName = "integration-pr5a-demo-disk-dsc"
+// E6 + dynamic child watch: root NamespaceSnapshot reaches Ready=Completed with a referenced
+// DemoVirtualDiskSnapshot child (same graph class as PR5a). A follow-up status-only patch on the
+// child (Ready=True message tweak, no spec / generation bump) must not break parent convergence —
+// guards against predicates or relay paths that ignore status-only updates.
+var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Serial, func() {
+	const dscName = "integration-nss-e6-status-dsc"
 
 	BeforeEach(func() {
 		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
@@ -53,13 +53,13 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
 	})
 
-	It("registers DSC and merges demo disk snapshot into root children*Refs", func() {
+	It("reaches parent Ready Completed and tolerates child status-only patches", func() {
 		testCtx := context.Background()
 
 		dsc := &ssv1alpha1.DomainSpecificSnapshotController{
 			ObjectMeta: metav1.ObjectMeta{Name: dscName},
 			Spec: ssv1alpha1.DomainSpecificSnapshotControllerSpec{
-				OwnerModule: "integration-pr5a",
+				OwnerModule: "integration-nss-e6-status",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
 						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
@@ -89,7 +89,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			Type:               controllers.DSCConditionRBACReady,
 			Status:             metav1.ConditionTrue,
 			Reason:             "IntegrationHook",
-			Message:            "pr5a demo",
+			Message:            "nss e6 status propagation",
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: gen,
 		})
@@ -97,15 +97,15 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "pr5a-demo-disk-",
-				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "pr5a-demo-disk"},
+				GenerateName: "nss-e6-status-",
+				Labels:       map[string]string{"state-snapshotter.deckhouse.io/test": "nss-e6-status"},
 			},
 		}
 		Expect(k8sClient.Create(testCtx, ns)).To(Succeed())
 		nsName := ns.Name
 		DeferCleanup(func() { _ = k8sClient.Delete(testCtx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}) })
 
-		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "pr5a-cm", Namespace: nsName}, Data: map[string]string{"k": "v"}}
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "nss-e6-cm", Namespace: nsName}, Data: map[string]string{"k": "v"}}
 		Expect(k8sClient.Create(testCtx, cm)).To(Succeed())
 
 		root := &storagev1alpha1.NamespaceSnapshot{
@@ -114,19 +114,8 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		}
 		Expect(k8sClient.Create(testCtx, root)).To(Succeed())
 
-		var rootNSC string
-		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
-			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
-			g.Expect(rc).NotTo(BeNil())
-			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(r.Status.BoundSnapshotContentName).NotTo(BeEmpty())
-			rootNSC = r.Status.BoundSnapshotContentName
-		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
-
 		disk := &demov1alpha1.DemoVirtualDiskSnapshot{
-			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: nsName},
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-e6", Namespace: nsName},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
 				RootNamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
@@ -134,7 +123,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 					Namespace:  nsName,
 					Name:       "root",
 				},
-				PersistentVolumeClaimName: "pr5a-disk-pvc",
+				PersistentVolumeClaimName: "nss-e6-pvc",
 			},
 		}
 		Expect(k8sClient.Create(testCtx, disk)).To(Succeed())
@@ -143,7 +132,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 			Kind:       "DemoVirtualDiskSnapshot",
 			Namespace:  nsName,
-			Name:       "disk-a",
+			Name:       "disk-e6",
 		}
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.NamespaceSnapshot{}
@@ -162,46 +151,40 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			g.Expect(found).To(BeTrue(), "root NamespaceSnapshot should list demo disk snapshot in childrenSnapshotRefs")
 		}).WithTimeout(45 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		var contentName string
 		Eventually(func(g Gomega) {
-			d := &demov1alpha1.DemoVirtualDiskSnapshot{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "disk-a"}, d)).To(Succeed())
-			g.Expect(d.Status.BoundSnapshotContentName).NotTo(BeEmpty())
-			contentName = d.Status.BoundSnapshotContentName
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+			r := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
+			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(rc).NotTo(BeNil())
+			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(rc.Reason).To(Equal(snapshot.ReasonCompleted))
+		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		Eventually(func(g Gomega) {
-			nsc := &storagev1alpha1.NamespaceSnapshotContent{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootNSC}, nsc)).To(Succeed())
-			var found bool
-			for _, ch := range nsc.Status.ChildrenSnapshotContentRefs {
-				if ch.Name == contentName {
-					found = true
-					break
-				}
-			}
-			g.Expect(found).To(BeTrue(), "root NamespaceSnapshotContent should reference demo disk content")
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+		diskKey := types.NamespacedName{Namespace: nsName, Name: "disk-e6"}
+		d0 := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		Expect(k8sClient.Get(testCtx, diskKey, d0)).To(Succeed())
+		genBefore := d0.GetGeneration()
+		Expect(genBefore).NotTo(BeZero())
 
-		var nscVisited []string
-		var demoVisited []string
-		hooks := &usecase.DedicatedContentVisitHooks{
-			Visit: func(_ context.Context, gvk schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
-				if gvk.Kind == "DemoVirtualDiskSnapshotContent" {
-					demoVisited = append(demoVisited, contentName)
-				}
-				return nil
-			},
-		}
-		err := usecase.WalkNamespaceSnapshotContentSubtreeWithRegistry(testCtx, k8sClient, rootNSC,
-			func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
-				nscVisited = append(nscVisited, nsc.Name)
-				return nil
-			},
-			integrationGraphRegProvider.Current(), hooks,
-		)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(nscVisited).NotTo(BeEmpty())
-		Expect(demoVisited).To(ContainElement(contentName), "ref-only walk should visit DemoVirtualDiskSnapshotContent leaf via same childrenSnapshotContentRefs graph")
+		base := d0.DeepCopy()
+		rc := meta.FindStatusCondition(d0.Status.Conditions, snapshot.ConditionReady)
+		Expect(rc).NotTo(BeNil())
+		Expect(rc.Status).To(Equal(metav1.ConditionTrue))
+		rc.Message = rc.Message + " | status-only-bump"
+		meta.SetStatusCondition(&d0.Status.Conditions, *rc)
+		Expect(k8sClient.Status().Patch(testCtx, d0, client.MergeFrom(base))).To(Succeed())
+
+		d1 := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		Expect(k8sClient.Get(testCtx, diskKey, d1)).To(Succeed())
+		Expect(d1.GetGeneration()).To(Equal(genBefore), "status-only patches must not bump spec generation")
+
+		Consistently(func(g Gomega) {
+			r := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
+			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(rc).NotTo(BeNil())
+			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(rc.Reason).To(Equal(snapshot.ReasonCompleted))
+		}).WithTimeout(15 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 })

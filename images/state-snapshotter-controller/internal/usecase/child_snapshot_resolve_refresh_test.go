@@ -25,8 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
 // countingLive starts with an empty registry; first TryRefresh installs NamespaceSnapshot mapping.
@@ -50,33 +50,22 @@ func (c *countingLive) TryRefresh(context.Context) error {
 	return nil
 }
 
-func TestResolveChildSnapshotToBoundContentNameLive_RefreshesOnceThenSucceeds(t *testing.T) {
+func TestEnsureGVKRegistryFromLive_RefreshesOnceThenReturnsRegistry(t *testing.T) {
 	ctx := context.Background()
-	scheme := rootCaptureTestScheme(t)
-	child := &unstructured.Unstructured{}
-	child.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot",
-	})
-	child.SetNamespace("ns1")
-	child.SetName("child1")
-	_ = unstructured.SetNestedField(child.Object, "nsc-child", "status", "boundSnapshotContentName")
-
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child).Build()
-
-	live := &countingLive{reg: snapshot.NewGVKRegistry()}
-	out, err := ResolveChildSnapshotToBoundContentNameLive(ctx, cl, live, "ns1", "child1")
+	live := &countingLive{reg: nil}
+	reg, err := EnsureGVKRegistryFromLive(ctx, live)
 	if err != nil {
-		t.Fatalf("ResolveChildSnapshotToBoundContentNameLive: %v", err)
+		t.Fatalf("EnsureGVKRegistryFromLive: %v", err)
 	}
-	if out != "nsc-child" {
-		t.Fatalf("bound content: got %q", out)
+	if reg == nil {
+		t.Fatal("expected non-nil registry")
 	}
 	if atomic.LoadInt32(&live.refreshCalls) != 1 {
 		t.Fatalf("expected exactly one TryRefresh, got %d", live.refreshCalls)
 	}
 }
 
-func TestResolveChildSnapshotToBoundContentNameLive_StaticNoSecondRefresh(t *testing.T) {
+func TestResolveChildSnapshotRefToBoundContentName_NamespaceSnapshot(t *testing.T) {
 	ctx := context.Background()
 	scheme := rootCaptureTestScheme(t)
 	child := &unstructured.Unstructured{}
@@ -88,10 +77,15 @@ func TestResolveChildSnapshotToBoundContentNameLive_StaticNoSecondRefresh(t *tes
 	_ = unstructured.SetNestedField(child.Object, "nsc-child", "status", "boundSnapshotContentName")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child).Build()
-	reg := graphRegistryForRootCapture(t)
-	out, err := ResolveChildSnapshotToBoundContentNameLive(ctx, cl, snapshotgraphregistry.NewStatic(reg), "ns1", "child1")
+	ref := storagev1alpha1.NamespaceSnapshotChildRef{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "NamespaceSnapshot",
+		Namespace:  "ns1",
+		Name:       "child1",
+	}
+	out, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, ref, "ns1")
 	if err != nil {
-		t.Fatalf("ResolveChildSnapshotToBoundContentNameLive: %v", err)
+		t.Fatalf("ResolveChildSnapshotRefToBoundContentName: %v", err)
 	}
 	if out != "nsc-child" {
 		t.Fatalf("bound content: got %q", out)
