@@ -1,6 +1,10 @@
 # Универсальная модель snapshot-дерева и роль ownerReferences
 
-**Статус:** Proposed — **концептуальный SSOT** для demo-domain и будущих PR5+; нормативные выдержки при реализации переносятся в `spec/system-spec.md` без противоречия этому документу.
+**Статус:** Historical design (частично реализовано). Нормативный runtime-контракт — в `spec/system-spec.md`.
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
 
 **Коротко:** snapshot-система — это **обобщённое дерево heterogeneous `*Snapshot` / `*SnapshotContent`**, связь через **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, единый **`Ready`**, каскадная деградация снизу вверх и **вычисляемый** dedup; **`NamespaceSnapshot`** — текущий верхний узел, **не** особый тип правил.
 
@@ -32,7 +36,7 @@
 
 **Жёсткая граница (полный состав дерева run):** всё, что **не** перечислено в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на пути от root этого run, **не** входит в **логическое** дерево snapshot-run, **даже** если объект есть в API. Обход, агрегация **`Ready`** и вычисление dedup **игнорируют** такие объекты как узлы дерева (см. [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) **INV-REF1**, **INV-S0** в [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md)).
 
-**Согласование с текущим spec (PR1):** в [`spec/system-spec.md`](../../spec/system-spec.md) элементы refs описаны минимально (например `name`/`namespace` для дочернего NS). **Целевая универсальная семантика** для PR5 — **расширить содержимое элементов тех же полей** до `{ apiGroup, kind, namespace, name }` (или эквивалент), **без** новых имён полей вроде `domainChild*Refs`. Перенос в нормативный spec — вместе с реализацией PR5.
+**Согласование с текущим spec/runtime:** для `childrenSnapshotRefs` используется strict ref `{ apiVersion, kind, name }`; namespace дочернего snapshot **не хранится в ref** и всегда берётся из namespace родительского `NamespaceSnapshot`. Отдельные cross-namespace refs не являются частью текущего API-контракта.
 
 ### A.3. Роли уровней
 
@@ -60,7 +64,7 @@
 
 **Fail-closed (агрегация `Ready`).** Если состояние **обязательного** ребёнка, заданного в **refs**, **нельзя надёжно** определить (ошибка чтения API, нет ожидаемых **conditions**, конфликт состояний), предок **обязан** **`Ready=False`** — **не** оставаться **`Ready=True`** из-за «не смогли проверить». Нормативно: **INV-R4** в [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md).
 
-**Несколько детей с `Ready=False` и разными `reason`:** на родителе выбирается **ровно один** стабильный код **`reason`** — **детерминированный** порядок по ключу элемента **refs** (**INV-R5**, [`07`](07-ready-delete-matrix.md) §3); иначе разные реализации дали бы разный корневой **`reason`**.
+**Несколько детей с `Ready=False` и разными `reason`:** на родителе выбирается один код по фиксированному E6-приоритету (`ChildSnapshotFailed` > `SubtreeManifestCapturePending` > `ChildSnapshotPending`) — см. **INV-R5** в [`07`](07-ready-delete-matrix.md) §3.
 
 Примеры `reason`: `ManifestChunkMissing`, `ChildSnapshotMissing`, `ManifestCheckpointMissing`, `VolumeSnapshotNotReady`, …
 

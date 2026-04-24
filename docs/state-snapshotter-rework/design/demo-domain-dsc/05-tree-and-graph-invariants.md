@@ -1,6 +1,11 @@
 # Дерево snapshot kinds и инварианты demo v1
 
-**Статус:** Proposed — **зафиксировано для согласования перед кодом.**  
+**Статус:** Historical design (частично реализовано). Нормативный контракт — в `spec/system-spec.md`; этот файл описывает инварианты и мотивацию.
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+
 **Базовая модель дерева, `Ready`, dedup, ownerRef:** [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md).
 
 **Не вводить** отдельных полей `domainChild*Refs`, `domainCoverage`, `domainSubtreeSummary` и отдельного condition `SubtreeReady` — используются **общие** **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** и единый **`Ready`**.

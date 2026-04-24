@@ -1,6 +1,10 @@
 # DSC wiring для demo domain
 
-**Статус:** Proposed.
+**Статус:** Historical design (частично реализовано). Нормативный контракт — в `spec/system-spec.md`.
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
 
 ## Принцип
 
@@ -19,7 +23,7 @@ Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKin
 | A | `DemoVirtualMachineSnapshot` | `DemoVirtualMachineSnapshotContent` (имя на ревью) | VM |
 | B | `DemoVirtualDiskSnapshot` | `DemoVirtualDiskSnapshotContent` | Нижний доменный disk-узел |
 
-**VolumeSnapshot** / **VolumeSnapshotContent** — обычно CSI API group; для участия в дереве под root **не** требуется DSC state-snapshotter (если драйвер стандартный). Generic **не** регистрирует VS через DSC, но при обходе refs **ожидает** стандартный контракт готовности CSI (например **ReadyToUse**), маппируемый в общую логику **`Ready`** / dedup **без** знания «demo»: это **тип-агностичный** разбор полей CSI **status** API (адаптер / правила reconcile), **не** продуктовая ветка вида «если это наш демо-VS». Связь логического узла дерева с VS — [`03-snapshot-flow.md`](03-snapshot-flow.md).
+**VolumeSnapshot** / **VolumeSnapshotContent** — обычно CSI API group; для участия в дереве под root **не** требуется DSC state-snapshotter (если драйвер стандартный). Для текущего PR5a/PR5b это **future work**: demo-путь сейчас опирается на `Demo*Snapshot` + `*Content` и stub `Ready`, без production CSI/data-path.
 
 ## Кто что создаёт
 

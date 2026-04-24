@@ -115,5 +115,6 @@
 ## Demo / remote validation
 
 - Автоматизированная проверка на кластере и подготовка окружения — по мере внедрения сценариев; не удалять диагностические тесты без замены.
+- Актуальный артефакт pre-e2e smoke (kubectl checklist, namespace-local refs, root/demo readiness): [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md) — статус `pre-e2e-passed`.
 - Детали деплоя контроллера и линтера: `.cursor/rules/controller-redeploy-and-remote-e2e.mdc`.
 - Эксплуатация на кластере (CRD, метрики, stale, рестарт): [`../operations/runbook-degraded-and-unified-runtime.md`](../operations/runbook-degraded-and-unified-runtime.md).

@@ -1,6 +1,11 @@
 # Dedup: data + domain resources (computed)
 
-**Статус:** Proposed (расширено по ревью).  
+**Статус:** Historical design (частично реализовано).  
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+
 **Роль этого файла:** смысл dedup и уровни; **алгоритм и ключи** — в [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md). **«Coverage»** здесь — не сущность и не поле на CR: это **вычисляемое на reconcile** множество «уже покрыто» для exclude.
 
 ## Жёсткое разделение: ownerRef **≠** dedup
@@ -19,16 +24,16 @@ Dedup **не** требует поля `status.domainCoverage`: достаточ
 
 ## Два уровня dedup
 
-### 1. Data dedup
+### 1. Data dedup (future work)
 
-Не два **VolumeSnapshot** на один **PVC** в одном root run. Проверка — через **вычисленное** множество `pvcUID` с уже существующим доменным VS (`06`).
+Не два **VolumeSnapshot** на один **PVC** в одном root run. Проверка через `pvcUID` — целевая модель; в текущем PR5a/PR5b data-path CSI не является реализованным контрактом.
 
-### 2. Resource dedup
+### 2. Resource dedup (partially implemented)
 
 Два разных класса риска (оба закрываются **вычислением** по refs + API, детали — `06`):
 
 1. **Внутри доменного дерева:** один и тот же доменный ресурс (например тот же логический диск / **`pvcUID`**) не должен оказаться в **двух несогласованных ветках** subtree — политика домена (**INV-T2** в [`05`](05-tree-and-graph-invariants.md)).
-2. **Между domain subtree и generic root capture:** объект уже попал в **domain MCP** / subtree этого run → **generic** не должен включить его **повторно** в **root** MCP того же run.
+2. **Между domain subtree и generic root capture:** объект уже попал в **domain MCP** / subtree этого run → **generic** не должен включить его **повторно** в **root** MCP того же run. Manifest-side exclude на subtree MCP — текущий реализованный baseline.
 
 > **Generic path must not re-capture any resource already covered by a more specific domain subtree** — проверка **на лету**, без денормализованного кэша в CR.
 

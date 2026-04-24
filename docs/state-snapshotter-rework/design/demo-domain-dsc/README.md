@@ -1,6 +1,10 @@
 # Demo domain-specific nested snapshot (via DSC)
 
-**Статус:** Proposed — **сначала документы → ревью → только потом код.** **PR5a/PR5b в репозитории:** группа **`demo.state-snapshotter.deckhouse.io`**, disk (**`DemoVirtualDiskSnapshot`**) и VM (**`DemoVirtualMachineSnapshot`**) + **`*Content`**, stubs **`DemoVirtualDisk`** / **`DemoVirtualMachine`** для DSC; контроллеры merge **`children*Refs`**; интеграции `demovirtualdisksnapshot_pr5a_test.go`, `demovirtualmachinesnapshot_pr5b_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
+**Статус:** Historical design (частично реализовано). Нормативный активный контракт — в [`spec/system-spec.md`](../../spec/system-spec.md). **PR5a/PR5b в репозитории:** группа **`demo.state-snapshotter.deckhouse.io`**, disk (**`DemoVirtualDiskSnapshot`**) и VM (**`DemoVirtualMachineSnapshot`**) + **`*Content`**; контроллеры merge **`children*Refs`**; интеграции `demovirtualdisksnapshot_pr5a_test.go`, `demovirtualmachinesnapshot_pr5b_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
 
 ### PR5a — что гарантирует / чего пока нет
 
@@ -14,7 +18,7 @@
 
 | Гарантирует | Пока не делает |
 |-------------|----------------|
-| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под root NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD). | **`Ready`**-каскад по детям VM, автосоздание disk snapshots контроллером VM. |
+| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под root NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD); child disk под VM через **`parentDemoVirtualMachineSnapshotRef`**; root/VM `Ready` сходится через generic E6. | Автосоздание disk snapshots контроллером VM; реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
 | **`DemoVirtualDiskSnapshot.spec.parentDemoVirtualMachineSnapshotRef`** — диск под VM при совпадении **`rootNamespaceSnapshotRef`** с родителем (**INV-T2**); merge **`children*Refs`** на VM snapshot и на VM content. | Не валидирует, что у VM «достаточно» дисков; оператор создаёт диск отдельно. |
 
 Поставка demo CRD: манифесты в **`crds/`**; образ **`bundle`** в **`.werf/bundle.yaml`** включает каталог **`crds`** в git-стадию модуля. Факт доставки на кластер проверяется **сборкой и деплоем** модуля (CI / релизный pipeline).

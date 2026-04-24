@@ -1,6 +1,11 @@
 # Единица дедупликации и **вычисляемое** coverage (v1)
 
-**Статус:** Proposed — **зафиксировано для согласования перед кодом.**  
+**Статус:** Historical design (частично реализовано).  
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+
 **Базовая модель:** [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) (dedup не хранится; ownerRef ≠ dedup).
 
 **Не использовать:** persisted **`domainCoverage`**, аннотации-кэш, отдельные summary-поля в CR.
@@ -11,8 +16,8 @@
 
 | Слой | Вопрос |
 |------|--------|
-| **Data dedup** | Один **PVC** — не два **VolumeSnapshot** в одном root run. |
-| **Resource dedup** | Один logical disk / объект **не** дважды в subtree и **не** повторно в generic root **MCP**, если манифесты/данные уже покрыты **domain MCP этого run** (см. уточнение ниже) — **не** достаточно одного лишь факта «доменный snapshot существует», пока соответствующий MCP/chunk-набор **не** материализован по критерию spec. |
+| **Data dedup** | Один **PVC** — не два **VolumeSnapshot** в одном root run (**future work для demo CSI data-path**). |
+| **Resource dedup** | Один logical disk / объект **не** дважды в subtree и **не** повторно в generic root **MCP**, если манифесты/данные уже покрыты **domain MCP этого run** (см. уточнение ниже). Manifest-side часть — текущий baseline; data-side часть остаётся target-моделью до CSI path. |
 
 **Принцип:** **generic path** не повторно захватывает ресурс, уже покрытый более специфичным subtree (см. также [`04-coverage-dedup.md`](04-coverage-dedup.md)).
 
@@ -26,7 +31,7 @@
 |--------|----------------------------------|
 | **PVC** | `metadata.uid` PVC (**`pvcUID`**). |
 | **Диск в demo v1** | **Упрощение модели:** логический диск отождествляется с **`pvcUID`**, потому что в v1 задано **1:1** disk ↔ PVC; при появлении multi-volume / абстракции диска ключ в **spec** меняется **отдельно**, этот ряд таблицы **не** универсальная истина. |
-| **Объект в root allowlist** | `{ apiGroup, kind, namespace, name }` или **uid**. |
+| **Объект в root allowlist** | `{ apiVersion, kind, namespace, name }` или **uid**. |
 
 Инварианты **INV-D1** / **INV-D2** (два disk snapshot на один `pvcUID`; standalone vs под VM) — по-прежнему; контроль — reconcile demo + проверка API, не поле в status.
 

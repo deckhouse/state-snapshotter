@@ -1,6 +1,11 @@
 # Snapshot flow: root NamespaceSnapshot + heterogeneous snapshot tree
 
-**Статус:** Proposed (исправлено по ревью: **без** вложенных `NamespaceSnapshot`).  
+**Статус:** Historical design (частично реализовано; updated after PR5a/PR5b).  
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+
 **Цель:** согласовать порядок reconcile, **ownerRef** (иерархия / GC / deletion) отдельно от **вычисляемого dedup/exclude**, и границу без special-case «если DemoVM» в generic reconcile.
 
 **Три оси (кратко):** дерево — **`children*Refs`**; готовность — **`Ready`** по refs + зависимостям; lifecycle — **ownerRef**/финализаторы ([`05` §3](05-tree-and-graph-invariants.md) таблица «Три оси», [`08` B](08-universal-snapshot-tree-model.md)).
@@ -39,13 +44,19 @@ NamespaceSnapshot (root)
 | **Demo VM / Disk snapshot controllers** | Создают и ведут **DemoVirtualMachineSnapshot**, **DemoVirtualDiskSnapshot**, их **Content**, **VolumeSnapshot**/VCR, MCR/MCP для manifest leaf. |
 | **Согласование с root** | **Пишут** в root **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** те **доменные** контроллеры (или **опциональный** demo orchestrator — [`02`](02-dsc-wiring.md)), которые **создали** соответствующие дочерние snapshot-узлы: каждый отвечает за **свои** элементы refs (**INV-REF-M1** / **INV-REF-M2**, [`05`](05-tree-and-graph-invariants.md) §1; merge-safe патчи — детали ключа в spec/коде PR5). **Generic** root reconciler **не** заполняет доменные дети в refs «по схеме»; он **читает** refs для **`Ready`** / exclude. **`Ready`** root — каскад снизу вверх по refs ([`07`](07-ready-delete-matrix.md), [`08`](08-universal-snapshot-tree-model.md)). В spec элементы refs могут быть описаны минимально для PR1 — для PR5 **расширяется содержимое тех же полей**, без новых имён полей дерева. |
 
-## Порядок (высокий уровень)
+## Порядок: current implementation
 
 1. Пользователь создаёт **root `NamespaceSnapshot`** на namespace с demo workload.
 2. Generic controller: bind root NSC, root MCR→MCP, с **exclude**, **вычисляемым** из API и дерева (см. [`04-coverage-dedup.md`](04-coverage-dedup.md)).
 3. **Доменный** контроллер (или orchestrator из [`02`](02-dsc-wiring.md)), **наблюдающий** root **`NamespaceSnapshot`** / namespace по **политике** (label/selector, аннотация на NS и т.д. — фиксируется в spec), **инициирует** создание **`DemoVirtualMachineSnapshot`**; далее **те же** доменные reconciler’ы создают disk snapshots, **VolumeSnapshot**/VCR, MCR/MCP по **`spec`** — **не** generic **`NamespaceSnapshot`** reconciler.
-4. Leaf disk: **VolumeSnapshot** для PVC + manifest path; **Ready** пропагируется к VM snapshot, затем к **политике root NS Ready** (расширение §11.1 под heterogeneous children — не дублировать здесь дословно).
+4. PR5a/PR5b demo-path: child refs пишутся в `children*Refs`; `Ready` root/VM сходится через generic E6 по дочерним snapshot refs. Demo `Ready` для child snapshots пока stub.
 5. **Aggregated manifests — граница контрактов:** в **текущем** shipping-контуре действует **PR4**: aggregated read и traversal завязаны на **существующий** обход (NSC-дерево / контракт в [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../../spec/namespace-snapshot-aggregated-manifests-pr4.md)). **В этом документе** flow **heterogeneous** графа для aggregation **не** нормативен до отдельного шага: поддержка **нескольких MCP** с доменных content и обход **по тем же** **`children*Refs`** потребует **явного** расширения traversal и обновления spec — иначе риск **двух несовместимых** моделей обхода (legacy PR4 vs полный PR5-граф). Пока не смержен контракт расширения — для aggregation опираться **только** на механизм PR4.
+
+## Порядок: target flow (future work)
+
+1. Реальный leaf data-path для demo disks через CSI `VolumeSnapshot`/`VolumeSnapshotContent` + VCR.
+2. Тип-агностичная интерпретация CSI готовности в общей `Ready` модели без demo-specific веток в generic.
+3. Полный dedup по data-path и manifest-path с единым критерием materialized coverage.
 
 ## Owner references (**не** дерево, **не** dedup, **не** `Ready`)
 
