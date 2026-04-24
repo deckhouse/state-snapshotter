@@ -1,105 +1,238 @@
-# Pre-E2E Smoke Validation (Passed)
+Ниже короткий smoke-checklist через `kubectl` перед полноценным e2e.
 
-Дата: 2026-04-24  
-Статус: **pre-e2e-passed**
+```shell
+# 0. Контекст
+kubectl cluster-info
+kubectl get ns d8-state-snapshotter
+kubectl get pods -n d8-state-snapshotter -o wide
+kubectl get deploy -n d8-state-snapshotter
+```
 
-Короткий smoke-check через `kubectl` выполнен перед полноценным e2e. Результат: кластер и контроллер в рабочем состоянии, базовый namespace-local flow подтверждён.
+```shell
+# 1. CRD установлены
+kubectl get crd | grep -E 'namespacesnapshots|namespacesnapshotcontents|demovirtual|domainspecificsnapshotcontrollers|manifestcapture'
+```
 
-## Использованный чеклист
+```shell
+# 2. Проверить schema childrenSnapshotRefs: без namespace
+kubectl explain namespacesnapshot.status.childrenSnapshotRefs
+kubectl explain namespacesnapshot.status.childrenSnapshotRefs.apiVersion
+kubectl explain namespacesnapshot.status.childrenSnapshotRefs.kind
+kubectl explain namespacesnapshot.status.childrenSnapshotRefs.name
 
-1. Контекст кластера и `d8-state-snapshotter` (`cluster-info`, `ns`, `pods`, `deploy`).
-2. Проверка наличия CRD (`namespacesnapshot*`, `demovirtual*`, `domainspecificsnapshotcontrollers`, `manifestcapture*`).
-3. Проверка схемы `childrenSnapshotRefs` через `kubectl explain`:
-   - есть только `apiVersion`, `kind`, `name` (required);
-   - поля `namespace` нет.
-4. Предварительный просмотр логов контроллера на `panic|fatal|stacktrace|error`.
-5. Создание smoke namespace и простого объекта.
-6. Создание root `NamespaceSnapshot`.
-7. Проверка bind `NamespaceSnapshot -> NamespaceSnapshotContent`.
-8. Проверка `MCR/MCP` и `manifestCheckpointName`.
-9. Проверка `Ready` у root snapshot и content.
-10. Проверка, что `childrenSnapshotRefs` пуст для простого root.
-11. Создание demo child (`DemoVirtualDiskSnapshot`) и проверка graph refs.
-12. Проверка `childrenSnapshotContentRefs` на root NSC.
-13. Проверка, что parent просыпается от child status.
-14. Удаление root и проверка cleanup/retain поведения.
-15. Финальная проверка логов контроллера.
+# В explain НЕ должно быть:
+# namespacesnapshot.status.childrenSnapshotRefs.namespace
+```
 
-## Фактический результат
+```shell
+# 3. Логи контроллера без panic/fatal
+kubectl logs -n d8-state-snapshotter deploy/state-snapshotter-controller --tail=300 \
+  | grep -Ei 'panic|fatal|stacktrace|error'
+```
 
-- **Контекст и доступность**
-  - `kubectl cluster-info` OK.
-  - `d8-state-snapshotter` существует.
-  - Pods `controller` и `webhooks` в `Running`.
-  - Deployments готовы (`1/1`).
+```shell
+# 4. Создать тестовый namespace и простой объект
+kubectl create ns nss-smoke
 
-- **CRD**
-  - В кластере присутствуют:
+kubectl -n nss-smoke create configmap smoke-cm \
+  --from-literal=key=value
+```
+
+```shell
+# 5. Создать root NamespaceSnapshot
+cat <<'EOF' | kubectl apply -f -
+apiVersion: storage.deckhouse.io/v1alpha1
+kind: NamespaceSnapshot
+metadata:
+  name: root
+  namespace: nss-smoke
+spec: {}
+EOF
+```
+
+```shell
+# 6. Проверить binding root → NamespaceSnapshotContent
+kubectl -n nss-smoke get namespacesnapshot root -o yaml
+
+kubectl -n nss-smoke get namespacesnapshot root \
+  -o jsonpath='{.status.boundSnapshotContentName}{"\n"}'
+
+ROOT_NSC=$(kubectl -n nss-smoke get namespacesnapshot root -o jsonpath='{.status.boundSnapshotContentName}')
+kubectl get namespacesnapshotcontent "$ROOT_NSC" -o yaml
+```
+
+Ожидаемо: у `NamespaceSnapshot` есть `status.boundSnapshotContentName`, у `NamespaceSnapshotContent` есть ссылка обратно на root snapshot.
+
+```shell
+# 7. Проверить MCR/MCP manifest capture
+kubectl -n nss-smoke get manifestcapturerequests
+kubectl get manifestcheckpoints
+
+kubectl get namespacesnapshotcontent "$ROOT_NSC" \
+  -o jsonpath='{.status.manifestCheckpointName}{"\n"}'
+
+MCP=$(kubectl get namespacesnapshotcontent "$ROOT_NSC" -o jsonpath='{.status.manifestCheckpointName}')
+kubectl get manifestcheckpoint "$MCP" -o yaml
+```
+
+Ожидаемо: MCP существует и `Ready=True`.
+
+```shell
+# 8. Проверить root Ready
+kubectl -n nss-smoke get namespacesnapshot root \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+
+kubectl get namespacesnapshotcontent "$ROOT_NSC" \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+```
+
+Ожидаемо: `Ready=True Completed`.
+
+```shell
+# 9. Проверить childrenSnapshotRefs: для простого root их быть не должно
+kubectl -n nss-smoke get namespacesnapshot root \
+  -o jsonpath='{.status.childrenSnapshotRefs}{"\n"}'
+```
+
+Ожидаемо: пусто.
+
+```shell
+# 10. Если demo CRD есть — создать demo child snapshot и проверить graph refs
+cat <<'EOF' | kubectl apply -f -
+apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+kind: DemoVirtualDiskSnapshot
+metadata:
+  name: disk-a
+  namespace: nss-smoke
+spec:
+  rootNamespaceSnapshotRef:
+    name: root
+EOF
+```
+
+```shell
+kubectl -n nss-smoke get demovirtualdisksnapshot disk-a -o yaml
+
+kubectl -n nss-smoke get namespacesnapshot root \
+  -o jsonpath='{.status.childrenSnapshotRefs}{"\n"}'
+```
+
+Ожидаемо: в `childrenSnapshotRefs` есть только:
+
+```shell
+apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+kind: DemoVirtualDiskSnapshot
+name: disk-a
+```
+
+и **нет `namespace`**.
+
+```shell
+# 11. Проверить child content refs на root NSC
+kubectl get namespacesnapshotcontent "$ROOT_NSC" \
+  -o jsonpath='{.status.childrenSnapshotContentRefs}{"\n"}'
+```
+
+```shell
+# 12. Проверить, что parent проснулся от child status
+kubectl -n nss-smoke get namespacesnapshot root \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+```
+
+Ожидаемо: root не завис в `ChildSnapshotPending`, если demo child уже `Ready=True`.
+
+```shell
+# 13. Удаление root и проверка cleanup
+kubectl -n nss-smoke delete namespacesnapshot root --wait=false
+
+kubectl -n nss-smoke get namespacesnapshot root
+kubectl get namespacesnapshotcontent "$ROOT_NSC" -o yaml
+```
+
+Ожидаемо зависит от deletionPolicy/retain-модели, но не должно быть бесконечного stuck без понятного condition/log.
+
+```shell
+# 14. Финальные логи после smoke
+kubectl logs -n d8-state-snapshotter deploy/state-snapshotter-controller --tail=500 \
+  | grep -Ei 'panic|fatal|stacktrace|error'
+```
+
+```text
+Smoke-check выполнен, кластер и контроллер в рабочем состоянии. Ниже фактический результат по чеклисту.
+
+- **0. Контекст**
+  - API доступен (`kubectl cluster-info` OK).
+  - Namespace `d8-state-snapshotter` активен.
+  - Pod’ы `controller` и `webhooks` в `Running`.
+  - Deployments `controller`/`webhooks` готовы `1/1`.
+
+- **1. CRD установлены**
+  - В кластере есть:
     - `namespacesnapshots.storage.deckhouse.io`
     - `namespacesnapshotcontents.storage.deckhouse.io`
     - `manifestcapturerequests.state-snapshotter.deckhouse.io`
     - `manifestcheckpoints.state-snapshotter.deckhouse.io`
-    - demo CRD (`demovirtualdisksnapshots`, `demovirtualmachinesnapshots`)
+    - demo CRD (включая `demovirtualdisksnapshots`, `demovirtualmachinesnapshots`)
     - `domainspecificsnapshotcontrollers...`
 
-- **Schema `childrenSnapshotRefs`**
-  - `kubectl explain namespacesnapshot.status.childrenSnapshotRefs` подтверждает только required:
-    - `apiVersion`
-    - `kind`
-    - `name`
-  - `kubectl explain namespacesnapshot.status.childrenSnapshotRefs.namespace` возвращает `field "namespace" does not exist` (ожидаемо).
+- **2. Schema childrenSnapshotRefs (без namespace)**
+  - `kubectl explain namespacesnapshot.status.childrenSnapshotRefs` показывает только required:
+    - `apiVersion` (required)
+    - `kind` (required)
+    - `name` (required)
+  - `kubectl explain namespacesnapshot.status.childrenSnapshotRefs.namespace` → `field "namespace" does not exist` (ожидаемо).
 
-- **Логи контроллера**
-  - До smoke были исторические строки leader-election (`leader election lost`), без panic/stacktrace.
-  - После smoke в хвосте логов не найдено `panic|fatal|stacktrace|error`.
+- **3. Логи контроллера (до smoke)**
+  - В хвосте нашли старые строки leader-election (`leader election lost`) — не panic/stacktrace приложения.
+  - После smoke (п.14) — `panic|fatal|stacktrace|error` не найдено.
 
-- **Root flow (`nss-smoke`)**
-  - Созданы `nss-smoke` и `ConfigMap smoke-cm`.
+- **4–6. Root NamespaceSnapshot**
+  - Создан `nss-smoke` + `ConfigMap smoke-cm`.
   - Создан `NamespaceSnapshot/root`.
   - Появился `status.boundSnapshotContentName`:
     - `ns-4414190b366e44a9bd50a77845d80576`
-  - Соответствующий `NamespaceSnapshotContent` существует и ссылается на `nss-smoke/root`.
+  - `NamespaceSnapshotContent` существует и корректно ссылается обратно:
+    - `spec.namespaceSnapshotRef = storage.deckhouse.io/v1alpha1, NamespaceSnapshot, nss-smoke/root`.
 
-- **MCR/MCP**
-  - `ManifestCaptureRequest` после успешного capture отсутствует (очистка).
+- **7. MCR/MCP**
+  - `ManifestCaptureRequest` в `nss-smoke` уже отсутствует (ожидаемая очистка после успешного capture).
   - `ManifestCheckpoint` существует:
     - `mcp-ca752c09efdf9b7f`
-    - `Ready=True`, `Reason=Completed`
-  - `NamespaceSnapshotContent.status.manifestCheckpointName` указывает на тот же MCP.
+    - Condition: `Ready=True Completed`.
+  - На `NamespaceSnapshotContent.status.manifestCheckpointName` стоит тот же MCP.
 
-- **Ready состояние**
-  - `NamespaceSnapshot/root`: `Bound=True ContentCreated`, `Ready=True Completed`.
-  - `NamespaceSnapshotContent`: `Ready=True Completed`.
+- **8. Root Ready**
+  - `NamespaceSnapshot/root`:
+    - `Bound=True ContentCreated`
+    - `Ready=True Completed`
+  - `NamespaceSnapshotContent`:
+    - `Ready=True Completed`
 
-- **Graph refs до demo child**
-  - `root.status.childrenSnapshotRefs` пусто (ожидаемо).
+- **9. childrenSnapshotRefs для простого root**
+  - До создания demo child — пусто (ожидаемо).
 
-- **Demo child и namespace-local refs**
-  - Короткий манифест child без `rootNamespaceSnapshotRef.apiVersion/kind` отклонён CRD-валидацией (ожидаемо).
-  - После применения валидного манифеста (`apiVersion/kind/name` + `persistentVolumeClaimName`) child создан.
-  - В `root.status.childrenSnapshotRefs` появился strict ref **без `namespace`**:
+- **10–12. Demo child + graph refs**
+  - Твой короткий манифест demo child не прошёл валидацию CRD:
+    - требуется `spec.rootNamespaceSnapshotRef.apiVersion` и `kind`.
+  - Применил валидный вариант (`apiVersion/kind/name` + `persistentVolumeClaimName`), объект создан.
+  - В `root.status.childrenSnapshotRefs` появился strict ref **без namespace**:
     - `apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1`
     - `kind: DemoVirtualDiskSnapshot`
     - `name: disk-a`
-  - `DemoVirtualDiskSnapshot` перешёл в `Ready=True Completed`.
-  - В root NSC появились `childrenSnapshotContentRefs`.
+  - `DemoVirtualDiskSnapshot` стал `Ready=True Completed`.
+  - В `root NSC` появились `childrenSnapshotContentRefs` с demo content.
   - Root не завис в `ChildSnapshotPending`, остался `Ready=True Completed`.
 
-- **Удаление root**
-  - `kubectl delete namespacesnapshot root --wait=false` — root удалён.
-  - `NamespaceSnapshotContent ns-441...` сохранился по retain-модели:
+- **13. Удаление root**
+  - `kubectl delete namespacesnapshot root --wait=false` → root удалён быстро (`NotFound`).
+  - `NamespaceSnapshotContent ns-441...` остался (Retain-модель):
     - `spec.deletionPolicy: Retain`
     - `ownerReference` на `ObjectKeeper`
-    - `Ready=True Completed`
+    - статус `Ready=True Completed`.
 
-## Вывод
+- **14. Финальные логи**
+  - В хвосте `deploy/controller` за последние 500 строк:
+    - `panic|fatal|stacktrace|error` — **не найдено**.
 
-Минимальный pre-e2e критерий выполнен:
-
-- pod'ы контроллера живы;
-- root `NamespaceSnapshot` успешно создаётся и бинится к content;
-- manifest capture завершается (`MCP Ready=True Completed`);
-- root `Ready=True Completed`;
-- demo child корректно добавляется в `childrenSnapshotRefs` в формате `apiVersion/kind/name` без `namespace`;
-- parent корректно реагирует на child status;
-- критичных ошибок в логах контроллера не обнаружено.
+Итог: минимальный критерий перед e2e выполнен — root flow рабочий, MCP/Ready сходятся, demo child корректно встраивается в `childrenSnapshotRefs` в формате `apiVersion/kind/name` без `namespace`.
+```
