@@ -16,7 +16,6 @@ limitations under the License.
 
 // E6: generic NamespaceSnapshot parent readiness aggregation from status.childrenSnapshotRefs.
 // Each ref carries explicit apiVersion/kind/name; the child object is loaded with a single Get (no registry scan).
-// Ref namespace must be empty or equal to the parent NamespaceSnapshot namespace (namespace-local run tree).
 
 package usecase
 
@@ -154,17 +153,12 @@ type NamespaceSnapshotChildrenRefsSummary struct {
 }
 
 // SummarizeChildrenSnapshotRefsForParentReadyE6 aggregates parent child readiness from strict refs (apiVersion/kind/name).
-// Ref namespace defaults to parentSnapshotNamespace when empty.
 func SummarizeChildrenSnapshotRefsForParentReadyE6(ctx context.Context, c client.Reader, refs []storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (*NamespaceSnapshotChildrenRefsSummary, error) {
 	if len(refs) == 0 {
 		return &NamespaceSnapshotChildrenRefsSummary{AllCompleted: true}, nil
 	}
 	var sum NamespaceSnapshotChildrenRefsSummary
 	for _, ref := range refs {
-		ns := ref.Namespace
-		if ns == "" {
-			ns = parentSnapshotNamespace
-		}
 		if _, err := RefGVK(ref); err != nil {
 			sum.HasFailed = true
 			sum.FailedMessages = append(sum.FailedMessages, err.Error())
@@ -175,17 +169,12 @@ func SummarizeChildrenSnapshotRefsForParentReadyE6(ctx context.Context, c client
 			if errors.Is(resErr, ErrRunGraphChildSnapshotNotFound) {
 				sum.HasPending = true
 				sum.PendingParts = append(sum.PendingParts,
-					fmt.Sprintf("child snapshot %s/%s/%s not found yet", ref.APIVersion, ref.Kind, ns+"/"+ref.Name))
-				continue
-			}
-			if errors.Is(resErr, ErrInvalidChildSnapshotRefNamespace) {
-				sum.HasFailed = true
-				sum.FailedMessages = append(sum.FailedMessages, resErr.Error())
+					fmt.Sprintf("child snapshot %s/%s/%s not found yet", ref.APIVersion, ref.Kind, parentSnapshotNamespace+"/"+ref.Name))
 				continue
 			}
 			return nil, resErr
 		}
-		cls, msg := ClassifyGenericChildSnapshotReady(u, gvk, ns, ref.Name)
+		cls, msg := ClassifyGenericChildSnapshotReady(u, gvk, parentSnapshotNamespace, ref.Name)
 		switch cls {
 		case NamespaceSnapshotChildReadyClassFailed:
 			sum.HasFailed = true

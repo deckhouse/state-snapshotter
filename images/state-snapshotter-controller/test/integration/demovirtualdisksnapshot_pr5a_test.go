@@ -142,7 +142,6 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		wantChild := storagev1alpha1.NamespaceSnapshotChildRef{
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 			Kind:       "DemoVirtualDiskSnapshot",
-			Namespace:  nsName,
 			Name:       "disk-a",
 		}
 		Eventually(func(g Gomega) {
@@ -150,11 +149,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			var found bool
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
-				ns := ch.Namespace
-				if ns == "" {
-					ns = r.Namespace
-				}
-				if ch.APIVersion == wantChild.APIVersion && ch.Kind == wantChild.Kind && ns == wantChild.Namespace && ch.Name == wantChild.Name {
+				if ch.APIVersion == wantChild.APIVersion && ch.Kind == wantChild.Kind && ch.Name == wantChild.Name {
 					found = true
 					break
 				}

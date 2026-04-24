@@ -131,7 +131,6 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 		wantChild := storagev1alpha1.NamespaceSnapshotChildRef{
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 			Kind:       "DemoVirtualDiskSnapshot",
-			Namespace:  nsName,
 			Name:       "disk-e6",
 		}
 		Eventually(func(g Gomega) {
@@ -139,11 +138,7 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			var found bool
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
-				ns := ch.Namespace
-				if ns == "" {
-					ns = r.Namespace
-				}
-				if ch.APIVersion == wantChild.APIVersion && ch.Kind == wantChild.Kind && ns == wantChild.Namespace && ch.Name == wantChild.Name {
+				if ch.APIVersion == wantChild.APIVersion && ch.Kind == wantChild.Kind && ch.Name == wantChild.Name {
 					found = true
 					break
 				}

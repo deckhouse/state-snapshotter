@@ -51,16 +51,11 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 		want := storagev1alpha1.NamespaceSnapshotChildRef{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 			Kind:       "NamespaceSnapshot",
-			Namespace:  rootNS,
 			Name:       childNSSName,
 		}
 		found := false
 		for _, r := range p.Status.ChildrenSnapshotRefs {
-			ns := r.Namespace
-			if ns == "" {
-				ns = rootNS
-			}
-			if r.APIVersion == want.APIVersion && r.Kind == want.Kind && ns == want.Namespace && r.Name == want.Name {
+			if r.APIVersion == want.APIVersion && r.Kind == want.Kind && r.Name == want.Name {
 				found = true
 				break
 			}

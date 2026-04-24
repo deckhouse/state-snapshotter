@@ -133,7 +133,6 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 					Kind:       "NamespaceSnapshot",
-					Namespace:  "ns1",
 					Name:       "ch1",
 				},
 			},
@@ -192,7 +191,6 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 				{
 					APIVersion: "generic.state-snapshotter.test/v1",
 					Kind:       "FixtureDomainSnapshot",
-					Namespace:  "ns1",
 					Name:       "disk-a",
 				},
 			},
@@ -239,7 +237,6 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 				{
 					APIVersion: "generic.state-snapshotter.test/v1",
 					Kind:       "FixtureDomainSnapshot",
-					Namespace:  "ns1",
 					Name:       "disk-a",
 				},
 			},

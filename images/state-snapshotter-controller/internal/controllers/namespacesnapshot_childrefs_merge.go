@@ -28,7 +28,7 @@ func namespaceSnapshotChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotChi
 	}
 	for i := range a {
 		if a[i].APIVersion != b[i].APIVersion || a[i].Kind != b[i].Kind ||
-			a[i].Name != b[i].Name || a[i].Namespace != b[i].Namespace {
+			a[i].Name != b[i].Name {
 			return false
 		}
 	}
@@ -36,11 +36,11 @@ func namespaceSnapshotChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotChi
 }
 
 func namespaceSnapshotChildRefKey(ref storagev1alpha1.NamespaceSnapshotChildRef) string {
-	return ref.APIVersion + "\x00" + ref.Kind + "\x00" + ref.Namespace + "\x00" + ref.Name
+	return ref.APIVersion + "\x00" + ref.Kind + "\x00" + ref.Name
 }
 
 // mergeNamespaceSnapshotChildRefs returns a new slice: all entries from existing, then each upsert overwrites
-// or appends by key (apiVersion, kind, namespace, name). Result is sorted for stable status (spec §3.2 / INV-REF-M1).
+// or appends by key (apiVersion, kind, name). Result is sorted for stable status (spec §3.2 / INV-REF-M1).
 func mergeNamespaceSnapshotChildRefs(existing, upsert []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
 	m := make(map[string]storagev1alpha1.NamespaceSnapshotChildRef, len(existing)+len(upsert))
 	order := make([]string, 0, len(existing)+len(upsert))
@@ -82,9 +82,6 @@ func namespaceSnapshotChildRefsSortedCopy(src []storagev1alpha1.NamespaceSnapsho
 		}
 		if cp[i].Kind != cp[j].Kind {
 			return cp[i].Kind < cp[j].Kind
-		}
-		if cp[i].Namespace != cp[j].Namespace {
-			return cp[i].Namespace < cp[j].Namespace
 		}
 		return cp[i].Name < cp[j].Name
 	})
@@ -145,7 +142,7 @@ func namespaceSnapshotContentChildRefsSortedCopy(src []storagev1alpha1.Namespace
 	return cp
 }
 
-// removeNamespaceSnapshotChildRefsByKeys returns existing refs minus any whose (namespace,name) appears in remove (INV-REF-M2: caller must only pass keys it owns).
+// removeNamespaceSnapshotChildRefsByKeys returns existing refs minus any whose key (apiVersion,kind,name) appears in remove (INV-REF-M2: caller must only pass keys it owns).
 func removeNamespaceSnapshotChildRefsByKeys(existing, remove []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
 	if len(remove) == 0 {
 		return namespaceSnapshotChildRefsSortedCopy(existing)

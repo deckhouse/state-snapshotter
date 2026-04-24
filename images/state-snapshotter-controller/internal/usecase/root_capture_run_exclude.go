@@ -180,13 +180,9 @@ func collectRunSubtreeManifestExcludeKeys(
 		if err != nil {
 			return nil, err
 		}
-		ns := ch.Namespace
-		if ns == "" {
-			ns = rootNS.Namespace
-		}
 		if _, ok := visited[resolved]; !ok {
 			return nil, fmt.Errorf("%w: childrenSnapshotRefs %s/%s -> %q not visited from root NamespaceSnapshotContent %q",
-				ErrRunGraphChildNotReachable, ns, ch.Name, resolved, rootNSCName)
+				ErrRunGraphChildNotReachable, rootNS.Namespace, ch.Name, resolved, rootNSCName)
 		}
 	}
 

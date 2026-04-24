@@ -57,7 +57,6 @@ func TestCollectRunSubtreeManifestExcludeKeys_GraphRegistryNotReady(t *testing.T
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 					Kind:       "NamespaceSnapshot",
-					Namespace:  "ns1",
 					Name:       "ch1",
 				},
 			},
@@ -104,7 +103,6 @@ func TestCollectRunSubtreeManifestExcludeKeys_DescendantNSCWithoutMCPPends(t *te
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 					Kind:       "NamespaceSnapshot",
-					Namespace:  "ns1",
 					Name:       "ch1",
 				},
 			},
@@ -143,7 +141,6 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotBoundNoExclude(t *testing.
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 					Kind:       "NamespaceSnapshot",
-					Namespace:  "ns1",
 					Name:       "ch1",
 				},
 			},

@@ -27,7 +27,7 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 		Status: NamespaceSnapshotStatus{
 			BoundSnapshotContentName: "parent-content",
 			ChildrenSnapshotRefs: []NamespaceSnapshotChildRef{
-				{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "NamespaceSnapshot", Name: "child1", Namespace: "ns-a"},
+				{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "NamespaceSnapshot", Name: "child1"},
 			},
 		},
 	}
@@ -45,7 +45,7 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 	if got := out.Status.ChildrenSnapshotRefs; len(got) != 1 {
 		t.Fatalf("ChildrenSnapshotRefs len: got %d want 1 (full %#v)", len(got), got)
 	}
-	if got := out.Status.ChildrenSnapshotRefs[0]; got.Name != "child1" || got.Namespace != "ns-a" ||
+	if got := out.Status.ChildrenSnapshotRefs[0]; got.Name != "child1" ||
 		got.APIVersion != "storage.deckhouse.io/v1alpha1" || got.Kind != "NamespaceSnapshot" {
 		t.Fatalf("ChildrenSnapshotRefs[0]: got %#v", got)
 	}
@@ -64,9 +64,12 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 		t.Fatalf("raw childrenSnapshotRefs len: got %d want 1", len(refs))
 	}
 	item := refs[0].(map[string]interface{})
-	if item["name"] != "child1" || item["namespace"] != "ns-a" ||
+	if item["name"] != "child1" ||
 		item["apiVersion"] != "storage.deckhouse.io/v1alpha1" || item["kind"] != "NamespaceSnapshot" {
-		t.Fatalf("expected JSON keys apiVersion/kind/name/namespace, got %#v", item)
+		t.Fatalf("expected JSON keys apiVersion/kind/name, got %#v", item)
+	}
+	if _, ok := item["namespace"]; ok {
+		t.Fatalf("did not expect namespace key in child ref JSON: %#v", item)
 	}
 }
 

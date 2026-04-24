@@ -46,10 +46,10 @@ func childSnapshotRefMatchesUnstructuredChild(ref storagev1alpha1.NamespaceSnaps
 }
 
 // findParentsReferencingChildSnapshot returns reconcile requests for NamespaceSnapshot parents whose
-// status.childrenSnapshotRefs match the child's apiVersion, kind, namespace, and name.
+// status.childrenSnapshotRefs match the child's apiVersion, kind, and name.
 //
 // Snapshot-run tree is namespace-local: only NamespaceSnapshot objects in the child's namespace are
-// considered (no cluster-wide list). Ref effective namespace must equal the child's namespace.
+// considered (no cluster-wide list).
 func findParentsReferencingChildSnapshot(ctx context.Context, c client.Reader, child *unstructured.Unstructured) []reconcile.Request {
 	if child == nil {
 		return nil
@@ -71,13 +71,6 @@ func findParentsReferencingChildSnapshot(ctx context.Context, c client.Reader, c
 		p := &list.Items[i]
 		for _, ref := range p.Status.ChildrenSnapshotRefs {
 			if !childSnapshotRefMatchesUnstructuredChild(ref, child, childName) {
-				continue
-			}
-			effectiveRefNS := ref.Namespace
-			if effectiveRefNS == "" {
-				effectiveRefNS = p.Namespace
-			}
-			if effectiveRefNS != childNS {
 				continue
 			}
 			out = append(out, reconcile.Request{

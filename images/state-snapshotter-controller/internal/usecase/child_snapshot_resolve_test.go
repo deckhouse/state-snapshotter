@@ -18,7 +18,6 @@ package usecase
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -42,7 +41,6 @@ func TestResolveChildSnapshotRefToBoundContentName_SameNameDifferentKinds(t *tes
 	refA := storagev1alpha1.NamespaceSnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
 		Kind:       "FixtureDomainSnapshotA",
-		Namespace:  ns,
 		Name:       name,
 	}
 	out, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, refA, ns)
@@ -52,7 +50,6 @@ func TestResolveChildSnapshotRefToBoundContentName_SameNameDifferentKinds(t *tes
 	refB := storagev1alpha1.NamespaceSnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
 		Kind:       "FixtureDomainSnapshotB",
-		Namespace:  ns,
 		Name:       name,
 	}
 	outB, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, refB, ns)
@@ -61,18 +58,23 @@ func TestResolveChildSnapshotRefToBoundContentName_SameNameDifferentKinds(t *tes
 	}
 }
 
-func TestResolveChildSnapshotRefToBoundContentName_RejectsCrossNamespaceRef(t *testing.T) {
+func TestResolveChildSnapshotRefToBoundContentName_UsesParentNamespace(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	cl := fake.NewClientBuilder().Build()
-	_, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, storagev1alpha1.NamespaceSnapshotChildRef{
+	parentNS := "parent-ns"
+	child := childSnapUnstructured(parentNS, "x", schema.GroupVersionKind{
+		Group:   "generic.state-snapshotter.test",
+		Version: "v1",
+		Kind:    "FixtureDomainSnapshotA",
+	}, "content-x")
+	cl := fake.NewClientBuilder().WithRuntimeObjects(child).Build()
+	got, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, storagev1alpha1.NamespaceSnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
 		Kind:       "FixtureDomainSnapshotA",
-		Namespace:  "other-ns",
 		Name:       "x",
-	}, "parent-ns")
-	if err == nil || !errors.Is(err, ErrInvalidChildSnapshotRefNamespace) {
-		t.Fatalf("expected ErrInvalidChildSnapshotRefNamespace, got %v", err)
+	}, parentNS)
+	if err != nil || got != "content-x" {
+		t.Fatalf("got %q err=%v", got, err)
 	}
 }
 

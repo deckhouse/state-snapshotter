@@ -22,18 +22,17 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-func childRef(ns, name string) storagev1alpha1.NamespaceSnapshotChildRef {
+func childRef(name string) storagev1alpha1.NamespaceSnapshotChildRef {
 	return storagev1alpha1.NamespaceSnapshotChildRef{
 		APIVersion: "demo.test/v1",
 		Kind:       "DemoSnapshot",
-		Namespace:  ns,
 		Name:       name,
 	}
 }
 
 func TestMergeNamespaceSnapshotChildRefs(t *testing.T) {
-	keep := childRef("ns1", "other")
-	child := childRef("ns1", "child")
+	keep := childRef("other")
+	child := childRef("child")
 	got := mergeNamespaceSnapshotChildRefs([]storagev1alpha1.NamespaceSnapshotChildRef{keep}, []storagev1alpha1.NamespaceSnapshotChildRef{child})
 	if len(got) != 2 {
 		t.Fatalf("want 2 refs got %d %+v", len(got), got)
@@ -46,8 +45,8 @@ func TestMergeNamespaceSnapshotChildRefs(t *testing.T) {
 	}
 
 	overwrite := mergeNamespaceSnapshotChildRefs(
-		[]storagev1alpha1.NamespaceSnapshotChildRef{childRef("ns1", "x")},
-		[]storagev1alpha1.NamespaceSnapshotChildRef{childRef("ns1", "x")},
+		[]storagev1alpha1.NamespaceSnapshotChildRef{childRef("x")},
+		[]storagev1alpha1.NamespaceSnapshotChildRef{childRef("x")},
 	)
 	if len(overwrite) != 1 || overwrite[0].Name != "x" {
 		t.Fatalf("same-key merge: %+v", overwrite)
@@ -56,10 +55,10 @@ func TestMergeNamespaceSnapshotChildRefs(t *testing.T) {
 
 func TestRemoveNamespaceSnapshotChildRefsByKeys(t *testing.T) {
 	existing := []storagev1alpha1.NamespaceSnapshotChildRef{
-		childRef("ns", "keep"),
-		childRef("ns", "drop"),
+		childRef("keep"),
+		childRef("drop"),
 	}
-	remove := []storagev1alpha1.NamespaceSnapshotChildRef{childRef("ns", "drop")}
+	remove := []storagev1alpha1.NamespaceSnapshotChildRef{childRef("drop")}
 	got := removeNamespaceSnapshotChildRefsByKeys(existing, remove)
 	if len(got) != 1 || got[0].Name != "keep" {
 		t.Fatalf("got %+v", got)

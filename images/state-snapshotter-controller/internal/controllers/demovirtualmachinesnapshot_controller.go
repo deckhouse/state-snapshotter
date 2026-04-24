@@ -120,7 +120,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       "DemoVirtualMachineSnapshot",
-		Namespace:  s.Namespace,
 		Name:       s.Name,
 	}}
 	if err := patchRootNamespaceSnapshotChildRefsMerge(ctx, r.Client, rootKey, wantSnap); err != nil {

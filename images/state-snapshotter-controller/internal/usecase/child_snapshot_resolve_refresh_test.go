@@ -80,7 +80,6 @@ func TestResolveChildSnapshotRefToBoundContentName_NamespaceSnapshot(t *testing.
 	ref := storagev1alpha1.NamespaceSnapshotChildRef{
 		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 		Kind:       "NamespaceSnapshot",
-		Namespace:  "ns1",
 		Name:       "child1",
 	}
 	out, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, ref, "ns1")

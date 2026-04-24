@@ -31,10 +31,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
-// ErrInvalidChildSnapshotRefNamespace is returned when status.childrenSnapshotRefs[].namespace is
-// non-empty and not equal to the parent NamespaceSnapshot namespace (namespace-local run tree; no cross-namespace graph).
-var ErrInvalidChildSnapshotRefNamespace = errors.New("childrenSnapshotRefs entry namespace must be empty or match the parent NamespaceSnapshot namespace")
-
 // RefGVK parses apiVersion/kind from a NamespaceSnapshotChildRef (strict; no registry).
 func RefGVK(ref storagev1alpha1.NamespaceSnapshotChildRef) (schema.GroupVersionKind, error) {
 	if ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
@@ -48,20 +44,13 @@ func RefGVK(ref storagev1alpha1.NamespaceSnapshotChildRef) (schema.GroupVersionK
 }
 
 // GetChildSnapshot resolves one status.childrenSnapshotRefs entry with a single Get (strict GVK).
-// parentSnapshotNamespace is used when ref.Namespace is empty (namespaced children).
-// If ref.Namespace is set, it must equal parentSnapshotNamespace (namespace-local snapshot run).
+// parentSnapshotNamespace is always used for child namespace (namespace-local snapshot run).
 func GetChildSnapshot(ctx context.Context, c client.Reader, ref storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (*unstructured.Unstructured, schema.GroupVersionKind, error) {
 	gvk, err := RefGVK(ref)
 	if err != nil {
 		return nil, schema.GroupVersionKind{}, err
 	}
-	if ref.Namespace != "" && ref.Namespace != parentSnapshotNamespace {
-		return nil, gvk, fmt.Errorf("%w: ref.namespace=%q parent.namespace=%q", ErrInvalidChildSnapshotRefNamespace, ref.Namespace, parentSnapshotNamespace)
-	}
-	ns := ref.Namespace
-	if ns == "" {
-		ns = parentSnapshotNamespace
-	}
+	ns := parentSnapshotNamespace
 	key := client.ObjectKey{Namespace: ns, Name: ref.Name}
 	if ns == "" {
 		key = client.ObjectKey{Name: ref.Name}
@@ -88,7 +77,7 @@ func ResolveChildSnapshotRefToBoundContentName(ctx context.Context, c client.Rea
 		return "", fmt.Errorf("read status.boundSnapshotContentName from %s %s/%s: %w", gvk.String(), u.GetNamespace(), u.GetName(), err)
 	}
 	if !found || bound == "" {
-		return "", fmt.Errorf("%s/%s: %w", ref.Namespace, ref.Name, ErrRunGraphChildNotBound)
+		return "", fmt.Errorf("%s/%s: %w", parentSnapshotNamespace, ref.Name, ErrRunGraphChildNotBound)
 	}
 	return bound, nil
 }

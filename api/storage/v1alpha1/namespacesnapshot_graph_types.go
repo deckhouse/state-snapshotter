@@ -21,16 +21,14 @@ package v1alpha1
 // generic code resolves the object with a single client Get — no registry scan and no ambiguity.
 //
 // Snapshot-run tree is namespace-local to the root NamespaceSnapshot: the child object MUST live
-// in the same namespace as that parent. Namespace, when set, MUST equal the parent NamespaceSnapshot
-// namespace; when empty it defaults to the parent namespace. Cross-namespace refs are invalid and
-// rejected fail-closed by generic reconcile (E6 / exclude resolution).
+// in the same namespace as that parent. Namespace is implicit and always taken from parent
+// NamespaceSnapshot namespace. Cross-namespace refs are not part of this model.
 //
 // +k8s:deepcopy-gen=true
 type NamespaceSnapshotChildRef struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
-	Namespace  string `json:"namespace,omitempty"`
 }
 
 // NamespaceSnapshotContentChildRef identifies one child NamespaceSnapshotContent in the N2b graph

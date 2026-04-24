@@ -149,7 +149,6 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		wantVMChild := storagev1alpha1.NamespaceSnapshotChildRef{
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 			Kind:       "DemoVirtualMachineSnapshot",
-			Namespace:  nsName,
 			Name:       "vm-run",
 		}
 		Eventually(func(g Gomega) {
@@ -157,11 +156,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			var found bool
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
-				ns := ch.Namespace
-				if ns == "" {
-					ns = r.Namespace
-				}
-				if ch.APIVersion == wantVMChild.APIVersion && ch.Kind == wantVMChild.Kind && ns == wantVMChild.Namespace && ch.Name == wantVMChild.Name {
+				if ch.APIVersion == wantVMChild.APIVersion && ch.Kind == wantVMChild.Kind && ch.Name == wantVMChild.Name {
 					found = true
 					break
 				}
@@ -209,7 +204,6 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		wantDiskChild := storagev1alpha1.NamespaceSnapshotChildRef{
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 			Kind:       "DemoVirtualDiskSnapshot",
-			Namespace:  nsName,
 			Name:       "disk-under-vm",
 		}
 		Eventually(func(g Gomega) {
@@ -217,11 +211,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "vm-run"}, v)).To(Succeed())
 			var found bool
 			for _, ch := range v.Status.ChildrenSnapshotRefs {
-				ns := ch.Namespace
-				if ns == "" {
-					ns = v.Namespace
-				}
-				if ch.APIVersion == wantDiskChild.APIVersion && ch.Kind == wantDiskChild.Kind && ns == wantDiskChild.Namespace && ch.Name == wantDiskChild.Name {
+				if ch.APIVersion == wantDiskChild.APIVersion && ch.Kind == wantDiskChild.Kind && ch.Name == wantDiskChild.Name {
 					found = true
 					break
 				}

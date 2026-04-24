@@ -127,7 +127,6 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       "DemoVirtualDiskSnapshot",
-		Namespace:  s.Namespace,
 		Name:       s.Name,
 	}}
 	if err := patchRootNamespaceSnapshotChildRefsMerge(ctx, r.Client, rootKey, wantSnap); err != nil {
@@ -267,7 +266,6 @@ func (r *DemoVirtualDiskSnapshotReconciler) reconcileUnderParentVM(ctx context.C
 	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       "DemoVirtualDiskSnapshot",
-		Namespace:  s.Namespace,
 		Name:       s.Name,
 	}}
 	if err := patchDemoVirtualMachineSnapshotChildRefsMerge(ctx, r.Client, vmKey, wantSnap); err != nil {

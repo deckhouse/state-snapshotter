@@ -44,7 +44,6 @@ func TestFindParentsReferencingChildSnapshot_MatchesGVKAndName(t *testing.T) {
 				{
 					APIVersion: "demo.test/v1",
 					Kind:       "DemoSnap",
-					Namespace:  "ns-a",
 					Name:       "snap-1",
 				},
 			},
@@ -61,8 +60,8 @@ func TestFindParentsReferencingChildSnapshot_MatchesGVKAndName(t *testing.T) {
 	}
 }
 
-// Namespace-local run tree: a NamespaceSnapshot in another namespace must not be returned even if
-// status.childrenSnapshotRefs would match the same GVK/name with a cross-namespace ref (invalid graph).
+// Namespace-local run tree: a NamespaceSnapshot in another namespace must not be returned because
+// parent lookup is scoped to child namespace only.
 func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing.T) {
 	ctx := context.Background()
 	gvk := schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "DemoSnap"}
@@ -75,7 +74,7 @@ func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "root"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{APIVersion: "demo.test/v1", Kind: "DemoSnap", Namespace: "", Name: "snap-1"},
+				{APIVersion: "demo.test/v1", Kind: "DemoSnap", Name: "snap-1"},
 			},
 		},
 	}
@@ -83,7 +82,7 @@ func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-b", Name: "other-root"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
 			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
-				{APIVersion: "demo.test/v1", Kind: "DemoSnap", Namespace: "ns-a", Name: "snap-1"},
+				{APIVersion: "demo.test/v1", Kind: "DemoSnap", Name: "snap-1"},
 			},
 		},
 	}
@@ -113,7 +112,6 @@ func TestFindParentsReferencingChildSnapshot_SameNameDifferentGVKNoFalsePositive
 				{
 					APIVersion: "demo.test/v1",
 					Kind:       "KindA",
-					Namespace:  "ns1",
 					Name:       "x",
 				},
 			},

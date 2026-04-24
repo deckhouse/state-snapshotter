@@ -59,23 +59,26 @@ spec:
                 type: string
               childrenSnapshotRefs:
                 description: |-
-                  ChildrenSnapshotRefs lists child snapshot objects (namespace+name) in the N2b run tree.
-                  Generic reconcile resolves each ref to a registered snapshot kind (GVKRegistry); it is not
-                  limited to NamespaceSnapshot. Populated by domain controllers or merge helpers that own edges.
+                  ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
+                  in the N2b run tree. Generic reconcile resolves each child with one Get by ref GVK (no demo-kind
+                  branching and no registry scan for child selection); it is not limited to NamespaceSnapshot.
+                  Child namespace is implicit and always equals parent NamespaceSnapshot namespace.
+                  Populated by domain controllers or merge helpers that own graph edges.
                 items:
                   description: |-
                     NamespaceSnapshotChildRef identifies one child snapshot object in the run tree (element of
                     status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
                     generic code resolves the object with a single client Get — no registry scan and no ambiguity.
-                    Namespace defaults to the parent NamespaceSnapshot namespace when empty.
+
+                    Snapshot-run tree is namespace-local to the root NamespaceSnapshot: the child object MUST live
+                    in the same namespace as that parent. Namespace is implicit and always taken from parent
+                    NamespaceSnapshot namespace. Cross-namespace refs are not part of this model.
                   properties:
                     apiVersion:
                       type: string
                     kind:
                       type: string
                     name:
-                      type: string
-                    namespace:
                       type: string
                   required:
                   - apiVersion
