@@ -44,6 +44,10 @@ type DemoVirtualMachineSnapshotContentSpec struct {
 // DemoVirtualMachineSnapshotContentStatus defines the observed state of DemoVirtualMachineSnapshotContent.
 // +k8s:deepcopy-gen=true
 type DemoVirtualMachineSnapshotContentStatus struct {
+	// ManifestCheckpointName points to the materialized manifest checkpoint for this content node.
+	// +optional
+	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
+
 	// ChildrenSnapshotContentRefs lists child snapshot content objects (e.g. DemoVirtualDiskSnapshotContent).
 	// +optional
 	ChildrenSnapshotContentRefs []storagev1alpha1.NamespaceSnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`

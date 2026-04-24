@@ -42,7 +42,11 @@ type DemoVirtualDiskSnapshotContentSpec struct {
 }
 
 // DemoVirtualDiskSnapshotContentStatus defines the observed state of DemoVirtualDiskSnapshotContent.
-type DemoVirtualDiskSnapshotContentStatus struct{}
+type DemoVirtualDiskSnapshotContentStatus struct {
+	// ManifestCheckpointName points to the materialized manifest checkpoint for this content node.
+	// +optional
+	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
+}
 
 // +kubebuilder:object:root=true
 type DemoVirtualDiskSnapshotContentList struct {
