@@ -14,6 +14,8 @@
 
 Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKind`: он ведёт **root** namespace capture и опирается на **универсальную** модель дерева — **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, единый **`Ready`**, и **вычисляемый** exclude для generic capture (без persisted «domain summary»; см. [`04-coverage-dedup.md`](04-coverage-dedup.md), [`08`](08-universal-snapshot-tree-model.md)).
 
+**Parent link в demo API:** `parentSnapshotRef` — универсальная ссылка на родительский snapshot-узел в namespace-local graph. Для текущего demo wiring поддержка parent kinds ограничена реализацией контроллеров (например, Disk: `NamespaceSnapshot` / `DemoVirtualMachineSnapshot`) и **не** является закрытым списком для общей модели graph/E6.
+
 ## Объекты DSC (черновик)
 
 Минимум **два** DSC (или один DSC с двумя парами kinds — если схема и KindConflict это позволяют). Таблица — **пример** demo v1, **не** фиксированный allowlist: новые kinds подключаются **дополнительными** DSC **без** изменений generic **`NamespaceSnapshot`** reconciler ([`05`](05-tree-and-graph-invariants.md) — дерево без compile-time списка детей).

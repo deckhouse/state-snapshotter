@@ -117,10 +117,9 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 		disk := &demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-e6", Namespace: nsName},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				RootNamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
+				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 					Kind:       "NamespaceSnapshot",
-					Namespace:  nsName,
 					Name:       "root",
 				},
 				PersistentVolumeClaimName: "nss-e6-pvc",

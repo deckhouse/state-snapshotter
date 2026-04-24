@@ -105,7 +105,9 @@ metadata:
   name: disk-a
   namespace: nss-smoke
 spec:
-  rootNamespaceSnapshotRef:
+  parentSnapshotRef:
+    apiVersion: storage.deckhouse.io/v1alpha1
+    kind: NamespaceSnapshot
     name: root
 EOF
 ```
@@ -213,7 +215,7 @@ Smoke-check выполнен, кластер и контроллер в рабо
 
 - **10–12. Demo child + graph refs**
   - Твой короткий манифест demo child не прошёл валидацию CRD:
-    - требуется `spec.rootNamespaceSnapshotRef.apiVersion` и `kind`.
+    - требуется `spec.parentSnapshotRef.apiVersion` и `kind`.
   - Применил валидный вариант (`apiVersion/kind/name` + `persistentVolumeClaimName`), объект создан.
   - В `root.status.childrenSnapshotRefs` появился strict ref **без namespace**:
     - `apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1`

@@ -119,10 +119,9 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		}
 		Expect(k8sClient.Create(testCtx, root)).To(Succeed())
 
-		rootRef := storagev1alpha1.SnapshotSubjectRef{
+		rootParentRef := demov1alpha1.SnapshotParentRef{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 			Kind:       "NamespaceSnapshot",
-			Namespace:  nsName,
 			Name:       "root",
 		}
 
@@ -140,8 +139,8 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		vmSnap := &demov1alpha1.DemoVirtualMachineSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "vm-run", Namespace: nsName},
 			Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-				RootNamespaceSnapshotRef: rootRef,
-				VirtualMachineName:       "demo-vm-1",
+				ParentSnapshotRef:  rootParentRef,
+				VirtualMachineName: "demo-vm-1",
 			},
 		}
 		Expect(k8sClient.Create(testCtx, vmSnap)).To(Succeed())
@@ -185,18 +184,16 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			g.Expect(found).To(BeTrue(), "root NamespaceSnapshotContent should reference VM snapshot content")
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		parentVMRef := &storagev1alpha1.SnapshotSubjectRef{
+		parentVMRef := demov1alpha1.SnapshotParentRef{
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 			Kind:       "DemoVirtualMachineSnapshot",
-			Namespace:  nsName,
 			Name:       "vm-run",
 		}
 		disk := &demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-under-vm", Namespace: nsName},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				RootNamespaceSnapshotRef:            rootRef,
-				ParentDemoVirtualMachineSnapshotRef: parentVMRef,
-				PersistentVolumeClaimName:           "pr5b-vm-disk-pvc",
+				ParentSnapshotRef:         parentVMRef,
+				PersistentVolumeClaimName: "pr5b-vm-disk-pvc",
 			},
 		}
 		Expect(k8sClient.Create(testCtx, disk)).To(Succeed())

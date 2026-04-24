@@ -62,15 +62,6 @@ func demoVirtualMachineSnapshotContentName(namespace, name string) string {
 	return "demovmc-" + hex.EncodeToString(sum[:10])
 }
 
-func rootNamespaceSnapshotKeyFromVM(s *demov1alpha1.DemoVirtualMachineSnapshot) types.NamespacedName {
-	ref := s.Spec.RootNamespaceSnapshotRef
-	ns := ref.Namespace
-	if ns == "" {
-		ns = s.Namespace
-	}
-	return types.NamespacedName{Namespace: ns, Name: ref.Name}
-}
-
 func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("demoVirtualMachineSnapshot", req.NamespacedName)
 	ctx = log.IntoContext(ctx, logger)
@@ -87,17 +78,26 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
-	ref := s.Spec.RootNamespaceSnapshotRef
-	if ref.Name == "" {
-		return ctrl.Result{}, fmt.Errorf("spec.rootNamespaceSnapshotRef.name is required")
+	parentRef := s.Spec.ParentSnapshotRef
+	if parentRef.APIVersion == "" {
+		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.apiVersion is required")
 	}
-	if ref.Kind != "" && ref.Kind != "NamespaceSnapshot" {
-		return ctrl.Result{}, fmt.Errorf("spec.rootNamespaceSnapshotRef.kind %q is not supported (only NamespaceSnapshot)", ref.Kind)
+	if parentRef.Kind == "" {
+		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.kind is required")
+	}
+	if parentRef.Name == "" {
+		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.name is required")
+	}
+	if parentRef.Kind != "NamespaceSnapshot" {
+		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported (only NamespaceSnapshot)", parentRef.Kind)
+	}
+	if parentRef.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
+		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", parentRef.APIVersion)
 	}
 
-	rootKey := rootNamespaceSnapshotKeyFromVM(s)
-	root := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, rootKey, root); err != nil {
+	parentKey := types.NamespacedName{Namespace: s.Namespace, Name: parentRef.Name}
+	parent := &storagev1alpha1.NamespaceSnapshot{}
+	if err := r.Client.Get(ctx, parentKey, parent); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
 		}
@@ -122,19 +122,19 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		Kind:       "DemoVirtualMachineSnapshot",
 		Name:       s.Name,
 	}}
-	if err := patchRootNamespaceSnapshotChildRefsMerge(ctx, r.Client, rootKey, wantSnap); err != nil {
+	if err := patchRootNamespaceSnapshotChildRefsMerge(ctx, r.Client, parentKey, wantSnap); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if err := r.Client.Get(ctx, rootKey, root); err != nil {
+	if err := r.Client.Get(ctx, parentKey, parent); err != nil {
 		return ctrl.Result{}, err
 	}
-	rootNSC := root.Status.BoundSnapshotContentName
-	if rootNSC == "" {
+	parentNSC := parent.Status.BoundSnapshotContentName
+	if parentNSC == "" {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	wantContent := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: contentName}}
-	if err := patchNamespaceSnapshotContentChildRefsMerge(ctx, r.Client, rootNSC, wantContent); err != nil {
+	if err := patchNamespaceSnapshotContentChildRefsMerge(ctx, r.Client, parentNSC, wantContent); err != nil {
 		return ctrl.Result{}, err
 	}
 

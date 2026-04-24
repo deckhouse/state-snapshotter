@@ -43,23 +43,19 @@ spec:
             description: DemoVirtualMachineSnapshotSpec defines the desired state
               of DemoVirtualMachineSnapshot.
             properties:
-              rootNamespaceSnapshotRef:
-                description: RootNamespaceSnapshotRef identifies the NamespaceSnapshot
-                  run root (same namespace allowed).
+              parentSnapshotRef:
+                description: |-
+                  ParentSnapshotRef identifies the parent snapshot node (namespace-local).
+                  For DemoVirtualMachineSnapshot, parent kind must be NamespaceSnapshot.
                 properties:
                   apiVersion:
+                    description: APIVersion of the parent snapshot.
                     type: string
                   kind:
+                    description: Kind of the parent snapshot.
                     type: string
                   name:
-                    type: string
-                  namespace:
-                    type: string
-                  uid:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
+                    description: Name of the parent snapshot.
                     type: string
                 required:
                 - apiVersion
@@ -71,7 +67,7 @@ spec:
                   demo snapshot (PR5b: identity only).'
                 type: string
             required:
-            - rootNamespaceSnapshotRef
+            - parentSnapshotRef
             type: object
           status:
             description: DemoVirtualMachineSnapshotStatus defines the observed state
@@ -106,6 +102,11 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - apiVersion
+                - kind
+                - name
+                x-kubernetes-list-type: map
               conditions:
                 description: Conditions report readiness (e.g. Ready=True for generic
                   parent E6 aggregation).

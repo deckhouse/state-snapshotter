@@ -30,13 +30,16 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -144,6 +147,23 @@ func aggManifestNS(bound string) *storagev1alpha1.NamespaceSnapshot {
 			BoundSnapshotContentName: bound,
 		},
 	}
+}
+
+func aggManifestDedicatedContent(gvk schema.GroupVersionKind, name, mcpName string, children ...string) *unstructured.Unstructured {
+	var refs []map[string]interface{}
+	for _, c := range children {
+		refs = append(refs, map[string]interface{}{"name": c})
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	u.SetName(name)
+	u.Object["status"] = map[string]interface{}{
+		"manifestCheckpointName": mcpName,
+	}
+	if len(refs) > 0 {
+		u.Object["status"].(map[string]interface{})["childrenSnapshotContentRefs"] = refs
+	}
+	return u
 }
 
 func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
@@ -314,6 +334,110 @@ func TestAggregatedNamespaceManifests_ParentTwoChildren_OrderAndDedup(t *testing
 	meta2 := arr[2]["metadata"].(map[string]interface{})
 	if meta1["name"] != "b" || meta2["name"] != "c" {
 		t.Fatalf("order b,c expected, got %v %v", meta1["name"], meta2["name"])
+	}
+}
+
+func TestAggregatedNamespaceManifests_DedicatedContentNodeMCPIncluded(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	reg := snapshot.NewGVKRegistry()
+	if err := reg.RegisterSnapshotContentMapping(
+		"DemoVirtualDiskSnapshot",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"DemoVirtualDiskSnapshotContent",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+	); err != nil {
+		t.Fatalf("register mapping: %v", err)
+	}
+	agg := NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
+
+	objRoot := []map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root", "namespace": "ns1"}}}
+	objChild := []map[string]interface{}{{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "child", "namespace": "ns1"}}}
+	for _, tc := range []struct {
+		cpName string
+		objs   []map[string]interface{}
+	}{
+		{"mcp-root", objRoot},
+		{"mcp-disk", objChild},
+	} {
+		d, cs := aggManifestEncodeChunk(tc.objs)
+		ch := aggManifestCreateChunk("ch-"+tc.cpName, tc.cpName, d, cs)
+		_ = cl.Create(context.Background(), ch)
+		mcp := aggManifestReadyMCP(tc.cpName, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+		_ = cl.Create(context.Background(), mcp)
+	}
+
+	diskGVK := schema.GroupVersionKind{
+		Group:   "demo.state-snapshotter.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "DemoVirtualDiskSnapshotContent",
+	}
+	diskContent := aggManifestDedicatedContent(diskGVK, "disk-content", "mcp-disk")
+	_ = cl.Create(context.Background(), diskContent)
+
+	root := aggManifestNSC("root-nsc", "mcp-root", "disk-content")
+	_ = cl.Create(context.Background(), root)
+	ns := aggManifestNS("root-nsc")
+	_ = cl.Create(context.Background(), ns)
+
+	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 2 {
+		t.Fatalf("want root+child objects, got %d", len(arr))
+	}
+}
+
+func TestAggregatedNamespaceManifests_DedicatedContentWithoutMCPFailsClosed(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	reg := snapshot.NewGVKRegistry()
+	if err := reg.RegisterSnapshotContentMapping(
+		"DemoVirtualDiskSnapshot",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"DemoVirtualDiskSnapshotContent",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+	); err != nil {
+		t.Fatalf("register mapping: %v", err)
+	}
+	agg := NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
+
+	d, cs := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root", "namespace": "ns1"}},
+	})
+	ch := aggManifestCreateChunk("ch-root", "mcp-root", d, cs)
+	_ = cl.Create(context.Background(), ch)
+	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+	_ = cl.Create(context.Background(), mcp)
+
+	diskGVK := schema.GroupVersionKind{
+		Group:   "demo.state-snapshotter.deckhouse.io",
+		Version: "v1alpha1",
+		Kind:    "DemoVirtualDiskSnapshotContent",
+	}
+	diskContent := aggManifestDedicatedContent(diskGVK, "disk-content", "")
+	_ = cl.Create(context.Background(), diskContent)
+
+	root := aggManifestNSC("root-nsc", "mcp-root", "disk-content")
+	_ = cl.Create(context.Background(), root)
+	ns := aggManifestNS("root-nsc")
+	_ = cl.Create(context.Background(), ns)
+
+	_, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	var st *AggregatedStatusError
+	if !errors.As(err, &st) || st.HTTPStatus != http.StatusInternalServerError {
+		t.Fatalf("want fail-closed 500, got %v", err)
 	}
 }
 

@@ -43,24 +43,19 @@ spec:
             description: DemoVirtualDiskSnapshotSpec defines the desired state of
               DemoVirtualDiskSnapshot.
             properties:
-              parentDemoVirtualMachineSnapshotRef:
+              parentSnapshotRef:
                 description: |-
-                  ParentDemoVirtualMachineSnapshotRef, when set, attaches this disk snapshot under that VM snapshot (same namespace).
-                  RootNamespaceSnapshotRef must match the parent's root (PR5b, INV-T2 single parent).
+                  ParentSnapshotRef identifies the parent snapshot node (namespace-local).
+                  For DemoVirtualDiskSnapshot, parent kind must be NamespaceSnapshot or DemoVirtualMachineSnapshot.
                 properties:
                   apiVersion:
+                    description: APIVersion of the parent snapshot.
                     type: string
                   kind:
+                    description: Kind of the parent snapshot.
                     type: string
                   name:
-                    type: string
-                  namespace:
-                    type: string
-                  uid:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
+                    description: Name of the parent snapshot.
                     type: string
                 required:
                 - apiVersion
@@ -72,31 +67,8 @@ spec:
                   namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI
                   wiring yet).'
                 type: string
-              rootNamespaceSnapshotRef:
-                description: RootNamespaceSnapshotRef identifies the NamespaceSnapshot
-                  run root (same namespace allowed).
-                properties:
-                  apiVersion:
-                    type: string
-                  kind:
-                    type: string
-                  name:
-                    type: string
-                  namespace:
-                    type: string
-                  uid:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
-                    type: string
-                required:
-                - apiVersion
-                - kind
-                - name
-                type: object
             required:
-            - rootNamespaceSnapshotRef
+            - parentSnapshotRef
             type: object
           status:
             description: DemoVirtualDiskSnapshotStatus defines the observed state

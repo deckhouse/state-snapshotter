@@ -37,9 +37,10 @@ type DemoVirtualMachineSnapshot struct {
 // DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot.
 // +k8s:deepcopy-gen=true
 type DemoVirtualMachineSnapshotSpec struct {
-	// RootNamespaceSnapshotRef identifies the NamespaceSnapshot run root (same namespace allowed).
+	// ParentSnapshotRef identifies the parent snapshot node (namespace-local graph).
+	// Current demo controller implementation supports NamespaceSnapshot as parent kind.
 	// +kubebuilder:validation:Required
-	RootNamespaceSnapshotRef storagev1alpha1.SnapshotSubjectRef `json:"rootNamespaceSnapshotRef"`
+	ParentSnapshotRef SnapshotParentRef `json:"parentSnapshotRef"`
 
 	// VirtualMachineName is a logical VM identifier for this demo snapshot (PR5b: identity only).
 	// +optional
@@ -60,6 +61,10 @@ type DemoVirtualMachineSnapshotStatus struct {
 
 	// ChildrenSnapshotRefs lists child snapshot objects (e.g. DemoVirtualDiskSnapshot) under this VM snapshot.
 	// +optional
+	// +listType=map
+	// +listMapKey=apiVersion
+	// +listMapKey=kind
+	// +listMapKey=name
 	ChildrenSnapshotRefs []storagev1alpha1.NamespaceSnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 }
 

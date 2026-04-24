@@ -18,8 +18,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // +kubebuilder:object:root=true
@@ -37,14 +35,12 @@ type DemoVirtualDiskSnapshot struct {
 // DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot.
 // +k8s:deepcopy-gen=true
 type DemoVirtualDiskSnapshotSpec struct {
-	// RootNamespaceSnapshotRef identifies the NamespaceSnapshot run root (same namespace allowed).
+	// ParentSnapshotRef identifies the parent snapshot node (namespace-local graph).
+	// Current demo controller implementation supports NamespaceSnapshot and
+	// DemoVirtualMachineSnapshot as parent kinds; the generic graph model is not
+	// limited to this pair.
 	// +kubebuilder:validation:Required
-	RootNamespaceSnapshotRef storagev1alpha1.SnapshotSubjectRef `json:"rootNamespaceSnapshotRef"`
-
-	// ParentDemoVirtualMachineSnapshotRef, when set, attaches this disk snapshot under that VM snapshot (same namespace).
-	// RootNamespaceSnapshotRef must match the parent's root (PR5b, INV-T2 single parent).
-	// +optional
-	ParentDemoVirtualMachineSnapshotRef *storagev1alpha1.SnapshotSubjectRef `json:"parentDemoVirtualMachineSnapshotRef,omitempty"`
+	ParentSnapshotRef SnapshotParentRef `json:"parentSnapshotRef"`
 
 	// PersistentVolumeClaimName is the PVC name in the same namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI wiring yet).
 	// +optional

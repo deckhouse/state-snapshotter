@@ -128,10 +128,9 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		disk := &demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: nsName},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				RootNamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
+				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 					Kind:       "NamespaceSnapshot",
-					Namespace:  nsName,
 					Name:       "root",
 				},
 				PersistentVolumeClaimName: "pr5a-disk-pvc",

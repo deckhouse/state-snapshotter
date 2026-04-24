@@ -10,7 +10,7 @@
 
 | Гарантирует | Пока не делает (вне PR5a) |
 |-------------|---------------------------|
-| Привязка к root **`NamespaceSnapshot`** через **`spec.rootNamespaceSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root NS и root NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, полный MCR/MCP для demo kinds. |
+| Привязка к parent snapshot через **`spec.parentSnapshotRef`** (для standalone disk — kind=`NamespaceSnapshot`); создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на parent NS и parent NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, полный MCR/MCP для demo kinds. |
 | Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
 | **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья без MCP в aggregated) **появляются в обходе**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
 
@@ -18,8 +18,8 @@
 
 | Гарантирует | Пока не делает |
 |-------------|----------------|
-| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под root NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD); child disk под VM через **`parentDemoVirtualMachineSnapshotRef`**; root/VM `Ready` сходится через generic E6. | Автосоздание disk snapshots контроллером VM; реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
-| **`DemoVirtualDiskSnapshot.spec.parentDemoVirtualMachineSnapshotRef`** — диск под VM при совпадении **`rootNamespaceSnapshotRef`** с родителем (**INV-T2**); merge **`children*Refs`** на VM snapshot и на VM content. | Не валидирует, что у VM «достаточно» дисков; оператор создаёт диск отдельно. |
+| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под parent NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD); parent задаётся через **`parentSnapshotRef`** (kind=`NamespaceSnapshot`); root/VM `Ready` сходится через generic E6. | Автосоздание disk snapshots контроллером VM; реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
+| **`DemoVirtualDiskSnapshot.spec.parentSnapshotRef`** — универсальная ссылка на parent snapshot-узел в namespace-local graph. В **текущей demo-реализации** поддержаны `NamespaceSnapshot` (standalone) и `DemoVirtualMachineSnapshot` (disk под VM); merge **`children*Refs`** на соответствующий parent snapshot/content. | Не валидирует, что у VM «достаточно» дисков; оператор создаёт диск отдельно. |
 
 Поставка demo CRD: манифесты в **`crds/`**; образ **`bundle`** в **`.werf/bundle.yaml`** включает каталог **`crds`** в git-стадию модуля. Факт доставки на кластер проверяется **сборкой и деплоем** модуля (CI / релизный pipeline).
 
