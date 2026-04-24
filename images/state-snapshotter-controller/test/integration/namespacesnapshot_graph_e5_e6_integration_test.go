@@ -100,8 +100,8 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 	})
 }
 
-var _ = Describe("Integration: E5 subtree root MCR gate (real child NamespaceSnapshot graph)", func() {
-	It("does not create root MCR until child NamespaceSnapshotContent subtree MCP is Ready", func() {
+var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapshot kind fixture)", func() {
+	It("does not create root MCR until child snapshot content subtree MCP is Ready", func() {
 		ctx := context.Background()
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
@@ -190,7 +190,7 @@ var _ = Describe("Integration: E5 subtree root MCR gate (real child NamespaceSna
 			if chNSC.Status.ManifestCheckpointName == "" {
 				err := k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: mcrName}, &ssv1alpha1.ManifestCaptureRequest{})
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "root MCR must not exist before child subtree has manifestCheckpointName")
-				g.Expect(false).To(BeTrue(), "waiting for child NamespaceSnapshotContent.manifestCheckpointName")
+				g.Expect(false).To(BeTrue(), "waiting for child snapshot content manifestCheckpointName")
 			}
 			mcp := &ssv1alpha1.ManifestCheckpoint{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: chNSC.Status.ManifestCheckpointName}, mcp)).To(Succeed())
@@ -228,7 +228,7 @@ var _ = Describe("Integration: E5 subtree root MCR gate (real child NamespaceSna
 	})
 })
 
-var _ = Describe("Integration: E6 parent Ready when child NamespaceSnapshot fails capture", func() {
+var _ = Describe("Integration: E6 parent Ready when child snapshot fails capture", func() {
 	It("sets parent Ready=False ChildSnapshotFailed when child hits terminal capture failure", func() {
 		ctx := context.Background()
 

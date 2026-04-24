@@ -58,7 +58,7 @@ var (
 // registry may be stale vs RESTMapper (CRD appeared after last DSC reconcile). Child snapshot refs carry
 // explicit apiVersion/kind/name (strict); subtree traversal still uses the registry for snapshot↔content mapping.
 //
-// When status.childrenSnapshotRefs is empty, behavior matches legacy root capture: full namespace
+// When status.childrenSnapshotRefs is empty, behavior matches N2a root capture: full namespace
 // allowlist without subtree exclude.
 //
 // While childrenSnapshotRefs is non-empty, descendant NamespaceSnapshotContent nodes reached from the root

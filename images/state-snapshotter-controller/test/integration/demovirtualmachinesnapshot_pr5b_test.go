@@ -274,7 +274,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Expect(diskVisited).To(ContainElement(diskContentName))
 
 		// E6: after domain wiring adds childrenSnapshotRefs, root NamespaceSnapshot becomes Ready=True only when
-		// all referenced child NamespaceSnapshots (e.g. vm-run) are ready — not immediately at first capture.
+		// all referenced child snapshot objects (e.g. DemoVirtualMachineSnapshot vm-run) are ready.
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
