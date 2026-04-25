@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -30,14 +29,17 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// DemoVirtualMachineSnapshotReconciler wires a demo VM snapshot into the root NamespaceSnapshot graph (PR5b).
+// DemoVirtualMachineSnapshotReconciler owns demo VM materialization and its parent-owned disk child graph.
 type DemoVirtualMachineSnapshotReconciler struct {
 	Client client.Client
 }
@@ -50,16 +52,40 @@ type DemoVirtualMachineSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=demo.state-snapshotter.deckhouse.io,resources=demovirtualdisksnapshots,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=demo.state-snapshotter.deckhouse.io,resources=demovirtualdisksnapshots/status,verbs=get
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualMachineSnapshot{}).
+		Watches(&demov1alpha1.DemoVirtualDiskSnapshot{}, handler.EnqueueRequestsFromMapFunc(mapDemoDiskSnapshotToParentVM)).
 		Complete(&DemoVirtualMachineSnapshotReconciler{Client: mgr.GetClient()})
 }
 
 func demoVirtualMachineSnapshotContentName(namespace, name string) string {
 	sum := sha256.Sum256([]byte("vm:" + namespace + "/" + name))
 	return "demovmc-" + hex.EncodeToString(sum[:10])
+}
+
+func demoVirtualMachineDiskSnapshotName(namespace, name string) string {
+	sum := sha256.Sum256([]byte("vm-disk:" + namespace + "/" + name))
+	return "demovmdisk-" + hex.EncodeToString(sum[:8])
+}
+
+func mapDemoDiskSnapshotToParentVM(_ context.Context, o client.Object) []reconcile.Request {
+	disk, ok := o.(*demov1alpha1.DemoVirtualDiskSnapshot)
+	if !ok {
+		return nil
+	}
+	ref := disk.Spec.ParentSnapshotRef
+	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != "DemoVirtualMachineSnapshot" || ref.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: disk.Namespace, Name: ref.Name}}}
 }
 
 func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -95,15 +121,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", parentRef.APIVersion)
 	}
 
-	parentKey := types.NamespacedName{Namespace: s.Namespace, Name: parentRef.Name}
-	parent := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.Client.Get(ctx, parentKey, parent); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
-		}
-		return ctrl.Result{}, err
-	}
-
 	contentName := demoVirtualMachineSnapshotContentName(s.Namespace, s.Name)
 	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
 		return ctrl.Result{}, err
@@ -117,73 +134,68 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		}
 	}
 
-	wantSnap := []storagev1alpha1.NamespaceSnapshotChildRef{{
-		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       "DemoVirtualMachineSnapshot",
-		Name:       s.Name,
-	}}
-	if err := patchRootNamespaceSnapshotChildRefsMerge(ctx, r.Client, parentKey, wantSnap); err != nil {
+	mcr, err := ensureDemoSnapshotManifestCaptureRequest(
+		ctx,
+		r.Client,
+		s.Namespace,
+		s.Name,
+		"DemoVirtualMachineSnapshot",
+		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), "DemoVirtualMachineSnapshot", s.Name, s.UID),
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	mcpName, ready, failed, msg, err := demoManifestCheckpointReady(ctx, r.Client, mcr)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if failed {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "ManifestCheckpointFailed", msg); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if !ready {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonSubtreeManifestCapturePending, msg); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+	if err := patchDemoVirtualMachineSnapshotContentManifestCheckpoint(ctx, r.Client, contentName, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if err := r.Client.Get(ctx, parentKey, parent); err != nil {
+	childRefs, err := r.ensureDemoVirtualMachineChildren(ctx, s)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	parentNSC := parent.Status.BoundSnapshotContentName
-	if parentNSC == "" {
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+	if err := patchDemoVirtualMachineSnapshotChildrenRefs(ctx, r.Client, req.NamespacedName, childRefs); err != nil {
+		return ctrl.Result{}, err
 	}
-	wantContent := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: contentName}}
-	if err := patchNamespaceSnapshotContentChildRefsMerge(ctx, r.Client, parentNSC, wantContent); err != nil {
+	if err := patchDemoVirtualMachineSnapshotContentChildrenFromRefs(ctx, r.Client, contentName, s.Namespace, childRefs); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if err := patchDemoVirtualMachineSnapshotReadyStub(ctx, r.Client, req.NamespacedName); err != nil {
+	sum, err := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.Client, childRefs, s.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if sum.HasFailed {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonChildSnapshotFailed, usecase.JoinNonEmpty(sum.FailedMessages, "; ")); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if sum.HasPending {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonChildSnapshotPending, usecase.JoinNonEmpty(sum.PendingParts, "; ")); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+	if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, fmt.Sprintf("demo VM snapshot materialized (ManifestCheckpoint %s) and all child snapshots are ready", mcpName)); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
-}
-
-// patchDemoVirtualMachineSnapshotReadyStub sets Ready=True so generic E6 parent aggregation can observe terminal success
-// on the registered DemoVirtualMachineSnapshot kind (minimal demo stub; real domains drive this from capture/MCP).
-func patchDemoVirtualMachineSnapshotReadyStub(ctx context.Context, c client.Client, vmKey types.NamespacedName) error {
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := c.Get(ctx, vmKey, o); err != nil {
-			return err
-		}
-		if o.Status.BoundSnapshotContentName == "" {
-			return nil
-		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionReady); rc != nil && rc.Status == metav1.ConditionTrue {
-			return nil
-		}
-		// Demo*Snapshot CRDs use status subresource, so status.conditions must be written via Status().Patch/Update.
-		stBase := o.DeepCopy()
-		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             snapshot.ReasonCompleted,
-			Message:            "demo VM snapshot graph wiring complete (stub)",
-			ObservedGeneration: o.Generation,
-		})
-		if err := c.Status().Patch(ctx, o, client.MergeFrom(stBase)); err != nil {
-			return err
-		}
-		if err := c.Get(ctx, vmKey, o); err != nil {
-			return err
-		}
-		if o.Annotations != nil && o.Annotations["snapshot.deckhouse.io/demo-stub"] == "true" {
-			return nil
-		}
-		metaBase := o.DeepCopy()
-		if o.Annotations == nil {
-			o.Annotations = map[string]string{}
-		}
-		o.Annotations["snapshot.deckhouse.io/demo-stub"] = "true"
-		return c.Patch(ctx, o, client.MergeFrom(metaBase))
-	})
-	return err
 }
 
 func (r *DemoVirtualMachineSnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *demov1alpha1.DemoVirtualMachineSnapshot, contentName string) error {
@@ -211,42 +223,147 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureSnapshotContent(ctx context
 	return r.Client.Create(ctx, content)
 }
 
-func patchDemoVirtualMachineSnapshotChildRefsMerge(
+func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot) ([]storagev1alpha1.NamespaceSnapshotChildRef, error) {
+	childName := demoVirtualMachineDiskSnapshotName(vm.Namespace, vm.Name)
+	key := types.NamespacedName{Namespace: vm.Namespace, Name: childName}
+	child := &demov1alpha1.DemoVirtualDiskSnapshot{}
+	err := r.Client.Get(ctx, key, child)
+	if apierrors.IsNotFound(err) {
+		child = &demov1alpha1.DemoVirtualDiskSnapshot{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      childName,
+				Namespace: vm.Namespace,
+				OwnerReferences: []metav1.OwnerReference{demoSnapshotOwnerReference(
+					demov1alpha1.SchemeGroupVersion.String(),
+					"DemoVirtualMachineSnapshot",
+					vm.Name,
+					vm.UID,
+				)},
+			},
+			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
+				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       "DemoVirtualMachineSnapshot",
+					Name:       vm.Name,
+				},
+			},
+		}
+		if err := r.Client.Create(ctx, child); err != nil && !apierrors.IsAlreadyExists(err) {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	return []storagev1alpha1.NamespaceSnapshotChildRef{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       childName,
+	}}, nil
+}
+
+func patchDemoVirtualMachineSnapshotChildrenRefs(
 	ctx context.Context,
 	c client.Client,
 	parent types.NamespacedName,
-	upsert []storagev1alpha1.NamespaceSnapshotChildRef,
+	desired []storagev1alpha1.NamespaceSnapshotChildRef,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
 		if err := c.Get(ctx, parent, o); err != nil {
 			return err
 		}
-		next := mergeNamespaceSnapshotChildRefs(o.Status.ChildrenSnapshotRefs, upsert)
-		if namespaceSnapshotChildRefsEqualIgnoreOrder(next, o.Status.ChildrenSnapshotRefs) {
+		if namespaceSnapshotChildRefsEqualIgnoreOrder(desired, o.Status.ChildrenSnapshotRefs) {
 			return nil
 		}
-		o.Status.ChildrenSnapshotRefs = next
-		return c.Status().Update(ctx, o)
+		base := o.DeepCopy()
+		o.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), desired...)
+		return c.Status().Patch(ctx, o, client.MergeFrom(base))
 	})
 }
 
-func patchDemoVirtualMachineSnapshotContentChildRefsMerge(
+func patchDemoVirtualMachineSnapshotContentChildrenFromRefs(
 	ctx context.Context,
 	c client.Client,
 	contentName string,
-	upsert []storagev1alpha1.NamespaceSnapshotContentChildRef,
+	parentNamespace string,
+	refs []storagev1alpha1.NamespaceSnapshotChildRef,
 ) error {
+	var desired []storagev1alpha1.NamespaceSnapshotContentChildRef
+	for _, ref := range refs {
+		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != "DemoVirtualDiskSnapshot" {
+			continue
+		}
+		disk := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: parentNamespace, Name: ref.Name}, disk); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if disk.Status.BoundSnapshotContentName != "" {
+			desired = append(desired, storagev1alpha1.NamespaceSnapshotContentChildRef{Name: disk.Status.BoundSnapshotContentName})
+		}
+	}
+	sortNamespaceSnapshotContentChildRefs(desired)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		m := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, m); err != nil {
 			return err
 		}
-		next := mergeNamespaceSnapshotContentChildRefs(m.Status.ChildrenSnapshotContentRefs, upsert)
-		if namespaceSnapshotContentChildRefsEqualIgnoreOrder(next, m.Status.ChildrenSnapshotContentRefs) {
+		if namespaceSnapshotContentChildRefsEqualIgnoreOrder(desired, m.Status.ChildrenSnapshotContentRefs) {
 			return nil
 		}
-		m.Status.ChildrenSnapshotContentRefs = next
-		return c.Status().Update(ctx, m)
+		base := m.DeepCopy()
+		m.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), desired...)
+		return c.Status().Patch(ctx, m, client.MergeFrom(base))
+	})
+}
+
+func patchDemoVirtualMachineSnapshotContentManifestCheckpoint(
+	ctx context.Context,
+	c client.Client,
+	contentName string,
+	mcpName string,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		content := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+			return err
+		}
+		if content.Status.ManifestCheckpointName == mcpName {
+			return nil
+		}
+		base := content.DeepCopy()
+		content.Status.ManifestCheckpointName = mcpName
+		return c.Status().Patch(ctx, content, client.MergeFrom(base))
+	})
+}
+
+func patchDemoVirtualMachineSnapshotReady(
+	ctx context.Context,
+	c client.Client,
+	vmKey types.NamespacedName,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
+		if err := c.Get(ctx, vmKey, o); err != nil {
+			return err
+		}
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionReady); rc != nil &&
+			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
+			return nil
+		}
+		base := o.DeepCopy()
+		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionReady,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: o.Generation,
+		})
+		return c.Status().Patch(ctx, o, client.MergeFrom(base))
 	})
 }

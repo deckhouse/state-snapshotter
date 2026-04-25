@@ -150,7 +150,7 @@ func aggManifestNS(bound string) *storagev1alpha1.NamespaceSnapshot {
 }
 
 func aggManifestDedicatedContent(gvk schema.GroupVersionKind, name, mcpName string, children ...string) *unstructured.Unstructured {
-	var refs []map[string]interface{}
+	var refs []interface{}
 	for _, c := range children {
 		refs = append(refs, map[string]interface{}{"name": c})
 	}
@@ -393,6 +393,66 @@ func TestAggregatedNamespaceManifests_DedicatedContentNodeMCPIncluded(t *testing
 	}
 	if len(arr) != 2 {
 		t.Fatalf("want root+child objects, got %d", len(arr))
+	}
+}
+
+func TestAggregatedNamespaceManifests_FromDedicatedContentNode(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	reg := snapshot.NewGVKRegistry()
+	if err := reg.RegisterSnapshotContentMapping(
+		"DemoVirtualMachineSnapshot",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"DemoVirtualMachineSnapshotContent",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+	); err != nil {
+		t.Fatalf("register VM mapping: %v", err)
+	}
+	if err := reg.RegisterSnapshotContentMapping(
+		"DemoVirtualDiskSnapshot",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"DemoVirtualDiskSnapshotContent",
+		"demo.state-snapshotter.deckhouse.io/v1alpha1",
+	); err != nil {
+		t.Fatalf("register disk mapping: %v", err)
+	}
+	agg := NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
+
+	for _, tc := range []struct {
+		cpName string
+		kind   string
+		name   string
+	}{
+		{"mcp-vm", "ConfigMap", "vm-own"},
+		{"mcp-disk", "Secret", "disk-own"},
+	} {
+		d, cs := aggManifestEncodeChunk([]map[string]interface{}{
+			{"apiVersion": "v1", "kind": tc.kind, "metadata": map[string]interface{}{"name": tc.name, "namespace": "ns1"}},
+		})
+		ch := aggManifestCreateChunk("ch-"+tc.cpName, tc.cpName, d, cs)
+		_ = cl.Create(context.Background(), ch)
+		mcp := aggManifestReadyMCP(tc.cpName, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+		_ = cl.Create(context.Background(), mcp)
+	}
+
+	vmGVK := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshotContent"}
+	diskGVK := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshotContent"}
+	_ = cl.Create(context.Background(), aggManifestDedicatedContent(diskGVK, "disk-content", "mcp-disk"))
+	_ = cl.Create(context.Background(), aggManifestDedicatedContent(vmGVK, "vm-content", "mcp-vm", "disk-content"))
+
+	raw, err := agg.BuildAggregatedJSONFromContent(context.Background(), vmGVK, "vm-content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 2 {
+		t.Fatalf("want VM+disk subtree objects, got %d", len(arr))
 	}
 }
 

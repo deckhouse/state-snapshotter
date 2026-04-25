@@ -108,6 +108,11 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "pr5a-cm", Namespace: nsName}, Data: map[string]string{"k": "v"}}
 		Expect(k8sClient.Create(testCtx, cm)).To(Succeed())
 
+		diskResource := &demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: nsName},
+		}
+		Expect(k8sClient.Create(testCtx, diskResource)).To(Succeed())
+
 		root := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
 			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
@@ -125,41 +130,24 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			rootNSC = r.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		disk := &demov1alpha1.DemoVirtualDiskSnapshot{
-			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: nsName},
-			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
-					Name:       "root",
-				},
-				PersistentVolumeClaimName: "pr5a-disk-pvc",
-			},
-		}
-		Expect(k8sClient.Create(testCtx, disk)).To(Succeed())
-
-		wantChild := storagev1alpha1.NamespaceSnapshotChildRef{
-			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-			Kind:       "DemoVirtualDiskSnapshot",
-			Name:       "disk-a",
-		}
+		var diskSnapshotName string
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
-			var found bool
+			diskSnapshotName = ""
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
-				if ch.APIVersion == wantChild.APIVersion && ch.Kind == wantChild.Kind && ch.Name == wantChild.Name {
-					found = true
+				if ch.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ch.Kind == "DemoVirtualDiskSnapshot" {
+					diskSnapshotName = ch.Name
 					break
 				}
 			}
-			g.Expect(found).To(BeTrue(), "root NamespaceSnapshot should list demo disk snapshot in childrenSnapshotRefs")
+			g.Expect(diskSnapshotName).NotTo(BeEmpty(), "root NamespaceSnapshot should list demo disk snapshot in childrenSnapshotRefs")
 		}).WithTimeout(45 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		var contentName string
 		Eventually(func(g Gomega) {
 			d := &demov1alpha1.DemoVirtualDiskSnapshot{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "disk-a"}, d)).To(Succeed())
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: diskSnapshotName}, d)).To(Succeed())
 			g.Expect(d.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			contentName = d.Status.BoundSnapshotContentName
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())

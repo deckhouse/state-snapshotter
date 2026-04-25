@@ -214,14 +214,13 @@ Smoke-check выполнен, кластер и контроллер в рабо
   - До создания demo child — пусто (ожидаемо).
 
 - **10–12. Demo child + graph refs**
-  - Твой короткий манифест demo child не прошёл валидацию CRD:
-    - требуется `spec.parentSnapshotRef.apiVersion` и `kind`.
-  - Применил валидный вариант (`apiVersion/kind/name` + `persistentVolumeClaimName`), объект создан.
-  - В `root.status.childrenSnapshotRefs` появился strict ref **без namespace**:
+  - Актуальная parent-owned модель: demo child создаётся parent-контроллером после регистрации DSC и обнаружения matching resource; вручную создавать child snapshot для нормального flow не нужно.
+  - Child snapshot spec использует обычный `spec.parentSnapshotRef` (`apiVersion/kind/name`), без legacy root-specific поля.
+  - В `root.status.childrenSnapshotRefs` появляется strict ref **без namespace**:
     - `apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1`
     - `kind: DemoVirtualDiskSnapshot`
     - `name: disk-a`
-  - `DemoVirtualDiskSnapshot` стал `Ready=True Completed`.
+  - `DemoVirtualDiskSnapshot` становится `Ready=True Completed` только после собственного MCR/MCP.
   - В `root NSC` появились `childrenSnapshotContentRefs` с demo content.
   - Root не завис в `ChildSnapshotPending`, остался `Ready=True Completed`.
 
@@ -236,5 +235,5 @@ Smoke-check выполнен, кластер и контроллер в рабо
   - В хвосте `deploy/controller` за последние 500 строк:
     - `panic|fatal|stacktrace|error` — **не найдено**.
 
-Итог: минимальный критерий перед e2e выполнен — root flow рабочий, MCP/Ready сходятся, demo child корректно встраивается в `childrenSnapshotRefs` в формате `apiVersion/kind/name` без `namespace`.
+Итог: минимальный критерий перед e2e выполнен — root flow рабочий, MCP/Ready сходятся, parent-owned demo child корректно встраивается в `childrenSnapshotRefs` в формате `apiVersion/kind/name` без `namespace`.
 ```

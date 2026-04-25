@@ -67,8 +67,8 @@ func (r *NamespaceSnapshotReconciler) e6ChildStatusReader() client.Reader {
 }
 
 // namespaceSnapshotReader returns a reader that prefers the API reader for NamespaceSnapshot reads.
-// Domain controllers merge status.childrenSnapshotRefs via their own writers; the split client cache
-// can lag and a subsequent Status().Update from this reconciler would otherwise wipe those refs.
+// The NamespaceSnapshot controller owns status.childrenSnapshotRefs; the split client cache can lag
+// behind status updates and a subsequent Status().Update would otherwise wipe fresh graph refs.
 func (r *NamespaceSnapshotReconciler) namespaceSnapshotReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -130,8 +130,12 @@ func mapNamespaceSnapshotContentToNamespaceSnapshot(_ context.Context, o client.
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=domainspecificsnapshotcontrollers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=deckhouse.io,resources=objectkeepers,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups=demo.state-snapshotter.deckhouse.io,resources=demovirtualmachines;demovirtualdisks,verbs=get;list;watch
+// +kubebuilder:rbac:groups=demo.state-snapshotter.deckhouse.io,resources=demovirtualmachinesnapshots;demovirtualdisksnapshots,verbs=get;list;watch;create;update;patch
 
 func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log.FromContext(ctx).V(1).Info("reconcile NamespaceSnapshot", "namespaceSnapshot", req.NamespacedName)
@@ -274,6 +278,13 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
+	}
+	graphChanged, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if graphChanged {
+		return ctrl.Result{Requeue: true}, nil
 	}
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
 }

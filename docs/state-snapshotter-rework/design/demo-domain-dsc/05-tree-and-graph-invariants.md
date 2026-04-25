@@ -53,9 +53,9 @@
 
 **Контракт записи refs (владение на родителе).** Детали ключа элемента и patch — **[`spec/system-spec.md`](../../spec/system-spec.md) §3**; поток и роли — [`03-snapshot-flow.md`](03-snapshot-flow.md), [`02-dsc-wiring.md`](02-dsc-wiring.md).
 
-**INV-REF-M1.** Запись в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** — **merge-only** по ключу элемента; контроллер **не** имеет права заменять список **целиком** или удалять **чужие** элементы.
+**INV-REF-M1.** Запись в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** — **parent-owned**: controller родительского snapshot-узла записывает полный список своих прямых children по ключу элемента. Child controllers не self-register и не патчат parent graph.
 
-**INV-REF-M2.** Удаление ref выполняется **только** контроллером, который **владеет** соответствующим дочерним узлом, **или** по **явной** политике родителя на reconcile. Конкурирующие **полные** замены `status` со списком refs без merge — **вне** контракта.
+**INV-REF-M2.** Удаление ref выполняет controller родительского snapshot-узла как результат recompute своего полного child set. Конкурирующие writers одного и того же parent graph — **вне** контракта.
 
 **Ограничения v1 (инварианты продукта, не compile-time allowlist):**
 

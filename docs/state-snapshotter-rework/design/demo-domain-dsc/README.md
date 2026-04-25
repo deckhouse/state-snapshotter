@@ -1,16 +1,17 @@
 # Demo domain-specific nested snapshot (via DSC)
 
-**Статус:** Historical design (частично реализовано). Нормативный активный контракт — в [`spec/system-spec.md`](../../spec/system-spec.md). **PR5a/PR5b в репозитории:** группа **`demo.state-snapshotter.deckhouse.io`**, disk (**`DemoVirtualDiskSnapshot`**) и VM (**`DemoVirtualMachineSnapshot`**) + **`*Content`**; контроллеры merge **`children*Refs`**; интеграции `demovirtualdisksnapshot_pr5a_test.go`, `demovirtualmachinesnapshot_pr5b_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
+**Статус:** Historical design (частично реализовано). Нормативный активный контракт — в [`spec/system-spec.md`](../../spec/system-spec.md). **Текущая целевая модель PR5a/PR5b:** группа **`demo.state-snapshotter.deckhouse.io`**, disk (**`DemoVirtualDiskSnapshot`**) и VM (**`DemoVirtualMachineSnapshot`**) + **`*Content`**; parent-owned graph через **`children*Refs`**; интеграции `demovirtualdisksnapshot_pr5a_test.go`, `demovirtualmachinesnapshot_pr5b_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
 > ⚠️ This document contains historical and potentially outdated design decisions.
 > Current normative behavior is defined in:
 > - [`spec/system-spec.md`](../../spec/system-spec.md)
 > - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+> - [`090-unified-snapshot-controller-lifecycle.md`](090-unified-snapshot-controller-lifecycle.md) (target lifecycle summary)
 
 ### PR5a — что гарантирует / чего пока нет
 
 | Гарантирует | Пока не делает (вне PR5a) |
 |-------------|---------------------------|
-| Привязка к parent snapshot через **`spec.parentSnapshotRef`** (для standalone disk — kind=`NamespaceSnapshot`); создание **`DemoVirtualDiskSnapshotContent`**; merge **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на parent NS и parent NSC (идемпотентно). | **`Ready`/TTL**, VolumeSnapshot/CSI, реальный data-path, полный MCR/MCP для demo kinds. |
+| Привязка к parent snapshot через **`spec.parentSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; parent-owned публикация refs родительским controller’ом. | VolumeSnapshot/CSI и реальный data-path. |
 | Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
 | **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья без MCP в aggregated) **появляются в обходе**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
 
@@ -18,8 +19,8 @@
 
 | Гарантирует | Пока не делает |
 |-------------|----------------|
-| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под parent NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD); parent задаётся через **`parentSnapshotRef`** (kind=`NamespaceSnapshot`); root/VM `Ready` сходится через generic E6. | Автосоздание disk snapshots контроллером VM; реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
-| **`DemoVirtualDiskSnapshot.spec.parentSnapshotRef`** — универсальная ссылка на parent snapshot-узел в namespace-local graph. В **текущей demo-реализации** поддержаны `NamespaceSnapshot` (standalone) и `DemoVirtualMachineSnapshot` (disk под VM); merge **`children*Refs`** на соответствующий parent snapshot/content. | Не валидирует, что у VM «достаточно» дисков; оператор создаёт диск отдельно. |
+| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под parent NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD); parent задаётся через **`parentSnapshotRef`**; root/VM `Ready` сходится через child aggregation. | Реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
+| **`DemoVirtualDiskSnapshot.spec.parentSnapshotRef`** — универсальная ссылка на parent snapshot-узел в namespace-local graph. VM controller создаёт disk child snapshots и сам пишет свой child graph. | Не валидирует, что у VM «достаточно» дисков. |
 
 Поставка demo CRD: манифесты в **`crds/`**; образ **`bundle`** в **`.werf/bundle.yaml`** включает каталог **`crds`** в git-стадию модуля. Факт доставки на кластер проверяется **сборкой и деплоем** модуля (CI / релизный pipeline).
 
@@ -64,6 +65,7 @@ Reference для **heterogeneous** доменного дерева под **те
 | 6 | [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md) | Ключи вычисления; без persisted coverage. |
 | 7 | [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md) | Единый **`Ready`**; каскады; сценарии деградации. |
 | **8** | [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) | **Универсальная** модель дерева, `Ready`, dedup, **ownerRef** (части A и B). |
+| **90** | [`090-unified-snapshot-controller-lifecycle.md`](090-unified-snapshot-controller-lifecycle.md) | Короткая финальная целевая модель lifecycle `XxxSnapshotController`. |
 
 **Минимальный API v1:** §0 в [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md).
 

@@ -1,156 +1,176 @@
-# Materialized Child Content MCP and Aggregated Read Checklist
+# Unified XxxSnapshotController Lifecycle and Aggregated Read Checklist
 
-Статус: рабочий чеклист реализации (не нормативный контракт).  
-Нормативный источник истины: `docs/state-snapshotter-rework/spec/system-spec.md`.
+**Status:** working implementation checklist, not a normative contract.  
+**Normative source of truth:** [`../../spec/system-spec.md`](../../spec/system-spec.md).
 
-## Цель
+## Goal
 
-Дотянуть текущий demo-flow до модели:
+Build one lifecycle model for every `XxxSnapshotController`:
 
-- каждый child snapshot имеет свой `*SnapshotContent`;
-- каждый materialized content-node имеет `status.manifestCheckpointName`;
-- `Ready` child/parent зависит от реальных MCP, а не только от stub;
-- aggregated read собирает данные по content graph (через `childrenSnapshotContentRefs`) с любого content-node.
+- every `XxxSnapshot` has its own `XxxSnapshotContent`;
+- every content node stores `status.manifestCheckpointName`;
+- every controller materializes its own scope through MCR/MCP;
+- parent controller creates child snapshots and writes `childrenSnapshotRefs`;
+- child controller does not self-register in parent status;
+- parent `Ready` is aggregated by reading child `Ready` conditions;
+- aggregated read can start from any content node and return YAML/JSON for the whole subtree.
 
-## Жесткие ограничения
+## Controller Template
 
-- не менять архитектуру graph/E5/E6;
-- не добавлять synthetic tree;
-- не создавать child `NamespaceSnapshot`;
-- не возвращать `namespace` в `childrenSnapshotRefs` (форма refs остается `apiVersion/kind/name`);
-- generic код не знает про demo-типы (без `if Demo...`);
-- все в рамках одного namespace;
-- CRD YAML руками не редактировать: только Go API types -> `bash hack/generate_code.sh`.
+Every domain snapshot controller follows the same lifecycle:
 
-## Этапы
+1. **Load own snapshot**: snapshot may exist standalone; missing or unavailable parent must not block own materialization.
+2. **Ensure own content**: create or find `XxxSnapshotContent`; write `status.boundSnapshotContentName`.
+3. **Compute own scope**: determine Kubernetes resources this controller backs up itself.
+4. **Compute child snapshots**: create/ensure child `YyySnapshot`; write own `status.childrenSnapshotRefs`; write own content `status.childrenSnapshotContentRefs` where applicable.
+5. **Own materialization**: create/ensure MCR for own scope; wait for `ManifestCheckpoint Ready=True`; write `XxxSnapshotContent.status.manifestCheckpointName`.
+6. **Aggregate children**: read each child from `status.childrenSnapshotRefs`; inspect `child.status.conditions[Ready]`.
+7. **Set Ready**: `Ready=False` while own MCP is not ready or any child is missing/not ready/failed; `Ready=True Completed` only when own MCP is ready and all children are ready.
 
-### 1) API/status + codegen
+## Own Scope
 
-Файлы:
+Generic code does not know which resources belong to a domain snapshot. Only the concrete domain controller defines its own scope.
 
-- `api/demo/v1alpha1/demovirtualdisksnapshotcontent_types.go`
-- `api/demo/v1alpha1/demovirtualmachinesnapshotcontent_types.go`
+- `DemoVirtualDiskSnapshotController`: if PVC is declared and allowed by scope filtering, include PVC manifest in own MCR; later data capture can add VCR. Missing PVC is not fatal; minimal/empty materialization is valid.
+- `DemoVirtualMachineSnapshotController`: includes VM-level resources such as Pod/qemu only when they belong to the VM; disk PVCs belong to disk snapshots and must be delegated to child disk snapshots.
+- `NamespaceSnapshotController`: captures standard namespace resources, discovers domain-owned resources via DSC/registry, creates top-level child snapshots for them, and excludes covered child subtree resources from root own MCR.
 
-Сделать:
+## OwnerReference / Scope Filtering
 
-- добавить `status.manifestCheckpointName` в оба `*SnapshotContentStatus`.
-- запустить `bash hack/generate_code.sh`.
+When building own scope, a controller must not blindly include every resource it finds.
 
-Сгенерированные изменения ожидаются в:
+Rule:
 
-- `api/demo/v1alpha1/zz_generated.deepcopy.go` (если затронется),
-- `crds/demo.state-snapshotter.deckhouse.io_demovirtualdisksnapshotcontents.yaml`,
-- `crds/demo.state-snapshotter.deckhouse.io_demovirtualmachinesnapshotcontents.yaml`.
+- if a resource has `ownerReferences`;
+- and the owner reference points to an object different from the domain object currently being snapshotted;
+- then the resource is skipped from this controller's own MCR.
 
-Gate:
+The controller may include a resource only when:
 
-- `manifestCheckpointName` отражен в API/CRD.
-- CRD изменены только генератором.
+- the resource has no `ownerReferences`;
+- or an owner reference points to the current domain object;
+- or the resource is explicitly allowed as root/namespace-level scope.
 
-Текущий статус: **сделано**.
+Examples:
 
-### 2) Generic traversal for aggregated read
+- VM snapshot includes Pod/qemu when it has ownerRef to the VM.
+- VM snapshot does not include PVC when the PVC has ownerRef to a disk object.
+- Disk snapshot includes PVC when it has ownerRef to the disk object.
+- NamespaceSnapshot first creates child snapshots for DSC-covered resources, then its own MCR keeps only uncovered standard resources.
 
-Файлы:
+## Ownership Rules
 
-- `images/state-snapshotter-controller/internal/usecase/aggregated_namespace_manifests.go`
-- `images/state-snapshotter-controller/internal/usecase/namespacesnapshot_content_graph.go`
-- тесты content graph / aggregated usecase.
+Parent owns graph edges.
 
-Сделать:
+If a controller creates a child snapshot, it writes:
 
-- traversal по `childrenSnapshotContentRefs` должен читать MCP у любого content-node;
-- если materialized node без MCP -> fail-closed;
-- без demo-specific веток.
+- `status.childrenSnapshotRefs`;
+- `content.status.childrenSnapshotContentRefs` when content graph traversal must include the child content node.
 
-Gate:
+Child controllers must not patch parent status. A child controller owns only:
 
-- unit: MCP собирается с root+child content;
-- unit: отсутствие MCP дает fail-closed.
+- its own snapshot;
+- its own content;
+- its own MCR/MCP;
+- its own `Ready`.
 
-Текущий статус: **в работе**.
+## Aggregated Read
 
-### 3) Disk materialization MCP
+Aggregated read is generic and domain-agnostic.
 
-Файл:
+Algorithm:
 
-- `images/state-snapshotter-controller/internal/controllers/demovirtualdisksnapshot_controller.go`
+1. start from any content node;
+2. read `status.manifestCheckpointName`;
+3. load objects from MCP archive;
+4. recurse through `status.childrenSnapshotContentRefs`;
+5. fail as one operation on incomplete graph.
 
-Сделать:
+Fail-closed cases:
 
-1. ensure content;
-2. ensure/create MCR;
-3. дождаться MCP `Ready=True`;
-4. записать `content.status.manifestCheckpointName`;
-5. `snapshot Ready=True Completed` только после MCP.
+- content node without `manifestCheckpointName`;
+- missing child content;
+- duplicate object identity across MCPs;
+- missing registry for heterogeneous content traversal.
 
-Gate:
+## NamespaceSnapshot Specifics
 
-- integration: disk snapshot -> content -> MCP -> Ready.
+`NamespaceSnapshotController` follows the same lifecycle. Its only difference is discovery: it uses DSC/registry to decide which top-level resources must be delegated to domain child snapshots. Other domain controllers usually compute children from their own domain model.
 
-### 4) VM materialization MCP + Ready by children
+## Do Not Reintroduce
 
-Файл:
+- the old expected/current dual-list field;
+- the old graph-pending condition reason;
+- the old expected-vs-current child-ref set helpers;
+- child self-registration;
+- ready-list;
+- namespace in `childrenSnapshotRefs`;
+- demo-specific branches in generic `internal/usecase`.
 
-- `images/state-snapshotter-controller/internal/controllers/demovirtualmachinesnapshot_controller.go`
+## Tests
 
-Сделать:
+Unit coverage:
 
-1. ensure content;
-2. ensure VM-level MCR/MCP (минимальный capture допустим);
-3. записать MCP в VM content;
-4. `VM Ready=True` только если:
-   - VM MCP готов;
-   - child disk snapshots готовы.
+- own MCP absent means `Ready=False`;
+- no children plus own MCP ready means `Ready=True`;
+- child missing means parent pending;
+- child `Ready=False` terminal means parent failed;
+- child `Ready=True` allows parent completion;
+- aggregated read starts from arbitrary content node;
+- content node without MCP fails closed.
 
-Gate:
+Integration coverage:
 
-- integration VM->Disk: MCP у VM и Disk, refs связаны, root `Ready`.
+- `NamespaceSnapshot` creates top-level child snapshots through DSC;
+- `DemoVirtualMachineSnapshot` creates child disk snapshots;
+- `DemoVirtualDiskSnapshot` works standalone;
+- child degradation is reflected by parent;
+- aggregated read returns root and child subtree manifests;
+- child controller does not patch parent graph.
 
-### 5) E5/E6 regression tests
+## Final Checks
 
-Файлы:
+```shell
+bash hack/generate_code.sh
+cd api && go test ./... -count=1
+cd ../images/state-snapshotter-controller
+go test ./internal/usecase ./internal/controllers -count=1
+go test -tags=integration ./test/integration/... -count=1
+```
 
-- `images/state-snapshotter-controller/internal/usecase/root_capture_run_exclude_test.go`
-- `images/state-snapshotter-controller/internal/usecase/namespace_snapshot_parent_ready_e6_test.go`
-- `images/state-snapshotter-controller/test/integration/namespacesnapshot_graph_e5_e6_integration_test.go`
-- `images/state-snapshotter-controller/test/integration/demovirtualmachinesnapshot_pr5b_test.go`
-- тесты aggregated read.
+```shell
+rg "<old expected/current graph model identifiers>"
+rg "childrenSnapshotRefs.*namespace|NamespaceSnapshotChildRef.*Namespace"
+rg "DemoVirtual" images/state-snapshotter-controller/internal/usecase
+rg "patch.*childrenSnapshotRefs" images/state-snapshotter-controller/internal/controllers
+```
 
-Проверки:
+The last search is not an absolute ban: graph patches are valid only on parent-controller paths, not on child self-registration paths.
 
-- exclude учитывает child MCP;
-- child MCP pending -> root `Ready=False` / `SubtreeManifestCapturePending`;
-- E6 не дает Completed без MCP-gated readiness;
-- refs без `namespace`;
-- generic usecase без demo-импортов.
+## Documentation Final Validation
 
-### 6) Документация и статус
+After implementation:
 
-Обновить:
+1. Review all related documents and ensure they do not contradict the new model:
+   - no old expected/current graph model;
+   - no child self-registration;
+   - no old lifecycle patterns;
+   - all current text uses one `XxxSnapshotController` lifecycle template.
+2. Check terminology consistency:
+   - `own scope`;
+   - `child snapshots`;
+   - `childrenSnapshotRefs`;
+   - `manifestCheckpointName`;
+   - `aggregated read`.
+3. Ensure `NamespaceSnapshot` is described as a normal controller with a separate DSC discovery mechanism, not as a special root type.
 
-- `docs/state-snapshotter-rework/spec/system-spec.md`
-- `docs/state-snapshotter-rework/design/implementation-plan.md`
-- `docs/state-snapshotter-rework/design/namespace-snapshot-controller.md`
-- `docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`
-- `docs/state-snapshotter-rework/operations/project-status.md`
-- `docs/state-snapshotter-rework/design/demo-domain-dsc/*.md`
+Docs are part of the result, not a side artifact. After the change, code and docs must describe the same model.
 
-Зафиксировать:
+## Final Model
 
-- snapshot refs = topology-only;
-- content хранит MCP;
-- aggregated read идет по content graph;
-- exclude основан на child MCP;
-- demo создает реальные MCP;
-- CSI остается future (если не реализуется в этом шаге).
-
-## Финальные проверки
-
-- `bash hack/generate_code.sh`
-- `cd api && go test ./... -count=1`
-- `cd images/state-snapshotter-controller && go test ./internal/usecase ./internal/controllers -count=1`
-- `cd images/state-snapshotter-controller && go test -tags=integration ./test/integration/... -count=1`
-- `rg "childrenSnapshotRefs.*namespace|ref\\.Namespace|NamespaceSnapshotChildRef.*Namespace" .`
-- `rg "synthetic" images/state-snapshotter-controller/internal`
-- `rg "DemoVirtual" images/state-snapshotter-controller/internal/usecase`
+- Own materialization is the responsibility of the current controller.
+- Own materialization scope is resources owned by the current domain object, excluding resources delegated to child snapshots.
+- Child graph is the responsibility of the parent controller.
+- Child state is the responsibility of the child controller.
+- Parent readiness is aggregation by the parent controller.
+- Aggregated read is generic traversal over the content graph.

@@ -99,8 +99,8 @@
 7. **`ownerReference`**: не для dedup; иерархия жизненного цикла / GC (часть B).  
 8. Объекты **вне** **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на пути от root run **не** входят в логическое дерево, **даже** если существуют в API.  
 9. При **неопределённости** состояния обязательного ребёнка (из **refs**) предок считается **деградировавшим**: **`Ready=False`**, а не «без изменений» (**INV-R4**, [`07`](07-ready-delete-matrix.md)).  
-10. Запись в **`children*Refs`** — **merge-only** по ключу элемента; **не** полная замена списка и **не** удаление чужих элементов (**INV-REF-M1**, [`05`](05-tree-and-graph-invariants.md) §1).  
-11. Удаление элемента ref — **только** владелец дочернего узла **или** явная политика родителя (**INV-REF-M2**, [`05`](05-tree-and-graph-invariants.md) §1).  
+10. Запись в **`children*Refs`** — **parent-owned**: parent snapshot controller записывает полный список своих прямых children; child controllers не self-register (**INV-REF-M1**, [`05`](05-tree-and-graph-invariants.md) §1).  
+11. Удаление элемента ref — результат recompute child set родительским controller’ом (**INV-REF-M2**, [`05`](05-tree-and-graph-invariants.md) §1).  
 12. Пустые / отсутствующие **`childrenSnapshotContentRefs`** **не** разрешают generic восстанавливать content через list API без normative правила (**INV-REF-C1**, [`05`](05-tree-and-graph-invariants.md) §1).
 
 ---

@@ -108,41 +108,29 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "nss-e6-cm", Namespace: nsName}, Data: map[string]string{"k": "v"}}
 		Expect(k8sClient.Create(testCtx, cm)).To(Succeed())
 
+		diskResource := &demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-e6", Namespace: nsName},
+		}
+		Expect(k8sClient.Create(testCtx, diskResource)).To(Succeed())
+
 		root := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
 			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
 		}
 		Expect(k8sClient.Create(testCtx, root)).To(Succeed())
 
-		disk := &demov1alpha1.DemoVirtualDiskSnapshot{
-			ObjectMeta: metav1.ObjectMeta{Name: "disk-e6", Namespace: nsName},
-			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
-					Name:       "root",
-				},
-				PersistentVolumeClaimName: "nss-e6-pvc",
-			},
-		}
-		Expect(k8sClient.Create(testCtx, disk)).To(Succeed())
-
-		wantChild := storagev1alpha1.NamespaceSnapshotChildRef{
-			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-			Kind:       "DemoVirtualDiskSnapshot",
-			Name:       "disk-e6",
-		}
+		var diskSnapshotName string
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
-			var found bool
+			diskSnapshotName = ""
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
-				if ch.APIVersion == wantChild.APIVersion && ch.Kind == wantChild.Kind && ch.Name == wantChild.Name {
-					found = true
+				if ch.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ch.Kind == "DemoVirtualDiskSnapshot" {
+					diskSnapshotName = ch.Name
 					break
 				}
 			}
-			g.Expect(found).To(BeTrue(), "root NamespaceSnapshot should list demo disk snapshot in childrenSnapshotRefs")
+			g.Expect(diskSnapshotName).NotTo(BeEmpty(), "root NamespaceSnapshot should list demo disk snapshot in childrenSnapshotRefs")
 		}).WithTimeout(45 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -154,7 +142,7 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 			g.Expect(rc.Reason).To(Equal(snapshot.ReasonCompleted))
 		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		diskKey := types.NamespacedName{Namespace: nsName, Name: "disk-e6"}
+		diskKey := types.NamespacedName{Namespace: nsName, Name: diskSnapshotName}
 		d0 := &demov1alpha1.DemoVirtualDiskSnapshot{}
 		Expect(k8sClient.Get(testCtx, diskKey, d0)).To(Succeed())
 		genBefore := d0.GetGeneration()

@@ -45,17 +45,14 @@ spec:
             properties:
               parentSnapshotRef:
                 description: |-
-                  ParentSnapshotRef identifies the parent snapshot node (namespace-local).
-                  For DemoVirtualMachineSnapshot, parent kind must be NamespaceSnapshot.
+                  ParentSnapshotRef identifies the parent snapshot node (namespace-local graph).
+                  Current demo controller implementation supports NamespaceSnapshot as parent kind.
                 properties:
                   apiVersion:
-                    description: APIVersion of the parent snapshot.
                     type: string
                   kind:
-                    description: Kind of the parent snapshot.
                     type: string
                   name:
-                    description: Name of the parent snapshot.
                     type: string
                 required:
                 - apiVersion

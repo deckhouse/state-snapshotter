@@ -65,11 +65,16 @@
 - **Область:** **`XxxxSnapshot`** / **`XxxxSnapshotContent`** **могут** существовать в API и reconciler'иться **доменным** (или иным) контроллером **до** появления в **`children*Refs`** данного run или **вне** любого такого run — это **не** запрещает **§3** и не отменяет **DSC** / reconcile зарегистрированных типов (**§0**). **§3** задаёт **только** состав **логического дерева** конкретного run от root **`NamespaceSnapshot`** и обязанности **generic** (обход, dedup/exclude и т.д.) относительно **этого** дерева.
 - **MUST NOT:** объект считаться узлом этого дерева, если он **не** представлен в **`children*Refs`** на пути от root (даже если существует в API). (**INV-REF1**, см. [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
 
-### §3.2. Ключ merge для элементов refs
+### §3.2. Parent-owned refs и ключ элементов refs
 
 - **MUST:** логическое дерево одного snapshot-run **namespace-local** относительно **root** **`NamespaceSnapshot`**: все узлы дерева (**`NamespaceSnapshot`**, дочерние **`XxxxSnapshot`** из **`childrenSnapshotRefs`**, связанные namespace-scoped объекты этого run в смысле контракта модуля) **MUST** находиться в **одном** namespace — том же, что и root **`NamespaceSnapshot`**. **MUST NOT:** поддерживать или подразумевать **cross-namespace** рёбра в **`childrenSnapshotRefs`**. Namespace дочернего snapshot не задается в ref и всегда неявно равен namespace родителя. Поиск parent **`NamespaceSnapshot`** по событию дочернего snapshot **MUST** выполняться **только** в namespace дочернего объекта (**без** cluster-wide list ради «родителя в другом namespace»).
-- **MUST:** запись в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** — **merge-only** по каноническому ключу элемента: для **`NamespaceSnapshotChildRef`** — **`(apiVersion, kind, name)`**; для **`NamespaceSnapshotContentChildRef`** — **`name`** дочернего **`XxxxSnapshotContent`** в **namespace** родительского **`NamespaceSnapshotContent`**. Ключ **MUST** совпадать с OpenAPI CRD этого репозитория.
-- **MUST NOT:** заменять список **`children*Refs`** целиком одним write, если этим стираются элементы, записанные другим контроллером; удалять из списка элемент, за который пишущий контроллер **не** несёт ответственности. (**INV-REF-M1**, **INV-REF-M2**, [`05`](../design/demo-domain-dsc/05-tree-and-graph-invariants.md) §1.)
+- **MUST:** каждый parent snapshot controller **владеет** своими исходящими рёбрами и записывает полный **`status.childrenSnapshotRefs`** для своего snapshot-узла. Для **`NamespaceSnapshot`** этот список строится через DSC/registry discovery top-level domain resources; для других domain controllers — из собственной domain model. Child controllers **MUST NOT** self-register: они не патчат **`parent.status.childrenSnapshotRefs`** и не патчат parent **`childrenSnapshotContentRefs`**.
+- **MUST:** канонический ключ элемента refs: для **`NamespaceSnapshotChildRef`** — **`(apiVersion, kind, name)`**; для **`NamespaceSnapshotContentChildRef`** — **`name`** дочернего **`XxxxSnapshotContent`**. Ключ **MUST** совпадать с OpenAPI CRD этого репозитория.
+
+### §3.2.1. Own scope filtering
+
+- **MUST:** own materialization scope каждого domain controller ограничен ресурсами, принадлежащими текущему domain object, плюс явно разрешёнными root/namespace-level ресурсами. Если resource имеет **`ownerReferences`** и они указывают на другой domain object, controller **MUST NOT** включать такой resource в свой own MCR; он должен быть покрыт child snapshot или fallback namespace-level логикой.
+- **MUST:** child graph delegation имеет приоритет над own scope: resource, вынесенный в child snapshot subtree, не должен дублироваться в own MCR родителя.
 
 ### §3.3. Удаление элемента из refs
 

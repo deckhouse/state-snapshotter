@@ -32,6 +32,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
@@ -101,6 +102,59 @@ func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootNSC(ctx context.
 		return nil, NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("marshal aggregated manifests: %v", err))
 	}
 	return out, nil
+}
+
+// BuildAggregatedJSONFromContent returns aggregated manifests starting from any registered content node.
+// NamespaceSnapshotContent roots use the typed walk; dedicated content roots require the live graph registry.
+func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromContent(ctx context.Context, contentGVK schema.GroupVersionKind, contentName string) ([]byte, error) {
+	if contentName == "" || contentGVK.Empty() {
+		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "content GVK and name are required")
+	}
+	if contentGVK == NamespaceSnapshotContentGVK() {
+		return s.marshalAggregatedFromRootNSC(ctx, contentName)
+	}
+
+	reg, err := s.currentAggregatedRegistry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(contentGVK)
+	if err := s.client.Get(ctx, client.ObjectKey{Name: contentName}, u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("%s %q not found", contentGVK.String(), contentName))
+		}
+		return nil, fmt.Errorf("get %s %q: %w", contentGVK.String(), contentName, err)
+	}
+
+	visited := make(map[string]struct{})
+	seenKeys := make(map[string]struct{})
+	var objects []map[string]interface{}
+	if err := s.walkDedicatedContent(ctx, contentGVK, contentName, u, reg, visited, &objects, seenKeys); err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(objects)
+	if err != nil {
+		return nil, NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("marshal aggregated manifests: %v", err))
+	}
+	return out, nil
+}
+
+func (s *AggregatedNamespaceManifests) currentAggregatedRegistry(ctx context.Context) (*snapshot.GVKRegistry, error) {
+	if s.graphLive == nil {
+		return nil, NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady", "heterogeneous content traversal requires snapshot graph registry")
+	}
+	reg := s.graphLive.Current()
+	if reg == nil {
+		if err := s.graphLive.TryRefresh(ctx); err != nil && !errors.Is(err, snapshotgraphregistry.ErrRefreshNotConfigured) {
+			return nil, err
+		}
+		reg = s.graphLive.Current()
+	}
+	if reg == nil {
+		return nil, NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady", snapshotgraphregistry.ErrGraphRegistryNotReady.Error())
+	}
+	return reg, nil
 }
 
 // findRetainedRootNSCName is a retained-read helper when the NamespaceSnapshot object is already deleted.
@@ -189,6 +243,53 @@ func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName stri
 		return err
 	}
 	return err
+}
+
+func (s *AggregatedNamespaceManifests) walkDedicatedContent(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	contentName string,
+	u *unstructured.Unstructured,
+	reg *snapshot.GVKRegistry,
+	visited map[string]struct{},
+	objects *[]map[string]interface{},
+	seenKeys map[string]struct{},
+) error {
+	visit := func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
+		if nsc.Status.ManifestCheckpointName == "" {
+			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
+				fmt.Sprintf("manifestCheckpointName is empty for NamespaceSnapshotContent %q", nsc.Name))
+		}
+		return s.appendObjectsFromManifestCheckpoint(ctx, nsc.Status.ManifestCheckpointName, objects, seenKeys)
+	}
+	hooks := &DedicatedContentVisitHooks{
+		Visit: func(ctx context.Context, childGVK schema.GroupVersionKind, childContentName string, child *unstructured.Unstructured, _ bool) error {
+			mcpName, _, err := unstructured.NestedString(child.Object, "status", "manifestCheckpointName")
+			if err != nil {
+				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
+					fmt.Sprintf("%s %q: invalid status.manifestCheckpointName: %v", childGVK.String(), childContentName, err))
+			}
+			if mcpName == "" {
+				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
+					fmt.Sprintf("manifestCheckpointName is empty for %s %q", childGVK.String(), childContentName))
+			}
+			return s.appendObjectsFromManifestCheckpoint(ctx, mcpName, objects, seenKeys)
+		},
+	}
+	if err := walkDedicatedSnapshotContentSubtree(ctx, s.client, contentName, gvk, u, visited, visit, reg, hooks); err != nil {
+		if errors.Is(err, ErrNamespaceSnapshotContentCycle) {
+			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
+		}
+		if apierrors.IsNotFound(err) {
+			return NewAggregatedStatusError(http.StatusNotFound, "NotFound", err.Error())
+		}
+		var st *AggregatedStatusError
+		if errors.As(err, &st) {
+			return err
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(

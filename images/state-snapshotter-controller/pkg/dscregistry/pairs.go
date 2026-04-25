@@ -28,6 +28,14 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
+// EligibleResourceSnapshotMapping is one DSC row resolved to concrete resource, snapshot, and content types.
+type EligibleResourceSnapshotMapping struct {
+	ResourceGVR     schema.GroupVersionResource
+	ResourceGVK     schema.GroupVersionKind
+	SnapshotGVK     schema.GroupVersionKind
+	SnapshotContent schema.GroupVersionKind
+}
+
 // EligibleUnifiedGVKPairs returns UnifiedGVKPair entries from every snapshotResourceMapping row
 // of DSC objects that satisfy DSCWatchEligible. Duplicate snapshot GVKs in the output are skipped
 // (first wins). Caller should merge with bootstrap pairs; invalid CRDs are skipped (no error).
@@ -70,6 +78,65 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 			seen[key] = struct{}{}
 			out = append(out, unifiedbootstrap.UnifiedGVKPair{
 				Snapshot:        snapGVK,
+				SnapshotContent: contentGVK,
+			})
+		}
+	}
+	return out, nil
+}
+
+// EligibleResourceSnapshotMappings returns DSC resource→snapshot mappings used by NamespaceSnapshot
+// parent-owned graph construction. Invalid or cluster-scoped resource rows are skipped fail-closed.
+func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]EligibleResourceSnapshotMapping, error) {
+	var list storagev1alpha1.DomainSpecificSnapshotControllerList
+	if err := c.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	var out []EligibleResourceSnapshotMapping
+	for i := range list.Items {
+		d := &list.Items[i]
+		if !DSCWatchEligible(d) {
+			continue
+		}
+		for _, entry := range d.Spec.SnapshotResourceMapping {
+			resourceCRD, err := getCRD(ctx, c, entry.ResourceCRDName)
+			if err != nil || resourceCRD.Spec.Scope != extv1.NamespaceScoped {
+				continue
+			}
+			snapCRD, err := getCRD(ctx, c, entry.SnapshotCRDName)
+			if err != nil {
+				continue
+			}
+			contentCRD, err := getCRD(ctx, c, entry.ContentCRDName)
+			if err != nil || contentCRD.Spec.Scope != extv1.ClusterScoped {
+				continue
+			}
+			resourceGVK, err := gvkFromCRD(resourceCRD)
+			if err != nil {
+				continue
+			}
+			snapshotGVK, err := gvkFromCRD(snapCRD)
+			if err != nil {
+				continue
+			}
+			contentGVK, err := gvkFromCRD(contentCRD)
+			if err != nil {
+				continue
+			}
+			key := resourceGVK.String() + "=>" + snapshotGVK.String()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, EligibleResourceSnapshotMapping{
+				ResourceGVR: schema.GroupVersionResource{
+					Group:    resourceGVK.Group,
+					Version:  resourceGVK.Version,
+					Resource: resourceCRD.Spec.Names.Plural,
+				},
+				ResourceGVK:     resourceGVK,
+				SnapshotGVK:     snapshotGVK,
 				SnapshotContent: contentGVK,
 			})
 		}
