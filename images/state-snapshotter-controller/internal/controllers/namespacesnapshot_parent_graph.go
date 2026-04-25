@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,6 +44,9 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 	mappings, err := dscregistry.EligibleResourceSnapshotMappings(ctx, r.namespaceSnapshotReader())
 	if err != nil {
 		return false, err
+	}
+	if len(mappings) == 0 {
+		return false, nil
 	}
 
 	var desiredRefs []storagev1alpha1.NamespaceSnapshotChildRef
@@ -73,12 +77,12 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 	}
 	sortNamespaceSnapshotChildRefs(desiredRefs)
 
-	statusChanged, err := r.patchNamespaceSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
+	statusChanged, effectiveRefs, err := r.patchNamespaceSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
 	if err != nil {
 		return false, err
 	}
 
-	contentChanged, err := r.patchNamespaceSnapshotContentChildrenFromSnapshotRefs(ctx, content.Name, nsSnap.Namespace, desiredRefs)
+	contentChanged, err := r.patchNamespaceSnapshotContentChildrenFromSnapshotRefs(ctx, content.Name, nsSnap.Namespace, effectiveRefs)
 	if err != nil {
 		return false, err
 	}
@@ -145,22 +149,41 @@ func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotChildrenRefs(
 	ctx context.Context,
 	parent types.NamespacedName,
 	desired []storagev1alpha1.NamespaceSnapshotChildRef,
-) (bool, error) {
+) (bool, []storagev1alpha1.NamespaceSnapshotChildRef, error) {
 	changed := false
+	var effective []storagev1alpha1.NamespaceSnapshotChildRef
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &storagev1alpha1.NamespaceSnapshot{}
 		if err := r.Client.Get(ctx, parent, cur); err != nil {
 			return err
 		}
-		if namespaceSnapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, desired) {
+		effective = mergeNamespaceSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
+		if namespaceSnapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) {
 			return nil
 		}
-		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), desired...)
+		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), effective...)
 		cur.Status.ObservedGeneration = cur.Generation
 		changed = true
 		return r.Client.Status().Update(ctx, cur)
 	})
-	return changed, err
+	return changed, effective, err
+}
+
+func mergeNamespaceSnapshotManagedChildRefs(current, desired []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
+	merged := make([]storagev1alpha1.NamespaceSnapshotChildRef, 0, len(current)+len(desired))
+	for _, ref := range current {
+		if namespaceSnapshotOwnsGeneratedChildRef(ref) {
+			continue
+		}
+		merged = append(merged, ref)
+	}
+	merged = append(merged, desired...)
+	sortNamespaceSnapshotChildRefs(merged)
+	return merged
+}
+
+func namespaceSnapshotOwnsGeneratedChildRef(ref storagev1alpha1.NamespaceSnapshotChildRef) bool {
+	return strings.HasPrefix(ref.Name, "nss-child-")
 }
 
 func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotContentChildrenFromSnapshotRefs(

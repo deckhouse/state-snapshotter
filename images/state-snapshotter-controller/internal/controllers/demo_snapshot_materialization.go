@@ -120,11 +120,7 @@ func ensureDemoSnapshotManifestCaptureRequest(
 		}
 		return nil, err
 	}
-	created := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := c.Get(ctx, key, created); err != nil {
-		return nil, err
-	}
-	return created, nil
+	return mcr, nil
 }
 
 func demoManifestCheckpointReady(
