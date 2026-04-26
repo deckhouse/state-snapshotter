@@ -60,7 +60,7 @@ func graphRegistryForRootCapture(t *testing.T) *snapshot.GVKRegistry {
 	return r
 }
 
-func fixtureSnapshotUnstructured(name, boundContent string) *unstructured.Unstructured {
+func fixtureSnapshotUnstructured(boundContent string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "generic.state-snapshotter.test",
@@ -68,7 +68,7 @@ func fixtureSnapshotUnstructured(name, boundContent string) *unstructured.Unstru
 		Kind:    "FixtureDomainSnapshot",
 	})
 	u.SetNamespace("ns1")
-	u.SetName(name)
+	u.SetName("disk-a")
 	_ = unstructured.SetNestedField(u.Object, boundContent, "status", "boundSnapshotContentName")
 	return u
 }
@@ -122,7 +122,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_DedicatedContentMCPContributes(t *
 			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
 		},
 	}
-	disk := fixtureSnapshotUnstructured("disk-a", "disk-content")
+	disk := fixtureSnapshotUnstructured("disk-content")
 	diskContent := fixtureContentUnstructured("disk-content", "mcp-dedicated")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
@@ -162,7 +162,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_DedicatedContentWithoutMCPPends(t 
 			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
 		},
 	}
-	disk := fixtureSnapshotUnstructured("disk-a", "disk-content")
+	disk := fixtureSnapshotUnstructured("disk-content")
 	diskContent := fixtureContentUnstructured("disk-content", "")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
@@ -199,7 +199,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_DedicatedContentMCPNotReadyPends(t
 			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
 		},
 	}
-	disk := fixtureSnapshotUnstructured("disk-a", "disk-content")
+	disk := fixtureSnapshotUnstructured("disk-content")
 	diskContent := fixtureContentUnstructured("disk-content", "mcp-pending")
 	mcpPending := &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "mcp-pending"}}
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
@@ -323,7 +323,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
 		Status:     storagev1alpha1.NamespaceSnapshotContentStatus{},
 	}
-	disk := fixtureSnapshotUnstructured("disk-a", "missing-from-graph")
+	disk := fixtureSnapshotUnstructured("missing-from-graph")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
@@ -369,7 +369,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	meta.SetStatusCondition(&nscChild.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	disk := fixtureSnapshotUnstructured("disk-a", "child-nsc")
+	disk := fixtureSnapshotUnstructured("child-nsc")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
