@@ -225,12 +225,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
 			return ctrl.Result{}, gerr
 		}
-		if len(freshParent.Status.ChildrenSnapshotRefs) == 0 {
-			return r.failCapture(ctx, freshParent, content, "NoCaptureTargets", "namespace has no resources matching the manifest capture allowlist (see design §4.5)")
-		}
-		// E5: child subtree MCP can list the same namespace allowlist as the root; exclude may remove every object.
-		// Still run MCR→ManifestCheckpoint with an empty target set instead of failing capture.
-		logger.Info("root namespace manifest capture: subtree exclude removed all allowlisted objects; proceeding with empty ManifestCaptureRequest targets")
+		return r.failCapture(ctx, freshParent, content, "NoCaptureTargets", "root capture produced no targets; this indicates a bug because the Kubernetes Namespace target must always be present")
 	}
 
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)

@@ -59,6 +59,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 
 	BeforeEach(func() {
 		scheme = runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(storagev1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(deckhousev1alpha1.AddToScheme(scheme)).To(Succeed())
 
@@ -84,6 +85,32 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			cfg,
 		)
 		Expect(err).ToNot(HaveOccurred(), "Failed to create controller")
+	})
+
+	Describe("collectTargetObjects", func() {
+		It("should read cluster-scoped Kubernetes Namespace targets", func() {
+			ctx := context.Background()
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}}
+			Expect(baseClient.Create(ctx, ns)).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-namespace", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{{
+						APIVersion: "v1",
+						Kind:       "Namespace",
+						Name:       "ns1",
+					}},
+				},
+			}
+
+			objects, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objects).To(HaveLen(1))
+			Expect(objects[0].GetKind()).To(Equal("Namespace"))
+			Expect(objects[0].GetName()).To(Equal("ns1"))
+			Expect(objects[0].GetNamespace()).To(BeEmpty())
+		})
 	})
 
 	// ============================================================================

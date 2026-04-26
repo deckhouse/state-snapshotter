@@ -46,11 +46,11 @@
 
 ### 4.1 NamespaceSnapshot (черновик полей)
 
-**Scope:** namespaced root — зафиксировано в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md). На текущем этапе целевой namespace совпадает с `metadata.namespace` объекта `NamespaceSnapshot`.
+**Scope:** namespaced root — зафиксировано в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md). На текущем этапе resolved target namespace совпадает с `metadata.namespace` объекта `NamespaceSnapshot`; будущий cluster-scoped `NamespaceSnapshot` может резолвить его из `spec.targetNamespace`.
 
 **Spec (логически):**
 
-- Источник namespace для capture: тот же, что `metadata.namespace` root (расширение через отдельное поле — позже, если понадобится продуктово).
+- Источник namespace для capture: resolved target namespace; сейчас это `metadata.namespace` root (расширение через отдельное поле — позже, если понадобится продуктово).
 - Класс/политика: `snapshotClassName` / `className` (как в продуктовой модели unified snapshots).
 - Опционально: include/exclude групп ресурсов (MVP — минимальный набор или фиксированный профиль).
 - Опционально позже: `capturePolicy` (см. §9); в MVP допустимо заложить поле, но **выставить только fail-closed**.
@@ -347,7 +347,9 @@
 
 - **N2a — download одного снимка:** отдаёт **только** манифесты **этого** root/content (один MCP / его chunks), **без** дочерних snapshot и без data payloads.
 - **N2b — aggregated download:** отдаёт манифесты **parent + subtree** (обход по **`childrenSnapshotContentRefs`** / согласованному graph), **только манифесты**, **без** data payloads.
-- **Материализация:** для N2a и N2b по умолчанию **не** хранить отдельный заранее собранный архив в etcd/storage; **read-only агрегация на чтении** из существующих **MCP + chunks** (склейка через `ArchiveService` или эквивалент). Предматериализованный артефакт — только если отдельное ADR/этап.
+- **Материализация:** каждый content-node пишет свой **`status.manifestCheckpointName`** на MCP собственного scope. Parent MCP **не** содержит child manifests; дочерние MCP участвуют в E5 exclude и в aggregated read только через content graph.
+- **Минимальный own scope `NamespaceSnapshot`:** Kubernetes **`Namespace`** с именем resolved target namespace всегда включается в root MCR/MCP. Сейчас resolved target namespace = **`NamespaceSnapshot.metadata.namespace`**; будущий cluster-scoped `NamespaceSnapshot` может резолвить его из **`spec.targetNamespace`**. `NamespaceSnapshot` остаётся namespaced в этом изменении; **`spec.namespace`** / **`spec.targetNamespace`** не добавляются. MCR executor обязан читать этот cluster-scoped target без namespace.
+- **Read-path:** для N2a и N2b по умолчанию **не** хранить отдельный заранее собранный архив в etcd/storage; **read-only агрегация на чтении** из существующих **MCP + chunks** (склейка через `ArchiveService` или эквивалент). Предматериализованный артефакт — только если отдельное ADR/этап.
 
 #### 8.7.1 Практика API и ошибок (N2a, текущий код)
 
@@ -355,7 +357,7 @@
 - **MCP не Ready:** ответ **409 Conflict** с телом Kubernetes **Status** (`checkpoint not ready`) — клиент не считает снимок готовым к выгрузке.
 - **MCP не найден:** **404**.
 - **Нет chunk / checksum mismatch / прочая поломка при склейке:** **500 InternalError** (как сейчас при ошибке `GetArchiveFromCheckpoint`); логирование с деталями. **N2a:** это **не** автоматически снимает **`Ready=True`** на `NamespaceSnapshot`/`NamespaceSnapshotContent` при одном неудачном запросе download (операционный сбой чтения ≠ откат capture). Отдельная condition уровня **ArtifactUnreadable** / reconcile, пересобирающий MCP — **после N2a**, если понадобится.
-- **N2b aggregated download (PR4):** нормативный контракт — [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../spec/namespace-snapshot-aggregated-manifests-pr4.md) (endpoint `…/namespaces/{ns}/namespacesnapshots/{name}/manifests`, fail-whole, обход NSC, `ArchiveService`). **N2a** single-MCP путь — без изменений (строка выше).
+- **N2b aggregated download (PR4):** нормативный контракт — [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../spec/namespace-snapshot-aggregated-manifests-pr4.md) (endpoint `…/namespaces/{ns}/namespacesnapshots/{name}/manifests`, fail-whole, обход NSC, `ArchiveService`). Generic usecase умеет стартовать от произвольного registered content-node; HTTP route для curl от любого snapshot/content node — отдельное расширение API. **N2a** single-MCP путь — без изменений (строка выше).
 
 ---
 
@@ -430,7 +432,7 @@ spec:
 
 **Выбрано:** namespaced root — [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md).
 
-- Проще делегирование прав и UX относительно владельцев namespace; целевой namespace на текущем этапе = `metadata.namespace` у `NamespaceSnapshot`.
+- Проще делегирование прав и UX относительно владельцев namespace; resolved target namespace на текущем этапе = `metadata.namespace` у `NamespaceSnapshot`.
 - `NamespaceSnapshotContent` остаётся **cluster-scoped**; права на content и OK — отдельно от namespaced root (см. RBAC в шаблонах модуля и будущий N2).
 
 ---

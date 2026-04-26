@@ -16,16 +16,14 @@ limitations under the License.
 
 package namespacemanifest
 
-import (
-	"fmt"
-	"sort"
-)
+import "fmt"
 
-// ManifestTargetDedupKey matches aggregated manifest identity (apiVersion|kind|namespace|name);
-// namespace is the NamespaceSnapshot namespace for namespaced capture targets.
+// ManifestTargetDedupKey matches aggregated manifest identity (apiVersion|kind|namespace|name).
+// NamespaceSnapshot captures mostly namespaced targets, plus cluster-scoped targets such as
+// the Kubernetes Namespace object itself.
 func ManifestTargetDedupKey(snapshotNamespace string, t ManifestTarget) string {
 	ns := snapshotNamespace
-	if ns == "" {
+	if IsClusterScopedManifestTarget(t) || ns == "" {
 		ns = "_cluster"
 	}
 	return fmt.Sprintf("%s|%s|%s|%s", t.APIVersion, t.Kind, ns, t.Name)
@@ -45,15 +43,6 @@ func FilterManifestTargets(targets []ManifestTarget, exclude map[string]struct{}
 		}
 		out = append(out, t)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		if a.APIVersion != b.APIVersion {
-			return a.APIVersion < b.APIVersion
-		}
-		if a.Kind != b.Kind {
-			return a.Kind < b.Kind
-		}
-		return a.Name < b.Name
-	})
+	sortManifestTargets(out)
 	return out
 }

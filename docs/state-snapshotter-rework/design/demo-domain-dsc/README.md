@@ -13,7 +13,7 @@
 |-------------|---------------------------|
 | Привязка к parent snapshot через **`spec.parentSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; parent-owned публикация refs родительским controller’ом. | VolumeSnapshot/CSI и реальный data-path. |
 | Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
-| **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья без MCP в aggregated) **появляются в обходе**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Не смешивает demo-архив в aggregated JSON до отдельного контракта. |
+| **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья) имеют собственные MCP и **появляются в aggregated read**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Реальный CSI/data-path остаётся вне PR5a. |
 
 ### PR5b (минимум в коде)
 

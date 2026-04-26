@@ -202,8 +202,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 	}
 
-	// Validate targets: a generic MCR with no targets is invalid. NamespaceSnapshot-bound capture may
-	// legitimately have an empty target list after E5 subtree exclude (child MCP already captured the whole allowlist).
+	// Validate targets: a generic MCR with no targets is invalid. NamespaceSnapshot-bound capture should
+	// normally include the Kubernetes Namespace target; this branch remains defensive for older/partial MCRs.
 	if len(mcr.Spec.Targets) == 0 {
 		boundNSC := ""
 		if mcr.Annotations != nil {
@@ -218,7 +218,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			}
 			return ctrl.Result{}, nil
 		}
-		r.Logger.Info("ManifestCaptureRequest has zero targets for NamespaceSnapshot-bound capture (subtree exclude); creating empty checkpoint",
+		r.Logger.Info("ManifestCaptureRequest has zero targets for NamespaceSnapshot-bound capture; creating empty checkpoint for compatibility",
 			"mcr", client.ObjectKeyFromObject(mcr).String(), "boundNamespaceSnapshotContent", boundNSC)
 	}
 
@@ -624,16 +624,15 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		}
 	}
 
-	// Step 1: Collect target objects (TZ section 5, step 1)
-	// TZ: All targets must be namespaced objects in the same namespace as ManifestCaptureRequest
-	// Cluster-scoped resources are NOT supported in targets
+	// Step 1: Collect target objects (TZ section 5, step 1).
+	// Most targets are namespaced in the same namespace as ManifestCaptureRequest.
+	// Kubernetes Namespace is the cluster-scoped anchor for NamespaceSnapshot own scope.
 	for _, target := range mcr.Spec.Targets {
 		gv, err := schema.ParseGroupVersion(target.APIVersion)
 		if err != nil {
 			return nil, fmt.Errorf("invalid apiVersion %s: %w", target.APIVersion, err)
 		}
 
-		// Get the resource (all targets are namespaced, so use MCR namespace)
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(schema.GroupVersionKind{
 			Group:   gv.Group,
@@ -641,17 +640,18 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			Kind:    target.Kind,
 		})
 		obj.SetName(target.Name)
-		obj.SetNamespace(mcr.Namespace)
+		key := client.ObjectKey{Name: target.Name}
+		if !manifestCaptureTargetIsClusterScoped(target) {
+			key.Namespace = mcr.Namespace
+			obj.SetNamespace(mcr.Namespace)
+		}
 
-		if err := r.Get(ctx, client.ObjectKey{
-			Namespace: mcr.Namespace,
-			Name:      target.Name,
-		}, obj); err != nil {
+		if err := r.Get(ctx, key, obj); err != nil {
 			// Preserve original error for IsNotFound check in caller
 			// errors.IsNotFound works with wrapped errors (fmt.Errorf with %w preserves error type via errors.Unwrap)
 			// NotFound → Ready=False immediately (terminal state)
 			// To retry, user must delete and recreate MCR
-			return nil, fmt.Errorf("failed to get %s %s/%s: %w", target.Kind, mcr.Namespace, target.Name, err)
+			return nil, fmt.Errorf("failed to get %s %s: %w", target.Kind, key.String(), err)
 		}
 
 		// Add target object (filtering happens inside addObject)
@@ -661,7 +661,9 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		// collectRelatedObjects now uses addObject directly, so filtering is applied
 		// Collect related objects (ConfigMaps, Secrets, etc.)
 		// Errors are ignored - continue even if related objects collection fails
-		r.collectRelatedObjects(ctx, obj, mcr.Namespace, addObject)
+		if !manifestCaptureTargetIsClusterScoped(target) {
+			r.collectRelatedObjects(ctx, obj, mcr.Namespace, addObject)
+		}
 	}
 
 	// Step 4: Sort objects (TZ section 5, step 4)
@@ -669,6 +671,12 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	r.sortObjects(objects)
 
 	return objects, nil
+}
+
+func manifestCaptureTargetIsClusterScoped(target storagev1alpha1.ManifestTarget) bool {
+	// Minimal cluster-scoped support for NamespaceSnapshot own scope.
+	// Future: replace with RESTMapper/discovery-based scope resolution.
+	return target.APIVersion == "v1" && target.Kind == "Namespace"
 }
 
 // collectRelatedObjects recursively collects ConfigMaps, Secrets, and volumeClaimTemplates (TZ section 5, step 2)

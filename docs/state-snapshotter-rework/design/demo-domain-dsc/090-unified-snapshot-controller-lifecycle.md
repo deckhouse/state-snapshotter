@@ -21,7 +21,7 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 ## Rules
 
-**Own materialization:** each controller materializes only its own scope. Missing optional domain resources do not make the snapshot invalid; an empty or minimal MCP is a valid materialization result.
+**Own materialization:** each controller materializes only its own scope. Missing optional domain resources do not make the snapshot invalid; a minimal MCP is valid, but a Ready snapshot must have its own MCP. Parent MCPs do not contain child manifests.
 
 **Child snapshot creation:** parent controller creates child snapshots and owns graph edges. Child controllers do not patch parent status.
 
@@ -35,7 +35,9 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 **VM:** `DemoVirtualMachineSnapshotController` owns VM-level materialization and creates disk child snapshots for disk resources. PVCs owned by disks are delegated to disk snapshots.
 
-**Namespace:** `NamespaceSnapshotController` owns namespace-level materialization. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
+**Namespace:** `NamespaceSnapshotController` owns namespace-level materialization. Its minimal own manifest is the Kubernetes `Namespace` object named by the resolved target namespace. Currently resolved target namespace = `NamespaceSnapshot.metadata.namespace`; a future cluster-scoped `NamespaceSnapshot` may resolve it from `spec.targetNamespace`. The `NamespaceSnapshot` CR remains namespaced for now and this change does not add `spec.namespace` / `spec.targetNamespace`. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
+
+**E5 exclude:** root capture excludes objects already present in descendant content-node MCPs, including dedicated `XxxSnapshotContent` nodes reached through `childrenSnapshotContentRefs`.
 
 ## Aggregated Read
 
@@ -51,12 +53,15 @@ start content
 
 It can start from any content node. Missing MCP, missing child content, registry gaps for heterogeneous content, and duplicate object identities fail the whole read.
 
+The generic usecase can start from arbitrary content nodes. The current HTTP API exposes root `NamespaceSnapshot` aggregated read; arbitrary snapshot/content-node routes are a follow-up API surface if curl access is needed for every node.
+
 ## Invariants
 
 - `childrenSnapshotRefs` is the complete parent-published graph for direct child snapshots.
 - `childrenSnapshotRefs` contains `apiVersion`, `kind`, and `name`; namespace is implicit from the parent.
 - Parent owns child graph edges.
 - Child owns only its own snapshot, content, MCR/MCP, and `Ready`.
+- Aggregated read is the only place where parent and child MCPs are combined.
 - `manifestCheckpointName` is required for materialized content traversal.
 - `NamespaceSnapshot` differs only by DSC-based discovery, not by special root semantics.
 - Generic/usecase code remains domain-agnostic.

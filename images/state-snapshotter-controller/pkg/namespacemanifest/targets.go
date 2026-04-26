@@ -46,13 +46,38 @@ var n2aNamespacedGVR = []schema.GroupVersionResource{
 	{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"},
 }
 
-// BuildManifestCaptureTargets is N2a-only: it lists the whole namespace per allowlist without List pagination.
+// NamespaceManifestTarget returns the cluster-scoped Kubernetes Namespace object for the
+// resolved target namespace that anchors NamespaceSnapshot own materialization.
+func NamespaceManifestTarget(targetNamespace string) ManifestTarget {
+	return ManifestTarget{APIVersion: "v1", Kind: "Namespace", Name: targetNamespace}
+}
+
+// IsClusterScopedManifestTarget returns true for targets that must be read without a namespace.
+func IsClusterScopedManifestTarget(t ManifestTarget) bool {
+	return t.APIVersion == "v1" && t.Kind == "Namespace"
+}
+
+// EnsureNamespaceManifestTarget appends the Kubernetes Namespace target if it was filtered out.
+func EnsureNamespaceManifestTarget(targets []ManifestTarget, targetNamespace string) []ManifestTarget {
+	nsTarget := NamespaceManifestTarget(targetNamespace)
+	for _, target := range targets {
+		if target == nsTarget {
+			return targets
+		}
+	}
+	out := append(append([]ManifestTarget(nil), targets...), nsTarget)
+	sortManifestTargets(out)
+	return out
+}
+
+// BuildManifestCaptureTargets is N2a-only: it includes the Kubernetes Namespace object plus
+// the whole namespace per allowlist without List pagination.
 // Large namespaces are intentionally unsupported until hardening; do not treat this as production-complete
 // capture enumeration (see design namespace-snapshot-controller.md §4.5 / §5.1 and implementation-plan).
 //
 // The returned slice is sorted by (APIVersion, Kind, Name) for stable MCR spec and drift checks.
 func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, namespace string) ([]ManifestTarget, error) {
-	var targets []ManifestTarget
+	targets := []ManifestTarget{NamespaceManifestTarget(namespace)}
 	seen := make(map[string]struct{})
 
 	for _, gvr := range n2aNamespacedGVR {
@@ -85,6 +110,11 @@ func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, nam
 		}
 	}
 
+	sortManifestTargets(targets)
+	return targets, nil
+}
+
+func sortManifestTargets(targets []ManifestTarget) {
 	sort.Slice(targets, func(i, j int) bool {
 		a, b := targets[i], targets[j]
 		if a.APIVersion != b.APIVersion {
@@ -95,7 +125,6 @@ func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, nam
 		}
 		return a.Name < b.Name
 	})
-	return targets, nil
 }
 
 // ManifestTarget is a minimal capture target (mirrors api/v1alpha1.ManifestTarget for the controller layer).

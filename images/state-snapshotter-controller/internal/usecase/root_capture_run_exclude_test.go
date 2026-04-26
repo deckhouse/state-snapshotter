@@ -73,6 +73,25 @@ func fixtureSnapshotUnstructured(name, boundContent string) *unstructured.Unstru
 	return u
 }
 
+func fixtureContentUnstructured(name, mcpName string, children ...string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "generic.state-snapshotter.test",
+		Version: "v1",
+		Kind:    "FixtureDomainSnapshotContent",
+	})
+	u.SetName(name)
+	_ = unstructured.SetNestedField(u.Object, mcpName, "status", "manifestCheckpointName")
+	if len(children) > 0 {
+		refs := make([]interface{}, 0, len(children))
+		for _, child := range children {
+			refs = append(refs, map[string]interface{}{"name": child})
+		}
+		_ = unstructured.SetNestedSlice(u.Object, refs, "status", "childrenSnapshotContentRefs")
+	}
+	return u
+}
+
 func graphRegistryWithFixtureDomain(t *testing.T) *snapshot.GVKRegistry {
 	t.Helper()
 	r := snapshot.NewGVKRegistry()
@@ -83,6 +102,127 @@ func graphRegistryWithFixtureDomain(t *testing.T) *snapshot.GVKRegistry {
 		t.Fatalf("RegisterSnapshotContentMapping: %v", err)
 	}
 	return r
+}
+
+func TestCollectRunSubtreeManifestExcludeKeys_DedicatedContentMCPContributes(t *testing.T) {
+	scheme := rootCaptureTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	ctx := context.Background()
+	reg := graphRegistryWithFixtureDomain(t)
+
+	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "demo-owned", "namespace": "ns1"}},
+	})
+	ch := aggManifestCreateChunk("ch-dedicated", "mcp-dedicated", d1, c1)
+	mcpDedicated := aggManifestReadyMCP("mcp-dedicated", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: c1}}, 1)
+
+	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
+		},
+	}
+	disk := fixtureSnapshotUnstructured("disk-a", "disk-content")
+	diskContent := fixtureContentUnstructured("disk-content", "mcp-dedicated")
+	rootNS := &storagev1alpha1.NamespaceSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
+		Status: storagev1alpha1.NamespaceSnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{{
+				APIVersion: "generic.state-snapshotter.test/v1",
+				Kind:       "FixtureDomainSnapshot",
+				Name:       "disk-a",
+			}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ch, mcpDedicated, nscRoot, disk, diskContent, rootNS).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, snapshotgraphregistry.NewStatic(reg), rootNS, "root-nsc")
+	if err != nil {
+		t.Fatalf("collectRunSubtreeManifestExcludeKeys: %v", err)
+	}
+	k := namespacemanifest.ManifestTargetDedupKey("ns1", namespacemanifest.ManifestTarget{
+		APIVersion: "v1", Kind: "ConfigMap", Name: "demo-owned",
+	})
+	if _, ok := excl[k]; !ok {
+		t.Fatalf("expected dedicated content MCP object in exclude set, got %#v", excl)
+	}
+}
+
+func TestCollectRunSubtreeManifestExcludeKeys_DedicatedContentWithoutMCPPends(t *testing.T) {
+	scheme := rootCaptureTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	ctx := context.Background()
+	reg := graphRegistryWithFixtureDomain(t)
+
+	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
+		},
+	}
+	disk := fixtureSnapshotUnstructured("disk-a", "disk-content")
+	diskContent := fixtureContentUnstructured("disk-content", "")
+	rootNS := &storagev1alpha1.NamespaceSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
+		Status: storagev1alpha1.NamespaceSnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{{
+				APIVersion: "generic.state-snapshotter.test/v1",
+				Kind:       "FixtureDomainSnapshot",
+				Name:       "disk-a",
+			}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, disk, diskContent, rootNS).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, snapshotgraphregistry.NewStatic(reg), rootNS, "root-nsc")
+	if err == nil {
+		t.Fatal("expected pending error when dedicated content has no manifestCheckpointName")
+	}
+	if !errors.Is(err, ErrSubtreeManifestCapturePending) {
+		t.Fatalf("expected ErrSubtreeManifestCapturePending, got %v", err)
+	}
+}
+
+func TestCollectRunSubtreeManifestExcludeKeys_DedicatedContentMCPNotReadyPends(t *testing.T) {
+	scheme := rootCaptureTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	ctx := context.Background()
+	reg := graphRegistryWithFixtureDomain(t)
+
+	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
+		},
+	}
+	disk := fixtureSnapshotUnstructured("disk-a", "disk-content")
+	diskContent := fixtureContentUnstructured("disk-content", "mcp-pending")
+	mcpPending := &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "mcp-pending"}}
+	rootNS := &storagev1alpha1.NamespaceSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
+		Status: storagev1alpha1.NamespaceSnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{{
+				APIVersion: "generic.state-snapshotter.test/v1",
+				Kind:       "FixtureDomainSnapshot",
+				Name:       "disk-a",
+			}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, disk, diskContent, mcpPending, rootNS).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, snapshotgraphregistry.NewStatic(reg), rootNS, "root-nsc")
+	if err == nil {
+		t.Fatal("expected pending error when dedicated content ManifestCheckpoint is not Ready")
+	}
+	if !errors.Is(err, ErrSubtreeManifestCapturePending) {
+		t.Fatalf("expected ErrSubtreeManifestCapturePending, got %v", err)
+	}
 }
 
 func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testing.T) {

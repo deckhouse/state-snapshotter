@@ -21,6 +21,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -39,7 +40,64 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
+
+func integrationArchiveObjectsFromMCP(ctx context.Context, mcpName string) []map[string]interface{} {
+	log, err := logger.NewLogger("error")
+	Expect(err).NotTo(HaveOccurred())
+	arch := usecase.NewArchiveService(k8sClient, k8sClient, log)
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, mcp)).To(Succeed())
+	raw, _, err := arch.GetArchiveFromCheckpoint(ctx, mcp, &usecase.ArchiveRequest{
+		CheckpointName:  mcpName,
+		CheckpointUID:   string(mcp.UID),
+		SourceNamespace: mcp.Spec.SourceNamespace,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	var objects []map[string]interface{}
+	Expect(json.Unmarshal(raw, &objects)).To(Succeed())
+	return objects
+}
+
+func integrationAggregatedObjects(ctx context.Context, contentGVK schema.GroupVersionKind, contentName string) []map[string]interface{} {
+	log, err := logger.NewLogger("error")
+	Expect(err).NotTo(HaveOccurred())
+	arch := usecase.NewArchiveService(k8sClient, k8sClient, log)
+	agg := usecase.NewAggregatedNamespaceManifests(k8sClient, arch, integrationGraphRegProvider)
+	raw, err := agg.BuildAggregatedJSONFromContent(ctx, contentGVK, contentName)
+	Expect(err).NotTo(HaveOccurred())
+	var objects []map[string]interface{}
+	Expect(json.Unmarshal(raw, &objects)).To(Succeed())
+	return objects
+}
+
+func integrationObjectsContainKindName(objects []map[string]interface{}, kind, name string) bool {
+	for _, obj := range objects {
+		if obj["kind"] != kind {
+			continue
+		}
+		meta, ok := obj["metadata"].(map[string]interface{})
+		if ok && meta["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func integrationObjectsContainDemoSnapshotKind(objects []map[string]interface{}, demoKind string) bool {
+	for _, obj := range objects {
+		meta, ok := obj["metadata"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		labels, ok := meta["labels"].(map[string]interface{})
+		if ok && labels["state-snapshotter.deckhouse.io/demo-snapshot-kind"] == demoKind {
+			return true
+		}
+	}
+	return false
+}
 
 // PR5b: DemoVirtualMachineSnapshot under root NamespaceSnapshot; DemoVirtualDiskSnapshot as child under VM; ref-only walk sees VM content then disk content.
 var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM", Serial, func() {
@@ -238,5 +296,53 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue), "root Ready: reason=%q message=%q", rc.Reason, rc.Message)
 			g.Expect(rc.Reason).To(Equal(snapshot.ReasonCompleted), "root Ready: status=%s message=%q", rc.Status, rc.Message)
 		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
+
+		var rootMCPName, vmMCPName, diskMCPName string
+		Eventually(func(g Gomega) {
+			rootContent := &storagev1alpha1.NamespaceSnapshotContent{}
+			g.Expect(k8sClient.Get(testCtx, client.ObjectKey{Name: rootNSC}, rootContent)).To(Succeed())
+			g.Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
+			rootMCPName = rootContent.Status.ManifestCheckpointName
+
+			vmContent := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+			g.Expect(k8sClient.Get(testCtx, client.ObjectKey{Name: vmContentName}, vmContent)).To(Succeed())
+			g.Expect(vmContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
+			vmMCPName = vmContent.Status.ManifestCheckpointName
+
+			diskContent := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+			g.Expect(k8sClient.Get(testCtx, client.ObjectKey{Name: diskContentName}, diskContent)).To(Succeed())
+			g.Expect(diskContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
+			diskMCPName = diskContent.Status.ManifestCheckpointName
+		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+
+		rootObjects := integrationArchiveObjectsFromMCP(testCtx, rootMCPName)
+		Expect(integrationObjectsContainKindName(rootObjects, "Namespace", nsName)).To(BeTrue(), "root own MCP should include the Kubernetes Namespace manifest")
+		Expect(integrationObjectsContainDemoSnapshotKind(rootObjects, "DemoVirtualMachineSnapshot")).To(BeFalse(), "root own MCP must not include VM child manifests")
+		Expect(integrationObjectsContainDemoSnapshotKind(rootObjects, "DemoVirtualDiskSnapshot")).To(BeFalse(), "root own MCP must not include disk child manifests")
+
+		vmObjects := integrationArchiveObjectsFromMCP(testCtx, vmMCPName)
+		Expect(integrationObjectsContainDemoSnapshotKind(vmObjects, "DemoVirtualMachineSnapshot")).To(BeTrue(), "VM own MCP should include VM own manifest")
+		Expect(integrationObjectsContainDemoSnapshotKind(vmObjects, "DemoVirtualDiskSnapshot")).To(BeFalse(), "VM own MCP must not include disk child manifests")
+
+		diskObjects := integrationArchiveObjectsFromMCP(testCtx, diskMCPName)
+		Expect(integrationObjectsContainDemoSnapshotKind(diskObjects, "DemoVirtualDiskSnapshot")).To(BeTrue(), "disk own MCP should include disk own manifest")
+		Expect(integrationObjectsContainDemoSnapshotKind(diskObjects, "DemoVirtualMachineSnapshot")).To(BeFalse(), "disk own MCP must not include ancestor manifests")
+
+		rootAggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootNSC)
+		Expect(integrationObjectsContainKindName(rootAggregated, "Namespace", nsName)).To(BeTrue())
+		Expect(integrationObjectsContainDemoSnapshotKind(rootAggregated, "DemoVirtualMachineSnapshot")).To(BeTrue())
+		Expect(integrationObjectsContainDemoSnapshotKind(rootAggregated, "DemoVirtualDiskSnapshot")).To(BeTrue())
+
+		vmContentGVK := schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshotContent"}
+		diskContentGVK := schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshotContent"}
+		vmAggregated := integrationAggregatedObjects(testCtx, vmContentGVK, vmContentName)
+		Expect(integrationObjectsContainKindName(vmAggregated, "Namespace", nsName)).To(BeFalse(), "VM subtree read must not include ancestor Namespace manifest")
+		Expect(integrationObjectsContainDemoSnapshotKind(vmAggregated, "DemoVirtualMachineSnapshot")).To(BeTrue())
+		Expect(integrationObjectsContainDemoSnapshotKind(vmAggregated, "DemoVirtualDiskSnapshot")).To(BeTrue())
+
+		diskAggregated := integrationAggregatedObjects(testCtx, diskContentGVK, diskContentName)
+		Expect(integrationObjectsContainKindName(diskAggregated, "Namespace", nsName)).To(BeFalse(), "disk leaf read must not include ancestor Namespace manifest")
+		Expect(integrationObjectsContainDemoSnapshotKind(diskAggregated, "DemoVirtualMachineSnapshot")).To(BeFalse(), "disk leaf read must not include VM ancestor manifest")
+		Expect(integrationObjectsContainDemoSnapshotKind(diskAggregated, "DemoVirtualDiskSnapshot")).To(BeTrue())
 	})
 })

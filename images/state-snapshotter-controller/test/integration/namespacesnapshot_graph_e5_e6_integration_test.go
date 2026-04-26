@@ -274,37 +274,23 @@ var _ = Describe("Integration: E6 parent Ready when child snapshot fails capture
 
 		childSnap := &storagev1alpha1.NamespaceSnapshot{}
 		Expect(k8sClient.Get(ctx, childKey, childSnap)).To(Succeed())
-		mcrKey := types.NamespacedName{
-			Namespace: nsName,
-			Name:      namespacemanifest.NamespaceSnapshotMCRName(childSnap.UID),
-		}
-
-		Eventually(func(g Gomega) {
-			mcr := &ssv1alpha1.ManifestCaptureRequest{}
-			g.Expect(k8sClient.Get(ctx, mcrKey, mcr)).To(Succeed())
-			g.Expect(mcr.Spec.Targets).NotTo(BeEmpty())
-		}, 180*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		Expect(mergeChildGraphIntoRoot(ctx, k8sClient, nsName, parentName, childName, childSnap.Status.BoundSnapshotContentName)).To(Succeed())
 
-		mcr := &ssv1alpha1.ManifestCaptureRequest{}
-		Expect(k8sClient.Get(ctx, mcrKey, mcr)).To(Succeed())
-		mcrPatchBase := mcr.DeepCopy()
-		mcr.Spec.Targets = append(append([]ssv1alpha1.ManifestTarget(nil), mcr.Spec.Targets...), ssv1alpha1.ManifestTarget{
-			APIVersion: "v1",
-			Kind:       "ConfigMap",
-			Name:       "nss-e6-fail-drift-fake-not-in-cluster",
-		})
-		Expect(k8sClient.Patch(ctx, mcr, client.MergeFrom(mcrPatchBase))).To(Succeed())
-
-		childFresh := &storagev1alpha1.NamespaceSnapshot{}
-		Expect(k8sClient.Get(ctx, childKey, childFresh)).To(Succeed())
-		childBase := childFresh.DeepCopy()
-		if childFresh.Annotations == nil {
-			childFresh.Annotations = map[string]string{}
-		}
-		childFresh.Annotations["state-snapshotter.deckhouse.io/integration-child-drift-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
-		Expect(k8sClient.Patch(ctx, childFresh, client.MergeFrom(childBase))).To(Succeed())
+		Eventually(func(g Gomega) {
+			childFresh := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(ctx, childKey, childFresh)).To(Succeed())
+			childBase := childFresh.DeepCopy()
+			meta.SetStatusCondition(&childFresh.Status.Conditions, metav1.Condition{
+				Type:               snapshot.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "CapturePlanDrift",
+				Message:            "integration terminal child capture failure",
+				ObservedGeneration: childFresh.Generation,
+				LastTransitionTime: metav1.Now(),
+			})
+			g.Expect(k8sClient.Status().Patch(ctx, childFresh, client.MergeFrom(childBase))).To(Succeed())
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			ch := &storagev1alpha1.NamespaceSnapshot{}

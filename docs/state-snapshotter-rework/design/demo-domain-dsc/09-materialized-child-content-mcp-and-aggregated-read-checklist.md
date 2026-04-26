@@ -33,7 +33,7 @@ Generic code does not know which resources belong to a domain snapshot. Only the
 
 - `DemoVirtualDiskSnapshotController`: if PVC is declared and allowed by scope filtering, include PVC manifest in own MCR; later data capture can add VCR. Missing PVC is not fatal; minimal/empty materialization is valid.
 - `DemoVirtualMachineSnapshotController`: includes VM-level resources such as Pod/qemu only when they belong to the VM; disk PVCs belong to disk snapshots and must be delegated to child disk snapshots.
-- `NamespaceSnapshotController`: captures standard namespace resources, discovers domain-owned resources via DSC/registry, creates top-level child snapshots for them, and excludes covered child subtree resources from root own MCR.
+- `NamespaceSnapshotController`: captures the Kubernetes `Namespace` object plus standard namespace resources, discovers domain-owned resources via DSC/registry, creates top-level child snapshots for them, and excludes covered child subtree resources from root own MCR.
 
 ## OwnerReference / Scope Filtering
 
@@ -57,6 +57,7 @@ Examples:
 - VM snapshot does not include PVC when the PVC has ownerRef to a disk object.
 - Disk snapshot includes PVC when it has ownerRef to the disk object.
 - NamespaceSnapshot first creates child snapshots for DSC-covered resources, then its own MCR keeps only uncovered standard resources.
+- E5 exclude reads MCPs from every descendant content-node reached through `childrenSnapshotContentRefs`, including dedicated `XxxSnapshotContent` nodes; child manifests stay in child MCPs and are not copied into parent MCPs.
 
 ## Ownership Rules
 
@@ -86,16 +87,21 @@ Algorithm:
 4. recurse through `status.childrenSnapshotContentRefs`;
 5. fail as one operation on incomplete graph.
 
+Aggregation is the only step that combines parent and child MCPs. Write-path materialization keeps each MCP scoped to its own node.
+
 Fail-closed cases:
 
 - content node without `manifestCheckpointName`;
 - missing child content;
+- missing or NotReady child MCP;
 - duplicate object identity across MCPs;
 - missing registry for heterogeneous content traversal.
 
 ## NamespaceSnapshot Specifics
 
 `NamespaceSnapshotController` follows the same lifecycle. Its only difference is discovery: it uses DSC/registry to decide which top-level resources must be delegated to domain child snapshots. Other domain controllers usually compute children from their own domain model.
+
+The minimal own MCP for `NamespaceSnapshot` contains the Kubernetes `Namespace` object named by the resolved target namespace. Currently resolved target namespace = `NamespaceSnapshot.metadata.namespace`; a future cluster-scoped `NamespaceSnapshot` may resolve it from `spec.targetNamespace`. `NamespaceSnapshot` remains namespaced in this change; no `spec.namespace` / `spec.targetNamespace` field is introduced.
 
 ## Do Not Reintroduce
 
@@ -126,6 +132,8 @@ Integration coverage:
 - `DemoVirtualDiskSnapshot` works standalone;
 - child degradation is reflected by parent;
 - aggregated read returns root and child subtree manifests;
+- root own MCP contains the Namespace object and excludes child MCP objects;
+- read from dedicated content returns only that node and descendants;
 - child controller does not patch parent graph.
 
 ## Final Checks

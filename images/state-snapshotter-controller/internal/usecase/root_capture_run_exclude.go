@@ -49,20 +49,21 @@ var (
 	ErrSubtreeManifestCaptureFailed = errors.New("subtree manifest capture failed for root exclude")
 )
 
-// BuildRootNamespaceManifestCaptureTargets lists namespace allowlist targets then, when the root
-// NamespaceSnapshot has status.childrenSnapshotRefs, subtracts manifest objects already captured
-// in descendant NamespaceSnapshotContent ManifestCheckpoints reachable only via that ref graph.
+// BuildRootNamespaceManifestCaptureTargets builds NamespaceSnapshot own targets for the resolved
+// target namespace: the Kubernetes Namespace object plus namespace allowlist targets, then, when the root NamespaceSnapshot has
+// status.childrenSnapshotRefs, subtracts manifest objects already captured in descendant content-node
+// ManifestCheckpoints reachable only via that ref graph.
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
 //
 // live supplies the current GVKRegistry (see pkg/snapshot.GVKRegistry) and optional TryRefresh when the
 // registry may be stale vs RESTMapper (CRD appeared after last DSC reconcile). Child snapshot refs carry
 // explicit apiVersion/kind/name (strict); subtree traversal still uses the registry for snapshot↔content mapping.
 //
-// When status.childrenSnapshotRefs is empty, behavior matches N2a root capture: full namespace
-// allowlist without subtree exclude.
+// When status.childrenSnapshotRefs is empty, behavior matches N2a root capture: Namespace object
+// plus full namespace allowlist without subtree exclude.
 //
-// While childrenSnapshotRefs is non-empty, descendant NamespaceSnapshotContent nodes reached from the root
-// must publish a Ready ManifestCheckpoint before exclude keys are derived; otherwise ErrSubtreeManifestCapturePending.
+// While childrenSnapshotRefs is non-empty, descendant content nodes reached from the root must publish
+// a Ready ManifestCheckpoint before exclude keys are derived; otherwise ErrSubtreeManifestCapturePending.
 func BuildRootNamespaceManifestCaptureTargets(
 	ctx context.Context,
 	arch *ArchiveService,
@@ -75,7 +76,8 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if arch == nil {
 		return nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
 	}
-	base, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, rootNS.Namespace)
+	targetNamespace := ResolveNamespaceSnapshotTargetNamespace(rootNS)
+	base, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, targetNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +91,8 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if err != nil {
 		return nil, err
 	}
-	return namespacemanifest.FilterManifestTargets(base, excl, rootNS.Namespace), nil
+	filtered := namespacemanifest.FilterManifestTargets(base, excl, targetNamespace)
+	return namespacemanifest.EnsureNamespaceManifestTarget(filtered, targetNamespace), nil
 }
 
 func collectRunSubtreeManifestExcludeKeys(
@@ -118,55 +121,18 @@ func collectRunSubtreeManifestExcludeKeys(
 		if nsc.Name == rootNSCName {
 			return nil
 		}
-		if nsc.Status.ManifestCheckpointName == "" {
-			return fmt.Errorf("%w: NamespaceSnapshotContent %q has empty manifestCheckpointName (subtree capture not finished)",
-				ErrSubtreeManifestCapturePending, nsc.Name)
-		}
-		mcp := &ssv1alpha1.ManifestCheckpoint{}
-		if err := c.Get(ctx, client.ObjectKey{Name: nsc.Status.ManifestCheckpointName}, mcp); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("get ManifestCheckpoint %q for NamespaceSnapshotContent %q: %w",
-					nsc.Status.ManifestCheckpointName, nsc.Name, err)
-			}
-			return fmt.Errorf("get ManifestCheckpoint %q: %w", nsc.Status.ManifestCheckpointName, err)
-		}
-		readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
-		if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
-			readyCond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed {
-			return fmt.Errorf("%w: ManifestCheckpoint %q for NamespaceSnapshotContent %q: %s",
-				ErrSubtreeManifestCaptureFailed, nsc.Status.ManifestCheckpointName, nsc.Name, readyCond.Message)
-		}
-		if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
-			return fmt.Errorf("%w: ManifestCheckpoint %q for NamespaceSnapshotContent %q is not Ready (exclude set would be incomplete)",
-				ErrSubtreeManifestCapturePending, nsc.Status.ManifestCheckpointName, nsc.Name)
-		}
-		req := &ArchiveRequest{
-			CheckpointName:  nsc.Status.ManifestCheckpointName,
-			CheckpointUID:   string(mcp.UID),
-			SourceNamespace: mcp.Spec.SourceNamespace,
-		}
-		raw, _, err := arch.GetArchiveFromCheckpoint(ctx, mcp, req)
-		if err != nil {
-			return fmt.Errorf("read ManifestCheckpoint %q archive: %w", nsc.Status.ManifestCheckpointName, err)
-		}
-		var arr []map[string]interface{}
-		if err := json.Unmarshal(raw, &arr); err != nil {
-			return fmt.Errorf("decode ManifestCheckpoint %q JSON: %w", nsc.Status.ManifestCheckpointName, err)
-		}
-		for _, obj := range arr {
-			k, err := manifestObjectIdentityKeyFromMap(obj)
-			if err != nil {
-				return fmt.Errorf("ManifestCheckpoint %q: %w", nsc.Status.ManifestCheckpointName, err)
-			}
-			exclude[k] = struct{}{}
-		}
-		return nil
+		return appendManifestCheckpointObjectsToExclude(ctx, arch, c, nsc.Status.ManifestCheckpointName, fmt.Sprintf("NamespaceSnapshotContent %q", nsc.Name), exclude)
 	}
 
 	hooks := &DedicatedContentVisitHooks{
-		Visit: func(_ context.Context, _ schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
+		Visit: func(ctx context.Context, gvk schema.GroupVersionKind, contentName string, u *unstructured.Unstructured, _ bool) error {
 			visited[contentName] = struct{}{}
-			return nil
+			mcpName, _, err := unstructured.NestedString(u.Object, "status", "manifestCheckpointName")
+			if err != nil {
+				return fmt.Errorf("%w: %s %q has invalid manifestCheckpointName: %v",
+					ErrSubtreeManifestCapturePending, gvk.String(), contentName, err)
+			}
+			return appendManifestCheckpointObjectsToExclude(ctx, arch, c, mcpName, fmt.Sprintf("%s %q", gvk.String(), contentName), exclude)
 		},
 	}
 
@@ -187,6 +153,59 @@ func collectRunSubtreeManifestExcludeKeys(
 	}
 
 	return exclude, nil
+}
+
+func appendManifestCheckpointObjectsToExclude(
+	ctx context.Context,
+	arch *ArchiveService,
+	c client.Reader,
+	mcpName string,
+	contentDescription string,
+	exclude map[string]struct{},
+) error {
+	if mcpName == "" {
+		return fmt.Errorf("%w: %s has empty manifestCheckpointName (subtree capture not finished)",
+			ErrSubtreeManifestCapturePending, contentDescription)
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := c.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: ManifestCheckpoint %q for %s not found (exclude set would be incomplete)",
+				ErrSubtreeManifestCapturePending, mcpName, contentDescription)
+		}
+		return fmt.Errorf("get ManifestCheckpoint %q: %w", mcpName, err)
+	}
+	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+	if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
+		readyCond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed {
+		return fmt.Errorf("%w: ManifestCheckpoint %q for %s: %s",
+			ErrSubtreeManifestCaptureFailed, mcpName, contentDescription, readyCond.Message)
+	}
+	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
+		return fmt.Errorf("%w: ManifestCheckpoint %q for %s is not Ready (exclude set would be incomplete)",
+			ErrSubtreeManifestCapturePending, mcpName, contentDescription)
+	}
+	req := &ArchiveRequest{
+		CheckpointName:  mcpName,
+		CheckpointUID:   string(mcp.UID),
+		SourceNamespace: mcp.Spec.SourceNamespace,
+	}
+	raw, _, err := arch.GetArchiveFromCheckpoint(ctx, mcp, req)
+	if err != nil {
+		return fmt.Errorf("read ManifestCheckpoint %q archive: %w", mcpName, err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return fmt.Errorf("decode ManifestCheckpoint %q JSON: %w", mcpName, err)
+	}
+	for _, obj := range arr {
+		k, err := manifestObjectIdentityKeyFromMap(obj)
+		if err != nil {
+			return fmt.Errorf("ManifestCheckpoint %q: %w", mcpName, err)
+		}
+		exclude[k] = struct{}{}
+	}
+	return nil
 }
 
 func manifestObjectIdentityKeyFromMap(obj map[string]interface{}) (string, error) {
