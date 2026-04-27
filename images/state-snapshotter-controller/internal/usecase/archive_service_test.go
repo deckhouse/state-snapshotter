@@ -1197,8 +1197,12 @@ func encodeChunkDataInKeyValueFormat(keyValueArray []interface{}) (string, strin
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	gz.Write(jsonData)
-	gz.Close()
+	if _, err := gz.Write(jsonData); err != nil {
+		panic(err)
+	}
+	if err := gz.Close(); err != nil {
+		panic(err)
+	}
 
 	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
 	hash := sha256.Sum256(buf.Bytes())
@@ -1432,8 +1436,12 @@ func TestDecodeChunkDataWithChecksum_KeyValueFormat(t *testing.T) {
 	jsonData, _ := json.Marshal(keyValueData)
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	gz.Write(jsonData)
-	gz.Close()
+	if _, err := gz.Write(jsonData); err != nil {
+		panic(err)
+	}
+	if err := gz.Close(); err != nil {
+		panic(err)
+	}
 	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
 	hash := sha256.Sum256(buf.Bytes())
 	checksum := hex.EncodeToString(hash[:])

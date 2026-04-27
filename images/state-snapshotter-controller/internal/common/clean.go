@@ -123,7 +123,7 @@ func CleanObjectForSnapshot(u *unstructured.Unstructured, excludeAnnotations []s
 	switch kind {
 	case "Secret":
 		// Do not include secret data unless explicitly requested
-		if !(ann != nil && ann["backup.deckhouse.io/include-secret-data"] == "true") {
+		if ann == nil || ann["backup.deckhouse.io/include-secret-data"] != "true" {
 			unstructured.RemoveNestedField(out.Object, "data")
 			unstructured.RemoveNestedField(out.Object, "stringData")
 		}
