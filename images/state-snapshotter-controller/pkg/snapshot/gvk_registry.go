@@ -26,6 +26,10 @@ import (
 
 // GVKRegistry provides mapping between Snapshot and SnapshotContent GVKs.
 //
+// NOTE: Snapshot registry is keyed by Kind.
+// This implies that Snapshot Kind must be globally unique across all registered snapshot types.
+// Different GVKs with the same Kind (e.g. v1alpha1 vs v1beta1) are not supported simultaneously.
+//
 // This is a centralized source of truth for GVK resolution in dynamic controllers.
 //
 // IMPORTANT: Interface Stability Contract
@@ -72,9 +76,9 @@ func NewGVKRegistry() *GVKRegistry {
 func (r *GVKRegistry) RegisterSnapshotGVK(kind string, apiVersion string) error {
 	gvk := parseGVK(kind, apiVersion)
 	if existing, ok := r.snapshotGVKs[kind]; ok {
-		if existing.GroupVersion().String() != gvk.GroupVersion().String() {
-			return fmt.Errorf("Snapshot Kind %q is already registered for %s; cannot register %s",
-				kind, existing.GroupVersion().String(), gvk.GroupVersion().String())
+		if existing != gvk {
+			return fmt.Errorf("duplicate snapshot Kind %q: %s conflicts with %s",
+				gvk.Kind, existing.String(), gvk.String())
 		}
 		return nil
 	}

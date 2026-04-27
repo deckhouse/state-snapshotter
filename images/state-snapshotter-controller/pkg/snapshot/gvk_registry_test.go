@@ -89,6 +89,25 @@ func TestRegisterSnapshotGVK_Idempotency(t *testing.T) {
 	}
 }
 
+func TestGVKRegistry_RejectsDuplicateKindWithDifferentGVK(t *testing.T) {
+	_, err := NewGVKRegistryFromParallelSnapshotContentPairs(
+		[]schema.GroupVersionKind{
+			{Group: "g1", Version: "v1", Kind: "DemoSnapshot"},
+			{Group: "g2", Version: "v1", Kind: "DemoSnapshot"},
+		},
+		[]schema.GroupVersionKind{
+			{Group: "g1", Version: "v1", Kind: "DemoSnapshotContent"},
+			{Group: "g2", Version: "v1", Kind: "DemoSnapshotContent"},
+		},
+	)
+	if err == nil {
+		t.Fatalf("expected error for duplicate snapshot Kind")
+	}
+	if !strings.Contains(err.Error(), `duplicate snapshot Kind "DemoSnapshot"`) {
+		t.Fatalf("expected duplicate snapshot Kind error, got: %v", err)
+	}
+}
+
 // Test ResolveSnapshotGVK - Unknown Kind Returns Error
 //
 // INTERFACE: pkg/snapshot.GVKRegistry.ResolveSnapshotGVK

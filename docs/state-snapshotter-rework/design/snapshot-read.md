@@ -1,5 +1,8 @@
 # Snapshot Read Model
 
+**Status:** design note, non-normative.  
+**Normative contract:** [`../spec/snapshot-aggregated-read.md`](../spec/snapshot-aggregated-read.md).
+
 ## Concept
 
 Every snapshot resource is a restore point. A root `NamespaceSnapshot`, a child domain snapshot, and a leaf snapshot all point to a `SnapshotContent`-like object through `status.boundSnapshotContentName`.
@@ -23,7 +26,7 @@ For each visited content node:
 3. Append its Kubernetes manifest objects to the response.
 4. Recurse into `childrenSnapshotContentRefs`.
 
-Heterogeneous children are resolved through the snapshot graph registry. The API layer resolves `resource/name` to a snapshot GVK, maps it to the registered content GVK, then reuses `BuildAggregatedJSONFromContent(...)`.
+Heterogeneous children are resolved through the snapshot graph registry. Snapshot Kind must be unique across registered snapshot types in the graph registry. The API layer resolves `resource/name` to a snapshot GVK, maps it to the registered content GVK, then reuses `BuildAggregatedJSONFromContent(...)`.
 
 Aggregation is an API/usecase responsibility. Controllers materialize their own MCPs and publish graph refs; clients do not reconstruct the tree themselves.
 

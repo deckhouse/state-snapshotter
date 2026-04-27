@@ -1,109 +1,43 @@
-# Unified XxxSnapshotController Lifecycle and Aggregated Read Checklist
+# Materialized Child Content MCP and Aggregated Read Checklist
 
-**Status:** working implementation checklist, not a normative contract.  
-**Normative source of truth:** [`../../spec/system-spec.md`](../../spec/system-spec.md).
+**Status:** implementation checklist, non-normative.
 
-## Goal
+Normative contracts:
 
-Build one lifecycle model for every `XxxSnapshotController`:
+- [`../../spec/system-spec.md`](../../spec/system-spec.md)
+- [`../../spec/snapshot-aggregated-read.md`](../../spec/snapshot-aggregated-read.md)
 
-- every `XxxSnapshot` has its own `XxxSnapshotContent`;
-- every content node stores `status.manifestCheckpointName`;
-- every controller materializes its own scope through MCR/MCP;
-- parent controller creates child snapshots and writes `childrenSnapshotRefs`;
-- child controller does not self-register in parent status;
-- parent `Ready` is aggregated by reading child `Ready` conditions;
-- aggregated read can start from any content node and return YAML/JSON for the whole subtree.
+Related design note:
 
-## Controller Template
+- [`./090-unified-snapshot-controller-lifecycle.md`](./090-unified-snapshot-controller-lifecycle.md)
 
-Every domain snapshot controller follows the same lifecycle:
+## Implementation Checklist
 
-1. **Load own snapshot**: snapshot may exist standalone; missing or unavailable parent must not block own materialization.
-2. **Ensure own content**: create or find `XxxSnapshotContent`; write `status.boundSnapshotContentName`.
-3. **Compute own scope**: determine Kubernetes resources this controller backs up itself.
-4. **Compute child snapshots**: create/ensure child `YyySnapshot`; write own `status.childrenSnapshotRefs`; write own content `status.childrenSnapshotContentRefs` where applicable.
-5. **Own materialization**: create/ensure MCR for own scope; wait for `ManifestCheckpoint Ready=True`; write `XxxSnapshotContent.status.manifestCheckpointName`.
-6. **Aggregate children**: read each child from `status.childrenSnapshotRefs`; inspect `child.status.conditions[Ready]`.
-7. **Set Ready**: `Ready=False` while own MCP is not ready or any child is missing/not ready/failed; `Ready=True Completed` only when own MCP is ready and all children are ready.
+- Every `XxxSnapshot` has its own `XxxSnapshotContent`.
+- Every materialized content node writes `status.manifestCheckpointName`.
+- Parent controllers create child snapshots and publish complete `status.childrenSnapshotRefs`.
+- Parent controllers publish content edges through `status.childrenSnapshotContentRefs` where the read model needs child content traversal.
+- Child controllers do not self-register in parent status.
+- Parent `Ready` is derived from own MCP state and direct children state.
+- Aggregated read combines MCPs only in the API/usecase layer.
+- Dedicated demo controllers can reconcile manual demo snapshots without DSC, but `NamespaceSnapshot` discovery sees demo resources only through eligible DSC mappings.
 
-## Own Scope
+## OwnerRef Filtering Examples
 
-Generic code does not know which resources belong to a domain snapshot. Only the concrete domain controller defines its own scope.
+- VM snapshot may include resources owned by the VM when they are part of VM own scope.
+- VM snapshot must not include resources owned by a disk object; they belong to disk snapshot scope.
+- Disk snapshot may include resources owned by the disk object when they are part of disk own scope.
+- `NamespaceSnapshot` top-level DSC discovery must skip resources with `ownerReferences`; owned resources are covered by the owner domain subtree when that owner is registered and skipped fail-closed when it is not.
+- `NamespaceSnapshot` root own MCP must not accidentally include domain-owned resources delegated to child snapshots or skipped by ownerRef filtering.
 
-- `DemoVirtualDiskSnapshotController`: if PVC is declared and allowed by scope filtering, include PVC manifest in own MCR; later data capture can add VCR. Missing PVC is not fatal; minimal/empty materialization is valid.
-- `DemoVirtualMachineSnapshotController`: includes VM-level resources such as Pod/qemu only when they belong to the VM; disk PVCs belong to disk snapshots and must be delegated to child disk snapshots.
-- `NamespaceSnapshotController`: captures the Kubernetes `Namespace` object plus standard namespace resources, discovers domain-owned resources only through eligible DSC mappings in the graph registry, creates top-level child snapshots for them, and excludes covered child subtree resources from root own MCR.
+## Validation Cases
 
-Dedicated demo controllers may run and reconcile manual demo snapshots before any DSC exists. That only proves the controller process is active; it does not make demo resources discoverable by `NamespaceSnapshot` until the DSC mapping is eligible.
-
-## OwnerReference / Scope Filtering
-
-When building own scope, a controller must not blindly include every resource it finds.
-
-Rule:
-
-- if a resource has `ownerReferences`;
-- and the owner reference points to an object different from the domain object currently being snapshotted;
-- then the resource is skipped from this controller's own MCR.
-
-The controller may include a resource only when:
-
-- the resource has no `ownerReferences`;
-- or an owner reference points to the current domain object;
-- or the resource is explicitly allowed as root/namespace-level scope.
-
-Examples:
-
-- VM snapshot includes Pod/qemu when it has ownerRef to the VM.
-- VM snapshot does not include PVC when the PVC has ownerRef to a disk object.
-- Disk snapshot includes PVC when it has ownerRef to the disk object.
-- NamespaceSnapshot first creates child snapshots for DSC-covered resources, then its own MCR keeps only uncovered standard resources.
-- E5 exclude reads MCPs from every descendant content-node reached through `childrenSnapshotContentRefs`, including dedicated `XxxSnapshotContent` nodes; child manifests stay in child MCPs and are not copied into parent MCPs.
-
-## Ownership Rules
-
-Parent owns graph edges.
-
-If a controller creates a child snapshot, it writes:
-
-- `status.childrenSnapshotRefs`;
-- `content.status.childrenSnapshotContentRefs` when content graph traversal must include the child content node.
-
-Child controllers must not patch parent status. A child controller owns only:
-
-- its own snapshot;
-- its own content;
-- its own MCR/MCP;
-- its own `Ready`.
-
-## Aggregated Read
-
-Aggregated read is generic and domain-agnostic.
-
-Algorithm:
-
-1. start from any content node;
-2. read `status.manifestCheckpointName`;
-3. load objects from MCP archive;
-4. recurse through `status.childrenSnapshotContentRefs`;
-5. fail as one operation on incomplete graph.
-
-Aggregation is the only step that combines parent and child MCPs. Write-path materialization keeps each MCP scoped to its own node.
-
-Fail-closed cases:
-
-- content node without `manifestCheckpointName`;
-- missing child content;
-- missing or NotReady child MCP;
-- duplicate object identity across MCPs;
-- missing registry for heterogeneous content traversal.
-
-## NamespaceSnapshot Specifics
-
-`NamespaceSnapshotController` follows the same lifecycle. Its only difference is discovery: it uses DSC/registry to decide which top-level resources must be delegated to domain child snapshots. Other domain controllers usually compute children from their own domain model.
-
-The minimal own MCP for `NamespaceSnapshot` contains the Kubernetes `Namespace` object named by the resolved target namespace. Currently resolved target namespace = `NamespaceSnapshot.metadata.namespace`; a future cluster-scoped `NamespaceSnapshot` may resolve it from `spec.targetNamespace`. `NamespaceSnapshot` remains namespaced in this change; no `spec.namespace` / `spec.targetNamespace` field is introduced.
+- Disk-only DSC with `DemoVirtualDisk ownerReference -> DemoVirtualMachine` does not create a direct `DemoVirtualDiskSnapshot` under root.
+- VM+Disk DSC creates `DemoVirtualMachineSnapshot` as a direct root child and creates `DemoVirtualDiskSnapshot` only under the VM subtree.
+- Root `childrenSnapshotRefs` does not contain VM-owned disk snapshots directly.
+- Root own MCP contains the namespace-level own scope and does not include child snapshot MCP objects.
+- Aggregated read returns the expected subtree and fails on duplicate object identity.
+- MCP-level endpoints return only local manifests and do not aggregate children.
 
 ## Do Not Reintroduce
 
@@ -132,6 +66,8 @@ Integration coverage:
 - `NamespaceSnapshot` creates top-level child snapshots through DSC;
 - `DemoVirtualMachineSnapshot` creates child disk snapshots;
 - `DemoVirtualDiskSnapshot` works standalone;
+- disk-only DSC skips a VM-owned disk instead of creating it as a direct root child;
+- VM+Disk DSC keeps disk under VM subtree, not directly under root;
 - child degradation is reflected by parent;
 - aggregated read returns root and child subtree manifests;
 - root own MCP contains the Namespace object and excludes child MCP objects;
@@ -173,14 +109,6 @@ After implementation:
    - `manifestCheckpointName`;
    - `aggregated read`.
 3. Ensure `NamespaceSnapshot` is described as a normal controller with a separate DSC discovery mechanism, not as a special root type.
+4. Ensure lifecycle and aggregated-read algorithm details are linked to normative/design documents instead of being copied here.
 
 Docs are part of the result, not a side artifact. After the change, code and docs must describe the same model.
-
-## Final Model
-
-- Own materialization is the responsibility of the current controller.
-- Own materialization scope is resources owned by the current domain object, excluding resources delegated to child snapshots.
-- Child graph is the responsibility of the parent controller.
-- Child state is the responsibility of the child controller.
-- Parent readiness is aggregation by the parent controller.
-- Aggregated read is generic traversal over the content graph.

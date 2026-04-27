@@ -1,5 +1,7 @@
 # Snapshot Read API
 
+Normative contract: [`../spec/snapshot-aggregated-read.md`](../spec/snapshot-aggregated-read.md).
+
 ## Generic Aggregated Endpoint
 
 ```text

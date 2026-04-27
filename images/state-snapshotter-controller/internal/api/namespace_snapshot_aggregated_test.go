@@ -248,10 +248,10 @@ func TestGenericSnapshotAggregatedManifests_HTTP_VMAndDiskSubtrees(t *testing.T)
 
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-	createReadyMCPForAPI(t, cl, "mcp-vm", "ns1", []map[string]interface{}{
+	createReadyMCPForAPI(t, cl, "mcp-vm", []map[string]interface{}{
 		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualMachine", "metadata": map[string]interface{}{"name": "vm-1", "namespace": "ns1"}},
 	})
-	createReadyMCPForAPI(t, cl, "mcp-disk", "ns1", []map[string]interface{}{
+	createReadyMCPForAPI(t, cl, "mcp-disk", []map[string]interface{}{
 		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualDisk", "metadata": map[string]interface{}{"name": "disk-a", "namespace": "ns1"}},
 	})
 	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshot{
@@ -308,8 +308,8 @@ func TestGenericSnapshotAggregatedManifests_HTTP_Errors(t *testing.T) {
 		dup := []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "same", "namespace": "ns1"}},
 		}
-		createReadyMCPForAPI(t, cl, "mcp-vm", "ns1", dup)
-		createReadyMCPForAPI(t, cl, "mcp-disk", "ns1", dup)
+		createReadyMCPForAPI(t, cl, "mcp-vm", dup)
+		createReadyMCPForAPI(t, cl, "mcp-disk", dup)
 		_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "vm-dup", Namespace: "ns1"},
 			Status:     demov1alpha1.DemoVirtualMachineSnapshotStatus{BoundSnapshotContentName: "vm-content"},
@@ -387,7 +387,7 @@ func newGenericAggregatedTestServerWithRESTMapper(t *testing.T, cl client.Client
 }
 
 func genericAggregatedRESTMapper() meta.RESTMapper {
-	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{demov1alpha1.SchemeGroupVersion, schema.GroupVersion{Group: "", Version: "v1"}})
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{demov1alpha1.SchemeGroupVersion, {Group: "", Version: "v1"}})
 	mapper.Add(schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
 	mapper.Add(schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
@@ -403,7 +403,7 @@ func genericAggregatedAmbiguousRESTMapper() meta.RESTMapper {
 	return mapper
 }
 
-func createReadyMCPForAPI(t *testing.T, cl client.Client, mcpName, namespace string, objects []map[string]interface{}) {
+func createReadyMCPForAPI(t *testing.T, cl client.Client, mcpName string, objects []map[string]interface{}) {
 	t.Helper()
 	data, checksum := encodeTestChunkData(objects)
 	chunk := &ssv1alpha1.ManifestCheckpointContentChunk{
@@ -421,7 +421,7 @@ func createReadyMCPForAPI(t *testing.T, cl client.Client, mcpName, namespace str
 	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: mcpName, UID: types.UID("uid-" + mcpName)},
-		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: namespace},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "ns1"},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
 			Chunks:       []ssv1alpha1.ChunkInfo{{Name: chunk.Name, Index: 0, Checksum: checksum}},
 			TotalObjects: len(objects),

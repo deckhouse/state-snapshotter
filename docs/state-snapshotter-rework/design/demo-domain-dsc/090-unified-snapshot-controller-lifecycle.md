@@ -1,7 +1,7 @@
 # Unified Snapshot Controller Lifecycle
 
-**Status:** target model.  
-**Normative source of truth:** [`../../spec/system-spec.md`](../../spec/system-spec.md).
+**Status:** design note for demo-domain-dsc implementation, non-normative.  
+**Normative lifecycle and aggregated read contract:** [`../../spec/system-spec.md`](../../spec/system-spec.md) and [`../../spec/snapshot-aggregated-read.md`](../../spec/snapshot-aggregated-read.md).
 
 ## Lifecycle
 
@@ -41,19 +41,7 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 ## Aggregated Read
 
-Aggregated read is generic traversal over the content graph:
-
-```text
-start content
-  -> status.manifestCheckpointName
-  -> objects from MCP
-  -> status.childrenSnapshotContentRefs
-  -> child content nodes
-```
-
-It can start from any content node. Missing MCP, missing child content, registry gaps for heterogeneous content, and duplicate object identities fail the whole read.
-
-The generic usecase can start from arbitrary content nodes. The current HTTP API exposes root `NamespaceSnapshot` aggregated read; arbitrary snapshot/content-node routes are a follow-up API surface if curl access is needed for every node.
+Aggregated read is generic traversal over the content graph. The normative API, traversal, duplicate handling, and MCP-local vs aggregated-read boundary are defined in [`../../spec/snapshot-aggregated-read.md`](../../spec/snapshot-aggregated-read.md).
 
 ## Invariants
 

@@ -35,6 +35,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -116,6 +117,142 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 				HaveField("Kind", "DemoVirtualDiskSnapshot"),
 			)))
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
+	})
+
+	It("does not create top-level disk snapshots for VM-owned disks when only disk DSC is registered", func() {
+		testCtx := context.Background()
+		nsName := createIntegrationNamespace(testCtx, "dsc-gated-owned-disk-only-")
+
+		vm := &demov1alpha1.DemoVirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: nsName},
+		}
+		Expect(k8sClient.Create(testCtx, vm)).To(Succeed())
+		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "disk-vm",
+				Namespace: nsName,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       "DemoVirtualMachine",
+					Name:       vm.Name,
+					UID:        vm.UID,
+				}},
+			},
+		})).To(Succeed())
+
+		createEligibleDemoDiskDSC(testCtx, dscName)
+		integrationWaitGraphRegistryKind("DemoVirtualDiskSnapshot")
+
+		Expect(k8sClient.Create(testCtx, &storagev1alpha1.NamespaceSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
+			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+		})).To(Succeed())
+
+		var rootContentName string
+		Eventually(func(g Gomega) {
+			root := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, root)).To(Succeed())
+			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(root.Status.ChildrenSnapshotRefs).To(BeEmpty())
+			g.Expect(root.Status.BoundSnapshotContentName).NotTo(BeEmpty())
+			rootContentName = root.Status.BoundSnapshotContentName
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
+
+		diskSnapshots := &demov1alpha1.DemoVirtualDiskSnapshotList{}
+		Expect(k8sClient.List(testCtx, diskSnapshots, client.InNamespace(nsName))).To(Succeed())
+		Expect(diskSnapshots.Items).To(BeEmpty())
+
+		rootContent := &storagev1alpha1.NamespaceSnapshotContent{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootContentName}, rootContent)).To(Succeed())
+		Expect(rootContent.Status.ChildrenSnapshotContentRefs).To(BeEmpty())
+		Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
+
+		rootObjects := integrationArchiveObjectsFromMCP(testCtx, rootContent.Status.ManifestCheckpointName)
+		Expect(integrationObjectsContainKindName(rootObjects, "DemoVirtualDisk", "disk-vm")).To(BeFalse(), "root own MCP must not include VM-owned disk resource")
+
+		aggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootContentName)
+		Expect(integrationObjectsContainDemoSnapshotKind(aggregated, "DemoVirtualDiskSnapshot")).To(BeFalse())
+		Expect(integrationObjectsContainKindName(aggregated, "DemoVirtualDisk", "disk-vm")).To(BeFalse())
+	})
+
+	It("creates VM as top-level child and disk only under VM when VM and disk DSC are registered", func() {
+		testCtx := context.Background()
+		const vmDiskDSCName = "integration-dsc-gated-demo-vm-disk"
+		_ = client.IgnoreNotFound(k8sClient.Delete(testCtx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: vmDiskDSCName}}))
+		DeferCleanup(func() {
+			_ = client.IgnoreNotFound(k8sClient.Delete(testCtx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: vmDiskDSCName}}))
+			Expect(integrationSnapshotGraphRegistryRefresh(context.Background())).To(Succeed())
+		})
+
+		nsName := createIntegrationNamespace(testCtx, "dsc-gated-owned-disk-vm-")
+		vm := &demov1alpha1.DemoVirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: nsName},
+		}
+		Expect(k8sClient.Create(testCtx, vm)).To(Succeed())
+		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "disk-vm",
+				Namespace: nsName,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       "DemoVirtualMachine",
+					Name:       vm.Name,
+					UID:        vm.UID,
+				}},
+			},
+		})).To(Succeed())
+
+		createEligibleDemoVMAndDiskDSC(testCtx, vmDiskDSCName)
+		integrationWaitGraphRegistryKind("DemoVirtualMachineSnapshot")
+		integrationWaitGraphRegistryKind("DemoVirtualDiskSnapshot")
+
+		Expect(k8sClient.Create(testCtx, &storagev1alpha1.NamespaceSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
+			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+		})).To(Succeed())
+
+		var vmSnapshotName string
+		Eventually(func(g Gomega) {
+			root := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, root)).To(Succeed())
+			g.Expect(root.Status.ChildrenSnapshotRefs).To(ContainElement(SatisfyAll(
+				HaveField("APIVersion", demov1alpha1.SchemeGroupVersion.String()),
+				HaveField("Kind", "DemoVirtualMachineSnapshot"),
+			)))
+			for _, ref := range root.Status.ChildrenSnapshotRefs {
+				g.Expect(ref.Kind).NotTo(Equal("DemoVirtualDiskSnapshot"), "root must not create VM-owned disk as a direct child")
+				if ref.Kind == "DemoVirtualMachineSnapshot" {
+					vmSnapshotName = ref.Name
+				}
+			}
+			g.Expect(vmSnapshotName).NotTo(BeEmpty())
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
+
+		var diskSnapshotName string
+		Eventually(func(g Gomega) {
+			vmSnapshot := &demov1alpha1.DemoVirtualMachineSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: vmSnapshotName}, vmSnapshot)).To(Succeed())
+			diskSnapshotName = ""
+			for _, ref := range vmSnapshot.Status.ChildrenSnapshotRefs {
+				if ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ref.Kind == "DemoVirtualDiskSnapshot" {
+					diskSnapshotName = ref.Name
+				}
+			}
+			g.Expect(diskSnapshotName).NotTo(BeEmpty(), "VM snapshot should own disk snapshot subtree")
+		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			root := &storagev1alpha1.NamespaceSnapshot{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, root)).To(Succeed())
+			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			for _, ref := range root.Status.ChildrenSnapshotRefs {
+				g.Expect(ref.Kind).NotTo(Equal("DemoVirtualDiskSnapshot"), "disk snapshot %q must stay below VM snapshot %q", diskSnapshotName, vmSnapshotName)
+			}
+		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
 	It("reconciles a manual demo snapshot without DSC", func() {
@@ -201,6 +338,48 @@ func createEligibleDemoDiskDSC(ctx context.Context, name string) {
 		Status:             metav1.ConditionTrue,
 		Reason:             "IntegrationHook",
 		Message:            "dsc-gated demo activation",
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: hook.GetGeneration(),
+	})
+	Expect(k8sClient.Status().Update(ctx, hook)).To(Succeed())
+}
+
+func createEligibleDemoVMAndDiskDSC(ctx context.Context, name string) {
+	dsc := &ssv1alpha1.DomainSpecificSnapshotController{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: ssv1alpha1.DomainSpecificSnapshotControllerSpec{
+			OwnerModule: "integration-dsc-gated-demo",
+			SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
+				{
+					ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
+					SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+					ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
+				},
+				{
+					ResourceCRDName: "demovirtualmachines.demo.state-snapshotter.deckhouse.io",
+					SnapshotCRDName: "demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io",
+					ContentCRDName:  "demovirtualmachinesnapshotcontents.demo.state-snapshotter.deckhouse.io",
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, dsc)).To(Succeed())
+
+	Eventually(func(g Gomega) {
+		cur := &ssv1alpha1.DomainSpecificSnapshotController{}
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, cur)).To(Succeed())
+		acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
+		g.Expect(acc).NotTo(BeNil())
+		g.Expect(acc.Status).To(Equal(metav1.ConditionTrue))
+	}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
+
+	hook := &ssv1alpha1.DomainSpecificSnapshotController{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, hook)).To(Succeed())
+	meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
+		Type:               controllers.DSCConditionRBACReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "IntegrationHook",
+		Message:            "dsc-gated demo VM and disk activation",
 		LastTransitionTime: metav1.Now(),
 		ObservedGeneration: hook.GetGeneration(),
 	})

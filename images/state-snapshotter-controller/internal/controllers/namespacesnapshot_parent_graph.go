@@ -64,6 +64,12 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 		list.Items = resources.Items
 		for i := range list.Items {
 			resource := &list.Items[i]
+			if len(resource.GetOwnerReferences()) > 0 {
+				// Parent-owned graph starts only from top-level domain resources.
+				// Owned resources are covered by their owner domain subtree when that owner is registered,
+				// and skipped fail-closed when the owner domain is not registered.
+				continue
+			}
 			childName := namespaceSnapshotChildSnapshotName(nsSnap.Name, mapping.ResourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName())
 			if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK); err != nil {
 				return false, err

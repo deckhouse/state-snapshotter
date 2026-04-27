@@ -1,11 +1,20 @@
 # Demo domain-specific nested snapshot (via DSC)
 
-**Статус:** Historical design (частично реализовано). Нормативный активный контракт — в [`spec/system-spec.md`](../../spec/system-spec.md). **Текущая целевая модель PR5a/PR5b:** группа **`demo.state-snapshotter.deckhouse.io`**, disk (**`DemoVirtualDiskSnapshot`**) и VM (**`DemoVirtualMachineSnapshot`**) + **`*Content`**; parent-owned graph через **`children*Refs`**; интеграции `demovirtualdisksnapshot_pr5a_test.go`, `demovirtualmachinesnapshot_pr5b_test.go` — см. [`operations/project-status.md`](../../operations/project-status.md).
-> ⚠️ This document contains historical and potentially outdated design decisions.
-> Current normative behavior is defined in:
-> - [`spec/system-spec.md`](../../spec/system-spec.md)
-> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
-> - [`090-unified-snapshot-controller-lifecycle.md`](090-unified-snapshot-controller-lifecycle.md) (target lifecycle summary)
+**Status:** implementation/design package for the current demo-domain-dsc work, non-normative.
+
+Normative contracts live in:
+
+- [`../../spec/system-spec.md`](../../spec/system-spec.md)
+- [`../../spec/snapshot-aggregated-read.md`](../../spec/snapshot-aggregated-read.md)
+
+This package explains the current work around:
+
+- DSC registration and graph activation for demo snapshot types;
+- parent/child snapshot tree materialization;
+- dedicated demo controllers for VM and disk snapshots;
+- aggregated manifest read validation for heterogeneous content graphs.
+
+Some documents in this directory are historical design notes. Treat them as context for implementation, not as the source of implementable contract when they disagree with `spec/`.
 
 ### PR5a — что гарантирует / чего пока нет
 
@@ -67,12 +76,14 @@ Reference для **heterogeneous** доменного дерева под **те
 | 6 | [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md) | Ключи вычисления; без persisted coverage. |
 | 7 | [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md) | Единый **`Ready`**; каскады; сценарии деградации. |
 | **8** | [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) | **Универсальная** модель дерева, `Ready`, dedup, **ownerRef** (части A и B). |
-| **90** | [`090-unified-snapshot-controller-lifecycle.md`](090-unified-snapshot-controller-lifecycle.md) | Короткая финальная целевая модель lifecycle `XxxSnapshotController`. |
+| **09** | [`09-materialized-child-content-mcp-and-aggregated-read-checklist.md`](09-materialized-child-content-mcp-and-aggregated-read-checklist.md) | Implementation checklist and validation cases. |
+| **90** | [`090-unified-snapshot-controller-lifecycle.md`](090-unified-snapshot-controller-lifecycle.md) | Design note for lifecycle `XxxSnapshotController`. |
 
 **Минимальный API v1:** §0 в [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md).
 
 ## Связь с существующими SSOT
 
 - [`namespace-snapshot-controller.md`](../namespace-snapshot-controller.md), [`implementation-plan.md`](../implementation-plan.md) §2.4, [`spec/system-spec.md`](../../spec/system-spec.md).
-- PR4: [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../../spec/namespace-snapshot-aggregated-manifests-pr4.md) — при heterogeneous обходе опираться на **ту же** модель refs после обновления spec.
+- Aggregated read: [`spec/snapshot-aggregated-read.md`](../../spec/snapshot-aggregated-read.md).
+- PR4 history: [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../../spec/namespace-snapshot-aggregated-manifests-pr4.md).
 - DSC: [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md).
