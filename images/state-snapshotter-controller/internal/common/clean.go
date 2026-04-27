@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package common
+package common //nolint:revive // shared snapshot cleanup helpers (directory internal/common)
 
 import (
 	"strings"
