@@ -150,16 +150,9 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromSnapshot(ctx conte
 	if err != nil {
 		return nil, err
 	}
-	registeredSnapshotGVK, err := reg.ResolveSnapshotGVK(snapshotGVK.Kind)
+	contentGVK, err := reg.ResolveSnapshotContentGVKBySnapshotGVK(snapshotGVK)
 	if err != nil {
 		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("unsupported snapshot resource %s", snapshotGVK.String()))
-	}
-	if registeredSnapshotGVK != snapshotGVK {
-		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("unsupported snapshot resource %s", snapshotGVK.String()))
-	}
-	contentGVK, err := reg.ResolveSnapshotContentGVK(snapshotGVK.Kind)
-	if err != nil {
-		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("resolve content for %s: %v", snapshotGVK.String(), err))
 	}
 
 	snap := &unstructured.Unstructured{}
@@ -178,6 +171,18 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromSnapshot(ctx conte
 		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "boundSnapshotContentName is empty")
 	}
 	return s.BuildAggregatedJSONFromContent(ctx, contentGVK, contentName)
+}
+
+// IsRegisteredSnapshotGVK checks the live graph registry for an exact Snapshot GVK match.
+func (s *AggregatedNamespaceManifests) IsRegisteredSnapshotGVK(ctx context.Context, snapshotGVK schema.GroupVersionKind) (bool, error) {
+	if snapshotGVK.Empty() {
+		return false, nil
+	}
+	reg, err := s.currentAggregatedRegistry(ctx)
+	if err != nil {
+		return false, err
+	}
+	return reg.HasSnapshotGVK(snapshotGVK), nil
 }
 
 func (s *AggregatedNamespaceManifests) currentAggregatedRegistry(ctx context.Context) (*snapshot.GVKRegistry, error) {

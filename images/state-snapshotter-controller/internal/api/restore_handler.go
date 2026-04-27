@@ -2,6 +2,7 @@ package api
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -191,7 +192,7 @@ func (h *RestoreHandler) HandleGenericSnapshotAggregatedManifests(w http.Respons
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "aggregated manifests handler not configured")
 		return
 	}
-	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(resource)
+	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
 	if err != nil {
 		h.writeAggregatedError(w, err)
 		return
@@ -205,7 +206,7 @@ func (h *RestoreHandler) HandleGenericSnapshotAggregatedManifests(w http.Respons
 	h.logger.Info("Returned generic aggregated snapshot manifests", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
 }
 
-func (h *RestoreHandler) resolveNamespacedSnapshotGVK(resource string) (schema.GroupVersionKind, error) {
+func (h *RestoreHandler) resolveNamespacedSnapshotGVK(ctx context.Context, resource string) (schema.GroupVersionKind, error) {
 	if h.restMapper == nil {
 		return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
 	}
@@ -214,6 +215,13 @@ func (h *RestoreHandler) resolveNamespacedSnapshotGVK(resource string) (schema.G
 		return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
 	}
 	for _, gvk := range gvks {
+		registered, rerr := h.nsAggregated.IsRegisteredSnapshotGVK(ctx, gvk)
+		if rerr != nil {
+			return schema.GroupVersionKind{}, rerr
+		}
+		if !registered {
+			continue
+		}
 		mapping, merr := h.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 		if merr != nil {
 			continue

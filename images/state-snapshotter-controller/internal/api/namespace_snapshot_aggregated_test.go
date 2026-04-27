@@ -249,10 +249,10 @@ func TestGenericSnapshotAggregatedManifests_HTTP_VMAndDiskSubtrees(t *testing.T)
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	createReadyMCPForAPI(t, cl, "mcp-vm", "ns1", []map[string]interface{}{
-		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualMachineSnapshot", "metadata": map[string]interface{}{"name": "vm-1", "namespace": "ns1"}},
+		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualMachine", "metadata": map[string]interface{}{"name": "vm-1", "namespace": "ns1"}},
 	})
 	createReadyMCPForAPI(t, cl, "mcp-disk", "ns1", []map[string]interface{}{
-		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualDiskSnapshot", "metadata": map[string]interface{}{"name": "disk-a", "namespace": "ns1"}},
+		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualDisk", "metadata": map[string]interface{}{"name": "disk-a", "namespace": "ns1"}},
 	})
 	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: "ns1"},
@@ -278,13 +278,20 @@ func TestGenericSnapshotAggregatedManifests_HTTP_VMAndDiskSubtrees(t *testing.T)
 	defer srv.Close()
 
 	vmObjects := getAggregatedObjects(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualmachinesnapshots/vm-1/manifests", http.StatusOK)
-	if !containsKindName(vmObjects, "DemoVirtualMachineSnapshot", "vm-1") || !containsKindName(vmObjects, "DemoVirtualDiskSnapshot", "disk-a") {
+	if !containsKindName(vmObjects, "DemoVirtualMachine", "vm-1") || !containsKindName(vmObjects, "DemoVirtualDisk", "disk-a") {
 		t.Fatalf("VM subtree should contain VM and disk objects: %#v", vmObjects)
 	}
 
 	diskObjects := getAggregatedObjects(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/disk-a/manifests", http.StatusOK)
-	if containsKindName(diskObjects, "DemoVirtualMachineSnapshot", "vm-1") || !containsKindName(diskObjects, "DemoVirtualDiskSnapshot", "disk-a") {
+	if containsKindName(diskObjects, "DemoVirtualMachine", "vm-1") || !containsKindName(diskObjects, "DemoVirtualDisk", "disk-a") {
 		t.Fatalf("disk subtree should contain only disk object from this tree: %#v", diskObjects)
+	}
+
+	ambiguousSrv := newGenericAggregatedTestServerWithRESTMapper(t, cl, log, genericAggregatedAmbiguousRESTMapper())
+	defer ambiguousSrv.Close()
+	ambiguousObjects := getAggregatedObjects(t, ambiguousSrv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualmachinesnapshots/vm-1/manifests", http.StatusOK)
+	if !containsKindName(ambiguousObjects, "DemoVirtualMachine", "vm-1") {
+		t.Fatalf("ambiguous resource resolution should select registered snapshot GVK: %#v", ambiguousObjects)
 	}
 }
 
@@ -352,6 +359,11 @@ func TestGenericSnapshotAggregatedManifests_HTTP_Errors(t *testing.T) {
 
 func newGenericAggregatedTestServer(t *testing.T, cl client.Client, log logger.LoggerInterface) *httptest.Server {
 	t.Helper()
+	return newGenericAggregatedTestServerWithRESTMapper(t, cl, log, genericAggregatedRESTMapper())
+}
+
+func newGenericAggregatedTestServerWithRESTMapper(t *testing.T, cl client.Client, log logger.LoggerInterface, mapper meta.RESTMapper) *httptest.Server {
+	t.Helper()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(
 		[]schema.GroupVersionKind{
@@ -368,7 +380,7 @@ func newGenericAggregatedTestServer(t *testing.T, cl client.Client, log logger.L
 	}
 	agg := usecase.NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
 	rs := restore.NewService(cl, arch)
-	rh := NewRestoreHandler(cl, rs, log, agg, genericAggregatedRESTMapper())
+	rh := NewRestoreHandler(cl, rs, log, agg, mapper)
 	mux := http.NewServeMux()
 	rh.SetupRoutes(mux)
 	return httptest.NewServer(mux)
@@ -379,6 +391,15 @@ func genericAggregatedRESTMapper() meta.RESTMapper {
 	mapper.Add(schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
 	mapper.Add(schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
+	return mapper
+}
+
+func genericAggregatedAmbiguousRESTMapper() meta.RESTMapper {
+	otherGV := schema.GroupVersion{Group: "other.example.io", Version: "v1"}
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{otherGV, demov1alpha1.SchemeGroupVersion})
+	mapper.Add(otherGV.WithKind("DemoVirtualMachineSnapshot"), meta.RESTScopeNamespace)
+	mapper.Add(demov1alpha1.SchemeGroupVersion.WithKind("DemoVirtualMachineSnapshot"), meta.RESTScopeNamespace)
+	mapper.Add(demov1alpha1.SchemeGroupVersion.WithKind("DemoVirtualDiskSnapshot"), meta.RESTScopeNamespace)
 	return mapper
 }
 

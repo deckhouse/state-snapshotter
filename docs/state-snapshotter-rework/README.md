@@ -39,6 +39,7 @@
 | [`operations/project-status.md`](operations/project-status.md) | Короткий статус дорожной карты |
 | [`design/implementation-plan.md`](design/implementation-plan.md) | Задачи S/R/M/D и галочки |
 | [`spec/system-spec.md`](spec/system-spec.md) | Нормативные выдержки для кода и тестов |
+| [`api/snapshot-read.md`](api/snapshot-read.md) | HTTP API чтения aggregated snapshot manifests |
 | [`operations/runbook-degraded-and-unified-runtime.md`](operations/runbook-degraded-and-unified-runtime.md) | **Runbook:** CRD, метрики, stale, рестарт (D3) |
 | [`operations/dsc-rbac-and-mcr.md`](operations/dsc-rbac-and-mcr.md) | DSC, hook, RBAC, отличие от MCR (D2) |
 | [`design/r2-phase-2b-r3-runtime-registry.md`](design/r2-phase-2b-r3-runtime-registry.md) | Техдизайн runtime registry |

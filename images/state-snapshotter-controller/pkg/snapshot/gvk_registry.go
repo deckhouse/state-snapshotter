@@ -169,6 +169,12 @@ func (r *GVKRegistry) ResolveSnapshotGVK(kind string) (schema.GroupVersionKind, 
 	return gvk, nil
 }
 
+// HasSnapshotGVK reports whether the exact Snapshot GVK is registered.
+func (r *GVKRegistry) HasSnapshotGVK(gvk schema.GroupVersionKind) bool {
+	registered, ok := r.snapshotGVKs[gvk.Kind]
+	return ok && registered == gvk
+}
+
 // ResolveSnapshotContentGVK resolves SnapshotContent GVK from Snapshot Kind.
 //
 // Derives Content GVK from Snapshot Kind (e.g., VirtualMachineSnapshot -> VirtualMachineSnapshotContent).
@@ -201,6 +207,14 @@ func (r *GVKRegistry) ResolveSnapshotContentGVK(snapshotKind string) (schema.Gro
 		Version: snapshotGVK.Version,
 		Kind:    contentKind,
 	}, nil
+}
+
+// ResolveSnapshotContentGVKBySnapshotGVK resolves SnapshotContent GVK only for an exact registered Snapshot GVK.
+func (r *GVKRegistry) ResolveSnapshotContentGVKBySnapshotGVK(snapshotGVK schema.GroupVersionKind) (schema.GroupVersionKind, error) {
+	if !r.HasSnapshotGVK(snapshotGVK) {
+		return schema.GroupVersionKind{}, fmt.Errorf("Snapshot GVK not registered: %s", snapshotGVK.String())
+	}
+	return r.ResolveSnapshotContentGVK(snapshotGVK.Kind)
 }
 
 // ResolveSnapshotKindByContentGVK resolves Snapshot Kind from Content GVK.
