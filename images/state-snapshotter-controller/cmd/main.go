@@ -431,7 +431,7 @@ func main() {
 		}
 	}
 
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList)
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList, mapper)
 	if apiServer == nil {
 		log.Error(nil, "[main] Failed to create API server (mTLS configuration failed)")
 		cancel() // Ensure cleanup before exit

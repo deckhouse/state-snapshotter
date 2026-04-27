@@ -23,19 +23,25 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -232,4 +238,224 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	if len(arr) != 1 {
 		t.Fatalf("len %d", len(arr))
 	}
+}
+
+func TestGenericSnapshotAggregatedManifests_HTTP_VMAndDiskSubtrees(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = ssv1alpha1.AddToScheme(scheme)
+	_ = storagev1alpha1.AddToScheme(scheme)
+	_ = demov1alpha1.AddToScheme(scheme)
+
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	createReadyMCPForAPI(t, cl, "mcp-vm", "ns1", []map[string]interface{}{
+		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualMachineSnapshot", "metadata": map[string]interface{}{"name": "vm-1", "namespace": "ns1"}},
+	})
+	createReadyMCPForAPI(t, cl, "mcp-disk", "ns1", []map[string]interface{}{
+		{"apiVersion": demov1alpha1.SchemeGroupVersion.String(), "kind": "DemoVirtualDiskSnapshot", "metadata": map[string]interface{}{"name": "disk-a", "namespace": "ns1"}},
+	})
+	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: "ns1"},
+		Status:     demov1alpha1.DemoVirtualMachineSnapshotStatus{BoundSnapshotContentName: "vm-content"},
+	})
+	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "vm-content"},
+		Status: demov1alpha1.DemoVirtualMachineSnapshotContentStatus{
+			ManifestCheckpointName:      "mcp-vm",
+			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
+		},
+	})
+	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualDiskSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
+		Status:     demov1alpha1.DemoVirtualDiskSnapshotStatus{BoundSnapshotContentName: "disk-content"},
+	})
+	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualDiskSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},
+		Status:     demov1alpha1.DemoVirtualDiskSnapshotContentStatus{ManifestCheckpointName: "mcp-disk"},
+	})
+
+	srv := newGenericAggregatedTestServer(t, cl, log)
+	defer srv.Close()
+
+	vmObjects := getAggregatedObjects(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualmachinesnapshots/vm-1/manifests", http.StatusOK)
+	if !containsKindName(vmObjects, "DemoVirtualMachineSnapshot", "vm-1") || !containsKindName(vmObjects, "DemoVirtualDiskSnapshot", "disk-a") {
+		t.Fatalf("VM subtree should contain VM and disk objects: %#v", vmObjects)
+	}
+
+	diskObjects := getAggregatedObjects(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/disk-a/manifests", http.StatusOK)
+	if containsKindName(diskObjects, "DemoVirtualMachineSnapshot", "vm-1") || !containsKindName(diskObjects, "DemoVirtualDiskSnapshot", "disk-a") {
+		t.Fatalf("disk subtree should contain only disk object from this tree: %#v", diskObjects)
+	}
+}
+
+func TestGenericSnapshotAggregatedManifests_HTTP_Errors(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = ssv1alpha1.AddToScheme(scheme)
+	_ = storagev1alpha1.AddToScheme(scheme)
+	_ = demov1alpha1.AddToScheme(scheme)
+
+	log, _ := logger.NewLogger("error")
+
+	t.Run("duplicate object returns 409", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		dup := []map[string]interface{}{
+			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "same", "namespace": "ns1"}},
+		}
+		createReadyMCPForAPI(t, cl, "mcp-vm", "ns1", dup)
+		createReadyMCPForAPI(t, cl, "mcp-disk", "ns1", dup)
+		_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "vm-dup", Namespace: "ns1"},
+			Status:     demov1alpha1.DemoVirtualMachineSnapshotStatus{BoundSnapshotContentName: "vm-content"},
+		})
+		_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{Name: "vm-content"},
+			Status: demov1alpha1.DemoVirtualMachineSnapshotContentStatus{
+				ManifestCheckpointName:      "mcp-vm",
+				ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
+			},
+		})
+		_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualDiskSnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},
+			Status:     demov1alpha1.DemoVirtualDiskSnapshotContentStatus{ManifestCheckpointName: "mcp-disk"},
+		})
+		srv := newGenericAggregatedTestServer(t, cl, log)
+		defer srv.Close()
+		body := getRawResponse(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualmachinesnapshots/vm-dup/manifests", http.StatusConflict)
+		if !jsonContainsString(body, "duplicate object detected in snapshot tree") {
+			t.Fatalf("expected duplicate error, got %s", string(body))
+		}
+	})
+
+	t.Run("empty bound content returns 400", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&demov1alpha1.DemoVirtualDiskSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-unbound", Namespace: "ns1"},
+		}).Build()
+		srv := newGenericAggregatedTestServer(t, cl, log)
+		defer srv.Close()
+		_ = getRawResponse(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/disk-unbound/manifests", http.StatusBadRequest)
+	})
+
+	t.Run("snapshot not found returns 404", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		srv := newGenericAggregatedTestServer(t, cl, log)
+		defer srv.Close()
+		_ = getRawResponse(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/missing/manifests", http.StatusNotFound)
+	})
+
+	t.Run("unsupported resource returns 400", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		srv := newGenericAggregatedTestServer(t, cl, log)
+		defer srv.Close()
+		_ = getRawResponse(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/notasnapshots/x/manifests", http.StatusBadRequest)
+	})
+}
+
+func newGenericAggregatedTestServer(t *testing.T, cl client.Client, log logger.LoggerInterface) *httptest.Server {
+	t.Helper()
+	arch := usecase.NewArchiveService(cl, cl, log)
+	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(
+		[]schema.GroupVersionKind{
+			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshot"},
+			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshot"},
+		},
+		[]schema.GroupVersionKind{
+			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshotContent"},
+			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshotContent"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := usecase.NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
+	rs := restore.NewService(cl, arch)
+	rh := NewRestoreHandler(cl, rs, log, agg, genericAggregatedRESTMapper())
+	mux := http.NewServeMux()
+	rh.SetupRoutes(mux)
+	return httptest.NewServer(mux)
+}
+
+func genericAggregatedRESTMapper() meta.RESTMapper {
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{demov1alpha1.SchemeGroupVersion, schema.GroupVersion{Group: "", Version: "v1"}})
+	mapper.Add(schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
+	mapper.Add(schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
+	return mapper
+}
+
+func createReadyMCPForAPI(t *testing.T, cl client.Client, mcpName, namespace string, objects []map[string]interface{}) {
+	t.Helper()
+	data, checksum := encodeTestChunkData(objects)
+	chunk := &ssv1alpha1.ManifestCheckpointContentChunk{
+		ObjectMeta: metav1.ObjectMeta{Name: "chunk-" + mcpName},
+		Spec: ssv1alpha1.ManifestCheckpointContentChunkSpec{
+			CheckpointName: mcpName,
+			Index:          0,
+			Data:           data,
+			Checksum:       checksum,
+			ObjectsCount:   len(objects),
+		},
+	}
+	if err := cl.Create(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: mcpName, UID: types.UID("uid-" + mcpName)},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: namespace},
+		Status: ssv1alpha1.ManifestCheckpointStatus{
+			Chunks:       []ssv1alpha1.ChunkInfo{{Name: chunk.Name, Index: 0, Checksum: checksum}},
+			TotalObjects: len(objects),
+		},
+	}
+	meta.SetStatusCondition(&mcp.Status.Conditions, metav1.Condition{
+		Type:   ssv1alpha1.ManifestCheckpointConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+	})
+	if err := cl.Create(context.Background(), mcp); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func getAggregatedObjects(t *testing.T, url string, wantStatus int) []map[string]interface{} {
+	t.Helper()
+	body := getRawResponse(t, url, wantStatus)
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(body, &arr); err != nil {
+		t.Fatal(err)
+	}
+	return arr
+}
+
+func getRawResponse(t *testing.T, url string, wantStatus int) []byte {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("status %d, want %d: %s", resp.StatusCode, wantStatus, string(body))
+	}
+	return body
+}
+
+func containsKindName(objects []map[string]interface{}, kind, name string) bool {
+	for _, obj := range objects {
+		if obj["kind"] != kind {
+			continue
+		}
+		metaObj, ok := obj["metadata"].(map[string]interface{})
+		if ok && metaObj["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonContainsString(body []byte, needle string) bool {
+	return strings.Contains(string(body), needle)
 }

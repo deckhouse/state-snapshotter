@@ -576,7 +576,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		}
 	})
 
-	t.Run("duplicate 500", func(t *testing.T) {
+	t.Run("duplicate 409", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		arch := NewArchiveService(cl, cl, log)
 		agg := NewAggregatedNamespaceManifests(cl, arch, nil)
@@ -598,7 +598,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
-		if !errors.As(err, &st) || st.HTTPStatus != http.StatusInternalServerError {
+		if !errors.As(err, &st) || st.HTTPStatus != http.StatusConflict {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -607,10 +607,10 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		arch := NewArchiveService(cl, cl, log)
 		agg := NewAggregatedNamespaceManifests(cl, arch, nil)
-		d, cs := aggManifestEncodeChunk([]map[string]interface{}{
-			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "x", "namespace": "ns1"}},
-		})
-		for _, pair := range []struct{ cp, ch string }{{"mcp-a", "ch-a"}, {"mcp-b", "ch-b"}} {
+		for _, pair := range []struct{ cp, ch, obj string }{{"mcp-a", "ch-a", "x-a"}, {"mcp-b", "ch-b", "x-b"}} {
+			d, cs := aggManifestEncodeChunk([]map[string]interface{}{
+				{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": pair.obj, "namespace": "ns1"}},
+			})
 			ch := aggManifestCreateChunk(pair.ch, pair.cp, d, cs)
 			_ = cl.Create(ctx, ch)
 			mcp := aggManifestReadyMCP(pair.cp, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)

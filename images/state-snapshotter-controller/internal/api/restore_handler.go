@@ -9,7 +9,9 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -22,14 +24,20 @@ type RestoreHandler struct {
 	service      *restore.Service
 	logger       logger.LoggerInterface
 	nsAggregated *usecase.AggregatedNamespaceManifests
+	restMapper   meta.RESTMapper
 }
 
-func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests) *RestoreHandler {
+func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests, restMappers ...meta.RESTMapper) *RestoreHandler {
+	var restMapper meta.RESTMapper
+	if len(restMappers) > 0 {
+		restMapper = restMappers[0]
+	}
 	return &RestoreHandler{
 		client:       client,
 		service:      service,
 		logger:       logger,
 		nsAggregated: nsAggregated,
+		restMapper:   restMapper,
 	}
 }
 
@@ -88,7 +96,21 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 			}
 			h.HandleNamespaceSnapshotAggregatedManifests(w, r, namespace, snapName)
 		default:
-			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
+			if len(parts) != 4 {
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
+				return
+			}
+			name := parts[2]
+			sub := parts[3]
+			if sub != "manifests" {
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
+				return
+			}
+			if r.Method != http.MethodGet {
+				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
+				return
+			}
+			h.HandleGenericSnapshotAggregatedManifests(w, r, namespace, parts[1], name)
 		}
 	})
 }
@@ -161,6 +183,47 @@ func (h *RestoreHandler) HandleNamespaceSnapshotAggregatedManifests(w http.Respo
 	}
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned NamespaceSnapshot aggregated manifests", "namespaceSnapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+}
+
+func (h *RestoreHandler) HandleGenericSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
+	start := time.Now()
+	if h.nsAggregated == nil {
+		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "aggregated manifests handler not configured")
+		return
+	}
+	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(resource)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	data, err := h.nsAggregated.BuildAggregatedJSONFromSnapshot(r.Context(), snapshotGVK, namespace, snapshotName)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned generic aggregated snapshot manifests", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
+}
+
+func (h *RestoreHandler) resolveNamespacedSnapshotGVK(resource string) (schema.GroupVersionKind, error) {
+	if h.restMapper == nil {
+		return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
+	}
+	gvks, err := h.restMapper.KindsFor(schema.GroupVersionResource{Resource: resource})
+	if err != nil || len(gvks) == 0 {
+		return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
+	}
+	for _, gvk := range gvks {
+		mapping, merr := h.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if merr != nil {
+			continue
+		}
+		if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
+			return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "cluster-scoped snapshot resources are not supported")
+		}
+		return gvk, nil
+	}
+	return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
 }
 
 func (h *RestoreHandler) writeAggregatedError(w http.ResponseWriter, err error) {

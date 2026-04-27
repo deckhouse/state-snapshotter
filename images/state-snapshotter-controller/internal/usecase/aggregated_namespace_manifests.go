@@ -140,6 +140,46 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromContent(ctx contex
 	return out, nil
 }
 
+// BuildAggregatedJSONFromSnapshot resolves a namespaced Snapshot-like object to its
+// registered SnapshotContent and returns aggregated manifests for that content subtree.
+func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) ([]byte, error) {
+	if snapshotName == "" || namespace == "" || snapshotGVK.Empty() {
+		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
+	}
+	reg, err := s.currentAggregatedRegistry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	registeredSnapshotGVK, err := reg.ResolveSnapshotGVK(snapshotGVK.Kind)
+	if err != nil {
+		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("unsupported snapshot resource %s", snapshotGVK.String()))
+	}
+	if registeredSnapshotGVK != snapshotGVK {
+		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("unsupported snapshot resource %s", snapshotGVK.String()))
+	}
+	contentGVK, err := reg.ResolveSnapshotContentGVK(snapshotGVK.Kind)
+	if err != nil {
+		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("resolve content for %s: %v", snapshotGVK.String(), err))
+	}
+
+	snap := &unstructured.Unstructured{}
+	snap.SetGroupVersionKind(snapshotGVK)
+	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, snap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("%s %s/%s not found", snapshotGVK.String(), namespace, snapshotName))
+		}
+		return nil, fmt.Errorf("get %s %s/%s: %w", snapshotGVK.String(), namespace, snapshotName, err)
+	}
+	contentName, _, err := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+	if err != nil {
+		return nil, NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("%s %s/%s has invalid status.boundSnapshotContentName: %v", snapshotGVK.String(), namespace, snapshotName, err))
+	}
+	if contentName == "" {
+		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "boundSnapshotContentName is empty")
+	}
+	return s.BuildAggregatedJSONFromContent(ctx, contentGVK, contentName)
+}
+
 func (s *AggregatedNamespaceManifests) currentAggregatedRegistry(ctx context.Context) (*snapshot.GVKRegistry, error) {
 	if s.graphLive == nil {
 		return nil, NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady", "heterogeneous content traversal requires snapshot graph registry")
@@ -328,8 +368,8 @@ func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(
 			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
 		}
 		if _, dup := seenKeys[key]; dup {
-			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-				fmt.Sprintf("duplicate object %q", key))
+			return NewAggregatedStatusError(http.StatusConflict, "Conflict",
+				fmt.Sprintf("duplicate object detected in snapshot tree: %s", key))
 		}
 		seenKeys[key] = struct{}{}
 		*objects = append(*objects, obj)

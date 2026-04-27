@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -46,7 +47,11 @@ type Server struct {
 // caCert: optional CA certificate bytes for mTLS (if provided, mTLS is mandatory - no fallback)
 // allowedClientCNs: list of allowed client certificate CNs for mTLS (comma-separated)
 // Returns nil if caCert is specified but cannot be parsed
-func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string) *Server {
+func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string, restMappers ...meta.RESTMapper) *Server {
+	var restMapper meta.RESTMapper
+	if len(restMappers) > 0 {
+		restMapper = restMappers[0]
+	}
 	// Create archive service with directClient for all operations
 	// directClient is used for both ManifestCheckpoint and chunks to avoid informer requirements
 	archiveService := usecase.NewArchiveService(directClient, directClient, logger)
@@ -55,7 +60,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
 	restoreService := restore.NewService(directClient, archiveService)
 	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
-	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg)
+	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper)
 
 	// Setup routes
 	mux := http.NewServeMux()
