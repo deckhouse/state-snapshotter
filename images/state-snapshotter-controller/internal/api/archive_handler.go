@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package api
+package api //nolint:revive // package name matches internal/api directory
 
 import (
 	"compress/gzip"
@@ -191,7 +191,7 @@ func (h *ArchiveHandler) HandleGetCheckpointInfo(w http.ResponseWriter, r *http.
 		ChunksCount:          len(checkpoint.Status.Chunks),
 		Format:               "json",
 		Ready:                isReady,
-		CreatedAt:            checkpoint.CreationTimestamp.Time.Format(time.RFC3339),
+		CreatedAt:            checkpoint.CreationTimestamp.Format(time.RFC3339),
 		Labels:               checkpoint.Labels,
 		Annotations:          checkpoint.Annotations,
 		FileCount:            info.FileCount,
@@ -578,7 +578,7 @@ func (h *ArchiveHandler) HandleListCheckpoints(w http.ResponseWriter, r *http.Re
 			TotalSizeBytes:       checkpoint.Status.TotalSizeBytes,
 			ChunksCount:          len(checkpoint.Status.Chunks),
 			Ready:                isReady,
-			CreatedAt:            checkpoint.CreationTimestamp.Time.Format(time.RFC3339),
+			CreatedAt:            checkpoint.CreationTimestamp.Format(time.RFC3339),
 		})
 	}
 
@@ -642,7 +642,9 @@ func (h *ArchiveHandler) HandleReady(w http.ResponseWriter, _ *http.Request) {
 // HandleLive handles GET /livez (Kubernetes standard endpoint)
 func (h *ArchiveHandler) HandleLive(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	if _, err := w.Write([]byte("ok")); err != nil {
+		return
+	}
 }
 
 // ============================================================================
