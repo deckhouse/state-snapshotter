@@ -36,7 +36,8 @@ type Syncer struct {
 	activeSnapshotGVKKeys map[string]struct{}
 }
 
-// NewSyncer builds a syncer. bootstrap must be the static default list (same as DefaultDesiredUnifiedSnapshotPairs);
+// NewSyncer builds a syncer. bootstrap must be the static unified-runtime list
+// (same as DefaultUnifiedRuntimeBootstrapPairs / legacy DefaultDesiredUnifiedSnapshotPairs);
 // eligible DSC pairs are merged on each Sync.
 func NewSyncer(
 	mgr ctrl.Manager,

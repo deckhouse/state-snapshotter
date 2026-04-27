@@ -117,6 +117,38 @@ func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing
 	}
 }
 
+func TestDefaultGraphRegistryBuiltInPairs_containsOnlyNamespaceSnapshot(t *testing.T) {
+	pairs := DefaultGraphRegistryBuiltInPairs()
+	if len(pairs) != 1 {
+		t.Fatalf("expected one graph built-in pair, got %d: %v", len(pairs), pairs)
+	}
+	if pairs[0].Snapshot.Kind != "NamespaceSnapshot" || pairs[0].SnapshotContent.Kind != "NamespaceSnapshotContent" {
+		t.Fatalf("expected NamespaceSnapshot graph built-in, got %v", pairs[0])
+	}
+	for _, p := range pairs {
+		switch p.Snapshot.Kind {
+		case "DemoVirtualMachineSnapshot", "DemoVirtualDiskSnapshot":
+			t.Fatalf("demo pair must be DSC-gated, found graph built-in: %v", p)
+		}
+	}
+}
+
+func TestDefaultUnifiedRuntimeBootstrapPairs_remainsSeparateFromGraphBuiltIns(t *testing.T) {
+	runtimePairs := DefaultUnifiedRuntimeBootstrapPairs()
+	if len(runtimePairs) <= len(DefaultGraphRegistryBuiltInPairs()) {
+		t.Fatalf("expected unified runtime bootstrap to keep its broader static list, got %v", runtimePairs)
+	}
+	var hasSnapshot bool
+	for _, p := range runtimePairs {
+		if p.Snapshot.Kind == "Snapshot" && p.SnapshotContent.Kind == "SnapshotContent" {
+			hasSnapshot = true
+		}
+	}
+	if !hasSnapshot {
+		t.Fatalf("expected generic Snapshot/SnapshotContent in unified runtime bootstrap, got %v", runtimePairs)
+	}
+}
+
 func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotContentMaps(t *testing.T) {
 	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})

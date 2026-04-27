@@ -29,7 +29,8 @@ const (
 	// EnvUnifiedSnapshotEnabled: when "false", "0", "no", "off" (case-insensitive), unified Snapshot/SnapshotContent
 	// wiring and unifiedruntime.Sync are disabled; DSC reconciler still runs with nil sync. Unset = enabled.
 	EnvUnifiedSnapshotEnabled = "STATE_SNAPSHOTTER_UNIFIED_ENABLED"
-	// EnvUnifiedBootstrapPairs: unset/empty = use DefaultDesiredUnifiedSnapshotPairs(); literal "empty"/"none"/"dsc-only"
+	// EnvUnifiedBootstrapPairs: unset/empty = use DefaultUnifiedRuntimeBootstrapPairs()
+	// (legacy alias DefaultDesiredUnifiedSnapshotPairs()); literal "empty"/"none"/"dsc-only"
 	// = bootstrap-only-from-DSC (empty static list); else semicolon-separated pairs
 	// "group/version/Kind|group/version/Kind" (snapshot side | content side).
 	EnvUnifiedBootstrapPairs = "STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS"
@@ -131,12 +132,12 @@ func parseGVKTriple(s string) (schema.GroupVersionKind, error) {
 func (o *Options) EffectiveUnifiedBootstrapPairs() []unifiedbootstrap.UnifiedGVKPair {
 	switch o.UnifiedBootstrapMode {
 	case UnifiedBootstrapDefault:
-		return unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
+		return unifiedbootstrap.DefaultUnifiedRuntimeBootstrapPairs()
 	case UnifiedBootstrapEmpty:
 		return nil
 	case UnifiedBootstrapCustom:
 		return append([]unifiedbootstrap.UnifiedGVKPair(nil), o.UnifiedBootstrapCustomPairs...)
 	default:
-		return unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
+		return unifiedbootstrap.DefaultUnifiedRuntimeBootstrapPairs()
 	}
 }

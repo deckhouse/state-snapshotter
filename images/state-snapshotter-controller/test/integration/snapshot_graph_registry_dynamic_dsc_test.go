@@ -37,7 +37,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
-// Serial: toggles global integrationGraphAppendDemo used by integrationSnapshotGraphRegistryRefresh.
+// Serial: mutates the global integration graph registry through DSC refreshes.
 var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Serial, func() {
 	const dscName = "integration-dynamic-graph-registry-dsc"
 
@@ -47,7 +47,6 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 
 	AfterEach(func() {
 		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
-		integrationGraphAppendDemo = true
 		Expect(integrationSnapshotGraphRegistryRefresh(context.Background())).To(Succeed())
 	})
 
@@ -111,24 +110,18 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 
-	It("global registry refresh respects integrationGraphAppendDemo=false (fail-closed for demo until DSC)", func() {
+	It("global registry refresh is fail-closed for demo until DSC", func() {
 		testCtx := context.Background()
-		integrationGraphAppendDemo = false
-		DeferCleanup(func() {
-			integrationGraphAppendDemo = true
-			Expect(integrationSnapshotGraphRegistryRefresh(context.Background())).To(Succeed())
-		})
 		Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())
 		Expect(integrationGraphRegProvider.Current().RegisteredSnapshotKinds()).NotTo(ContainElement("DemoVirtualDiskSnapshot"))
+		Expect(integrationGraphRegProvider.Current().RegisteredSnapshotKinds()).NotTo(ContainElement("DemoVirtualMachineSnapshot"))
 	})
 
 	It("global graph registry loses demo disk pair after DSC delete without manual Refresh (DSC reconcile only)", func() {
 		testCtx := context.Background()
 		const globalDSC = "integration-global-graph-dsc-delete"
-		integrationGraphAppendDemo = false
 		DeferCleanup(func() {
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: globalDSC}}))
-			integrationGraphAppendDemo = true
 			Expect(integrationSnapshotGraphRegistryRefresh(context.Background())).To(Succeed())
 		})
 		Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())

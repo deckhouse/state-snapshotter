@@ -211,10 +211,11 @@ Smoke-check выполнен, кластер и контроллер в рабо
     - `Ready=True Completed`
 
 - **9. childrenSnapshotRefs для простого root**
-  - До создания demo child — пусто (ожидаемо).
+  - Без demo DSC — пусто даже если в namespace есть demo resource. Это проверяет, что resource присутствует в API, но kind не активирован в `NamespaceSnapshot` discovery.
 
 - **10–12. Demo child + graph refs**
-  - Актуальная parent-owned модель: demo child создаётся parent-контроллером после регистрации DSC и обнаружения matching resource; вручную создавать child snapshot для нормального flow не нужно.
+  - Актуальная parent-owned модель: demo child создаётся parent-контроллером только после регистрации eligible DSC и обнаружения matching resource; вручную создавать child snapshot для нормального flow не нужно.
+  - `DemoVirtualDiskSnapshotController` / `DemoVirtualMachineSnapshotController` при этом стартуют всегда: manual demo snapshot может materialize без DSC, но это не включает demo kind в root discovery.
   - Child snapshot spec использует обычный `spec.parentSnapshotRef` (`apiVersion/kind/name`), без legacy root-specific поля.
   - В `root.status.childrenSnapshotRefs` появляется strict ref **без namespace**:
     - `apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1`

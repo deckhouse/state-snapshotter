@@ -203,6 +203,34 @@ func main() {
 	}
 	log.Info("ManifestCheckpointController added to manager")
 
+	if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
+		log.Error(err, "Failed to add NamespaceSnapshotController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("NamespaceSnapshotController added to manager")
+
+	if err := controllers.AddNamespaceSnapshotContentControllerToManager(mgr, cfgParams); err != nil {
+		log.Error(err, "Failed to add NamespaceSnapshotContentController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("NamespaceSnapshotContentController added to manager")
+
+	if err := controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr); err != nil {
+		log.Error(err, "Failed to add DemoVirtualDiskSnapshotController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("DemoVirtualDiskSnapshotController added to manager")
+
+	if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr); err != nil {
+		log.Error(err, "Failed to add DemoVirtualMachineSnapshotController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("DemoVirtualMachineSnapshotController added to manager")
+
 	// Unified snapshots: optional rollout (STATE_SNAPSHOTTER_UNIFIED_ENABLED); bootstrap list from R5 env or defaults.
 	var unifiedSyncFn func(context.Context) error
 
@@ -282,34 +310,6 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(genericContentGVKs))
-
-		if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
-			log.Error(err, "Failed to add NamespaceSnapshotController to manager")
-			cancel()
-			os.Exit(1)
-		}
-		log.Info("NamespaceSnapshotController added to manager")
-
-		if err := controllers.AddNamespaceSnapshotContentControllerToManager(mgr, cfgParams); err != nil {
-			log.Error(err, "Failed to add NamespaceSnapshotContentController to manager")
-			cancel()
-			os.Exit(1)
-		}
-		log.Info("NamespaceSnapshotContentController added to manager")
-
-		if err := controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr); err != nil {
-			log.Error(err, "Failed to add DemoVirtualDiskSnapshotController to manager")
-			cancel()
-			os.Exit(1)
-		}
-		log.Info("DemoVirtualDiskSnapshotController added to manager")
-
-		if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr); err != nil {
-			log.Error(err, "Failed to add DemoVirtualMachineSnapshotController to manager")
-			cancel()
-			os.Exit(1)
-		}
-		log.Info("DemoVirtualMachineSnapshotController added to manager")
 
 		unifiedSync := unifiedruntime.NewSyncer(
 			mgr,

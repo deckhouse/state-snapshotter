@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package snapshotgraphregistry builds and refreshes the generic NamespaceSnapshot graph GVK registry
-// from static bootstrap pairs, eligible DomainSpecificSnapshotController rows, and RESTMapper discovery.
+// from graph built-ins, eligible DomainSpecificSnapshotController rows, and RESTMapper discovery.
 package snapshotgraphregistry
 
 import (
@@ -32,7 +32,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// BuildRegistry merges bootstrap + eligible DSC snapshot↔content pairs, filters to GVKs present in the
+// BuildRegistry merges graph built-ins + eligible DSC snapshot↔content pairs, filters to GVKs present in the
 // apiserver (RESTMapper), and returns a new GVKRegistry snapshot (immutable after return).
 // Eligible pairs come from a fresh List of DSC objects each call — deleted or no longer eligible DSC rows
 // disappear from the merged set on the next refresh (no sticky DSC-derived kinds).
@@ -48,10 +48,10 @@ func BuildRegistry(ctx context.Context, mapper meta.RESTMapper, apiReader client
 	}
 	dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, apiReader)
 	if err != nil {
-		log.Info("snapshot graph registry: DSC list/parse failed; bootstrap-only merge", "error", err)
+		log.Info("snapshot graph registry: DSC list/parse failed; using graph built-ins only", "error", err)
 		dscPairs = nil
 	}
-	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(cfg.EffectiveUnifiedBootstrapPairs(), dscPairs)
+	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), dscPairs)
 	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(mapper, merged, log.WithName("snapshot-graph-registry-build"))
 	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
 	if err != nil {

@@ -157,6 +157,8 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			ObservedGeneration: gen,
 		})
 		Expect(k8sClient.Status().Update(testCtx, hook)).To(Succeed())
+		integrationWaitGraphRegistryKind("DemoVirtualMachineSnapshot")
+		integrationWaitGraphRegistryKind("DemoVirtualDiskSnapshot")
 
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{

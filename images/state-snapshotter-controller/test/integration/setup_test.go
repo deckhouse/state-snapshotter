@@ -26,13 +26,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -69,25 +67,21 @@ var (
 	testCfg                     *config.Options
 	unifiedSyncer               *unifiedruntime.Syncer
 	integrationGraphRegProvider *snapshotgraphregistry.Provider
-	integrationGraphAppendDemo  = true
 )
 
-// integrationParallelSnapshotGraphGVKs returns resolved snapshot↔content GVK slices merged from bootstrap,
-// eligible DSC, RESTMapper, and (when integrationGraphAppendDemo) demo pairs for envtest parity.
+// integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
+// from graph built-ins and eligible DSC rows. Demo domain pairs are intentionally DSC-gated here.
 func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
 	dscPairs, derr := dscregistry.EligibleUnifiedGVKPairs(ctx, mgr.GetAPIReader())
 	if derr != nil {
 		dscPairs = nil
 	}
-	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(testCfg.EffectiveUnifiedBootstrapPairs(), dscPairs)
+	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), dscPairs)
 	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
 		merged,
 		ctrl.Log.WithName("integration-unified-bootstrap"),
 	)
-	if integrationGraphAppendDemo {
-		snapGVKs, contentGVKs = appendResolvedDemoSnapshotGraphPairs(mgr.GetRESTMapper(), snapGVKs, contentGVKs)
-	}
 	return snapGVKs, contentGVKs, nil
 }
 
@@ -106,35 +100,6 @@ func integrationSnapshotGraphRegistryRefresh(ctx context.Context) error {
 	}
 	integrationGraphRegProvider.ReplaceCurrent(reg)
 	return nil
-}
-
-// appendResolvedDemoSnapshotGraphPairs merges demo snapshot↔content GVK pairs into the parallel
-// slices used for integrationGraphRegProvider. Production gets these from DSC merge; BeforeSuite
-// runs before per-test DSC objects exist, so demo CRDs alone are not enough for ResolveAvailableUnifiedGVKPairs.
-func appendResolvedDemoSnapshotGraphPairs(mapper meta.RESTMapper, snapGVKs, contentGVKs []schema.GroupVersionKind) ([]schema.GroupVersionKind, []schema.GroupVersionKind) {
-	gv := demov1alpha1.SchemeGroupVersion
-	demoPairs := []unifiedbootstrap.UnifiedGVKPair{
-		{
-			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualDiskSnapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualDiskSnapshotContent"},
-		},
-		{
-			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualMachineSnapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "DemoVirtualMachineSnapshotContent"},
-		},
-	}
-	s2, c2 := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(mapper, demoPairs, logr.Discard())
-outer:
-	for i := range s2 {
-		for _, ex := range snapGVKs {
-			if ex == s2[i] {
-				continue outer
-			}
-		}
-		snapGVKs = append(snapGVKs, s2[i])
-		contentGVKs = append(contentGVKs, c2[i])
-	}
-	return snapGVKs, contentGVKs
 }
 
 func TestIntegration(t *testing.T) {
@@ -722,10 +687,13 @@ var _ = BeforeSuite(func() {
 	Expect(errProv).NotTo(HaveOccurred())
 	Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())
 
-	snapGVKs, contentGVKs, errPair := integrationParallelSnapshotGraphGVKs(testCtx)
-	Expect(errPair).NotTo(HaveOccurred())
-	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
-	genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
+	runtimeSnapGVKs, runtimeContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+		mgr.GetRESTMapper(),
+		testCfg.EffectiveUnifiedBootstrapPairs(),
+		ctrl.Log.WithName("integration-unified-runtime-bootstrap"),
+	)
+	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(runtimeSnapGVKs, runtimeContentGVKs)
+	genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(runtimeSnapGVKs, runtimeContentGVKs)
 	snapshotController, err := controllers.NewSnapshotController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),

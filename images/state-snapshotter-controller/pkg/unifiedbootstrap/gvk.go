@@ -31,23 +31,47 @@ type UnifiedGVKPair struct {
 	SnapshotContent schema.GroupVersionKind
 }
 
-// DefaultDesiredUnifiedSnapshotPairs lists unified snapshot types the controller
-// can support until registration is driven by DomainSpecificSnapshotController.
-func DefaultDesiredUnifiedSnapshotPairs() []UnifiedGVKPair {
+// DefaultNamespaceSnapshotPair returns the built-in NamespaceSnapshot pair used
+// by graph registry defaults and generic runtime bootstrap.
+func DefaultNamespaceSnapshotPair() UnifiedGVKPair {
+	return UnifiedGVKPair{
+		Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
+		SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
+	}
+}
+
+// DefaultGraphRegistryBuiltInPairs lists Snapshot↔SnapshotContent pairs that are
+// active in the NamespaceSnapshot graph registry without a DSC. Domain-specific
+// demo pairs intentionally are not built in: they enter discovery only through
+// eligible DomainSpecificSnapshotController resources.
+func DefaultGraphRegistryBuiltInPairs() []UnifiedGVKPair {
+	return []UnifiedGVKPair{
+		DefaultNamespaceSnapshotPair(),
+	}
+}
+
+// DefaultUnifiedRuntimeBootstrapPairs lists static bootstrap pairs for the
+// generic unified Snapshot/SnapshotContent runtime. This is separate from graph
+// registry built-ins: runtime startup support must not activate domain kinds in
+// NamespaceSnapshot discovery.
+func DefaultUnifiedRuntimeBootstrapPairs() []UnifiedGVKPair {
 	return []UnifiedGVKPair{
 		{
 			Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 			SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 		},
-		{
-			Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
-		},
+		DefaultNamespaceSnapshotPair(),
 		{
 			Snapshot:        schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
 			SnapshotContent: schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshotContent"},
 		},
 	}
+}
+
+// DefaultDesiredUnifiedSnapshotPairs preserves the older function name for the
+// unified runtime bootstrap environment path.
+func DefaultDesiredUnifiedSnapshotPairs() []UnifiedGVKPair {
+	return DefaultUnifiedRuntimeBootstrapPairs()
 }
 
 // ResolveAvailableUnifiedGVKPairs keeps only pairs where both Snapshot and SnapshotContent

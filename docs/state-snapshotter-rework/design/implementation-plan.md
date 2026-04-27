@@ -23,8 +23,8 @@
 
 **Как сделано (S1–S2):**
 
-- Пакет `images/state-snapshotter-controller/pkg/unifiedbootstrap/`: `DefaultDesiredUnifiedSnapshotPairs()`, `ResolveAvailableUnifiedGVKPairs(mapper, pairs, log)`.
-- `cmd/main.go`: resolve после `manager.New`; при нуле типов — сообщение в logrus.
+- Пакет `images/state-snapshotter-controller/pkg/unifiedbootstrap/`: `DefaultUnifiedRuntimeBootstrapPairs()` / legacy alias `DefaultDesiredUnifiedSnapshotPairs()`, отдельный `DefaultGraphRegistryBuiltInPairs()`, `ResolveAvailableUnifiedGVKPairs(mapper, pairs, log)`.
+- `cmd/main.go`: dedicated controllers (`NamespaceSnapshot*`, `DemoVirtual*Snapshot`) регистрируются всегда; `STATE_SNAPSHOTTER_UNIFIED_ENABLED` управляет только generic unified Snapshot/SnapshotContent wiring и runtime sync.
 - **Динамика после старта:** новые eligible типы из DSC подхватываются **без рестарта** через `pkg/unifiedruntime.Syncer.Sync` (R2 2b/R3). **Снятие** watch при выпадении типа из resolved — по-прежнему не гарантируется; см. gauges `state_snapshotter_unified_runtime_*` и лог при stale.
 
 Опционально (не сделано): **feature gate** в values для всего unified трека.
@@ -50,7 +50,7 @@
 - [x] **Phase 2b (additive):** `pkg/unifiedruntime.Syncer` после успешного `reconcileAll` DSC: merge + `ResolveAvailableUnifiedGVKPairs` → `SnapshotController.AddWatchForPair` / `SnapshotContentController.AddWatchForContent` (`mgr.Add` после `Start` поддерживается controller-runtime). Идемпотентность по GVK; один сбой add не валит остальные пары.
 - [x] **R3 (часть 1 — state + proof):** слой **bootstrap / eligible / merged / resolved** в `pkg/unifiedruntime.LayeredGVKState` + `BuildLayeredGVKState`; **active** — `Syncer.activeSnapshotGVKKeys` (монотонно: ключ попадает, если оба `AddWatch*` успешны); `LastLayeredState()` / `ActiveSnapshotGVKKeys()` для отладки и тестов; unit — `pkg/unifiedruntime/layers_test.go`. Интеграция: `test/integration/unified_runtime_hot_add_test.go` — DSC становится watch-eligible (Accepted → RBACReady), затем проверяются `LastLayeredState` (resolved + eligible) и `ActiveSnapshotGVKKeys`; тест **Serial**, маппинг на **RegistrationTestSnapshot** (не `TestSnapshot`), чтобы не вешать глобальный watch на тип, с которым lifecycle-спеки делают прямой `Reconcile` (иначе два reconcile-потока и 409). В `BeforeSuite` интеграции — wiring как в production: unified controllers + `unifiedruntime.NewSyncer` + `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync, graphRegistryRefresh)`.
 - [x] **R3 (observability):** после каждого `Sync` обновляются Prometheus gauges (`sigs.k8s.io/controller-runtime/pkg/metrics`): `state_snapshotter_unified_runtime_resolved_snapshot_gvk_count`, `active_monotonic_snapshot_gvk_count`, `stale_active_snapshot_gvk_count`; сводка на `V(2)`; при `stale_active_snapshot_gvk_count > 0` — **Info**-лог со списком ключей и явным hint про restart pod (additive watches не снимаются). Регистрация метрик — `sync.Once` в `NewSyncer`. См. [`r2-phase-2b-r3-runtime-registry.md`](r2-phase-2b-r3-runtime-registry.md).
-- [x] **R5:** `config.Options` + env (`STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`); `cmd/main.go` ветка без unified; `NewSyncer` получает `EffectiveUnifiedBootstrapPairs()`; Helm/OpenAPI. Ошибка парсинга bootstrap → warning + дефолтный список.
+- [x] **R5:** `config.Options` + env (`STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`); `cmd/main.go` ветка без generic unified wiring; dedicated controllers остаются в manager; `NewSyncer` получает `EffectiveUnifiedBootstrapPairs()`; Helm/OpenAPI. Ошибка парсинга bootstrap → warning + дефолтный список. Graph registry built-ins отделены от runtime bootstrap: по умолчанию только `NamespaceSnapshot`→`NamespaceSnapshotContent`, demo пары — через eligible DSC.
 - [ ] **R3 / integration (опционально):** два DSC при поломке одного, полный T5/T9 и т.д.
 
 ### 2.3 Manifest capture

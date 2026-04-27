@@ -94,6 +94,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			ObservedGeneration: gen,
 		})
 		Expect(k8sClient.Status().Update(testCtx, hook)).To(Succeed())
+		integrationWaitGraphRegistryKind("DemoVirtualDiskSnapshot")
 
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{

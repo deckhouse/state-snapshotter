@@ -33,7 +33,9 @@ Generic code does not know which resources belong to a domain snapshot. Only the
 
 - `DemoVirtualDiskSnapshotController`: if PVC is declared and allowed by scope filtering, include PVC manifest in own MCR; later data capture can add VCR. Missing PVC is not fatal; minimal/empty materialization is valid.
 - `DemoVirtualMachineSnapshotController`: includes VM-level resources such as Pod/qemu only when they belong to the VM; disk PVCs belong to disk snapshots and must be delegated to child disk snapshots.
-- `NamespaceSnapshotController`: captures the Kubernetes `Namespace` object plus standard namespace resources, discovers domain-owned resources via DSC/registry, creates top-level child snapshots for them, and excludes covered child subtree resources from root own MCR.
+- `NamespaceSnapshotController`: captures the Kubernetes `Namespace` object plus standard namespace resources, discovers domain-owned resources only through eligible DSC mappings in the graph registry, creates top-level child snapshots for them, and excludes covered child subtree resources from root own MCR.
+
+Dedicated demo controllers may run and reconcile manual demo snapshots before any DSC exists. That only proves the controller process is active; it does not make demo resources discoverable by `NamespaceSnapshot` until the DSC mapping is eligible.
 
 ## OwnerReference / Scope Filtering
 
