@@ -8,6 +8,7 @@ config:
       - GOLANG_VERSION
       - GOPROXY
       - SOURCE_REPO
+      - DISTRO_PACKAGES_PROXY
       - MODULE_EDITION
       - MODULES_REGISTRY
       - MODULES_REGISTRY_LOGIN
@@ -27,6 +28,7 @@ config:
     allowValueIds:
       - GOPROXY
       - SOURCE_REPO
+      - DISTRO_PACKAGES_PROXY
   stapel:
     mount:
       allowBuildDir: true
