@@ -422,8 +422,12 @@ func encodeTestChunkData(objects []map[string]interface{}) (string, string) {
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	gz.Write(jsonData)
-	gz.Close()
+	if _, err := gz.Write(jsonData); err != nil {
+		panic(err)
+	}
+	if err := gz.Close(); err != nil {
+		panic(err)
+	}
 
 	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
 	hash := sha256.Sum256(buf.Bytes())
