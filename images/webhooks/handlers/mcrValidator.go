@@ -36,6 +36,12 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
+const (
+	boundNamespaceSnapshotContentAnnotation = "state-snapshotter.deckhouse.io/bound-namespace-snapshot-content"
+	namespaceSnapshotAPIVersion             = "storage.deckhouse.io/v1alpha1"
+	namespaceSnapshotKind                   = "NamespaceSnapshot"
+)
+
 // MCRValidate validates ManifestCaptureRequest by checking if the user who creates/updates the MCR
 // has GET permissions for all target resources specified in the request.
 // This ensures that users can only request backup of resources they have permission to read.
@@ -120,8 +126,13 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 			}, nil
 		}
 
-		// Check if resource is namespaced (MCR only supports namespaced resources)
+		// Check if resource is namespaced. NamespaceSnapshot-bound MCRs are the only
+		// flow allowed to capture the cluster-scoped Namespace object that anchors
+		// root NamespaceSnapshot materialization.
 		if !resourceInfo.Namespaced {
+			if isAllowedNamespaceSnapshotNamespaceTarget(mcr, target, resourceInfo) {
+				continue
+			}
 			return &kwhvalidating.ValidatorResult{
 				Valid:   false,
 				Message: fmt.Sprintf("Target %d: resource %s/%s is cluster-scoped and cannot be captured", i, target.APIVersion, target.Kind),
@@ -208,6 +219,24 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 	}
 
 	return &kwhvalidating.ValidatorResult{Valid: true}, nil
+}
+
+func isAllowedNamespaceSnapshotNamespaceTarget(mcr *storagev1alpha1.ManifestCaptureRequest, target storagev1alpha1.ManifestTarget, resourceInfo *resourceInfo) bool {
+	if target.APIVersion != "v1" || target.Kind != "Namespace" || resourceInfo.Name != "namespaces" {
+		return false
+	}
+	if target.Name != mcr.Namespace {
+		return false
+	}
+	if mcr.Annotations[boundNamespaceSnapshotContentAnnotation] == "" {
+		return false
+	}
+	for _, ref := range mcr.OwnerReferences {
+		if ref.APIVersion == namespaceSnapshotAPIVersion && ref.Kind == namespaceSnapshotKind {
+			return true
+		}
+	}
+	return false
 }
 
 // resourceInfo contains information about a Kubernetes resource from Discovery API

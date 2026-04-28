@@ -29,27 +29,41 @@ CTRL_DEPLOY=state-snapshotter-controller
 jq --version
 ```
 
-Доступ к subresource API зависит от текущего Service в установке. Сначала проверьте доступные Service:
+Subresource API опубликован как Kubernetes aggregated APIService. В smoke вызывайте его через kube-apiserver:
+
+```shell
+API_PATH_BASE="/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS"
+```
+
+Direct `port-forward` на `svc/controller` не является обычным smoke path: controller API работает по HTTPS/mTLS и требует front-proxy client certificate с допустимым CN (`system:kube-apiserver`, `kubernetes`, `front-proxy-client`). Для ручного `curl` используйте kubeconfig client cert против Kubernetes API server, а не прямой Service controller.
+
+Для справки проверьте Service/APIService:
 
 ```shell
 kubectl -n "$CTRL_NS" get svc
+kubectl get apiservice v1alpha1.subresources.state-snapshotter.deckhouse.io
 ```
 
-Пример port-forward (поправьте имя Service/port под текущую установку):
+Пример `curl` через kube-apiserver (если нужен именно `curl`; `kubectl get --raw` предпочтительнее):
 
 ```shell
-kubectl -n "$CTRL_NS" port-forward svc/state-snapshotter-api 8080:443
-```
+CTX=$(kubectl config current-context)
+CLUSTER=$(kubectl config view --raw -o jsonpath="{.contexts[?(@.name=='$CTX')].context.cluster}")
+USER=$(kubectl config view --raw -o jsonpath="{.contexts[?(@.name=='$CTX')].context.user}")
+SERVER=$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name=='$CLUSTER')].cluster.server}")
+TMP_CERT_DIR=$(mktemp -d /tmp/ss-smoke-certs.XXXXXX)
 
-В другом терминале:
+kubectl config view --raw -o jsonpath="{.clusters[?(@.name=='$CLUSTER')].cluster.certificate-authority-data}" \
+  | base64 -d > "$TMP_CERT_DIR/ca.crt"
+kubectl config view --raw -o jsonpath="{.users[?(@.name=='$USER')].user.client-certificate-data}" \
+  | base64 -d > "$TMP_CERT_DIR/client.crt"
+kubectl config view --raw -o jsonpath="{.users[?(@.name=='$USER')].user.client-key-data}" \
+  | base64 -d > "$TMP_CERT_DIR/client.key"
 
-```shell
-API_BASE="https://127.0.0.1:8080"
-CURL_OPTS="-sk"
-
-# Если локальный port-forward отдаёт plain HTTP, используйте:
-# API_BASE="http://127.0.0.1:8080"
-# CURL_OPTS="-s"
+curl --cacert "$TMP_CERT_DIR/ca.crt" \
+  --cert "$TMP_CERT_DIR/client.crt" \
+  --key "$TMP_CERT_DIR/client.key" \
+  "$SERVER$API_PATH_BASE/namespacesnapshots/root-no-dsc/manifests"
 ```
 
 ## 1. CRD установлены
@@ -255,8 +269,8 @@ kubectl -n "$NS" get namespacesnapshot root-no-dsc -o json \
 Aggregated read через legacy/generic `namespacesnapshots` route:
 
 ```shell
-curl $CURL_OPTS \
-  "$API_BASE/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS/namespacesnapshots/root-no-dsc/manifests" \
+kubectl get --raw \
+  "$API_PATH_BASE/namespacesnapshots/root-no-dsc/manifests" \
   | tee /tmp/root-no-dsc-manifests.json \
   | jq .
 ```
@@ -352,8 +366,8 @@ done
 Проверка root aggregated read:
 
 ```shell
-curl $CURL_OPTS \
-  "$API_BASE/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS/namespacesnapshots/root-disk-only/manifests" \
+kubectl get --raw \
+  "$API_PATH_BASE/namespacesnapshots/root-disk-only/manifests" \
   | tee /tmp/root-disk-only-manifests.json \
   | jq .
 ```
@@ -480,8 +494,8 @@ apiVersion | kind | namespace | name
 ### 9.1 Root full
 
 ```shell
-curl $CURL_OPTS \
-  "$API_BASE/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS/namespacesnapshots/root-full/manifests" \
+kubectl get --raw \
+  "$API_PATH_BASE/namespacesnapshots/root-full/manifests" \
   | tee /tmp/root-full-manifests.json \
   | jq .
 ```
@@ -514,8 +528,8 @@ jq -r '
 ### 9.2 VM subtree
 
 ```shell
-curl $CURL_OPTS \
-  "$API_BASE/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS/demovirtualmachinesnapshots/$CHILD_VM/manifests" \
+kubectl get --raw \
+  "$API_PATH_BASE/demovirtualmachinesnapshots/$CHILD_VM/manifests" \
   | tee /tmp/vm-subtree-manifests.json \
   | jq .
 ```
@@ -530,8 +544,8 @@ curl $CURL_OPTS \
 ### 9.3 Disk subtree
 
 ```shell
-curl $CURL_OPTS \
-  "$API_BASE/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS/demovirtualdisksnapshots/$CHILD_DISK/manifests" \
+kubectl get --raw \
+  "$API_PATH_BASE/demovirtualdisksnapshots/$CHILD_DISK/manifests" \
   | tee /tmp/disk-subtree-manifests.json \
   | jq .
 ```
@@ -544,23 +558,29 @@ curl $CURL_OPTS \
 
 ## 10. Negative generic API checks
 
-Проверяйте и HTTP status, и Kubernetes Status `reason`.
+Для `kubectl get --raw` проверяйте Kubernetes Status `reason`; команда вернёт non-zero на error response. Если нужен HTTP status, используйте `curl` к Kubernetes API server с kubeconfig client cert из раздела 0.
 
 ```shell
-curl -i $CURL_OPTS \
-  "$API_BASE/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS/demovirtualdisksnapshots/not-found/manifests" \
-  | tee /tmp/not-found-response.txt
+set +e
+kubectl get --raw \
+  "$API_PATH_BASE/demovirtualdisksnapshots/not-found/manifests" \
+  > /tmp/not-found-response.txt 2>&1
+status=$?
+set -e
 
-grep -q 'HTTP/.* 404' /tmp/not-found-response.txt
+test "$status" -ne 0
 grep -q '"reason"[[:space:]]*:[[:space:]]*"NotFound"' /tmp/not-found-response.txt
 ```
 
 ```shell
-curl -i $CURL_OPTS \
-  "$API_BASE/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/$NS/notasnapshots/x/manifests" \
-  | tee /tmp/bad-request-response.txt
+set +e
+kubectl get --raw \
+  "$API_PATH_BASE/notasnapshots/x/manifests" \
+  > /tmp/bad-request-response.txt 2>&1
+status=$?
+set -e
 
-grep -q 'HTTP/.* 400' /tmp/bad-request-response.txt
+test "$status" -ne 0
 grep -q '"reason"[[:space:]]*:[[:space:]]*"BadRequest"' /tmp/bad-request-response.txt
 ```
 
