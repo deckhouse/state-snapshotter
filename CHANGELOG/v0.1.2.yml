@@ -1,0 +1,6 @@
+Изменения:
+- Контроллер: TTL processing moved to MCR; IRetainer replaced with ObjectKeeper
+- Mount points in distroless images; updating base images, Go and lib-helm
+- Изменения в CI: DistroPackagesProxy and env proxy in werf, improvements to CVE scans
+    and auxiliary workflows
+- Added user-authz cluster roles in templates

@@ -1,7 +1,6 @@
 module github.com/deckhouse/state-snapshotter/images/webhooks
 
-go 1.24.11
-
+go 1.25.9
 require (
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
 	github.com/sirupsen/logrus v1.9.3

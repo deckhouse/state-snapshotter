@@ -34,7 +34,6 @@ import (
 	sv1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -60,7 +59,7 @@ import (
 )
 
 var (
-	resourcesSchemeFuncs = []func(*apiruntime.Scheme) error{
+	resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
 		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (NamespaceSnapshot, NamespaceSnapshotContent, SnapshotContent, …)
 		demov1alpha1.AddToScheme,      // demo.state-snapshotter.deckhouse.io (PR5a demo domain)

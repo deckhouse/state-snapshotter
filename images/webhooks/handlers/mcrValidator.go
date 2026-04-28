@@ -49,7 +49,7 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 	}
 
 	// Skip validation for delete operations
-	if mcr.ObjectMeta.DeletionTimestamp != nil || arReview.Operation == model.OperationDelete {
+	if mcr.DeletionTimestamp != nil || arReview.Operation == model.OperationDelete {
 		return &kwhvalidating.ValidatorResult{Valid: true}, nil
 	}
 

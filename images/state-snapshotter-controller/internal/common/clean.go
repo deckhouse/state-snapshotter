@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package common
+package common //nolint:revive // shared snapshot cleanup helpers (directory internal/common)
 
 import (
 	"strings"
@@ -123,7 +123,7 @@ func CleanObjectForSnapshot(u *unstructured.Unstructured, excludeAnnotations []s
 	switch kind {
 	case "Secret":
 		// Do not include secret data unless explicitly requested
-		if !(ann != nil && ann["backup.deckhouse.io/include-secret-data"] == "true") {
+		if ann == nil || ann["backup.deckhouse.io/include-secret-data"] != "true" {
 			unstructured.RemoveNestedField(out.Object, "data")
 			unstructured.RemoveNestedField(out.Object, "stringData")
 		}

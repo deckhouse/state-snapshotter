@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package api
+package api //nolint:revive // package name matches internal/api directory
 
 import (
 	"crypto/rand"
@@ -181,7 +181,9 @@ var _ = Describe("mTLSMiddleware", func() {
 		// Create a simple handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
+			if _, err := w.Write([]byte("OK")); err != nil {
+				return
+			}
 		})
 	})
 
