@@ -186,5 +186,14 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		Expect(err).NotTo(HaveOccurred())
 		Expect(nscVisited).NotTo(BeEmpty())
 		Expect(demoVisited).To(ContainElement(contentName), "ref-only walk should visit DemoVirtualDiskSnapshotContent leaf via same childrenSnapshotContentRefs graph")
+
+		Eventually(func(g Gomega) {
+			content := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: contentName}, content)).To(Succeed())
+			g.Expect(content.Status.ManifestCheckpointName).NotTo(BeEmpty())
+			objects := integrationArchiveObjectsFromMCP(testCtx, content.Status.ManifestCheckpointName)
+			g.Expect(integrationObjectsContainKindName(objects, "DemoVirtualDisk", "disk-a")).To(BeTrue(), "disk own MCP should contain source DemoVirtualDisk")
+			g.Expect(integrationObjectsContainKind(objects, "ConfigMap")).To(BeFalse(), "disk own MCP must contain only the source demo disk object")
+		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })

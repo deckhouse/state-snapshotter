@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,48 +34,9 @@ import (
 
 const defaultDemoSnapshotRequeueAfter = 500 * time.Millisecond
 
-func demoSnapshotManifestObjectName(kind, snapshotName string) string {
-	sum := sha256.Sum256([]byte(kind + "/" + snapshotName))
-	return "demo-snapshot-" + hex.EncodeToString(sum[:8])
-}
-
 func demoSnapshotManifestCaptureRequestName(kind, namespace, name string) string {
 	sum := sha256.Sum256([]byte(kind + ":" + namespace + "/" + name))
 	return "demo-mcr-" + hex.EncodeToString(sum[:10])
-}
-
-func ensureDemoSnapshotManifestObject(
-	ctx context.Context,
-	c client.Client,
-	namespace string,
-	name string,
-	kind string,
-	ownerRef metav1.OwnerReference,
-) error {
-	cmName := demoSnapshotManifestObjectName(kind, name)
-	existing := &corev1.ConfigMap{}
-	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: cmName}, existing)
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            cmName,
-			Namespace:       namespace,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-			Labels: map[string]string{
-				"state-snapshotter.deckhouse.io/demo-snapshot-kind": kind,
-			},
-		},
-		Data: map[string]string{
-			"snapshot": name,
-			"kind":     kind,
-		},
-	}
-	return c.Create(ctx, cm)
 }
 
 func ensureDemoSnapshotManifestCaptureRequest(
@@ -85,16 +45,28 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	namespace string,
 	name string,
 	kind string,
+	targetAPIVersion string,
+	targetKind string,
+	targetName string,
 	ownerRef metav1.OwnerReference,
 ) (*ssv1alpha1.ManifestCaptureRequest, error) {
-	if err := ensureDemoSnapshotManifestObject(ctx, c, namespace, name, kind, ownerRef); err != nil {
-		return nil, err
-	}
 	mcrName := demoSnapshotManifestCaptureRequestName(kind, namespace, name)
 	key := types.NamespacedName{Namespace: namespace, Name: mcrName}
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
+	desiredTargets := []ssv1alpha1.ManifestTarget{{
+		APIVersion: targetAPIVersion,
+		Kind:       targetKind,
+		Name:       targetName,
+	}}
 	err := c.Get(ctx, key, existing)
 	if err == nil {
+		if !manifestTargetsEqual(existing.Spec.Targets, desiredTargets) {
+			base := existing.DeepCopy()
+			existing.Spec.Targets = desiredTargets
+			if err := c.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
+				return nil, err
+			}
+		}
 		return existing, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -107,16 +79,12 @@ func ensureDemoSnapshotManifestCaptureRequest(
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
 		Spec: ssv1alpha1.ManifestCaptureRequestSpec{
-			Targets: []ssv1alpha1.ManifestTarget{{
-				APIVersion: "v1",
-				Kind:       "ConfigMap",
-				Name:       demoSnapshotManifestObjectName(kind, name),
-			}},
+			Targets: desiredTargets,
 		},
 	}
 	if err := c.Create(ctx, mcr); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, ownerRef)
+			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, targetAPIVersion, targetKind, targetName, ownerRef)
 		}
 		return nil, err
 	}

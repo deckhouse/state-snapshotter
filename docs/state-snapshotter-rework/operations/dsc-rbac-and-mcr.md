@@ -51,6 +51,8 @@
 - **Создание** Role/RoleBinding/ClusterRole для работы доменного оператора с конкретными CRD — на стороне **модуля** (Helm/hook).
 - DSC **не генерирует** RBAC; он лишь **ожидает**, что модуль выставит **`RBACReady=True`**, когда политика применена.
 - Если RBAC не готов: DSC может быть `Accepted=True`, но watch по формуле не активируется — это ожидаемо до сигнала hook.
+- Demo materialization captures existing domain objects directly (`DemoVirtualDisk`, `DemoVirtualMachine`), not placeholder ConfigMap payloads.
+- Removing synthetic marker materialization does **not** solve dynamic domain RBAC. If domain controllers lack `get/list/watch` for resources declared by DSC mappings, that is handled by the separate DSC RBAC track; do not add broad static self-grants as part of materialization cleanup.
 
 ---
 

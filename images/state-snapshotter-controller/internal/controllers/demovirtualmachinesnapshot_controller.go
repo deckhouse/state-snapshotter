@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -57,7 +58,6 @@ type DemoVirtualMachineSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -71,8 +71,8 @@ func demoVirtualMachineSnapshotContentName(namespace, name string) string {
 	return "demovmc-" + hex.EncodeToString(sum[:10])
 }
 
-func demoVirtualMachineDiskSnapshotName(namespace, name string) string {
-	sum := sha256.Sum256([]byte("vm-disk:" + namespace + "/" + name))
+func demoVirtualMachineDiskSnapshotName(namespace, vmSnapshotName, sourceDiskName string) string {
+	sum := sha256.Sum256([]byte("vm-disk:" + namespace + "/" + vmSnapshotName + "/" + sourceDiskName))
 	return "demovmdisk-" + hex.EncodeToString(sum[:8])
 }
 
@@ -134,12 +134,33 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		}
 	}
 
+	sourceName := demoSnapshotSourceName(s, s.Spec.VirtualMachineName)
+	if sourceName == "" {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotSpecified", "demo VM snapshot source is not specified"); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	source := &demov1alpha1.DemoVirtualMachine{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
+		if apierrors.IsNotFound(err) {
+			if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotFound", fmt.Sprintf("DemoVirtualMachine %q not found", sourceName)); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
 	mcr, err := ensureDemoSnapshotManifestCaptureRequest(
 		ctx,
 		r.Client,
 		s.Namespace,
 		s.Name,
 		"DemoVirtualMachineSnapshot",
+		demov1alpha1.SchemeGroupVersion.String(),
+		"DemoVirtualMachine",
+		source.Name,
 		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), "DemoVirtualMachineSnapshot", s.Name, s.UID),
 	)
 	if err != nil {
@@ -165,7 +186,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 
-	childRefs, err := r.ensureDemoVirtualMachineChildren(ctx, s)
+	childRefs, err := r.ensureDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -223,8 +244,35 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureSnapshotContent(ctx context
 	return r.Client.Create(ctx, content)
 }
 
-func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot) ([]storagev1alpha1.NamespaceSnapshotChildRef, error) {
-	childName := demoVirtualMachineDiskSnapshotName(vm.Namespace, vm.Name)
+func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, source *demov1alpha1.DemoVirtualMachine) ([]storagev1alpha1.NamespaceSnapshotChildRef, error) {
+	disks := &demov1alpha1.DemoVirtualDiskList{}
+	if err := r.Client.List(ctx, disks, client.InNamespace(vm.Namespace)); err != nil {
+		return nil, err
+	}
+	sort.Slice(disks.Items, func(i, j int) bool {
+		return disks.Items[i].Name < disks.Items[j].Name
+	})
+
+	var refs []storagev1alpha1.NamespaceSnapshotChildRef
+	for i := range disks.Items {
+		disk := &disks.Items[i]
+		if !demoDiskOwnedByVM(disk, source) {
+			continue
+		}
+		childName := demoVirtualMachineDiskSnapshotName(vm.Namespace, vm.Name, disk.Name)
+		if err := r.ensureDemoVirtualMachineDiskChild(ctx, vm, disk, childName); err != nil {
+			return nil, err
+		}
+		refs = append(refs, storagev1alpha1.NamespaceSnapshotChildRef{
+			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+			Kind:       "DemoVirtualDiskSnapshot",
+			Name:       childName,
+		})
+	}
+	return refs, nil
+}
+
+func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, disk *demov1alpha1.DemoVirtualDisk, childName string) error {
 	key := types.NamespacedName{Namespace: vm.Namespace, Name: childName}
 	child := &demov1alpha1.DemoVirtualDiskSnapshot{}
 	err := r.Client.Get(ctx, key, child)
@@ -233,6 +281,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      childName,
 				Namespace: vm.Namespace,
+				Annotations: map[string]string{
+					sourceAPIVersionAnnotation: demov1alpha1.SchemeGroupVersion.String(),
+					sourceKindAnnotation:       "DemoVirtualDisk",
+					sourceNameAnnotation:       disk.Name,
+				},
 				OwnerReferences: []metav1.OwnerReference{demoSnapshotOwnerReference(
 					demov1alpha1.SchemeGroupVersion.String(),
 					"DemoVirtualMachineSnapshot",
@@ -249,16 +302,46 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(
 			},
 		}
 		if err := r.Client.Create(ctx, child); err != nil && !apierrors.IsAlreadyExists(err) {
-			return nil, err
+			return err
 		}
-	} else if err != nil {
-		return nil, err
+		return nil
 	}
-	return []storagev1alpha1.NamespaceSnapshotChildRef{{
+	if err != nil {
+		return err
+	}
+	base := child.DeepCopy()
+	annotations := child.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[sourceAPIVersionAnnotation] = demov1alpha1.SchemeGroupVersion.String()
+	annotations[sourceKindAnnotation] = "DemoVirtualDisk"
+	annotations[sourceNameAnnotation] = disk.Name
+	child.SetAnnotations(annotations)
+	child.Spec.ParentSnapshotRef = demov1alpha1.SnapshotParentRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       "DemoVirtualDiskSnapshot",
-		Name:       childName,
-	}}, nil
+		Kind:       "DemoVirtualMachineSnapshot",
+		Name:       vm.Name,
+	}
+	if len(child.GetOwnerReferences()) == 0 {
+		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(
+			demov1alpha1.SchemeGroupVersion.String(),
+			"DemoVirtualMachineSnapshot",
+			vm.Name,
+			vm.UID,
+		)})
+	}
+	return r.Client.Patch(ctx, child, client.MergeFrom(base))
+}
+
+func demoDiskOwnedByVM(disk *demov1alpha1.DemoVirtualDisk, vm *demov1alpha1.DemoVirtualMachine) bool {
+	for _, ref := range disk.OwnerReferences {
+		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != "DemoVirtualMachine" || ref.Name != vm.Name {
+			continue
+		}
+		return ref.UID == "" || ref.UID == vm.UID
+	}
+	return false
 }
 
 func patchDemoVirtualMachineSnapshotChildrenRefs(

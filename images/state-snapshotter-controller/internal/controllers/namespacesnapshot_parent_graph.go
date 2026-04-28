@@ -71,7 +71,7 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 				continue
 			}
 			childName := namespaceSnapshotChildSnapshotName(nsSnap.Name, mapping.ResourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName())
-			if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK); err != nil {
+			if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, mapping.ResourceGVK, resource.GetName()); err != nil {
 				return false, err
 			}
 			desiredRefs = append(desiredRefs, storagev1alpha1.NamespaceSnapshotChildRef{
@@ -106,6 +106,8 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
 	name string,
 	gvk schema.GroupVersionKind,
+	resourceGVK schema.GroupVersionKind,
+	resourceName string,
 ) error {
 	key := client.ObjectKey{Namespace: nsSnap.Namespace, Name: name}
 	child := &unstructured.Unstructured{}
@@ -118,7 +120,15 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 			Object: map[string]interface{}{
 				"apiVersion": gvk.GroupVersion().String(),
 				"kind":       gvk.Kind,
-				"metadata":   map[string]interface{}{"name": name, "namespace": nsSnap.Namespace},
+				"metadata": map[string]interface{}{
+					"name":      name,
+					"namespace": nsSnap.Namespace,
+					"annotations": map[string]interface{}{
+						sourceAPIVersionAnnotation: resourceGVK.GroupVersion().String(),
+						sourceKindAnnotation:       resourceGVK.Kind,
+						sourceNameAnnotation:       resourceName,
+					},
+				},
 				"spec": map[string]interface{}{
 					"parentSnapshotRef": map[string]interface{}{
 						"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
@@ -137,15 +147,35 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 		}})
 		return r.Client.Create(ctx, child)
 	}
+	base := child.DeepCopy()
+	changed := false
+	annotations := child.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	if annotations[sourceAPIVersionAnnotation] != resourceGVK.GroupVersion().String() ||
+		annotations[sourceKindAnnotation] != resourceGVK.Kind ||
+		annotations[sourceNameAnnotation] != resourceName {
+		annotations[sourceAPIVersionAnnotation] = resourceGVK.GroupVersion().String()
+		annotations[sourceKindAnnotation] = resourceGVK.Kind
+		annotations[sourceNameAnnotation] = resourceName
+		child.SetAnnotations(annotations)
+		changed = true
+	}
 	if child.Object["spec"] == nil {
-		base := child.DeepCopy()
-		child.Object["spec"] = map[string]interface{}{
-			"parentSnapshotRef": map[string]interface{}{
-				"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
-				"kind":       "NamespaceSnapshot",
-				"name":       nsSnap.Name,
-			},
+		child.Object["spec"] = map[string]interface{}{}
+		changed = true
+	}
+	spec, _ := child.Object["spec"].(map[string]interface{})
+	if _, ok := spec["parentSnapshotRef"]; !ok {
+		spec["parentSnapshotRef"] = map[string]interface{}{
+			"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
+			"kind":       "NamespaceSnapshot",
+			"name":       nsSnap.Name,
 		}
+		changed = true
+	}
+	if changed {
 		return r.Client.Patch(ctx, child, client.MergeFrom(base))
 	}
 	return nil

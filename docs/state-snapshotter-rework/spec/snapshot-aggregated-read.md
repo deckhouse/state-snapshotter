@@ -64,6 +64,17 @@ If two MCP archives in one subtree contain the same identity, the whole aggregat
 
 The HTTP surface for duplicate object identity is `409 Conflict`.
 
+## Identity Requirements
+
+Aggregated read returns Kubernetes object manifests from MCP archives. Every returned top-level object MUST have:
+
+- `apiVersion`;
+- `kind`;
+- `metadata.name`;
+- `metadata.namespace` when the object is namespaced.
+
+Synthetic/demo marker objects without stable identity MUST NOT be used as materialized restore manifests. Demo snapshot controllers materialize source domain objects directly (`DemoVirtualDisk`, `DemoVirtualMachine`) so aggregated output uses normal Kubernetes object identity.
+
 ## Local MCP Reads
 
 MCP-level archive/read endpoints return only the manifests stored in that MCP. They do not aggregate child MCPs and do not follow `childrenSnapshotContentRefs`.

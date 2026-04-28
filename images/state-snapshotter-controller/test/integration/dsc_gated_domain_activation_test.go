@@ -173,7 +173,7 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		Expect(integrationObjectsContainKindName(rootObjects, "DemoVirtualDisk", "disk-vm")).To(BeFalse(), "root own MCP must not include VM-owned disk resource")
 
 		aggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootContentName)
-		Expect(integrationObjectsContainDemoSnapshotKind(aggregated, "DemoVirtualDiskSnapshot")).To(BeFalse())
+		Expect(integrationObjectsContainKind(aggregated, "DemoVirtualDisk")).To(BeFalse())
 		Expect(integrationObjectsContainKindName(aggregated, "DemoVirtualDisk", "disk-vm")).To(BeFalse())
 	})
 
@@ -259,6 +259,9 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		testCtx := context.Background()
 		nsName := createIntegrationNamespace(testCtx, "dsc-gated-manual-")
 
+		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{Name: "manual-disk", Namespace: nsName},
+		})).To(Succeed())
 		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "manual-disk-snapshot", Namespace: nsName},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
@@ -267,6 +270,7 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 					Kind:       "NamespaceSnapshot",
 					Name:       "manual-parent",
 				},
+				PersistentVolumeClaimName: "manual-disk",
 			},
 		})).To(Succeed())
 

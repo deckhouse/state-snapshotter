@@ -280,15 +280,7 @@ kubectl get --raw \
 Ожидаемо:
 
 - response содержит root scope (например `ConfigMap/smoke-cm` и/или Kubernetes `Namespace`, в зависимости от текущего root MCP);
-- response не содержит demo subtree markers / demo snapshot payload.
-
-Перед строгими payload assertions один раз посмотрите фактический MCP/aggregated output. Текущие demo controllers могут materialize synthetic marker objects или `ConfigMap` с label:
-
-```text
-state-snapshotter.deckhouse.io/demo-snapshot-kind
-```
-
-Проверяйте фактические markers/labels текущей реализации, а не предполагаемые domain objects.
+- response не содержит demo child domain objects (`DemoVirtualMachine`, `DemoVirtualDisk`), потому что demo kinds не активированы в graph registry без eligible DSC.
 
 ## 7. Disk-only DSC + ownerRef filtering
 
@@ -374,7 +366,7 @@ kubectl get --raw \
   | jq .
 ```
 
-Ожидаемо в `/tmp/root-disk-only-manifests.json` нет VM-owned `disk-vm` ни как direct child subtree, ни как root MCP payload. Проверяйте по фактическим labels/markers текущей реализации. Если используется demo marker label, VM-owned disk не должен давать marker subtree под root.
+Ожидаемо в `/tmp/root-disk-only-manifests.json` нет VM-owned `DemoVirtualDisk/disk-vm` ни как direct child subtree, ни как root MCP payload. Direct disk child MCP должен содержать `DemoVirtualDisk/disk-standalone`.
 
 ## 8. VM + Disk DSC: полный parent/child graph
 
@@ -505,9 +497,10 @@ kubectl get --raw \
 Ожидаемо:
 
 - response содержит root scope (`ConfigMap/smoke-cm` и/или `Namespace`, по текущему root MCP);
-- response содержит VM subtree artifacts/markers;
-- response содержит disk subtree artifacts/markers для VM-owned disk;
-- response может содержать standalone disk subtree, если standalone disk есть direct root child;
+- response содержит VM subtree: `DemoVirtualMachine/vm-1`;
+- response содержит disk subtree для VM-owned disk: `DemoVirtualDisk/disk-vm`;
+- response может содержать standalone disk subtree: `DemoVirtualDisk/disk-standalone`, если standalone disk есть direct root child;
+- response не содержит placeholder ConfigMap payload from old demo materialization;
 - нет duplicate identity `apiVersion|kind|namespace|name`.
 
 Пример проверки duplicate identity:
@@ -538,8 +531,8 @@ kubectl get --raw \
 
 Ожидаемо:
 
-- содержит VM subtree artifacts/markers;
-- содержит VM-owned disk subtree artifacts/markers;
+- содержит `DemoVirtualMachine/vm-1`;
+- содержит VM-owned `DemoVirtualDisk/disk-vm`;
 - не содержит root-level `ConfigMap/smoke-cm` / Kubernetes `Namespace`;
 - не содержит standalone disk subtree.
 
@@ -554,7 +547,7 @@ kubectl get --raw \
 
 Ожидаемо:
 
-- содержит только disk subtree artifacts/markers;
+- содержит только `DemoVirtualDisk/disk-vm`;
 - не содержит VM parent subtree;
 - не содержит root-level `ConfigMap/smoke-cm` / Kubernetes `Namespace`.
 

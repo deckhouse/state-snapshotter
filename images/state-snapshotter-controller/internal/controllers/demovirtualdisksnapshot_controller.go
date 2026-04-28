@@ -55,7 +55,6 @@ type DemoVirtualDiskSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get
 // +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -122,12 +121,33 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
+	sourceName := demoSnapshotSourceName(s, s.Spec.PersistentVolumeClaimName)
+	if sourceName == "" {
+		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotSpecified", "demo disk snapshot source is not specified"); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	source := &demov1alpha1.DemoVirtualDisk{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
+		if apierrors.IsNotFound(err) {
+			if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotFound", fmt.Sprintf("DemoVirtualDisk %q not found", sourceName)); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
 	mcr, err := ensureDemoSnapshotManifestCaptureRequest(
 		ctx,
 		r.Client,
 		s.Namespace,
 		s.Name,
 		"DemoVirtualDiskSnapshot",
+		demov1alpha1.SchemeGroupVersion.String(),
+		"DemoVirtualDisk",
+		source.Name,
 		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), "DemoVirtualDiskSnapshot", s.Name, s.UID),
 	)
 	if err != nil {
@@ -156,6 +176,15 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func demoSnapshotSourceName(obj client.Object, fallback string) string {
+	if annotations := obj.GetAnnotations(); annotations != nil {
+		if name := annotations[sourceNameAnnotation]; name != "" {
+			return name
+		}
+	}
+	return fallback
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *demov1alpha1.DemoVirtualDiskSnapshot, contentName string) error {

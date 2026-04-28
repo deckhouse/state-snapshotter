@@ -85,14 +85,9 @@ func integrationObjectsContainKindName(objects []map[string]interface{}, kind, n
 	return false
 }
 
-func integrationObjectsContainDemoSnapshotKind(objects []map[string]interface{}, demoKind string) bool {
+func integrationObjectsContainKind(objects []map[string]interface{}, kind string) bool {
 	for _, obj := range objects {
-		meta, ok := obj["metadata"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		labels, ok := meta["labels"].(map[string]interface{})
-		if ok && labels["state-snapshotter.deckhouse.io/demo-snapshot-kind"] == demoKind {
+		if obj["kind"] == kind {
 			return true
 		}
 	}
@@ -177,6 +172,19 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			ObjectMeta: metav1.ObjectMeta{Name: "demo-vm-1", Namespace: nsName},
 		}
 		Expect(k8sClient.Create(testCtx, vmResource)).To(Succeed())
+		diskResource := &demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo-disk-1",
+				Namespace: nsName,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       "DemoVirtualMachine",
+					Name:       vmResource.Name,
+					UID:        vmResource.UID,
+				}},
+			},
+		}
+		Expect(k8sClient.Create(testCtx, diskResource)).To(Succeed())
 
 		root := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
@@ -319,32 +327,32 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 
 		rootObjects := integrationArchiveObjectsFromMCP(testCtx, rootMCPName)
 		Expect(integrationObjectsContainKindName(rootObjects, "Namespace", nsName)).To(BeTrue(), "root own MCP should include the Kubernetes Namespace manifest")
-		Expect(integrationObjectsContainDemoSnapshotKind(rootObjects, "DemoVirtualMachineSnapshot")).To(BeFalse(), "root own MCP must not include VM child manifests")
-		Expect(integrationObjectsContainDemoSnapshotKind(rootObjects, "DemoVirtualDiskSnapshot")).To(BeFalse(), "root own MCP must not include disk child manifests")
+		Expect(integrationObjectsContainKind(rootObjects, "DemoVirtualMachine")).To(BeFalse(), "root own MCP must not include VM child domain manifests")
+		Expect(integrationObjectsContainKind(rootObjects, "DemoVirtualDisk")).To(BeFalse(), "root own MCP must not include disk child domain manifests")
 
 		vmObjects := integrationArchiveObjectsFromMCP(testCtx, vmMCPName)
-		Expect(integrationObjectsContainDemoSnapshotKind(vmObjects, "DemoVirtualMachineSnapshot")).To(BeTrue(), "VM own MCP should include VM own manifest")
-		Expect(integrationObjectsContainDemoSnapshotKind(vmObjects, "DemoVirtualDiskSnapshot")).To(BeFalse(), "VM own MCP must not include disk child manifests")
+		Expect(integrationObjectsContainKindName(vmObjects, "DemoVirtualMachine", "demo-vm-1")).To(BeTrue(), "VM own MCP should include source VM manifest")
+		Expect(integrationObjectsContainKind(vmObjects, "DemoVirtualDisk")).To(BeFalse(), "VM own MCP must not include disk child domain manifests")
 
 		diskObjects := integrationArchiveObjectsFromMCP(testCtx, diskMCPName)
-		Expect(integrationObjectsContainDemoSnapshotKind(diskObjects, "DemoVirtualDiskSnapshot")).To(BeTrue(), "disk own MCP should include disk own manifest")
-		Expect(integrationObjectsContainDemoSnapshotKind(diskObjects, "DemoVirtualMachineSnapshot")).To(BeFalse(), "disk own MCP must not include ancestor manifests")
+		Expect(integrationObjectsContainKindName(diskObjects, "DemoVirtualDisk", "demo-disk-1")).To(BeTrue(), "disk own MCP should include source disk manifest")
+		Expect(integrationObjectsContainKind(diskObjects, "DemoVirtualMachine")).To(BeFalse(), "disk own MCP must not include ancestor manifests")
 
 		rootAggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootNSC)
 		Expect(integrationObjectsContainKindName(rootAggregated, "Namespace", nsName)).To(BeTrue())
-		Expect(integrationObjectsContainDemoSnapshotKind(rootAggregated, "DemoVirtualMachineSnapshot")).To(BeTrue())
-		Expect(integrationObjectsContainDemoSnapshotKind(rootAggregated, "DemoVirtualDiskSnapshot")).To(BeTrue())
+		Expect(integrationObjectsContainKindName(rootAggregated, "DemoVirtualMachine", "demo-vm-1")).To(BeTrue())
+		Expect(integrationObjectsContainKindName(rootAggregated, "DemoVirtualDisk", "demo-disk-1")).To(BeTrue())
 
 		vmContentGVK := schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshotContent"}
 		diskContentGVK := schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshotContent"}
 		vmAggregated := integrationAggregatedObjects(testCtx, vmContentGVK, vmContentName)
 		Expect(integrationObjectsContainKindName(vmAggregated, "Namespace", nsName)).To(BeFalse(), "VM subtree read must not include ancestor Namespace manifest")
-		Expect(integrationObjectsContainDemoSnapshotKind(vmAggregated, "DemoVirtualMachineSnapshot")).To(BeTrue())
-		Expect(integrationObjectsContainDemoSnapshotKind(vmAggregated, "DemoVirtualDiskSnapshot")).To(BeTrue())
+		Expect(integrationObjectsContainKindName(vmAggregated, "DemoVirtualMachine", "demo-vm-1")).To(BeTrue())
+		Expect(integrationObjectsContainKindName(vmAggregated, "DemoVirtualDisk", "demo-disk-1")).To(BeTrue())
 
 		diskAggregated := integrationAggregatedObjects(testCtx, diskContentGVK, diskContentName)
 		Expect(integrationObjectsContainKindName(diskAggregated, "Namespace", nsName)).To(BeFalse(), "disk leaf read must not include ancestor Namespace manifest")
-		Expect(integrationObjectsContainDemoSnapshotKind(diskAggregated, "DemoVirtualMachineSnapshot")).To(BeFalse(), "disk leaf read must not include VM ancestor manifest")
-		Expect(integrationObjectsContainDemoSnapshotKind(diskAggregated, "DemoVirtualDiskSnapshot")).To(BeTrue())
+		Expect(integrationObjectsContainKind(diskAggregated, "DemoVirtualMachine")).To(BeFalse(), "disk leaf read must not include VM ancestor manifest")
+		Expect(integrationObjectsContainKindName(diskAggregated, "DemoVirtualDisk", "demo-disk-1")).To(BeTrue())
 	})
 })

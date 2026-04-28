@@ -21,7 +21,7 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 ## Rules
 
-**Own materialization:** each controller materializes only its own scope. Missing optional domain resources do not make the snapshot invalid; a minimal MCP is valid, but a Ready snapshot must have its own MCP. Parent MCPs do not contain child manifests.
+**Own materialization:** each controller materializes only its own scope. Demo materialization captures the existing source domain object directly: `DemoVirtualDiskSnapshot` captures `DemoVirtualDisk`, and `DemoVirtualMachineSnapshot` captures `DemoVirtualMachine`. Placeholder ConfigMap payloads are not part of the target model. Parent MCPs do not contain child manifests.
 
 **Child snapshot creation:** parent controller creates child snapshots and owns graph edges. Child controllers do not patch parent status.
 
@@ -31,9 +31,9 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 ## Examples
 
-**Disk:** `DemoVirtualDiskSnapshotController` owns disk-level materialization. A PVC owned by the disk is in disk own scope. The disk currently has no child snapshots.
+**Disk:** `DemoVirtualDiskSnapshotController` owns disk-level materialization. Its own MCP contains the source `DemoVirtualDisk`. The disk currently has no child snapshots.
 
-**VM:** `DemoVirtualMachineSnapshotController` owns VM-level materialization and creates disk child snapshots for disk resources. PVCs owned by disks are delegated to disk snapshots.
+**VM:** `DemoVirtualMachineSnapshotController` owns VM-level materialization and creates disk child snapshots for disk resources. Its own MCP contains the source `DemoVirtualMachine`; VM-owned disks are delegated to child `DemoVirtualDiskSnapshot` nodes.
 
 **Namespace:** `NamespaceSnapshotController` owns namespace-level materialization. Its minimal own manifest is the Kubernetes `Namespace` object named by the resolved target namespace. Currently resolved target namespace = `NamespaceSnapshot.metadata.namespace`; a future cluster-scoped `NamespaceSnapshot` may resolve it from `spec.targetNamespace`. The `NamespaceSnapshot` CR remains namespaced for now and this change does not add `spec.namespace` / `spec.targetNamespace`. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
 
