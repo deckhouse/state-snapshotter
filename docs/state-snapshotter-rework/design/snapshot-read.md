@@ -30,6 +30,10 @@ Heterogeneous children are resolved through the snapshot graph registry. Snapsho
 
 Aggregation is an API/usecase responsibility. Controllers materialize their own MCPs and publish graph refs; clients do not reconstruct the tree themselves.
 
+## Temporary Root Capture Bridge
+
+Current Namespace root capture uses a temporary NamespaceSnapshot-bound MCR marker to allow capturing the Kubernetes `Namespace` object. This is not the target architecture. The future cluster-scoped `NamespaceSnapshot` design must revisit root capture and remove annotation-based webhook coupling in favor of an explicit system/root capture contract.
+
 ## Duplicate Objects
 
 Object identity is:

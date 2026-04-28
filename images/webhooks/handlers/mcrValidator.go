@@ -37,6 +37,9 @@ import (
 )
 
 const (
+	// boundNamespaceSnapshotContentAnnotation is an internal marker used only by
+	// the current NamespaceSnapshot root-capture path. It is not a public API
+	// contract and should be replaced by an explicit system/root capture contract.
 	boundNamespaceSnapshotContentAnnotation = "state-snapshotter.deckhouse.io/bound-namespace-snapshot-content"
 	namespaceSnapshotAPIVersion             = "storage.deckhouse.io/v1alpha1"
 	namespaceSnapshotKind                   = "NamespaceSnapshot"
@@ -221,6 +224,12 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 	return &kwhvalidating.ValidatorResult{Valid: true}, nil
 }
 
+// TODO(ns-snapshot-cluster-scoped): This is a temporary bridge for the current
+// namespaced NamespaceSnapshot root-capture path. It uses an internal annotation
+// plus ownerRef to distinguish controller-created MCRs from user MCRs.
+// Do not extend this exception to other cluster-scoped resources.
+// When NamespaceSnapshot becomes cluster-scoped, replace this with an explicit
+// system/root capture contract or remove MCR from Namespace root capture path.
 func isAllowedNamespaceSnapshotNamespaceTarget(mcr *storagev1alpha1.ManifestCaptureRequest, target storagev1alpha1.ManifestTarget, resourceInfo *resourceInfo) bool {
 	if target.APIVersion != "v1" || target.Kind != "Namespace" || resourceInfo.Name != "namespaces" {
 		return false

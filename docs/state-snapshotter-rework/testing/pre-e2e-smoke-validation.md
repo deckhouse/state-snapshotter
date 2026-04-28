@@ -261,6 +261,8 @@ kubectl get manifestcheckpoint "$ROOT_NO_DSC_MCP" -o yaml
 - `NamespaceSnapshotContent.status.manifestCheckpointName` установлен;
 - `childrenSnapshotRefs` пустой, потому что demo kinds не активированы в graph registry без eligible DSC.
 
+Если flow застрял на validation `v1/Namespace` target, проверьте temporary NamespaceSnapshot-bound MCR webhook exception: текущий namespaced `NamespaceSnapshot` root capture временно разрешает Kubernetes `Namespace` target только для controller-created MCR с internal marker.
+
 ```shell
 kubectl -n "$NS" get namespacesnapshot root-no-dsc -o json \
   | jq -e '(.status.childrenSnapshotRefs // []) | length == 0'
