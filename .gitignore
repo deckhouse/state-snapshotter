@@ -16,6 +16,7 @@
 # Go build cache when GOCACHE is set inside the repo (e.g. sandbox / local override)
 .gocache/
 .gomodcache/
+.tmp-golangci-bin/
 
 # vim
 *.swp
