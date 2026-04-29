@@ -42,9 +42,9 @@ type DemoVirtualDiskSnapshotSpec struct {
 	// +kubebuilder:validation:Required
 	ParentSnapshotRef SnapshotParentRef `json:"parentSnapshotRef"`
 
-	// PersistentVolumeClaimName is the PVC name in the same namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI wiring yet).
-	// +optional
-	PersistentVolumeClaimName string `json:"persistentVolumeClaimName,omitempty"`
+	// SourceRef identifies the DemoVirtualDisk captured by this snapshot.
+	// +kubebuilder:validation:Required
+	SourceRef SnapshotSourceRef `json:"sourceRef"`
 }
 
 // DemoVirtualDiskSnapshotStatus defines the observed state of DemoVirtualDiskSnapshot.

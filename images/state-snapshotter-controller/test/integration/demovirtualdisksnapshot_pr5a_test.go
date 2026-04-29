@@ -149,6 +149,11 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		Eventually(func(g Gomega) {
 			d := &demov1alpha1.DemoVirtualDiskSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: diskSnapshotName}, d)).To(Succeed())
+			g.Expect(d.Spec.SourceRef).To(Equal(demov1alpha1.SnapshotSourceRef{
+				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+				Kind:       "DemoVirtualDisk",
+				Name:       "disk-a",
+			}))
 			g.Expect(d.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			contentName = d.Status.BoundSnapshotContentName
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())

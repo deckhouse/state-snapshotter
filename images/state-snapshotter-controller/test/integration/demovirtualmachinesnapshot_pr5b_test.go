@@ -221,6 +221,11 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Eventually(func(g Gomega) {
 			v := &demov1alpha1.DemoVirtualMachineSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: vmSnapshotName}, v)).To(Succeed())
+			g.Expect(v.Spec.SourceRef).To(Equal(demov1alpha1.SnapshotSourceRef{
+				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+				Kind:       "DemoVirtualMachine",
+				Name:       "demo-vm-1",
+			}))
 			g.Expect(v.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			vmContentName = v.Status.BoundSnapshotContentName
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
@@ -256,6 +261,11 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Eventually(func(g Gomega) {
 			d := &demov1alpha1.DemoVirtualDiskSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: diskSnapshotName}, d)).To(Succeed())
+			g.Expect(d.Spec.SourceRef).To(Equal(demov1alpha1.SnapshotSourceRef{
+				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+				Kind:       "DemoVirtualDisk",
+				Name:       "demo-disk-1",
+			}))
 			g.Expect(d.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			diskContentName = d.Status.BoundSnapshotContentName
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())

@@ -42,9 +42,9 @@ type DemoVirtualMachineSnapshotSpec struct {
 	// +kubebuilder:validation:Required
 	ParentSnapshotRef SnapshotParentRef `json:"parentSnapshotRef"`
 
-	// VirtualMachineName is a logical VM identifier for this demo snapshot (PR5b: identity only).
-	// +optional
-	VirtualMachineName string `json:"virtualMachineName,omitempty"`
+	// SourceRef identifies the DemoVirtualMachine captured by this snapshot.
+	// +kubebuilder:validation:Required
+	SourceRef SnapshotSourceRef `json:"sourceRef"`
 }
 
 // DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.

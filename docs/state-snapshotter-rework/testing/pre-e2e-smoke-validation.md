@@ -356,6 +356,12 @@ test -n "$DISK_ONLY_CHILDREN"
 ```shell
 for child in $DISK_ONLY_CHILDREN; do
   kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o yaml
+  kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o json \
+    | jq -e '.spec.sourceRef == {
+        "apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1",
+        "kind":"DemoVirtualDisk",
+        "name":"disk-standalone"
+      }'
 done
 ```
 
@@ -424,6 +430,12 @@ wait_snapshot_ready namespacesnapshot root-full 240
 CHILD_VM=$(child_ref_name namespacesnapshot root-full DemoVirtualMachineSnapshot)
 test -n "$CHILD_VM"
 kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o yaml
+kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o json \
+  | jq -e '.spec.sourceRef == {
+      "apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1",
+      "kind":"DemoVirtualMachine",
+      "name":"vm-1"
+    }'
 wait_snapshot_ready demovirtualmachinesnapshot "$CHILD_VM" 180
 ```
 
@@ -433,6 +445,12 @@ wait_snapshot_ready demovirtualmachinesnapshot "$CHILD_VM" 180
 CHILD_DISK=$(child_ref_name demovirtualmachinesnapshot "$CHILD_VM" DemoVirtualDiskSnapshot)
 test -n "$CHILD_DISK"
 kubectl -n "$NS" get demovirtualdisksnapshot "$CHILD_DISK" -o yaml
+kubectl -n "$NS" get demovirtualdisksnapshot "$CHILD_DISK" -o json \
+  | jq -e '.spec.sourceRef == {
+      "apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1",
+      "kind":"DemoVirtualDisk",
+      "name":"disk-vm"
+    }'
 wait_snapshot_ready demovirtualdisksnapshot "$CHILD_DISK" 180
 ```
 

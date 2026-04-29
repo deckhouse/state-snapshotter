@@ -82,6 +82,20 @@ func mapDemoDiskSnapshotToParentVM(_ context.Context, o client.Object) []reconci
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: disk.Namespace, Name: ref.Name}}}
 }
 
+func validateVMSourceRef(s *demov1alpha1.DemoVirtualMachineSnapshot) (string, error) {
+	ref := s.Spec.SourceRef
+	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
+		return "", fmt.Errorf("spec.sourceRef.apiVersion must be %q", demov1alpha1.SchemeGroupVersion.String())
+	}
+	if ref.Kind != "DemoVirtualMachine" {
+		return "", fmt.Errorf("spec.sourceRef.kind must be %q", "DemoVirtualMachine")
+	}
+	if ref.Name == "" {
+		return "", fmt.Errorf("spec.sourceRef.name is required")
+	}
+	return ref.Name, nil
+}
+
 func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("demoVirtualMachineSnapshot", req.NamespacedName)
 	ctx = log.IntoContext(ctx, logger)
@@ -115,23 +129,10 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", parentRef.APIVersion)
 	}
 
-	contentName := demoVirtualMachineSnapshotContentName(s.Namespace, s.Name)
-	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if s.Status.BoundSnapshotContentName != contentName {
-		base := s.DeepCopy()
-		s.Status.BoundSnapshotContentName = contentName
-		if err := r.Client.Status().Patch(ctx, s, client.MergeFrom(base)); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	sourceName := s.Spec.VirtualMachineName
-	if sourceName == "" {
-		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotSpecified", "demo VM snapshot source is not specified"); err != nil {
-			return ctrl.Result{}, err
+	sourceName, err := validateVMSourceRef(s)
+	if err != nil {
+		if patchErr := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidSourceRef", err.Error()); patchErr != nil {
+			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, nil
 	}
@@ -144,6 +145,19 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	contentName := demoVirtualMachineSnapshotContentName(s.Namespace, s.Name)
+	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if s.Status.BoundSnapshotContentName != contentName {
+		base := s.DeepCopy()
+		s.Status.BoundSnapshotContentName = contentName
+		if err := r.Client.Status().Patch(ctx, s, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	mcr, err := ensureDemoSnapshotManifestCaptureRequest(
@@ -288,7 +302,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 					Kind:       "DemoVirtualMachineSnapshot",
 					Name:       vm.Name,
 				},
-				PersistentVolumeClaimName: disk.Name,
+				SourceRef: demov1alpha1.SnapshotSourceRef{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       "DemoVirtualDisk",
+					Name:       disk.Name,
+				},
 			},
 		}
 		if err := r.Client.Create(ctx, child); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -305,7 +323,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 		Kind:       "DemoVirtualMachineSnapshot",
 		Name:       vm.Name,
 	}
-	child.Spec.PersistentVolumeClaimName = disk.Name
+	child.Spec.SourceRef = demov1alpha1.SnapshotSourceRef{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       "DemoVirtualDisk",
+		Name:       disk.Name,
+	}
 	if len(child.GetOwnerReferences()) == 0 {
 		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(
 			demov1alpha1.SchemeGroupVersion.String(),

@@ -87,6 +87,20 @@ func validateDiskParentRef(s *demov1alpha1.DemoVirtualDiskSnapshot) error {
 	return nil
 }
 
+func validateDiskSourceRef(s *demov1alpha1.DemoVirtualDiskSnapshot) (string, error) {
+	ref := s.Spec.SourceRef
+	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
+		return "", fmt.Errorf("spec.sourceRef.apiVersion must be %q", demov1alpha1.SchemeGroupVersion.String())
+	}
+	if ref.Kind != "DemoVirtualDisk" {
+		return "", fmt.Errorf("spec.sourceRef.kind must be %q", "DemoVirtualDisk")
+	}
+	if ref.Name == "" {
+		return "", fmt.Errorf("spec.sourceRef.name is required")
+	}
+	return ref.Name, nil
+}
+
 func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("demoVirtualDiskSnapshot", req.NamespacedName)
 	ctx = log.IntoContext(ctx, logger)
@@ -107,18 +121,10 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
-	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
-	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := patchDemoVirtualDiskSnapshotBound(ctx, r.Client, req.NamespacedName, contentName); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	sourceName := s.Spec.PersistentVolumeClaimName
-	if sourceName == "" {
-		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotSpecified", "demo disk snapshot source is not specified"); err != nil {
-			return ctrl.Result{}, err
+	sourceName, err := validateDiskSourceRef(s)
+	if err != nil {
+		if patchErr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidSourceRef", err.Error()); patchErr != nil {
+			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, nil
 	}
@@ -130,6 +136,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 			}
 			return ctrl.Result{}, nil
 		}
+		return ctrl.Result{}, err
+	}
+
+	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
+	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := patchDemoVirtualDiskSnapshotBound(ctx, r.Client, req.NamespacedName, contentName); err != nil {
 		return ctrl.Result{}, err
 	}
 

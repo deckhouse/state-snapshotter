@@ -22,3 +22,13 @@ type SnapshotParentRef struct {
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 }
+
+// SnapshotSourceRef identifies the namespace-local source object captured by a snapshot.
+type SnapshotSourceRef struct {
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}

@@ -129,7 +129,10 @@ metadata:
       name: demo-snapshot
       uid: <namespace-snapshot-uid>
 spec:
-  virtualMachineName: my-vm
+  sourceRef:
+    apiVersion: virtualization.deckhouse.io/v1alpha1
+    kind: VirtualMachine
+    name: my-vm
 ```
 
 Доменный контроллер виртуализации:
@@ -308,7 +311,7 @@ metadata:
       name: demo-snapshot
 spec:
   source:
-    persistentVolumeClaimName: standalone-pvc
+    # PVC source name omitted in this historical sketch.
   volumeSnapshotClassName: ceph-ssd-snapclass
 status:
   boundVolumeSnapshotContentName: vsc-standalone-pvc-s4t5u6
@@ -328,7 +331,7 @@ metadata:
       name: demo-snapshot
 spec:
   source:
-    persistentVolumeClaimName: data-my-sts-0
+    # PVC source name omitted in this historical sketch.
   volumeSnapshotClassName: ceph-hdd-snapclass
 status:
   boundVolumeSnapshotContentName: vsc-data-my-sts-0-v7w8x9
@@ -347,7 +350,7 @@ metadata:
       name: demo-snapshot
 spec:
   source:
-    persistentVolumeClaimName: data-my-sts-1
+    # PVC source name omitted in this historical sketch.
   volumeSnapshotClassName: ceph-hdd-snapclass
 status:
   boundVolumeSnapshotContentName: vsc-data-my-sts-1-y9z0a1

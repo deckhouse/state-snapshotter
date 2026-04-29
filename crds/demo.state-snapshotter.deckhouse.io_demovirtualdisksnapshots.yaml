@@ -61,13 +61,27 @@ spec:
                 - kind
                 - name
                 type: object
-              persistentVolumeClaimName:
-                description: 'PersistentVolumeClaimName is the PVC name in the same
-                  namespace as this snapshot (PR5a: identity only; no VolumeSnapshot/CSI
-                  wiring yet).'
-                type: string
+              sourceRef:
+                description: SourceRef identifies the DemoVirtualDisk captured by
+                  this snapshot.
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
             required:
             - parentSnapshotRef
+            - sourceRef
             type: object
           status:
             description: DemoVirtualDiskSnapshotStatus defines the observed state

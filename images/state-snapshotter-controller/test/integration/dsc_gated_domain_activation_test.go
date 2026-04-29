@@ -269,7 +269,11 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 					Kind:       "NamespaceSnapshot",
 					Name:       "manual-parent",
 				},
-				PersistentVolumeClaimName: "manual-disk",
+				SourceRef: demov1alpha1.SnapshotSourceRef{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       "DemoVirtualDisk",
+					Name:       "manual-disk",
+				},
 			},
 		})).To(Succeed())
 

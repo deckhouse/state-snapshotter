@@ -20,16 +20,16 @@ Some documents in this directory are historical design notes. Treat them as cont
 
 | Гарантирует | Пока не делает (вне PR5a) |
 |-------------|---------------------------|
-| Привязка к parent snapshot через **`spec.parentSnapshotRef`**; создание **`DemoVirtualDiskSnapshotContent`**; parent-owned публикация refs родительским controller’ом. | VolumeSnapshot/CSI и реальный data-path. |
-| Опционально в **`spec`**: **`persistentVolumeClaimName`** — имя PVC в том же namespace (только идентичность для доменной семантики «диск»; без reconcile PVC/VolumeSnapshot). | Не валидирует существование PVC в API-сервере; не пишет статус по PVC. |
+| Привязка к parent snapshot через **`spec.parentSnapshotRef`**; обязательный **`spec.sourceRef`** на namespace-local **`DemoVirtualDisk`**; создание **`DemoVirtualDiskSnapshotContent`**; parent-owned публикация refs родительским controller’ом. | VolumeSnapshot/CSI и реальный data-path. |
+| `sourceRef` описывает объект, который materializes текущий snapshot; `parentSnapshotRef` описывает только положение в дереве. | Cross-namespace source refs. |
 | **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья) имеют собственные MCP и **появляются в aggregated read**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Реальный CSI/data-path остаётся вне PR5a. |
 
 ### PR5b (минимум в коде)
 
 | Гарантирует | Пока не делает |
 |-------------|----------------|
-| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под parent NS/NSC; **`spec.virtualMachineName`** (идентификатор VM без inventory CRD); parent задаётся через **`parentSnapshotRef`**; root/VM `Ready` сходится через child aggregation. | Реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
-| **`DemoVirtualDiskSnapshot.spec.parentSnapshotRef`** — универсальная ссылка на parent snapshot-узел в namespace-local graph. VM controller создаёт disk child snapshots и сам пишет свой child graph. | Не валидирует, что у VM «достаточно» дисков. |
+| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под parent NS/NSC; обязательный **`spec.sourceRef`** на **`DemoVirtualMachine`**; parent задаётся через **`parentSnapshotRef`**; root/VM `Ready` сходится через child aggregation. | Реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
+| **`DemoVirtualDiskSnapshot.spec.parentSnapshotRef`** — универсальная ссылка на parent snapshot-узел в namespace-local graph. VM controller создаёт disk child snapshots с **`spec.sourceRef`** на соответствующий **`DemoVirtualDisk`** и сам пишет свой child graph. | Не валидирует, что у VM «достаточно» дисков. |
 
 Поставка demo CRD: манифесты в **`crds/`**; образ **`bundle`** в **`.werf/bundle.yaml`** включает каталог **`crds`** в git-стадию модуля. Факт доставки на кластер проверяется **сборкой и деплоем** модуля (CI / релизный pipeline).
 

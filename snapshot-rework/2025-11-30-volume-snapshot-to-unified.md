@@ -33,7 +33,7 @@
 При создании `VolumeSnapshot` (VS) пропатченный **snapshot-controller** выполняет следующий алгоритм:
 
 1. **Создание VCR и MCR** (параллельно):
-   - Создаёт `VolumeCaptureRequest` (VCR) с `spec.mode: Snapshot` для исходного PVC, указанного в `VS.spec.source.persistentVolumeClaimName`. Имя VCR связано с VS (например, `vcr-<vs-name>`).
+   - Создаёт `VolumeCaptureRequest` (VCR) с `spec.mode: Snapshot` для исходного PVC, указанного в source-секции `VolumeSnapshot`. Имя VCR связано с VS (например, `vcr-<vs-name>`).
    - Создаёт `ManifestCaptureRequest` (MCR) в том же namespace с таргетом на исходный PVC.
 
 2. **Ожидание завершения**:

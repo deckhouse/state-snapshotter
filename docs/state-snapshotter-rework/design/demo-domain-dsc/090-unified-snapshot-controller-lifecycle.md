@@ -21,7 +21,7 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 ## Rules
 
-**Own materialization:** each controller materializes only its own scope. Demo materialization captures the existing source domain object directly: `DemoVirtualDiskSnapshot` takes the source from `spec.persistentVolumeClaimName` and captures `DemoVirtualDisk`; `DemoVirtualMachineSnapshot` takes the source from `spec.virtualMachineName` and captures `DemoVirtualMachine`. Generic `source-*` annotations and placeholder ConfigMap payloads are not part of the target model. Parent MCPs do not contain child manifests.
+**Own materialization:** each controller materializes only its own scope. Every DSC-registered `XxxSnapshot` in the parent-owned graph carries `spec.sourceRef` (`apiVersion`, `kind`, `name`) for the namespace-local source object it captures, while `spec.parentSnapshotRef` only describes the tree parent. Demo materialization captures the existing source domain object directly: `DemoVirtualDiskSnapshot` requires `sourceRef` to `DemoVirtualDisk`; `DemoVirtualMachineSnapshot` requires `sourceRef` to `DemoVirtualMachine`. Legacy source annotations, demo-specific source fields, fallback source resolution, and placeholder ConfigMap payloads are not part of the target model. Parent MCPs do not contain child manifests.
 
 **Child snapshot creation:** parent controller creates child snapshots and owns graph edges. Child controllers do not patch parent status.
 

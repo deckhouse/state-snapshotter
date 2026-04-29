@@ -59,12 +59,27 @@ spec:
                 - kind
                 - name
                 type: object
-              virtualMachineName:
-                description: 'VirtualMachineName is a logical VM identifier for this
-                  demo snapshot (PR5b: identity only).'
-                type: string
+              sourceRef:
+                description: SourceRef identifies the DemoVirtualMachine captured
+                  by this snapshot.
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
             required:
             - parentSnapshotRef
+            - sourceRef
             type: object
           status:
             description: DemoVirtualMachineSnapshotStatus defines the observed state

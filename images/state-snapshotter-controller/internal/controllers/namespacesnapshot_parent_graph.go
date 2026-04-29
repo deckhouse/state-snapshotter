@@ -130,10 +130,14 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 						"kind":       "NamespaceSnapshot",
 						"name":       nsSnap.Name,
 					},
+					"sourceRef": map[string]interface{}{
+						"apiVersion": resourceGVK.GroupVersion().String(),
+						"kind":       resourceGVK.Kind,
+						"name":       resourceName,
+					},
 				},
 			},
 		}
-		setDemoSnapshotSourceSpec(child.Object["spec"].(map[string]interface{}), resourceGVK, resourceName)
 		child.SetGroupVersionKind(gvk)
 		child.SetOwnerReferences([]metav1.OwnerReference{{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
@@ -150,15 +154,10 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 		changed = true
 	}
 	spec, _ := child.Object["spec"].(map[string]interface{})
-	if _, ok := spec["parentSnapshotRef"]; !ok {
-		spec["parentSnapshotRef"] = map[string]interface{}{
-			"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
-			"kind":       "NamespaceSnapshot",
-			"name":       nsSnap.Name,
-		}
+	if ensureParentSnapshotRefSpec(spec, nsSnap.Name) {
 		changed = true
 	}
-	if setDemoSnapshotSourceSpec(spec, resourceGVK, resourceName) {
+	if ensureSourceRefSpec(spec, resourceGVK, resourceName) {
 		changed = true
 	}
 	if changed {
@@ -167,23 +166,32 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 	return nil
 }
 
-func setDemoSnapshotSourceSpec(spec map[string]interface{}, resourceGVK schema.GroupVersionKind, resourceName string) bool {
-	switch resourceGVK.GroupKind() {
-	case schema.GroupKind{Group: "demo.state-snapshotter.deckhouse.io", Kind: "DemoVirtualDisk"}:
-		if spec["persistentVolumeClaimName"] == resourceName {
-			return false
-		}
-		spec["persistentVolumeClaimName"] = resourceName
-		return true
-	case schema.GroupKind{Group: "demo.state-snapshotter.deckhouse.io", Kind: "DemoVirtualMachine"}:
-		if spec["virtualMachineName"] == resourceName {
-			return false
-		}
-		spec["virtualMachineName"] = resourceName
-		return true
-	default:
+func ensureParentSnapshotRefSpec(spec map[string]interface{}, nsSnapName string) bool {
+	want := map[string]interface{}{
+		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
+		"kind":       "NamespaceSnapshot",
+		"name":       nsSnapName,
+	}
+	got, _ := spec["parentSnapshotRef"].(map[string]interface{})
+	if got != nil && got["apiVersion"] == want["apiVersion"] && got["kind"] == want["kind"] && got["name"] == want["name"] {
 		return false
 	}
+	spec["parentSnapshotRef"] = want
+	return true
+}
+
+func ensureSourceRefSpec(spec map[string]interface{}, resourceGVK schema.GroupVersionKind, resourceName string) bool {
+	want := map[string]interface{}{
+		"apiVersion": resourceGVK.GroupVersion().String(),
+		"kind":       resourceGVK.Kind,
+		"name":       resourceName,
+	}
+	got, _ := spec["sourceRef"].(map[string]interface{})
+	if got != nil && got["apiVersion"] == want["apiVersion"] && got["kind"] == want["kind"] && got["name"] == want["name"] {
+		return false
+	}
+	spec["sourceRef"] = want
+	return true
 }
 
 func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotChildrenRefs(
