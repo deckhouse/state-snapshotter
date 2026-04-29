@@ -48,8 +48,11 @@
 
 ## RBAC «из DSC» в смысле эксплуатации
 
-- **Создание** Role/RoleBinding/ClusterRole для работы доменного оператора с конкретными CRD — на стороне **модуля** (Helm/hook).
-- DSC **не генерирует** RBAC; он лишь **ожидает**, что модуль выставит **`RBACReady=True`**, когда политика применена.
+- Static controller RBAC covers only core state-snapshotter resources and the standard root `NamespaceSnapshot` manifest allowlist.
+- Domain/demo resources are not part of the static production controller RBAC contract.
+- Demo controllers that live in the same binary are examples/dev controllers. Their permissions must be granted by the DSC/module RBAC path, not by generic static ClusterRole rules.
+- **Создание** Role/RoleBinding/ClusterRole для работы доменного оператора с конкретными CRD — на стороне **модуля** (Helm/hook/reconciler).
+- DSC **не генерирует** RBAC в текущей реализации; он лишь **ожидает**, что модуль выставит **`RBACReady=True`**, когда политика применена.
 - Если RBAC не готов: DSC может быть `Accepted=True`, но watch по формуле не активируется — это ожидаемо до сигнала hook.
 - Demo materialization captures existing domain objects directly (`DemoVirtualDisk`, `DemoVirtualMachine`), not placeholder ConfigMap payloads.
 - Removing synthetic marker materialization does **not** solve dynamic domain RBAC. If domain controllers lack `get/list/watch` for resources declared by DSC mappings, that is handled by the separate DSC RBAC track; do not add broad static self-grants as part of materialization cleanup.

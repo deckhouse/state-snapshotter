@@ -88,30 +88,6 @@ rules:
 # Note: Kubernetes RBAC does NOT support wildcards in resource names
 # We need to list all snapshot resource types explicitly
 
-# demo.state-snapshotter.deckhouse.io (PR5a/PR5b demo domain)
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - "demovirtualdisks"
-  - "demovirtualdisksnapshots"
-  - "demovirtualmachines"
-  - "demovirtualmachinesnapshots"
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - "demovirtualdisksnapshots/status"
-  - "demovirtualmachinesnapshots/status"
-  verbs: ["get", "update", "patch"]
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - "demovirtualdisksnapshotcontents"
-  - "demovirtualmachinesnapshotcontents"
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - "demovirtualdisksnapshotcontents/status"
-  - "demovirtualmachinesnapshotcontents/status"
-  verbs: ["get", "update", "patch"]
-
 # storage.deckhouse.io group (Snapshot, SnapshotContent, NamespaceSnapshot, NamespaceSnapshotContent)
 - apiGroups: ["storage.deckhouse.io"]
   resources:
