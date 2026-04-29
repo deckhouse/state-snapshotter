@@ -29,6 +29,8 @@
 
 **DSC-gated demo activation:** dedicated controllers для `NamespaceSnapshot*` и `DemoVirtual*Snapshot` стартуют независимо от `STATE_SNAPSHOTTER_UNIFIED_ENABLED`; graph registry built-in по умолчанию содержит только `NamespaceSnapshot`→`NamespaceSnapshotContent`. Demo VM/Disk resources входят в `NamespaceSnapshot` tree только через eligible DSC. Hot-add DSC покрыт для новых root snapshots; requeue уже существующих root после активации DSC остаётся follow-up при необходимости.
 
+**Latest pre-e2e smoke (2026-04-29):** пройден на реальном кластере с test-only domain RBAC до `RBACReady=True`. Подтверждены no-DSC root, disk-only DSC, VM+Disk DSC, `spec.sourceRef`, content tree, MCP/chunks, namespace-relative aggregated API output, negative API (`NotFound` / `BadRequest`) и cleanup с ожидаемыми retained NSC/ObjectKeeper. Не блокирует: transient `ObjectKeeper already exists` при повторном run с retained artifacts; Kubernetes warning по имени `NamespaceSnapshot` finalizer.
+
 **Для команды (одно предложение):** **E1–E6**: граф по **`children*Refs`**, E5 exclude через registry, E6 parent **`Ready`** через строгий ref + **`unstructured`**, child→parent через dynamic watches.
 
 **Критерий «сделано до M-трека»:** ядро R2/R3, D1–D3, R5, точечные integration (RBAC / eligibility) — в коде; **все тесты зелёные**, включая `go test -tags=integration ./test/integration/...`.

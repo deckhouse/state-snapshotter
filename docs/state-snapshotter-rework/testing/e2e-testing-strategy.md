@@ -62,11 +62,13 @@
 | Unit | Условия, GVK registry, `unifiedbootstrap`, `unifiedruntime` (`layers_test`, `metrics_test`, snapshot registry tests) |
 | Integration | envtest, CRD из `crds/`; **DSC:** см. ниже |
 | E2E (envtest) | Сборка manager |
-| Smoke | Реальный кластер (`./test-smoke.sh`, `hack/pr4-smoke.sh` для NamespaceSnapshot retained) |
+| Smoke | Реальный кластер: ручной pre-e2e checklist [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md), `hack/pr4-smoke.sh` для NamespaceSnapshot retained |
 
 **Integration (DSC + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются DSC reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible DSC на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync, graphRegistryRefresh)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
 
 Envtest integration не проверяет реальный Kubernetes RBAC enforcement: `RBACReady` в этих тестах симулирует handshake внешнего RBAC controller/hook. Real-cluster smoke/e2e должны явно применять test-only RBAC для domain resources до `RBACReady=True` (см. [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md)).
+
+Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain RBAC, namespace-relative aggregated API output, and expected retained NSC/ObjectKeeper artifacts after cleanup. Non-blocking findings to keep visible in reports: transient `ObjectKeeper already exists` can appear on repeated runs with retained artifacts; Kubernetes warns that the current `NamespaceSnapshot` finalizer name should include a path.
 
 **DSC-gated demo activation:** graph registry built-ins содержат только `NamespaceSnapshot`→`NamespaceSnapshotContent`. Demo VM/Disk controllers стартуют в harness всегда, но demo resources входят в `NamespaceSnapshot` tree только через eligible DSC. Integration покрывает три границы: без demo DSC нет demo children; после hot-add DSC новый `NamespaceSnapshot` создаёт demo child; manual `DemoVirtualDiskSnapshot` materializes без DSC.
 
@@ -120,6 +122,6 @@ Envtest integration не проверяет реальный Kubernetes RBAC enf
 ## Demo / remote validation
 
 - Автоматизированная проверка на кластере и подготовка окружения — по мере внедрения сценариев; не удалять диагностические тесты без замены.
-- Актуальный артефакт pre-e2e smoke (kubectl checklist, namespace-local refs, root/demo readiness): [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md) — статус `pre-e2e-passed`.
+- Актуальный артефакт pre-e2e smoke (kubectl checklist, namespace-local refs, `sourceRef`, root/demo readiness, namespace-relative aggregated API): [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md) — статус `pre-e2e-passed` на 2026-04-29.
 - Детали деплоя контроллера и линтера: `.cursor/rules/controller-redeploy-and-remote-e2e.mdc`.
 - Эксплуатация на кластере (CRD, метрики, stale, рестарт): [`../operations/runbook-degraded-and-unified-runtime.md`](../operations/runbook-degraded-and-unified-runtime.md).
