@@ -66,6 +66,8 @@
 
 **Integration (DSC + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются DSC reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible DSC на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync, graphRegistryRefresh)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
 
+Envtest integration не проверяет реальный Kubernetes RBAC enforcement: `RBACReady` в этих тестах симулирует handshake внешнего RBAC controller/hook. Real-cluster smoke/e2e должны явно применять test-only RBAC для domain resources до `RBACReady=True` (см. [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md)).
+
 **DSC-gated demo activation:** graph registry built-ins содержат только `NamespaceSnapshot`→`NamespaceSnapshotContent`. Demo VM/Disk controllers стартуют в harness всегда, но demo resources входят в `NamespaceSnapshot` tree только через eligible DSC. Integration покрывает три границы: без demo DSC нет demo children; после hot-add DSC новый `NamespaceSnapshot` создаёт demo child; manual `DemoVirtualDiskSnapshot` materializes без DSC.
 
 | Файл | Что проверяет |

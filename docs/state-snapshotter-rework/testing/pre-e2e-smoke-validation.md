@@ -149,7 +149,8 @@ child_ref_name() {
     | head -n 1
 }
 
-# If the project/environment already has a helper or hook that makes a DSC
+# Apply test-only domain RBAC before setting RBACReady=True. If the
+# project/environment already has a helper or hook that makes a DSC
 # RBACReady/eligible, use that instead. This manual status replace is only
 # a smoke fallback and preserves existing conditions such as Accepted.
 mark_dsc_rbac_ready() {
@@ -187,6 +188,61 @@ assert_source_ref() {
         .spec.sourceRef.kind == $kind and
         .spec.sourceRef.name == $name
       '
+}
+
+apply_demo_domain_rbac() {
+  local controller_namespace="${1:-d8-state-snapshotter}"
+  local controller_sa="${2:-controller}"
+  cat <<EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: state-snapshotter-smoke-demo-domain-rbac
+rules:
+- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
+  resources:
+  - demovirtualmachines
+  - demovirtualdisks
+  - demovirtualmachinesnapshots
+  - demovirtualdisksnapshots
+  - demovirtualmachinesnapshotcontents
+  - demovirtualdisksnapshotcontents
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
+  resources:
+  - demovirtualmachinesnapshots/status
+  - demovirtualdisksnapshots/status
+  - demovirtualmachinesnapshotcontents/status
+  - demovirtualdisksnapshotcontents/status
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
+  resources:
+  - demovirtualmachinesnapshots/finalizers
+  - demovirtualdisksnapshots/finalizers
+  - demovirtualmachinesnapshotcontents/finalizers
+  - demovirtualdisksnapshotcontents/finalizers
+  verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: state-snapshotter-smoke-demo-domain-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: state-snapshotter-smoke-demo-domain-rbac
+subjects:
+- kind: ServiceAccount
+  name: ${controller_sa}
+  namespace: ${controller_namespace}
+EOF
+
+  kubectl auth can-i list demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io \
+    --as="system:serviceaccount:${controller_namespace}:${controller_sa}" --all-namespaces
+  kubectl auth can-i list demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io \
+    --as="system:serviceaccount:${controller_namespace}:${controller_sa}" --all-namespaces
+  kubectl auth can-i create demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io \
+    --as="system:serviceaccount:${controller_namespace}:${controller_sa}" -n "$NS"
 }
 ```
 
@@ -303,7 +359,19 @@ kubectl get --raw \
 - response namespace-relative: у namespaced objects нет `metadata.namespace`;
 - response не содержит demo child domain objects (`DemoVirtualMachine`, `DemoVirtualDisk`), потому что demo kinds не активированы в graph registry без eligible DSC.
 
-## 7. Disk-only DSC + ownerRef filtering
+## 7. Test-only domain RBAC emulation
+
+Production target model: RBAC for domain/custom snapshot resources is granted by an external Deckhouse RBAC controller/hook. The state-snapshotter controller does not grant these permissions to itself, and static production RBAC stays domain-agnostic.
+
+In real-cluster smoke/e2e, apply explicit test-only RBAC before setting any DSC `RBACReady=True`. This emulates the external RBAC controller. Keep this RBAC applied until smoke is finished if the controller may restart; otherwise a restart can fail during cache sync on demo watches.
+
+```shell
+apply_demo_domain_rbac "$CTRL_NS" controller
+```
+
+Invariant for the rest of this smoke: `RBACReady=True` means the test-only RBAC above is already effective.
+
+## 8. Disk-only DSC + ownerRef filtering
 
 Создайте eligible DSC только для disk snapshot kind:
 
@@ -322,7 +390,7 @@ spec:
 EOF
 ```
 
-Дождитесь `Accepted=True`, затем выставьте `RBACReady=True` тем же способом, который используется в текущем окружении (hook/controller/manual patch для smoke). Manual patch должен сохранять существующие conditions, включая `Accepted`; не заменяйте массив `status.conditions` целиком.
+Дождитесь `Accepted=True`, затем выставьте `RBACReady=True` тем же способом, который используется в текущем окружении (hook/controller/manual patch для smoke). Перед этим test-only RBAC из раздела 7 уже должен быть применён. Manual patch должен сохранять существующие conditions, включая `Accepted`; не заменяйте массив `status.conditions` целиком.
 
 ```shell
 until kubectl get domainspecificsnapshotcontroller smoke-demo-disk-only -o json \
@@ -394,7 +462,7 @@ kubectl get --raw \
 
 Ожидаемо в `/tmp/root-disk-only-manifests.json` нет VM-owned `DemoVirtualDisk/disk-vm` ни как direct child subtree, ни как root MCP payload. Direct disk child MCP должен содержать `DemoVirtualDisk/disk-standalone`.
 
-## 8. VM + Disk DSC: полный parent/child graph
+## 9. VM + Disk DSC: полный parent/child graph
 
 Создайте или обновите DSC так, чтобы eligible mappings включали VM и Disk:
 
@@ -416,7 +484,7 @@ spec:
 EOF
 ```
 
-Доведите DSC до eligible состояния (`Accepted=True`, `RBACReady=True` с актуальным `observedGeneration`) тем же способом, что в предыдущем разделе:
+Доведите DSC до eligible состояния (`Accepted=True`, `RBACReady=True` с актуальным `observedGeneration`) тем же способом, что в предыдущем разделе. Test-only RBAC из раздела 7 должен оставаться применённым до конца smoke:
 
 ```shell
 until kubectl get domainspecificsnapshotcontroller smoke-demo-vm-disk -o json \
@@ -513,7 +581,7 @@ kubectl get demovirtualdisksnapshotcontent "$DISK_CONTENT" -o json \
 - content objects с children имеют `status.childrenSnapshotContentRefs`;
 - не проверяйте `Content Ready=True`, если конкретный content CRD этого не гарантирует.
 
-## 9. Aggregated read API checks
+## 10. Aggregated read API checks
 
 Duplicate identity в namespace-relative aggregated output is checked as:
 
@@ -588,7 +656,7 @@ kubectl get --raw \
 - не содержит VM parent subtree;
 - не содержит root-level namespace-scoped objects such as `ConfigMap/smoke-cm`.
 
-## 10. Negative generic API checks
+## 11. Negative generic API checks
 
 Для `kubectl get --raw` проверяйте Kubernetes Status `reason`; команда вернёт non-zero на error response. Если нужен HTTP status, используйте `curl` к Kubernetes API server с kubeconfig client cert из раздела 0.
 
@@ -618,7 +686,7 @@ grep -q '"reason"[[:space:]]*:[[:space:]]*"BadRequest"' /tmp/bad-request-respons
 
 Duplicate `409 Conflict` можно оставить optional/manual-hard, если нет удобного ручного способа создать duplicate MCP contents.
 
-## 11. Cleanup
+## 12. Cleanup
 
 ```shell
 kubectl -n "$NS" delete namespacesnapshot root-no-dsc --ignore-not-found --wait=false
@@ -632,6 +700,14 @@ kubectl delete ns "$NS" --wait=false
 ```
 
 Cleanup не должен требовать, чтобы вообще ничего не осталось. Текущая Retain/ObjectKeeper модель может намеренно оставлять cluster-scoped artifacts.
+
+Test-only RBAC из раздела 7 можно удалить только после завершения smoke и финальной проверки controller logs. Если controller может рестартовать сразу после smoke, оставьте RBAC применённым до появления внешнего RBAC controller/hook.
+
+```shell
+# Optional after final log checks:
+kubectl delete clusterrolebinding state-snapshotter-smoke-demo-domain-rbac --ignore-not-found
+kubectl delete clusterrole state-snapshotter-smoke-demo-domain-rbac --ignore-not-found
+```
 
 Проверьте:
 
@@ -656,6 +732,7 @@ kubectl logs -n "$CTRL_NS" deploy/"$CTRL_DEPLOY" --tail=500 \
 - CRD установлены.
 - Schema `childrenSnapshotRefs` не содержит `namespace`.
 - Без DSC `NamespaceSnapshot` готов и не создаёт demo children.
+- Test-only domain RBAC applied before `RBACReady=True`; controller remains restart-safe during smoke.
 - Disk-only DSC: VM-owned disk не становится direct root child и не протекает в root aggregated read; standalone disk становится top-level child.
 - VM+Disk DSC: root создаёт VM child, VM создаёт disk child, generated names получены через refs.
 - Generated child snapshots have correct `spec.sourceRef`.
