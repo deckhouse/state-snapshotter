@@ -44,15 +44,18 @@
 
 Путаница часто возникает, потому что оба объекта «про модуль» и «про снимки», но **DSC — реестр типов для unified контроллера**, а **MCR — операция захвата**, живущая в другом контуре (см. D1 «manifest line» в [`../README.md`](../README.md)).
 
+MCR остаётся строго namespaced capture request: все targets должны быть namespaced resources в namespace MCR. Cluster-scoped resources, включая Kubernetes `Namespace`, не захватываются через MCR. Empty MCR допустим и создаёт empty MCP (0 objects), что используется для пустого root `NamespaceSnapshot` own scope.
+
 ---
 
 ## RBAC «из DSC» в смысле эксплуатации
 
-- Static controller RBAC covers only core state-snapshotter resources and the standard root `NamespaceSnapshot` manifest allowlist.
+- Static controller RBAC covers only core state-snapshotter resources, MCR/MCP/chunks, `NamespaceSnapshot` / `NamespaceSnapshotContent`, ObjectKeeper, and the standard root `NamespaceSnapshot` manifest allowlist.
 - Domain/demo resources are not part of the static production controller RBAC contract.
 - Demo controllers that live in the same binary are examples/dev controllers. Their permissions must be granted by the DSC/module RBAC path, not by generic static ClusterRole rules.
 - **Создание** Role/RoleBinding/ClusterRole для работы доменного оператора с конкретными CRD — на стороне **модуля** (Helm/hook/reconciler).
 - DSC **не генерирует** RBAC в текущей реализации; он лишь **ожидает**, что модуль выставит **`RBACReady=True`**, когда политика применена.
+- В текущем спринте тесты/smoke сами создают нужные Role/RoleBinding для demo/domain resources, и только после этого выставляют `RBACReady=True`.
 - Если RBAC не готов: DSC может быть `Accepted=True`, но watch по формуле не активируется — это ожидаемо до сигнала hook.
 - Demo materialization captures existing domain objects directly (`DemoVirtualDisk`, `DemoVirtualMachine`), not placeholder ConfigMap payloads.
 - Removing synthetic marker materialization does **not** solve dynamic domain RBAC. If domain controllers lack `get/list/watch` for resources declared by DSC mappings, that is handled by the separate DSC RBAC track; do not add broad static self-grants as part of materialization cleanup.

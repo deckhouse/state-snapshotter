@@ -93,7 +93,7 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, 
 func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootNSC(ctx context.Context, rootNSC string) ([]byte, error) {
 	visited := make(map[string]struct{})
 	seenKeys := make(map[string]struct{})
-	var objects []map[string]interface{}
+	objects := make([]map[string]interface{}, 0)
 	if err := s.walkNSC(ctx, rootNSC, visited, &objects, seenKeys); err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromContent(ctx contex
 
 	visited := make(map[string]struct{})
 	seenKeys := make(map[string]struct{})
-	var objects []map[string]interface{}
+	objects := make([]map[string]interface{}, 0)
 	if err := s.walkDedicatedContent(ctx, contentGVK, contentName, u, reg, visited, &objects, seenKeys); err != nil {
 		return nil, err
 	}
@@ -377,9 +377,24 @@ func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(
 				fmt.Sprintf("duplicate object detected in snapshot tree: %s", key))
 		}
 		seenKeys[key] = struct{}{}
+		if !makeAggregatedObjectNamespaceRelative(obj) {
+			continue
+		}
 		*objects = append(*objects, obj)
 	}
 	return nil
+}
+
+func makeAggregatedObjectNamespaceRelative(obj map[string]interface{}) bool {
+	meta, ok := obj["metadata"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if ns, _ := meta["namespace"].(string); ns == "" {
+		return false
+	}
+	delete(meta, "namespace")
+	return true
 }
 
 func aggregatedObjectIdentityKey(obj map[string]interface{}) (string, error) {

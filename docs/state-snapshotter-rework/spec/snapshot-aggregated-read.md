@@ -50,6 +50,8 @@ Snapshot
 
 For each visited content node, the usecase reads `status.manifestCheckpointName`, loads the referenced `ManifestCheckpoint` archive, appends its objects to the response, and then follows `status.childrenSnapshotContentRefs`.
 
+Every materialized content node MUST have an MCP. The MCP MAY contain zero objects; an empty root own scope is represented by an empty MCP, not by a missing `manifestCheckpointName`.
+
 Traversal MUST NOT rediscover the tree by listing resources in a namespace. Controllers materialize the graph and publish refs; aggregated read only consumes the saved graph.
 
 ## Duplicate Objects
@@ -66,12 +68,13 @@ The HTTP surface for duplicate object identity is `409 Conflict`.
 
 ## Identity Requirements
 
-Aggregated read returns Kubernetes object manifests from MCP archives. Every returned top-level object MUST have:
+Aggregated read returns namespace-relative Kubernetes object manifests from MCP archives. Every returned top-level object MUST have:
 
 - `apiVersion`;
 - `kind`;
 - `metadata.name`;
-- `metadata.namespace` when the object is namespaced.
+
+Aggregated output MUST omit `metadata.namespace` for namespaced objects so the manifest can be applied into the target namespace with `kubectl -n <target> apply -f ...`. Cluster-scoped objects MUST NOT be returned by aggregated read. MCP storage may still keep the original namespace for identity, dedup, and audit.
 
 Synthetic/demo marker objects without stable identity MUST NOT be used as materialized restore manifests. Demo snapshot controllers materialize source domain objects directly (`DemoVirtualDisk`, `DemoVirtualMachine`) so aggregated output uses normal Kubernetes object identity.
 

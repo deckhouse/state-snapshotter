@@ -123,11 +123,6 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 				"metadata": map[string]interface{}{
 					"name":      name,
 					"namespace": nsSnap.Namespace,
-					"annotations": map[string]interface{}{
-						sourceAPIVersionAnnotation: resourceGVK.GroupVersion().String(),
-						sourceKindAnnotation:       resourceGVK.Kind,
-						sourceNameAnnotation:       resourceName,
-					},
 				},
 				"spec": map[string]interface{}{
 					"parentSnapshotRef": map[string]interface{}{
@@ -138,6 +133,7 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 				},
 			},
 		}
+		setDemoSnapshotSourceSpec(child.Object["spec"].(map[string]interface{}), resourceGVK, resourceName)
 		child.SetGroupVersionKind(gvk)
 		child.SetOwnerReferences([]metav1.OwnerReference{{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
@@ -149,19 +145,6 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 	}
 	base := child.DeepCopy()
 	changed := false
-	annotations := child.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	if annotations[sourceAPIVersionAnnotation] != resourceGVK.GroupVersion().String() ||
-		annotations[sourceKindAnnotation] != resourceGVK.Kind ||
-		annotations[sourceNameAnnotation] != resourceName {
-		annotations[sourceAPIVersionAnnotation] = resourceGVK.GroupVersion().String()
-		annotations[sourceKindAnnotation] = resourceGVK.Kind
-		annotations[sourceNameAnnotation] = resourceName
-		child.SetAnnotations(annotations)
-		changed = true
-	}
 	if child.Object["spec"] == nil {
 		child.Object["spec"] = map[string]interface{}{}
 		changed = true
@@ -175,10 +158,32 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 		}
 		changed = true
 	}
+	if setDemoSnapshotSourceSpec(spec, resourceGVK, resourceName) {
+		changed = true
+	}
 	if changed {
 		return r.Client.Patch(ctx, child, client.MergeFrom(base))
 	}
 	return nil
+}
+
+func setDemoSnapshotSourceSpec(spec map[string]interface{}, resourceGVK schema.GroupVersionKind, resourceName string) bool {
+	switch resourceGVK.GroupKind() {
+	case schema.GroupKind{Group: "demo.state-snapshotter.deckhouse.io", Kind: "DemoVirtualDisk"}:
+		if spec["persistentVolumeClaimName"] == resourceName {
+			return false
+		}
+		spec["persistentVolumeClaimName"] = resourceName
+		return true
+	case schema.GroupKind{Group: "demo.state-snapshotter.deckhouse.io", Kind: "DemoVirtualMachine"}:
+		if spec["virtualMachineName"] == resourceName {
+			return false
+		}
+		spec["virtualMachineName"] = resourceName
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotChildrenRefs(

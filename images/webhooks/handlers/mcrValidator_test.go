@@ -183,44 +183,7 @@ func TestMCRValidate_RejectClusterScopedResource(t *testing.T) {
 	}
 }
 
-func TestMCRValidate_AllowsNamespaceTargetForNamespaceSnapshotBoundMCR(t *testing.T) {
-	ctx := context.Background()
-
-	mockClient := fake.NewSimpleClientset()
-	setDiscoveryResources(mockClient, metav1.APIResource{Name: "namespaces", Kind: "Namespace", Namespaced: false})
-	SetKubernetesClient(mockClient)
-	SetDynamicClient(newFakeDynamicClient(map[string]map[string]runtime.Object{}))
-
-	result, err := MCRValidate(ctx, testCreateAdmissionReview(), namespaceSnapshotBoundMCR("default", "default"))
-	if err != nil {
-		t.Fatalf("MCRValidate returned error: %v", err)
-	}
-	if !result.Valid {
-		t.Fatalf("Expected NamespaceSnapshot-bound Namespace target to be valid, got: %s", result.Message)
-	}
-}
-
-func TestMCRValidate_RejectsNamespaceTargetForDifferentNamespace(t *testing.T) {
-	ctx := context.Background()
-
-	mockClient := fake.NewSimpleClientset()
-	setDiscoveryResources(mockClient, metav1.APIResource{Name: "namespaces", Kind: "Namespace", Namespaced: false})
-	SetKubernetesClient(mockClient)
-	SetDynamicClient(newFakeDynamicClient(map[string]map[string]runtime.Object{}))
-
-	result, err := MCRValidate(ctx, testCreateAdmissionReview(), namespaceSnapshotBoundMCR("default", "other"))
-	if err != nil {
-		t.Fatalf("MCRValidate returned error: %v", err)
-	}
-	if result.Valid {
-		t.Fatal("Expected Namespace target with name != MCR namespace to be rejected")
-	}
-	if !contains(result.Message, "cluster-scoped") {
-		t.Fatalf("Expected cluster-scoped rejection, got: %s", result.Message)
-	}
-}
-
-func TestMCRValidate_RejectsNamespaceTargetForOrdinaryMCR(t *testing.T) {
+func TestMCRValidate_RejectsNamespaceTarget(t *testing.T) {
 	ctx := context.Background()
 
 	mockClient := fake.NewSimpleClientset()
@@ -230,7 +193,7 @@ func TestMCRValidate_RejectsNamespaceTargetForOrdinaryMCR(t *testing.T) {
 
 	mcr := &storagev1alpha1.ManifestCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mcr-ordinary",
+			Name:      "mcr-namespace",
 			Namespace: "default",
 		},
 		Spec: storagev1alpha1.ManifestCaptureRequestSpec{
@@ -246,33 +209,7 @@ func TestMCRValidate_RejectsNamespaceTargetForOrdinaryMCR(t *testing.T) {
 		t.Fatalf("MCRValidate returned error: %v", err)
 	}
 	if result.Valid {
-		t.Fatal("Expected ordinary MCR Namespace target to be rejected")
-	}
-	if !contains(result.Message, "cluster-scoped") {
-		t.Fatalf("Expected cluster-scoped rejection, got: %s", result.Message)
-	}
-}
-
-func TestMCRValidate_RejectsOtherClusterScopedTargetForNamespaceSnapshotBoundMCR(t *testing.T) {
-	ctx := context.Background()
-
-	mockClient := fake.NewSimpleClientset()
-	setDiscoveryResources(mockClient, metav1.APIResource{Name: "nodes", Kind: "Node", Namespaced: false})
-	SetKubernetesClient(mockClient)
-	SetDynamicClient(newFakeDynamicClient(map[string]map[string]runtime.Object{}))
-
-	mcr := namespaceSnapshotBoundMCR("default", "default")
-	mcr.Spec.Targets[0] = storagev1alpha1.ManifestTarget{
-		APIVersion: "v1",
-		Kind:       "Node",
-		Name:       "node-a",
-	}
-	result, err := MCRValidate(ctx, testCreateAdmissionReview(), mcr)
-	if err != nil {
-		t.Fatalf("MCRValidate returned error: %v", err)
-	}
-	if result.Valid {
-		t.Fatal("Expected non-Namespace cluster-scoped target to be rejected")
+		t.Fatal("Expected Namespace target to be rejected")
 	}
 	if !contains(result.Message, "cluster-scoped") {
 		t.Fatalf("Expected cluster-scoped rejection, got: %s", result.Message)
@@ -425,7 +362,7 @@ func TestMCRValidate_RejectSecretInDifferentNamespace(t *testing.T) {
 	}
 }
 
-func TestMCRValidate_EmptyTargets(t *testing.T) {
+func TestMCRValidate_AllowsEmptyTargets(t *testing.T) {
 	ctx := context.Background()
 
 	mockClient := fake.NewSimpleClientset()
@@ -455,13 +392,8 @@ func TestMCRValidate_EmptyTargets(t *testing.T) {
 		t.Fatalf("MCRValidate returned error: %v", err)
 	}
 
-	if result.Valid {
-		t.Error("Expected MCR to be rejected (empty targets), but it was accepted")
-	}
-
-	expectedMsg := "At least one target must be specified"
-	if result.Message != expectedMsg {
-		t.Errorf("Expected error message %q, but got: %s", expectedMsg, result.Message)
+	if !result.Valid {
+		t.Errorf("Expected MCR with empty targets to be valid, got: %s", result.Message)
 	}
 }
 
@@ -633,30 +565,6 @@ func testCreateAdmissionReview() *model.AdmissionReview {
 		UserInfo: authenticationv1.UserInfo{
 			Username: "test-user",
 			Groups:   []string{"system:authenticated"},
-		},
-	}
-}
-
-func namespaceSnapshotBoundMCR(namespace, targetName string) *storagev1alpha1.ManifestCaptureRequest {
-	return &storagev1alpha1.ManifestCaptureRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mcr-ns-bound",
-			Namespace: namespace,
-			Annotations: map[string]string{
-				boundNamespaceSnapshotContentAnnotation: "ns-content",
-			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: namespaceSnapshotAPIVersion,
-				Kind:       namespaceSnapshotKind,
-				Name:       "root",
-			}},
-		},
-		Spec: storagev1alpha1.ManifestCaptureRequestSpec{
-			Targets: []storagev1alpha1.ManifestTarget{{
-				APIVersion: "v1",
-				Kind:       "Namespace",
-				Name:       targetName,
-			}},
 		},
 	}
 }

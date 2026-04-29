@@ -118,7 +118,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
-	It("captures Kubernetes Namespace when there are no allowlisted namespaced resources", func() {
+	It("reaches Ready with empty MCP when there are no allowlisted namespaced resources", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -145,7 +145,6 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
-		var mcpName string
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
@@ -158,10 +157,11 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			sc := &storagev1alpha1.NamespaceSnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
 			g.Expect(sc.Status.ManifestCheckpointName).NotTo(BeEmpty())
-			mcpName = sc.Status.ManifestCheckpointName
+			contentReady := meta.FindStatusCondition(sc.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(contentReady).NotTo(BeNil())
+			g.Expect(contentReady.Status).To(Equal(metav1.ConditionTrue))
+			objects := integrationArchiveObjectsFromMCP(ctx, sc.Status.ManifestCheckpointName)
+			g.Expect(objects).To(BeEmpty())
 		}).WithTimeout(60 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
-
-		objects := integrationArchiveObjectsFromMCP(ctx, mcpName)
-		Expect(integrationObjectsContainKindName(objects, "Namespace", nsName)).To(BeTrue())
 	})
 })

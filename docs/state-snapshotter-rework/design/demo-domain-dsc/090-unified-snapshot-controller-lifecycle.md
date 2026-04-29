@@ -21,7 +21,7 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 ## Rules
 
-**Own materialization:** each controller materializes only its own scope. Demo materialization captures the existing source domain object directly: `DemoVirtualDiskSnapshot` captures `DemoVirtualDisk`, and `DemoVirtualMachineSnapshot` captures `DemoVirtualMachine`. Placeholder ConfigMap payloads are not part of the target model. Parent MCPs do not contain child manifests.
+**Own materialization:** each controller materializes only its own scope. Demo materialization captures the existing source domain object directly: `DemoVirtualDiskSnapshot` takes the source from `spec.persistentVolumeClaimName` and captures `DemoVirtualDisk`; `DemoVirtualMachineSnapshot` takes the source from `spec.virtualMachineName` and captures `DemoVirtualMachine`. Generic `source-*` annotations and placeholder ConfigMap payloads are not part of the target model. Parent MCPs do not contain child manifests.
 
 **Child snapshot creation:** parent controller creates child snapshots and owns graph edges. Child controllers do not patch parent status.
 
@@ -35,7 +35,7 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 **VM:** `DemoVirtualMachineSnapshotController` owns VM-level materialization and creates disk child snapshots for disk resources. Its own MCP contains the source `DemoVirtualMachine`; VM-owned disks are delegated to child `DemoVirtualDiskSnapshot` nodes.
 
-**Namespace:** `NamespaceSnapshotController` owns namespace-level materialization. Its minimal own manifest is the Kubernetes `Namespace` object named by the resolved target namespace. Currently resolved target namespace = `NamespaceSnapshot.metadata.namespace`; a future cluster-scoped `NamespaceSnapshot` may resolve it from `spec.targetNamespace`. The `NamespaceSnapshot` CR remains namespaced for now and this change does not add `spec.namespace` / `spec.targetNamespace`. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
+**Namespace:** `NamespaceSnapshotController` owns namespace-level materialization for namespace-scoped allowlist resources only. It does not capture the cluster-scoped Kubernetes `Namespace` object. Empty own scope is represented by an empty MCP with `status.manifestCheckpointName` set. The `NamespaceSnapshot` CR remains namespaced; resolved target namespace is `NamespaceSnapshot.metadata.namespace`, and this change does not add `spec.namespace` / `spec.targetNamespace`. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
 
 **E5 exclude:** root capture excludes objects already present in descendant content-node MCPs, including dedicated `XxxSnapshotContent` nodes reached through `childrenSnapshotContentRefs`.
 
@@ -50,6 +50,6 @@ Aggregated read is generic traversal over the content graph. The normative API, 
 - Parent owns child graph edges.
 - Child owns only its own snapshot, content, MCR/MCP, and `Ready`.
 - Aggregated read is the only place where parent and child MCPs are combined.
-- `manifestCheckpointName` is required for materialized content traversal.
+- `manifestCheckpointName` is required for materialized content traversal; empty scope is represented by an empty MCP.
 - `NamespaceSnapshot` differs only by DSC-based discovery, not by special root semantics.
 - Generic/usecase code remains domain-agnostic.

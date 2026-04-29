@@ -46,7 +46,7 @@
 
 ### 4.1 NamespaceSnapshot (черновик полей)
 
-**Scope:** namespaced root — зафиксировано в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md). На текущем этапе resolved target namespace совпадает с `metadata.namespace` объекта `NamespaceSnapshot`; будущий cluster-scoped `NamespaceSnapshot` может резолвить его из `spec.targetNamespace`.
+**Scope:** namespaced root — зафиксировано в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md). Resolved target namespace совпадает с `metadata.namespace` объекта `NamespaceSnapshot`; `NamespaceSnapshot` остаётся namespaced built-in snapshot type.
 
 **Spec (логически):**
 
@@ -348,7 +348,7 @@
 - **N2a — download одного снимка:** отдаёт **только** манифесты **этого** root/content (один MCP / его chunks), **без** дочерних snapshot и без data payloads.
 - **N2b — aggregated download:** отдаёт манифесты **parent + subtree** (обход по **`childrenSnapshotContentRefs`** / согласованному graph), **только манифесты**, **без** data payloads.
 - **Материализация:** каждый content-node пишет свой **`status.manifestCheckpointName`** на MCP собственного scope. Parent MCP **не** содержит child manifests; дочерние MCP участвуют в E5 exclude и в aggregated read только через content graph.
-- **Минимальный own scope `NamespaceSnapshot`:** Kubernetes **`Namespace`** с именем resolved target namespace всегда включается в root MCR/MCP. Сейчас resolved target namespace = **`NamespaceSnapshot.metadata.namespace`**; будущий cluster-scoped `NamespaceSnapshot` может резолвить его из **`spec.targetNamespace`**. `NamespaceSnapshot` остаётся namespaced в этом изменении; **`spec.namespace`** / **`spec.targetNamespace`** не добавляются. MCR executor обязан читать этот cluster-scoped target без namespace.
+- **Own scope `NamespaceSnapshot`:** root MCR/MCP содержит только namespace-scoped allowlist resources. Kubernetes **`Namespace`** object не захватывается. Если после exclude root own scope пустой, создаётся empty MCP (0 objects), а `NamespaceSnapshotContent.status.manifestCheckpointName` всё равно заполняется.
 - **Read-path:** для N2a и N2b по умолчанию **не** хранить отдельный заранее собранный архив в etcd/storage; **read-only агрегация на чтении** из существующих **MCP + chunks** (склейка через `ArchiveService` или эквивалент). Предматериализованный артефакт — только если отдельное ADR/этап.
 
 #### 8.7.1 Практика API и ошибок (N2a, текущий код)

@@ -19,11 +19,10 @@ package namespacemanifest
 import "fmt"
 
 // ManifestTargetDedupKey matches aggregated manifest identity (apiVersion|kind|namespace|name).
-// NamespaceSnapshot captures mostly namespaced targets, plus cluster-scoped targets such as
-// the Kubernetes Namespace object itself.
+// NamespaceSnapshot root capture is namespaced-only; snapshotNamespace is the target namespace.
 func ManifestTargetDedupKey(snapshotNamespace string, t ManifestTarget) string {
 	ns := snapshotNamespace
-	if IsClusterScopedManifestTarget(t) || ns == "" {
+	if ns == "" {
 		ns = "_cluster"
 	}
 	return fmt.Sprintf("%s|%s|%s|%s", t.APIVersion, t.Kind, ns, t.Name)

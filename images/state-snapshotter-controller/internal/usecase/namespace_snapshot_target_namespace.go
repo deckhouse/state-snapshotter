@@ -21,9 +21,7 @@ import storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alp
 // ResolveNamespaceSnapshotTargetNamespace is the single place that maps a NamespaceSnapshot
 // object to the Kubernetes namespace being captured.
 //
-// Current API: NamespaceSnapshot is namespaced, so the resolved target namespace is metadata.namespace.
-// Future API: a cluster-scoped NamespaceSnapshot can switch this to spec.targetNamespace without
-// changing callers that need the target namespace.
+// NamespaceSnapshot is namespaced, so the resolved target namespace is metadata.namespace.
 func ResolveNamespaceSnapshotTargetNamespace(nsSnap *storagev1alpha1.NamespaceSnapshot) string {
 	if nsSnap == nil {
 		return ""

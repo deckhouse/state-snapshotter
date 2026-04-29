@@ -326,7 +326,8 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		rootObjects := integrationArchiveObjectsFromMCP(testCtx, rootMCPName)
-		Expect(integrationObjectsContainKindName(rootObjects, "Namespace", nsName)).To(BeTrue(), "root own MCP should include the Kubernetes Namespace manifest")
+		Expect(integrationObjectsContainKindName(rootObjects, "Namespace", nsName)).To(BeFalse(), "root own MCP must not include the Kubernetes Namespace manifest")
+		Expect(integrationObjectsContainKindName(rootObjects, "ConfigMap", "pr5b-cm")).To(BeTrue(), "root own MCP should include namespace-scoped allowlist manifests")
 		Expect(integrationObjectsContainKind(rootObjects, "DemoVirtualMachine")).To(BeFalse(), "root own MCP must not include VM child domain manifests")
 		Expect(integrationObjectsContainKind(rootObjects, "DemoVirtualDisk")).To(BeFalse(), "root own MCP must not include disk child domain manifests")
 
@@ -339,7 +340,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Expect(integrationObjectsContainKind(diskObjects, "DemoVirtualMachine")).To(BeFalse(), "disk own MCP must not include ancestor manifests")
 
 		rootAggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootNSC)
-		Expect(integrationObjectsContainKindName(rootAggregated, "Namespace", nsName)).To(BeTrue())
+		Expect(integrationObjectsContainKindName(rootAggregated, "Namespace", nsName)).To(BeFalse())
 		Expect(integrationObjectsContainKindName(rootAggregated, "DemoVirtualMachine", "demo-vm-1")).To(BeTrue())
 		Expect(integrationObjectsContainKindName(rootAggregated, "DemoVirtualDisk", "demo-disk-1")).To(BeTrue())
 

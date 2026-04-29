@@ -195,6 +195,13 @@ func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
 	if len(arr) != 1 {
 		t.Fatalf("len=%d", len(arr))
 	}
+	meta, ok := arr[0]["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("object missing metadata: %#v", arr[0])
+	}
+	if _, ok := meta["namespace"]; ok {
+		t.Fatalf("aggregated output must be namespace-relative, got metadata %#v", meta)
+	}
 }
 
 func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
@@ -206,6 +213,7 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 
 	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "a", "namespace": "ns1"}},
+		{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]interface{}{"name": "ns1"}},
 	})
 	ch := aggManifestCreateChunk("ch0", "mcp-root", d1, c1)
 	_ = cl.Create(context.Background(), ch)

@@ -48,7 +48,7 @@ rules:
 # ManifestCheckpointContentChunk (cluster-scoped)
 - apiGroups: ["state-snapshotter.deckhouse.io"]
   resources: ["manifestcheckpointcontentchunks"]
-  verbs: ["create", "get", "delete"]
+  verbs: ["create", "get", "list", "watch", "delete"]
 
 # ObjectKeeper (cluster-scoped) - created by this controller for lifecycle management
 # ObjectKeeper is used in FollowObject mode to manage ManifestCheckpoint lifecycle
@@ -61,14 +61,37 @@ rules:
 - apiGroups: [""]
   resources: ["namespaces"]
   verbs: ["get", "list", "watch"]
-# Allow controller-runtime to watch configmaps (needed for informer cache)
+
+# NamespaceSnapshot root capture allowlist (read-only)
 - apiGroups: [""]
-  resources: ["configmaps"]
+  resources:
+  - "pods"
+  - "services"
+  - "configmaps"
+  - "secrets"
+  - "serviceaccounts"
+  - "persistentvolumeclaims"
   verbs: ["get", "list", "watch"]
-# Core Kubernetes resources (temporary wide permissions)
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources:
+  - "deployments"
+  - "statefulsets"
+  - "daemonsets"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources:
+  - "jobs"
+  - "cronjobs"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources:
+  - "ingresses"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources:
+  - "roles"
+  - "rolebindings"
+  verbs: ["get", "list", "watch"]
 
 # API Server permissions (for /manifests subresource)
 # Only 'get' permission needed - no list/watch (no informer cache)
@@ -103,19 +126,6 @@ rules:
   - "snapshotcontents/status"
   - "namespacesnapshots/status"
   - "namespacesnapshotcontents/status"
-  verbs: ["get", "update", "patch"]
-
-# snapshot.internal.virtualization.deckhouse.io group (InternalVirtualizationVirtualMachineSnapshot, etc.)
-- apiGroups: ["snapshot.internal.virtualization.deckhouse.io"]
-  resources:
-  - "internalvirtualizationvirtualmachinesnapshots"      # InternalVirtualizationVirtualMachineSnapshot kind
-  - "internalvirtualizationvirtualmachinesnapshotcontents" # InternalVirtualizationVirtualMachineSnapshotContent kind
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-# Unified Snapshots status subresources for snapshot.internal.virtualization.deckhouse.io
-- apiGroups: ["snapshot.internal.virtualization.deckhouse.io"]
-  resources:
-  - "internalvirtualizationvirtualmachinesnapshots/status"
-  - "internalvirtualizationvirtualmachinesnapshotcontents/status"
   verbs: ["get", "update", "patch"]
 
 ---

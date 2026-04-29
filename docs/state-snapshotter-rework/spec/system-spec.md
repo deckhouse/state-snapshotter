@@ -78,8 +78,8 @@
 
 - **MUST:** own materialization scope каждого domain controller ограничен ресурсами, принадлежащими текущему domain object, плюс явно разрешёнными root/namespace-level ресурсами. Если resource имеет **`ownerReferences`** и они указывают на другой domain object, controller **MUST NOT** включать такой resource в свой own MCR; он должен быть покрыт child snapshot или fallback namespace-level логикой.
 - **MUST:** child graph delegation имеет приоритет над own scope: resource, вынесенный в child snapshot subtree, не должен дублироваться в own MCR родителя.
-- **MUST:** каждый materialized content-node имеет собственный **`status.manifestCheckpointName`** на MCP только своего own scope; parent MCP **MUST NOT** служить контейнером всего subtree. Объединение parent + child MCP выполняется только на read-path по **`childrenSnapshotContentRefs`**.
-- **MUST:** own scope **`NamespaceSnapshot`** всегда включает cluster-scoped Kubernetes **`Namespace`** с именем resolved target namespace. Сейчас resolved target namespace = **`NamespaceSnapshot.metadata.namespace`**; будущий cluster-scoped `NamespaceSnapshot` может резолвить его из **`spec.targetNamespace`**. В этом изменении `NamespaceSnapshot` остаётся namespaced; **`spec.namespace`** / **`spec.targetNamespace`** не вводятся.
+- **MUST:** каждый materialized content-node имеет собственный **`status.manifestCheckpointName`** на MCP только своего own scope; parent MCP **MUST NOT** служить контейнером всего subtree. MCP **может быть пустым** (0 objects), если own scope после exclude пустой. Объединение parent + child MCP выполняется только на read-path по **`childrenSnapshotContentRefs`**.
+- **MUST:** own scope **`NamespaceSnapshot`** состоит только из namespace-scoped resources из root allowlist. **`NamespaceSnapshot`** остаётся namespaced built-in snapshot type, не регистрируется через DSC/CSD, и **не** захватывает cluster-scoped Kubernetes **`Namespace`** object. Resolved target namespace = **`NamespaceSnapshot.metadata.namespace`**; **`spec.namespace`** / **`spec.targetNamespace`** не вводятся.
 
 ### §3.3. Удаление элемента из refs
 

@@ -50,7 +50,7 @@ var (
 )
 
 // BuildRootNamespaceManifestCaptureTargets builds NamespaceSnapshot own targets for the resolved
-// target namespace: the Kubernetes Namespace object plus namespace allowlist targets, then, when the root NamespaceSnapshot has
+// target namespace: namespace-scoped allowlist targets, then, when the root NamespaceSnapshot has
 // status.childrenSnapshotRefs, subtracts manifest objects already captured in descendant content-node
 // ManifestCheckpoints reachable only via that ref graph.
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
@@ -59,8 +59,8 @@ var (
 // registry may be stale vs RESTMapper (CRD appeared after last DSC reconcile). Child snapshot refs carry
 // explicit apiVersion/kind/name (strict); subtree traversal still uses the registry for snapshot↔content mapping.
 //
-// When status.childrenSnapshotRefs is empty, behavior matches N2a root capture: Namespace object
-// plus full namespace allowlist without subtree exclude.
+// When status.childrenSnapshotRefs is empty, behavior matches N2a root capture: full
+// namespace-scoped allowlist without subtree exclude.
 //
 // While childrenSnapshotRefs is non-empty, descendant content nodes reached from the root must publish
 // a Ready ManifestCheckpoint before exclude keys are derived; otherwise ErrSubtreeManifestCapturePending.
@@ -92,7 +92,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 		return nil, err
 	}
 	filtered := namespacemanifest.FilterManifestTargets(base, excl, targetNamespace)
-	return namespacemanifest.EnsureNamespaceManifestTarget(filtered, targetNamespace), nil
+	return filtered, nil
 }
 
 func collectRunSubtreeManifestExcludeKeys(

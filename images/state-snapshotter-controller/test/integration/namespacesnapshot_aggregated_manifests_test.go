@@ -183,18 +183,20 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 		var arr []map[string]interface{}
 		Expect(json.Unmarshal(body, &arr)).To(Succeed())
 		Expect(arr).NotTo(BeEmpty())
-		var foundNamespace bool
+		var foundConfigMap bool
 		for _, obj := range arr {
-			if obj["kind"] != "Namespace" {
+			if obj["kind"] != "ConfigMap" {
 				continue
 			}
 			meta, ok := obj["metadata"].(map[string]interface{})
-			if ok && meta["name"] == nsName {
-				foundNamespace = true
+			Expect(ok).To(BeTrue())
+			Expect(meta).NotTo(HaveKey("namespace"), "aggregated output must be namespace-relative")
+			if ok && meta["name"] == "cm1" {
+				foundConfigMap = true
 				break
 			}
 		}
-		Expect(foundNamespace).To(BeTrue(), "NamespaceSnapshot own MCP should include the Kubernetes Namespace manifest")
+		Expect(foundConfigMap).To(BeTrue(), "NamespaceSnapshot own MCP should include namespace-scoped allowlist manifests")
 	})
 
 	It("returns aggregated manifests for parent + one manual child NSC (disjoint MCP objects)", func() {

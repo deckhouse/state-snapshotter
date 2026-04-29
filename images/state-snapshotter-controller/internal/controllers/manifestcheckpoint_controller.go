@@ -202,26 +202,6 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 	}
 
-	// Validate targets: a generic MCR with no targets is invalid. NamespaceSnapshot-bound capture should
-	// normally include the Kubernetes Namespace target; this branch remains defensive for older/partial MCRs.
-	if len(mcr.Spec.Targets) == 0 {
-		boundNSC := ""
-		if mcr.Annotations != nil {
-			boundNSC = mcr.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent]
-		}
-		if boundNSC == "" {
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, "No targets specified"); err != nil {
-				if errors.IsNotFound(err) {
-					return ctrl.Result{}, nil
-				}
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
-		}
-		r.Logger.Info("ManifestCaptureRequest has zero targets for NamespaceSnapshot-bound capture; creating empty checkpoint for compatibility",
-			"mcr", client.ObjectKeyFromObject(mcr).String(), "boundNamespaceSnapshotContent", boundNSC)
-	}
-
 	// Collect all target objects
 	// Note: NotFound errors from collectTargetObjects are always from target objects, not related objects.
 	// Related objects (ConfigMaps, Secrets from volumes) are collected in collectRelatedObjects,
@@ -625,8 +605,7 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	}
 
 	// Step 1: Collect target objects (TZ section 5, step 1).
-	// Most targets are namespaced in the same namespace as ManifestCaptureRequest.
-	// Kubernetes Namespace is the cluster-scoped anchor for NamespaceSnapshot own scope.
+	// MCR targets are namespaced in the same namespace as ManifestCaptureRequest.
 	for _, target := range mcr.Spec.Targets {
 		gv, err := schema.ParseGroupVersion(target.APIVersion)
 		if err != nil {
@@ -640,11 +619,8 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			Kind:    target.Kind,
 		})
 		obj.SetName(target.Name)
-		key := client.ObjectKey{Name: target.Name}
-		if !manifestCaptureTargetIsClusterScoped(target) {
-			key.Namespace = mcr.Namespace
-			obj.SetNamespace(mcr.Namespace)
-		}
+		key := client.ObjectKey{Namespace: mcr.Namespace, Name: target.Name}
+		obj.SetNamespace(mcr.Namespace)
 
 		if err := r.Get(ctx, key, obj); err != nil {
 			// Preserve original error for IsNotFound check in caller
@@ -661,9 +637,7 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		// collectRelatedObjects now uses addObject directly, so filtering is applied
 		// Collect related objects (ConfigMaps, Secrets, etc.)
 		// Errors are ignored - continue even if related objects collection fails
-		if !manifestCaptureTargetIsClusterScoped(target) {
-			r.collectRelatedObjects(ctx, obj, mcr.Namespace, addObject)
-		}
+		r.collectRelatedObjects(ctx, obj, mcr.Namespace, addObject)
 	}
 
 	// Step 4: Sort objects (TZ section 5, step 4)
@@ -671,12 +645,6 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	r.sortObjects(objects)
 
 	return objects, nil
-}
-
-func manifestCaptureTargetIsClusterScoped(target storagev1alpha1.ManifestTarget) bool {
-	// Minimal cluster-scoped support for NamespaceSnapshot own scope.
-	// Future: replace with RESTMapper/discovery-based scope resolution.
-	return target.APIVersion == "v1" && target.Kind == "Namespace"
 }
 
 // collectRelatedObjects recursively collects ConfigMaps, Secrets, and volumeClaimTemplates (TZ section 5, step 2)

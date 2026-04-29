@@ -87,18 +87,18 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 	})
 
 	Describe("collectTargetObjects", func() {
-		It("should read cluster-scoped Kubernetes Namespace targets", func() {
+		It("should resolve targets in the ManifestCaptureRequest namespace", func() {
 			ctx := context.Background()
-			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}}
-			Expect(baseClient.Create(ctx, ns)).To(Succeed())
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: "ns1"}}
+			Expect(baseClient.Create(ctx, cm)).To(Succeed())
 
 			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "mcr-namespace", Namespace: "ns1"},
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-configmap", Namespace: "ns1"},
 				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
 					Targets: []storagev1alpha1.ManifestTarget{{
 						APIVersion: "v1",
-						Kind:       "Namespace",
-						Name:       "ns1",
+						Kind:       "ConfigMap",
+						Name:       "cm1",
 					}},
 				},
 			}
@@ -106,9 +106,9 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			objects, err := ctrl.collectTargetObjects(ctx, mcr)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(objects).To(HaveLen(1))
-			Expect(objects[0].GetKind()).To(Equal("Namespace"))
-			Expect(objects[0].GetName()).To(Equal("ns1"))
-			Expect(objects[0].GetNamespace()).To(BeEmpty())
+			Expect(objects[0].GetKind()).To(Equal("ConfigMap"))
+			Expect(objects[0].GetName()).To(Equal("cm1"))
+			Expect(objects[0].GetNamespace()).To(Equal("ns1"))
 		})
 	})
 
@@ -1457,34 +1457,6 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 
-		It("sets Failed without entering Processing for invalid spec", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "bad",
-					Namespace: "default",
-				},
-				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
-					Targets: []storagev1alpha1.ManifestTarget{}, // Empty targets
-				},
-			}
-			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
-
-			_, err := reconciler.Reconcile(ctx, controllerruntime.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      mcr.Name,
-					Namespace: mcr.Namespace,
-				},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			updated := &storagev1alpha1.ManifestCaptureRequest{}
-			Expect(k8sClient.Get(ctx, ctrlclient.ObjectKeyFromObject(mcr), updated)).To(Succeed())
-
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
-			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
-		})
 	})
 
 	Describe("isTerminal semantics", func() {

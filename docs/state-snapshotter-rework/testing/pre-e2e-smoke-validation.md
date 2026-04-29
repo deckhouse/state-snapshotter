@@ -258,10 +258,10 @@ kubectl get manifestcheckpoint "$ROOT_NO_DSC_MCP" -o yaml
 
 - `NamespaceSnapshot/root-no-dsc` имеет `Ready=True Completed`;
 - `status.boundSnapshotContentName` установлен;
-- `NamespaceSnapshotContent.status.manifestCheckpointName` установлен;
+- `NamespaceSnapshotContent.status.manifestCheckpointName` всегда установлен;
+- если root own scope пустой, MCP существует и содержит `0` objects;
 - `childrenSnapshotRefs` пустой, потому что demo kinds не активированы в graph registry без eligible DSC.
-
-Если flow застрял на validation `v1/Namespace` target, проверьте temporary NamespaceSnapshot-bound MCR webhook exception: текущий namespaced `NamespaceSnapshot` root capture временно разрешает Kubernetes `Namespace` target только для controller-created MCR с internal marker.
+- root MCR не содержит `v1/Namespace`; cluster-scoped targets в MCR запрещены.
 
 ```shell
 kubectl -n "$NS" get namespacesnapshot root-no-dsc -o json \
@@ -279,7 +279,9 @@ kubectl get --raw \
 
 Ожидаемо:
 
-- response содержит root scope (например `ConfigMap/smoke-cm` и/или Kubernetes `Namespace`, в зависимости от текущего root MCP);
+- response содержит root scope namespace-scoped allowlist objects (например `ConfigMap/smoke-cm`, `ServiceAccount/default`, RBAC objects);
+- response не содержит Kubernetes `Namespace` object;
+- response namespace-relative: у namespaced objects нет `metadata.namespace`;
 - response не содержит demo child domain objects (`DemoVirtualMachine`, `DemoVirtualDisk`), потому что demo kinds не активированы в graph registry без eligible DSC.
 
 ## 7. Disk-only DSC + ownerRef filtering
@@ -496,7 +498,7 @@ kubectl get --raw \
 
 Ожидаемо:
 
-- response содержит root scope (`ConfigMap/smoke-cm` и/или `Namespace`, по текущему root MCP);
+- response содержит root scope namespace-scoped objects (`ConfigMap/smoke-cm`, RBAC smoke artifacts, etc.);
 - response содержит VM subtree: `DemoVirtualMachine/vm-1`;
 - response содержит disk subtree для VM-owned disk: `DemoVirtualDisk/disk-vm`;
 - response может содержать standalone disk subtree: `DemoVirtualDisk/disk-standalone`, если standalone disk есть direct root child;
@@ -511,7 +513,6 @@ jq -r '
   | [
       (.apiVersion // ""),
       (.kind // ""),
-      (.metadata.namespace // ""),
       (.metadata.name // "")
     ]
   | @tsv
@@ -533,7 +534,7 @@ kubectl get --raw \
 
 - содержит `DemoVirtualMachine/vm-1`;
 - содержит VM-owned `DemoVirtualDisk/disk-vm`;
-- не содержит root-level `ConfigMap/smoke-cm` / Kubernetes `Namespace`;
+- не содержит root-level namespace-scoped objects such as `ConfigMap/smoke-cm`;
 - не содержит standalone disk subtree.
 
 ### 9.3 Disk subtree
@@ -549,7 +550,7 @@ kubectl get --raw \
 
 - содержит только `DemoVirtualDisk/disk-vm`;
 - не содержит VM parent subtree;
-- не содержит root-level `ConfigMap/smoke-cm` / Kubernetes `Namespace`.
+- не содержит root-level namespace-scoped objects such as `ConfigMap/smoke-cm`.
 
 ## 10. Negative generic API checks
 

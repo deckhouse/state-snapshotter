@@ -70,7 +70,7 @@ Integration coverage:
 - VM+Disk DSC keeps disk under VM subtree, not directly under root;
 - child degradation is reflected by parent;
 - aggregated read returns root and child subtree manifests;
-- root own MCP contains the Namespace object and excludes child MCP objects;
+- root own MCP contains only namespace-scoped allowlist objects and excludes child MCP objects;
 - read from dedicated content returns only that node and descendants;
 - child controller does not patch parent graph.
 

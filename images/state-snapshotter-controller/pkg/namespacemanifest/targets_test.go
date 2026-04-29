@@ -25,7 +25,7 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 )
 
-func TestBuildManifestCaptureTargets_AlwaysIncludesNamespace(t *testing.T) {
+func TestBuildManifestCaptureTargets_EmptyNamespaceHasNoTargets(t *testing.T) {
 	listKinds := make(map[schema.GroupVersionResource]string, len(n2aNamespacedGVR))
 	for _, gvr := range n2aNamespacedGVR {
 		listKinds[gvr] = gvr.Resource + "List"
@@ -36,10 +36,7 @@ func TestBuildManifestCaptureTargets_AlwaysIncludesNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildManifestCaptureTargets: %v", err)
 	}
-	for _, target := range targets {
-		if target == NamespaceManifestTarget("ns1") {
-			return
-		}
+	if len(targets) != 0 {
+		t.Fatalf("expected no targets in empty namespace, got %#v", targets)
 	}
-	t.Fatalf("expected Namespace target in %#v", targets)
 }

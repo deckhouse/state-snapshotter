@@ -26,35 +26,6 @@ func TestManifestTargetDedupKey(t *testing.T) {
 	}
 }
 
-func TestManifestTargetDedupKey_NamespaceIsClusterScoped(t *testing.T) {
-	k := ManifestTargetDedupKey("ns1", NamespaceManifestTarget("ns1"))
-	want := "v1|Namespace|_cluster|ns1"
-	if k != want {
-		t.Fatalf("got %q want %q", k, want)
-	}
-}
-
-func TestEnsureNamespaceManifestTarget_ReaddsFilteredNamespace(t *testing.T) {
-	out := EnsureNamespaceManifestTarget([]ManifestTarget{
-		{APIVersion: "v1", Kind: "ConfigMap", Name: "cm"},
-	}, "ns1")
-	if len(out) != 2 {
-		t.Fatalf("len %d", len(out))
-	}
-	got := map[ManifestTarget]bool{}
-	for _, target := range out {
-		got[target] = true
-	}
-	for _, want := range []ManifestTarget{
-		{APIVersion: "v1", Kind: "ConfigMap", Name: "cm"},
-		NamespaceManifestTarget("ns1"),
-	} {
-		if !got[want] {
-			t.Fatalf("expected target %#v in %#v", want, out)
-		}
-	}
-}
-
 func TestFilterManifestTargets_EmptyExcludePreservesOrder(t *testing.T) {
 	base := []ManifestTarget{
 		{APIVersion: "v1", Kind: "ConfigMap", Name: "b"},

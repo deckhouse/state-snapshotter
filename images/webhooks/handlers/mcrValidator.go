@@ -36,15 +36,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
-const (
-	// boundNamespaceSnapshotContentAnnotation is an internal marker used only by
-	// the current NamespaceSnapshot root-capture path. It is not a public API
-	// contract and should be replaced by an explicit system/root capture contract.
-	boundNamespaceSnapshotContentAnnotation = "state-snapshotter.deckhouse.io/bound-namespace-snapshot-content"
-	namespaceSnapshotAPIVersion             = "storage.deckhouse.io/v1alpha1"
-	namespaceSnapshotKind                   = "NamespaceSnapshot"
-)
-
 // MCRValidate validates ManifestCaptureRequest by checking if the user who creates/updates the MCR
 // has GET permissions for all target resources specified in the request.
 // This ensures that users can only request backup of resources they have permission to read.
@@ -60,14 +51,6 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 	// Skip validation for delete operations
 	if mcr.DeletionTimestamp != nil || arReview.Operation == model.OperationDelete {
 		return &kwhvalidating.ValidatorResult{Valid: true}, nil
-	}
-
-	// Validate that targets are not empty
-	if len(mcr.Spec.Targets) == 0 {
-		return &kwhvalidating.ValidatorResult{
-			Valid:   false,
-			Message: "At least one target must be specified",
-		}, nil
 	}
 
 	// Validate that namespace is set (MCR is namespaced)
@@ -129,13 +112,9 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 			}, nil
 		}
 
-		// Check if resource is namespaced. NamespaceSnapshot-bound MCRs are the only
-		// flow allowed to capture the cluster-scoped Namespace object that anchors
-		// root NamespaceSnapshot materialization.
+		// Check if resource is namespaced. MCR is a namespaced capture request and
+		// must not capture cluster-scoped resources.
 		if !resourceInfo.Namespaced {
-			if isAllowedNamespaceSnapshotNamespaceTarget(mcr, target, resourceInfo) {
-				continue
-			}
 			return &kwhvalidating.ValidatorResult{
 				Valid:   false,
 				Message: fmt.Sprintf("Target %d: resource %s/%s is cluster-scoped and cannot be captured", i, target.APIVersion, target.Kind),
@@ -222,30 +201,6 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 	}
 
 	return &kwhvalidating.ValidatorResult{Valid: true}, nil
-}
-
-// TODO(ns-snapshot-cluster-scoped): This is a temporary bridge for the current
-// namespaced NamespaceSnapshot root-capture path. It uses an internal annotation
-// plus ownerRef to distinguish controller-created MCRs from user MCRs.
-// Do not extend this exception to other cluster-scoped resources.
-// When NamespaceSnapshot becomes cluster-scoped, replace this with an explicit
-// system/root capture contract or remove MCR from Namespace root capture path.
-func isAllowedNamespaceSnapshotNamespaceTarget(mcr *storagev1alpha1.ManifestCaptureRequest, target storagev1alpha1.ManifestTarget, resourceInfo *resourceInfo) bool {
-	if target.APIVersion != "v1" || target.Kind != "Namespace" || resourceInfo.Name != "namespaces" {
-		return false
-	}
-	if target.Name != mcr.Namespace {
-		return false
-	}
-	if mcr.Annotations[boundNamespaceSnapshotContentAnnotation] == "" {
-		return false
-	}
-	for _, ref := range mcr.OwnerReferences {
-		if ref.APIVersion == namespaceSnapshotAPIVersion && ref.Kind == namespaceSnapshotKind {
-			return true
-		}
-	}
-	return false
 }
 
 // resourceInfo contains information about a Kubernetes resource from Discovery API

@@ -167,10 +167,9 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		rootContent := &storagev1alpha1.NamespaceSnapshotContent{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootContentName}, rootContent)).To(Succeed())
 		Expect(rootContent.Status.ChildrenSnapshotContentRefs).To(BeEmpty())
-		Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
-
+		Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty(), "root own capture always materializes an MCP, even when empty")
 		rootObjects := integrationArchiveObjectsFromMCP(testCtx, rootContent.Status.ManifestCheckpointName)
-		Expect(integrationObjectsContainKindName(rootObjects, "DemoVirtualDisk", "disk-vm")).To(BeFalse(), "root own MCP must not include VM-owned disk resource")
+		Expect(rootObjects).To(BeEmpty(), "root own MCP should be empty when no namespace-scoped allowlist objects remain")
 
 		aggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootContentName)
 		Expect(integrationObjectsContainKind(aggregated, "DemoVirtualDisk")).To(BeFalse())

@@ -220,14 +220,6 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		}
 		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}
-	if len(targets) == 0 {
-		freshParent := &storagev1alpha1.NamespaceSnapshot{}
-		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
-			return ctrl.Result{}, gerr
-		}
-		return r.failCapture(ctx, freshParent, content, "NoCaptureTargets", "root capture produced no targets; this indicates a bug because the Kubernetes Namespace target must always be present")
-	}
-
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
 		if errors.Is(err, errManifestCapturePlanDrift) {
@@ -418,7 +410,7 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 				Type:               snapshot.ConditionReady,
 				Status:             metav1.ConditionTrue,
 				Reason:             snapshot.ReasonCompleted,
-				Message:            fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s)", mcpName),
+				Message:            namespaceSnapshotReadyMessage(mcpName),
 				ObservedGeneration: cur.Generation,
 			})
 			return r.Client.Status().Update(ctx, cur)
@@ -434,6 +426,10 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func namespaceSnapshotReadyMessage(mcpName string) string {
+	return fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s)", mcpName)
 }
 
 func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent, reason, msg string) (ctrl.Result, error) {

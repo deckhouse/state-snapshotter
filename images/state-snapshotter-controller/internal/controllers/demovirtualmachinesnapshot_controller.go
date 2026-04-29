@@ -128,7 +128,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		}
 	}
 
-	sourceName := demoSnapshotSourceName(s, s.Spec.VirtualMachineName)
+	sourceName := s.Spec.VirtualMachineName
 	if sourceName == "" {
 		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotSpecified", "demo VM snapshot source is not specified"); err != nil {
 			return ctrl.Result{}, err
@@ -275,11 +275,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      childName,
 				Namespace: vm.Namespace,
-				Annotations: map[string]string{
-					sourceAPIVersionAnnotation: demov1alpha1.SchemeGroupVersion.String(),
-					sourceKindAnnotation:       "DemoVirtualDisk",
-					sourceNameAnnotation:       disk.Name,
-				},
 				OwnerReferences: []metav1.OwnerReference{demoSnapshotOwnerReference(
 					demov1alpha1.SchemeGroupVersion.String(),
 					"DemoVirtualMachineSnapshot",
@@ -293,6 +288,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 					Kind:       "DemoVirtualMachineSnapshot",
 					Name:       vm.Name,
 				},
+				PersistentVolumeClaimName: disk.Name,
 			},
 		}
 		if err := r.Client.Create(ctx, child); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -304,19 +300,12 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 		return err
 	}
 	base := child.DeepCopy()
-	annotations := child.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	annotations[sourceAPIVersionAnnotation] = demov1alpha1.SchemeGroupVersion.String()
-	annotations[sourceKindAnnotation] = "DemoVirtualDisk"
-	annotations[sourceNameAnnotation] = disk.Name
-	child.SetAnnotations(annotations)
 	child.Spec.ParentSnapshotRef = demov1alpha1.SnapshotParentRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       "DemoVirtualMachineSnapshot",
 		Name:       vm.Name,
 	}
+	child.Spec.PersistentVolumeClaimName = disk.Name
 	if len(child.GetOwnerReferences()) == 0 {
 		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(
 			demov1alpha1.SchemeGroupVersion.String(),

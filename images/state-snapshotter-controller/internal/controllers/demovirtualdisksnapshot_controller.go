@@ -115,7 +115,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
-	sourceName := demoSnapshotSourceName(s, s.Spec.PersistentVolumeClaimName)
+	sourceName := s.Spec.PersistentVolumeClaimName
 	if sourceName == "" {
 		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotSpecified", "demo disk snapshot source is not specified"); err != nil {
 			return ctrl.Result{}, err
@@ -170,15 +170,6 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
-}
-
-func demoSnapshotSourceName(obj client.Object, fallback string) string {
-	if annotations := obj.GetAnnotations(); annotations != nil {
-		if name := annotations[sourceNameAnnotation]; name != "" {
-			return name
-		}
-	}
-	return fallback
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *demov1alpha1.DemoVirtualDiskSnapshot, contentName string) error {
