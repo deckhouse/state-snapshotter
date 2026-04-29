@@ -5,7 +5,7 @@
 Цель проверки — не совпадение generated names, а модель:
 
 ```text
-DSC -> snapshot graph -> MCP -> aggregated read
+DSC -> snapshot graph -> sourceRef -> MCP -> aggregated read
 ```
 
 Все имена child snapshots получайте из `status.childrenSnapshotRefs`. Не используйте фиксированные имена вроде `DemoVirtualMachineSnapshot/vm-1` или `DemoVirtualDiskSnapshot/disk-vm`.
@@ -154,20 +154,39 @@ child_ref_name() {
 # a smoke fallback and preserves existing conditions such as Accepted.
 mark_dsc_rbac_ready() {
   local name="$1"
-  local gen
+  local gen now
   gen=$(kubectl get domainspecificsnapshotcontroller "$name" -o jsonpath='{.metadata.generation}')
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   kubectl get domainspecificsnapshotcontroller "$name" -o json \
-    | jq --argjson gen "$gen" '
+    | jq --argjson gen "$gen" --arg now "$now" '
         .status.conditions =
           ((.status.conditions // []) | map(select(.type != "RBACReady")) + [{
             "type": "RBACReady",
             "status": "True",
             "reason": "Smoke",
             "message": "manual smoke approval",
+            "lastTransitionTime": $now,
             "observedGeneration": $gen
           }])
       ' \
     | kubectl replace --subresource=status -f -
+}
+
+assert_source_ref() {
+  local kind="$1"
+  local name="$2"
+  local api_version="$3"
+  local source_kind="$4"
+  local source_name="$5"
+  kubectl -n "$NS" get "$kind" "$name" -o json \
+    | jq -e \
+      --arg apiVersion "$api_version" \
+      --arg kind "$source_kind" \
+      --arg name "$source_name" '
+        .spec.sourceRef.apiVersion == $apiVersion and
+        .spec.sourceRef.kind == $kind and
+        .spec.sourceRef.name == $name
+      '
 }
 ```
 
@@ -356,12 +375,11 @@ test -n "$DISK_ONLY_CHILDREN"
 ```shell
 for child in $DISK_ONLY_CHILDREN; do
   kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o yaml
-  kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o json \
-    | jq -e '.spec.sourceRef == {
-        "apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1",
-        "kind":"DemoVirtualDisk",
-        "name":"disk-standalone"
-      }'
+  assert_source_ref \
+    demovirtualdisksnapshot "$child" \
+    demo.state-snapshotter.deckhouse.io/v1alpha1 \
+    DemoVirtualDisk \
+    disk-standalone
 done
 ```
 
@@ -430,12 +448,11 @@ wait_snapshot_ready namespacesnapshot root-full 240
 CHILD_VM=$(child_ref_name namespacesnapshot root-full DemoVirtualMachineSnapshot)
 test -n "$CHILD_VM"
 kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o yaml
-kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o json \
-  | jq -e '.spec.sourceRef == {
-      "apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1",
-      "kind":"DemoVirtualMachine",
-      "name":"vm-1"
-    }'
+assert_source_ref \
+  demovirtualmachinesnapshot "$CHILD_VM" \
+  demo.state-snapshotter.deckhouse.io/v1alpha1 \
+  DemoVirtualMachine \
+  vm-1
 wait_snapshot_ready demovirtualmachinesnapshot "$CHILD_VM" 180
 ```
 
@@ -445,12 +462,11 @@ wait_snapshot_ready demovirtualmachinesnapshot "$CHILD_VM" 180
 CHILD_DISK=$(child_ref_name demovirtualmachinesnapshot "$CHILD_VM" DemoVirtualDiskSnapshot)
 test -n "$CHILD_DISK"
 kubectl -n "$NS" get demovirtualdisksnapshot "$CHILD_DISK" -o yaml
-kubectl -n "$NS" get demovirtualdisksnapshot "$CHILD_DISK" -o json \
-  | jq -e '.spec.sourceRef == {
-      "apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1",
-      "kind":"DemoVirtualDisk",
-      "name":"disk-vm"
-    }'
+assert_source_ref \
+  demovirtualdisksnapshot "$CHILD_DISK" \
+  demo.state-snapshotter.deckhouse.io/v1alpha1 \
+  DemoVirtualDisk \
+  disk-vm
 wait_snapshot_ready demovirtualdisksnapshot "$CHILD_DISK" 180
 ```
 
@@ -499,11 +515,13 @@ kubectl get demovirtualdisksnapshotcontent "$DISK_CONTENT" -o json \
 
 ## 9. Aggregated read API checks
 
-Duplicate identity в aggregated read — это:
+Duplicate identity в namespace-relative aggregated output is checked as:
 
 ```text
-apiVersion | kind | namespace | name
+apiVersion | kind | name
 ```
+
+MCP storage may keep namespace for internal identity, but API output strips `metadata.namespace`.
 
 ### 9.1 Root full
 
@@ -640,6 +658,7 @@ kubectl logs -n "$CTRL_NS" deploy/"$CTRL_DEPLOY" --tail=500 \
 - Без DSC `NamespaceSnapshot` готов и не создаёт demo children.
 - Disk-only DSC: VM-owned disk не становится direct root child и не протекает в root aggregated read; standalone disk становится top-level child.
 - VM+Disk DSC: root создаёт VM child, VM создаёт disk child, generated names получены через refs.
+- Generated child snapshots have correct `spec.sourceRef`.
 - Aggregated read работает для root / VM subtree / Disk subtree.
 - Negative generic API checks возвращают ожидаемые HTTP code и Kubernetes Status `reason`.
 - Cleanup не оставляет stuck finalizers/Terminating без объяснения.
