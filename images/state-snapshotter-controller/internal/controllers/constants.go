@@ -16,6 +16,13 @@ limitations under the License.
 
 package controllers
 
+const (
+	KindDemoVirtualDiskSnapshot    = "DemoVirtualDiskSnapshot"
+	KindDemoVirtualMachineSnapshot = "DemoVirtualMachineSnapshot"
+	KindDemoVirtualDisk            = "DemoVirtualDisk"
+	KindDemoVirtualMachine         = "DemoVirtualMachine"
+)
+
 // API constants for ObjectKeeper
 const (
 	// DeckhouseAPIVersion is the API version for deckhouse.io resources (ObjectKeeper)

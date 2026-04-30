@@ -73,9 +73,9 @@ func validateDiskParentRef(s *demov1alpha1.DemoVirtualDiskSnapshot) error {
 		if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
 			return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", ref.APIVersion)
 		}
-	case "DemoVirtualMachineSnapshot":
+	case KindDemoVirtualMachineSnapshot:
 		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
-			return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for DemoVirtualMachineSnapshot parent", ref.APIVersion)
+			return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for %s parent", ref.APIVersion, KindDemoVirtualMachineSnapshot)
 		}
 	default:
 		return fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported", ref.Kind)
@@ -88,8 +88,8 @@ func validateDiskSourceRef(s *demov1alpha1.DemoVirtualDiskSnapshot) (string, err
 	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
 		return "", fmt.Errorf("spec.sourceRef.apiVersion must be %q", demov1alpha1.SchemeGroupVersion.String())
 	}
-	if ref.Kind != "DemoVirtualDisk" {
-		return "", fmt.Errorf("spec.sourceRef.kind must be %q", "DemoVirtualDisk")
+	if ref.Kind != KindDemoVirtualDisk {
+		return "", fmt.Errorf("spec.sourceRef.kind must be %q", KindDemoVirtualDisk)
 	}
 	if ref.Name == "" {
 		return "", fmt.Errorf("spec.sourceRef.name is required")
@@ -103,12 +103,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 
 	s := &demov1alpha1.DemoVirtualDiskSnapshot{}
 	if err := r.Client.Get(ctx, req.NamespacedName, s); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, nil
 	}
 
+	// Deletion is handled by higher-level lifecycle (no finalizers here).
+	// This controller is materialization-only.
 	if s.DeletionTimestamp != nil {
 		return ctrl.Result{}, nil
 	}
@@ -129,13 +131,13 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 	source := &demov1alpha1.DemoVirtualDisk{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
-		if apierrors.IsNotFound(err) {
-			if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotFound", fmt.Sprintf("DemoVirtualDisk %q not found", sourceName)); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
+		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotFound", fmt.Sprintf("%s %q not found", KindDemoVirtualDisk, sourceName)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
@@ -151,11 +153,11 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		r.Client,
 		s.Namespace,
 		s.Name,
-		"DemoVirtualDiskSnapshot",
+		KindDemoVirtualDiskSnapshot,
 		demov1alpha1.SchemeGroupVersion.String(),
-		"DemoVirtualDisk",
+		KindDemoVirtualDisk,
 		source.Name,
-		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), "DemoVirtualDiskSnapshot", s.Name, s.UID),
+		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualDiskSnapshot, s.Name, s.UID),
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -199,12 +201,15 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Co
 	// this child controller owns the content status and MCP link, while parent
 	// graph/content refs are written by the parent controller under the current
 	// Retain/ObjectKeeper lifecycle model.
+	// We intentionally do not use controllerutil.CreateOrUpdate here.
+	// This controller owns only a subset of fields and must avoid
+	// accidental overwrites of fields owned by other controllers.
 	content := &demov1alpha1.DemoVirtualDiskSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: contentName},
 		Spec: demov1alpha1.DemoVirtualDiskSnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       "DemoVirtualDiskSnapshot",
+				Kind:       KindDemoVirtualDiskSnapshot,
 				Name:       snap.Name,
 				Namespace:  snap.Namespace,
 				UID:        snap.UID,

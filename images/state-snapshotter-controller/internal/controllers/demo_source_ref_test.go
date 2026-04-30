@@ -60,7 +60,7 @@ func TestDemoVirtualDiskSnapshot_InvalidParentRefDoesNotCreateContentOrMCR(t *te
 					ParentSnapshotRef: tt.parentRef,
 					SourceRef: demov1alpha1.SnapshotSourceRef{
 						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-						Kind:       "DemoVirtualDisk",
+						Kind:       KindDemoVirtualDisk,
 						Name:       "disk-a",
 					},
 				},
@@ -93,7 +93,7 @@ func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) 
 			name: "wrong kind",
 			sourceRef: demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       "DemoVirtualMachine",
+				Kind:       KindDemoVirtualMachine,
 				Name:       "disk-a",
 			},
 		},
@@ -138,7 +138,7 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 			},
 			SourceRef: demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       "DemoVirtualDisk",
+				Kind:       KindDemoVirtualDisk,
 				Name:       "missing-disk",
 			},
 		},
@@ -172,7 +172,7 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       "DemoVirtualDisk",
+					Kind:       KindDemoVirtualDisk,
 					Name:       "disk-a",
 				},
 			},
@@ -190,14 +190,14 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
 		t.Fatalf("expected content %q: %v", contentName, err)
 	}
-	mcrName := demoSnapshotManifestCaptureRequestName("DemoVirtualDiskSnapshot", "ns1", "snap")
+	mcrName := demoSnapshotManifestCaptureRequestName(KindDemoVirtualDiskSnapshot, "ns1", "snap")
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
 		t.Fatalf("expected MCR %q: %v", mcrName, err)
 	}
 	expectedTargets := []ssv1alpha1.ManifestTarget{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       "DemoVirtualDisk",
+		Kind:       KindDemoVirtualDisk,
 		Name:       "disk-a",
 	}}
 	if !equality.Semantic.DeepEqual(mcr.Spec.Targets, expectedTargets) {
@@ -263,7 +263,7 @@ func TestDemoVirtualMachineSnapshot_InvalidParentRefDoesNotCreateContentMCROrChi
 			name: "wrong kind",
 			parentRef: demov1alpha1.SnapshotParentRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       "DemoVirtualMachineSnapshot",
+				Kind:       KindDemoVirtualMachineSnapshot,
 				Name:       "parent-vm",
 			},
 		},
@@ -276,7 +276,7 @@ func TestDemoVirtualMachineSnapshot_InvalidParentRefDoesNotCreateContentMCROrChi
 					ParentSnapshotRef: tt.parentRef,
 					SourceRef: demov1alpha1.SnapshotSourceRef{
 						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-						Kind:       "DemoVirtualMachine",
+						Kind:       KindDemoVirtualMachine,
 						Name:       "vm-a",
 					},
 				},
@@ -310,7 +310,7 @@ func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChi
 			name: "wrong kind",
 			sourceRef: demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       "DemoVirtualDisk",
+				Kind:       KindDemoVirtualDisk,
 				Name:       "vm-a",
 			},
 		},
@@ -356,7 +356,7 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 			},
 			SourceRef: demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       "DemoVirtualMachine",
+				Kind:       KindDemoVirtualMachine,
 				Name:       "missing-vm",
 			},
 		},
@@ -391,7 +391,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 				Namespace: "ns1",
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       "DemoVirtualMachine",
+					Kind:       KindDemoVirtualMachine,
 					Name:       "vm-a",
 					UID:        vmUID,
 				}},
@@ -410,7 +410,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       "DemoVirtualMachine",
+					Kind:       KindDemoVirtualMachine,
 					Name:       "vm-a",
 				},
 			},
@@ -428,14 +428,14 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {
 		t.Fatalf("expected VM content %q: %v", vmContentName, err)
 	}
-	mcrName := demoSnapshotManifestCaptureRequestName("DemoVirtualMachineSnapshot", "ns1", "snap")
+	mcrName := demoSnapshotManifestCaptureRequestName(KindDemoVirtualMachineSnapshot, "ns1", "snap")
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
 		t.Fatalf("expected VM MCR %q: %v", mcrName, err)
 	}
 	expectedTargets := []ssv1alpha1.ManifestTarget{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       "DemoVirtualMachine",
+		Kind:       KindDemoVirtualMachine,
 		Name:       "vm-a",
 	}}
 	if !equality.Semantic.DeepEqual(mcr.Spec.Targets, expectedTargets) {
@@ -481,7 +481,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}
 	if child.Spec.SourceRef != (demov1alpha1.SnapshotSourceRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       "DemoVirtualDisk",
+		Kind:       KindDemoVirtualDisk,
 		Name:       "disk-owned",
 	}) {
 		t.Fatalf("unexpected child sourceRef: %#v", child.Spec.SourceRef)
@@ -496,7 +496,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	vmSnap := getDemoVMSnapshot(t, cl, "ns1", "snap")
 	if !namespaceSnapshotChildRefsEqualIgnoreOrder(vmSnap.Status.ChildrenSnapshotRefs, []storagev1alpha1.NamespaceSnapshotChildRef{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       "DemoVirtualDiskSnapshot",
+		Kind:       KindDemoVirtualDiskSnapshot,
 		Name:       childName,
 	}}) {
 		t.Fatalf("unexpected VM child refs: %#v", vmSnap.Status.ChildrenSnapshotRefs)
@@ -512,7 +512,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		Spec: demov1alpha1.DemoVirtualDiskSnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       "DemoVirtualDiskSnapshot",
+				Kind:       KindDemoVirtualDiskSnapshot,
 				Name:       childName,
 				Namespace:  "ns1",
 				UID:        child.UID,
