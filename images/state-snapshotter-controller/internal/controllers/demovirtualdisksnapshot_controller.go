@@ -42,15 +42,11 @@ type DemoVirtualDiskSnapshotReconciler struct {
 	Client client.Client
 }
 
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
-
 func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager) error {
+	// RBAC is not generated from kubebuilder markers in this module.
+	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
+	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
+	// before RBACReady=True is set on DSC.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
 		Complete(&DemoVirtualDiskSnapshotReconciler{Client: mgr.GetClient()})
@@ -118,7 +114,10 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	if err := validateDiskParentRef(s); err != nil {
-		return ctrl.Result{}, err
+		if patchErr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidParentRef", err.Error()); patchErr != nil {
+			return ctrl.Result{}, patchErr
+		}
+		return ctrl.Result{}, nil
 	}
 
 	sourceName, err := validateDiskSourceRef(s)
@@ -172,7 +171,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 	if !ready {
-		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonSubtreeManifestCapturePending, msg); err != nil {
+		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonManifestCapturePending, msg); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
@@ -196,6 +195,10 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Co
 		return err
 	}
 
+	// Content is cluster-scoped and intentionally retained/managed separately:
+	// this child controller owns the content status and MCP link, while parent
+	// graph/content refs are written by the parent controller under the current
+	// Retain/ObjectKeeper lifecycle model.
 	content := &demov1alpha1.DemoVirtualDiskSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: contentName},
 		Spec: demov1alpha1.DemoVirtualDiskSnapshotContentSpec{

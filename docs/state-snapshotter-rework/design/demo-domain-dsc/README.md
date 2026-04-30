@@ -48,6 +48,10 @@ Reference для **heterogeneous** доменного дерева под **те
 
 **Граница generic / demo (имплементация):** reconciler **`NamespaceSnapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge graph built-ins ∪ eligible DSC, **refresh после reconcile DSC**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
 
+**Reference controller contract:** a demo domain snapshot controller owns validation of `parentSnapshotRef` / `sourceRef`, creation of its own `*SnapshotContent`, creation of an MCR for its own source object, linking `content.status.manifestCheckpointName`, and its own `Ready` condition. A domain parent controller also owns child snapshot creation for nested resources, its own `childrenSnapshotRefs`, its own content `childrenSnapshotContentRefs`, and Ready aggregation over children. It does **not** own root/parent refs, `RBACReady`, RBAC creation, or parent status. Invalid user spec is reported as `Ready=False` and must not create content, MCR, or child snapshots.
+
+**Reference RBAC model:** demo/domain controllers intentionally omit kubebuilder RBAC markers. Required permissions are documented as contract and granted externally by the Deckhouse RBAC controller/hook before DSC `RBACReady=True`; they are not generated from controller code comments.
+
 **Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; generic **E5/E6** и доменные **PR5a/PR5b** в коде опираются на registry и **`children*Refs`**, без отдельного временного child-**NamespaceSnapshot** scaffold в runtime (см. **[`spec/system-spec.md`](../../spec/system-spec.md) §3.8** и **§2.4.2**/**§2.4.4** [`implementation-plan.md`](../implementation-plan.md)).
 
 ## ADR (кратко)

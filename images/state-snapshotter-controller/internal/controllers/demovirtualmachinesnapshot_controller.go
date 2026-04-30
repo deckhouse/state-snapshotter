@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"sort"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,15 +46,11 @@ type DemoVirtualMachineSnapshotReconciler struct {
 	Client client.Client
 }
 
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
-
 func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager) error {
+	// RBAC is not generated from kubebuilder markers in this module.
+	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
+	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
+	// before RBACReady=True is set on DSC.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualMachineSnapshot{}).
 		Watches(&demov1alpha1.DemoVirtualDiskSnapshot{}, handler.EnqueueRequestsFromMapFunc(mapDemoDiskSnapshotToParentVM)).
@@ -96,6 +93,26 @@ func validateVMSourceRef(s *demov1alpha1.DemoVirtualMachineSnapshot) (string, er
 	return ref.Name, nil
 }
 
+func validateVMParentRef(s *demov1alpha1.DemoVirtualMachineSnapshot) error {
+	ref := s.Spec.ParentSnapshotRef
+	if ref.APIVersion == "" {
+		return fmt.Errorf("spec.parentSnapshotRef.apiVersion is required")
+	}
+	if ref.Kind == "" {
+		return fmt.Errorf("spec.parentSnapshotRef.kind is required")
+	}
+	if ref.Name == "" {
+		return fmt.Errorf("spec.parentSnapshotRef.name is required")
+	}
+	if ref.Kind != "NamespaceSnapshot" {
+		return fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported (only NamespaceSnapshot)", ref.Kind)
+	}
+	if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
+		return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", ref.APIVersion)
+	}
+	return nil
+}
+
 func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("demoVirtualMachineSnapshot", req.NamespacedName)
 	ctx = log.IntoContext(ctx, logger)
@@ -112,21 +129,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
-	parentRef := s.Spec.ParentSnapshotRef
-	if parentRef.APIVersion == "" {
-		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.apiVersion is required")
-	}
-	if parentRef.Kind == "" {
-		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.kind is required")
-	}
-	if parentRef.Name == "" {
-		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.name is required")
-	}
-	if parentRef.Kind != "NamespaceSnapshot" {
-		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported (only NamespaceSnapshot)", parentRef.Kind)
-	}
-	if parentRef.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
-		return ctrl.Result{}, fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", parentRef.APIVersion)
+	if err := validateVMParentRef(s); err != nil {
+		if patchErr := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidParentRef", err.Error()); patchErr != nil {
+			return ctrl.Result{}, patchErr
+		}
+		return ctrl.Result{}, nil
 	}
 
 	sourceName, err := validateVMSourceRef(s)
@@ -185,7 +192,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 	if !ready {
-		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonSubtreeManifestCapturePending, msg); err != nil {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonManifestCapturePending, msg); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
@@ -237,6 +244,10 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureSnapshotContent(ctx context
 		return err
 	}
 
+	// VM content is cluster-scoped and intentionally retained/managed separately.
+	// This VM controller owns its MCP link and child content refs; the parent/root
+	// controller owns only refs to this VM snapshot/content. Retain/ObjectKeeper
+	// lifecycle is outside this controller.
 	content := &demov1alpha1.DemoVirtualMachineSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: contentName},
 		Spec: demov1alpha1.DemoVirtualMachineSnapshotContentSpec{
@@ -317,25 +328,31 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 	if err != nil {
 		return err
 	}
-	base := child.DeepCopy()
-	child.Spec.ParentSnapshotRef = demov1alpha1.SnapshotParentRef{
+	desiredParentRef := demov1alpha1.SnapshotParentRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       "DemoVirtualMachineSnapshot",
 		Name:       vm.Name,
 	}
-	child.Spec.SourceRef = demov1alpha1.SnapshotSourceRef{
+	desiredSourceRef := demov1alpha1.SnapshotSourceRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       "DemoVirtualDisk",
 		Name:       disk.Name,
 	}
-	if len(child.GetOwnerReferences()) == 0 {
-		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(
-			demov1alpha1.SchemeGroupVersion.String(),
-			"DemoVirtualMachineSnapshot",
-			vm.Name,
-			vm.UID,
-		)})
+	desiredOwnerRefs := []metav1.OwnerReference{demoSnapshotOwnerReference(
+		demov1alpha1.SchemeGroupVersion.String(),
+		"DemoVirtualMachineSnapshot",
+		vm.Name,
+		vm.UID,
+	)}
+	if child.Spec.ParentSnapshotRef == desiredParentRef &&
+		child.Spec.SourceRef == desiredSourceRef &&
+		equality.Semantic.DeepEqual(child.GetOwnerReferences(), desiredOwnerRefs) {
+		return nil
 	}
+	base := child.DeepCopy()
+	child.Spec.ParentSnapshotRef = desiredParentRef
+	child.Spec.SourceRef = desiredSourceRef
+	child.SetOwnerReferences(desiredOwnerRefs)
 	return r.Client.Patch(ctx, child, client.MergeFrom(base))
 }
 

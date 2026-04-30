@@ -63,6 +63,8 @@ const (
 	// while status.childrenSnapshotRefs is non-empty but the subtree exclude set cannot be computed yet
 	// (E5: no root ManifestCaptureRequest until exclude is complete — distinct from ChildSnapshotPending / ListFailed).
 	ReasonSubtreeManifestCapturePending = "SubtreeManifestCapturePending"
+	// ReasonManifestCapturePending is set while a snapshot controller waits for its own MCR/MCP materialization.
+	ReasonManifestCapturePending = "ManifestCapturePending"
 	// ReasonChildSnapshotFailed is set on a parent NamespaceSnapshot (E6) when any required child snapshot has a terminal
 	// Ready=False (see usecase.ChildSnapshotTerminalReadyReasons).
 	ReasonChildSnapshotFailed = "ChildSnapshotFailed"

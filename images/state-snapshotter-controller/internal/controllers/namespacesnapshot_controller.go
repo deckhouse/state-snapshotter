@@ -122,19 +122,6 @@ func mapNamespaceSnapshotContentToNamespaceSnapshot(_ context.Context, o client.
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}}}
 }
 
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcapturerequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints,verbs=get;list;watch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=manifestcheckpoints/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=state-snapshotter.deckhouse.io,resources=domainspecificsnapshotcontrollers,verbs=get;list;watch
-// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
-// +kubebuilder:rbac:groups=deckhouse.io,resources=objectkeepers,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
-
 func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log.FromContext(ctx).V(1).Info("reconcile NamespaceSnapshot", "namespaceSnapshot", req.NamespacedName)
 	nsSnap := &storagev1alpha1.NamespaceSnapshot{}

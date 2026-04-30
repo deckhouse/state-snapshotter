@@ -29,6 +29,12 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 **Readiness aggregation:** parent `Ready` is derived by reading every child listed in `status.childrenSnapshotRefs`. Child state is not copied into the parent list.
 
+**Reference domain controller contract:** a domain snapshot controller validates its own `spec.parentSnapshotRef` and `spec.sourceRef`, creates its own cluster-scoped `XxxSnapshotContent`, creates an MCR for its own source object, links `content.status.manifestCheckpointName`, and owns its snapshot `Ready` condition. A domain parent controller (for example VM) also creates child snapshots for nested domain resources, publishes its own `status.childrenSnapshotRefs`, writes its own content `status.childrenSnapshotContentRefs`, and aggregates `Ready` over those children. User spec errors are represented as `Ready=False` conditions (for example `InvalidParentRef` / `InvalidSourceRef`) rather than reconcile errors, and must not create content, MCR, or child snapshots.
+
+**Not owned by a domain controller:** root/parent `childrenSnapshotRefs`, root/parent content `childrenSnapshotContentRefs`, DSC `RBACReady`, RBAC creation, and parent status. Content lifecycle is intentionally separate from namespaced snapshot lifecycle in the current Retain/ObjectKeeper model: each controller owns only its own content status/MCP links and direct child graph/content refs.
+
+**RBAC:** reference domain controllers intentionally omit kubebuilder RBAC markers. Required domain permissions are part of the controller contract, but they are granted externally by the Deckhouse RBAC controller/hook before DSC `RBACReady=True`, not generated from controller source comments.
+
 ## Examples
 
 **Disk:** `DemoVirtualDiskSnapshotController` owns disk-level materialization. Its own MCP contains the source `DemoVirtualDisk`. The disk currently has no child snapshots.

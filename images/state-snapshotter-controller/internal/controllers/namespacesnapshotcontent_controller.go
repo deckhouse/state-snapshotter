@@ -40,9 +40,6 @@ type NamespaceSnapshotContentReconciler struct {
 	Client client.Client
 }
 
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshotcontents,verbs=get;list;watch;update;patch;delete
-// +kubebuilder:rbac:groups=storage.deckhouse.io,resources=namespacesnapshots,verbs=get;list;watch
-
 // AddNamespaceSnapshotContentControllerToManager registers the reconciler.
 func AddNamespaceSnapshotContentControllerToManager(mgr ctrl.Manager, _ *config.Options) error {
 	r := &NamespaceSnapshotContentReconciler{
