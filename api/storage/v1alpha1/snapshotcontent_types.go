@@ -69,6 +69,25 @@ type SnapshotSubjectRef struct {
 }
 
 // +k8s:deepcopy-gen=true
+type SnapshotDataRef struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// +k8s:deepcopy-gen=true
 type SnapshotContentStatus struct {
+	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name once manifest capture has persisted.
+	// +optional
+	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
+
+	// ChildrenSnapshotContentRefs lists direct child SnapshotContent objects in the snapshot tree.
+	// +optional
+	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
+
+	// DataRef optional reference to data artifact/content produced by data path.
+	// +optional
+	DataRef *SnapshotDataRef `json:"dataRef,omitempty"`
+
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

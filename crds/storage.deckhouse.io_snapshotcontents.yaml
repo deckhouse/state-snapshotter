@@ -80,6 +80,20 @@ spec:
             type: object
           status:
             properties:
+              childrenSnapshotContentRefs:
+                description: ChildrenSnapshotContentRefs lists direct child SnapshotContent
+                  objects in the snapshot tree.
+                items:
+                  description: |-
+                    SnapshotContentChildRef identifies one child common SnapshotContent in the target content graph.
+                    SnapshotContent is cluster-scoped, so the ref is name-only and MUST NOT carry namespace.
+                  properties:
+                    name:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -136,6 +150,24 @@ spec:
                   - type
                   type: object
                 type: array
+              dataRef:
+                description: DataRef optional reference to data artifact/content produced
+                  by data path.
+                properties:
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              manifestCheckpointName:
+                description: ManifestCheckpointName is the cluster-scoped ManifestCheckpoint
+                  name once manifest capture has persisted.
+                type: string
             type: object
         type: object
     served: true

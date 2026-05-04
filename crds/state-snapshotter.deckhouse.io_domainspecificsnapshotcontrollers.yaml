@@ -78,6 +78,9 @@ spec:
                     / content CRDs (plural.resource.group form).
                   properties:
                     contentCRDName:
+                      description: |-
+                        ContentCRDName is deprecated and kept for compatibility with the current v1alpha1 registration flow.
+                        Target architecture uses the common storage.deckhouse.io SnapshotContent for all snapshot kinds.
                       type: string
                     priority:
                       description: Priority is used when ordering orchestration across

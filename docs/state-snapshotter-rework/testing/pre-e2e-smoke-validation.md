@@ -302,6 +302,11 @@ EOF
 
 PVC/VCR в этот smoke не добавляйте.
 
+Stage 1 common-content migration note: this smoke still validates the current runtime with
+`NamespaceSnapshotContent` and demo `*SnapshotContent` CRDs. The target common
+`storage.deckhouse.io/SnapshotContent` has been extended for future migration, but this scenario
+must not switch expectations until runtime stage 2 is explicitly implemented.
+
 Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `NamespaceSnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-nssnap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
 ## 6. Базовый flow без DSC

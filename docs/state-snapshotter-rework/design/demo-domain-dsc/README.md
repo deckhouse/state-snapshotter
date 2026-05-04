@@ -14,6 +14,11 @@ This package explains the current work around:
 - dedicated demo controllers for VM and disk snapshots;
 - aggregated manifest read validation for heterogeneous content graphs.
 
+Content model migration note: the current runtime still uses dedicated `NamespaceSnapshotContent`,
+`DemoVirtualMachineSnapshotContent`, and `DemoVirtualDiskSnapshotContent` objects. The target model
+is a single common cluster-scoped `storage.deckhouse.io/SnapshotContent` owned by the state-snapshotter
+common layer. Stage 1 prepares API/adapters only; it does not change the smoke/runtime expectations.
+
 Some documents in this directory are historical design notes. Treat them as context for implementation, not as the source of implementable contract when they disagree with `spec/`.
 
 ### PR5a — что гарантирует / чего пока нет
@@ -48,7 +53,9 @@ Reference для **heterogeneous** доменного дерева под **те
 
 **Граница generic / demo (имплементация):** reconciler **`NamespaceSnapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge graph built-ins ∪ eligible DSC, **refresh после reconcile DSC**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
 
-**Reference controller contract:** a demo domain snapshot controller owns validation of `parentSnapshotRef` / `sourceRef`, creation of its own `*SnapshotContent`, creation of an MCR for its own source object, linking `content.status.manifestCheckpointName`, and its own `Ready` condition. A domain parent controller also owns child snapshot creation for nested resources, its own `childrenSnapshotRefs`, its own content `childrenSnapshotContentRefs`, and Ready aggregation over children. It does **not** own root/parent refs, `RBACReady`, RBAC creation, or parent status. Invalid user spec is reported as `Ready=False` and must not create content, MCR, or child snapshots.
+**Reference controller contract (current runtime):** a demo domain snapshot controller owns validation of `parentSnapshotRef` / `sourceRef`, creation of its own dedicated `*SnapshotContent`, creation of an MCR for its own source object, linking `content.status.manifestCheckpointName`, and its own `Ready` condition. A domain parent controller also owns child snapshot creation for nested resources, its own `childrenSnapshotRefs`, its own content `childrenSnapshotContentRefs`, and Ready aggregation over children. It does **not** own root/parent refs, `RBACReady`, RBAC creation, or parent status. Invalid user spec is reported as `Ready=False` and must not create content, MCR, or child snapshots.
+
+**Target content ownership:** domain controllers should eventually own only `XxxSnapshot` behavior, `sourceRef` validation, and child snapshot refs. The common state-snapshotter layer owns common `SnapshotContent`, ObjectKeeper/Retain, MCP/data refs, and content-tree aggregation. DSC target mapping becomes `resourceCRDName -> snapshotCRDName`; `contentCRDName` is legacy v1alpha1 compatibility.
 
 **Reference RBAC model:** demo/domain controllers intentionally omit kubebuilder RBAC markers. Required permissions are documented as contract and granted externally by the Deckhouse RBAC controller/hook before DSC `RBACReady=True`; they are not generated from controller code comments.
 

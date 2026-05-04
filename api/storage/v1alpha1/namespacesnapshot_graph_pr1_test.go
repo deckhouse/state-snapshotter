@@ -105,6 +105,60 @@ func TestNamespaceSnapshotContentStatus_ChildrenSnapshotContentRefs_JSONRoundTri
 	}
 }
 
+func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
+	sc := SnapshotContent{
+		Status: SnapshotContentStatus{
+			ManifestCheckpointName: "mcp-common",
+			ChildrenSnapshotContentRefs: []SnapshotContentChildRef{
+				{Name: "child-content-1"},
+			},
+			DataRef: &SnapshotDataRef{
+				Kind:      "VolumeSnapshotContent",
+				Name:      "vsc-1",
+				Namespace: "data-ns",
+			},
+		},
+	}
+
+	data, err := json.Marshal(&sc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var out SnapshotContent
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got := out.Status.ManifestCheckpointName; got != "mcp-common" {
+		t.Fatalf("ManifestCheckpointName: got %q want mcp-common", got)
+	}
+	if got := out.Status.ChildrenSnapshotContentRefs; len(got) != 1 || got[0].Name != "child-content-1" {
+		t.Fatalf("ChildrenSnapshotContentRefs: got %#v", got)
+	}
+	if out.Status.DataRef == nil || out.Status.DataRef.Kind != "VolumeSnapshotContent" ||
+		out.Status.DataRef.Name != "vsc-1" || out.Status.DataRef.Namespace != "data-ns" {
+		t.Fatalf("DataRef: got %#v", out.Status.DataRef)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	status := raw["status"].(map[string]interface{})
+	if _, ok := status["manifestCheckpointName"]; !ok {
+		t.Fatal("expected manifestCheckpointName JSON field")
+	}
+	refs := status["childrenSnapshotContentRefs"].([]interface{})
+	item := refs[0].(map[string]interface{})
+	if item["name"] != "child-content-1" {
+		t.Fatalf("expected name-only child content ref, got %#v", item)
+	}
+	if _, ok := item["namespace"]; ok {
+		t.Fatalf("did not expect namespace key in child content ref JSON: %#v", item)
+	}
+}
+
 func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_OmittedWhenEmpty(t *testing.T) {
 	ns := NamespaceSnapshot{
 		Status: NamespaceSnapshotStatus{

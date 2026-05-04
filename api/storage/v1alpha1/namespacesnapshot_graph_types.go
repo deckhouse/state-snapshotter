@@ -39,3 +39,11 @@ type NamespaceSnapshotChildRef struct {
 type NamespaceSnapshotContentChildRef struct {
 	Name string `json:"name"`
 }
+
+// SnapshotContentChildRef identifies one child common SnapshotContent in the target content graph.
+// SnapshotContent is cluster-scoped, so the ref is name-only and MUST NOT carry namespace.
+//
+// +k8s:deepcopy-gen=true
+type SnapshotContentChildRef struct {
+	Name string `json:"name"`
+}

@@ -6,7 +6,7 @@
 
 ## DomainSpecificSnapshotController (DSC)
 
-**Назначение:** модуль (через свой hook/оператор) создаёт кластерный объект DSC и указывает **маппинг** имён CRD: какие `*Snapshot` / `*SnapshotContent` типы модуль «предъявляет» unified-контроллеру.
+**Назначение:** модуль (через свой hook/оператор) создаёт кластерный объект DSC и указывает **маппинг** имён CRD: какой source resource обслуживает какой `*Snapshot` тип. В v1alpha1 mapping всё ещё содержит `contentCRDName` для совместимости с текущим registration flow, но целевая модель использует общий cluster-scoped `storage.deckhouse.io/SnapshotContent` для всех snapshot kinds.
 
 **Что делает reconciler state-snapshotter**
 
@@ -20,6 +20,8 @@
 - Условие **`RBACReady`**: его в реальном кластере выставляет **модульный hook / внешний Deckhouse RBAC controller** (или другой компонент модуля), когда RBAC для соответствующих типов уже согласован и применён. Контроллер state-snapshotter **читает** это условие как вход формулы watch-eligibility (`Accepted` + `RBACReady` + поколения).
 
 Итог: **DSC — контракт регистрации типов и статуса приёмки**; **RBAC для снимков в API — ответственность модуля / внешнего RBAC controller**, сигнал о готовности приходит через `RBACReady`.
+
+**Content model migration:** `spec.snapshotResourceMapping[].contentCRDName` is legacy/deprecated in v1alpha1 and remains required until the runtime is migrated. Target architecture is `resourceCRDName -> snapshotCRDName`; the state-snapshotter common layer owns `SnapshotContent` lifecycle, ObjectKeeper/Retain, MCP/data refs, and content-tree aggregation.
 
 ---
 

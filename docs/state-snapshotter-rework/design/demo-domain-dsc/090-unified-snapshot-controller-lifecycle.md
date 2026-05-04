@@ -19,6 +19,12 @@ Every `XxxSnapshotController` follows the same lifecycle:
 
 A snapshot with no children is valid. Its `Ready` depends only on its own materialization.
 
+Stage 1 content migration note: steps that mention `XxxSnapshotContent` describe the current runtime.
+The target model moves content creation/lifecycle to the common state-snapshotter layer and a single
+cluster-scoped `storage.deckhouse.io/SnapshotContent`. Domain controllers keep ownership of
+`XxxSnapshot` validation, `sourceRef`, child snapshot creation, and `Ready` aggregation until the
+runtime migration is explicitly performed.
+
 ## Rules
 
 **Own materialization:** each controller materializes only its own scope. Every DSC-registered `XxxSnapshot` in the parent-owned graph carries `spec.sourceRef` (`apiVersion`, `kind`, `name`) for the namespace-local source object it captures, while `spec.parentSnapshotRef` only describes the tree parent. Demo materialization captures the existing source domain object directly: `DemoVirtualDiskSnapshot` requires `sourceRef` to `DemoVirtualDisk`; `DemoVirtualMachineSnapshot` requires `sourceRef` to `DemoVirtualMachine`. Legacy source annotations, demo-specific source fields, fallback source resolution, and placeholder ConfigMap payloads are not part of the target model. Parent MCPs do not contain child manifests.
@@ -29,7 +35,9 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 **Readiness aggregation:** parent `Ready` is derived by reading every child listed in `status.childrenSnapshotRefs`. Child state is not copied into the parent list.
 
-**Reference domain controller contract:** a domain snapshot controller validates its own `spec.parentSnapshotRef` and `spec.sourceRef`, creates its own cluster-scoped `XxxSnapshotContent`, creates an MCR for its own source object, links `content.status.manifestCheckpointName`, and owns its snapshot `Ready` condition. A domain parent controller (for example VM) also creates child snapshots for nested domain resources, publishes its own `status.childrenSnapshotRefs`, writes its own content `status.childrenSnapshotContentRefs`, and aggregates `Ready` over those children. User spec errors are represented as `Ready=False` conditions (for example `InvalidParentRef` / `InvalidSourceRef`) rather than reconcile errors, and must not create content, MCR, or child snapshots.
+**Reference domain controller contract (current runtime):** a domain snapshot controller validates its own `spec.parentSnapshotRef` and `spec.sourceRef`, creates its own cluster-scoped `XxxSnapshotContent`, creates an MCR for its own source object, links `content.status.manifestCheckpointName`, and owns its snapshot `Ready` condition. A domain parent controller (for example VM) also creates child snapshots for nested domain resources, publishes its own `status.childrenSnapshotRefs`, writes its own content `status.childrenSnapshotContentRefs`, and aggregates `Ready` over those children. User spec errors are represented as `Ready=False` conditions (for example `InvalidParentRef` / `InvalidSourceRef`) rather than reconcile errors, and must not create content, MCR, or child snapshots.
+
+**Target common content contract:** the common controller owns `SnapshotContent` lifecycle, ObjectKeeper/Retain, MCP/data refs, and aggregation over `SnapshotContent.status.childrenSnapshotContentRefs`. Domain modules register source resource and snapshot CRD through DSC; `contentCRDName` remains a legacy v1alpha1 field until the runtime is migrated.
 
 **Not owned by a domain controller:** root/parent `childrenSnapshotRefs`, root/parent content `childrenSnapshotContentRefs`, DSC `RBACReady`, RBAC creation, and parent status. Content lifecycle is intentionally separate from namespaced snapshot lifecycle in the current Retain/ObjectKeeper model: each controller owns only its own content status/MCP links and direct child graph/content refs.
 

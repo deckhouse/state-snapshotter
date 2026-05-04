@@ -31,6 +31,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
+const SnapshotContentKind = "SnapshotContent"
+
 // RefGVK parses apiVersion/kind from a NamespaceSnapshotChildRef (strict; no registry).
 func RefGVK(ref storagev1alpha1.NamespaceSnapshotChildRef) (schema.GroupVersionKind, error) {
 	if ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
@@ -107,5 +109,23 @@ func NamespaceSnapshotContentGVK() schema.GroupVersionKind {
 		Group:   storagev1alpha1.APIGroup,
 		Version: storagev1alpha1.APIVersion,
 		Kind:    "NamespaceSnapshotContent",
+	}
+}
+
+// SnapshotContentGVK returns the GVK for the common target SnapshotContent (storage API).
+func SnapshotContentGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group:   storagev1alpha1.APIGroup,
+		Version: storagev1alpha1.APIVersion,
+		Kind:    SnapshotContentKind,
+	}
+}
+
+// SnapshotContentGVR returns the GVR for the common target SnapshotContent (storage API).
+func SnapshotContentGVR() schema.GroupVersionResource {
+	return schema.GroupVersionResource{
+		Group:    storagev1alpha1.APIGroup,
+		Version:  storagev1alpha1.APIVersion,
+		Resource: "snapshotcontents",
 	}
 }
