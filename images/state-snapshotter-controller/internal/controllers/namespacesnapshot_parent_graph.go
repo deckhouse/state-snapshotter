@@ -88,12 +88,9 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 		return false, err
 	}
 
-	contentChanged, err := r.patchSnapshotContentChildrenFromSnapshotRefs(ctx, content.Name, nsSnap.Namespace, effectiveRefs)
-	if err != nil {
-		return false, err
-	}
-
-	return statusChanged || contentChanged, nil
+	_ = content
+	_ = effectiveRefs
+	return statusChanged, nil
 }
 
 func namespaceSnapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName string) string {
@@ -233,49 +230,6 @@ func mergeNamespaceSnapshotManagedChildRefs(current, desired []storagev1alpha1.N
 
 func namespaceSnapshotOwnsGeneratedChildRef(ref storagev1alpha1.NamespaceSnapshotChildRef) bool {
 	return strings.HasPrefix(ref.Name, "nss-child-")
-}
-
-func (r *NamespaceSnapshotReconciler) patchSnapshotContentChildrenFromSnapshotRefs(
-	ctx context.Context,
-	contentName string,
-	parentNamespace string,
-	refs []storagev1alpha1.NamespaceSnapshotChildRef,
-) (bool, error) {
-	var desired []storagev1alpha1.SnapshotContentChildRef
-	for _, ref := range refs {
-		child := &unstructured.Unstructured{}
-		child.SetAPIVersion(ref.APIVersion)
-		child.SetKind(ref.Kind)
-		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: parentNamespace, Name: ref.Name}, child); err != nil {
-			if errors.IsNotFound(err) {
-				continue
-			}
-			return false, err
-		}
-		boundName, found, err := unstructured.NestedString(child.Object, "status", "boundSnapshotContentName")
-		if err != nil {
-			return false, err
-		}
-		if found && boundName != "" {
-			desired = append(desired, storagev1alpha1.SnapshotContentChildRef{Name: boundName})
-		}
-	}
-	sortSnapshotContentChildRefs(desired)
-
-	changed := false
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		content := &storagev1alpha1.SnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-			return err
-		}
-		if snapshotContentChildRefsEqualIgnoreOrder(content.Status.ChildrenSnapshotContentRefs, desired) {
-			return nil
-		}
-		content.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.SnapshotContentChildRef(nil), desired...)
-		changed = true
-		return r.Client.Status().Update(ctx, content)
-	})
-	return changed, err
 }
 
 func sortNamespaceSnapshotChildRefs(refs []storagev1alpha1.NamespaceSnapshotChildRef) {

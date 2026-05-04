@@ -178,8 +178,15 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
-	if err := patchDemoVirtualDiskContentManifestCheckpoint(ctx, r.Client, contentName, mcpName); err != nil {
+	contentReady, contentReason, contentMessage, err := commonSnapshotContentReadyForSnapshot(ctx, r.Client, contentName)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if !contentReady {
+		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, contentReason, contentMessage); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
 	if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, fmt.Sprintf("demo disk snapshot materialized (ManifestCheckpoint %s)", mcpName)); err != nil {
 		return ctrl.Result{}, err
@@ -197,10 +204,9 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureContent(ctx context.Context, s
 		return err
 	}
 
-	// Content is cluster-scoped and intentionally retained/managed separately:
-	// this child controller owns the content status and MCP link, while parent
-	// graph/content refs are written by the parent controller under the current
-	// Retain/ObjectKeeper lifecycle model.
+	// Content is cluster-scoped and intentionally retained/managed separately.
+	// This controller binds the snapshot and owns snapshot status only; content
+	// status/MCP links are published by SnapshotContentController.
 	// We intentionally do not use controllerutil.CreateOrUpdate here.
 	// This controller owns only a subset of fields and must avoid
 	// accidental overwrites of fields owned by other controllers.
@@ -236,26 +242,6 @@ func patchDemoVirtualDiskSnapshotBound(
 		base := o.DeepCopy()
 		o.Status.BoundSnapshotContentName = contentName
 		return c.Status().Patch(ctx, o, client.MergeFrom(base))
-	})
-}
-
-func patchDemoVirtualDiskContentManifestCheckpoint(
-	ctx context.Context,
-	c client.Client,
-	contentName string,
-	mcpName string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		content := &storagev1alpha1.SnapshotContent{}
-		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-			return err
-		}
-		if content.Status.ManifestCheckpointName == mcpName {
-			return nil
-		}
-		base := content.DeepCopy()
-		content.Status.ManifestCheckpointName = mcpName
-		return c.Status().Patch(ctx, content, client.MergeFrom(base))
 	})
 }
 

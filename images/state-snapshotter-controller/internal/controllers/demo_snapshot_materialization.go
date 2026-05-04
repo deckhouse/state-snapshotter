@@ -29,7 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 const defaultDemoSnapshotRequeueAfter = 500 * time.Millisecond
@@ -122,6 +124,24 @@ func demoManifestCheckpointReady(
 		return mcp.Name, false, true, cond.Message, nil
 	}
 	return mcp.Name, false, false, cond.Message, nil
+}
+
+func commonSnapshotContentReadyForSnapshot(ctx context.Context, c client.Reader, contentName string) (bool, string, string, error) {
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %q not found", contentName), nil
+		}
+		return false, "", "", err
+	}
+	ready := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
+	if ready == nil {
+		return false, snapshot.ReasonManifestCapturePending, fmt.Sprintf("SnapshotContent %q is not Ready yet", contentName), nil
+	}
+	if ready.Status == metav1.ConditionTrue {
+		return true, ready.Reason, ready.Message, nil
+	}
+	return false, ready.Reason, ready.Message, nil
 }
 
 func demoSnapshotOwnerReference(apiVersion, kind, name string, uid types.UID) metav1.OwnerReference {

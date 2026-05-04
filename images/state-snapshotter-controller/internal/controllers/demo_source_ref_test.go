@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -33,6 +34,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 func TestDemoVirtualDiskSnapshot_InvalidParentRefDoesNotCreateContentOrMCR(t *testing.T) {
@@ -234,6 +236,10 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second reconcile failed: %v", err)
 	}
+	reconcileCommonSnapshotContentStatusForTest(t, cl, contentName)
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("third reconcile failed: %v", err)
+	}
 
 	snap := getDemoDiskSnapshot(t, cl)
 	if snap.Status.BoundSnapshotContentName != contentName {
@@ -248,6 +254,10 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	}
 	if content.Status.ManifestCheckpointName != "mcp-disk" {
 		t.Fatalf("expected content MCP link %q, got %q", "mcp-disk", content.Status.ManifestCheckpointName)
+	}
+	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
+	if contentReady == nil || contentReady.Status != metav1.ConditionTrue || contentReady.Reason != snapshot.ReasonCompleted {
+		t.Fatalf("expected content Ready=True Completed, got %#v", contentReady)
 	}
 }
 
@@ -521,6 +531,19 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}); err != nil {
 		t.Fatalf("create disk content: %v", err)
 	}
+	diskContent := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: diskContentName}, diskContent); err != nil {
+		t.Fatalf("get disk content: %v", err)
+	}
+	baseDiskContent := diskContent.DeepCopy()
+	meta.SetStatusCondition(&diskContent.Status.Conditions, metav1.Condition{
+		Type:   snapshot.ConditionReady,
+		Status: metav1.ConditionTrue,
+		Reason: snapshot.ReasonCompleted,
+	})
+	if err := cl.Status().Patch(context.Background(), diskContent, client.MergeFrom(baseDiskContent)); err != nil {
+		t.Fatalf("patch disk content Ready: %v", err)
+	}
 	baseChild := child.DeepCopy()
 	child.Status.BoundSnapshotContentName = diskContentName
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
@@ -534,6 +557,10 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("third reconcile failed: %v", err)
+	}
+	reconcileCommonSnapshotContentStatusForTest(t, cl, vmContentName)
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("fourth reconcile failed: %v", err)
 	}
 
 	vmSnap = getDemoVMSnapshot(t, cl)
@@ -552,6 +579,24 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}
 	if !snapshotContentChildRefsEqualIgnoreOrder(vmContent.Status.ChildrenSnapshotContentRefs, []storagev1alpha1.SnapshotContentChildRef{{Name: diskContentName}}) {
 		t.Fatalf("unexpected VM content child refs: %#v", vmContent.Status.ChildrenSnapshotContentRefs)
+	}
+}
+
+func reconcileCommonSnapshotContentStatusForTest(t *testing.T, cl client.Client, contentName string) {
+	t.Helper()
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
+		t.Fatalf("get content %q: %v", contentName, err)
+	}
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(content)
+	if err != nil {
+		t.Fatalf("convert content %q to unstructured: %v", contentName, err)
+	}
+	obj := &unstructured.Unstructured{Object: raw}
+	obj.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+	reconciler := &SnapshotContentController{Client: cl, APIReader: cl}
+	if _, err := reconciler.reconcileCommonSnapshotContentStatus(context.Background(), obj); err != nil {
+		t.Fatalf("reconcile common SnapshotContent status %q: %v", contentName, err)
 	}
 }
 

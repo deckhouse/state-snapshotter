@@ -41,7 +41,7 @@
 
 | Роль | Обязанность |
 |------|-------------|
-| **Demo controllers** | Создают объекты дерева, VS, MCP; заполняют **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**; лейблы/ownerRef для однозначной выявляемости в API. **Не** пишут coverage в CR. |
+| **Demo controllers** | Создают объекты дерева и MCR; заполняют **`childrenSnapshotRefs`** на своих snapshot objects; лейблы/ownerRef для однозначной выявляемости в API. **`childrenSnapshotContentRefs`** и MCP links на common content заполняет **`SnapshotContentController`**. **Не** пишут coverage в CR. |
 | **Generic controller** | Перед root capture **вычисляет** exclude-множества, обходя дерево по **общим refs** (§4); **без** доменно-специфичных правил по типам ([`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) G1–G4, **INV-REF1**). |
 
 ---

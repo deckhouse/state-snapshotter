@@ -195,18 +195,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
-	if err := patchDemoVirtualMachineContentManifestCheckpoint(ctx, r.Client, contentName, mcpName); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	childRefs, err := r.ensureDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := patchDemoVirtualMachineSnapshotChildrenRefs(ctx, r.Client, req.NamespacedName, childRefs); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := patchDemoVirtualMachineContentChildrenFromRefs(ctx, r.Client, contentName, s.Namespace, childRefs); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -222,6 +215,16 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 	if sum.HasPending {
 		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonChildSnapshotPending, usecase.JoinNonEmpty(sum.PendingParts, "; ")); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+	contentReady, contentReason, contentMessage, err := commonSnapshotContentReadyForSnapshot(ctx, r.Client, contentName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !contentReady {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, contentReason, contentMessage); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
@@ -243,9 +246,8 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureContent(ctx context.Context
 	}
 
 	// VM content is cluster-scoped and intentionally retained/managed separately.
-	// This VM controller owns its MCP link and child content refs; the parent/root
-	// controller owns only refs to this VM snapshot/content. Retain/ObjectKeeper
-	// lifecycle is outside this controller.
+	// This VM controller owns snapshot binding/child snapshot refs only; content
+	// status/MCP links and child content refs are published by SnapshotContentController.
 	// We intentionally do not use controllerutil.CreateOrUpdate here.
 	// This controller owns only a subset of fields and must avoid
 	// accidental overwrites of fields owned by other controllers.
@@ -404,64 +406,6 @@ func patchDemoVirtualMachineSnapshotBound(
 		base := o.DeepCopy()
 		o.Status.BoundSnapshotContentName = contentName
 		return c.Status().Patch(ctx, o, client.MergeFrom(base))
-	})
-}
-
-func patchDemoVirtualMachineContentChildrenFromRefs(
-	ctx context.Context,
-	c client.Client,
-	contentName string,
-	parentNamespace string,
-	refs []storagev1alpha1.NamespaceSnapshotChildRef,
-) error {
-	var desired []storagev1alpha1.SnapshotContentChildRef
-	for _, ref := range refs {
-		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != KindDemoVirtualDiskSnapshot {
-			continue
-		}
-		disk := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := c.Get(ctx, types.NamespacedName{Namespace: parentNamespace, Name: ref.Name}, disk); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return err
-		}
-		if disk.Status.BoundSnapshotContentName != "" {
-			desired = append(desired, storagev1alpha1.SnapshotContentChildRef{Name: disk.Status.BoundSnapshotContentName})
-		}
-	}
-	sortSnapshotContentChildRefs(desired)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		m := &storagev1alpha1.SnapshotContent{}
-		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, m); err != nil {
-			return err
-		}
-		if snapshotContentChildRefsEqualIgnoreOrder(desired, m.Status.ChildrenSnapshotContentRefs) {
-			return nil
-		}
-		base := m.DeepCopy()
-		m.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.SnapshotContentChildRef(nil), desired...)
-		return c.Status().Patch(ctx, m, client.MergeFrom(base))
-	})
-}
-
-func patchDemoVirtualMachineContentManifestCheckpoint(
-	ctx context.Context,
-	c client.Client,
-	contentName string,
-	mcpName string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		content := &storagev1alpha1.SnapshotContent{}
-		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-			return err
-		}
-		if content.Status.ManifestCheckpointName == mcpName {
-			return nil
-		}
-		base := content.DeepCopy()
-		content.Status.ManifestCheckpointName = mcpName
-		return c.Status().Patch(ctx, content, client.MergeFrom(base))
 	})
 }
 

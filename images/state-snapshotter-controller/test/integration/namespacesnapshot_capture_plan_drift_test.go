@@ -22,12 +22,12 @@ package integration
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -76,43 +76,66 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
+		contentName = fmt.Sprintf("ns-%s", strings.ReplaceAll(string(snap.UID), "-", ""))
+
+		mcrKey := client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(snap.UID)}
+		controller := true
+		mcr := &ssv1alpha1.ManifestCaptureRequest{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      mcrKey.Name,
+				Namespace: mcrKey.Namespace,
+				Labels: map[string]string{
+					"state-snapshotter.deckhouse.io/namespace-snapshot-uid": string(snap.UID),
+				},
+				Annotations: map[string]string{
+					namespacemanifest.AnnotationBoundSnapshotContent: contentName,
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "NamespaceSnapshot",
+					Name:       snap.Name,
+					UID:        snap.UID,
+					Controller: &controller,
+				}},
+			},
+			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
+				Targets: []ssv1alpha1.ManifestTarget{{
+					APIVersion: "v1",
+					Kind:       "ConfigMap",
+					Name:       cm1.Name,
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 
 		cm2 := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: "nss-drift-cm2", Namespace: nsName},
 			Data:       map[string]string{"k": "v2"},
 		}
-		var cm2Injected bool
-
-		// Inject cm2 as soon as MCR exists (before capture completes and MCR is deleted), then expect drift.
+		Expect(k8sClient.Create(ctx, cm2)).To(Succeed())
+		// Wait until root binding exists with an already-stale frozen MCR plan.
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
-			contentName = fresh.Status.BoundSnapshotContentName
+			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(contentName))
+		}).WithTimeout(30 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
 
-			mcrKey := client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(fresh.UID)}
-			mcr := &ssv1alpha1.ManifestCaptureRequest{}
-			if err := k8sClient.Get(ctx, mcrKey, mcr); err != nil {
-				g.Expect(errors.IsNotFound(err)).To(BeFalse(), "wait until MCR exists (capture started)")
-				g.Expect(err).NotTo(HaveOccurred())
-			}
-			g.Expect(mcrOwnerRefToNamespaceSnapshot(mcr.OwnerReferences, fresh.Name, fresh.UID)).To(BeTrue(), "MCR must be owned by root NamespaceSnapshot for in-flight GC")
+		rootForMCR := &storagev1alpha1.NamespaceSnapshot{}
+		Expect(k8sClient.Get(ctx, key, rootForMCR)).To(Succeed())
 
-			if !cm2Injected {
-				if err := k8sClient.Create(ctx, cm2); err != nil && !errors.IsAlreadyExists(err) {
-					g.Expect(err).NotTo(HaveOccurred())
-				}
-				snapFresh := &storagev1alpha1.NamespaceSnapshot{}
-				g.Expect(k8sClient.Get(ctx, key, snapFresh)).To(Succeed())
-				base := snapFresh.DeepCopy()
-				if snapFresh.Annotations == nil {
-					snapFresh.Annotations = map[string]string{}
-				}
-				snapFresh.Annotations["state-snapshotter.deckhouse.io/integration-drift-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
-				g.Expect(k8sClient.Patch(ctx, snapFresh, client.MergeFrom(base))).To(Succeed())
-				cm2Injected = true
-			}
+		Expect(mcrOwnerRefToNamespaceSnapshot(mcr.OwnerReferences, rootForMCR.Name, rootForMCR.UID)).To(BeTrue(), "MCR must be owned by root NamespaceSnapshot for in-flight GC")
 
+		snapFresh := &storagev1alpha1.NamespaceSnapshot{}
+		Expect(k8sClient.Get(ctx, key, snapFresh)).To(Succeed())
+		base := snapFresh.DeepCopy()
+		if snapFresh.Annotations == nil {
+			snapFresh.Annotations = map[string]string{}
+		}
+		snapFresh.Annotations["state-snapshotter.deckhouse.io/integration-drift-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
+		Expect(k8sClient.Patch(ctx, snapFresh, client.MergeFrom(base))).To(Succeed())
+
+		Eventually(func(g Gomega) {
 			root := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, key, root)).To(Succeed())
 			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
@@ -121,19 +144,12 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 			g.Expect(ready.Reason).To(Equal("CapturePlanDrift"))
 			g.Expect(ready.Message).To(ContainSubstring("spec.targets differ"))
 
-			sc := &storagev1alpha1.SnapshotContent{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
-			cReady := meta.FindStatusCondition(sc.Status.Conditions, snapshot.ConditionReady)
-			g.Expect(cReady).NotTo(BeNil())
-			g.Expect(cReady.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(cReady.Reason).To(Equal("CapturePlanDrift"))
-			g.Expect(cReady.Message).To(ContainSubstring("spec.targets differ"))
 		}).WithTimeout(90 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
 
 		// MCR still exists with frozen spec.targets; operator deletes MCR to retry with a fresh plan.
 		root := &storagev1alpha1.NamespaceSnapshot{}
 		Expect(k8sClient.Get(ctx, key, root)).To(Succeed())
-		mcr := &ssv1alpha1.ManifestCaptureRequest{}
+		mcr = &ssv1alpha1.ManifestCaptureRequest{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{
 			Namespace: nsName,
 			Name:      namespacemanifest.NamespaceSnapshotMCRName(root.UID),

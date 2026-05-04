@@ -36,6 +36,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 var _ = Describe("Integration: SnapshotController - MCR linking", func() {
@@ -48,10 +49,10 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		snapshotGVK = schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshot"}
-		contentGVK = schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "TestSnapshotContent"}
+		contentGVK = unifiedbootstrap.CommonSnapshotContentGVK()
 	})
 
-	It("should link ManifestCheckpointName into SnapshotContent when MCR is Ready", func() {
+	It("SnapshotContentController should link ManifestCheckpointName and Ready into common SnapshotContent when MCR is Ready", func() {
 		// Create Snapshot
 		snapshotObj := &unstructured.Unstructured{}
 		snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -121,7 +122,24 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 			mgr.GetAPIReader(),
 			scheme,
 			testCfg,
-			[]schema.GroupVersionKind{snapshotGVK},
+			nil,
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snapshotCtrl.GVKRegistry.RegisterSnapshotContentMapping(
+			snapshotGVK.Kind,
+			snapshotGVK.GroupVersion().String(),
+			contentGVK.Kind,
+			contentGVK.GroupVersion().String(),
+		)).To(Succeed())
+		snapshotCtrl.SnapshotGVKs = []schema.GroupVersionKind{snapshotGVK}
+
+		contentCtrl, err := controllers.NewSnapshotContentController(
+			k8sClient,
+			mgr.GetAPIReader(),
+			scheme,
+			mgr.GetRESTMapper(),
+			testCfg,
+			[]schema.GroupVersionKind{contentGVK},
 		)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -132,44 +150,46 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 			},
 		}
 
-		// Reconcile to create SnapshotContent and link MCP
-		Eventually(func() bool {
+		var contentName string
+		Eventually(func(g Gomega) {
 			_, err := snapshotCtrl.Reconcile(ctx, req)
-			if err != nil {
-				return false
-			}
+			g.Expect(err).NotTo(HaveOccurred())
 
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
-			err = k8sClient.Get(ctx, types.NamespacedName{
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Name:      snapshotObj.GetName(),
 				Namespace: snapshotObj.GetNamespace(),
-			}, freshSnapshot)
-			if err != nil {
-				return false
-			}
+			}, freshSnapshot)).To(Succeed())
 
 			freshLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
-			if err != nil {
-				return false
-			}
-			contentName := freshLike.GetStatusContentName()
-			if contentName == "" {
-				return false
-			}
+			g.Expect(err).NotTo(HaveOccurred())
+			contentName = freshLike.GetStatusContentName()
+			g.Expect(contentName).NotTo(BeEmpty())
+		}, "30s", "200ms").Should(Succeed(), "Snapshot should bind common SnapshotContent")
 
+		Eventually(func(g Gomega) {
+			_, err := contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}})
+			g.Expect(err).NotTo(HaveOccurred())
 			contentObj := &unstructured.Unstructured{}
 			contentObj.SetGroupVersionKind(contentGVK)
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, contentObj)
-			if err != nil {
-				return false
-			}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
 
 			contentStatus, _ := contentObj.Object["status"].(map[string]interface{})
-			if contentStatus == nil {
-				return false
-			}
-			return contentStatus["manifestCheckpointName"] == mcpName
-		}, "30s", "200ms").Should(BeTrue(), "SnapshotContent should be linked to MCP from MCR")
+			g.Expect(contentStatus).NotTo(BeNil())
+			g.Expect(contentStatus["manifestCheckpointName"]).To(Equal(mcpName))
+			contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(snapshot.IsReady(contentLike)).To(BeTrue())
+		}, "30s", "200ms").Should(Succeed(), "SnapshotContentController should link MCP and set common content Ready")
+
+		_, err = snapshotCtrl.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		freshSnapshot := &unstructured.Unstructured{}
+		freshSnapshot.SetGroupVersionKind(snapshotGVK)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshSnapshot)).To(Succeed())
+		freshLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(snapshot.IsReady(freshLike)).To(BeTrue())
 	})
 })

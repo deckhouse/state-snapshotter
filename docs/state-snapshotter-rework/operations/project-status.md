@@ -31,7 +31,7 @@
 
 **DSC-gated demo activation:** graph registry built-in по умолчанию содержит только `NamespaceSnapshot`→ common content. Demo VM/Disk resources входят в `NamespaceSnapshot` tree только через eligible DSC. Hot-add DSC покрыт для новых root snapshots; requeue уже существующих root после активации DSC остаётся follow-up при необходимости.
 
-**Common `SnapshotContent` ownership:** lifecycle/finalizers controller не пишет `Ready` / MCP / child refs / data refs для common content; эти поля принадлежат `NamespaceSnapshot` и demo snapshot controllers.
+**Common `SnapshotContent` ownership:** `SnapshotContentController` — aggregator/lifecycle controller, не domain planner/executor. Он не создаёт MCR/VCR/DataExport/VolumeSnapshot requests и не выбирает capture scope; он читает результаты и владеет всем `SnapshotContent.status` (`Ready`, MCP, child refs, data refs). Snapshot-domain controllers владеют planning/execution requests и пишут только свои `XxxxSnapshot.status`: bind, `childrenSnapshotRefs`, и snapshot-level `Ready` на основе bound content.
 
 **Latest pre-e2e smoke (2026-04-29):** пройден на реальном кластере с test-only domain RBAC до `RBACReady=True`. Подтверждены no-DSC root, disk-only DSC, VM+Disk DSC, `spec.sourceRef`, content tree, MCP/chunks, namespace-relative aggregated API output, negative API (`NotFound` / `BadRequest`) и cleanup с ожидаемыми retained SnapshotContent/ObjectKeeper. Не блокирует: transient `ObjectKeeper already exists` при повторном run с retained artifacts; Kubernetes warning по имени `NamespaceSnapshot` finalizer.
 

@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -28,20 +29,35 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// SnapshotContentController reconciles generic XxxxSnapshotContent resources
+// SnapshotContentController reconciles generic XxxxSnapshotContent resources.
 //
-// This controller manages the lifecycle of SnapshotContent:
+// Architectural boundary: SnapshotContentController is a result aggregator and
+// lifecycle controller, not a domain planner/executor. It does not decide what
+// must be captured and does not create domain execution requests such as MCR,
+// VCR, DataExport, or VolumeSnapshot requests. Snapshot/domain controllers own
+// planning and request creation because only they know the domain model.
+//
+// This controller manages the lifecycle and aggregate result of SnapshotContent:
 // - Manages finalizers (protection from manual deletion)
-// - Checks consistency (artifacts exist, Ready condition)
+// - Reads existing manifest/data result objects and aggregates Ready
+// - Publishes SnapshotContent.status fields (MCP/data refs and child content refs)
 // - Handles deletion (cascade finalizers removal)
 // - Does NOT create SnapshotContent (that's SnapshotController's responsibility)
 //
@@ -270,10 +286,17 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
-	// Step 3: Consistency checks and Ready condition
-	// Common SnapshotContent status is owned by namespace/demo snapshot controllers.
-	// The generic content controller keeps only lifecycle/finalizer ownership for it.
-	if !isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
+	// Step 3: Content status aggregation and Ready condition.
+	if isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj)
+		if err != nil {
+			logger.Error(err, "Failed to reconcile common SnapshotContent status")
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+		}
+	} else {
 		if err := r.checkConsistencyAndSetReady(ctx, contentLike, obj); err != nil {
 			logger.Error(err, "Failed to check consistency")
 			// Non-fatal: continue reconciliation
@@ -286,6 +309,338 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 
 func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
 	return gvk == unifiedbootstrap.CommonSnapshotContentGVK()
+}
+
+type commonContentStatusPlan struct {
+	manifestCheckpointName string
+	childrenRefs           []storagev1alpha1.SnapshotContentChildRef
+	readyStatus            metav1.ConditionStatus
+	readyReason            string
+	readyMessage           string
+}
+
+func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, obj)
+	if err != nil {
+		return false, err
+	}
+
+	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
+	if err != nil {
+		return false, fmt.Errorf("extract common SnapshotContentLike: %w", err)
+	}
+	statusMap, _ := obj.Object["status"].(map[string]interface{})
+	if statusMap == nil {
+		statusMap = map[string]interface{}{}
+	}
+
+	changed := false
+	if existing, _ := statusMap["manifestCheckpointName"].(string); existing != plan.manifestCheckpointName {
+		if plan.manifestCheckpointName == "" {
+			delete(statusMap, "manifestCheckpointName")
+		} else {
+			statusMap["manifestCheckpointName"] = plan.manifestCheckpointName
+		}
+		changed = true
+	}
+	if !snapshotObjectRefsEqualStorageContentRefs(contentLike.GetStatusChildrenSnapshotContentRefs(), plan.childrenRefs) {
+		statusMap["childrenSnapshotContentRefs"] = snapshotContentChildRefsToUnstructured(plan.childrenRefs)
+		changed = true
+	}
+
+	desired := metav1.Condition{
+		Type:               snapshot.ConditionReady,
+		Status:             plan.readyStatus,
+		Reason:             plan.readyReason,
+		Message:            plan.readyMessage,
+		ObservedGeneration: obj.GetGeneration(),
+	}
+	if cur := snapshot.GetCondition(contentLike, snapshot.ConditionReady); cur == nil ||
+		cur.Status != desired.Status || cur.Reason != desired.Reason || cur.Message != desired.Message || cur.ObservedGeneration != desired.ObservedGeneration {
+		snapshot.SetCondition(contentLike, snapshot.ConditionReady, desired.Status, desired.Reason, desired.Message)
+		conditions := contentLike.GetStatusConditions()
+		for i := range conditions {
+			if conditions[i].Type == snapshot.ConditionReady {
+				conditions[i].ObservedGeneration = desired.ObservedGeneration
+			}
+		}
+		obj.Object["status"] = statusMap
+		snapshot.SyncConditionsToUnstructured(obj, conditions)
+		changed = true
+	}
+
+	if !changed {
+		return plan.readyStatus == metav1.ConditionTrue, nil
+	}
+	obj.Object["status"] = statusMap
+	if err := r.Status().Update(ctx, obj); err != nil {
+		if errors.IsConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return plan.readyStatus == metav1.ConditionTrue, nil
+}
+
+func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
+	plan := commonContentStatusPlan{
+		readyStatus:  metav1.ConditionFalse,
+		readyReason:  snapshot.ReasonManifestCapturePending,
+		readyMessage: "waiting for manifest capture",
+	}
+
+	snapshotRef, err := snapshotRefFromCommonContent(obj)
+	if err != nil {
+		plan.readyReason = snapshot.ReasonContentMissing
+		plan.readyMessage = err.Error()
+		return plan, nil
+	}
+	snapObj := &unstructured.Unstructured{}
+	snapObj.SetAPIVersion(snapshotRef.APIVersion)
+	snapObj.SetKind(snapshotRef.Kind)
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: snapshotRef.Namespace, Name: snapshotRef.Name}, snapObj); err != nil {
+		if errors.IsNotFound(err) {
+			plan.readyReason = snapshot.ReasonContentMissing
+			plan.readyMessage = fmt.Sprintf("snapshot %s/%s not found", snapshotRef.Namespace, snapshotRef.Name)
+			return plan, nil
+		}
+		return plan, err
+	}
+
+	childRefs, childrenReady, childReason, childMessage, err := r.resolveCommonContentChildren(ctx, snapObj)
+	if err != nil {
+		return plan, err
+	}
+	plan.childrenRefs = childRefs
+
+	mcpName, mcpReady, mcpFailed, mcpMessage, err := r.resolveCommonContentManifestCheckpoint(ctx, obj, snapshotRef, snapObj)
+	if err != nil {
+		return plan, err
+	}
+	plan.manifestCheckpointName = mcpName
+	if mcpFailed {
+		plan.readyReason = "ManifestCheckpointFailed"
+		plan.readyMessage = mcpMessage
+		return plan, nil
+	}
+	if !mcpReady {
+		plan.readyReason = snapshot.ReasonManifestCapturePending
+		plan.readyMessage = mcpMessage
+		return plan, nil
+	}
+
+	dataReady, dataReason, dataMessage, err := r.resolveDataReadiness(ctx, obj)
+	if err != nil {
+		return plan, err
+	}
+	if !dataReady {
+		plan.readyReason = dataReason
+		plan.readyMessage = dataMessage
+		return plan, nil
+	}
+	if !childrenReady {
+		plan.readyReason = childReason
+		plan.readyMessage = childMessage
+		return plan, nil
+	}
+
+	plan.readyStatus = metav1.ConditionTrue
+	plan.readyReason = snapshot.ReasonCompleted
+	plan.readyMessage = "manifest, data, and child content are ready"
+	return plan, nil
+}
+
+func snapshotRefFromCommonContent(obj *unstructured.Unstructured) (storagev1alpha1.SnapshotSubjectRef, error) {
+	ref := storagev1alpha1.SnapshotSubjectRef{}
+	refMap, ok, err := unstructured.NestedMap(obj.Object, "spec", "snapshotRef")
+	if err != nil {
+		return ref, err
+	}
+	if !ok {
+		return ref, fmt.Errorf("spec.snapshotRef is missing")
+	}
+	ref.APIVersion, _ = refMap["apiVersion"].(string)
+	ref.Kind, _ = refMap["kind"].(string)
+	ref.Name, _ = refMap["name"].(string)
+	ref.Namespace, _ = refMap["namespace"].(string)
+	if uid, _ := refMap["uid"].(string); uid != "" {
+		ref.UID = types.UID(uid)
+	}
+	if ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
+		return ref, fmt.Errorf("spec.snapshotRef apiVersion/kind/name are required")
+	}
+	return ref, nil
+}
+
+func (r *SnapshotContentController) resolveCommonContentChildren(ctx context.Context, snapObj *unstructured.Unstructured) ([]storagev1alpha1.SnapshotContentChildRef, bool, string, string, error) {
+	rawRefs, _, err := unstructured.NestedSlice(snapObj.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return nil, false, "", "", err
+	}
+	var refs []storagev1alpha1.SnapshotContentChildRef
+	for _, raw := range rawRefs {
+		refMap, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		apiVersion, _ := refMap["apiVersion"].(string)
+		kind, _ := refMap["kind"].(string)
+		name, _ := refMap["name"].(string)
+		if apiVersion == "" || kind == "" || name == "" {
+			continue
+		}
+		child := &unstructured.Unstructured{}
+		child.SetAPIVersion(apiVersion)
+		child.SetKind(kind)
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: snapObj.GetNamespace(), Name: name}, child); err != nil {
+			if errors.IsNotFound(err) {
+				return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child snapshot %s/%s not found", kind, name), nil
+			}
+			return refs, false, "", "", err
+		}
+		boundName, _, err := unstructured.NestedString(child.Object, "status", "boundSnapshotContentName")
+		if err != nil {
+			return refs, false, "", "", err
+		}
+		if boundName == "" {
+			return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child snapshot %s/%s has no bound SnapshotContent", kind, name), nil
+		}
+		refs = append(refs, storagev1alpha1.SnapshotContentChildRef{Name: boundName})
+		childContent := &unstructured.Unstructured{}
+		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: boundName}, childContent); err != nil {
+			if errors.IsNotFound(err) {
+				return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s not found", boundName), nil
+			}
+			return refs, false, "", "", err
+		}
+		childLike, err := snapshot.ExtractSnapshotContentLike(childContent)
+		if err != nil {
+			return refs, false, "", "", err
+		}
+		if !snapshot.IsReady(childLike) {
+			readyCond := snapshot.GetCondition(childLike, snapshot.ConditionReady)
+			if readyCond != nil && readyCond.Status == metav1.ConditionFalse && readyCond.Reason == snapshot.ReasonChildSnapshotFailed {
+				return refs, false, snapshot.ReasonChildSnapshotFailed, readyCond.Message, nil
+			}
+			return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s is not Ready", boundName), nil
+		}
+	}
+	sortSnapshotContentChildRefs(refs)
+	return refs, true, "", "", nil
+}
+
+func (r *SnapshotContentController) resolveCommonContentManifestCheckpoint(ctx context.Context, contentObj *unstructured.Unstructured, ref storagev1alpha1.SnapshotSubjectRef, snapObj *unstructured.Unstructured) (string, bool, bool, string, error) {
+	existingMCPName, _, err := unstructured.NestedString(contentObj.Object, "status", "manifestCheckpointName")
+	if err != nil {
+		return "", false, false, "", err
+	}
+	if existingMCPName != "" {
+		mcpName, ready, failed, msg, err := r.resolveManifestCheckpointReady(ctx, existingMCPName)
+		if err != nil {
+			return "", false, false, "", err
+		}
+		if ready || failed {
+			return mcpName, ready, failed, msg, nil
+		}
+	}
+
+	mcrName := commonContentManifestCaptureRequestName(ref, snapObj)
+	if mcrName == "" {
+		return "", false, false, "waiting for ManifestCaptureRequest name", nil
+	}
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: mcrName}, mcr); err != nil {
+		if errors.IsNotFound(err) {
+			return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s", ref.Namespace, mcrName), nil
+		}
+		return "", false, false, "", err
+	}
+	if mcr.Status.CheckpointName == "" {
+		cond := meta.FindStatusCondition(mcr.Status.Conditions, ssv1alpha1.ManifestCaptureRequestConditionTypeReady)
+		if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonFailed {
+			return "", false, true, cond.Message, nil
+		}
+		return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s checkpoint", ref.Namespace, mcrName), nil
+	}
+	return r.resolveManifestCheckpointReady(ctx, mcr.Status.CheckpointName)
+}
+
+func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.Context, mcpName string) (string, bool, bool, string, error) {
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if errors.IsNotFound(err) {
+			return mcpName, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s", mcpName), nil
+		}
+		return "", false, false, "", err
+	}
+	cond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+	if cond == nil {
+		return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s Ready condition", mcp.Name), nil
+	}
+	if cond.Status == metav1.ConditionTrue {
+		return mcp.Name, true, false, cond.Message, nil
+	}
+	if cond.Status == metav1.ConditionFalse && cond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed {
+		return mcp.Name, false, true, cond.Message, nil
+	}
+	return mcp.Name, false, false, cond.Message, nil
+}
+
+func commonContentManifestCaptureRequestName(ref storagev1alpha1.SnapshotSubjectRef, snapObj *unstructured.Unstructured) string {
+	switch {
+	case ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == KindNamespaceSnapshot:
+		uid := ref.UID
+		if uid == "" {
+			uid = snapObj.GetUID()
+		}
+		if uid == "" {
+			return ""
+		}
+		return namespacemanifest.NamespaceSnapshotMCRName(uid)
+	case ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && (ref.Kind == KindDemoVirtualDiskSnapshot || ref.Kind == KindDemoVirtualMachineSnapshot):
+		return demoSnapshotManifestCaptureRequestName(ref.Kind, ref.Namespace, ref.Name)
+	default:
+		name, _, _ := unstructured.NestedString(snapObj.Object, "status", "manifestCaptureRequestName")
+		return name
+	}
+}
+
+func (r *SnapshotContentController) resolveDataReadiness(_ context.Context, _ *unstructured.Unstructured) (bool, string, string, error) {
+	// Extension point for reading already-created VolumeSnapshotContent/DataExport
+	// results. Creation of data-path requests stays in the domain snapshot controllers.
+	// State-only demo and namespace snapshots currently have no data artifact requirement.
+	return true, "", "", nil
+}
+
+func snapshotContentChildRefsToUnstructured(refs []storagev1alpha1.SnapshotContentChildRef) []interface{} {
+	out := make([]interface{}, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, map[string]interface{}{"name": ref.Name})
+	}
+	return out
+}
+
+func snapshotObjectRefsEqualStorageContentRefs(left []snapshot.ObjectRef, right []storagev1alpha1.SnapshotContentChildRef) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftNames := make([]string, 0, len(left))
+	for _, ref := range left {
+		leftNames = append(leftNames, ref.Name)
+	}
+	rightNames := make([]string, 0, len(right))
+	for _, ref := range right {
+		rightNames = append(rightNames, ref.Name)
+	}
+	sort.Strings(leftNames)
+	sort.Strings(rightNames)
+	for i := range leftNames {
+		if leftNames[i] != rightNames[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // cascadeRemoveFinalizersFromChildren removes finalizers from child SnapshotContent objects
@@ -729,10 +1084,47 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
+		r.addCommonSnapshotStatusWatches(mgr, builder, gvk)
 		if err := builder.Complete(r); err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
 		}
 		r.activeContentWatchSet[key] = struct{}{}
 	}
 	return nil
+}
+
+func (r *SnapshotContentController) addCommonSnapshotStatusWatches(_ ctrl.Manager, builder *ctrlbuilder.Builder, contentGVK schema.GroupVersionKind) {
+	if !isCommonSnapshotContentGVK(contentGVK) {
+		return
+	}
+	for _, snapshotGVK := range commonContentStatusSnapshotWatchGVKs() {
+		if _, err := r.RESTMapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version); err != nil {
+			continue
+		}
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(snapshotGVK)
+		builder.Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent))
+	}
+}
+
+func commonContentStatusSnapshotWatchGVKs() []schema.GroupVersionKind {
+	return []schema.GroupVersionKind{
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: storagev1alpha1.SchemeGroupVersion.Group, Version: storagev1alpha1.SchemeGroupVersion.Version, Kind: KindNamespaceSnapshot},
+		{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: KindDemoVirtualDiskSnapshot},
+		{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: KindDemoVirtualMachineSnapshot},
+		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
+	}
+}
+
+func mapSnapshotStatusToBoundCommonContent(_ context.Context, obj client.Object) []reconcile.Request {
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil
+	}
+	boundName, _, err := unstructured.NestedString(raw, "status", "boundSnapshotContentName")
+	if err != nil || boundName == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: boundName}}}
 }

@@ -65,23 +65,6 @@ func (r *NamespaceSnapshotReconciler) deleteNamespaceSnapshotManifestCaptureRequ
 	return nil
 }
 
-// mirrorSubtreeManifestCapturePendingOnContent mirrors E5 subtree wait onto root SnapshotContent so
-// the content object does not look Ready while exclude cannot be computed yet.
-func (r *NamespaceSnapshotReconciler) mirrorSubtreeManifestCapturePendingOnContent(ctx context.Context, contentName, msg string) error {
-	fresh := &storagev1alpha1.SnapshotContent{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, fresh); err != nil {
-		return err
-	}
-	meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             snapshot.ReasonSubtreeManifestCapturePending,
-		Message:            msg,
-		ObservedGeneration: fresh.Generation,
-	})
-	return r.Client.Status().Update(ctx, fresh)
-}
-
 // reconcileChildrenRefsE6ParentReadyOrPatch applies E6 aggregation for status.childrenSnapshotRefs (strict
 // apiVersion/kind/name refs; single Get per child). Returns (allChildrenAllowParentSuccess, result, err):
 // when false, result is from patchNamespaceSnapshotReadyFromE6 and the caller must return it; when true, caller may mark root capture complete.
@@ -208,11 +191,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 			if uerr := r.Client.Status().Update(ctx, freshParent); uerr != nil {
 				return ctrl.Result{}, uerr
 			}
-			if hasSubtree && reason == snapshot.ReasonSubtreeManifestCapturePending {
-				if uerr := r.mirrorSubtreeManifestCapturePendingOnContent(ctx, content.Name, msg); uerr != nil {
-					return ctrl.Result{}, uerr
-				}
-			}
+			_ = content
 			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
@@ -290,25 +269,6 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	if readyCond.Reason != ssv1alpha1.ManifestCheckpointConditionReasonCompleted {
 		// Ready=True with unexpected reason — still treat as success if True (defensive).
 		logger.Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
-	}
-
-	// Persist checkpoint name on content and mirror success on SnapshotContent.status.conditions.
-	contentKey := client.ObjectKey{Name: content.Name}
-	if err := r.Client.Get(ctx, contentKey, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	if content.Status.ManifestCheckpointName != mcpName {
-		content.Status.ManifestCheckpointName = mcpName
-	}
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             snapshot.ReasonCompleted,
-		Message:            fmt.Sprintf("manifest capture persisted (ManifestCheckpoint %s)", mcpName),
-		ObservedGeneration: content.Generation,
-	})
-	if err := r.Client.Status().Update(ctx, content); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	return r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
@@ -391,6 +351,43 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 	if gerr != nil {
 		return ctrl.Result{}, gerr
 	}
+	if fresh.Status.BoundSnapshotContentName == "" {
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
+	if contentReady == nil || contentReady.Status != metav1.ConditionTrue {
+		reason := snapshot.ReasonManifestCapturePending
+		message := fmt.Sprintf("waiting for SnapshotContent %q Ready", content.Name)
+		if contentReady != nil {
+			reason = contentReady.Reason
+			message = contentReady.Message
+		}
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur := &storagev1alpha1.NamespaceSnapshot{}
+			if err := r.Client.Get(ctx, nsKey, cur); err != nil {
+				return err
+			}
+			cur.Status.ObservedGeneration = cur.Generation
+			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+				Type:               snapshot.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            message,
+				ObservedGeneration: cur.Generation,
+			})
+			return r.Client.Status().Update(ctx, cur)
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
 	allClear, res, err := r.reconcileChildrenRefsE6ParentReadyOrPatch(ctx, fresh, false, "", true)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -444,25 +441,7 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}
-	if content != nil && content.Name != "" {
-		fresh := &storagev1alpha1.SnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, fresh); err != nil {
-			if apierrors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, err
-		}
-		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            msg,
-			ObservedGeneration: fresh.Generation,
-		})
-		if err := r.Client.Status().Update(ctx, fresh); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+	_ = content
 	return ctrl.Result{}, nil
 }
 

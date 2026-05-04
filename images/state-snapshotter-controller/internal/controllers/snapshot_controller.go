@@ -19,13 +19,11 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -281,11 +278,12 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 
 		// Set spec.snapshotRef
-		// CRD requires: name, namespace
-		// NOTE: snapshotRef.kind is intentionally omitted to avoid CRD schema warnings.
+		// CRD requires apiVersion/kind/name and namespace for namespaced snapshots.
 		snapshotRef := map[string]interface{}{
-			"name":      obj.GetName(),
-			"namespace": obj.GetNamespace(),
+			"apiVersion": obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+			"kind":       obj.GetKind(),
+			"name":       obj.GetName(),
+			"namespace":  obj.GetNamespace(),
 		}
 		spec := map[string]interface{}{
 			"snapshotRef": snapshotRef,
@@ -382,120 +380,20 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return ctrl.Result{}, nil
 }
 
-// ensureSnapshotContentLinks populates SnapshotContent.status.manifestCheckpointName/dataRef
-// from ready MCR/VCR (if present). Returns requeue=true if requests are not ready yet.
+// ensureSnapshotContentLinks is intentionally a no-op for content status ownership.
+// SnapshotController owns Snapshot orchestration and binding only; SnapshotContentController owns
+// SnapshotContent.status (MCP/data refs, child content refs, and Ready aggregation).
 func (r *SnapshotController) ensureSnapshotContentLinks(
 	ctx context.Context,
 	snapshotLike snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
 	contentName string,
 ) (bool, error) {
-	logger := log.FromContext(ctx)
-
-	mcrName := snapshotLike.GetStatusManifestCaptureRequestName()
-	vcrName := snapshotLike.GetStatusVolumeCaptureRequestName()
-
-	// No requests yet - nothing to do
-	if mcrName == "" && vcrName == "" {
-		return false, nil
-	}
-
-	// Fetch SnapshotContent
-	contentGVK, err := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
-	if err != nil {
-		return false, fmt.Errorf("failed to resolve SnapshotContent GVK: %w", err)
-	}
-	contentObj := &unstructured.Unstructured{}
-	contentObj.SetGroupVersionKind(contentGVK)
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: contentName}, contentObj); err != nil {
-		return false, err
-	}
-
-	statusMap, _ := contentObj.Object["status"].(map[string]interface{})
-	if statusMap == nil {
-		statusMap = map[string]interface{}{}
-	}
-
-	needsUpdate := false
-
-	// Handle MCR -> ManifestCheckpointName
-	if mcrName != "" {
-		mcr := &storagev1alpha1.ManifestCaptureRequest{}
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: mcrName}, mcr); err != nil {
-			return false, err
-		}
-		readyCond := meta.FindStatusCondition(mcr.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
-		if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
-			logger.V(1).Info("MCR not ready yet, requeue", "mcr", mcrName)
-			return true, nil
-		}
-		if mcr.Status.CheckpointName == "" {
-			logger.V(1).Info("MCR Ready but checkpointName empty, requeue", "mcr", mcrName)
-			return true, nil
-		}
-		if existing, ok := statusMap["manifestCheckpointName"].(string); !ok || existing != mcr.Status.CheckpointName {
-			statusMap["manifestCheckpointName"] = mcr.Status.CheckpointName
-			needsUpdate = true
-		}
-	}
-
-	// Handle VCR -> dataRef
-	if vcrName != "" {
-		vcrGVK := schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "VolumeCaptureRequest"}
-		vcrObj := &unstructured.Unstructured{}
-		vcrObj.SetGroupVersionKind(vcrGVK)
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: vcrName}, vcrObj); err != nil {
-			return false, err
-		}
-		conditions, _, _ := unstructured.NestedSlice(vcrObj.Object, "status", "conditions")
-		ready := isConditionTrue(conditions, "Ready")
-		if !ready {
-			logger.V(1).Info("VCR not ready yet, requeue", "vcr", vcrName)
-			return true, nil
-		}
-		dataRefMap, _, _ := unstructured.NestedMap(vcrObj.Object, "status", "dataRef")
-		name, _ := dataRefMap["name"].(string)
-		kind, _ := dataRefMap["kind"].(string)
-		namespace, _ := dataRefMap["namespace"].(string)
-		if name == "" || kind == "" {
-			logger.V(1).Info("VCR Ready but dataRef incomplete, requeue", "vcr", vcrName)
-			return true, nil
-		}
-		newDataRef := map[string]interface{}{"name": name, "kind": kind}
-		if namespace != "" {
-			newDataRef["namespace"] = namespace
-		}
-		if existing, ok := statusMap["dataRef"].(map[string]interface{}); !ok || !reflect.DeepEqual(existing, newDataRef) {
-			statusMap["dataRef"] = newDataRef
-			needsUpdate = true
-		}
-	}
-
-	if needsUpdate {
-		contentObj.Object["status"] = statusMap
-		if err := r.Status().Update(ctx, contentObj); err != nil {
-			return false, err
-		}
-		logger.Info("Updated SnapshotContent links", "content", contentName, "mcr", mcrName, "vcr", vcrName)
-	}
-
+	_ = ctx
+	_ = snapshotLike
+	_ = obj
+	_ = contentName
 	return false, nil
-}
-
-func isConditionTrue(conditions []interface{}, condType string) bool {
-	for _, c := range conditions {
-		cond, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		t, _ := cond["type"].(string)
-		if t != condType {
-			continue
-		}
-		status, _ := cond["status"].(string)
-		return status == string(metav1.ConditionTrue)
-	}
-	return false
 }
 
 func (r *SnapshotController) removeSnapshotContentFinalizer(
