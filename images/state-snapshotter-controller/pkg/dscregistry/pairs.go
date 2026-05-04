@@ -24,7 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
@@ -68,7 +67,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 			seen[key] = struct{}{}
 			out = append(out, unifiedbootstrap.UnifiedGVKPair{
 				Snapshot:        snapGVK,
-				SnapshotContent: commonSnapshotContentGVK(),
+				SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
 			})
 		}
 	}
@@ -119,19 +118,11 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]E
 				},
 				ResourceGVK:     resourceGVK,
 				SnapshotGVK:     snapshotGVK,
-				SnapshotContent: commonSnapshotContentGVK(),
+				SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
 			})
 		}
 	}
 	return out, nil
-}
-
-func commonSnapshotContentGVK() schema.GroupVersionKind {
-	return schema.GroupVersionKind{
-		Group:   storagev1alpha1.APIGroup,
-		Version: storagev1alpha1.APIVersion,
-		Kind:    "SnapshotContent",
-	}
 }
 
 func getCRD(ctx context.Context, c client.Reader, name string) (*extv1.CustomResourceDefinition, error) {

@@ -60,7 +60,7 @@
 
 **Когда имеет смысл рестарт pod**
 
-- **Stale > 0** после осознанного удаления/отключения unified CRD или смены набора типов, и нужна **строгая** согласованность «что в конфиге/DSC» ↔ «что реально смотрит процесс».
+- **Stale > 0** после осознанного удаления CRD или смены набора типов, и нужна **строгая** согласованность «что в конфиге/DSC» ↔ «что реально смотрит процесс».
 - Подозрение на застрявшие informer’ы или редкие гонки после больших изменений CRD.
 
 **Когда рестарт часто не обязателен**
@@ -70,13 +70,12 @@
 
 ---
 
-## 4. Rollout (R5): отключение unified и bootstrap
+## 4. Bootstrap (R5): always-on runtime
 
-Переменные окружения контроллера (часть дублируется Helm values `stateSnapshotter.*`):
+Unified/generic runtime в v0 имеет один режим: DSC reconciler, graph registry, `unifiedruntime.Syncer`, generic watches и hot-add путь всегда инициализируются. Переменные окружения контроллера (часть дублируется Helm values `stateSnapshotter.*`):
 
 | Переменная | Смысл |
 |------------|--------|
-| `STATE_SNAPSHOTTER_UNIFIED_ENABLED` | По умолчанию включено. Значения `false`, `0`, `no`, `off` — **не** поднимать Snapshot/SnapshotContent и **не** вызывать `unifiedruntime.Sync`; reconciler DSC остаётся (статусы), sync = nil. |
 | `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS` | Пусто — встроенный unified-runtime bootstrap (`DefaultUnifiedRuntimeBootstrapPairs()`, legacy alias `DefaultDesiredUnifiedSnapshotPairs()`). Это не graph registry built-ins. Литералы `empty` / `none` / `dsc-only` — пустой статический bootstrap (только eligible DSC). Иначе кастом: пары через `;`, внутри пары `snapGVK|contentGVK`, каждый GVK как `group/version/Kind`. |
 | `STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL` | Опционально: длительность `spec.ttl` у корневого ObjectKeeper в режиме **`FollowObjectWithTTL`** (root `NamespaceSnapshot` и unified `XxxxSnapshot`). Формат Go `time.ParseDuration` (`24h`, `168h`, …). Не задана или ≤0 — используется встроенный дефолт контроллера (см. `pkg/config`). Алиас: `STATE_SNAPSHOTTER_NS_ROOT_OK_TTL` (если основная не задана). Value Helm: `stateSnapshotter.snapshotRootOkTtl`. |
 

@@ -75,9 +75,6 @@ type Options struct {
 	// Default: false (filtering disabled by default)
 	EnableFiltering bool
 
-	// UnifiedSnapshotDisabled: when true, do not register Snapshot/SnapshotContent controllers or unifiedruntime.Sync;
-	// DSC reconciler still runs (status only), with nil runtime sync. Env: STATE_SNAPSHOTTER_UNIFIED_ENABLED=false|0|no|off.
-	UnifiedSnapshotDisabled bool
 	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible DSC (R5).
 	// See EffectiveUnifiedBootstrapPairs().
 	UnifiedBootstrapMode        UnifiedBootstrapMode
@@ -137,7 +134,6 @@ func NewConfig() *Options {
 	// Filtering disabled by default - all objects included as-is
 	opts.EnableFiltering = false
 
-	opts.UnifiedSnapshotDisabled = parseUnifiedSnapshotDisabled(os.Getenv(EnvUnifiedSnapshotEnabled))
 	mode, pairs, perr := ParseUnifiedBootstrapPairsEnv(os.Getenv(EnvUnifiedBootstrapPairs))
 	if perr != nil {
 		log.Printf("Invalid %s (%v); using default bootstrap list", EnvUnifiedBootstrapPairs, perr)

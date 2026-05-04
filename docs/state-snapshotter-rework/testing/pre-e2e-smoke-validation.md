@@ -8,6 +8,8 @@
 DSC -> snapshot graph -> sourceRef -> MCP -> aggregated read
 ```
 
+В текущем v0 есть один runtime mode: `NamespaceSnapshotController`, common `SnapshotContentController`, DSC reconciler, graph registry, generic runtime syncer and dynamic hot-add watches always enabled.
+
 Все имена child snapshots получайте из `status.childrenSnapshotRefs`. Не используйте фиксированные имена вроде `DemoVirtualMachineSnapshot/vm-1` или `DemoVirtualDiskSnapshot/disk-vm`.
 
 ## 0. Контекст и переменные

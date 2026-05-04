@@ -24,7 +24,7 @@
 **Как сделано (S1–S2):**
 
 - Пакет `images/state-snapshotter-controller/pkg/unifiedbootstrap/`: `DefaultUnifiedRuntimeBootstrapPairs()` / legacy alias `DefaultDesiredUnifiedSnapshotPairs()`, отдельный `DefaultGraphRegistryBuiltInPairs()`, `ResolveAvailableUnifiedGVKPairs(mapper, pairs, log)`.
-- `cmd/main.go`: dedicated controllers (`NamespaceSnapshot*`, demo snapshot kinds) регистрируются всегда; `STATE_SNAPSHOTTER_UNIFIED_ENABLED` управляет только generic unified runtime wiring и runtime sync.
+- `cmd/main.go`: unified/generic runtime в v0 always-on; `NamespaceSnapshot*`, common `SnapshotContent`, demo snapshot kinds, DSC reconciler, graph registry, `SnapshotController`, `unifiedruntime.Syncer` и hot-add path регистрируются на едином startup path.
 - **Динамика после старта:** новые eligible типы из DSC подхватываются **без рестарта** через `pkg/unifiedruntime.Syncer.Sync` (R2 2b/R3). **Снятие** watch при выпадении типа из resolved — по-прежнему не гарантируется; см. gauges `state_snapshotter_unified_runtime_*` и лог при stale.
 
 Опционально (не сделано): **feature gate** в values для всего unified трека.
@@ -37,7 +37,7 @@
 | R2 | **DSC reconciler** в manager + пересчёт статусов; **phase 1** — см. блок ниже; **phase 2a** — merge на старте; **phase 2b** — `pkg/unifiedruntime.Sync` после reconcile DSC: additive `mgr.Add` для новых пар | Замена статического bootstrap как единственного источника пар GVK | ✅ phase 1 / 2a / 2b *(additive add; без clean unwatch)* |
 | R3 | **Runtime (без рестарта pod):** подписка по формуле `Accepted`+`RBACReady`+поколения; `Ready` не в предикате; **отписка не гарантируется** | Нет обязательности watch на stale тип; новые eligible — без рестарта | ✅ *(additive + layered state + proof-тест + gauges/log stale↔resolved; symmetric unwatch — ⬜)* |
 | R4 | Конфликт kind между DSC → `Accepted=False (KindConflict)`; процесс не падает | Fail-closed на уровне DSC | ✅ *(reconciler; см. `domainspecificsnapshot_controller.go`)* |
-| R5 | Опциональный bootstrap-список GVK + отключение unified wiring (env / Helm values) | Rollout | ✅ см. `pkg/config` (`STATE_SNAPSHOTTER_*`), `openapi/config-values.yaml`, `templates/controller/deployment.yaml` |
+| R5 | Опциональный bootstrap-список GVK (env / Helm values); runtime always-on | Rollout | ✅ см. `pkg/config` (`STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`), `openapi/config-values.yaml`, `templates/controller/deployment.yaml` |
 
 **R2 phase 1 — сделано (status-only, без runtime activation):**
 
@@ -50,7 +50,7 @@
 - [x] **Phase 2b (additive):** `pkg/unifiedruntime.Syncer` после успешного `reconcileAll` DSC: merge + `ResolveAvailableUnifiedGVKPairs` → `SnapshotController.AddWatchForPair` / `SnapshotContentController.AddWatchForContent` (`mgr.Add` после `Start` поддерживается controller-runtime). Идемпотентность по GVK; один сбой add не валит остальные пары.
 - [x] **R3 (часть 1 — state + proof):** слой **bootstrap / eligible / merged / resolved** в `pkg/unifiedruntime.LayeredGVKState` + `BuildLayeredGVKState`; **active** — `Syncer.activeSnapshotGVKKeys` (монотонно: ключ попадает, если оба `AddWatch*` успешны); `LastLayeredState()` / `ActiveSnapshotGVKKeys()` для отладки и тестов; unit — `pkg/unifiedruntime/layers_test.go`. Интеграция: `test/integration/unified_runtime_hot_add_test.go` — DSC становится watch-eligible (Accepted → RBACReady), затем проверяются `LastLayeredState` (resolved + eligible) и `ActiveSnapshotGVKKeys`; тест **Serial**, маппинг на **RegistrationTestSnapshot** (не `TestSnapshot`), чтобы не вешать глобальный watch на тип, с которым lifecycle-спеки делают прямой `Reconcile` (иначе два reconcile-потока и 409). В `BeforeSuite` интеграции — wiring как в production: unified controllers + `unifiedruntime.NewSyncer` + `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync, graphRegistryRefresh)`.
 - [x] **R3 (observability):** после каждого `Sync` обновляются Prometheus gauges (`sigs.k8s.io/controller-runtime/pkg/metrics`): `state_snapshotter_unified_runtime_resolved_snapshot_gvk_count`, `active_monotonic_snapshot_gvk_count`, `stale_active_snapshot_gvk_count`; сводка на `V(2)`; при `stale_active_snapshot_gvk_count > 0` — **Info**-лог со списком ключей и явным hint про restart pod (additive watches не снимаются). Регистрация метрик — `sync.Once` в `NewSyncer`. См. [`r2-phase-2b-r3-runtime-registry.md`](r2-phase-2b-r3-runtime-registry.md).
-- [x] **R5:** `config.Options` + env (`STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`); `cmd/main.go` ветка без generic unified wiring; dedicated controllers остаются в manager; `NewSyncer` получает `EffectiveUnifiedBootstrapPairs()`; Helm/OpenAPI. Ошибка парсинга bootstrap → warning + дефолтный список. Graph registry built-ins отделены от runtime bootstrap: по умолчанию только `NamespaceSnapshot`→`SnapshotContent`, demo пары — через eligible DSC.
+- [x] **R5:** `config.Options` + env (`STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`); `cmd/main.go` имеет один always-on generic/unified startup path; `NewSyncer` получает `EffectiveUnifiedBootstrapPairs()`; Helm/OpenAPI. Ошибка парсинга bootstrap → warning + дефолтный список. Graph registry built-ins отделены от runtime bootstrap: по умолчанию только `NamespaceSnapshot`→`SnapshotContent`, demo пары — через eligible DSC.
 - [ ] **R3 / integration (опционально):** два DSC при поломке одного, полный T5/T9 и т.д.
 
 ### 2.3 Manifest capture
@@ -235,7 +235,7 @@
 
 **Рекомендуемый порядок дальше** (после закрытого ядра R2/R3 + D1–D3): не смешивать manifest с rollout-unified в одном PR.
 
-1. ~~**R5 + feature gates**~~ ✅ — `STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`; Helm `unifiedSnapshotEnabled`, `unifiedBootstrapPairs`.
+1. ~~**R5 bootstrap config**~~ ✅ — `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`; Helm `unifiedBootstrapPairs`; unified/generic runtime always-on in v0.
 2. ~~**Точечные integration-тесты**~~ ✅ — `unified_runtime_rbac_eligibility_test.go`: без RBACReady нет записи в `EligibleFromDSC`; после снятия RBACReady resolved теряет пару, monotonic active сохраняет ключ.
 3. ~~**N0 → N1**~~ ✅; **N2** — по **§2.4.1**: **N2a** (первый manifests-only snapshot + OK + download), затем **N2b** (дерево + aggregated download); далее **N3** (restart/hardening), **N4** (лимиты после N2), **N5** (data-layer и полный ТЗ вне manifests-only дерева).
 4. **M1**, затем **M2** — только после стабилизации namespace-flow (**N2a** или явный gate в плане; расширение MCR spec не блокируется закрытием **N2b**, если так зафиксировано); manifest-трек не смешивать с N2 без необходимости.

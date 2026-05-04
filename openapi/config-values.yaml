@@ -10,10 +10,6 @@ properties:
       - TRACE
     description: Module log level.
     default: DEBUG
-  unifiedSnapshotEnabled:
-    type: boolean
-    default: true
-    description: When false, disables Snapshot/SnapshotContent controllers and unifiedruntime.Sync; DSC reconciler still runs (status only). Maps to env STATE_SNAPSHOTTER_UNIFIED_ENABLED.
   unifiedBootstrapPairs:
     type: string
     default: ""

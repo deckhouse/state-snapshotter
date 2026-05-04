@@ -53,7 +53,7 @@ const (
 
 // DomainSpecificSnapshotControllerReconciler resolves snapshotResourceMapping, detects cross-DSC
 // snapshot kind conflicts, writes Accepted and aggregated Ready. RBACReady is owned by Deckhouse hook.
-// Runtime watch activation is out of scope for this reconciler.
+// Runtime watch activation is triggered after successful status reconciliation.
 //
 // Phase-1 trade-off: Reconcile ignores the triggering request and always List()s all DSCs, then fully
 // recomputes resolution and conflicts for every object. Any update to one DSC re-runs the whole cycle.
@@ -64,10 +64,12 @@ type DomainSpecificSnapshotControllerReconciler struct {
 	Logger logger.LoggerInterface
 	Config *config.Options
 
-	// UnifiedRuntimeSync runs after a successful full DSC reconcile (optional). Used for R2 2b/R3 additive watches.
+	// UnifiedRuntimeSync runs after a successful full DSC reconcile. Production wiring always provides it;
+	// nil remains valid for focused unit tests.
 	UnifiedRuntimeSync func(context.Context) error
 
-	// GraphRegistryRefresh rebuilds the generic NamespaceSnapshot graph GVK registry (optional).
+	// GraphRegistryRefresh rebuilds the generic NamespaceSnapshot graph GVK registry. Production wiring
+	// always provides it; nil remains valid for focused unit tests.
 	GraphRegistryRefresh func(context.Context) error
 }
 

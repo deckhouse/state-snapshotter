@@ -27,7 +27,7 @@
 
 - **`DomainSpecificSnapshotController` (DSC)** — кластерный объект: модуль декларирует, какие **CRD имёна** соответствуют паре snapshot / snapshot content.
 - После формулы **Accepted + RBACReady** (+ поколения) DSC участвует в **merge** с bootstrap; `pkg/unifiedruntime` делает **additive** watches без рестарта pod для новых eligible типов.
-- **Rollout (R5):** env `STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS` и Helm values — см. [`operations/runbook-degraded-and-unified-runtime.md`](operations/runbook-degraded-and-unified-runtime.md) §4.
+- **Bootstrap (R5):** env `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS` и Helm values — см. [`operations/runbook-degraded-and-unified-runtime.md`](operations/runbook-degraded-and-unified-runtime.md) §4. Unified/generic runtime в v0 always-on.
 - Ограничения (unwatch, stale) — там же §1–§3.
 
 ---

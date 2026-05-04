@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 var _ = Describe("Integration: Controller Registration", func() {
@@ -94,5 +95,24 @@ var _ = Describe("Integration: Controller Registration", func() {
 		)
 		Expect(err).NotTo(HaveOccurred(), "SnapshotContentController should be created without errors")
 		Expect(contentCtrl).NotTo(BeNil(), "SnapshotContentController should not be nil")
+	})
+
+	It("should construct common SnapshotContent lifecycle controller without generic Snapshot GVKs", func() {
+		contentCtrl, err := controllers.NewSnapshotContentController(
+			k8sClient,
+			mgr.GetAPIReader(),
+			scheme,
+			mgr.GetRESTMapper(),
+			testCfg,
+			[]schema.GroupVersionKind{unifiedbootstrap.CommonSnapshotContentGVK()},
+		)
+		Expect(err).NotTo(HaveOccurred(), "common SnapshotContentController must be available as its own lifecycle controller")
+		Expect(contentCtrl).NotTo(BeNil())
+	})
+
+	It("should initialize unified runtime and graph registry hooks in integration wiring", func() {
+		Expect(unifiedSyncer).NotTo(BeNil(), "unifiedruntime.Syncer must be initialized in the single always-on runtime path")
+		Expect(integrationGraphRegProvider).NotTo(BeNil(), "NamespaceSnapshot graph registry provider must be initialized")
+		Expect(integrationSnapshotGraphRegistryRefresh(ctx)).To(Succeed(), "DSC hot-add graph refresh path must be callable")
 	})
 })

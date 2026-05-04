@@ -26,9 +26,6 @@ import (
 )
 
 const (
-	// EnvUnifiedSnapshotEnabled: when "false", "0", "no", "off" (case-insensitive), unified Snapshot/SnapshotContent
-	// wiring and unifiedruntime.Sync are disabled; DSC reconciler still runs with nil sync. Unset = enabled.
-	EnvUnifiedSnapshotEnabled = "STATE_SNAPSHOTTER_UNIFIED_ENABLED"
 	// EnvUnifiedBootstrapPairs: unset/empty = use DefaultUnifiedRuntimeBootstrapPairs()
 	// (legacy alias DefaultDesiredUnifiedSnapshotPairs()); literal "empty"/"none"/"dsc-only"
 	// = bootstrap-only-from-DSC (empty static list); else semicolon-separated pairs
@@ -44,20 +41,6 @@ const (
 	UnifiedBootstrapEmpty
 	UnifiedBootstrapCustom
 )
-
-// parseUnifiedSnapshotDisabled returns true if unified wiring should be skipped.
-func parseUnifiedSnapshotDisabled(env string) bool {
-	s := strings.TrimSpace(strings.ToLower(env))
-	if s == "" {
-		return false
-	}
-	switch s {
-	case "false", "0", "no", "off":
-		return true
-	default:
-		return false
-	}
-}
 
 // ParseUnifiedBootstrapPairsEnv interprets STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
 func ParseUnifiedBootstrapPairsEnv(env string) (mode UnifiedBootstrapMode, pairs []unifiedbootstrap.UnifiedGVKPair, err error) {

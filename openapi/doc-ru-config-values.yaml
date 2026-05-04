@@ -2,8 +2,6 @@ type: object
 properties:
   logLevel:
     description: Уровень логирования модуля.
-  unifiedSnapshotEnabled:
-    description: Если false — отключаются unified Snapshot/SnapshotContent и runtime Sync; reconciler DSC остаётся (только статусы).
   unifiedBootstrapPairs:
     description: Статический bootstrap списка пар GVK до merge с DSC. Пусто — дефолт из кода; empty/none/dsc-only — только DSC; иначе кастомная строка (см. англ. описание в config-values).
   snapshotRootOkTtl:

@@ -91,10 +91,11 @@ func TestFilterGenericSnapshotGVKPairs_skipsDemoVirtualDiskAndVMSnapshots(t *tes
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"},
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 	}
+	commonContent := CommonSnapshotContentGVK()
 	contentGVKs := []schema.GroupVersionKind{
-		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		commonContent,
+		commonContent,
+		commonContent,
 	}
 	sOut, cOut := FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
 	if len(sOut) != 1 || sOut[0].Kind != "Snapshot" || len(cOut) != 1 || cOut[0].Kind != "SnapshotContent" {

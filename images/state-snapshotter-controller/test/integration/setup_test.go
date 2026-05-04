@@ -689,18 +689,18 @@ var _ = BeforeSuite(func() {
 		testCfg.EffectiveUnifiedBootstrapPairs(),
 		ctrl.Log.WithName("integration-unified-runtime-bootstrap"),
 	)
-	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(runtimeSnapGVKs, runtimeContentGVKs)
-	genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(runtimeSnapGVKs, runtimeContentGVKs)
-	genericContentGVKs = unifiedbootstrap.AppendGVKIfMissing(genericContentGVKs, unifiedbootstrap.CommonSnapshotContentGVK())
+	genericSnapGVKs, genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotGVKPairs(runtimeSnapGVKs, runtimeContentGVKs)
 	snapshotController, err := controllers.NewSnapshotController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		scheme,
 		testCfg,
-		genericSnapGVKs,
+		nil,
 	)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(snapshotController.SetupWithManager(mgr)).To(Succeed())
+	for i := range genericSnapGVKs {
+		Expect(snapshotController.AddWatchForPair(mgr, genericSnapGVKs[i], genericContentGVKs[i])).To(Succeed())
+	}
 
 	var contentController *controllers.SnapshotContentController
 	contentController, err = controllers.NewSnapshotContentController(
@@ -709,7 +709,7 @@ var _ = BeforeSuite(func() {
 		scheme,
 		mgr.GetRESTMapper(),
 		testCfg,
-		genericContentGVKs,
+		[]schema.GroupVersionKind{unifiedbootstrap.CommonSnapshotContentGVK()},
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())

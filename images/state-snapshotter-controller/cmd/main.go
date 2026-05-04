@@ -34,6 +34,7 @@ import (
 	sv1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -223,99 +224,91 @@ func main() {
 	}
 	log.Info("DemoVirtualMachineSnapshotController added to manager")
 
-	// Unified snapshots: optional rollout (STATE_SNAPSHOTTER_UNIFIED_ENABLED); bootstrap list from R5 env or defaults.
-	var unifiedSyncFn func(context.Context) error
+	contentController, err := controllers.NewSnapshotContentController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		mgr.GetRESTMapper(),
+		cfgParams,
+		[]schema.GroupVersionKind{unifiedbootstrap.CommonSnapshotContentGVK()},
+	)
+	if err != nil {
+		log.Error(err, "Failed to create SnapshotContentController")
+		cancel()
+		os.Exit(1)
+	}
+	if err := contentController.SetupWithManager(mgr); err != nil {
+		log.Error(err, "Failed to setup SnapshotContentController with manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", 1)
 
-	if cfgParams.UnifiedSnapshotDisabled {
-		log.Info("[main] unified snapshot wiring disabled (STATE_SNAPSHOTTER_UNIFIED_ENABLED); skipping Snapshot/SnapshotContent and runtime sync; DSC reconciler runs without sync")
-		unifiedSyncFn = nil
+	// Unified runtime is always on in v0; bootstrap list comes from env defaults or STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
+	dscBootstrapClient, err := client.New(kConfig, client.Options{
+		Scheme: scheme,
+		Mapper: mgr.GetRESTMapper(),
+	})
+	if err != nil {
+		log.Error(err, "[main] unable to create client for DSC→unified GVK bootstrap")
+		cancel()
+		os.Exit(1)
+	}
+	dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, dscBootstrapClient)
+	if err != nil {
+		log.Warning("DSC list/parse for unified GVK bootstrap failed; using bootstrap-only merge", "error", err)
+		dscPairs = nil
 	} else {
-		dscBootstrapClient, err := client.New(kConfig, client.Options{
-			Scheme: scheme,
-			Mapper: mgr.GetRESTMapper(),
-		})
-		if err != nil {
-			log.Error(err, "[main] unable to create client for DSC→unified GVK bootstrap")
-			cancel()
-			os.Exit(1)
-		}
-		dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, dscBootstrapClient)
-		if err != nil {
-			log.Warning("DSC list/parse for unified GVK bootstrap failed; using bootstrap-only merge", "error", err)
-			dscPairs = nil
-		} else {
-			log.Info("[main] DSC-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(dscPairs))
-		}
-		bootstrapPairs := cfgParams.EffectiveUnifiedBootstrapPairs()
-		log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs), "bootstrapMode", cfgParams.UnifiedBootstrapMode)
-		mergedPairs := unifiedbootstrap.MergeBootstrapAndDSCPairs(bootstrapPairs, dscPairs)
-		log.Info("[main] unified GVK pairs after merge (bootstrap + DSC)", "count", len(mergedPairs))
-		snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
-			mgr.GetRESTMapper(),
-			mergedPairs,
-			ctrl.Log.WithName("unified-bootstrap"),
-		)
-		if len(snapshotGVKs) == 0 {
-			log.Info("[main] no unified snapshot CRDs found in API; unified snapshot controllers run with zero watches (manifest/MCR and other controllers continue)")
-		} else {
-			log.Info("[main] unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
-		}
-
-		genericSnapshotGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
-		genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapshotGVKs, snapshotContentGVKs)
-		genericContentGVKs = unifiedbootstrap.AppendGVKIfMissing(genericContentGVKs, unifiedbootstrap.CommonSnapshotContentGVK())
-
-		snapshotController, err := controllers.NewSnapshotController(
-			mgr.GetClient(),
-			mgr.GetAPIReader(),
-			mgr.GetScheme(),
-			cfgParams,
-			genericSnapshotGVKs,
-		)
-		if err != nil {
-			log.Error(err, "Failed to create SnapshotController")
-			cancel()
-			os.Exit(1)
-		}
-		if err := snapshotController.SetupWithManager(mgr); err != nil {
-			log.Error(err, "Failed to setup SnapshotController with manager")
-			cancel()
-			os.Exit(1)
-		}
-		log.Info("SnapshotController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
-
-		contentController, err := controllers.NewSnapshotContentController(
-			mgr.GetClient(),
-			mgr.GetAPIReader(),
-			mgr.GetScheme(),
-			mgr.GetRESTMapper(),
-			cfgParams,
-			genericContentGVKs,
-		)
-		if err != nil {
-			log.Error(err, "Failed to create SnapshotContentController")
-			cancel()
-			os.Exit(1)
-		}
-		if err := contentController.SetupWithManager(mgr); err != nil {
-			log.Error(err, "Failed to setup SnapshotContentController with manager")
-			cancel()
-			os.Exit(1)
-		}
-		log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", len(genericContentGVKs))
-
-		unifiedSync := unifiedruntime.NewSyncer(
-			mgr,
-			ctrl.Log,
-			cfgParams.EffectiveUnifiedBootstrapPairs(),
-			mgr.GetAPIReader(),
-			snapshotController,
-			contentController,
-		)
-		unifiedSyncFn = unifiedSync.Sync
+		log.Info("[main] DSC-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(dscPairs))
+	}
+	bootstrapPairs := cfgParams.EffectiveUnifiedBootstrapPairs()
+	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs), "bootstrapMode", cfgParams.UnifiedBootstrapMode)
+	mergedPairs := unifiedbootstrap.MergeBootstrapAndDSCPairs(bootstrapPairs, dscPairs)
+	log.Info("[main] unified GVK pairs after merge (bootstrap + DSC)", "count", len(mergedPairs))
+	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+		mgr.GetRESTMapper(),
+		mergedPairs,
+		ctrl.Log.WithName("unified-bootstrap"),
+	)
+	if len(snapshotGVKs) == 0 {
+		log.Info("[main] no unified snapshot CRDs found in API; unified snapshot controllers run with zero watches (manifest/MCR and other controllers continue)")
+	} else {
+		log.Info("[main] unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
 	}
 
-	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams, unifiedSyncFn, graphRegProvider.Refresh); err != nil {
+	genericSnapshotGVKs, genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
+
+	snapshotController, err := controllers.NewSnapshotController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		cfgParams,
+		nil,
+	)
+	if err != nil {
+		log.Error(err, "Failed to create SnapshotController")
+		cancel()
+		os.Exit(1)
+	}
+	for i := range genericSnapshotGVKs {
+		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
+			log.Error(err, "Failed to setup SnapshotController watch", "snapshotGVK", genericSnapshotGVKs[i].String(), "snapshotContentGVK", genericContentGVKs[i].String())
+			cancel()
+			os.Exit(1)
+		}
+	}
+	log.Info("SnapshotController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
+
+	unifiedSync := unifiedruntime.NewSyncer(
+		mgr,
+		ctrl.Log,
+		cfgParams.EffectiveUnifiedBootstrapPairs(),
+		mgr.GetAPIReader(),
+		snapshotController,
+		contentController,
+	)
+
+	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams, unifiedSync.Sync, graphRegProvider.Refresh); err != nil {
 		log.Error(err, "Failed to add DomainSpecificSnapshotController reconciler to manager")
 		cancel()
 		os.Exit(1)

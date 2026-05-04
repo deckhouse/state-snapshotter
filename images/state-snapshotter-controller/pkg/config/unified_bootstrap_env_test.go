@@ -22,19 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-func TestParseUnifiedSnapshotDisabled(t *testing.T) {
-	t.Parallel()
-	if parseUnifiedSnapshotDisabled("") {
-		t.Fatal("empty should be enabled")
-	}
-	if parseUnifiedSnapshotDisabled("TRUE") {
-		t.Fatal("true should not disable")
-	}
-	if !parseUnifiedSnapshotDisabled("false") || !parseUnifiedSnapshotDisabled("0") || !parseUnifiedSnapshotDisabled("NO") {
-		t.Fatal("false/0/no should disable")
-	}
-}
-
 func TestParseUnifiedBootstrapPairsEnv(t *testing.T) {
 	t.Parallel()
 	mode, pairs, err := ParseUnifiedBootstrapPairsEnv("")
