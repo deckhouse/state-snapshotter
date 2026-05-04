@@ -70,7 +70,7 @@ func TestDemoVirtualDiskSnapshot_InvalidParentRefDoesNotCreateContentOrMCR(t *te
 				t.Fatalf("reconcile failed: %v", err)
 			}
 
-			snap := getDemoDiskSnapshot(t, cl, "ns1", "snap")
+			snap := getDemoDiskSnapshot(t, cl)
 			ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidParentRef" {
 				t.Fatalf("expected Ready=False InvalidParentRef, got %#v", ready)
@@ -116,7 +116,7 @@ func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) 
 				t.Fatalf("reconcile failed: %v", err)
 			}
 
-			snap := getDemoDiskSnapshot(t, cl, "ns1", "snap")
+			snap := getDemoDiskSnapshot(t, cl)
 			ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidSourceRef" {
 				t.Fatalf("expected Ready=False InvalidSourceRef, got %#v", ready)
@@ -148,7 +148,7 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	snap := getDemoDiskSnapshot(t, cl, "ns1", "snap")
+	snap := getDemoDiskSnapshot(t, cl)
 	ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "SourceNotFound" {
 		t.Fatalf("expected Ready=False SourceNotFound, got %#v", ready)
@@ -235,7 +235,7 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 		t.Fatalf("second reconcile failed: %v", err)
 	}
 
-	snap := getDemoDiskSnapshot(t, cl, "ns1", "snap")
+	snap := getDemoDiskSnapshot(t, cl)
 	if snap.Status.BoundSnapshotContentName != contentName {
 		t.Fatalf("expected bound content %q, got %q", contentName, snap.Status.BoundSnapshotContentName)
 	}
@@ -286,7 +286,7 @@ func TestDemoVirtualMachineSnapshot_InvalidParentRefDoesNotCreateContentMCROrChi
 				t.Fatalf("reconcile failed: %v", err)
 			}
 
-			snap := getDemoVMSnapshot(t, cl, "ns1", "snap")
+			snap := getDemoVMSnapshot(t, cl)
 			ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidParentRef" {
 				t.Fatalf("expected Ready=False InvalidParentRef, got %#v", ready)
@@ -333,7 +333,7 @@ func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChi
 				t.Fatalf("reconcile failed: %v", err)
 			}
 
-			snap := getDemoVMSnapshot(t, cl, "ns1", "snap")
+			snap := getDemoVMSnapshot(t, cl)
 			ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidSourceRef" {
 				t.Fatalf("expected Ready=False InvalidSourceRef, got %#v", ready)
@@ -493,7 +493,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if len(diskSnapshots.Items) != 1 {
 		t.Fatalf("expected only owned disk child snapshot, got %d", len(diskSnapshots.Items))
 	}
-	vmSnap := getDemoVMSnapshot(t, cl, "ns1", "snap")
+	vmSnap := getDemoVMSnapshot(t, cl)
 	if !namespaceSnapshotChildRefsEqualIgnoreOrder(vmSnap.Status.ChildrenSnapshotRefs, []storagev1alpha1.NamespaceSnapshotChildRef{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       KindDemoVirtualDiskSnapshot,
@@ -536,7 +536,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		t.Fatalf("third reconcile failed: %v", err)
 	}
 
-	vmSnap = getDemoVMSnapshot(t, cl, "ns1", "snap")
+	vmSnap = getDemoVMSnapshot(t, cl)
 	if vmSnap.Status.BoundSnapshotContentName != vmContentName {
 		t.Fatalf("expected VM bound content %q, got %q", vmContentName, vmSnap.Status.BoundSnapshotContentName)
 	}
@@ -582,19 +582,19 @@ func newDemoSourceRefFakeClient(t *testing.T, initObjs ...client.Object) client.
 		Build()
 }
 
-func getDemoDiskSnapshot(t *testing.T, cl client.Client, namespace, name string) *demov1alpha1.DemoVirtualDiskSnapshot {
+func getDemoDiskSnapshot(t *testing.T, cl client.Client) *demov1alpha1.DemoVirtualDiskSnapshot {
 	t.Helper()
 	snap := &demov1alpha1.DemoVirtualDiskSnapshot{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: name}, snap); err != nil {
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: "snap"}, snap); err != nil {
 		t.Fatalf("get snapshot: %v", err)
 	}
 	return snap
 }
 
-func getDemoVMSnapshot(t *testing.T, cl client.Client, namespace, name string) *demov1alpha1.DemoVirtualMachineSnapshot {
+func getDemoVMSnapshot(t *testing.T, cl client.Client) *demov1alpha1.DemoVirtualMachineSnapshot {
 	t.Helper()
 	snap := &demov1alpha1.DemoVirtualMachineSnapshot{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: name}, snap); err != nil {
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: "snap"}, snap); err != nil {
 		t.Fatalf("get VM snapshot: %v", err)
 	}
 	return snap
