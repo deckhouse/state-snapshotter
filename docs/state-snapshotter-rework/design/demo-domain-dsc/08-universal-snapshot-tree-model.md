@@ -18,12 +18,12 @@
 
 - `NamespaceSnapshot`, `DemoVirtualMachineSnapshot`, `DemoVirtualDiskSnapshot`, любой будущий **`XxxxSnapshot`**.
 
-Для каждого — соответствующий **`XxxxSnapshotContent`** (зафиксированный результат: данные + манифесты).
+Для каждого — соответствующий **`SnapshotContent`** (зафиксированный результат: данные + манифесты).
 
 | Слой | Роль |
 |------|------|
 | **`XxxxSnapshot`** | Декларация / интент |
-| **`XxxxSnapshotContent`** | Зафиксированный результат |
+| **`SnapshotContent`** | Зафиксированный результат |
 
 ### A.2. Дерево snapshot’ов
 
@@ -156,7 +156,7 @@
 Ниже — **типовой** wiring для GC; **не** норматив «всегда так в проде»: Kubernetes и политика модуля могут запретить цепочку **ownerRef** — тогда **лейблы + финализаторы** и см. **B.7** (**best-effort**).
 
 - **`XxxxSnapshot`** → ownerRef на родительский **`YyyySnapshot`** (если политика namespace/GC позволяет).
-- **`XxxxSnapshotContent`** → ownerRef на соответствующий **`XxxxSnapshot`**.
+- **`SnapshotContent`** → ownerRef на соответствующий **`XxxxSnapshot`**.
 - **Leaf** (например `VolumeSnapshot`) → ownerRef на **`DemoVirtualDiskSnapshot`** (или аналог); если нельзя — **лейблы + финализаторы**.
 
 ### B.7. Ограничения Kubernetes

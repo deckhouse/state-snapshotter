@@ -65,22 +65,22 @@ func TestRemoveNamespaceSnapshotChildRefsByKeys(t *testing.T) {
 	}
 }
 
-func TestRemoveNamespaceSnapshotContentChildRefsByKeys(t *testing.T) {
-	existing := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "a"}, {Name: "b"}}
-	got := removeNamespaceSnapshotContentChildRefsByKeys(existing, []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "a"}})
+func TestRemoveSnapshotContentChildRefsByKeys(t *testing.T) {
+	existing := []storagev1alpha1.SnapshotContentChildRef{{Name: "a"}, {Name: "b"}}
+	got := removeSnapshotContentChildRefsByKeys(existing, []storagev1alpha1.SnapshotContentChildRef{{Name: "a"}})
 	if len(got) != 1 || got[0].Name != "b" {
 		t.Fatalf("got %+v", got)
 	}
 }
 
-func TestMergeNamespaceSnapshotContentChildRefs(t *testing.T) {
-	existing := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "x"}}
-	upsert := []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "y"}}
-	got := mergeNamespaceSnapshotContentChildRefs(existing, upsert)
+func TestMergeSnapshotContentChildRefs(t *testing.T) {
+	existing := []storagev1alpha1.SnapshotContentChildRef{{Name: "x"}}
+	upsert := []storagev1alpha1.SnapshotContentChildRef{{Name: "y"}}
+	got := mergeSnapshotContentChildRefs(existing, upsert)
 	if len(got) != 2 {
 		t.Fatalf("want len 2 got %d", len(got))
 	}
-	got2 := mergeNamespaceSnapshotContentChildRefs(got, []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "x"}})
+	got2 := mergeSnapshotContentChildRefs(got, []storagev1alpha1.SnapshotContentChildRef{{Name: "x"}})
 	if len(got2) != 2 {
 		t.Fatalf("re-upsert same name: want len 2 got %d", len(got2))
 	}

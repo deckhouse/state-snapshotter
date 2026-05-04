@@ -51,7 +51,7 @@ func namespaceSnapshotRESTMapper(t *testing.T) meta.RESTMapper {
 	gv := schema.GroupVersion{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion}
 	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshot"}
-	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshotContent"}
+	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}
 	m.Add(snap, meta.RESTScopeNamespace)
 	m.Add(content, meta.RESTScopeRoot)
 	return m
@@ -62,7 +62,7 @@ func TestProvider_CurrentNilBeforeRefresh(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	pair := unifiedbootstrap.UnifiedGVKPair{
 		Snapshot:        schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "NamespaceSnapshot"},
-		SnapshotContent: schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "NamespaceSnapshotContent"},
+		SnapshotContent: schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "SnapshotContent"},
 	}
 	cfg := &config.Options{
 		UnifiedBootstrapMode:        config.UnifiedBootstrapCustom,

@@ -42,7 +42,7 @@ import (
 )
 
 var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
-	It("binds NamespaceSnapshotContent and reaches Ready with manifestCheckpointName on content (N2a)", func() {
+	It("binds SnapshotContent and reaches Ready with manifestCheckpointName on content (N2a)", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -88,14 +88,14 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			// Root NamespaceSnapshot status must not surface internal capture CRs (no MCR/VCR fields in API);
-			// binding and manifest artifact identity go through NamespaceSnapshotContent.
+			// binding and manifest artifact identity go through SnapshotContent.
 
-			sc := &storagev1alpha1.NamespaceSnapshotContent{}
+			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
 			g.Expect(sc.Spec.DeletionPolicy).To(Equal(storagev1alpha1.SnapshotContentDeletionPolicyRetain))
-			g.Expect(sc.Spec.NamespaceSnapshotRef.Kind).To(Equal("NamespaceSnapshot"))
-			g.Expect(sc.Spec.NamespaceSnapshotRef.Name).To(Equal(fresh.Name))
-			g.Expect(sc.Spec.NamespaceSnapshotRef.Namespace).To(Equal(fresh.Namespace))
+			g.Expect(sc.Spec.SnapshotRef.Kind).To(Equal("NamespaceSnapshot"))
+			g.Expect(sc.Spec.SnapshotRef.Name).To(Equal(fresh.Name))
+			g.Expect(sc.Spec.SnapshotRef.Namespace).To(Equal(fresh.Namespace))
 
 			mcrName := namespacemanifest.NamespaceSnapshotMCRName(fresh.UID)
 			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: mcrName}, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
@@ -154,7 +154,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(ready.Reason).To(Equal(snapshot.ReasonCompleted))
 
-			sc := &storagev1alpha1.NamespaceSnapshotContent{}
+			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
 			g.Expect(sc.Status.ManifestCheckpointName).NotTo(BeEmpty())
 			contentReady := meta.FindStatusCondition(sc.Status.Conditions, snapshot.ConditionReady)

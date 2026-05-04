@@ -88,7 +88,7 @@ spec:
               of DemoVirtualDiskSnapshot.
             properties:
               boundSnapshotContentName:
-                description: BoundSnapshotContentName is the cluster-scoped DemoVirtualDiskSnapshotContent
+                description: BoundSnapshotContentName is the cluster-scoped SnapshotContent
                   name, once created.
                 type: string
               conditions:

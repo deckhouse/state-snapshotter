@@ -25,24 +25,21 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
 // Run-graph errors for root manifest capture (INV-S0 / INV-E1, E5).
 var (
 	ErrRunGraphChildSnapshotNotFound = errors.New("child snapshot object not found for status.childrenSnapshotRefs entry")
 	ErrRunGraphChildNotBound         = errors.New("child snapshot has empty boundSnapshotContentName")
-	ErrRunGraphChildNotReachable     = errors.New("child snapshot content not reachable from root NamespaceSnapshotContent via childrenSnapshotContentRefs graph")
+	ErrRunGraphChildNotReachable     = errors.New("child snapshot content not reachable from root SnapshotContent via childrenSnapshotContentRefs graph")
 	// ErrSubtreeManifestCapturePending is returned when exclude cannot be computed yet because a descendant
-	// NamespaceSnapshotContent has no MCP link or the MCP is not Ready (fail-closed: do not create root MCR with an incomplete exclude set).
+	// SnapshotContent has no MCP link or the MCP is not Ready (fail-closed: do not create root MCR with an incomplete exclude set).
 	ErrSubtreeManifestCapturePending = errors.New("subtree manifest capture pending for root exclude")
 	// ErrSubtreeManifestCaptureFailed is returned when a descendant ManifestCheckpoint is terminally Failed
 	// (distinct from pending / not Ready yet).
@@ -55,9 +52,8 @@ var (
 // ManifestCheckpoints reachable only via that ref graph.
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
 //
-// live supplies the current GVKRegistry (see pkg/snapshot.GVKRegistry) and optional TryRefresh when the
-// registry may be stale vs RESTMapper (CRD appeared after last DSC reconcile). Child snapshot refs carry
-// explicit apiVersion/kind/name (strict); subtree traversal still uses the registry for snapshot↔content mapping.
+// Child snapshot refs carry explicit apiVersion/kind/name (strict); subtree traversal reads the common
+// SnapshotContent tree by status.childrenSnapshotContentRefs.
 //
 // When status.childrenSnapshotRefs is empty, behavior matches N2a root capture: full
 // namespace-scoped allowlist without subtree exclude.
@@ -69,9 +65,8 @@ func BuildRootNamespaceManifestCaptureTargets(
 	arch *ArchiveService,
 	dyn dynamic.Interface,
 	c client.Reader,
-	live snapshotgraphregistry.LiveReader,
 	rootNS *storagev1alpha1.NamespaceSnapshot,
-	rootNSCName string,
+	rootContentName string,
 ) ([]namespacemanifest.ManifestTarget, error) {
 	if arch == nil {
 		return nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
@@ -84,10 +79,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if len(rootNS.Status.ChildrenSnapshotRefs) == 0 {
 		return base, nil
 	}
-	if live == nil {
-		return nil, fmt.Errorf("snapshot graph registry is required when status.childrenSnapshotRefs is non-empty")
-	}
-	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, live, rootNS, rootNSCName)
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
 	if err != nil {
 		return nil, err
 	}
@@ -99,44 +91,21 @@ func collectRunSubtreeManifestExcludeKeys(
 	ctx context.Context,
 	arch *ArchiveService,
 	c client.Reader,
-	live snapshotgraphregistry.LiveReader,
 	rootNS *storagev1alpha1.NamespaceSnapshot,
-	rootNSCName string,
+	rootContentName string,
 ) (map[string]struct{}, error) {
-	reg := live.Current()
-	if reg == nil {
-		if err := live.TryRefresh(ctx); err != nil && !errors.Is(err, snapshotgraphregistry.ErrRefreshNotConfigured) {
-			return nil, err
-		}
-		reg = live.Current()
-	}
-	if reg == nil {
-		return nil, fmt.Errorf("%w: GVK registry is required when status.childrenSnapshotRefs is non-empty (graph registry not ready or DSC/bootstrap pairs not merged yet)", snapshotgraphregistry.ErrGraphRegistryNotReady)
-	}
 	visited := make(map[string]struct{})
 	exclude := make(map[string]struct{})
 
-	visitNSC := func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
-		visited[nsc.Name] = struct{}{}
-		if nsc.Name == rootNSCName {
+	visitContent := func(ctx context.Context, content *storagev1alpha1.SnapshotContent) error {
+		visited[content.Name] = struct{}{}
+		if content.Name == rootContentName {
 			return nil
 		}
-		return appendManifestCheckpointObjectsToExclude(ctx, arch, c, nsc.Status.ManifestCheckpointName, fmt.Sprintf("NamespaceSnapshotContent %q", nsc.Name), exclude)
+		return appendManifestCheckpointObjectsToExclude(ctx, arch, c, content.Status.ManifestCheckpointName, fmt.Sprintf("SnapshotContent %q", content.Name), exclude)
 	}
 
-	hooks := &DedicatedContentVisitHooks{
-		Visit: func(ctx context.Context, gvk schema.GroupVersionKind, contentName string, u *unstructured.Unstructured, _ bool) error {
-			visited[contentName] = struct{}{}
-			mcpName, _, err := unstructured.NestedString(u.Object, "status", "manifestCheckpointName")
-			if err != nil {
-				return fmt.Errorf("%w: %s %q has invalid manifestCheckpointName: %v",
-					ErrSubtreeManifestCapturePending, gvk.String(), contentName, err)
-			}
-			return appendManifestCheckpointObjectsToExclude(ctx, arch, c, mcpName, fmt.Sprintf("%s %q", gvk.String(), contentName), exclude)
-		},
-	}
-
-	if err := WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh(ctx, c, rootNSCName, visitNSC, live, hooks); err != nil {
+	if err := WalkSnapshotContentSubtree(ctx, c, rootContentName, visitContent); err != nil {
 		return nil, err
 	}
 
@@ -147,8 +116,8 @@ func collectRunSubtreeManifestExcludeKeys(
 			return nil, err
 		}
 		if _, ok := visited[resolved]; !ok {
-			return nil, fmt.Errorf("%w: childrenSnapshotRefs %s/%s -> %q not visited from root NamespaceSnapshotContent %q",
-				ErrRunGraphChildNotReachable, rootNS.Namespace, ch.Name, resolved, rootNSCName)
+			return nil, fmt.Errorf("%w: childrenSnapshotRefs %s/%s -> %q not visited from root SnapshotContent %q",
+				ErrRunGraphChildNotReachable, rootNS.Namespace, ch.Name, resolved, rootContentName)
 		}
 	}
 

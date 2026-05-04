@@ -1,4 +1,4 @@
-# Decision: NamespaceSnapshot paired with NamespaceSnapshotContent (+ ObjectKeeper)
+# Decision: NamespaceSnapshot paired with SnapshotContent (+ ObjectKeeper)
 
 ## Status
 
@@ -8,19 +8,19 @@
 
 ## Context
 
-Нужен явный носитель результата снимка namespace в паре с **`NamespaceSnapshot`**, по тому же паттерну, что и другие доменные `XxxSnapshot` / `XxxSnapshotContent`. Общий **`SnapshotContent`** (`storage.deckhouse.io`) для **корня** namespace-snapshot **не** используем: целевая пара — **`NamespaceSnapshot` + `NamespaceSnapshotContent`**.
+Нужен явный носитель результата снимка namespace в паре с **`NamespaceSnapshot`**, по тому же паттерну, что и другие доменные `XxxSnapshot` / `SnapshotContent`. Общий **`SnapshotContent`** (`storage.deckhouse.io`) для **корня** namespace-snapshot **не** используем: целевая пара — **`NamespaceSnapshot` + `SnapshotContent`**.
 
 Удержание артефактов и связь с **ObjectKeeper** — как в ТЗ (`snapshot-rework`), без отдельной «миграции» с промежуточной схемы: реализацию **сразу** ведём к NS + NSC + OK.
 
 ## Decision
 
-1. Публичная пара для namespace snapshot: **`NamespaceSnapshot`** и **`NamespaceSnapshotContent`** (CRD, группа/apiVersion — **как в ТЗ** в `snapshot-rework`, при реализации сверять YAML из ТЗ с фактическим CRD в репозитории).
+1. Публичная пара для namespace snapshot: **`NamespaceSnapshot`** и **`SnapshotContent`** (CRD, группа/apiVersion — **как в ТЗ** в `snapshot-rework`, при реализации сверять YAML из ТЗ с фактическим CRD в репозитории).
 2. **ObjectKeeper** связываем с моделью по ТЗ: для корневого content — сценарий с **FollowObjectWithTTL** (и прочие правила из ТЗ); детали не дублировать здесь.
 3. Статус **`NamespaceSnapshot`**: **только `conditions`** (и поля фактов), **без `status.phase`** — [`namespace-snapshot-status-surface.md`](namespace-snapshot-status-surface.md).
 
 ## Consequences
 
-- **Bootstrap / unified:** пара GVK `NamespaceSnapshot` / `NamespaceSnapshotContent` в desired list, DSC при необходимости; убрать опору на generic `SnapshotContent` **именно как носитель результата** для этого root.
+- **Bootstrap / unified:** пара GVK `NamespaceSnapshot` / `SnapshotContent` в desired list, DSC при необходимости; убрать опору на generic `SnapshotContent` **именно как носитель результата** для этого root.
 - **Код:** новые/обновлённые типы, CRD, reconciler(ы), тесты — под NSC + OK; **не** закладывать миграцию со старого пути через `SnapshotContent` для namespace root.
 - **Документы в `docs/`:** остаются планом поставки и выжимкой; **истина по сценарию** — `snapshot-rework/`.
 

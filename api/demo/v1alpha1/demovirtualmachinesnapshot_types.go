@@ -50,7 +50,7 @@ type DemoVirtualMachineSnapshotSpec struct {
 // DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.
 // +k8s:deepcopy-gen=true
 type DemoVirtualMachineSnapshotStatus struct {
-	// BoundSnapshotContentName is the cluster-scoped DemoVirtualMachineSnapshotContent name, once created.
+	// BoundSnapshotContentName is the cluster-scoped SnapshotContent name, once created.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
 	// Conditions report readiness (e.g. Ready=True for generic parent E6 aggregation).

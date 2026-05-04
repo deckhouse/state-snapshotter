@@ -65,10 +65,10 @@ func (r *NamespaceSnapshotReconciler) deleteNamespaceSnapshotManifestCaptureRequ
 	return nil
 }
 
-// mirrorSubtreeManifestCapturePendingOnContent mirrors E5 subtree wait onto root NamespaceSnapshotContent so
+// mirrorSubtreeManifestCapturePendingOnContent mirrors E5 subtree wait onto root SnapshotContent so
 // the content object does not look Ready while exclude cannot be computed yet.
 func (r *NamespaceSnapshotReconciler) mirrorSubtreeManifestCapturePendingOnContent(ctx context.Context, contentName, msg string) error {
-	fresh := &storagev1alpha1.NamespaceSnapshotContent{}
+	fresh := &storagev1alpha1.SnapshotContent{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, fresh); err != nil {
 		return err
 	}
@@ -117,11 +117,11 @@ func (r *NamespaceSnapshotReconciler) reconcileChildrenRefsE6ParentReadyOrPatch(
 	return false, res, err
 }
 
-// reconcileCaptureN2a drives manifest capture via MCR→ManifestCheckpoint after root NamespaceSnapshotContent is bound.
+// reconcileCaptureN2a drives manifest capture via MCR->ManifestCheckpoint after root SnapshotContent is bound.
 func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
-	content *storagev1alpha1.NamespaceSnapshotContent,
+	content *storagev1alpha1.SnapshotContent,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -147,7 +147,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		return res, err
 	}
 
-	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, r.SnapshotGraphRegistry, nsSnap, content.Name)
+	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, nsSnap, content.Name)
 	if err != nil {
 		freshParent := &storagev1alpha1.NamespaceSnapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
@@ -292,7 +292,7 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 		logger.Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
 	}
 
-	// Persist checkpoint name on content and mirror success on NamespaceSnapshotContent.status.conditions.
+	// Persist checkpoint name on content and mirror success on SnapshotContent.status.conditions.
 	contentKey := client.ObjectKey{Name: content.Name}
 	if err := r.Client.Get(ctx, contentKey, content); err != nil {
 		return ctrl.Result{}, err
@@ -314,12 +314,12 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	return r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
 }
 
-// reconcileIfRootManifestCheckpointAlreadyReady handles idempotent steady state: MCP name on NSC, MCP Ready,
+// reconcileIfRootManifestCheckpointAlreadyReady handles idempotent steady state: MCP name on SnapshotContent, MCP Ready,
 // NamespaceSnapshot Ready, and MCR already removed. Skips recreating MCR when capture is complete.
 func (r *NamespaceSnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyReady(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
-	content *storagev1alpha1.NamespaceSnapshotContent,
+	content *storagev1alpha1.SnapshotContent,
 ) (done bool, res ctrl.Result, err error) {
 	mcpName := content.Status.ManifestCheckpointName
 	if mcpName == "" {
@@ -432,7 +432,7 @@ func namespaceSnapshotReadyMessage(mcpName string) string {
 	return fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s)", mcpName)
 }
 
-func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent, reason, msg string) (ctrl.Result, error) {
+func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 		Type:               snapshot.ConditionReady,
@@ -445,7 +445,7 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 		return ctrl.Result{}, err
 	}
 	if content != nil && content.Name != "" {
-		fresh := &storagev1alpha1.NamespaceSnapshotContent{}
+		fresh := &storagev1alpha1.SnapshotContent{}
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return ctrl.Result{}, nil
@@ -467,13 +467,13 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 }
 
 // ensureNamespaceSnapshotRootObjectKeeper creates the cluster-scoped ret-nssnap-* ObjectKeeper.
-// Root NamespaceSnapshotContent gets metadata.ownerReferences -> that ObjectKeeper (controller) so that when the
-// Deckhouse ObjectKeeper controller deletes the OK after follow+TTL, Kubernetes GC removes retained root NSC and
+// Root SnapshotContent gets metadata.ownerReferences -> that ObjectKeeper (controller) so that when the
+// Deckhouse ObjectKeeper controller deletes the OK after follow+TTL, Kubernetes GC removes retained root content and
 // cascades to MCP / child content. The OK itself must not list NSC in ownerReferences (wrong direction for TTL).
 //
 // spec.mode is always FollowObjectWithTTL; spec.followObjectRef targets the root NamespaceSnapshot; spec.ttl is
 // SnapshotRootOKTTL from controller config (env override or built-in default). Execution-chain ObjectKeepers (MCR) stay FollowObject without TTL.
-func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
+func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.SnapshotContent) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	name := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsSnap.Namespace, nsSnap.Name)
 	ok := &deckhousev1alpha1.ObjectKeeper{}
@@ -533,7 +533,7 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
 		logger.Info("created root ObjectKeeper for NamespaceSnapshot", "objectKeeper", name, "mode", spec.Mode)
-		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
+		patchRes, err := r.ensureRootSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
 		if err != nil {
 			return nil, ctrl.Result{}, err
 		}
@@ -556,7 +556,7 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 				return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 			}
 		}
-		patchRes, err := r.ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
+		patchRes, err := r.ensureRootSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
 		if err != nil {
 			return nil, ctrl.Result{}, err
 		}
@@ -567,10 +567,10 @@ func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ct
 	}
 }
 
-// ensureRootNamespaceSnapshotContentOwnedByObjectKeeper patches root NamespaceSnapshotContent to reference the root ObjectKeeper.
-func (r *NamespaceSnapshotReconciler) ensureRootNamespaceSnapshotContentOwnedByObjectKeeper(
+// ensureRootSnapshotContentOwnedByObjectKeeper patches root SnapshotContent to reference the root ObjectKeeper.
+func (r *NamespaceSnapshotReconciler) ensureRootSnapshotContentOwnedByObjectKeeper(
 	ctx context.Context,
-	content *storagev1alpha1.NamespaceSnapshotContent,
+	content *storagev1alpha1.SnapshotContent,
 	ok *deckhousev1alpha1.ObjectKeeper,
 ) (ctrl.Result, error) {
 	want := namespaceSnapshotRootContentOwnerReferenceToOK(ok)
@@ -639,7 +639,7 @@ func manifestCaptureRequestConflictingNamespaceSnapshotOwner(refs []metav1.Owner
 	return false
 }
 
-func (r *NamespaceSnapshotReconciler) namespaceRootManifestCapturePersistedOnContent(ctx context.Context, content *storagev1alpha1.NamespaceSnapshotContent) bool {
+func (r *NamespaceSnapshotReconciler) namespaceRootManifestCapturePersistedOnContent(ctx context.Context, content *storagev1alpha1.SnapshotContent) bool {
 	mcpName := content.Status.ManifestCheckpointName
 	if mcpName == "" {
 		return false
@@ -652,7 +652,7 @@ func (r *NamespaceSnapshotReconciler) namespaceRootManifestCapturePersistedOnCon
 	return readyCond != nil && readyCond.Status == metav1.ConditionTrue
 }
 
-func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.NamespaceSnapshotContent, targets []namespacemanifest.ManifestTarget) (*ssv1alpha1.ManifestCaptureRequest, ctrl.Result, error) {
+func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.SnapshotContent, targets []namespacemanifest.ManifestTarget) (*ssv1alpha1.ManifestCaptureRequest, ctrl.Result, error) {
 	name := namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: name}
 
@@ -669,7 +669,7 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 	err := r.Client.Get(ctx, key, existing)
 	switch {
 	case apierrors.IsNotFound(err):
-		freshContent := &storagev1alpha1.NamespaceSnapshotContent{}
+		freshContent := &storagev1alpha1.SnapshotContent{}
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, freshContent); err == nil {
 			if r.namespaceRootManifestCapturePersistedOnContent(ctx, freshContent) {
 				// Another reconcile finished capture and deleted the MCR; avoid recreating the request.
@@ -687,7 +687,7 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 					labelNamespaceSnapshotUID: string(nsSnap.UID),
 				},
 				Annotations: map[string]string{
-					namespacemanifest.AnnotationBoundNamespaceSnapshotContent: content.Name,
+					namespacemanifest.AnnotationBoundSnapshotContent: content.Name,
 				},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{Targets: specTargets},
@@ -720,12 +720,12 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 			}
 			return nil, ctrl.Result{Requeue: true}, nil
 		}
-		if existing.Annotations == nil || existing.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent] != content.Name {
+		if existing.Annotations == nil || existing.Annotations[namespacemanifest.AnnotationBoundSnapshotContent] != content.Name {
 			base := existing.DeepCopy()
 			if existing.Annotations == nil {
 				existing.Annotations = map[string]string{}
 			}
-			existing.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent] = content.Name
+			existing.Annotations[namespacemanifest.AnnotationBoundSnapshotContent] = content.Name
 			if err := r.Client.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
 				return nil, ctrl.Result{}, err
 			}

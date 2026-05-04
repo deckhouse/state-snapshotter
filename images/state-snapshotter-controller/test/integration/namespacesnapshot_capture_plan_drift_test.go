@@ -56,7 +56,7 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 		nsName := ns.Name
 		DeferCleanup(func() {
 			if contentName != "" {
-				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}})
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}})
 			}
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
@@ -121,7 +121,7 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 			g.Expect(ready.Reason).To(Equal("CapturePlanDrift"))
 			g.Expect(ready.Message).To(ContainSubstring("spec.targets differ"))
 
-			sc := &storagev1alpha1.NamespaceSnapshotContent{}
+			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
 			cReady := meta.FindStatusCondition(sc.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(cReady).NotTo(BeNil())

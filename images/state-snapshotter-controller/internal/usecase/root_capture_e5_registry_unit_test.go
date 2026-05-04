@@ -25,24 +25,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-func TestCollectRunSubtreeManifestExcludeKeys_GraphRegistryNotReady(t *testing.T) {
+func TestCollectRunSubtreeManifestExcludeKeys_RegistryNotRequired(t *testing.T) {
 	ctx := context.Background()
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 
-	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
+	nscRoot := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
-		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "child-nsc"}},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-nsc"}},
 		},
 	}
-	nscChild := &storagev1alpha1.NamespaceSnapshotContent{
+	nscChild := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child-nsc"},
-		Status:     storagev1alpha1.NamespaceSnapshotContentStatus{},
+		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
 	childSnap := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
@@ -65,12 +64,12 @@ func TestCollectRunSubtreeManifestExcludeKeys_GraphRegistryNotReady(t *testing.T
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, nscChild, childSnap, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, snapshotgraphregistry.NewStatic(nil), rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
 	if err == nil {
-		t.Fatal("expected error when GVK registry is nil with non-empty childrenSnapshotRefs")
+		t.Fatal("expected pending error when descendant content has no manifestCheckpointName")
 	}
-	if !errors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady) {
-		t.Fatalf("expected ErrGraphRegistryNotReady, got %v", err)
+	if !errors.Is(err, ErrSubtreeManifestCapturePending) {
+		t.Fatalf("expected ErrSubtreeManifestCapturePending, got %v", err)
 	}
 }
 
@@ -78,17 +77,15 @@ func TestCollectRunSubtreeManifestExcludeKeys_DescendantNSCWithoutMCPPends(t *te
 	ctx := context.Background()
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
-	reg := graphRegistryForRootCapture(t)
-
-	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
+	nscRoot := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
-		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "child-nsc"}},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-nsc"}},
 		},
 	}
-	nscChild := &storagev1alpha1.NamespaceSnapshotContent{
+	nscChild := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child-nsc"},
-		Status:     storagev1alpha1.NamespaceSnapshotContentStatus{},
+		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
 	childSnap := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
@@ -111,7 +108,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_DescendantNSCWithoutMCPPends(t *te
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, nscChild, childSnap, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, snapshotgraphregistry.NewStatic(reg), rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
 	if err == nil {
 		t.Fatal("expected pending error when descendant NSC has no manifestCheckpointName")
 	}
@@ -124,11 +121,9 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotBoundNoExclude(t *testing.
 	ctx := context.Background()
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
-	reg := graphRegistryForRootCapture(t)
-
-	nscRoot := &storagev1alpha1.NamespaceSnapshotContent{
+	nscRoot := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
-		Status:     storagev1alpha1.NamespaceSnapshotContentStatus{},
+		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
 	childSnap := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
@@ -149,7 +144,7 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotBoundNoExclude(t *testing.
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, childSnap, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, snapshotgraphregistry.NewStatic(reg), rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
 	if err == nil {
 		t.Fatal("expected error when child snapshot is not bound")
 	}

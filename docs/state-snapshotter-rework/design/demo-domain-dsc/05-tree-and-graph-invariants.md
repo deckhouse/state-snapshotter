@@ -10,7 +10,7 @@
 
 **Не вводить** отдельных полей `domainChild*Refs`, `domainCoverage`, `domainSubtreeSummary` и отдельного condition `SubtreeReady` — используются **общие** **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** и единый **`Ready`**.
 
-**Лоб:** **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** — это **универсальная** модель дерева для **любого** `XxxxSnapshot` / `XxxxSnapshotContent` в системе, **не** namespace-specific и **не** demo-only механизм; `NamespaceSnapshot` — один из типов узла, использующий те же поля.
+**Лоб:** **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** — это **универсальная** модель дерева для **любого** `XxxxSnapshot` / `SnapshotContent` в системе, **не** namespace-specific и **не** demo-only механизм; `NamespaceSnapshot` — один из типов узла, использующий те же поля.
 
 ---
 
@@ -19,8 +19,8 @@
 | Решение | Значение |
 |---------|----------|
 | **Inventory CRD** (`DemoVirtualMachine`, `DemoVirtualDisk`) | **Не входят в v1.** Состав VM — в **`DemoVirtualMachineSnapshot.spec`** (+ `pvcRef` на диски). |
-| **`DemoVirtualMachineSnapshotContent`** / **`DemoVirtualDiskSnapshotContent`** | **Да, в v1** (DSC-пары). |
-| **Дерево** | Связи только через **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на соответствующих **`XxxxSnapshot` / `XxxxSnapshotContent`** (см. §2 и [`08`](08-universal-snapshot-tree-model.md) A.2). |
+| **`SnapshotContent`** / **`SnapshotContent`** | **Да, в v1** (DSC-пары). |
+| **Дерево** | Связи только через **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на соответствующих **`XxxxSnapshot` / `SnapshotContent`** (см. §2 и [`08`](08-universal-snapshot-tree-model.md) A.2). |
 
 ---
 
@@ -36,7 +36,7 @@
 
 | Шаг | Кто | Результат |
 |-----|-----|-------------|
-| 1 | Пользователь / CI (и при необходимости generic) | Создаётся root **`NamespaceSnapshot`** (и bind root **`NamespaceSnapshotContent`**) |
+| 1 | Пользователь / CI (и при необходимости generic) | Создаётся root **`NamespaceSnapshot`** (и bind root **`SnapshotContent`**) |
 | 2 | **Доменные** контроллеры (через **DSC**) | По доменной логике и **`spec`** создают дочерние snapshot’ы / content (**VM**, **disk**, при необходимости **VolumeSnapshot** и т.д.) |
 | 3 | Те же (или согласованные) контроллеры | Заполняют **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на родителях |
 | 4 | **Generic** `NamespaceSnapshot` reconciler | Обходит дерево **по refs** (dedup, **`Ready`**, aggregated — без жёсткого списка «разрешённых детей») |
@@ -69,16 +69,16 @@
 
 ## 2. Отражение в `childrenSnapshotRefs` / `childrenSnapshotContentRefs`
 
-Эти поля — **универсальная** модель дерева для **любого** `XxxxSnapshot` / `XxxxSnapshotContent`, не специфичны для namespace и не требуют отдельных demo-полей.
+Эти поля — **универсальная** модель дерева для **любого** `XxxxSnapshot` / `SnapshotContent`, не специфичны для namespace и не требуют отдельных demo-полей.
 
 | Правило | Содержание |
 |---------|------------|
 | **R1** | На **`NamespaceSnapshot.status.childrenSnapshotRefs`** — **прямые** дети **того run**, которые контроллеры **фактически** создали и записали в refs (**любые** поддерживаемые DSC типы, а не заранее зафиксированная таблица «родитель → kinds»). |
 | **R2** | Форма графа **наблюдаема** по refs: например, диски под VM snapshot перечисляются у **`DemoVirtualMachineSnapshot.status.childrenSnapshotRefs`**, а не дублируются как прямые дети root, **если** так задано доменной политикой записи refs. Обход для aggregated / dedup / **`Ready`** — от корня по **единой** модели refs. |
-| **R3** | **`childrenSnapshotContentRefs`** на **`NamespaceSnapshotContent`** (root) **при необходимости** (политика домена, **traversal**, **aggregation**) могут указывать на content **прямых** детей root (например `DemoVirtualMachineSnapshotContent`). Это **не** жёсткое универсальное требование «всегда полное зеркалирование snapshot→content на NSC»; минимум для этапа задаётся **spec** (PR1/PR5). Без заполнения — обход опирается на snapshot refs и правила разрешения content в spec. |
-| **R4** | Корневой **`NamespaceSnapshotContent`** несёт **`manifestCheckpointName`** для **root** namespace MCP; MCP доменных leaf — на **`DemoVirtualDiskSnapshotContent`** (и при необходимости на VM snapshot content). |
+| **R3** | **`childrenSnapshotContentRefs`** на **`SnapshotContent`** (root) **при необходимости** (политика домена, **traversal**, **aggregation**) могут указывать на content **прямых** детей root (например `SnapshotContent`). Это **не** жёсткое универсальное требование «всегда полное зеркалирование snapshot→content на NSC»; минимум для этапа задаётся **spec** (PR1/PR5). Без заполнения — обход опирается на snapshot refs и правила разрешения content в spec. |
+| **R4** | Корневой **`SnapshotContent`** несёт **`manifestCheckpointName`** для **root** namespace MCP; MCP доменных leaf — на **`SnapshotContent`** (и при необходимости на VM snapshot content). |
 
-**Snapshot refs vs content refs (для однозначного чтения пакета).** **`childrenSnapshotRefs`** — основной носитель **ребёнка-узла** в логическом дереве. **`childrenSnapshotContentRefs`** (в т.ч. на root **`NamespaceSnapshotContent`**) **дополняют** граф там, где это нужно для **traversal** / **aggregation** или по политике домена (**R3**); они **не** заменяют SoT дерева и **не** разрешают «достраивать» дерево list’ом по namespace (**INV-REF1**, **INV-REF-C1**). Пока нормативно не зафиксировано иначе: минимальный вход для обхода узлов — **snapshot refs**; **обязательность** заполнения content refs на конкретном родителе/этапе и правило **разрешения** content при пустых content refs на NSC — задаются **единым** текстом normative spec для PR1/PR5 (**не** ветвление `if NSC` в generic «на глаз»).
+**Snapshot refs vs content refs (для однозначного чтения пакета).** **`childrenSnapshotRefs`** — основной носитель **ребёнка-узла** в логическом дереве. **`childrenSnapshotContentRefs`** (в т.ч. на root **`SnapshotContent`**) **дополняют** граф там, где это нужно для **traversal** / **aggregation** или по политике домена (**R3**); они **не** заменяют SoT дерева и **не** разрешают «достраивать» дерево list’ом по namespace (**INV-REF1**, **INV-REF-C1**). Пока нормативно не зафиксировано иначе: минимальный вход для обхода узлов — **snapshot refs**; **обязательность** заполнения content refs на конкретном родителе/этапе и правило **разрешения** content при пустых content refs на NSC — задаются **единым** текстом normative spec для PR1/PR5 (**не** ветвление `if NSC` в generic «на глаз»).
 
 **Целевая форма элементов refs** (после расширения PR1 → PR5 в spec): для `childrenSnapshotRefs` достаточно идентифицировать ребёнка в API по **`apiVersion`, `kind`, `name`**; namespace дочернего snapshot — неявно namespace родителя. До переноса в CRD дизайн не меняет код.
 
@@ -124,10 +124,10 @@
 | Объект | ownerRef → |
 |--------|------------|
 | `DemoVirtualMachineSnapshot` | root `NamespaceSnapshot` |
-| `DemoVirtualMachineSnapshotContent` | `DemoVirtualMachineSnapshot` |
+| `SnapshotContent` | `DemoVirtualMachineSnapshot` |
 | `DemoVirtualDiskSnapshot` (под VM) | `DemoVirtualMachineSnapshot` |
 | `DemoVirtualDiskSnapshot` (standalone) | root `NamespaceSnapshot` |
-| `DemoVirtualDiskSnapshotContent` | `DemoVirtualDiskSnapshot` |
+| `SnapshotContent` | `DemoVirtualDiskSnapshot` |
 | `VolumeSnapshot` | **Типовой** вариант demo v1: **ownerRef** на `DemoVirtualDiskSnapshot`; иначе лейблы + финализаторы ([`08`](08-universal-snapshot-tree-model.md) B.6–B.7). **Не** обязательная на все будущие схемы привязка. |
 
 **INV-O1.** Dedup **не** выводится из ownerRef — см. [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md).

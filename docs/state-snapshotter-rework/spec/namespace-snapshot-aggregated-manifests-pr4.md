@@ -7,7 +7,7 @@ Normative contract for implementation and tests. **SSOT** for this HTTP surface;
 **In scope**
 
 - Read-time aggregation of manifests
-- Traversal of the **already materialized** manifests-only subgraph: follow **only** persisted `NamespaceSnapshotContent` edges (no list-based reconstruction of the tree; two-stage model in [`system-spec.md`](system-spec.md) **§3.0**)
+- Traversal of the **already materialized** manifests-only subgraph: follow **only** persisted `SnapshotContent` edges (no list-based reconstruction of the tree; two-stage model in [`system-spec.md`](system-spec.md) **§3.0**)
 - HTTP endpoint for aggregated manifests
 - Error semantics (fail-whole)
 - Output format
@@ -31,43 +31,43 @@ Root is resolved as:
 ```text
 NamespaceSnapshot
   → status.boundSnapshotContentName
-  → NamespaceSnapshotContent (root)
+  → SnapshotContent (root)
 ```
 
 If `boundSnapshotContentName` is empty → **409 Conflict**.
 
 ### 2.2 Traversal graph
 
-This read-path assumes the snapshot graph for the run has **already** been built and published in **`status`** (system-spec **§3.0** stage 1). The handler **must not** infer subtree membership by listing API objects.
+This read-path assumes the snapshot graph for the run has **already** been built and published in **`status`** (system-spec **§3.0** v0). The handler **must not** infer subtree membership by listing API objects.
 
 Traversal is performed **only** via:
 
-`NamespaceSnapshotContent.status.childrenSnapshotContentRefs[]`
+`SnapshotContent.status.childrenSnapshotContentRefs[]`
 
-Each ref contains **`name`** (cluster-scoped `NamespaceSnapshotContent`).
+Each ref contains **`name`** (cluster-scoped `SnapshotContent`).
 
 **Important**
 
 - `childrenSnapshotRefs` (on `NamespaceSnapshot`) are **not** used for this aggregated-manifests traversal.
-- Only the persisted `NamespaceSnapshotContent` ref graph is canonical for this endpoint.
+- Only the persisted `SnapshotContent` ref graph is canonical for this endpoint.
 
 ## 3. Traversal algorithm
 
-Recursive (**DFS** or **BFS**) walk over **`NamespaceSnapshotContent`** nodes linked by **`childrenSnapshotContentRefs`** only (no other discovery rule in this contract).
+Recursive (**DFS** or **BFS**) walk over **`SnapshotContent`** nodes linked by **`childrenSnapshotContentRefs`** only (no other discovery rule in this contract).
 
 ### 3.1 Node processing
 
-For each `NamespaceSnapshotContent`:
+For each `SnapshotContent`:
 
 1. Must exist → otherwise **404**
 2. Must have non-empty `status.manifestCheckpointName` → otherwise **500**
 3. **Read artifact:** call **`ArchiveService.GetArchiveFromCheckpoint`** for that ManifestCheckpoint (§4). **404** if ManifestCheckpoint not found; **409** if ManifestCheckpoint exists but is **not Ready** (same semantics as single-MCP `/manifests`, [`namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §8.7.1); **500** for chunk decode / checksum / other archive failures covered in §7.1.
 
-**Relationship to NSC `Ready`:** the **authoritative** gate for «can we read this node’s manifests» is **ManifestCheckpoint readiness**, enforced inside **`GetArchiveFromCheckpoint`** (step 3). The handler **MAY** additionally return **409** when `NamespaceSnapshotContent` `Ready` is not `True` **if** that is consistent with N2b status semantics in design (**§4.4**, **§11**); that check is **not** a substitute for step 3.
+**Relationship to NSC `Ready`:** the **authoritative** gate for «can we read this node’s manifests» is **ManifestCheckpoint readiness**, enforced inside **`GetArchiveFromCheckpoint`** (step 3). The handler **MAY** additionally return **409** when `SnapshotContent` `Ready` is not `True` **if** that is consistent with N2b status semantics in design (**§4.4**, **§11**); that check is **not** a substitute for step 3.
 
 ### 3.2 Cycle protection
 
-Traversal **MUST** maintain `visited` := set of `NamespaceSnapshotContent` names. If a node is visited twice → **500 InternalError** (cycle detected).
+Traversal **MUST** maintain `visited` := set of `SnapshotContent` names. If a node is visited twice → **500 InternalError** (cycle detected).
 
 ### 3.3 Ordering
 
@@ -129,10 +129,10 @@ This endpoint is **fail-whole**.
 | Case | Code |
 |------|------|
 | `NamespaceSnapshot` not found | 404 |
-| `NamespaceSnapshotContent` not found | 404 |
+| `SnapshotContent` not found | 404 |
 | `ManifestCheckpoint` not found | 404 |
 | `ManifestCheckpoint` not Ready (enforced via `GetArchiveFromCheckpoint`) | 409 |
-| `NamespaceSnapshotContent` not ready for capture (optional early check; only if aligned with N2b design §4.4 / §11) | 409 |
+| `SnapshotContent` not ready for capture (optional early check; only if aligned with N2b design §4.4 / §11) | 409 |
 | Missing `manifestCheckpointName` | 500 |
 | Chunk decode / checksum error | 500 |
 | Duplicate objects | 500 |
@@ -182,7 +182,7 @@ Implementation requires:
 
 - New use case: aggregated namespace manifests
 - New HTTP handler
-- Read-path logic: walk persisted **`NamespaceSnapshotContent`** edges only (system-spec **§3.0** stage 2)
+- Read-path logic: walk persisted **`SnapshotContent`** edges only (system-spec **§3.0** stage 2)
 
 ### 10.3 Readiness checks
 

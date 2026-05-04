@@ -86,7 +86,7 @@ spec:
               of DemoVirtualMachineSnapshot.
             properties:
               boundSnapshotContentName:
-                description: BoundSnapshotContentName is the cluster-scoped DemoVirtualMachineSnapshotContent
+                description: BoundSnapshotContentName is the cluster-scoped SnapshotContent
                   name, once created.
                 type: string
               childrenSnapshotRefs:

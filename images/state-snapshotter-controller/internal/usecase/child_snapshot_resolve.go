@@ -103,15 +103,6 @@ func EnsureGVKRegistryFromLive(ctx context.Context, live snapshotgraphregistry.L
 	return reg, nil
 }
 
-// NamespaceSnapshotContentGVK returns the GVK for NamespaceSnapshotContent (storage API).
-func NamespaceSnapshotContentGVK() schema.GroupVersionKind {
-	return schema.GroupVersionKind{
-		Group:   storagev1alpha1.APIGroup,
-		Version: storagev1alpha1.APIVersion,
-		Kind:    "NamespaceSnapshotContent",
-	}
-}
-
 // SnapshotContentGVK returns the GVK for the common target SnapshotContent (storage API).
 func SnapshotContentGVK() schema.GroupVersionKind {
 	return schema.GroupVersionKind{

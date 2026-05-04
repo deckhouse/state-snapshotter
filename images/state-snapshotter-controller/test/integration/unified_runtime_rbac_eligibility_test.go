@@ -82,7 +82,6 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 			{
 				ResourceCRDName: "registrationtestsnapshots.test.deckhouse.io",
 				SnapshotCRDName: "registrationtestsnapshots.test.deckhouse.io",
-				ContentCRDName:  "registrationtestsnapshotcontents.test.deckhouse.io",
 			},
 		}
 	}

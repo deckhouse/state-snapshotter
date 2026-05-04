@@ -50,7 +50,7 @@ type DemoVirtualDiskSnapshotSpec struct {
 // DemoVirtualDiskSnapshotStatus defines the observed state of DemoVirtualDiskSnapshot.
 // +k8s:deepcopy-gen=true
 type DemoVirtualDiskSnapshotStatus struct {
-	// BoundSnapshotContentName is the cluster-scoped DemoVirtualDiskSnapshotContent name, once created.
+	// BoundSnapshotContentName is the cluster-scoped SnapshotContent name, once created.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
 	// Conditions report readiness (e.g. Ready=True for generic parent E6 aggregation).

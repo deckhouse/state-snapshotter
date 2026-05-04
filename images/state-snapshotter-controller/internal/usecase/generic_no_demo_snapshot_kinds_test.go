@@ -31,8 +31,8 @@ func TestProductionSourcesDoNotNameDemoSnapshotKinds(t *testing.T) {
 	forbidden := []string{
 		"DemoVirtualDiskSnapshot",
 		"DemoVirtualMachineSnapshot",
-		"DemoVirtualDiskSnapshotContent",
-		"DemoVirtualMachineSnapshotContent",
+		"DemoVirtualDiskSnapshot" + "Content",
+		"DemoVirtualMachineSnapshot" + "Content",
 	}
 	forbiddenImports := []string{
 		"github.com/deckhouse/state-snapshotter/api/demo",

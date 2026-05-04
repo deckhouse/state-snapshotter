@@ -39,7 +39,7 @@ import (
 func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
-	content *storagev1alpha1.NamespaceSnapshotContent,
+	content *storagev1alpha1.SnapshotContent,
 ) (bool, error) {
 	mappings, err := dscregistry.EligibleResourceSnapshotMappings(ctx, r.namespaceSnapshotReader())
 	if err != nil {
@@ -88,7 +88,7 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 		return false, err
 	}
 
-	contentChanged, err := r.patchNamespaceSnapshotContentChildrenFromSnapshotRefs(ctx, content.Name, nsSnap.Namespace, effectiveRefs)
+	contentChanged, err := r.patchSnapshotContentChildrenFromSnapshotRefs(ctx, content.Name, nsSnap.Namespace, effectiveRefs)
 	if err != nil {
 		return false, err
 	}
@@ -235,13 +235,13 @@ func namespaceSnapshotOwnsGeneratedChildRef(ref storagev1alpha1.NamespaceSnapsho
 	return strings.HasPrefix(ref.Name, "nss-child-")
 }
 
-func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotContentChildrenFromSnapshotRefs(
+func (r *NamespaceSnapshotReconciler) patchSnapshotContentChildrenFromSnapshotRefs(
 	ctx context.Context,
 	contentName string,
 	parentNamespace string,
 	refs []storagev1alpha1.NamespaceSnapshotChildRef,
 ) (bool, error) {
-	var desired []storagev1alpha1.NamespaceSnapshotContentChildRef
+	var desired []storagev1alpha1.SnapshotContentChildRef
 	for _, ref := range refs {
 		child := &unstructured.Unstructured{}
 		child.SetAPIVersion(ref.APIVersion)
@@ -257,21 +257,21 @@ func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotContentChildrenFromS
 			return false, err
 		}
 		if found && boundName != "" {
-			desired = append(desired, storagev1alpha1.NamespaceSnapshotContentChildRef{Name: boundName})
+			desired = append(desired, storagev1alpha1.SnapshotContentChildRef{Name: boundName})
 		}
 	}
-	sortNamespaceSnapshotContentChildRefs(desired)
+	sortSnapshotContentChildRefs(desired)
 
 	changed := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		nsc := &storagev1alpha1.NamespaceSnapshotContent{}
+		nsc := &storagev1alpha1.SnapshotContent{}
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, nsc); err != nil {
 			return err
 		}
-		if namespaceSnapshotContentChildRefsEqualIgnoreOrder(nsc.Status.ChildrenSnapshotContentRefs, desired) {
+		if snapshotContentChildRefsEqualIgnoreOrder(nsc.Status.ChildrenSnapshotContentRefs, desired) {
 			return nil
 		}
-		nsc.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), desired...)
+		nsc.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.SnapshotContentChildRef(nil), desired...)
 		changed = true
 		return r.Client.Status().Update(ctx, nsc)
 	})
@@ -285,7 +285,7 @@ func sortNamespaceSnapshotChildRefs(refs []storagev1alpha1.NamespaceSnapshotChil
 	})
 }
 
-func sortNamespaceSnapshotContentChildRefs(refs []storagev1alpha1.NamespaceSnapshotContentChildRef) {
+func sortSnapshotContentChildRefs(refs []storagev1alpha1.SnapshotContentChildRef) {
 	sort.Slice(refs, func(i, j int) bool {
 		return refs[i].Name < refs[j].Name
 	})

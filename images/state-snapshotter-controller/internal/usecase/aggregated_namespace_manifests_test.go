@@ -30,16 +30,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -113,15 +110,15 @@ func aggManifestNotReadyMCP(name, srcNS string, chunks []ssv1alpha1.ChunkInfo, t
 	return cp
 }
 
-func aggManifestNSC(name, mcpName string, children ...string) *storagev1alpha1.NamespaceSnapshotContent {
-	var refs []storagev1alpha1.NamespaceSnapshotContentChildRef
+func aggManifestNSC(name, mcpName string, children ...string) *storagev1alpha1.SnapshotContent {
+	var refs []storagev1alpha1.SnapshotContentChildRef
 	for _, c := range children {
-		refs = append(refs, storagev1alpha1.NamespaceSnapshotContentChildRef{Name: c})
+		refs = append(refs, storagev1alpha1.SnapshotContentChildRef{Name: c})
 	}
-	nsc := &storagev1alpha1.NamespaceSnapshotContent{
+	nsc := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: storagev1alpha1.NamespaceSnapshotContentSpec{
-			NamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				Kind:       "NamespaceSnapshot",
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 				Name:       aggManifestTestSnapName,
@@ -129,7 +126,7 @@ func aggManifestNSC(name, mcpName string, children ...string) *storagev1alpha1.N
 			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
-		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
+		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName:      mcpName,
 			ChildrenSnapshotContentRefs: refs,
 		},
@@ -147,23 +144,6 @@ func aggManifestNS(bound string) *storagev1alpha1.NamespaceSnapshot {
 			BoundSnapshotContentName: bound,
 		},
 	}
-}
-
-func aggManifestDedicatedContent(gvk schema.GroupVersionKind, name, mcpName string, children ...string) *unstructured.Unstructured {
-	var refs []interface{}
-	for _, c := range children {
-		refs = append(refs, map[string]interface{}{"name": c})
-	}
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(gvk)
-	u.SetName(name)
-	u.Object["status"] = map[string]interface{}{
-		"manifestCheckpointName": mcpName,
-	}
-	if len(refs) > 0 {
-		u.Object["status"].(map[string]interface{})["childrenSnapshotContentRefs"] = refs
-	}
-	return u
 }
 
 func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
@@ -238,7 +218,7 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 }
 
 func TestAggregatedNamespaceManifests_UnreferencedChildNSCNotWalked(t *testing.T) {
-	// §3-E3 / INV-REF-C1: an extra NamespaceSnapshotContent+MCP may exist in the cluster, but if the root
+	// §3-E3 / INV-REF-C1: an extra SnapshotContent+MCP may exist in the cluster, but if the root
 	// content node has empty childrenSnapshotContentRefs, aggregation MUST NOT reach it (no list/search fallback).
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
@@ -345,22 +325,12 @@ func TestAggregatedNamespaceManifests_ParentTwoChildren_OrderAndDedup(t *testing
 	}
 }
 
-func TestAggregatedNamespaceManifests_DedicatedContentNodeMCPIncluded(t *testing.T) {
+func TestAggregatedNamespaceManifests_ChildContentNodeMCPIncluded(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
-
-	reg := snapshot.NewGVKRegistry()
-	if err := reg.RegisterSnapshotContentMapping(
-		"DemoVirtualDiskSnapshot",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-		"DemoVirtualDiskSnapshotContent",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-	); err != nil {
-		t.Fatalf("register mapping: %v", err)
-	}
-	agg := NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	objRoot := []map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root", "namespace": "ns1"}}}
 	objChild := []map[string]interface{}{{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "child", "namespace": "ns1"}}}
@@ -378,12 +348,7 @@ func TestAggregatedNamespaceManifests_DedicatedContentNodeMCPIncluded(t *testing
 		_ = cl.Create(context.Background(), mcp)
 	}
 
-	diskGVK := schema.GroupVersionKind{
-		Group:   "demo.state-snapshotter.deckhouse.io",
-		Version: "v1alpha1",
-		Kind:    "DemoVirtualDiskSnapshotContent",
-	}
-	diskContent := aggManifestDedicatedContent(diskGVK, "disk-content", "mcp-disk")
+	diskContent := aggManifestNSC("disk-content", "mcp-disk")
 	_ = cl.Create(context.Background(), diskContent)
 
 	root := aggManifestNSC("root-nsc", "mcp-root", "disk-content")
@@ -404,30 +369,12 @@ func TestAggregatedNamespaceManifests_DedicatedContentNodeMCPIncluded(t *testing
 	}
 }
 
-func TestAggregatedNamespaceManifests_FromDedicatedContentNode(t *testing.T) {
+func TestAggregatedNamespaceManifests_FromContentNode(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
-
-	reg := snapshot.NewGVKRegistry()
-	if err := reg.RegisterSnapshotContentMapping(
-		"DemoVirtualMachineSnapshot",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-		"DemoVirtualMachineSnapshotContent",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-	); err != nil {
-		t.Fatalf("register VM mapping: %v", err)
-	}
-	if err := reg.RegisterSnapshotContentMapping(
-		"DemoVirtualDiskSnapshot",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-		"DemoVirtualDiskSnapshotContent",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-	); err != nil {
-		t.Fatalf("register disk mapping: %v", err)
-	}
-	agg := NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	for _, tc := range []struct {
 		cpName string
@@ -446,12 +393,10 @@ func TestAggregatedNamespaceManifests_FromDedicatedContentNode(t *testing.T) {
 		_ = cl.Create(context.Background(), mcp)
 	}
 
-	vmGVK := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshotContent"}
-	diskGVK := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshotContent"}
-	_ = cl.Create(context.Background(), aggManifestDedicatedContent(diskGVK, "disk-content", "mcp-disk"))
-	_ = cl.Create(context.Background(), aggManifestDedicatedContent(vmGVK, "vm-content", "mcp-vm", "disk-content"))
+	_ = cl.Create(context.Background(), aggManifestNSC("disk-content", "mcp-disk"))
+	_ = cl.Create(context.Background(), aggManifestNSC("vm-content", "mcp-vm", "disk-content"))
 
-	raw, err := agg.BuildAggregatedJSONFromContent(context.Background(), vmGVK, "vm-content")
+	raw, err := agg.BuildAggregatedJSONFromContent(context.Background(), SnapshotContentGVK(), "vm-content")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,22 +409,13 @@ func TestAggregatedNamespaceManifests_FromDedicatedContentNode(t *testing.T) {
 	}
 }
 
-func TestAggregatedNamespaceManifests_DedicatedContentWithoutMCPFailsClosed(t *testing.T) {
+func TestAggregatedNamespaceManifests_ChildContentWithoutMCPFailsClosed(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	reg := snapshot.NewGVKRegistry()
-	if err := reg.RegisterSnapshotContentMapping(
-		"DemoVirtualDiskSnapshot",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-		"DemoVirtualDiskSnapshotContent",
-		"demo.state-snapshotter.deckhouse.io/v1alpha1",
-	); err != nil {
-		t.Fatalf("register mapping: %v", err)
-	}
-	agg := NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
 
 	d, cs := aggManifestEncodeChunk([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root", "namespace": "ns1"}},
@@ -489,12 +425,7 @@ func TestAggregatedNamespaceManifests_DedicatedContentWithoutMCPFailsClosed(t *t
 	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 	_ = cl.Create(context.Background(), mcp)
 
-	diskGVK := schema.GroupVersionKind{
-		Group:   "demo.state-snapshotter.deckhouse.io",
-		Version: "v1alpha1",
-		Kind:    "DemoVirtualDiskSnapshotContent",
-	}
-	diskContent := aggManifestDedicatedContent(diskGVK, "disk-content", "")
+	diskContent := aggManifestNSC("disk-content", "")
 	_ = cl.Create(context.Background(), diskContent)
 
 	root := aggManifestNSC("root-nsc", "mcp-root", "disk-content")

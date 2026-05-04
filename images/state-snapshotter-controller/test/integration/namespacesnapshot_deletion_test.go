@@ -40,13 +40,13 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// objectKeeperHasControllerOwnerRefToNamespaceSnapshotContent is true when ObjectKeeper lists NamespaceSnapshotContent
-// as a controlling ownerReference (OK→NSC). Retained root contract is the opposite: root NamespaceSnapshotContent must
+// objectKeeperHasControllerOwnerRefToSnapshotContent is true when ObjectKeeper lists SnapshotContent
+// as a controlling ownerReference (OK→NSC). Retained root contract is the opposite: root SnapshotContent must
 // depend on ObjectKeeper (NSC→OK) so TTL expiry on OK drives GC of the tree below NSC.
-func objectKeeperHasControllerOwnerRefToNamespaceSnapshotContent(refs []metav1.OwnerReference, nscName string, nscUID types.UID) bool {
+func objectKeeperHasControllerOwnerRefToSnapshotContent(refs []metav1.OwnerReference, nscName string, nscUID types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
-		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshotContent" &&
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" &&
 			ref.Name == nscName && ref.UID == nscUID {
 			return true
 		}
@@ -54,7 +54,7 @@ func objectKeeperHasControllerOwnerRefToNamespaceSnapshotContent(refs []metav1.O
 	return false
 }
 
-// rootNSCOwnerRefToObjectKeeper is true when root NamespaceSnapshotContent has a controlling ownerRef to the root ObjectKeeper (TTL anchor).
+// rootNSCOwnerRefToObjectKeeper is true when root SnapshotContent has a controlling ownerRef to the root ObjectKeeper (TTL anchor).
 func rootNSCOwnerRefToObjectKeeper(refs []metav1.OwnerReference, okName string, okUID types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
@@ -66,11 +66,11 @@ func rootNSCOwnerRefToObjectKeeper(refs []metav1.OwnerReference, okName string, 
 	return false
 }
 
-// mcpOwnerRefToRootNSC is true when ManifestCheckpoint has a controlling ownerRef to the root NamespaceSnapshotContent (namespace-snapshot capture path).
+// mcpOwnerRefToRootNSC is true when ManifestCheckpoint has a controlling ownerRef to the root SnapshotContent (namespace-snapshot capture path).
 func mcpOwnerRefToRootNSC(refs []metav1.OwnerReference, name string, uid types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
-		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "NamespaceSnapshotContent" &&
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" &&
 			ref.Name == name && ref.UID == uid && ref.Controller != nil && *ref.Controller {
 			return true
 		}
@@ -91,7 +91,7 @@ func mcrOwnerRefToNamespaceSnapshot(refs []metav1.OwnerReference, name string, u
 }
 
 var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
-	It("Retain: deleting NamespaceSnapshot removes root finalizer but keeps NamespaceSnapshotContent", func() {
+	It("Retain: deleting NamespaceSnapshot removes root finalizer but keeps SnapshotContent", func() {
 		ctx := context.Background()
 		contentName := ""
 
@@ -107,7 +107,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		nsName := ns.Name
 		DeferCleanup(func() {
 			if contentName != "" {
-				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{
 					ObjectMeta: metav1.ObjectMeta{Name: contentName},
 				})
 			}
@@ -138,7 +138,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			contentName = fresh.Status.BoundSnapshotContentName
-			sc := &storagev1alpha1.NamespaceSnapshotContent{}
+			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
 			g.Expect(sc.Spec.DeletionPolicy).To(Equal(storagev1alpha1.SnapshotContentDeletionPolicyRetain))
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
@@ -152,11 +152,11 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		sc := &storagev1alpha1.NamespaceSnapshotContent{}
+		sc := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
 	})
 
-	It("Delete: root finalizer clears only after NamespaceSnapshotContent is gone", func() {
+	It("Delete: root finalizer clears only after SnapshotContent is gone", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -200,7 +200,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			contentName = fresh.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		sc := &storagev1alpha1.NamespaceSnapshotContent{}
+		sc := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
 		base := sc.DeepCopy()
 		sc.Spec.DeletionPolicy = storagev1alpha1.SnapshotContentDeletionPolicyDelete
@@ -211,7 +211,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		})).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.NamespaceSnapshotContent{})
+			err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.SnapshotContent{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
@@ -237,7 +237,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		nsName := ns.Name
 		DeferCleanup(func() {
 			if contentName != "" {
-				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{
 					ObjectMeta: metav1.ObjectMeta{Name: contentName},
 				})
 			}
@@ -274,18 +274,18 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			contentName = fresh.Status.BoundSnapshotContentName
 			mcrKey = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(rootUID)}
 			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
-			sc := &storagev1alpha1.NamespaceSnapshotContent{}
+			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
 			mcpName = sc.Status.ManifestCheckpointName
 			g.Expect(mcpName).NotTo(BeEmpty())
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})).To(Succeed())
 		}).WithTimeout(90 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
-		nsc := &storagev1alpha1.NamespaceSnapshotContent{}
+		nsc := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, nsc)).To(Succeed())
 		for i := range nsc.OwnerReferences {
 			Expect(nsc.OwnerReferences[i].Kind).NotTo(Equal("NamespaceSnapshot"),
-				"root NamespaceSnapshotContent must not use ownerReferences to NamespaceSnapshot (bind is spec.namespaceSnapshotRef only)")
+				"root SnapshotContent must not use ownerReferences to NamespaceSnapshot (bind is spec.namespaceSnapshotRef only)")
 		}
 		ok := &deckhousev1alpha1.ObjectKeeper{}
 		okName := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsName, snap.Name)
@@ -298,8 +298,8 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Expect(ok.Spec.Mode).To(Equal("FollowObjectWithTTL"))
 		Expect(ok.Spec.TTL).NotTo(BeNil())
 		Expect(ok.Spec.TTL.Duration).To(Equal(config.DefaultSnapshotRootOKTTL))
-		Expect(objectKeeperHasControllerOwnerRefToNamespaceSnapshotContent(ok.OwnerReferences, contentName, nsc.UID)).To(BeFalse(),
-			"root ObjectKeeper must not list NamespaceSnapshotContent as a controlling ownerRef; retained anchor is NSC→OK")
+		Expect(objectKeeperHasControllerOwnerRefToSnapshotContent(ok.OwnerReferences, contentName, nsc.UID)).To(BeFalse(),
+			"root ObjectKeeper must not list SnapshotContent as a controlling ownerRef; retained anchor is NSC→OK")
 		Expect(rootNSCOwnerRefToObjectKeeper(nsc.OwnerReferences, okName, ok.UID)).To(BeTrue())
 
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
@@ -315,12 +315,12 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.NamespaceSnapshotContent{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.SnapshotContent{})).To(Succeed())
 		Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})).To(Succeed())
 	})
 
-	It("Retain: user can delete NamespaceSnapshotContent after root snapshot is gone (deletion completes; no GC/TTL contract)", func() {
+	It("Retain: user can delete SnapshotContent after root snapshot is gone (deletion completes; no GC/TTL contract)", func() {
 		ctx := context.Background()
 		contentName := ""
 
@@ -336,7 +336,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		nsName := ns.Name
 		DeferCleanup(func() {
 			if contentName != "" {
-				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{
 					ObjectMeta: metav1.ObjectMeta{Name: contentName},
 				})
 			}
@@ -378,14 +378,14 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.NamespaceSnapshotContent{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.SnapshotContent{})).To(Succeed())
 
-		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{
+		Expect(k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: contentName},
 		})).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.NamespaceSnapshotContent{})
+			err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, &storagev1alpha1.SnapshotContent{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
@@ -410,7 +410,7 @@ var _ = Describe("Integration: NamespaceSnapshot MCR ownerReference (N2a)", func
 		nsName := ns.Name
 		DeferCleanup(func() {
 			if contentName != "" {
-				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}})
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}})
 			}
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})

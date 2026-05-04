@@ -88,7 +88,7 @@ func namespaceSnapshotChildRefsSortedCopy(src []storagev1alpha1.NamespaceSnapsho
 	return cp
 }
 
-func namespaceSnapshotContentChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotContentChildRef) bool {
+func snapshotContentChildRefsEqual(a, b []storagev1alpha1.SnapshotContentChildRef) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -100,11 +100,11 @@ func namespaceSnapshotContentChildRefsEqual(a, b []storagev1alpha1.NamespaceSnap
 	return true
 }
 
-// mergeNamespaceSnapshotContentChildRefs merges by child content name (key within parent NamespaceSnapshotContent).
-func mergeNamespaceSnapshotContentChildRefs(existing, upsert []storagev1alpha1.NamespaceSnapshotContentChildRef) []storagev1alpha1.NamespaceSnapshotContentChildRef {
-	m := make(map[string]storagev1alpha1.NamespaceSnapshotContentChildRef, len(existing)+len(upsert))
+// mergeSnapshotContentChildRefs merges by child content name (key within parent SnapshotContent).
+func mergeSnapshotContentChildRefs(existing, upsert []storagev1alpha1.SnapshotContentChildRef) []storagev1alpha1.SnapshotContentChildRef {
+	m := make(map[string]storagev1alpha1.SnapshotContentChildRef, len(existing)+len(upsert))
 	order := make([]string, 0, len(existing)+len(upsert))
-	add := func(ref storagev1alpha1.NamespaceSnapshotContentChildRef) {
+	add := func(ref storagev1alpha1.SnapshotContentChildRef) {
 		k := ref.Name
 		if _, ok := m[k]; !ok {
 			order = append(order, k)
@@ -118,24 +118,24 @@ func mergeNamespaceSnapshotContentChildRefs(existing, upsert []storagev1alpha1.N
 		add(upsert[i])
 	}
 	sort.Strings(order)
-	out := make([]storagev1alpha1.NamespaceSnapshotContentChildRef, 0, len(order))
+	out := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(order))
 	for _, k := range order {
 		out = append(out, m[k])
 	}
 	return out
 }
 
-func namespaceSnapshotContentChildRefsEqualIgnoreOrder(a, b []storagev1alpha1.NamespaceSnapshotContentChildRef) bool {
+func snapshotContentChildRefsEqualIgnoreOrder(a, b []storagev1alpha1.SnapshotContentChildRef) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	sa := namespaceSnapshotContentChildRefsSortedCopy(a)
-	sb := namespaceSnapshotContentChildRefsSortedCopy(b)
-	return namespaceSnapshotContentChildRefsEqual(sa, sb)
+	sa := snapshotContentChildRefsSortedCopy(a)
+	sb := snapshotContentChildRefsSortedCopy(b)
+	return snapshotContentChildRefsEqual(sa, sb)
 }
 
-func namespaceSnapshotContentChildRefsSortedCopy(src []storagev1alpha1.NamespaceSnapshotContentChildRef) []storagev1alpha1.NamespaceSnapshotContentChildRef {
-	cp := append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), src...)
+func snapshotContentChildRefsSortedCopy(src []storagev1alpha1.SnapshotContentChildRef) []storagev1alpha1.SnapshotContentChildRef {
+	cp := append([]storagev1alpha1.SnapshotContentChildRef(nil), src...)
 	sort.Slice(cp, func(i, j int) bool {
 		return cp[i].Name < cp[j].Name
 	})
@@ -161,21 +161,21 @@ func removeNamespaceSnapshotChildRefsByKeys(existing, remove []storagev1alpha1.N
 	return namespaceSnapshotChildRefsSortedCopy(out)
 }
 
-// removeNamespaceSnapshotContentChildRefsByKeys drops child content refs listed in remove (by Name).
-func removeNamespaceSnapshotContentChildRefsByKeys(existing, remove []storagev1alpha1.NamespaceSnapshotContentChildRef) []storagev1alpha1.NamespaceSnapshotContentChildRef {
+// removeSnapshotContentChildRefsByKeys drops child content refs listed in remove (by Name).
+func removeSnapshotContentChildRefsByKeys(existing, remove []storagev1alpha1.SnapshotContentChildRef) []storagev1alpha1.SnapshotContentChildRef {
 	if len(remove) == 0 {
-		return namespaceSnapshotContentChildRefsSortedCopy(existing)
+		return snapshotContentChildRefsSortedCopy(existing)
 	}
 	rm := make(map[string]struct{}, len(remove))
 	for i := range remove {
 		rm[remove[i].Name] = struct{}{}
 	}
-	var out []storagev1alpha1.NamespaceSnapshotContentChildRef
+	var out []storagev1alpha1.SnapshotContentChildRef
 	for i := range existing {
 		if _, drop := rm[existing[i].Name]; drop {
 			continue
 		}
 		out = append(out, existing[i])
 	}
-	return namespaceSnapshotContentChildRefsSortedCopy(out)
+	return snapshotContentChildRefsSortedCopy(out)
 }

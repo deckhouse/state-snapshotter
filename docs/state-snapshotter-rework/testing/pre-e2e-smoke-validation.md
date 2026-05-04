@@ -71,12 +71,12 @@ curl --cacert "$TMP_CERT_DIR/ca.crt" \
 ## 1. CRD установлены
 
 ```shell
-kubectl get crd | grep -E 'namespacesnapshots|namespacesnapshotcontents|demovirtual|domainspecificsnapshotcontrollers|manifestcapture|manifestcheckpoints'
+kubectl get crd | grep -E 'namespacesnapshots|snapshotcontents|demovirtual|domainspecificsnapshotcontrollers|manifestcapture|manifestcheckpoints'
 ```
 
 Ожидаемо есть CRD для:
 
-- `NamespaceSnapshot` / `NamespaceSnapshotContent`;
+- `NamespaceSnapshot` / `SnapshotContent`;
 - `ManifestCaptureRequest` / `ManifestCheckpoint`;
 - `DomainSpecificSnapshotController`;
 - demo VM/Disk resources, snapshots and contents.
@@ -130,11 +130,11 @@ wait_content_mcp() {
   local content="$1"
   local timeout="${2:-120}"
   local elapsed=0
-  until kubectl get namespacesnapshotcontent "$content" -o json \
+  until kubectl get snapshotcontent "$content" -o json \
     | jq -e '.status.manifestCheckpointName | select(. != null and . != "")' >/dev/null; do
     if [ "$elapsed" -ge "$timeout" ]; then
-      echo "timeout waiting for NamespaceSnapshotContent/$content manifestCheckpointName" >&2
-      kubectl get namespacesnapshotcontent "$content" -o yaml >&2 || true
+      echo "timeout waiting for SnapshotContent/$content manifestCheckpointName" >&2
+      kubectl get snapshotcontent "$content" -o yaml >&2 || true
       return 1
     fi
     sleep 2
@@ -207,22 +207,16 @@ rules:
   - demovirtualdisks
   - demovirtualmachinesnapshots
   - demovirtualdisksnapshots
-  - demovirtualmachinesnapshotcontents
-  - demovirtualdisksnapshotcontents
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["demo.state-snapshotter.deckhouse.io"]
   resources:
   - demovirtualmachinesnapshots/status
   - demovirtualdisksnapshots/status
-  - demovirtualmachinesnapshotcontents/status
-  - demovirtualdisksnapshotcontents/status
   verbs: ["get", "update", "patch"]
 - apiGroups: ["demo.state-snapshotter.deckhouse.io"]
   resources:
   - demovirtualmachinesnapshots/finalizers
   - demovirtualdisksnapshots/finalizers
-  - demovirtualmachinesnapshotcontents/finalizers
-  - demovirtualdisksnapshotcontents/finalizers
   verbs: ["update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -302,12 +296,10 @@ EOF
 
 PVC/VCR в этот smoke не добавляйте.
 
-Stage 1 common-content migration note: this smoke still validates the current runtime with
-`NamespaceSnapshotContent` and demo `*SnapshotContent` CRDs. The target common
-`storage.deckhouse.io/SnapshotContent` has been extended for future migration, but this scenario
-must not switch expectations until runtime stage 2 is explicitly implemented.
+v0 common-content note: this smoke validates only `storage.deckhouse.io/SnapshotContent`
+as the active content resource. Dedicated content CRDs are not expected in the cluster.
 
-Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `NamespaceSnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-nssnap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
+Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-nssnap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
 ## 6. Базовый flow без DSC
 
@@ -331,10 +323,10 @@ wait_snapshot_ready namespacesnapshot root-no-dsc 120
 ```shell
 ROOT_NO_DSC_NSC=$(kubectl -n "$NS" get namespacesnapshot root-no-dsc -o jsonpath='{.status.boundSnapshotContentName}')
 test -n "$ROOT_NO_DSC_NSC"
-kubectl get namespacesnapshotcontent "$ROOT_NO_DSC_NSC" -o yaml
+kubectl get snapshotcontent "$ROOT_NO_DSC_NSC" -o yaml
 
 wait_content_mcp "$ROOT_NO_DSC_NSC" 120
-ROOT_NO_DSC_MCP=$(kubectl get namespacesnapshotcontent "$ROOT_NO_DSC_NSC" -o jsonpath='{.status.manifestCheckpointName}')
+ROOT_NO_DSC_MCP=$(kubectl get snapshotcontent "$ROOT_NO_DSC_NSC" -o jsonpath='{.status.manifestCheckpointName}')
 kubectl get manifestcheckpoint "$ROOT_NO_DSC_MCP" -o yaml
 ```
 
@@ -342,7 +334,7 @@ kubectl get manifestcheckpoint "$ROOT_NO_DSC_MCP" -o yaml
 
 - `NamespaceSnapshot/root-no-dsc` имеет `Ready=True Completed`;
 - `status.boundSnapshotContentName` установлен;
-- `NamespaceSnapshotContent.status.manifestCheckpointName` всегда установлен;
+- `SnapshotContent.status.manifestCheckpointName` всегда установлен;
 - если root own scope пустой, MCP существует и содержит `0` objects;
 - `childrenSnapshotRefs` пустой, потому что demo kinds не активированы в graph registry без eligible DSC.
 - root MCR не содержит `v1/Namespace`; cluster-scoped targets в MCR запрещены.
@@ -395,7 +387,6 @@ spec:
   snapshotResourceMapping:
   - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
     snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
-    contentCRDName: demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io
 EOF
 ```
 
@@ -486,10 +477,8 @@ spec:
   snapshotResourceMapping:
   - resourceCRDName: demovirtualmachines.demo.state-snapshotter.deckhouse.io
     snapshotCRDName: demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io
-    contentCRDName: demovirtualmachinesnapshotcontents.demo.state-snapshotter.deckhouse.io
   - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
     snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
-    contentCRDName: demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io
 EOF
 ```
 
@@ -571,15 +560,15 @@ Content checks:
 ```shell
 ROOT_FULL_NSC=$(kubectl -n "$NS" get namespacesnapshot root-full -o jsonpath='{.status.boundSnapshotContentName}')
 wait_content_mcp "$ROOT_FULL_NSC" 180
-kubectl get namespacesnapshotcontent "$ROOT_FULL_NSC" -o json \
+kubectl get snapshotcontent "$ROOT_FULL_NSC" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
 
 VM_CONTENT=$(kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o jsonpath='{.status.boundSnapshotContentName}')
-kubectl get demovirtualmachinesnapshotcontent "$VM_CONTENT" -o json \
+kubectl get snapshotcontent "$VM_CONTENT" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
 
 DISK_CONTENT=$(kubectl -n "$NS" get demovirtualdisksnapshot "$CHILD_DISK" -o jsonpath='{.status.boundSnapshotContentName}')
-kubectl get demovirtualdisksnapshotcontent "$DISK_CONTENT" -o json \
+kubectl get snapshotcontent "$DISK_CONTENT" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
 ```
 
@@ -722,7 +711,7 @@ kubectl delete clusterrole state-snapshotter-smoke-demo-domain-rbac --ignore-not
 
 ```shell
 kubectl get ns "$NS" -o yaml || true
-kubectl get namespacesnapshotcontents
+kubectl get snapshotcontents
 kubectl get objectkeepers 2>/dev/null || true
 
 kubectl logs -n "$CTRL_NS" deploy/"$CTRL_DEPLOY" --tail=500 \

@@ -22,14 +22,14 @@
 
 ```text
 NamespaceSnapshot (root)
-├── NamespaceSnapshotContent          ← root namespace manifest result (N2a/N2b root)
+├── SnapshotContent          ← root namespace manifest result (N2a/N2b root)
 ├── DemoVirtualMachineSnapshot
-│   ├── DemoVirtualMachineSnapshotContent
+│   ├── SnapshotContent
 │   ├── DemoVirtualDiskSnapshot
-│   │   └── DemoVirtualDiskSnapshotContent
+│   │   └── SnapshotContent
 │   └── …
 ├── DemoVirtualDiskSnapshot            ← при необходимости standalone disk под root
-│   └── DemoVirtualDiskSnapshotContent
+│   └── SnapshotContent
 └── VolumeSnapshot                     ← где leaf данных = CSI
     └── VolumeSnapshotContent
 ```
@@ -42,7 +42,7 @@ NamespaceSnapshot (root)
 
 | Участник | Роль |
 |----------|------|
-| **Generic NamespaceSnapshot controller** | Только **root** namespace-level capture: bind **одного** root `NamespaceSnapshotContent`, MCR→MCP для root; **`Ready`** root — каскад по **`childrenSnapshotRefs`** (heterogeneous дети после расширения элементов refs в spec) и собственные зависимости root. **Не** создаёт **вложенный** `NamespaceSnapshot` под root (**INV-T1** — политика трека, не «особый» kind). **Не** содержит `if DemoVM`. |
+| **Generic NamespaceSnapshot controller** | Только **root** namespace-level capture: bind **одного** root `SnapshotContent`, MCR→MCP для root; **`Ready`** root — каскад по **`childrenSnapshotRefs`** (heterogeneous дети после расширения элементов refs в spec) и собственные зависимости root. **Не** создаёт **вложенный** `NamespaceSnapshot` под root (**INV-T1** — политика трека, не «особый» kind). **Не** содержит `if DemoVM`. |
 | **Demo VM / Disk snapshot controllers** | Создают и ведут **DemoVirtualMachineSnapshot**, **DemoVirtualDiskSnapshot**, их **Content**, **VolumeSnapshot**/VCR, MCR/MCP для manifest leaf. |
 | **Согласование с root** | **Пишут** в root **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** те **доменные** контроллеры (или **опциональный** demo orchestrator — [`02`](02-dsc-wiring.md)), которые **создали** соответствующие дочерние snapshot-узлы: каждый отвечает за **свои** элементы refs (**INV-REF-M1** / **INV-REF-M2**, [`05`](05-tree-and-graph-invariants.md) §1; merge-safe патчи — детали ключа в spec/коде PR5). **Generic** root reconciler **не** заполняет доменные дети в refs «по схеме»; он **читает** refs для **`Ready`** / exclude. **`Ready`** root — каскад снизу вверх по refs ([`07`](07-ready-delete-matrix.md), [`08`](08-universal-snapshot-tree-model.md)). В spec элементы refs могут быть описаны минимально для PR1 — для PR5 **расширяется содержимое тех же полей**, без новых имён полей дерева. |
 
@@ -73,7 +73,7 @@ NamespaceSnapshot (root)
 
 - инициирует каскад через **`ownerReference`** и **финализаторы** для объектов, входящих в **текущий snapshot-run** (**run** здесь: объекты, достижимые по **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** от root, плюс lifecycle-связи — **не** «всё с label» и **не** «всё по ownerRef» как определение run);
 - **состав** удаляемых объектов определяется **фактическими связями в API** (**refs** как логическое дерево + **ownerRef** / финализаторы как lifecycle), а не заранее заданной «схемой дерева»;
-- **`NamespaceSnapshotContent`**, **MCP** и связанные артефакты **root** namespace capture удаляются по **тем же** правилам модуля, что и сегодня (**N2a/N2b**), **без** отдельной ветки «только для demo»;
+- **`SnapshotContent`**, **MCP** и связанные артефакты **root** namespace capture удаляются по **тем же** правилам модуля, что и сегодня (**N2a/N2b**), **без** отдельной ветки «только для demo»;
 - модель **не** предполагает **вложенный** **`NamespaceSnapshot`** под root (**INV-T1**), поэтому **нет** отдельной ветки «каскад nested NS» — дочерние узлы PR5 это **heterogeneous** kinds, снимаемые вместе с run по **ownerRef**/политике модуля.
 
 Сводка по kind и финализаторам — [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md) §6–§7; ограничения **ownerRef** — [`08` часть B](08-universal-snapshot-tree-model.md).

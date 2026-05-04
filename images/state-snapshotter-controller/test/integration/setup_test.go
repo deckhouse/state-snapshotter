@@ -646,14 +646,11 @@ var _ = BeforeSuite(func() {
 		"namespacedtestsnapshotcontents.test.deckhouse.io",
 		"backupclasses.storage.deckhouse.io",
 		"namespacesnapshots.storage.deckhouse.io",
-		"namespacesnapshotcontents.storage.deckhouse.io",
 		"snapshotcontents.storage.deckhouse.io",
 		"demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 		"demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-		"demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 		"demovirtualmachines.demo.state-snapshotter.deckhouse.io",
 		"demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io",
-		"demovirtualmachinesnapshotcontents.demo.state-snapshotter.deckhouse.io",
 	}
 	Eventually(func() bool {
 		for _, n := range crdNamesWaitEstablished {
@@ -718,7 +715,6 @@ var _ = BeforeSuite(func() {
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
-	Expect(controllers.AddNamespaceSnapshotContentControllerToManager(mgr, testCfg)).To(Succeed())
 	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr)).To(Succeed())
 	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr)).To(Succeed())
 

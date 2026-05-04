@@ -73,38 +73,6 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 	}
 }
 
-func TestNamespaceSnapshotContentStatus_ChildrenSnapshotContentRefs_JSONRoundTrip(t *testing.T) {
-	nsc := NamespaceSnapshotContent{
-		Status: NamespaceSnapshotContentStatus{
-			ManifestCheckpointName: "mcp-1",
-			ChildrenSnapshotContentRefs: []NamespaceSnapshotContentChildRef{
-				{Name: "child-content-1"},
-			},
-		},
-	}
-
-	data, err := json.Marshal(&nsc)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var out NamespaceSnapshotContent
-	if err := json.Unmarshal(data, &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if got := out.Status.ChildrenSnapshotContentRefs; len(got) != 1 {
-		t.Fatalf("ChildrenSnapshotContentRefs len: got %d want 1 (full %#v)", len(got), got)
-	}
-	if got := out.Status.ChildrenSnapshotContentRefs[0].Name; got != "child-content-1" {
-		t.Fatalf("ChildrenSnapshotContentRefs[0].Name: got %q want child-content-1", got)
-	}
-
-	if !reflect.DeepEqual(out.Status.ChildrenSnapshotContentRefs, nsc.Status.ChildrenSnapshotContentRefs) {
-		t.Fatalf("childrenSnapshotContentRefs mismatch: got %#v want %#v", out.Status.ChildrenSnapshotContentRefs, nsc.Status.ChildrenSnapshotContentRefs)
-	}
-}
-
 func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	sc := SnapshotContent{
 		Status: SnapshotContentStatus{
@@ -182,17 +150,17 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_OmittedWhenEmpty(t *testin
 	}
 }
 
-func TestNamespaceSnapshotContentStatus_ChildrenSnapshotContentRefs_OmittedWhenEmpty(t *testing.T) {
-	nsc := NamespaceSnapshotContent{
-		Status: NamespaceSnapshotContentStatus{
+func TestSnapshotContentStatus_ChildrenSnapshotContentRefs_OmittedWhenEmpty(t *testing.T) {
+	sc := SnapshotContent{
+		Status: SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-only",
 		},
 	}
-	if nsc.Status.ChildrenSnapshotContentRefs != nil {
-		t.Fatalf("expected nil slice by default, got %#v", nsc.Status.ChildrenSnapshotContentRefs)
+	if sc.Status.ChildrenSnapshotContentRefs != nil {
+		t.Fatalf("expected nil slice by default, got %#v", sc.Status.ChildrenSnapshotContentRefs)
 	}
 
-	data, err := json.Marshal(nsc.Status)
+	data, err := json.Marshal(sc.Status)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

@@ -43,7 +43,7 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 		{Snapshot: snap, SnapshotContent: content},
 		{
 			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshotContent"},
+			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"},
 		},
 	}
 
@@ -92,8 +92,8 @@ func TestFilterGenericSnapshotGVKPairs_skipsDemoVirtualDiskAndVMSnapshots(t *tes
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 	}
 	contentGVKs := []schema.GroupVersionKind{
-		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshotContent"},
-		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshotContent"},
+		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 	}
 	sOut, cOut := FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
@@ -109,7 +109,7 @@ func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing
 	}
 	contentGVKs := []schema.GroupVersionKind{
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 	}
 	out := FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
 	if len(out) != 1 || out[0].Kind != "SnapshotContent" {
@@ -122,7 +122,7 @@ func TestDefaultGraphRegistryBuiltInPairs_containsOnlyNamespaceSnapshot(t *testi
 	if len(pairs) != 1 {
 		t.Fatalf("expected one graph built-in pair, got %d: %v", len(pairs), pairs)
 	}
-	if pairs[0].Snapshot.Kind != "NamespaceSnapshot" || pairs[0].SnapshotContent.Kind != "NamespaceSnapshotContent" {
+	if pairs[0].Snapshot.Kind != "NamespaceSnapshot" || pairs[0].SnapshotContent.Kind != "SnapshotContent" {
 		t.Fatalf("expected NamespaceSnapshot graph built-in, got %v", pairs[0])
 	}
 	for _, p := range pairs {

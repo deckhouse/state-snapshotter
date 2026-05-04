@@ -24,7 +24,7 @@
 **Как сделано (S1–S2):**
 
 - Пакет `images/state-snapshotter-controller/pkg/unifiedbootstrap/`: `DefaultUnifiedRuntimeBootstrapPairs()` / legacy alias `DefaultDesiredUnifiedSnapshotPairs()`, отдельный `DefaultGraphRegistryBuiltInPairs()`, `ResolveAvailableUnifiedGVKPairs(mapper, pairs, log)`.
-- `cmd/main.go`: dedicated controllers (`NamespaceSnapshot*`, `DemoVirtual*Snapshot`) регистрируются всегда; `STATE_SNAPSHOTTER_UNIFIED_ENABLED` управляет только generic unified Snapshot/SnapshotContent wiring и runtime sync.
+- `cmd/main.go`: dedicated controllers (`NamespaceSnapshot*`, demo snapshot kinds) регистрируются всегда; `STATE_SNAPSHOTTER_UNIFIED_ENABLED` управляет только generic unified runtime wiring и runtime sync.
 - **Динамика после старта:** новые eligible типы из DSC подхватываются **без рестарта** через `pkg/unifiedruntime.Syncer.Sync` (R2 2b/R3). **Снятие** watch при выпадении типа из resolved — по-прежнему не гарантируется; см. gauges `state_snapshotter_unified_runtime_*` и лог при stale.
 
 Опционально (не сделано): **feature gate** в values для всего unified трека.
@@ -50,24 +50,24 @@
 - [x] **Phase 2b (additive):** `pkg/unifiedruntime.Syncer` после успешного `reconcileAll` DSC: merge + `ResolveAvailableUnifiedGVKPairs` → `SnapshotController.AddWatchForPair` / `SnapshotContentController.AddWatchForContent` (`mgr.Add` после `Start` поддерживается controller-runtime). Идемпотентность по GVK; один сбой add не валит остальные пары.
 - [x] **R3 (часть 1 — state + proof):** слой **bootstrap / eligible / merged / resolved** в `pkg/unifiedruntime.LayeredGVKState` + `BuildLayeredGVKState`; **active** — `Syncer.activeSnapshotGVKKeys` (монотонно: ключ попадает, если оба `AddWatch*` успешны); `LastLayeredState()` / `ActiveSnapshotGVKKeys()` для отладки и тестов; unit — `pkg/unifiedruntime/layers_test.go`. Интеграция: `test/integration/unified_runtime_hot_add_test.go` — DSC становится watch-eligible (Accepted → RBACReady), затем проверяются `LastLayeredState` (resolved + eligible) и `ActiveSnapshotGVKKeys`; тест **Serial**, маппинг на **RegistrationTestSnapshot** (не `TestSnapshot`), чтобы не вешать глобальный watch на тип, с которым lifecycle-спеки делают прямой `Reconcile` (иначе два reconcile-потока и 409). В `BeforeSuite` интеграции — wiring как в production: unified controllers + `unifiedruntime.NewSyncer` + `AddDomainSpecificSnapshotControllerToManager(..., syncer.Sync, graphRegistryRefresh)`.
 - [x] **R3 (observability):** после каждого `Sync` обновляются Prometheus gauges (`sigs.k8s.io/controller-runtime/pkg/metrics`): `state_snapshotter_unified_runtime_resolved_snapshot_gvk_count`, `active_monotonic_snapshot_gvk_count`, `stale_active_snapshot_gvk_count`; сводка на `V(2)`; при `stale_active_snapshot_gvk_count > 0` — **Info**-лог со списком ключей и явным hint про restart pod (additive watches не снимаются). Регистрация метрик — `sync.Once` в `NewSyncer`. См. [`r2-phase-2b-r3-runtime-registry.md`](r2-phase-2b-r3-runtime-registry.md).
-- [x] **R5:** `config.Options` + env (`STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`); `cmd/main.go` ветка без generic unified wiring; dedicated controllers остаются в manager; `NewSyncer` получает `EffectiveUnifiedBootstrapPairs()`; Helm/OpenAPI. Ошибка парсинга bootstrap → warning + дефолтный список. Graph registry built-ins отделены от runtime bootstrap: по умолчанию только `NamespaceSnapshot`→`NamespaceSnapshotContent`, demo пары — через eligible DSC.
+- [x] **R5:** `config.Options` + env (`STATE_SNAPSHOTTER_UNIFIED_ENABLED`, `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`); `cmd/main.go` ветка без generic unified wiring; dedicated controllers остаются в manager; `NewSyncer` получает `EffectiveUnifiedBootstrapPairs()`; Helm/OpenAPI. Ошибка парсинга bootstrap → warning + дефолтный список. Graph registry built-ins отделены от runtime bootstrap: по умолчанию только `NamespaceSnapshot`→`SnapshotContent`, demo пары — через eligible DSC.
 - [ ] **R3 / integration (опционально):** два DSC при поломке одного, полный T5/T9 и т.д.
 
 ### 2.3 Manifest capture
 
 | # | Задача | Зачем | Статус |
 |---|--------|--------|--------|
-| M1 | Расширение **MCR spec** | UX | ⬜ **отложено** до стабилизации **NamespaceSnapshot / NamespaceSnapshotContent / ObjectKeeper** по поставке **N2a** (и при необходимости N3); не смешивать с закрытием **N2b** без явного gate |
+| M1 | Расширение **MCR spec** | UX | ⬜ **отложено** до стабилизации **NamespaceSnapshot / SnapshotContent / ObjectKeeper** по поставке **N2a** (и при необходимости N3); не смешивать с закрытием **N2b** без явного gate |
 | M2 | Лимиты объёма, таймауты list | Защита apiserver/etcd | ⬜ **после M1** (тот же gate) |
 
-### 2.4 Namespace snapshot + NamespaceSnapshotContent + ObjectKeeper
+### 2.4 Namespace snapshot + SnapshotContent + ObjectKeeper
 
 **Цель:** сразу целевая схема **без миграции** с промежуточного generic `SnapshotContent` для корня namespace — см. [`decisions/namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md). Детали сценария — **только** [`snapshot-rework/`](../../../snapshot-rework/). Статус **`NamespaceSnapshot`**: **только `conditions`**, без `status.phase` — [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md).
 
 | # | Задача | Документ / примечание | Статус |
 |---|--------|------------------------|--------|
-| N0 | **Gate:** **Chosen option** в [`namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `NamespaceSnapshot` / `NamespaceSnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §13–§16 | ✅ (scope resolved; group `storage.deckhouse.io/v1alpha1` на этапе N1) |
-| N1 | **API + lifecycle skeleton (завершённый подготовительный слой, код не откатывается):** типы `NamespaceSnapshot`, `NamespaceSnapshotContent`, codegen, OpenAPI; **убрать** generic `SnapshotContent` как носитель root; bind + delete; integration (lifecycle, deletion, mismatch, recovery). **В N1 намеренно нет:** ObjectKeeper, реального manifest capture, дочернего дерева. | decision + design §14–§16 | ✅ |
+| N0 | **Gate:** **Chosen option** в [`namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `NamespaceSnapshot` / `SnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §13–§16 | ✅ (scope resolved; group `storage.deckhouse.io/v1alpha1` на этапе N1) |
+| N1 | **API + lifecycle skeleton (завершённый подготовительный слой, код не откатывается):** типы `NamespaceSnapshot`, `SnapshotContent`, codegen, OpenAPI; **убрать** generic `SnapshotContent` как носитель root; bind + delete; integration (lifecycle, deletion, mismatch, recovery). **В N1 намеренно нет:** ObjectKeeper, реального manifest capture, дочернего дерева. | decision + design §14–§16 | ✅ |
 | N2 | **Manifests-only snapshot path** (без data-layer), в два подэтапа — **§2.4.1:** **N2a** — первый рабочий снимок манифестов одного root (OK + MCR→ManifestCheckpoint + статус на NSC + download одного снимка); **N2b** — дерево манифест-only снимков (дети, refs на graph, агрегированный Ready, aggregated download). | [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) + §2.4.1 | ⬜ |
 | N3 | **Интеграция / hardening:** envtest — recovery после **рестарта** контроллера; доп. негативные кейсы; политика по §15. Базовые mismatch/recovery/status уже в N1 (`namespacesnapshot_n1_boundary_test.go`). | design §15 | ⬜ |
 | N4 | **После закрытого N2 (N2a+N2b):** углублённые лимиты большого namespace, политики таймаутов list/apiserver (пересечение с §8.6 design, M2). | design §8.6, §16 | ⬜ |
@@ -77,13 +77,13 @@
 
 #### 2.4.1 N2 — manifests-only путь (N2a / N2b), SSOT декомпозиции
 
-**Граница N1 ↔ N2 (код N1 не пересматривается как «неудачная работа»):** **N1** — **завершённый** слой **API + lifecycle skeleton**: CRD/типы, bind root↔`NamespaceSnapshotContent`, delete (Retain/Delete), integration (lifecycle, mismatch, recovery). **В N1 намеренно нет:** **ObjectKeeper**, **реального** manifest capture, **дочернего дерева**. Дальнейшие этапы опираются на этот скелет без отката CRD/bind/delete.
+**Граница N1 ↔ N2 (код N1 не пересматривается как «неудачная работа»):** **N1** — **завершённый** слой **API + lifecycle skeleton**: CRD/типы, bind root↔`SnapshotContent`, delete (Retain/Delete), integration (lifecycle, mismatch, recovery). **В N1 намеренно нет:** **ObjectKeeper**, **реального** manifest capture, **дочернего дерева**. Дальнейшие этапы опираются на этот скелет без отката CRD/bind/delete.
 
 **Зафиксированные договорённости для N2:**
 
 - **ObjectKeeper** нужен уже в **первом рабочем** проходе (**N2a**), как **retention anchor** для корневого content/артефакта; OK **не** заменяет bind (**`spec.namespaceSnapshotRef`** / **`status.boundSnapshotContentName`**).
 - Рабочий scope до data-layer — **manifests-only**; **VolumeCaptureRequest**, **VolumeSnapshotContent**, dataRefs и прочие data-ветки — **не реализуются** в N2; в API допускаются только **placeholders**, если они уже заложены в модели.
-- **Внутренний** путь исполнения manifest capture — **ManifestCaptureRequest → ManifestCheckpoint** (+ существующие **ManifestCheckpointContentChunk** в коде модуля); публичный lifecycle и статусы — **`NamespaceSnapshot` / `NamespaceSnapshotContent`** (+ при необходимости те же поля связи, что у unified content с MCP, по аналогии со `SnapshotContent`).
+- **Внутренний** путь исполнения manifest capture — **ManifestCaptureRequest → ManifestCheckpoint** (+ существующие **ManifestCheckpointContentChunk** в коде модуля); публичный lifecycle и статусы — **`NamespaceSnapshot` / `SnapshotContent`** (+ при необходимости те же поля связи, что у unified content с MCP, по аналогии со `SnapshotContent`).
 - **Дерево snapshot-ов и child composition** — **целевая ось продукта**, закрывается в **N2b** (manifests-only), а не откладывается как «дальний optional».
 
 **Цель N2 целиком:** кратчайший путь к **первым рабочим** снимкам манифестов (**N2a**), затем к **рабочему дереву** manifests-only снимков (**N2b**). Полный vision из [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) **не** тащить в один этап.
@@ -96,20 +96,20 @@
 
 **Definition of Done (N2a):**
 
-1. **Два ObjectKeeper не смешивать:** корневой OK (**`ret-nssnap-…`**: **`FollowObjectWithTTL`** на **`NamespaceSnapshot`**, `spec.ttl` из env или дефолта в `pkg/config`) + **root `NamespaceSnapshotContent.metadata.ownerReferences` → этот OK** (TTL-якорь; не наоборот) — отдельно от **generic** execution OK **`ret-mcr-*`** (**`FollowObject`** на MCR) в `ManifestCheckpointController`. Для **namespace N2a** финальный **MCP** крепится к **NSC** (`ownerReference`), **без** `ret-mcr-*` для MCP. Chunks → **ownerRef на MCP**. Детали — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §4.3 / §4.6.  
-2. Реальный manifest capture через цепочку **MCR → ManifestCheckpoint** (chunks), управляемый из потока **NamespaceSnapshot** (ensure временного MCR с **ownerRef** на root snapshot для GC in-flight, observe MCP; после успешного persisted результата — **удаление MCR**, §4.7 design; без публичной обязанности MCR для оператора — §10).  
-3. Запись результата в **`NamespaceSnapshotContent.status`** по **§4.4** design (как минимум **`manifestCheckpointName`**, conditions; опционально `capturedAt`, `resourceCount`).  
-4. **`Ready=True`** на root **только** после **persisted** manifest-результата (MCP Ready + консистентные chunks / статус MCP), **не** из «промежуточного» события вроде одного лишь факта создания MCR без готового checkpoint.  
-5. Рабочий **read/download path** манифестов **одного** снимка (на базе существующей склейки chunks / archive path в модуле, без обязательности нового формата хранения).  
+1. **Два ObjectKeeper не смешивать:** корневой OK (**`ret-nssnap-…`**: **`FollowObjectWithTTL`** на **`NamespaceSnapshot`**, `spec.ttl` из env или дефолта в `pkg/config`) + **root `SnapshotContent.metadata.ownerReferences` → этот OK** (TTL-якорь; не наоборот) — отдельно от **generic** execution OK **`ret-mcr-*`** (**`FollowObject`** на MCR) в `ManifestCheckpointController`. Для **namespace N2a** финальный **MCP** крепится к **NSC** (`ownerReference`), **без** `ret-mcr-*` для MCP. Chunks → **ownerRef на MCP**. Детали — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §4.3 / §4.6.
+2. Реальный manifest capture через цепочку **MCR → ManifestCheckpoint** (chunks), управляемый из потока **NamespaceSnapshot** (ensure временного MCR с **ownerRef** на root snapshot для GC in-flight, observe MCP; после успешного persisted результата — **удаление MCR**, §4.7 design; без публичной обязанности MCR для оператора — §10).
+3. Запись результата в **`SnapshotContent.status`** по **§4.4** design (как минимум **`manifestCheckpointName`**, conditions; опционально `capturedAt`, `resourceCount`).
+4. **`Ready=True`** на root **только** после **persisted** manifest-результата (MCP Ready + консистентные chunks / статус MCP), **не** из «промежуточного» события вроде одного лишь факта создания MCR без готового checkpoint.
+5. Рабочий **read/download path** манифестов **одного** снимка (на базе существующей склейки chunks / archive path в модуле, без обязательности нового формата хранения).
 6. **Без** агрегации детей и **без** data-flow; поля data-related — только **placeholders**, если уже есть в CRD.
 
 **Design lock до кода N2a (подробности в design, не дублировать здесь):**
 
-- Публичный **status surface** N2a — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) **§4.4** (root без MCR в status; NSC — `manifestCheckpointName` + conditions + опциональные счётчики/время).  
-- **Allowlist / exclusions** — **§4.5**.  
-- **Download** (один снимок, без предматериализации) — **§8.7**.  
-- **N2b агрегация Ready** — **§11.1**.  
-- **Контроллеры** (NS vs `ManifestCheckpointController`) — **§10**.  
+- Публичный **status surface** N2a — [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) **§4.4** (root без MCR в status; NSC — `manifestCheckpointName` + conditions + опциональные счётчики/время).
+- **Allowlist / exclusions** — **§4.5**.
+- **Download** (один снимок, без предматериализации) — **§8.7**.
+- **N2b агрегация Ready** — **§11.1**.
+- **Контроллеры** (NS vs `ManifestCheckpointController`) — **§10**.
 - **OK vs ownerRef** — **§4.3**.
 
 **N2a.x:** выполнено — см. [`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) **§4.6** (сверка с `ManifestCheckpointController`).
@@ -128,11 +128,11 @@
 
 **Definition of Done (N2b):**
 
-1. Создание **дочерних** snapshot **доменными контроллерами** (по ТЗ), дочерние **`NamespaceSnapshotContent`**.  
-2. На **`NamespaceSnapshot`**: **`childrenSnapshotRefs`** — **observability** / намерения.  
-3. На **`NamespaceSnapshotContent`**: **`childrenSnapshotContentRefs`** — **канонический graph** результата.  
-4. **`Ready=True`** у parent — по политике **[`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §11.1** (собственный result + required children; child failed → parent `Ready=False` / `ChildSnapshotFailed`).  
-5. **Aggregated manifests download** для **subtree / root** (только манифесты, без data payloads; на чтении из MCP/chunks — §8.7 design).  
+1. Создание **дочерних** snapshot **доменными контроллерами** (по ТЗ), дочерние **`SnapshotContent`**.
+2. На **`NamespaceSnapshot`**: **`childrenSnapshotRefs`** — **observability** / намерения.
+3. На **`SnapshotContent`**: **`childrenSnapshotContentRefs`** — **канонический graph** результата.
+4. **`Ready=True`** у parent — по политике **[`namespace-snapshot-controller.md`](namespace-snapshot-controller.md) §11.1** (собственный result + required children; child failed → parent `Ready=False` / `ChildSnapshotFailed`).
+5. **Aggregated manifests download** для **subtree / root** (только манифесты, без data payloads; на чтении из MCP/chunks — §8.7 design).
 6. По-прежнему **без** data-flow (volume и т.д.).
 
 #### 2.4.2 N2b — поставка короткими PR (инвариант на PR)
@@ -141,7 +141,7 @@
 
 | PR | Фокус | Включить | Не включать (отложить) | Критерий остановки |
 |----|--------|----------|-------------------------|-------------------|
-| **PR1** | Только **форма графа** в API | JSON: `childrenSnapshotRefs` / `childrenSnapshotContentRefs`; в Go элементы — **`NamespaceSnapshotChildRef`** / **`NamespaceSnapshotContentChildRef`** (узкие имена, не путать с полем **`snapshotRef`** у generic **`SnapshotContent.spec`**). Обновление **design** и при необходимости **spec**; unit / envtest на **сериализацию** | Aggregated download; полный parent **Ready**; несколько типов детей; domain traversal | «API графа стабилен, дерево в поведении ещё не оживлено» |
+| **PR1** | Только **форма графа** в API | JSON: `childrenSnapshotRefs` / `childrenSnapshotContentRefs`; в Go элементы — **`NamespaceSnapshotChildRef`** / **`SnapshotContentChildRef`** (узкие имена, не путать с полем **`snapshotRef`** у generic **`SnapshotContent.spec`**). Обновление **design** и при необходимости **spec**; unit / envtest на **сериализацию** | Aggregated download; полный parent **Ready**; несколько типов детей; domain traversal | «API графа стабилен, дерево в поведении ещё не оживлено» |
 | **PR2** | **Один** child в графе **end-to-end** (без доменного writer) | **Было:** временный in-repo scaffold (удалён). **Сейчас:** интеграция **`namespacesnapshot_graph_e5_e6_integration_test.go`** — merge refs, child как **registered snapshot kind fixture** (NamespaceSnapshot kind) + **NSC/MCP**, parent **Ready** после child; плюс **PR5a** как доменный writer одного kind. | Subtree download как продукт; несколько детей без ручного merge в тесте | «Дерево на **одном** ребёнке работает» |
 | **PR3** | **Политика агрегации Ready** parent по **`childrenSnapshotRefs`** | **Сейчас:** **`SummarizeChildrenSnapshotRefsForParentReadyE6`**, **`PickParentReadyReasonE6`**, **`ClassifyGenericChildSnapshotReady`**; allowlist терминальных N2a-причин у child; **§11.1** design (таблица); integration в **`namespacesnapshot_graph_e5_e6_integration_test.go`** (pending / subtree pending / failed / приоритеты). | Aggregated download (PR4); несколько детей; optional/required в API | «Матрица success / pending / failed зафиксирована тестами» |
 | **PR4** | **Aggregated manifests download** (без data) | **SSOT:** [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../spec/namespace-snapshot-aggregated-manifests-pr4.md) — endpoint, read-path по **сохранённому** NSC-графу ([`spec/system-spec.md`](../spec/system-spec.md) **§3.0** ст. 2), fail-whole, merge, циклы/дубликаты. Integration: parent + 1 child, затем parent + 2 children | Data payloads; export/import; restore | «N2b manifests-only **для пользователя** замкнут на чтении subtree». **Real cluster:** `hack/pr4-smoke.sh` (без skip OK) — aggregated до/после удаления root snapshot, retained read, шаг 5b (root OK: followRef→`NamespaceSnapshot`, **NSC ownerRef→OK**). **Strict TTL** (`PR4_SMOKE_REQUIRE_TTL=1`) — на кластере с рабочим Deckhouse ObjectKeeper; TTL снимка задаётся контроллером (`FollowObjectWithTTL` + `spec.ttl`, env/дефолт); см. [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md). |
@@ -175,26 +175,26 @@
 2. **PR5a** — один реальный demo kind (**DemoVirtualDiskSnapshot**), один **DSC**, один простой child-path; parent-owned запись **`children*Refs`** выполняет **`NamespaceSnapshot`** через DSC discovery; проверить, что generic читает граф только через registry / **`unstructured`**.
 3. **PR5b** — **DemoVirtualMachineSnapshot** (и при необходимости цепочка VM → Disk), промежуточный узел и каскад **`Ready`**.
 
-**§3-E1 — базовый graph (write + read)**  
+**§3-E1 — базовый graph (write + read)**
 Запись **`childrenSnapshotRefs`** как parent-owned complete child set (**INV-REF-M1** / **INV-REF-M2**); generic читает только refs (**INV-REF1**, без list-достройки); в этом срезе **не** опираться на **`childrenSnapshotContentRefs`** для обхода; **без** dedup. **Тест:** один child, happy-path.
 
-**§3-E2 — multi-writer / merge correctness**  
+**§3-E2 — multi-writer / merge correctness**
 Несколько writers на refs; **RetryOnConflict** / согласованная стратегия patch. **Тесты:** concurrent writers; **нельзя** удалить чужой ref (**INV-REF-M2**).
 
-**§3-E3 — content refs (частично)**  
+**§3-E3 — content refs (частично)**
 Использование **`childrenSnapshotContentRefs`** там, где нужно по spec traversal; generic: **без** list-обхода (**INV-REF-C1**); при выбранном варианте — **явный fallback** только по цепочке **snapshot refs**. **Тест:** отсутствие / пустые content refs → **fail-closed** или задокументированный fallback.
 
-**§3-E4 — traversal / aggregation (если выносится отдельным PR)**  
-Обход дерева **по refs**; подготовка к aggregated операциям (download / restore по политике N2b); **без** расширения матрицы **Ready** в том же PR (если иначе — разнести). Общий DFS по **`childrenSnapshotContentRefs`** (сортировка детей, циклы) — в коде **`usecase.WalkNamespaceSnapshotContentSubtree`** (только узлы **`NamespaceSnapshotContent`**) и **`usecase.WalkNamespaceSnapshotContentSubtreeWithRegistry`** / **`WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh`** (heterogeneous: зарегистрированные **`XxxxSnapshotContent`** под теми же refs, **`unstructured`**, без импорта доменных CRD в generic). Агрегатор PR4 и интеграции PR5a/PR5b используют **один** ref-only walk (PR4 — через **`snapshotgraphregistry.LiveReader`** и maybe-refresh); листья dedicated content **без** MCP на aggregated path — как в **`namespacesnapshot_content_graph.go`**.
+**§3-E4 — traversal / aggregation (если выносится отдельным PR)**
+Обход дерева **по refs**; подготовка к aggregated операциям (download / restore по политике N2b); **без** расширения матрицы **Ready** в том же PR (если иначе — разнести). Общий DFS по **`childrenSnapshotContentRefs`** (сортировка детей, циклы) — в коде **`usecase.WalkSnapshotContentSubtree`**; обход работает только по common **`SnapshotContent`** и не использует DSC content-CRD registry. Агрегатор PR4 и интеграции PR5a/PR5b используют **один** ref-only walk; листья common content **без** MCP на aggregated path fail-closed.
 
 **Aggregated Snapshot Read API:** generic endpoint **`/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/{resource}/{name}/manifests`** читает любой namespaced registered snapshot resource как restore point: snapshot → `status.boundSnapshotContentName` → graph registry content GVK → **`BuildAggregatedJSONFromContent`**. Legacy `namespacesnapshots/{name}/manifests` сохраняется. Duplicate object identity (`apiVersion|kind|namespace|name`) — fail, без merge/overwrite/silent dedup; HTTP surface — `409 Conflict`. Design/API SSOT: [`snapshot-read.md`](snapshot-read.md), [`../api/snapshot-read.md`](../api/snapshot-read.md).
 
-**§3-E5 — dedup / exclude**  
+**§3-E5 — dedup / exclude**
 **INV-S0** / **INV-E1**: вычисление только по дереву текущего run; **fail-closed** при неполных данных. **В коде (root capture):** `usecase.BuildRootNamespaceManifestCaptureTargets` + `collectRunSubtreeManifestExcludeKeys` (обход **`childrenSnapshotContentRefs`** + dedicated content через registry; **без** list subtree); для каждого **`status.childrenSnapshotRefs`** — **`usecase.ResolveChildSnapshotRefToBoundContentName`** (один **`Get`** по **`apiVersion`/`kind`** из ref) + опционально **`EnsureGVKRegistryFromLive`** / **`TryRefresh`** там, где нужен registry для content walk, не для разрешения ref; **`namespacemanifest.FilterManifestTargets`**; wiring в **`namespacesnapshot_capture.go`** + **`ArchiveService`** на **`NamespaceSnapshotReconciler`** (`snapshotgraphregistry.LiveReader`). **Ограничения среза:** при пустых **`childrenSnapshotRefs`** exclude не применяется (как раньше — полный namespace list); при непустых **`childrenSnapshotRefs`** registry **обязателен** для E5 subtree (иначе fail-closed). **Живой registry:** `pkg/snapshotgraphregistry` — полная пересборка Current на каждом **`Refresh`** после reconcile DSC **и** не более **одного** **`TryRefresh`** на пользовательскую операцию generic read-path / E5 при пустом registry или **`ErrChildRefNotRegistered`** (без polling). **Finish line (срез):** при непустых **`status.childrenSnapshotRefs`** первый root **MCR** не создаётся, пока exclude по subtree нельзя посчитать полностью по **уже опубликованному** графу и registry (**`ReasonSubtreeManifestCapturePending`**, короткий requeue, зеркалирование на root **NSC**); **без** создания искусственного child **`NamespaceSnapshot`** для этого. **CapturePlanDrift** при subtree-root: удалить **MCR** + requeue (**не** штатный путь к сходимости); для **N2a** без subtree refs — drift по-прежнему **terminal**. Если после exclude не осталось allowlisted целей, root **MCR** с пустыми **`spec.targets`**: **`ManifestCheckpointController`** для **NSS-bound** MCR (аннотация **`bound-namespace-snapshot-content`**) строит пустой checkpoint вместо ошибки «No targets specified». При **терминальном** сбое дочернего snapshot capture родительский reconcile не перетирает **`ChildSnapshotFailed`** состоянием **`SubtreeManifestCapturePending`**. Integration: **`namespacesnapshot_graph_e5_e6_integration_test.go`**, **`snapshot_graph_registry_dynamic_dsc_test.go`**; unit — **`root_capture_run_exclude_test.go`**, **`root_capture_e5_registry_unit_test.go`**, **`pkg/snapshotgraphregistry/provider_test.go`**.
 
 **Own scope filtering:** domain controllers формируют own MCR только из ресурсов, принадлежащих текущему domain object, и явно разрешённых root/namespace-level ресурсов. Ресурсы с `ownerReferences` на другой domain object исключаются из own scope родителя и должны покрываться child snapshot subtree или namespace fallback. Детальный рабочий checklist — [`demo-domain-dsc/09-materialized-child-content-mcp-and-aggregated-read-checklist.md`](demo-domain-dsc/09-materialized-child-content-mcp-and-aggregated-read-checklist.md).
 
-**§3-E6 — Ready (generic child snapshot refs)**  
+**§3-E6 — Ready (generic child snapshot refs)**
 **Агрегация** parent snapshot по **`status.childrenSnapshotRefs`**: каждый ref **MUST** содержать только **`apiVersion`**, **`kind`**, **`name`**; child namespace всегда берётся из namespace родителя (namespace-local модель, см. **[`spec/system-spec.md`](../spec/system-spec.md) §3.2**). Parent controller владеет полным списком своих children: **`NamespaceSnapshot`** строит top-level refs через DSC/registry discovery, domain controllers строят refs из собственной модели; child controllers **не** self-register и не патчат parent graph. Дочерний объект — **`usecase.GetChildSnapshot`** / один **`Get`**; статус — **`unstructured`** (**`status.boundSnapshotContentName`**, condition **`Ready`**); классификация — **`usecase.ClassifyGenericChildSnapshotReady`**; терминальные причины — **`usecase.ChildSnapshotTerminalReadyReasons`**; агрегат — **`SummarizeChildrenSnapshotRefsForParentReadyE6`** (**без** обязательного registry на пути E6). **Приоритет parent reason:** **`ChildSnapshotFailed`** > **`SubtreeManifestCapturePending`** > **`ChildSnapshotPending`** > **`Completed`** — **`PickParentReadyReasonE6`**. **Wiring:** **`reconcileChildrenRefsE6ParentReadyOrPatch`** в **`namespacesnapshot_capture.go`**. **`ClassifyNamespaceSnapshotChildReady`** — thin-wrapper для typed **`NamespaceSnapshot`**-ребёнка. **Demo:** VM/Disk materialization теперь идёт через реальные MCR/MCP; Ready больше не stub. **Тесты:** **`namespace_snapshot_parent_ready_e6_test.go`**, **`namespacesnapshot_child_snapshot_watches_test.go`**, **`namespacesnapshot_graph_e5_e6_integration_test.go`**, **PR5b**. Нормативный минимум — **[`spec/system-spec.md`](../spec/system-spec.md) §3.8**.
 
 **Фактический прогресс срезов §3-E в коде** (объём «сделано / не сделано» без повторения таблиц Must) — в [`operations/project-status.md`](../operations/project-status.md) (строка таблицы N2b generic §3 и блок под ней).
@@ -209,7 +209,7 @@
 
 **Практический task-list (копипаст backlog)**
 
-**N2a:** CRD §4.4.1 + allowlist §4.5 + §4.7 → NS reconciler → download §8.7.1 → integration.  
+**N2a:** CRD §4.4.1 + allowlist §4.5 + §4.7 → NS reconciler → download §8.7.1 → integration.
 
 **N2b:** по шагам **§2.4.2** (таблица PR в подразделе **2.4.2** выше в этом документе; PR1→PR4, затем PR5 при необходимости). Порядок имплементации контракта **[`spec/system-spec.md`](../spec/system-spec.md) §3** — **§2.4.4**.
 

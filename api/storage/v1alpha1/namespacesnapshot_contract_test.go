@@ -49,7 +49,7 @@ func TestNamespaceSnapshot_UnifiedBindFieldUsesBoundSnapshotContentName(t *testi
 	}
 }
 
-func TestNamespaceSnapshotContent_Registered(t *testing.T) {
+func TestSnapshotContent_Registered(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
@@ -58,10 +58,10 @@ func TestNamespaceSnapshotContent_Registered(t *testing.T) {
 	gvk := schema.GroupVersionKind{
 		Group:   APIGroup,
 		Version: APIVersion,
-		Kind:    "NamespaceSnapshotContent",
+		Kind:    "SnapshotContent",
 	}
 
 	if _, err := scheme.New(gvk); err != nil {
-		t.Fatalf("scheme.New NamespaceSnapshotContent: %v", err)
+		t.Fatalf("scheme.New SnapshotContent: %v", err)
 	}
 }

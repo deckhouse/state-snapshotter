@@ -7,9 +7,9 @@
 # Controller must expose aggregated subresource. Root ObjectKeeper uses FollowObjectWithTTL on NamespaceSnapshot;
 # spec.ttl comes from STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL or STATE_SNAPSHOTTER_NS_ROOT_OK_TTL or built-in default (see pkg/config).
 # Physical delete after TTL is driven by Deckhouse ObjectKeeper controller, not this module.
-# Optional sleep step checks whether NSC/MCP were removed by your cluster/ObjectKeeper policy; set PR4_SMOKE_SKIP_TTL=1 to skip.
+# Optional sleep step checks whether content/MCP were removed by your cluster/ObjectKeeper policy; set PR4_SMOKE_SKIP_TTL=1 to skip.
 #
-# Mandatory checks (script exits non-zero if failed): discovery, Ready, NSC/MCP, aggregated manifests,
+# Mandatory checks (script exits non-zero if failed): discovery, Ready, content/MCP, aggregated manifests,
 # post-delete retained snapshot/MCP/aggregated, root ObjectKeeper contract — unless skipped below.
 #
 # Optional:
@@ -18,7 +18,7 @@
 #   PR4_SMOKE_PROXY_PORT           default 18443
 #   PR4_SMOKE_SKIP_TTL             1 = skip TTL wait and post-TTL checks (WARN-only when run)
 #   PR4_SMOKE_SKIP_OK_CONTRACT     1 = skip root ObjectKeeper contract (clusters without deckhouse.io ObjectKeeper)
-#   PR4_SMOKE_REQUIRE_TTL          1 = after TTL wait, require NSC (and MCP if set) gone — fail if still present
+#   PR4_SMOKE_REQUIRE_TTL          1 = after TTL wait, require content (and MCP if set) gone — fail if still present
 #   PR4_SMOKE_TTL_LOG_EVERY_SEC    progress log interval during strict TTL wait (default 30)
 #   PR4_SMOKE_EXTRA_SNAPSHOT       optional second NamespaceSnapshot name under default for extra .../snapshots/<name>/manifests probe
 #
@@ -45,9 +45,9 @@ log() { printf '%s\n' "$*" >&2; }
 dump_ttl_diagnostics() {
 	local bound="${1:-}" ok_name="${2:-}" mcp="${3:-}" agg_path="${4:-}"
 	log ""
-	log "=== TTL diagnostics: NamespaceSnapshotContent (name=${bound}) ==="
+	log "=== TTL diagnostics: SnapshotContent (name=${bound}) ==="
 	if [[ -n "${bound}" ]]; then
-		kubectl get namespacesnapshotcontent.storage.deckhouse.io "${bound}" -o yaml 2>&1 || log "(get NSC failed — object may already be gone)"
+		kubectl get snapshotcontent.storage.deckhouse.io "${bound}" -o yaml 2>&1 || log "(get content failed — object may already be gone)"
 	else
 		log "(no BOUND name)"
 	fi
@@ -154,8 +154,8 @@ if [[ "${ok}" != "1" ]]; then
 fi
 
 BOUND=$(kubectl -n "${NS}" get "${NS_SNAP_RES}" "${SNAP_NAME}" -o json | jq -r '.status.boundSnapshotContentName')
-MCP=$(kubectl get namespacesnapshotcontent.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)
-log "OK Ready; NSC=${BOUND} MCP=${MCP}"
+MCP=$(kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)
+log "OK Ready; content=${BOUND} MCP=${MCP}"
 
 SNAP_UID=$(kubectl -n "${NS}" get "${NS_SNAP_RES}" "${SNAP_NAME}" -o json | jq -r '.metadata.uid')
 MCR_RES="${PR4_SMOKE_MCR_RESOURCE:-manifestcapturerequests.state-snapshotter.deckhouse.io}"
@@ -181,20 +181,20 @@ else
 			and (.spec.ttl != null)
 			and (.spec.followObjectRef.kind == "NamespaceSnapshot")
 			and (.spec.followObjectRef.uid == $suid)
-			and ([ .metadata.ownerReferences[]? | select(.kind == "NamespaceSnapshotContent") ] | length == 0)' >/dev/null; then
-		log "ERROR: ObjectKeeper ${OK_NAME} contract mismatch (expect FollowObjectWithTTL on NamespaceSnapshot, no ownerRef to NamespaceSnapshotContent)"
+			and ([ .metadata.ownerReferences[]? | select(.kind == "SnapshotContent") ] | length == 0)' >/dev/null; then
+		log "ERROR: ObjectKeeper ${OK_NAME} contract mismatch (expect FollowObjectWithTTL on NamespaceSnapshot, no ownerRef to SnapshotContent)"
 		exit 1
 	fi
-	nsc_json=$(kubectl get namespacesnapshotcontent.storage.deckhouse.io "${BOUND}" -o json) || {
-		log "ERROR: NamespaceSnapshotContent ${BOUND} not found"
+	nsc_json=$(kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" -o json) || {
+		log "ERROR: SnapshotContent ${BOUND} not found"
 		exit 1
 	}
 	if ! echo "${nsc_json}" | jq -e --arg on "${OK_NAME}" --arg ouid "${OK_UID}" \
 		'[ .metadata.ownerReferences[]? | select(.apiVersion == "deckhouse.io/v1alpha1" and .kind == "ObjectKeeper" and .name == $on and .uid == $ouid and .controller == true) ] | length >= 1' >/dev/null; then
-		log "ERROR: NamespaceSnapshotContent ${BOUND} must have controller ownerRef -> ObjectKeeper ${OK_NAME}"
+		log "ERROR: SnapshotContent ${BOUND} must have controller ownerRef -> ObjectKeeper ${OK_NAME}"
 		exit 1
 	fi
-	log "OK retained root chain: OK follow NamespaceSnapshot; NSC ownerRef -> OK"
+	log "OK retained root chain: OK follow NamespaceSnapshot; content ownerRef -> OK"
 fi
 
 AGG_PATH="/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/namespacesnapshots/${SNAP_NAME}/manifests"
@@ -214,13 +214,13 @@ log "== 8. Post-delete: snapshot gone, retained tree present"
 	log "ERROR: NamespaceSnapshot still exists"
 	exit 1
 }
-kubectl get namespacesnapshotcontent.storage.deckhouse.io "${BOUND}" >/dev/null
+kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" >/dev/null
 [[ -n "${MCP}" ]] && kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" >/dev/null
 if kubectl -n "${NS}" get "${MCR_RES}" "${MCR_NAME}" >/dev/null 2>&1; then
 	log "ERROR: ManifestCaptureRequest ${MCR_NAME} present after root delete (unexpected)"
 	exit 1
 fi
-log "OK NSC + MCP present; no MCR"
+log "OK content + MCP present; no MCR"
 
 log "== 9. Aggregated GET after root delete (retained)"
 kubectl get --raw "${AGG_PATH}" >"${TMP}"
@@ -232,33 +232,33 @@ if [[ "${PR4_SMOKE_SKIP_TTL:-0}" == "1" ]]; then
 	log "SKIP: PR4_SMOKE_SKIP_TTL=1 (no wait; use real-cluster TTL smoke separately if needed)"
 elif [[ "${PR4_SMOKE_REQUIRE_TTL:-0}" == "1" ]]; then
 	TTL_LOG_EVERY="${PR4_SMOKE_TTL_LOG_EVERY_SEC:-30}"
-	log "PR4_SMOKE_REQUIRE_TTL=1: waiting up to ${WAIT_SEC}s for NSC ${BOUND} to disappear (poll ${POLL_SEC}s; progress log every ${TTL_LOG_EVERY}s)..."
-	log "Hint: controller always creates root OK with FollowObjectWithTTL; if NSC never disappears, check ObjectKeeper controller and whether WAIT_SEC exceeds spec.ttl (override via STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL for shorter test TTL)."
+	log "PR4_SMOKE_REQUIRE_TTL=1: waiting up to ${WAIT_SEC}s for content ${BOUND} to disappear (poll ${POLL_SEC}s; progress log every ${TTL_LOG_EVERY}s)..."
+	log "Hint: controller always creates root OK with FollowObjectWithTTL; if content never disappears, check ObjectKeeper controller and whether WAIT_SEC exceeds spec.ttl (override via STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL for shorter test TTL)."
 	deadline=$((SECONDS + WAIT_SEC))
 	ttl_ok=0
 	ttl_phase_start=${SECONDS}
 	last_log=${SECONDS}
 	while (( SECONDS < deadline )); do
-		if ! kubectl get namespacesnapshotcontent.storage.deckhouse.io "${BOUND}" >/dev/null 2>&1; then
+		if ! kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" >/dev/null 2>&1; then
 			ttl_ok=1
-			log "OK: NamespaceSnapshotContent ${BOUND} disappeared after $((SECONDS - ttl_phase_start))s (strict TTL wait)"
+			log "OK: SnapshotContent ${BOUND} disappeared after $((SECONDS - ttl_phase_start))s (strict TTL wait)"
 			break
 		fi
 		if (( SECONDS - last_log >= TTL_LOG_EVERY )); then
-			log "TTL wait: NSC ${BOUND} still present, elapsed $((SECONDS - ttl_phase_start))s / limit ${WAIT_SEC}s"
-			kubectl get namespacesnapshotcontent.storage.deckhouse.io "${BOUND}" -o jsonpath='{.metadata.name} rv={.metadata.resourceVersion} deletionTimestamp={.metadata.deletionTimestamp}{"\n"}' 2>/dev/null || true
+			log "TTL wait: content ${BOUND} still present, elapsed $((SECONDS - ttl_phase_start))s / limit ${WAIT_SEC}s"
+			kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" -o jsonpath='{.metadata.name} rv={.metadata.resourceVersion} deletionTimestamp={.metadata.deletionTimestamp}{"\n"}' 2>/dev/null || true
 			last_log=${SECONDS}
 		fi
 		sleep "${POLL_SEC}"
 	done
 	if [[ "${ttl_ok}" != "1" ]]; then
-		log "ERROR: NamespaceSnapshotContent ${BOUND} still exists after ${WAIT_SEC}s — check ObjectKeeper TTL / module config / OK controller reconcile."
+		log "ERROR: SnapshotContent ${BOUND} still exists after ${WAIT_SEC}s — check ObjectKeeper TTL / module config / OK controller reconcile."
 		dump_ttl_diagnostics "${BOUND}" "${OK_NAME}" "${MCP}" "${AGG_PATH}"
 		exit 1
 	fi
-	log "OK NamespaceSnapshotContent removed (strict TTL phase)"
+	log "OK SnapshotContent removed (strict TTL phase)"
 	if [[ -n "${MCP}" ]] && kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" >/dev/null 2>&1; then
-		log "ERROR: ManifestCheckpoint ${MCP} still exists after NSC gone (PR4_SMOKE_REQUIRE_TTL=1) — expect GC after ownerRef broken"
+		log "ERROR: ManifestCheckpoint ${MCP} still exists after content gone (PR4_SMOKE_REQUIRE_TTL=1) — expect GC after ownerRef broken"
 		dump_ttl_diagnostics "" "${OK_NAME}" "${MCP}" "${AGG_PATH}"
 		exit 1
 	fi
@@ -276,13 +276,13 @@ elif [[ "${PR4_SMOKE_REQUIRE_TTL:-0}" == "1" ]]; then
 	fi
 	log "OK aggregated path no longer readable (rc=${agg_rc})"
 else
-	log "sleep 45s (NSC/MCP may remain until ObjectKeeper TTL; WARN-only below)"
+	log "sleep 45s (content/MCP may remain until ObjectKeeper TTL; WARN-only below)"
 	sleep 45
 	log "== 11. Post-wait (informational)"
-	if kubectl get namespacesnapshotcontent.storage.deckhouse.io "${BOUND}" >/dev/null 2>&1; then
-		log "INFO: NSC still exists (normal without TTL or slow ObjectKeeper reconcile)"
+	if kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" >/dev/null 2>&1; then
+		log "INFO: content still exists (normal without TTL or slow ObjectKeeper reconcile)"
 	else
-		log "INFO: NamespaceSnapshotContent removed"
+		log "INFO: SnapshotContent removed"
 	fi
 	if [[ -n "${MCP}" ]] && kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" >/dev/null 2>&1; then
 		log "INFO: MCP still exists"

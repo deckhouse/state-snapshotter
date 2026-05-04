@@ -14,10 +14,10 @@ This package explains the current work around:
 - dedicated demo controllers for VM and disk snapshots;
 - aggregated manifest read validation for heterogeneous content graphs.
 
-Content model migration note: the current runtime still uses dedicated `NamespaceSnapshotContent`,
-`DemoVirtualMachineSnapshotContent`, and `DemoVirtualDiskSnapshotContent` objects. The target model
+Content model migration note: the current runtime still uses dedicated `SnapshotContent`,
+`SnapshotContent`, and `SnapshotContent` objects. The target model
 is a single common cluster-scoped `storage.deckhouse.io/SnapshotContent` owned by the state-snapshotter
-common layer. Stage 1 prepares API/adapters only; it does not change the smoke/runtime expectations.
+common layer. v0 prepares API/adapters only; it does not change the smoke/runtime expectations.
 
 Some documents in this directory are historical design notes. Treat them as context for implementation, not as the source of implementable contract when they disagree with `spec/`.
 
@@ -25,7 +25,7 @@ Some documents in this directory are historical design notes. Treat them as cont
 
 | Гарантирует | Пока не делает (вне PR5a) |
 |-------------|---------------------------|
-| Привязка к parent snapshot через **`spec.parentSnapshotRef`**; обязательный **`spec.sourceRef`** на namespace-local **`DemoVirtualDisk`**; создание **`DemoVirtualDiskSnapshotContent`**; parent-owned публикация refs родительским controller’ом. | VolumeSnapshot/CSI и реальный data-path. |
+| Привязка к parent snapshot через **`spec.parentSnapshotRef`**; обязательный **`spec.sourceRef`** на namespace-local **`DemoVirtualDisk`**; создание common content; parent-owned публикация refs родительским controller’ом. | VolumeSnapshot/CSI и реальный data-path. |
 | `sourceRef` описывает объект, который materializes текущий snapshot; `parentSnapshotRef` описывает только положение в дереве. | Cross-namespace source refs. |
 | **Стадия 2** из **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0:** обход **уже записанного** графа только по **`children*Refs`** (как aggregated/N2b); без list-based восстановления дерева. Доменные узлы (VM content → дети в PR5b; disk content как листья) имеют собственные MCP и **появляются в aggregated read**, потому что доменный контроллер **записал** refs на стадии capture/build (**§3.0** п. 1). | Реальный CSI/data-path остаётся вне PR5a. |
 
@@ -33,7 +33,7 @@ Some documents in this directory are historical design notes. Treat them as cont
 
 | Гарантирует | Пока не делает |
 |-------------|----------------|
-| **`DemoVirtualMachineSnapshot`** + **`DemoVirtualMachineSnapshotContent`** под parent NS/NSC; обязательный **`spec.sourceRef`** на **`DemoVirtualMachine`**; parent задаётся через **`parentSnapshotRef`**; root/VM `Ready` сходится через child aggregation. | Реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
+| Demo VM snapshot + common content под parent NS; обязательный **`spec.sourceRef`** на **`DemoVirtualMachine`**; parent задаётся через **`parentSnapshotRef`**; root/VM `Ready` сходится через child aggregation. | Реальный CSI/data-path (VolumeSnapshot/VCR) в demo. |
 | **`DemoVirtualDiskSnapshot.spec.parentSnapshotRef`** — универсальная ссылка на parent snapshot-узел в namespace-local graph. VM controller создаёт disk child snapshots с **`spec.sourceRef`** на соответствующий **`DemoVirtualDisk`** и сам пишет свой child graph. | Не валидирует, что у VM «достаточно» дисков. |
 
 Поставка demo CRD: манифесты в **`crds/`**; образ **`bundle`** в **`.werf/bundle.yaml`** включает каталог **`crds`** в git-стадию модуля. Факт доставки на кластер проверяется **сборкой и деплоем** модуля (CI / релизный pipeline).
@@ -42,20 +42,20 @@ Some documents in this directory are historical design notes. Treat them as cont
 
 Reference для **heterogeneous** доменного дерева под **текущим** root **`NamespaceSnapshot`**, на базе **общей** snapshot-модели ([`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md)):
 
-- дерево — **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** для **любых** `XxxxSnapshot` / `XxxxSnapshotContent`, без отдельных `domainChild*` и без «особого» graph API только для namespace;
+- дерево — **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** для **любых** `XxxxSnapshot` / `SnapshotContent`, без отдельных `domainChild*` и без «особого» graph API только для namespace;
 - **dedup** — **вычисляется** при reconcile из API, **не** хранится в `status`/аннотациях;
 - **готовность и деградация** — единый condition **`Ready`**, каскад снизу вверх и обратная деградация с сохранением **`reason`/`message`**;
 - **`NamespaceSnapshot`** — текущий верхний узел архитектуры, **не** отдельный класс правил дерева ([`08`](08-universal-snapshot-tree-model.md) §A.3).
 
 **Слой PR5 vs generic §3-E*:** код и тесты **демо-доменного контроллера** (первый реальный writer **`children*Refs`** в heterogeneous flow) — это **PR5** таблицы **[`implementation-plan.md`](../implementation-plan.md) §2.4.2** и этот пакет документов; это **не** отдельный этап **§3-E1…E6** того же плана (**E1–E6** готовят **generic** контракт и реализацию в модуле, **PR5** впервые использует контракт в **domain flow**). Порядок и нарезка PR5a/PR5b — в **§2.4.4** плана.
 
-**Граница startup / graph activation:** dedicated demo controllers стартуют всегда и могут reconciler'ить вручную созданные `DemoVirtualDiskSnapshot` / `DemoVirtualMachineSnapshot` без DSC. Это не активирует demo kinds в `NamespaceSnapshot` discovery. Graph registry built-in содержит только `NamespaceSnapshot`→`NamespaceSnapshotContent`; demo VM/Disk пары появляются в discovery только через eligible DSC.
+**Граница startup / graph activation:** dedicated demo controllers стартуют всегда и могут reconciler'ить вручную созданные demo snapshot объекты без DSC. Это не активирует demo kinds в `NamespaceSnapshot` discovery. Graph registry built-in содержит только `NamespaceSnapshot`→ common content; demo VM/Disk пары появляются в discovery только через eligible DSC.
 
 **Граница generic / demo (имплементация):** reconciler **`NamespaceSnapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge graph built-ins ∪ eligible DSC, **refresh после reconcile DSC**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
 
 **Reference controller contract (current runtime):** a demo domain snapshot controller owns validation of `parentSnapshotRef` / `sourceRef`, creation of its own dedicated `*SnapshotContent`, creation of an MCR for its own source object, linking `content.status.manifestCheckpointName`, and its own `Ready` condition. A domain parent controller also owns child snapshot creation for nested resources, its own `childrenSnapshotRefs`, its own content `childrenSnapshotContentRefs`, and Ready aggregation over children. It does **not** own root/parent refs, `RBACReady`, RBAC creation, or parent status. Invalid user spec is reported as `Ready=False` and must not create content, MCR, or child snapshots.
 
-**Target content ownership:** domain controllers should eventually own only `XxxSnapshot` behavior, `sourceRef` validation, and child snapshot refs. The common state-snapshotter layer owns common `SnapshotContent`, ObjectKeeper/Retain, MCP/data refs, and content-tree aggregation. DSC target mapping becomes `resourceCRDName -> snapshotCRDName`; `contentCRDName` is legacy v1alpha1 compatibility.
+**Content ownership:** domain controllers own `XxxSnapshot` behavior, `sourceRef` validation, child snapshot refs, and Ready aggregation for their domain. The common state-snapshotter layer owns common `SnapshotContent`, ObjectKeeper/Retain, MCP/data refs, and content-tree aggregation. DSC mapping is `resourceCRDName -> snapshotCRDName`; content GVK is fixed to `storage.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
 
 **Reference RBAC model:** demo/domain controllers intentionally omit kubebuilder RBAC markers. Required permissions are documented as contract and granted externally by the Deckhouse RBAC controller/hook before DSC `RBACReady=True`; they are not generated from controller code comments.
 

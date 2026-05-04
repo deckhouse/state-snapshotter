@@ -53,7 +53,7 @@ type NamespaceSnapshotStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
-	// The content kind is defined by the snapshot line (e.g. NamespaceSnapshotContent), not by this field name.
+	// The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
 	// ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)

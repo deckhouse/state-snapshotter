@@ -85,7 +85,6 @@ spec:
   snapshotResourceMapping:
     - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
       snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
-      contentCRDName: demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io
       priority: 0
 EOF
 # (CRD names must match metadata.name in crds/demo.state-snapshotter.deckhouse.io_*.yaml)

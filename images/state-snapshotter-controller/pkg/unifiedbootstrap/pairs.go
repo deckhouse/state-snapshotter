@@ -41,17 +41,13 @@ func ResolveAvailableUnifiedPairs(mapper meta.RESTMapper, pairs []UnifiedGVKPair
 	return out
 }
 
-// PairsFromSnapshotGVKs builds pairs using SnapshotKind+"Content" for the content side (minimal bootstrap / tests).
+// PairsFromSnapshotGVKs builds pairs using common SnapshotContent for the content side (minimal bootstrap / tests).
 func PairsFromSnapshotGVKs(snapshotGVKs []schema.GroupVersionKind) []UnifiedGVKPair {
 	out := make([]UnifiedGVKPair, 0, len(snapshotGVKs))
 	for _, gvk := range snapshotGVKs {
 		out = append(out, UnifiedGVKPair{
-			Snapshot: gvk,
-			SnapshotContent: schema.GroupVersionKind{
-				Group:   gvk.Group,
-				Version: gvk.Version,
-				Kind:    gvk.Kind + "Content",
-			},
+			Snapshot:        gvk,
+			SnapshotContent: CommonSnapshotContentGVK(),
 		})
 	}
 	return out
@@ -109,8 +105,7 @@ func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKi
 }
 
 // FilterGenericSnapshotContentGVKs drops content GVKs whose snapshot side is handled by a dedicated
-// reconciler (e.g. NamespaceSnapshot → NamespaceSnapshotContent). Generic SnapshotContentController
-// only understands spec.snapshotRef on SnapshotContent-like types, not NamespaceSnapshotContent.
+// reconciler. Common SnapshotContent may still be kept through other generic pairs after dedupe.
 func FilterGenericSnapshotContentGVKs(snapshotGVKs, contentGVKs []schema.GroupVersionKind) []schema.GroupVersionKind {
 	if len(snapshotGVKs) != len(contentGVKs) {
 		return nil

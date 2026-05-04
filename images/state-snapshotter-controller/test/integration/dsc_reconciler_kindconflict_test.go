@@ -43,7 +43,6 @@ var _ = Describe("Integration: DSC reconciler KindConflict", func() {
 			{
 				ResourceCRDName: "testsnapshots.test.deckhouse.io",
 				SnapshotCRDName: "testsnapshots.test.deckhouse.io",
-				ContentCRDName:  "testsnapshotcontents.test.deckhouse.io",
 			},
 		}
 	}

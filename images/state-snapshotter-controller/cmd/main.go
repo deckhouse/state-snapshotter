@@ -61,7 +61,7 @@ import (
 var (
 	resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
-		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (NamespaceSnapshot, NamespaceSnapshotContent, SnapshotContent, …)
+		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (NamespaceSnapshot, SnapshotContent, ...)
 		demov1alpha1.AddToScheme,      // demo.state-snapshotter.deckhouse.io (PR5a demo domain)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
@@ -159,7 +159,7 @@ func main() {
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
 	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
-	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (NamespaceSnapshot, NamespaceSnapshotContent — PR4 aggregated manifests)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (NamespaceSnapshot, SnapshotContent)
 	_ = demov1alpha1.AddToScheme(fullScheme)      // demo.state-snapshotter.deckhouse.io (PR5a)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
@@ -208,13 +208,6 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("NamespaceSnapshotController added to manager")
-
-	if err := controllers.AddNamespaceSnapshotContentControllerToManager(mgr, cfgParams); err != nil {
-		log.Error(err, "Failed to add NamespaceSnapshotContentController to manager")
-		cancel()
-		os.Exit(1)
-	}
-	log.Info("NamespaceSnapshotContentController added to manager")
 
 	if err := controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr); err != nil {
 		log.Error(err, "Failed to add DemoVirtualDiskSnapshotController to manager")
@@ -270,6 +263,7 @@ func main() {
 
 		genericSnapshotGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
 		genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapshotGVKs, snapshotContentGVKs)
+		genericContentGVKs = append(genericContentGVKs, unifiedbootstrap.CommonSnapshotContentGVK())
 
 		snapshotController, err := controllers.NewSnapshotController(
 			mgr.GetClient(),

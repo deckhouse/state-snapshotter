@@ -186,7 +186,7 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	}
 
 	contentName := demoVirtualDiskSnapshotContentName("ns1", "snap")
-	content := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+	content := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
 		t.Fatalf("expected content %q: %v", contentName, err)
 	}
@@ -424,7 +424,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}
 
 	vmContentName := demoVirtualMachineSnapshotContentName("ns1", "snap")
-	vmContent := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+	vmContent := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {
 		t.Fatalf("expected VM content %q: %v", vmContentName, err)
 	}
@@ -507,9 +507,9 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}
 
 	diskContentName := "disk-content"
-	if err := cl.Create(context.Background(), &demov1alpha1.DemoVirtualDiskSnapshotContent{
+	if err := cl.Create(context.Background(), &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: diskContentName},
-		Spec: demov1alpha1.DemoVirtualDiskSnapshotContentSpec{
+		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       KindDemoVirtualDiskSnapshot,
@@ -550,7 +550,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if vmContent.Status.ManifestCheckpointName != "mcp-vm" {
 		t.Fatalf("expected VM content MCP link %q, got %q", "mcp-vm", vmContent.Status.ManifestCheckpointName)
 	}
-	if !namespaceSnapshotContentChildRefsEqualIgnoreOrder(vmContent.Status.ChildrenSnapshotContentRefs, []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: diskContentName}}) {
+	if !snapshotContentChildRefsEqualIgnoreOrder(vmContent.Status.ChildrenSnapshotContentRefs, []storagev1alpha1.SnapshotContentChildRef{{Name: diskContentName}}) {
 		t.Fatalf("unexpected VM content child refs: %#v", vmContent.Status.ChildrenSnapshotContentRefs)
 	}
 }
@@ -569,9 +569,9 @@ func newDemoSourceRefFakeClient(t *testing.T, initObjs ...client.Object) client.
 	}
 	statusSubresources := []client.Object{
 		&demov1alpha1.DemoVirtualDiskSnapshot{},
-		&demov1alpha1.DemoVirtualDiskSnapshotContent{},
+		&storagev1alpha1.SnapshotContent{},
 		&demov1alpha1.DemoVirtualMachineSnapshot{},
-		&demov1alpha1.DemoVirtualMachineSnapshotContent{},
+		&storagev1alpha1.SnapshotContent{},
 		&ssv1alpha1.ManifestCaptureRequest{},
 		&ssv1alpha1.ManifestCheckpoint{},
 	}
@@ -613,7 +613,7 @@ func assertNoDemoMCRs(t *testing.T, cl client.Client) {
 
 func assertNoDemoDiskContents(t *testing.T, cl client.Client) {
 	t.Helper()
-	contents := &demov1alpha1.DemoVirtualDiskSnapshotContentList{}
+	contents := &storagev1alpha1.SnapshotContentList{}
 	if err := cl.List(context.Background(), contents); err != nil {
 		t.Fatalf("list disk contents: %v", err)
 	}
@@ -624,7 +624,7 @@ func assertNoDemoDiskContents(t *testing.T, cl client.Client) {
 
 func assertNoDemoVMContents(t *testing.T, cl client.Client) {
 	t.Helper()
-	contents := &demov1alpha1.DemoVirtualMachineSnapshotContentList{}
+	contents := &storagev1alpha1.SnapshotContentList{}
 	if err := cl.List(context.Background(), contents); err != nil {
 		t.Fatalf("list VM contents: %v", err)
 	}

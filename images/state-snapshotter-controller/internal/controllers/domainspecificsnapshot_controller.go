@@ -211,12 +211,6 @@ func (r *DomainSpecificSnapshotControllerReconciler) resolveDSCSpec(ctx context.
 			out.perMapping = append(out.perMapping, mr)
 			continue
 		}
-		contentCRD, err := r.getCRD(ctx, entry.ContentCRDName)
-		if err != nil {
-			mr.resolveErr = fmt.Errorf("content CRD %q: %w", entry.ContentCRDName, err)
-			out.perMapping = append(out.perMapping, mr)
-			continue
-		}
 		_, err = r.getCRD(ctx, entry.ResourceCRDName)
 		if err != nil {
 			mr.resolveErr = fmt.Errorf("resource CRD %q: %w", entry.ResourceCRDName, err)
@@ -236,9 +230,6 @@ func (r *DomainSpecificSnapshotControllerReconciler) resolveDSCSpec(ctx context.
 		}
 		seenGK[mr.snapshotGK.String()] = struct{}{}
 
-		if contentCRD.Spec.Scope != extv1.ClusterScoped {
-			mr.resolveErr = fmt.Errorf("content CRD %q must be cluster-scoped (v1alpha1 contract)", entry.ContentCRDName)
-		}
 		out.perMapping = append(out.perMapping, mr)
 	}
 	return out

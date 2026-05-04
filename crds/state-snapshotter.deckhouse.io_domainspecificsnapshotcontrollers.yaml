@@ -74,14 +74,9 @@ spec:
                 description: SnapshotResourceMapping declares supported snapshot types
                   using CRD names only (v1alpha1).
                 items:
-                  description: SnapshotResourceMappingEntry maps resource / snapshot
-                    / content CRDs (plural.resource.group form).
+                  description: SnapshotResourceMappingEntry maps resource CRDs to
+                    snapshot CRDs (plural.resource.group form).
                   properties:
-                    contentCRDName:
-                      description: |-
-                        ContentCRDName is deprecated and kept for compatibility with the current v1alpha1 registration flow.
-                        Target architecture uses the common storage.deckhouse.io SnapshotContent for all snapshot kinds.
-                      type: string
                     priority:
                       description: Priority is used when ordering orchestration across
                         mappings (lower runs first).
@@ -93,7 +88,6 @@ spec:
                     snapshotCRDName:
                       type: string
                   required:
-                  - contentCRDName
                   - resourceCRDName
                   - snapshotCRDName
                   type: object

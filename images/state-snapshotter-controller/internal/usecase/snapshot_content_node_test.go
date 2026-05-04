@@ -20,8 +20,6 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
@@ -46,50 +44,22 @@ func TestSnapshotContentNodeFromSnapshotContent(t *testing.T) {
 	}
 }
 
-func TestSnapshotContentNodeFromNamespaceSnapshotContent(t *testing.T) {
-	nsc := &storagev1alpha1.NamespaceSnapshotContent{
+func TestSnapshotContentNodeFromSnapshotContentRoot(t *testing.T) {
+	nsc := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
-		Status: storagev1alpha1.NamespaceSnapshotContentStatus{
+		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-root",
-			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{
 				{Name: "child-content"},
 			},
 		},
 	}
 
-	node := snapshotContentNodeFromNamespaceSnapshotContent(nsc)
-	if node.GVK != NamespaceSnapshotContentGVK() || node.Name != "root-content" || node.ManifestCheckpointName != "mcp-root" {
+	node := snapshotContentNodeFromSnapshotContent(nsc)
+	if node.GVK != SnapshotContentGVK() || node.Name != "root-content" || node.ManifestCheckpointName != "mcp-root" {
 		t.Fatalf("unexpected node: %#v", node)
 	}
 	if len(node.Children) != 1 || node.Children[0].Name != "child-content" {
-		t.Fatalf("unexpected children: %#v", node.Children)
-	}
-}
-
-func TestSnapshotContentNodeFromUnstructured(t *testing.T) {
-	gvk := schema.GroupVersionKind{
-		Group:   "demo.state-snapshotter.deckhouse.io",
-		Version: "v1alpha1",
-		Kind:    "DemoVirtualMachineSnapshotContent",
-	}
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(gvk)
-	u.SetName("vm-content")
-	u.Object["status"] = map[string]interface{}{
-		"manifestCheckpointName": "mcp-vm",
-		"childrenSnapshotContentRefs": []interface{}{
-			map[string]interface{}{"name": "disk-content"},
-		},
-	}
-
-	node, err := snapshotContentNodeFromUnstructured(u)
-	if err != nil {
-		t.Fatalf("adapter failed: %v", err)
-	}
-	if node.GVK != gvk || node.Name != "vm-content" || node.ManifestCheckpointName != "mcp-vm" {
-		t.Fatalf("unexpected node: %#v", node)
-	}
-	if len(node.Children) != 1 || node.Children[0].Name != "disk-content" {
 		t.Fatalf("unexpected children: %#v", node.Children)
 	}
 }

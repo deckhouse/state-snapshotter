@@ -29,7 +29,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -117,12 +116,10 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 					{
 						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-						ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 					},
 					{
 						ResourceCRDName: "demovirtualmachines.demo.state-snapshotter.deckhouse.io",
 						SnapshotCRDName: "demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io",
-						ContentCRDName:  "demovirtualmachinesnapshotcontents.demo.state-snapshotter.deckhouse.io",
 					},
 				},
 			},
@@ -231,7 +228,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			nsc := &storagev1alpha1.NamespaceSnapshotContent{}
+			nsc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootNSC}, nsc)).To(Succeed())
 			var found bool
 			for _, ch := range nsc.Status.ChildrenSnapshotContentRefs {
@@ -240,7 +237,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 					break
 				}
 			}
-			g.Expect(found).To(BeTrue(), "root NamespaceSnapshotContent should reference VM snapshot content")
+			g.Expect(found).To(BeTrue(), "root SnapshotContent should reference VM snapshot content")
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		var diskSnapshotName string
@@ -271,7 +268,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			vmc := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+			vmc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: vmContentName}, vmc)).To(Succeed())
 			var found bool
 			for _, ch := range vmc.Status.ChildrenSnapshotContentRefs {
@@ -283,28 +280,16 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 			g.Expect(found).To(BeTrue(), "VM snapshot content should reference disk snapshot content")
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		var vmVisited []string
-		var diskVisited []string
-		hooks := &usecase.DedicatedContentVisitHooks{
-			Visit: func(_ context.Context, gvk schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
-				switch gvk.Kind {
-				case "DemoVirtualMachineSnapshotContent":
-					vmVisited = append(vmVisited, contentName)
-				case "DemoVirtualDiskSnapshotContent":
-					diskVisited = append(diskVisited, contentName)
-				}
+		var visited []string
+		err := usecase.WalkSnapshotContentSubtree(testCtx, k8sClient, rootNSC,
+			func(_ context.Context, content *storagev1alpha1.SnapshotContent) error {
+				visited = append(visited, content.Name)
 				return nil
 			},
-		}
-		err := usecase.WalkNamespaceSnapshotContentSubtreeWithRegistry(testCtx, k8sClient, rootNSC,
-			func(_ context.Context, _ *storagev1alpha1.NamespaceSnapshotContent) error {
-				return nil
-			},
-			integrationGraphRegProvider.Current(), hooks,
 		)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(vmVisited).To(ContainElement(vmContentName))
-		Expect(diskVisited).To(ContainElement(diskContentName))
+		Expect(visited).To(ContainElement(vmContentName))
+		Expect(visited).To(ContainElement(diskContentName))
 
 		// E6: after NamespaceSnapshot publishes childrenSnapshotRefs, root becomes Ready=True only when
 		// all referenced child snapshot objects are ready.
@@ -319,17 +304,17 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 
 		var rootMCPName, vmMCPName, diskMCPName string
 		Eventually(func(g Gomega) {
-			rootContent := &storagev1alpha1.NamespaceSnapshotContent{}
+			rootContent := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(testCtx, client.ObjectKey{Name: rootNSC}, rootContent)).To(Succeed())
 			g.Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
 			rootMCPName = rootContent.Status.ManifestCheckpointName
 
-			vmContent := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+			vmContent := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(testCtx, client.ObjectKey{Name: vmContentName}, vmContent)).To(Succeed())
 			g.Expect(vmContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
 			vmMCPName = vmContent.Status.ManifestCheckpointName
 
-			diskContent := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+			diskContent := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(testCtx, client.ObjectKey{Name: diskContentName}, diskContent)).To(Succeed())
 			g.Expect(diskContent.Status.ManifestCheckpointName).NotTo(BeEmpty())
 			diskMCPName = diskContent.Status.ManifestCheckpointName
@@ -349,13 +334,13 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Expect(integrationObjectsContainKindName(diskObjects, "DemoVirtualDisk", "demo-disk-1")).To(BeTrue(), "disk own MCP should include source disk manifest")
 		Expect(integrationObjectsContainKind(diskObjects, "DemoVirtualMachine")).To(BeFalse(), "disk own MCP must not include ancestor manifests")
 
-		rootAggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootNSC)
+		rootAggregated := integrationAggregatedObjects(testCtx, usecase.SnapshotContentGVK(), rootNSC)
 		Expect(integrationObjectsContainKindName(rootAggregated, "Namespace", nsName)).To(BeFalse())
 		Expect(integrationObjectsContainKindName(rootAggregated, "DemoVirtualMachine", "demo-vm-1")).To(BeTrue())
 		Expect(integrationObjectsContainKindName(rootAggregated, "DemoVirtualDisk", "demo-disk-1")).To(BeTrue())
 
-		vmContentGVK := schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshotContent"}
-		diskContentGVK := schema.GroupVersionKind{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshotContent"}
+		vmContentGVK := usecase.SnapshotContentGVK()
+		diskContentGVK := usecase.SnapshotContentGVK()
 		vmAggregated := integrationAggregatedObjects(testCtx, vmContentGVK, vmContentName)
 		Expect(integrationObjectsContainKindName(vmAggregated, "Namespace", nsName)).To(BeFalse(), "VM subtree read must not include ancestor Namespace manifest")
 		Expect(integrationObjectsContainKindName(vmAggregated, "DemoVirtualMachine", "demo-vm-1")).To(BeTrue())

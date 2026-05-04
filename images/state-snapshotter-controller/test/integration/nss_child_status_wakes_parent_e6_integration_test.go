@@ -64,7 +64,6 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 					{
 						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-						ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 					},
 				},
 			},

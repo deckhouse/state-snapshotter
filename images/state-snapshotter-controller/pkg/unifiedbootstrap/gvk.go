@@ -25,10 +25,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// UnifiedGVKPair is a Snapshot-like kind and its SnapshotContent kind in the same API group/version.
+// UnifiedGVKPair is a Snapshot-like kind and the common SnapshotContent kind.
 type UnifiedGVKPair struct {
 	Snapshot        schema.GroupVersionKind
 	SnapshotContent schema.GroupVersionKind
+}
+
+// CommonSnapshotContentGVK returns the common storage SnapshotContent GVK used by every snapshot kind.
+func CommonSnapshotContentGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"}
 }
 
 // DefaultNamespaceSnapshotPair returns the built-in NamespaceSnapshot pair used
@@ -36,7 +41,7 @@ type UnifiedGVKPair struct {
 func DefaultNamespaceSnapshotPair() UnifiedGVKPair {
 	return UnifiedGVKPair{
 		Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
-		SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
+		SnapshotContent: CommonSnapshotContentGVK(),
 	}
 }
 
@@ -58,12 +63,12 @@ func DefaultUnifiedRuntimeBootstrapPairs() []UnifiedGVKPair {
 	return []UnifiedGVKPair{
 		{
 			Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+			SnapshotContent: CommonSnapshotContentGVK(),
 		},
 		DefaultNamespaceSnapshotPair(),
 		{
 			Snapshot:        schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshotContent"},
+			SnapshotContent: CommonSnapshotContentGVK(),
 		},
 	}
 }

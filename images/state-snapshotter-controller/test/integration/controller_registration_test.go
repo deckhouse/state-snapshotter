@@ -68,7 +68,7 @@ var _ = Describe("Integration: Controller Registration", func() {
 			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshotContent"},
 			// In production (main.go), these would be:
 			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshotContent"},
+			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 			// {Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshotContent"},
 		}
 

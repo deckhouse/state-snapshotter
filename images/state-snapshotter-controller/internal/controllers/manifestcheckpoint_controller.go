@@ -253,19 +253,19 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 
 	nscBoundName := ""
 	if mcr.Annotations != nil {
-		nscBoundName = mcr.Annotations[namespacemanifest.AnnotationBoundNamespaceSnapshotContent]
+		nscBoundName = mcr.Annotations[namespacemanifest.AnnotationBoundSnapshotContent]
 	}
 
 	var mcpOwnerRefs []metav1.OwnerReference
 
 	if nscBoundName != "" {
-		r.Logger.Info("NamespaceSnapshot-bound capture: MCP ownerRef -> NamespaceSnapshotContent",
-			"namespaceSnapshotContent", nscBoundName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
-		r.updateProcessingMessage(ctx, mcr, "Resolving NamespaceSnapshotContent for checkpoint ownerRef...")
-		boundNSC := &snapstorage.NamespaceSnapshotContent{}
-		if err := r.Get(ctx, client.ObjectKey{Name: nscBoundName}, boundNSC); err != nil {
+		r.Logger.Info("NamespaceSnapshot-bound capture: MCP ownerRef -> SnapshotContent",
+			"snapshotContent", nscBoundName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		r.updateProcessingMessage(ctx, mcr, "Resolving SnapshotContent for checkpoint ownerRef...")
+		boundContent := &snapstorage.SnapshotContent{}
+		if err := r.Get(ctx, client.ObjectKey{Name: nscBoundName}, boundContent); err != nil {
 			if errors.IsNotFound(err) {
-				msg := fmt.Sprintf("NamespaceSnapshotContent %q not found", nscBoundName)
+				msg := fmt.Sprintf("SnapshotContent %q not found", nscBoundName)
 				if ferr := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, msg); ferr != nil {
 					if errors.IsNotFound(ferr) {
 						return ctrl.Result{}, nil
@@ -274,13 +274,13 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				}
 				return ctrl.Result{}, fmt.Errorf("%s", msg)
 			}
-			return ctrl.Result{}, fmt.Errorf("get NamespaceSnapshotContent %q: %w", nscBoundName, err)
+			return ctrl.Result{}, fmt.Errorf("get SnapshotContent %q: %w", nscBoundName, err)
 		}
 		mcpOwnerRefs = []metav1.OwnerReference{{
 			APIVersion: snapstorage.SchemeGroupVersion.String(),
-			Kind:       "NamespaceSnapshotContent",
-			Name:       boundNSC.Name,
-			UID:        boundNSC.UID,
+			Kind:       "SnapshotContent",
+			Name:       boundContent.Name,
+			UID:        boundContent.UID,
 			Controller: controllerTrue,
 		}}
 	} else {
@@ -368,7 +368,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
-	// Create ManifestCheckpoint: ownerRef -> NamespaceSnapshotContent (namespace snapshot capture) or ObjectKeeper (generic MCR capture).
+	// Create ManifestCheckpoint: ownerRef -> SnapshotContent (namespace snapshot capture) or ObjectKeeper (generic MCR capture).
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",

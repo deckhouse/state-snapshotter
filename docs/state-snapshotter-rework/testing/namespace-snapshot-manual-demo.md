@@ -65,7 +65,7 @@ kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o w
 
 ```bash
 export BOUND=$(kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.status.boundSnapshotContentName}')
-export MCP=$(kubectl get namespacesnapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}')
+export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}')
 export OK_NAME=ret-nssnap-default-demo-ns-snap
 export SNAP_UID=$(kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.metadata.uid}')
 export MCR_NAME="nss-${SNAP_UID}"
@@ -85,8 +85,8 @@ kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o y
 **5b. Cluster content + кто владелец (NSC → OK)**
 
 ```bash
-kubectl get namespacesnapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
-kubectl get namespacesnapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.metadata.ownerReferences}' | jq .
+kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
+kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.metadata.ownerReferences}' | jq .
 ```
 
 **5c. ObjectKeeper (follow на NamespaceSnapshot, TTL)**
@@ -134,7 +134,7 @@ kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/na
 
 ```bash
 kubectl -n default delete namespacesnapshots.storage.deckhouse.io demo-ns-snap --wait=true
-kubectl get namespacesnapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
+kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
 kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/namespacesnapshots/demo-ns-snap/manifests" | jq 'length'
 ```
 
@@ -155,7 +155,7 @@ kubectl get objectkeepers.deckhouse.io "${OK_NAME}" -o jsonpath='{.spec.ttl}{"\n
 ```bash
 sleep 90
 kubectl get objectkeepers.deckhouse.io "${OK_NAME}" 2>&1 || echo "OK удалён"
-kubectl get namespacesnapshotcontents.storage.deckhouse.io "${BOUND}" 2>&1 || echo "NSC удалён"
+kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" 2>&1 || echo "NSC удалён"
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" 2>&1 || echo "MCP удалён"
 ```
 
@@ -184,7 +184,7 @@ kubectl -n default delete configmap demo-ns-snapshot-cm --ignore-not-found
 | Ресурс | `kubectl` group |
 |--------|-----------------|
 | NamespaceSnapshot | `namespacesnapshots.storage.deckhouse.io` |
-| NamespaceSnapshotContent | `namespacesnapshotcontents.storage.deckhouse.io` |
+| SnapshotContent | `snapshotcontents.storage.deckhouse.io` |
 | ObjectKeeper | `objectkeepers.deckhouse.io` |
 | ManifestCheckpoint | `manifestcheckpoints.state-snapshotter.deckhouse.io` |
 | ManifestCaptureRequest | `manifestcapturerequests.state-snapshotter.deckhouse.io` |

@@ -141,7 +141,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
-	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
+	if err := r.ensureContent(ctx, s, contentName); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := patchDemoVirtualDiskSnapshotBound(ctx, r.Client, req.NamespacedName, contentName); err != nil {
@@ -178,7 +178,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
-	if err := patchDemoVirtualDiskSnapshotContentManifestCheckpoint(ctx, r.Client, contentName, mcpName); err != nil {
+	if err := patchDemoVirtualDiskContentManifestCheckpoint(ctx, r.Client, contentName, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, fmt.Sprintf("demo disk snapshot materialized (ManifestCheckpoint %s)", mcpName)); err != nil {
@@ -187,8 +187,8 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	return ctrl.Result{}, nil
 }
 
-func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *demov1alpha1.DemoVirtualDiskSnapshot, contentName string) error {
-	existing := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+func (r *DemoVirtualDiskSnapshotReconciler) ensureContent(ctx context.Context, snap *demov1alpha1.DemoVirtualDiskSnapshot, contentName string) error {
+	existing := &storagev1alpha1.SnapshotContent{}
 	err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, existing)
 	if err == nil {
 		return nil
@@ -204,9 +204,9 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureSnapshotContent(ctx context.Co
 	// We intentionally do not use controllerutil.CreateOrUpdate here.
 	// This controller owns only a subset of fields and must avoid
 	// accidental overwrites of fields owned by other controllers.
-	content := &demov1alpha1.DemoVirtualDiskSnapshotContent{
+	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: contentName},
-		Spec: demov1alpha1.DemoVirtualDiskSnapshotContentSpec{
+		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       KindDemoVirtualDiskSnapshot,
@@ -239,14 +239,14 @@ func patchDemoVirtualDiskSnapshotBound(
 	})
 }
 
-func patchDemoVirtualDiskSnapshotContentManifestCheckpoint(
+func patchDemoVirtualDiskContentManifestCheckpoint(
 	ctx context.Context,
 	c client.Client,
 	contentName string,
 	mcpName string,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		content := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+		content := &storagev1alpha1.SnapshotContent{}
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}

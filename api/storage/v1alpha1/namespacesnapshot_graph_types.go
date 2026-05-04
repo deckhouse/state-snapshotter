@@ -31,15 +31,6 @@ type NamespaceSnapshotChildRef struct {
 	Name       string `json:"name"`
 }
 
-// NamespaceSnapshotContentChildRef identifies one child NamespaceSnapshotContent in the N2b graph
-// (element of status.childrenSnapshotContentRefs). Cluster-scoped name only; kind is implied
-// (NamespaceSnapshotContent). Not a universal SnapshotContent reference.
-//
-// +k8s:deepcopy-gen=true
-type NamespaceSnapshotContentChildRef struct {
-	Name string `json:"name"`
-}
-
 // SnapshotContentChildRef identifies one child common SnapshotContent in the target content graph.
 // SnapshotContent is cluster-scoped, so the ref is name-only and MUST NOT carry namespace.
 //

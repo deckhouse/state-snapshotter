@@ -43,7 +43,7 @@ func (c *countingLive) TryRefresh(context.Context) error {
 	atomic.AddInt32(&c.refreshCalls, 1)
 	r := snapshot.NewGVKRegistry()
 	gv := "storage.deckhouse.io/v1alpha1"
-	if err := r.RegisterSnapshotContentMapping("NamespaceSnapshot", gv, "NamespaceSnapshotContent", gv); err != nil {
+	if err := r.RegisterSnapshotContentMapping("NamespaceSnapshot", gv, "SnapshotContent", gv); err != nil {
 		return err
 	}
 	c.reg = r

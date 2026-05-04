@@ -63,7 +63,7 @@ var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", Seri
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, client.ObjectKey{Name: n}, &storagev1alpha1.DomainSpecificSnapshotController{})
 				return errors.IsNotFound(err)
-			}).WithTimeout(20*time.Second).WithPolling(100*time.Millisecond).Should(BeTrue())
+			}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
 		}
 	})
 
@@ -101,7 +101,6 @@ var _ = Describe("Integration: DomainSpecificSnapshotController API smoke", Seri
 					{
 						ResourceCRDName: "registrationtestsnapshots.test.deckhouse.io",
 						SnapshotCRDName: "registrationtestsnapshots.test.deckhouse.io",
-						ContentCRDName:  "registrationtestsnapshotcontents.test.deckhouse.io",
 					},
 				},
 			},

@@ -76,7 +76,7 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 			rootContentName = root.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		content := &storagev1alpha1.NamespaceSnapshotContent{}
+		content := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootContentName}, content)).To(Succeed())
 		Expect(content.Status.ChildrenSnapshotContentRefs).To(BeEmpty())
 
@@ -164,14 +164,14 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		Expect(k8sClient.List(testCtx, diskSnapshots, client.InNamespace(nsName))).To(Succeed())
 		Expect(diskSnapshots.Items).To(BeEmpty())
 
-		rootContent := &storagev1alpha1.NamespaceSnapshotContent{}
+		rootContent := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootContentName}, rootContent)).To(Succeed())
 		Expect(rootContent.Status.ChildrenSnapshotContentRefs).To(BeEmpty())
 		Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty(), "root own capture always materializes an MCP, even when empty")
 		rootObjects := integrationArchiveObjectsFromMCP(testCtx, rootContent.Status.ManifestCheckpointName)
 		Expect(rootObjects).To(BeEmpty(), "root own MCP should be empty when no namespace-scoped allowlist objects remain")
 
-		aggregated := integrationAggregatedObjects(testCtx, usecase.NamespaceSnapshotContentGVK(), rootContentName)
+		aggregated := integrationAggregatedObjects(testCtx, usecase.SnapshotContentGVK(), rootContentName)
 		Expect(integrationObjectsContainKind(aggregated, "DemoVirtualDisk")).To(BeFalse())
 		Expect(integrationObjectsContainKindName(aggregated, "DemoVirtualDisk", "disk-vm")).To(BeFalse())
 	})
@@ -288,7 +288,7 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 			contentName = snap.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		content := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+		content := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: contentName}, content)).To(Succeed())
 		Expect(content.Status.ManifestCheckpointName).NotTo(BeEmpty())
 		Expect(integrationGraphRegProvider.Current().RegisteredSnapshotKinds()).NotTo(ContainElement("DemoVirtualDiskSnapshot"))
@@ -323,7 +323,6 @@ func createEligibleDemoDiskDSC(ctx context.Context, name string) {
 				{
 					ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 					SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-					ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 				},
 			},
 		},
@@ -360,12 +359,10 @@ func createEligibleDemoVMAndDiskDSC(ctx context.Context, name string) {
 				{
 					ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 					SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-					ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 				},
 				{
 					ResourceCRDName: "demovirtualmachines.demo.state-snapshotter.deckhouse.io",
 					SnapshotCRDName: "demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io",
-					ContentCRDName:  "demovirtualmachinesnapshotcontents.demo.state-snapshotter.deckhouse.io",
 				},
 			},
 		},

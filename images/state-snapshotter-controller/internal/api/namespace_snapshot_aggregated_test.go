@@ -84,10 +84,10 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	})
 	_ = cl.Create(context.Background(), mcp)
 
-	nsc := &storagev1alpha1.NamespaceSnapshotContent{
+	nsc := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
-		Spec: storagev1alpha1.NamespaceSnapshotContentSpec{
-			NamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 				Kind:       "NamespaceSnapshot",
 				Name:       "snap",
@@ -95,7 +95,7 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
-		Status: storagev1alpha1.NamespaceSnapshotContentStatus{ManifestCheckpointName: "mcp-root"},
+		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-root"},
 	}
 	meta.SetStatusCondition(&nsc.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
@@ -173,10 +173,10 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	})
 	_ = cl.Create(context.Background(), mcp)
 
-	nsc := &storagev1alpha1.NamespaceSnapshotContent{
+	nsc := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
-		Spec: storagev1alpha1.NamespaceSnapshotContentSpec{
-			NamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 				Kind:       "NamespaceSnapshot",
 				Name:       "snap",
@@ -184,7 +184,7 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
-		Status: storagev1alpha1.NamespaceSnapshotContentStatus{ManifestCheckpointName: "mcp-root"},
+		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-root"},
 	}
 	meta.SetStatusCondition(&nsc.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
@@ -256,22 +256,26 @@ func TestGenericSnapshotAggregatedManifests_HTTP_VMAndDiskSubtrees(t *testing.T)
 	})
 	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: "ns1"},
-		Status:     demov1alpha1.DemoVirtualMachineSnapshotStatus{BoundSnapshotContentName: "vm-content"},
+		Status: demov1alpha1.DemoVirtualMachineSnapshotStatus{
+			BoundSnapshotContentName: "vm-content",
+		},
 	})
-	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshotContent{
+	_ = cl.Create(context.Background(), &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "vm-content"},
-		Status: demov1alpha1.DemoVirtualMachineSnapshotContentStatus{
+		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName:      "mcp-vm",
-			ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
 		},
 	})
 	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualDiskSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
-		Status:     demov1alpha1.DemoVirtualDiskSnapshotStatus{BoundSnapshotContentName: "disk-content"},
+		Status: demov1alpha1.DemoVirtualDiskSnapshotStatus{
+			BoundSnapshotContentName: "disk-content",
+		},
 	})
-	_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualDiskSnapshotContent{
+	_ = cl.Create(context.Background(), &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},
-		Status:     demov1alpha1.DemoVirtualDiskSnapshotContentStatus{ManifestCheckpointName: "mcp-disk"},
+		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-disk"},
 	})
 
 	srv := newGenericAggregatedTestServer(t, cl, log)
@@ -312,18 +316,20 @@ func TestGenericSnapshotAggregatedManifests_HTTP_Errors(t *testing.T) {
 		createReadyMCPForAPI(t, cl, "mcp-disk", dup)
 		_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "vm-dup", Namespace: "ns1"},
-			Status:     demov1alpha1.DemoVirtualMachineSnapshotStatus{BoundSnapshotContentName: "vm-content"},
-		})
-		_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualMachineSnapshotContent{
-			ObjectMeta: metav1.ObjectMeta{Name: "vm-content"},
-			Status: demov1alpha1.DemoVirtualMachineSnapshotContentStatus{
-				ManifestCheckpointName:      "mcp-vm",
-				ChildrenSnapshotContentRefs: []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: "disk-content"}},
+			Status: demov1alpha1.DemoVirtualMachineSnapshotStatus{
+				BoundSnapshotContentName: "vm-content",
 			},
 		})
-		_ = cl.Create(context.Background(), &demov1alpha1.DemoVirtualDiskSnapshotContent{
+		_ = cl.Create(context.Background(), &storagev1alpha1.SnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{Name: "vm-content"},
+			Status: storagev1alpha1.SnapshotContentStatus{
+				ManifestCheckpointName:      "mcp-vm",
+				ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
+			},
+		})
+		_ = cl.Create(context.Background(), &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},
-			Status:     demov1alpha1.DemoVirtualDiskSnapshotContentStatus{ManifestCheckpointName: "mcp-disk"},
+			Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-disk"},
 		})
 		srv := newGenericAggregatedTestServer(t, cl, log)
 		defer srv.Close()
@@ -371,8 +377,8 @@ func newGenericAggregatedTestServerWithRESTMapper(t *testing.T, cl client.Client
 			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshot"},
 		},
 		[]schema.GroupVersionKind{
-			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualMachineSnapshotContent"},
-			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "DemoVirtualDiskSnapshotContent"},
+			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "SnapshotContent"},
+			{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: "SnapshotContent"},
 		},
 	)
 	if err != nil {

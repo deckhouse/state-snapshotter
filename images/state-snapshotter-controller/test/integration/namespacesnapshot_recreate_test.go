@@ -56,10 +56,10 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 		nsName := ns.Name
 		DeferCleanup(func() {
 			if contentName2 != "" {
-				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName2}})
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName2}})
 			}
 			if contentName1 != "" {
-				_ = k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName1}})
+				_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName1}})
 			}
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
@@ -130,11 +130,11 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		}).WithTimeout(90 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		sc := &storagev1alpha1.NamespaceSnapshotContent{}
+		sc := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName1}, sc)).To(Succeed())
-		Expect(sc.Spec.NamespaceSnapshotRef.UID).To(Equal(uid1))
-		sc2 := &storagev1alpha1.NamespaceSnapshotContent{}
+		Expect(sc.Spec.SnapshotRef.UID).To(Equal(uid1))
+		sc2 := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName2}, sc2)).To(Succeed())
-		Expect(sc2.Spec.NamespaceSnapshotRef.UID).To(Equal(uid2))
+		Expect(sc2.Spec.SnapshotRef.UID).To(Equal(uid2))
 	})
 })

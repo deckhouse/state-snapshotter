@@ -34,42 +34,14 @@ import (
 )
 
 var _ = Describe("Integration: DSC reconciler InvalidSpec", func() {
-	const nsContentName = "integration-dsc-invalid-ns-content"
 	const dupKindName = "integration-dsc-dup-snapshot-kind"
 
 	BeforeEach(func() {
-		for _, n := range []string{nsContentName, dupKindName} {
+		for _, n := range []string{dupKindName} {
 			d := &storagev1alpha1.DomainSpecificSnapshotController{}
 			d.SetName(n)
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
 		}
-	})
-
-	It("sets Accepted=False InvalidSpec when *SnapshotContent CRD is namespace-scoped", func() {
-		dsc := &storagev1alpha1.DomainSpecificSnapshotController{
-			ObjectMeta: metav1.ObjectMeta{Name: nsContentName},
-			Spec: storagev1alpha1.DomainSpecificSnapshotControllerSpec{
-				OwnerModule: "integration-test",
-				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
-					{
-						ResourceCRDName: "testsnapshots.test.deckhouse.io",
-						SnapshotCRDName: "testsnapshots.test.deckhouse.io",
-						ContentCRDName:  "namespacedtestsnapshotcontents.test.deckhouse.io",
-					},
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, dsc)).To(Succeed())
-
-		Eventually(func(g Gomega) {
-			cur := &storagev1alpha1.DomainSpecificSnapshotController{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nsContentName}, cur)).To(Succeed())
-			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
-			g.Expect(acc).NotTo(BeNil())
-			g.Expect(acc.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(acc.Reason).To(Equal(controllers.DSCReasonInvalidSpec))
-			g.Expect(acc.Message).To(ContainSubstring("cluster-scoped"))
-		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 
 	It("sets Accepted=False InvalidSpec when two mappings repeat the same snapshot kind", func() {
@@ -81,12 +53,10 @@ var _ = Describe("Integration: DSC reconciler InvalidSpec", func() {
 					{
 						ResourceCRDName: "testsnapshots.test.deckhouse.io",
 						SnapshotCRDName: "testsnapshots.test.deckhouse.io",
-						ContentCRDName:  "testsnapshotcontents.test.deckhouse.io",
 					},
 					{
 						ResourceCRDName: "testsnapshots.test.deckhouse.io",
 						SnapshotCRDName: "testsnapshots.test.deckhouse.io",
-						ContentCRDName:  "testsnapshotcontents.test.deckhouse.io",
 					},
 				},
 			},

@@ -157,7 +157,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 
 	contentName := demoVirtualMachineSnapshotContentName(s.Namespace, s.Name)
-	if err := r.ensureSnapshotContent(ctx, s, contentName); err != nil {
+	if err := r.ensureContent(ctx, s, contentName); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -195,7 +195,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
-	if err := patchDemoVirtualMachineSnapshotContentManifestCheckpoint(ctx, r.Client, contentName, mcpName); err != nil {
+	if err := patchDemoVirtualMachineContentManifestCheckpoint(ctx, r.Client, contentName, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -206,7 +206,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	if err := patchDemoVirtualMachineSnapshotChildrenRefs(ctx, r.Client, req.NamespacedName, childRefs); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := patchDemoVirtualMachineSnapshotContentChildrenFromRefs(ctx, r.Client, contentName, s.Namespace, childRefs); err != nil {
+	if err := patchDemoVirtualMachineContentChildrenFromRefs(ctx, r.Client, contentName, s.Namespace, childRefs); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -232,8 +232,8 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	return ctrl.Result{}, nil
 }
 
-func (r *DemoVirtualMachineSnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *demov1alpha1.DemoVirtualMachineSnapshot, contentName string) error {
-	existing := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+func (r *DemoVirtualMachineSnapshotReconciler) ensureContent(ctx context.Context, snap *demov1alpha1.DemoVirtualMachineSnapshot, contentName string) error {
+	existing := &storagev1alpha1.SnapshotContent{}
 	err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, existing)
 	if err == nil {
 		return nil
@@ -249,9 +249,9 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureSnapshotContent(ctx context
 	// We intentionally do not use controllerutil.CreateOrUpdate here.
 	// This controller owns only a subset of fields and must avoid
 	// accidental overwrites of fields owned by other controllers.
-	content := &demov1alpha1.DemoVirtualMachineSnapshotContent{
+	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: contentName},
-		Spec: demov1alpha1.DemoVirtualMachineSnapshotContentSpec{
+		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       KindDemoVirtualMachineSnapshot,
@@ -407,14 +407,14 @@ func patchDemoVirtualMachineSnapshotBound(
 	})
 }
 
-func patchDemoVirtualMachineSnapshotContentChildrenFromRefs(
+func patchDemoVirtualMachineContentChildrenFromRefs(
 	ctx context.Context,
 	c client.Client,
 	contentName string,
 	parentNamespace string,
 	refs []storagev1alpha1.NamespaceSnapshotChildRef,
 ) error {
-	var desired []storagev1alpha1.NamespaceSnapshotContentChildRef
+	var desired []storagev1alpha1.SnapshotContentChildRef
 	for _, ref := range refs {
 		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != KindDemoVirtualDiskSnapshot {
 			continue
@@ -427,32 +427,32 @@ func patchDemoVirtualMachineSnapshotContentChildrenFromRefs(
 			return err
 		}
 		if disk.Status.BoundSnapshotContentName != "" {
-			desired = append(desired, storagev1alpha1.NamespaceSnapshotContentChildRef{Name: disk.Status.BoundSnapshotContentName})
+			desired = append(desired, storagev1alpha1.SnapshotContentChildRef{Name: disk.Status.BoundSnapshotContentName})
 		}
 	}
-	sortNamespaceSnapshotContentChildRefs(desired)
+	sortSnapshotContentChildRefs(desired)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		m := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+		m := &storagev1alpha1.SnapshotContent{}
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, m); err != nil {
 			return err
 		}
-		if namespaceSnapshotContentChildRefsEqualIgnoreOrder(desired, m.Status.ChildrenSnapshotContentRefs) {
+		if snapshotContentChildRefsEqualIgnoreOrder(desired, m.Status.ChildrenSnapshotContentRefs) {
 			return nil
 		}
 		base := m.DeepCopy()
-		m.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), desired...)
+		m.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.SnapshotContentChildRef(nil), desired...)
 		return c.Status().Patch(ctx, m, client.MergeFrom(base))
 	})
 }
 
-func patchDemoVirtualMachineSnapshotContentManifestCheckpoint(
+func patchDemoVirtualMachineContentManifestCheckpoint(
 	ctx context.Context,
 	c client.Client,
 	contentName string,
 	mcpName string,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		content := &demov1alpha1.DemoVirtualMachineSnapshotContent{}
+		content := &storagev1alpha1.SnapshotContent{}
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}

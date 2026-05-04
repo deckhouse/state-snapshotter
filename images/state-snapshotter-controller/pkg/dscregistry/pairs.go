@@ -24,7 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
@@ -40,7 +41,7 @@ type EligibleResourceSnapshotMapping struct {
 // of DSC objects that satisfy DSCWatchEligible. Duplicate snapshot GVKs in the output are skipped
 // (first wins). Caller should merge with bootstrap pairs; invalid CRDs are skipped (no error).
 func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedbootstrap.UnifiedGVKPair, error) {
-	var list storagev1alpha1.DomainSpecificSnapshotControllerList
+	var list ssv1alpha1.DomainSpecificSnapshotControllerList
 	if err := c.List(ctx, &list); err != nil {
 		return nil, err
 	}
@@ -56,18 +57,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 			if err != nil {
 				continue
 			}
-			contentCRD, err := getCRD(ctx, c, entry.ContentCRDName)
-			if err != nil {
-				continue
-			}
-			if contentCRD.Spec.Scope != extv1.ClusterScoped {
-				continue
-			}
 			snapGVK, err := gvkFromCRD(snapCRD)
-			if err != nil {
-				continue
-			}
-			contentGVK, err := gvkFromCRD(contentCRD)
 			if err != nil {
 				continue
 			}
@@ -78,7 +68,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 			seen[key] = struct{}{}
 			out = append(out, unifiedbootstrap.UnifiedGVKPair{
 				Snapshot:        snapGVK,
-				SnapshotContent: contentGVK,
+				SnapshotContent: commonSnapshotContentGVK(),
 			})
 		}
 	}
@@ -88,7 +78,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 // EligibleResourceSnapshotMappings returns DSC resource→snapshot mappings used by NamespaceSnapshot
 // parent-owned graph construction. Invalid or cluster-scoped resource rows are skipped fail-closed.
 func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]EligibleResourceSnapshotMapping, error) {
-	var list storagev1alpha1.DomainSpecificSnapshotControllerList
+	var list ssv1alpha1.DomainSpecificSnapshotControllerList
 	if err := c.List(ctx, &list); err != nil {
 		return nil, err
 	}
@@ -108,19 +98,11 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]E
 			if err != nil {
 				continue
 			}
-			contentCRD, err := getCRD(ctx, c, entry.ContentCRDName)
-			if err != nil || contentCRD.Spec.Scope != extv1.ClusterScoped {
-				continue
-			}
 			resourceGVK, err := gvkFromCRD(resourceCRD)
 			if err != nil {
 				continue
 			}
 			snapshotGVK, err := gvkFromCRD(snapCRD)
-			if err != nil {
-				continue
-			}
-			contentGVK, err := gvkFromCRD(contentCRD)
 			if err != nil {
 				continue
 			}
@@ -137,11 +119,19 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]E
 				},
 				ResourceGVK:     resourceGVK,
 				SnapshotGVK:     snapshotGVK,
-				SnapshotContent: contentGVK,
+				SnapshotContent: commonSnapshotContentGVK(),
 			})
 		}
 	}
 	return out, nil
+}
+
+func commonSnapshotContentGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group:   storagev1alpha1.APIGroup,
+		Version: storagev1alpha1.APIVersion,
+		Kind:    "SnapshotContent",
+	}
 }
 
 func getCRD(ctx context.Context, c client.Reader, name string) (*extv1.CustomResourceDefinition, error) {

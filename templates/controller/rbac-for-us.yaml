@@ -104,20 +104,19 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["get"]  # Only 'get' by name - no list/watch needed (no informer cache)
 
-# Unified Snapshots RBAC (for XxxxSnapshot / XxxxSnapshotContent resources)
+# Unified Snapshots RBAC (for XxxxSnapshot roots and common SnapshotContent)
 # RBAC is scoped to API group, not to concrete Snapshot kinds
 # Adding a new Snapshot kind requires adding its resource name here
 # See ADR section 7 (RBAC Strategy) for details
 # Note: Kubernetes RBAC does NOT support wildcards in resource names
 # We need to list all snapshot resource types explicitly
 
-# storage.deckhouse.io group (Snapshot, SnapshotContent, NamespaceSnapshot, NamespaceSnapshotContent)
+# storage.deckhouse.io group (Snapshot, SnapshotContent, NamespaceSnapshot)
 - apiGroups: ["storage.deckhouse.io"]
   resources:
   - "snapshots"                    # Snapshot kind
   - "snapshotcontents"            # SnapshotContent kind
   - "namespacesnapshots"          # NamespaceSnapshot kind
-  - "namespacesnapshotcontents"   # NamespaceSnapshotContent kind
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 # Unified Snapshots status subresources for storage.deckhouse.io
 - apiGroups: ["storage.deckhouse.io"]
@@ -125,7 +124,6 @@ rules:
   - "snapshots/status"
   - "snapshotcontents/status"
   - "namespacesnapshots/status"
-  - "namespacesnapshotcontents/status"
   verbs: ["get", "update", "patch"]
 
 ---

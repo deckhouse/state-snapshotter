@@ -99,16 +99,16 @@ func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl c
 	return mcp
 }
 
-// aggregatedManifestsIntegrationMustCreateNSC creates a NamespaceSnapshotContent and writes status (Create ignores .Status on CRD).
+// aggregatedManifestsIntegrationMustCreateNSC creates a SnapshotContent and writes status (Create ignores .Status on CRD).
 func aggregatedManifestsIntegrationMustCreateNSC(ctx context.Context, cl client.Client, name, snapNS, snapName, mcpName string, children ...string) {
-	var refs []storagev1alpha1.NamespaceSnapshotContentChildRef
+	var refs []storagev1alpha1.SnapshotContentChildRef
 	for _, c := range children {
-		refs = append(refs, storagev1alpha1.NamespaceSnapshotContentChildRef{Name: c})
+		refs = append(refs, storagev1alpha1.SnapshotContentChildRef{Name: c})
 	}
-	nsc := &storagev1alpha1.NamespaceSnapshotContent{
+	nsc := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: storagev1alpha1.NamespaceSnapshotContentSpec{
-			NamespaceSnapshotRef: storagev1alpha1.SnapshotSubjectRef{
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 				Kind:       "NamespaceSnapshot",
 				Name:       snapName,
@@ -237,10 +237,10 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 		})
 		aggregatedManifestsIntegrationMustCreateNSC(ctx, k8sClient, child, nsName, "snap", mcpChild.Name)
 
-		rootNSC := &storagev1alpha1.NamespaceSnapshotContent{}
+		rootNSC := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: rootContentName}, rootNSC)).To(Succeed())
 		base := rootNSC.DeepCopy()
-		rootNSC.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.NamespaceSnapshotContentChildRef{{Name: child}}
+		rootNSC.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.SnapshotContentChildRef{{Name: child}}
 		Expect(k8sClient.Status().Patch(ctx, rootNSC, client.MergeFrom(base))).To(Succeed())
 
 		srv := aggregatedManifestsIntegrationStartServer()
@@ -317,11 +317,11 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 		aggregatedManifestsIntegrationMustCreateNSC(ctx, k8sClient, childA, nsName, "snap", mcpA.Name)
 		aggregatedManifestsIntegrationMustCreateNSC(ctx, k8sClient, childB, nsName, "snap", mcpB.Name)
 
-		rootNSC := &storagev1alpha1.NamespaceSnapshotContent{}
+		rootNSC := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: rootContentName}, rootNSC)).To(Succeed())
 		base := rootNSC.DeepCopy()
 		// Unsorted refs — aggregator must sort by name
-		rootNSC.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.NamespaceSnapshotContentChildRef{
+		rootNSC.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.SnapshotContentChildRef{
 			{Name: childB},
 			{Name: childA},
 		}

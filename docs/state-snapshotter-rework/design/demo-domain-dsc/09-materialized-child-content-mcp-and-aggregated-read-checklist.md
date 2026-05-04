@@ -13,7 +13,7 @@ Related design note:
 
 ## Implementation Checklist
 
-- Every `XxxSnapshot` has its own `XxxSnapshotContent`.
+- Every `XxxSnapshot` has its own `SnapshotContent`.
 - Every materialized content node writes `status.manifestCheckpointName`.
 - Parent controllers create child snapshots and publish complete `status.childrenSnapshotRefs`.
 - Parent controllers publish content edges through `status.childrenSnapshotContentRefs` where the read model needs child content traversal.

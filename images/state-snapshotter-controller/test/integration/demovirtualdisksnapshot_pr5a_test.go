@@ -28,8 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -41,7 +39,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// PR5a: one demo kind, merge-safe refs on root NamespaceSnapshot + root NamespaceSnapshotContent, plus one DSC row for registration smoke.
+// PR5a: one demo kind, merge-safe refs on root NamespaceSnapshot + root SnapshotContent, plus one DSC row for registration smoke.
 var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Serial, func() {
 	const dscName = "integration-pr5a-demo-disk-dsc"
 
@@ -64,7 +62,6 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 					{
 						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-						ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 					},
 				},
 			},
@@ -159,7 +156,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			nsc := &storagev1alpha1.NamespaceSnapshotContent{}
+			nsc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootNSC}, nsc)).To(Succeed())
 			var found bool
 			for _, ch := range nsc.Status.ChildrenSnapshotContentRefs {
@@ -168,32 +165,22 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 					break
 				}
 			}
-			g.Expect(found).To(BeTrue(), "root NamespaceSnapshotContent should reference demo disk content")
+			g.Expect(found).To(BeTrue(), "root SnapshotContent should reference demo disk content")
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		var nscVisited []string
-		var demoVisited []string
-		hooks := &usecase.DedicatedContentVisitHooks{
-			Visit: func(_ context.Context, gvk schema.GroupVersionKind, contentName string, _ *unstructured.Unstructured, _ bool) error {
-				if gvk.Kind == "DemoVirtualDiskSnapshotContent" {
-					demoVisited = append(demoVisited, contentName)
-				}
-				return nil
-			},
-		}
-		err := usecase.WalkNamespaceSnapshotContentSubtreeWithRegistry(testCtx, k8sClient, rootNSC,
-			func(_ context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
+		err := usecase.WalkSnapshotContentSubtree(testCtx, k8sClient, rootNSC,
+			func(_ context.Context, nsc *storagev1alpha1.SnapshotContent) error {
 				nscVisited = append(nscVisited, nsc.Name)
 				return nil
 			},
-			integrationGraphRegProvider.Current(), hooks,
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(nscVisited).NotTo(BeEmpty())
-		Expect(demoVisited).To(ContainElement(contentName), "ref-only walk should visit DemoVirtualDiskSnapshotContent leaf via same childrenSnapshotContentRefs graph")
+		Expect(nscVisited).To(ContainElement(contentName), "ref-only walk should visit SnapshotContent leaf via same childrenSnapshotContentRefs graph")
 
 		Eventually(func(g Gomega) {
-			content := &demov1alpha1.DemoVirtualDiskSnapshotContent{}
+			content := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: contentName}, content)).To(Succeed())
 			g.Expect(content.Status.ManifestCheckpointName).NotTo(BeEmpty())
 			objects := integrationArchiveObjectsFromMCP(testCtx, content.Status.ManifestCheckpointName)

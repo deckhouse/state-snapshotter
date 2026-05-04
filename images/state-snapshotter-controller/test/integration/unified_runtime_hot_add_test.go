@@ -45,7 +45,7 @@ var _ = Describe("Integration: unified runtime hot-add (DSC → Sync)", Serial, 
 	const integrationSmokeDSCName = "integration-dsc-smoke"
 	// RBAC/eligibility specs (other Serial Describe) use the same RegistrationTest kind; must be gone or KindConflict breaks this block and smoke.
 	const integrationEligibilityDSCName = "integration-eligibility-loss"
-	const integrationT4DSCName          = "integration-t4-no-rbac"
+	const integrationT4DSCName = "integration-t4-no-rbac"
 	snapGVK := schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"}
 
 	dscNamesToClear := []string{hotDSCName, integrationSmokeDSCName, integrationEligibilityDSCName, integrationT4DSCName}
@@ -91,7 +91,6 @@ var _ = Describe("Integration: unified runtime hot-add (DSC → Sync)", Serial, 
 					{
 						ResourceCRDName: "registrationtestsnapshots.test.deckhouse.io",
 						SnapshotCRDName: "registrationtestsnapshots.test.deckhouse.io",
-						ContentCRDName:  "registrationtestsnapshotcontents.test.deckhouse.io",
 					},
 				},
 			},

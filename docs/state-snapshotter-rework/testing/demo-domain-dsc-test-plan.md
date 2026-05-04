@@ -87,7 +87,7 @@
 
 **5c. Удалён дочерний SnapshotContent**
 
-- Удалён **`DemoVirtualDiskSnapshotContent`** (или другой обязательный content) → родительский snapshot **`Ready=False`**, **`ChildSnapshotContentMissing`** → каскад вверх ([`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §4.3). Проверить **`message`** (контекст пути) как выше.
+- Удалён **`SnapshotContent`** (или другой обязательный content) → родительский snapshot **`Ready=False`**, **`ChildSnapshotContentMissing`** → каскад вверх ([`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §4.3). Проверить **`message`** (контекст пути) как выше.
 
 **INV:** root **не** остаётся **`Ready=True`**, если выполняется **INV-R0** ((a)–(d) в [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md)); отсутствие в API обязательного узла **из refs** — **INV-R2** (**5b**, **5c**).
 
@@ -96,7 +96,7 @@
 - **When:** удаление root `NamespaceSnapshot`.  
 - **Then (ассерты):**
   - объекты **текущего** run очищаются по **lifecycle** (**ownerRef** / финализаторы / Retain-Delete) согласно [`07`](../design/demo-domain-dsc/07-ready-delete-matrix.md) §6 и [`08`](../design/demo-domain-dsc/08-universal-snapshot-tree-model.md) часть B;
-  - артефакты **root** namespace capture (**`NamespaceSnapshotContent`**, root MCP и т.д.) удаляются по **обычным** правилам модуля (**N2a/N2b**), **без** отдельной ветки «только для demo» в generic;
+  - артефакты **root** namespace capture (**`SnapshotContent`**, root MCP и т.д.) удаляются по **обычным** правилам модуля (**N2a/N2b**), **без** отдельной ветки «только для demo» в generic;
   - при политике без retain **не** остаётся orphan demo snapshot/content/VS, если модуль этого требует;
   - удаление root **не** требует **special-case** «demo branch» в generic reconcile вне общих правил.
 

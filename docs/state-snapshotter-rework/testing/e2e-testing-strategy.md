@@ -45,13 +45,13 @@
 **Подтверждено базовым прогоном** (read-path + retained + контракт модуля на живом API server):
 
 - subresource **aggregated manifests** отвечает и отдаёт ожидаемый JSON-массив;
-- **retained read** после удаления `NamespaceSnapshot` продолжает работать (тот же путь агрегации по retained `NamespaceSnapshotContent`);
-- **root ObjectKeeper** (шаг 5b скрипта): `spec.followObjectRef` → `NamespaceSnapshot` (UID root snapshot); у **root `NamespaceSnapshotContent`** есть **controller `ownerReference` → этот ObjectKeeper** (OK без `ownerReferences` на NSC);
+- **retained read** после удаления `NamespaceSnapshot` продолжает работать (тот же путь агрегации по retained `SnapshotContent`);
+- **root ObjectKeeper** (шаг 5b скрипта): `spec.followObjectRef` → `NamespaceSnapshot` (UID root snapshot); у **root `SnapshotContent`** есть **controller `ownerReference` → этот ObjectKeeper** (OK без `ownerReferences` на NSC);
 - discovery субресурса, опциональный gzip, negative 404 — по сценарию скрипта.
 
 **Не является частью базового прогона** (отдельно: интеграция с Deckhouse ObjectKeeper + GC, не unit/integration модуля):
 
-- **strict TTL cascade:** `PR4_SMOKE_REQUIRE_TTL=1` — скрипт ждёт до `PR4_SMOKE_WAIT_SEC` исчезновения retained `NamespaceSnapshotContent`, затем отсутствия `ManifestCheckpoint`, затем **неуспешный** aggregated GET. Корневой OK создаётся контроллером всегда в **`FollowObjectWithTTL`**; `spec.ttl` — из `STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL` / алиас `STATE_SNAPSHOTTER_NS_ROOT_OK_TTL` или встроенный дефолт (`DefaultSnapshotRootOKTTL` в `pkg/config`; может быть временно уменьшен для отладки, например 1m). Для strict-прогона задайте `PR4_SMOKE_WAIT_SEC` с запасом относительно `spec.ttl`. Без strict-режима шаг 10 остаётся наблюдательным (`sleep` + INFO).
+- **strict TTL cascade:** `PR4_SMOKE_REQUIRE_TTL=1` — скрипт ждёт до `PR4_SMOKE_WAIT_SEC` исчезновения retained `SnapshotContent`, затем отсутствия `ManifestCheckpoint`, затем **неуспешный** aggregated GET. Корневой OK создаётся контроллером всегда в **`FollowObjectWithTTL`**; `spec.ttl` — из `STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL` / алиас `STATE_SNAPSHOTTER_NS_ROOT_OK_TTL` или встроенный дефолт (`DefaultSnapshotRootOKTTL` в `pkg/config`; может быть временно уменьшен для отладки, например 1m). Для strict-прогона задайте `PR4_SMOKE_WAIT_SEC` с запасом относительно `spec.ttl`. Без strict-режима шаг 10 остаётся наблюдательным (`sleep` + INFO).
 
 **Итоговая формулировка для PR / чата:** PR4 как **read-path** и **retained-path** на реальном кластере — рабочие; полное доказательство **TTL-удаления** retained артефактов — отдельный прогон на окружении с известным конфигом ObjectKeeper.
 
@@ -70,7 +70,7 @@ Envtest integration не проверяет реальный Kubernetes RBAC enf
 
 Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain RBAC, namespace-relative aggregated API output, and expected retained NSC/ObjectKeeper artifacts after cleanup. Non-blocking findings to keep visible in reports: transient `ObjectKeeper already exists` can appear on repeated runs with retained artifacts; Kubernetes warns that the current `NamespaceSnapshot` finalizer name should include a path.
 
-**DSC-gated demo activation:** graph registry built-ins содержат только `NamespaceSnapshot`→`NamespaceSnapshotContent`. Demo VM/Disk controllers стартуют в harness всегда, но demo resources входят в `NamespaceSnapshot` tree только через eligible DSC. Integration покрывает три границы: без demo DSC нет demo children; после hot-add DSC новый `NamespaceSnapshot` создаёт demo child; manual `DemoVirtualDiskSnapshot` materializes без DSC.
+**DSC-gated demo activation:** graph registry built-ins содержат только `NamespaceSnapshot`→`SnapshotContent`. Demo VM/Disk controllers стартуют в harness всегда, но demo resources входят в `NamespaceSnapshot` tree только через eligible DSC. Integration покрывает три границы: без demo DSC нет demo children; после hot-add DSC новый `NamespaceSnapshot` создаёт demo child; manual `DemoVirtualDiskSnapshot` materializes без DSC.
 
 | Файл | Что проверяет |
 |------|----------------|
@@ -81,7 +81,7 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 | `unified_runtime_rbac_eligibility_test.go` | **T4 + eligibility:** без RBACReady нет eligible-слоя для RegistrationTest; после снятия RBACReady resolved без пары, monotonic active сохраняет ключ. **`Serial`**; `AfterEach` чистит DSC. |
 | `dsc_gated_domain_activation_test.go` | Demo domain graph activation: without DSC → no demo children; hot-add DSC → new root sees demo child; manual demo snapshot works without DSC. |
 | `controller_registration_test.go` | Конструирование контроллеров как в production; **без** повторного `SetupWithManager` на общем `mgr` |
-| `namespacesnapshot_lifecycle_test.go` | **N1 skeleton:** `NamespaceSnapshot` → `NamespaceSnapshotContent`, `status.boundSnapshotContentName` (unified root bind field), Ready через conditions (без ObjectKeeper / полного N2) |
+| `namespacesnapshot_lifecycle_test.go` | **N1 skeleton:** `NamespaceSnapshot` → `SnapshotContent`, `status.boundSnapshotContentName` (unified root bind field), Ready через conditions (без ObjectKeeper / полного N2) |
 | `namespacesnapshot_deletion_test.go` | **Delete flow:** Retain — snapshot gone, NSC остаётся; Delete policy — root finalizer только после `NotFound` на content; **retained unified** — после delete snapshot остаются NSC+MCP (MCR уже снят после capture); проверки контракта root OK (`followObjectRef`→NamespaceSnapshot; root **NSC** controller `ownerRef`→OK) и MCP→NSC; **MCR `ownerRef`→NamespaceSnapshot** — сценарий «удаление root при живом MCR»: delete с **`DeletePropagationBackground`** (foreground без kube-controller-manager зависает); ожидается **NotFound** на snapshot; MCR — **NotFound** на кластере с GC или (plain envtest) объект может остаться с тем же **`ownerRef`** до появления GC; узкий сценарий — пользователь удаляет NSC после удаления snapshot (deletion завершается, без контракта GC артефактов) |
 | `namespacesnapshot_n1_boundary_test.go` | **Формальное закрытие N1:** `ContentRefMismatch` при неверном `namespaceSnapshotRef` на NSC; **recovery** — после сброса `status` при валидном content снова `Bound`+`Ready`; короткая **стабильность** (Consistently) |
 | `namespacesnapshot_recreate_test.go` | **§4.7 / отдельный lifecycle MCR:** после первого **Ready** MCR уже снят; удаление root; второй snapshot с тем же `metadata.name` — новый UID, новый NSC + новый MCR (`nss-{uid2}`), **Ready**; старый Retain NSC остаётся; имя MCR зависит от UID, коллизий нет |

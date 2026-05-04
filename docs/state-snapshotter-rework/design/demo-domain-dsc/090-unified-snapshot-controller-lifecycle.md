@@ -8,7 +8,7 @@
 Every `XxxSnapshotController` follows the same lifecycle:
 
 1. Load its own `XxxSnapshot`.
-2. Ensure its own `XxxSnapshotContent`.
+2. Ensure its own `SnapshotContent`.
 3. Compute its own scope.
 4. Create child snapshots when the domain model requires them.
 5. Write the complete direct-child list to its own `status.childrenSnapshotRefs`.
@@ -19,7 +19,7 @@ Every `XxxSnapshotController` follows the same lifecycle:
 
 A snapshot with no children is valid. Its `Ready` depends only on its own materialization.
 
-Stage 1 content migration note: steps that mention `XxxSnapshotContent` describe the current runtime.
+v0 content migration note: steps that mention `SnapshotContent` describe the current runtime.
 The target model moves content creation/lifecycle to the common state-snapshotter layer and a single
 cluster-scoped `storage.deckhouse.io/SnapshotContent`. Domain controllers keep ownership of
 `XxxSnapshot` validation, `sourceRef`, child snapshot creation, and `Ready` aggregation until the
@@ -35,9 +35,9 @@ runtime migration is explicitly performed.
 
 **Readiness aggregation:** parent `Ready` is derived by reading every child listed in `status.childrenSnapshotRefs`. Child state is not copied into the parent list.
 
-**Reference domain controller contract (current runtime):** a domain snapshot controller validates its own `spec.parentSnapshotRef` and `spec.sourceRef`, creates its own cluster-scoped `XxxSnapshotContent`, creates an MCR for its own source object, links `content.status.manifestCheckpointName`, and owns its snapshot `Ready` condition. A domain parent controller (for example VM) also creates child snapshots for nested domain resources, publishes its own `status.childrenSnapshotRefs`, writes its own content `status.childrenSnapshotContentRefs`, and aggregates `Ready` over those children. User spec errors are represented as `Ready=False` conditions (for example `InvalidParentRef` / `InvalidSourceRef`) rather than reconcile errors, and must not create content, MCR, or child snapshots.
+**Reference domain controller contract (current runtime):** a domain snapshot controller validates its own `spec.parentSnapshotRef` and `spec.sourceRef`, creates its own cluster-scoped `SnapshotContent`, creates an MCR for its own source object, links `content.status.manifestCheckpointName`, and owns its snapshot `Ready` condition. A domain parent controller (for example VM) also creates child snapshots for nested domain resources, publishes its own `status.childrenSnapshotRefs`, writes its own content `status.childrenSnapshotContentRefs`, and aggregates `Ready` over those children. User spec errors are represented as `Ready=False` conditions (for example `InvalidParentRef` / `InvalidSourceRef`) rather than reconcile errors, and must not create content, MCR, or child snapshots.
 
-**Target common content contract:** the common controller owns `SnapshotContent` lifecycle, ObjectKeeper/Retain, MCP/data refs, and aggregation over `SnapshotContent.status.childrenSnapshotContentRefs`. Domain modules register source resource and snapshot CRD through DSC; `contentCRDName` remains a legacy v1alpha1 field until the runtime is migrated.
+**Common content contract:** the common controller owns `SnapshotContent` lifecycle, ObjectKeeper/Retain, MCP/data refs, and aggregation over `SnapshotContent.status.childrenSnapshotContentRefs`. Domain modules register source resource and snapshot CRD through DSC; content GVK is fixed to `storage.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
 
 **Not owned by a domain controller:** root/parent `childrenSnapshotRefs`, root/parent content `childrenSnapshotContentRefs`, DSC `RBACReady`, RBAC creation, and parent status. Content lifecycle is intentionally separate from namespaced snapshot lifecycle in the current Retain/ObjectKeeper model: each controller owns only its own content status/MCP links and direct child graph/content refs.
 
@@ -51,7 +51,7 @@ runtime migration is explicitly performed.
 
 **Namespace:** `NamespaceSnapshotController` owns namespace-level materialization for namespace-scoped allowlist resources only. It does not capture the cluster-scoped Kubernetes `Namespace` object. Empty own scope is represented by an empty MCP with `status.manifestCheckpointName` set. The `NamespaceSnapshot` CR remains namespaced; resolved target namespace is `NamespaceSnapshot.metadata.namespace`, and this change does not add `spec.namespace` / `spec.targetNamespace`. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
 
-**E5 exclude:** root capture excludes objects already present in descendant content-node MCPs, including dedicated `XxxSnapshotContent` nodes reached through `childrenSnapshotContentRefs`.
+**E5 exclude:** root capture excludes objects already present in descendant content-node MCPs, including dedicated `SnapshotContent` nodes reached through `childrenSnapshotContentRefs`.
 
 ## Aggregated Read
 

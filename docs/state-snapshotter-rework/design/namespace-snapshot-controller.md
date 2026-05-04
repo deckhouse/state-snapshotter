@@ -16,12 +16,12 @@
 
 ### 2.1 Целевая семантика (согласовано с ТЗ)
 
-**NamespaceSnapshot** — namespaced root / intention; результат фиксируется в cluster-scoped **`NamespaceSnapshotContent`** (пара 1:1 с root по смыслу ТЗ). Generic **`SnapshotContent`** для этого потока **не** используется как root-carrier. Связка с **ObjectKeeper** — по правилам из `snapshot-rework`. **N2a в коде сейчас:** cluster-scoped root OK **`ret-nssnap-<namespace>-<snapshotName>`** в режиме **`FollowObjectWithTTL`** на **root `NamespaceSnapshot`** (UID в `followObjectRef`); **root `NamespaceSnapshotContent.metadata.ownerReferences` → этот ObjectKeeper** (**controller: true**) — якорь TTL: после удаления root snapshot OK остаётся до истечения TTL; Deckhouse ObjectKeeper controller удаляет OK → GC снимает retained NSC и каскадно MCP/детей. TTL задаётся конфигом контроллера (`SnapshotRootOKTTL`). **Временный** `ManifestCaptureRequest` (MCR) для capture после успешного завершения **удаляется** NS-контроллером (см. §4.7).
+**NamespaceSnapshot** — namespaced root / intention; результат фиксируется в cluster-scoped **`SnapshotContent`** (пара 1:1 с root по смыслу ТЗ). Generic **`SnapshotContent`** для этого потока **не** используется как root-carrier. Связка с **ObjectKeeper** — по правилам из `snapshot-rework`. **N2a в коде сейчас:** cluster-scoped root OK **`ret-nssnap-<namespace>-<snapshotName>`** в режиме **`FollowObjectWithTTL`** на **root `NamespaceSnapshot`** (UID в `followObjectRef`); **root `SnapshotContent.metadata.ownerReferences` → этот ObjectKeeper** (**controller: true**) — якорь TTL: после удаления root snapshot OK остаётся до истечения TTL; Deckhouse ObjectKeeper controller удаляет OK → GC снимает retained NSC и каскадно MCP/детей. TTL задаётся конфигом контроллера (`SnapshotRootOKTTL`). **Временный** `ManifestCaptureRequest` (MCR) для capture после успешного завершения **удаляется** NS-контроллером (см. §4.7).
 
 **Поставка поэтапно** (см. §16 и [`implementation-plan.md`](implementation-plan.md)): **N1** — skeleton bind/delete без OK и без real capture; **N2a** — manifests-only один root + OK + внутренний **MCR→ManifestCheckpoint** + download; **N2b** — **дерево** manifests-only (дети, refs, aggregated Ready/download); data-layer, полный export/import/restore — после N2, **не** переписывая SSOT в `snapshot-rework`.
 
 - **Capture** тяжёлой работы: для manifests в **N2a** — через **внутренний** путь **ManifestCaptureRequest → ManifestCheckpoint** (существующий контроллер/chunks); root-контроллер **не** обязан держать весь list/capture в одном reconcile, но **не** обязателен и отдельный Job, если исполнение согласовано с MCR-потоком.
-- **Unified shared runtime** там, где применим общий паттерн Snapshot/SnapshotContent для **других** GVK; для пары namespace root используем **свой** content kind (`NamespaceSnapshotContent`), см. [`namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md).
+- **Unified shared runtime** там, где применим общий паттерн Snapshot/SnapshotContent для **других** GVK; для пары namespace root используем **свой** content kind (`SnapshotContent`), см. [`namespace-snapshot-content-decision.md`](decisions/namespace-snapshot-content-decision.md).
 
 ### 2.2 Out of scope на ранних milestones (N1–N2)
 
@@ -32,7 +32,7 @@
 - **Child composition (manifests-only)** — целевая ось **N2b**, не «опциональный потом».
 - DSC priority traversal **в полном объёме**, data-layer — после закрытого N2 / в **N5** по плану.
 - Экспорт/импорт архива и CLI как в полном ТЗ — не обещать в рамках N2.
-- **`ManifestCaptureRequest` как обязательный публичный контракт** для оператора — см. §10; публично: root + **NamespaceSnapshotContent** + artifact metadata; MCR/MCP — **внутренний** execution path в **N2a**.
+- **`ManifestCaptureRequest` как обязательный публичный контракт** для оператора — см. §10; публично: root + **SnapshotContent** + artifact metadata; MCR/MCP — **внутренний** execution path в **N2a**.
 
 ---
 
@@ -61,25 +61,25 @@
 
 - **`conditions` — единственный** нормативный источник жизненного цикла и ошибок для операторов; поля **`status.phase` нет** (см. [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md)).
 - `conditions`: как минимум согласованный набор с unified-паттерном (например Ready, Bound, Progressing; при необходимости CaptureStarted, ArtifactStored; терминальные сбои — через Ready=False и reason).
-- Имя привязанного content-объекта snapshot-линии — в CRD: **`status.boundSnapshotContentName`** (cluster-scoped имя; для этой линии фактический kind — **`NamespaceSnapshotContent`**, не выводится из имени поля).
+- Имя привязанного content-объекта snapshot-линии — в CRD: **`status.boundSnapshotContentName`** (cluster-scoped имя; для этой линии фактический kind — **`SnapshotContent`**, не выводится из имени поля).
 - `observedGeneration`.
 - `startedAt`, `completedAt` (опционально).
 - Сводные поля прогресса/ошибки по необходимости (без дублирования детального состояния Job).
 
-### 4.2 NamespaceSnapshotContent binding (контракт)
+### 4.2 SnapshotContent binding (контракт)
 
 **Root → Content**
 
-- В status root — **`status.boundSnapshotContentName`**: cluster-scoped имя привязанного **`NamespaceSnapshotContent`** (единое имя поля для всех snapshot root’ов в модуле).
+- В status root — **`status.boundSnapshotContentName`**: cluster-scoped имя привязанного **`SnapshotContent`** (единое имя поля для всех snapshot root’ов в модуле).
 
 **Content → Root**
 
-- В `NamespaceSnapshotContent.spec`: ссылка **`namespaceSnapshotRef`**: `apiVersion`, `kind`, `name`, **`uid`**, `namespace` (root namespaced).
+- В `SnapshotContent.spec`: ссылка **`namespaceSnapshotRef`**: `apiVersion`, `kind`, `name`, **`uid`**, `namespace` (root namespaced).
 
 **Инварианты**
 
-1. Пока NamespaceSnapshot **не** в согласованном терминальном состоянии по conditions для данного поколения spec, он связан **не более чем с одним** NamespaceSnapshotContent.
-2. NamespaceSnapshotContent **не перепривязывается** к другому root.
+1. Пока NamespaceSnapshot **не** в согласованном терминальном состоянии по conditions для данного поколения spec, он связан **не более чем с одним** SnapshotContent.
+2. SnapshotContent **не перепривязывается** к другому root.
 3. После рестарта контроллер восстанавливает связь по status root, ref на content в spec/status content, или **детерминированному имени** content.
 
 **Идемпотентность**
@@ -101,17 +101,17 @@
 Полная схема полей OK — в [`snapshot-rework/2026-01-25-namespace-snapshot.md`](../../../snapshot-rework/2026-01-25-namespace-snapshot.md) и ADR там же. Ниже — **design lock** для N2a/N2b, согласованный с текущим кодом manifest-линии:
 
 - **Общий (generic) путь MCR** в `ManifestCheckpointController`: при отсутствии привязки к NSC создаётся OK **`ret-mcr-<namespace>-<mcrName>`** в **FollowObject** на MCR; **ManifestCheckpoint** получает `ownerReference` → этот OK; **chunks** → MCP.
-- **Namespace N2a-путь:** на MCR ставится аннотация **`state-snapshotter.deckhouse.io/bound-namespace-snapshot-content`** (имя root NSC); тогда **ManifestCheckpoint** создаётся с **`ownerReference` → `NamespaceSnapshotContent`** (**controller: true**), **без** OK `ret-mcr-*` для MCP. MCR после успешного capture удаляется (§4.7) — MCP **не** должен зависеть от дальнейшего существования MCR.
+- **Namespace N2a-путь:** на MCR ставится аннотация **`state-snapshotter.deckhouse.io/bound-namespace-snapshot-content`** (имя root NSC); тогда **ManifestCheckpoint** создаётся с **`ownerReference` → `SnapshotContent`** (**controller: true**), **без** OK `ret-mcr-*` для MCP. MCR после успешного capture удаляется (§4.7) — MCP **не** должен зависеть от дальнейшего существования MCR.
 
 #### 4.3.1 Правило: ownerReference vs ObjectKeeper
 
 - **`ownerReference`** используем там, где объекты в **совместимом scope** для Kubernetes GC (например оба cluster-scoped): **ManifestCheckpointContentChunk → ManifestCheckpoint** — chunks удаляются через ownerRef на MCP (как сейчас в коде).
-- **ObjectKeeper** используем там, где нужен **cluster-scoped retention anchor** (TTL на follow root snapshot): логический bind **root ↔ NamespaceSnapshotContent** остаётся **spec.namespaceSnapshotRef** / **status.boundSnapshotContentName**; **удержание retained NSC** — через **`NamespaceSnapshotContent.ownerReferences` → root OK** (не наоборот).
+- **ObjectKeeper** используем там, где нужен **cluster-scoped retention anchor** (TTL на follow root snapshot): логический bind **root ↔ SnapshotContent** остаётся **spec.namespaceSnapshotRef** / **status.boundSnapshotContentName**; **удержание retained NSC** — через **`SnapshotContent.ownerReferences` → root OK** (не наоборот).
 - **ObjectKeeper нигде не подменяет** bind-контракт **`spec.namespaceSnapshotRef`** / **`status.boundSnapshotContentName`**.
 
 #### 4.3.2 Два применения ObjectKeeper (не смешивать)
 
-1. **Root / snapshot (N2a, `namespacesnapshot_capture.go`):** cluster-scoped OK **`ret-nssnap-…`**: **`FollowObjectWithTTL`** на **root `NamespaceSnapshot`**; **без** `metadata.ownerReferences` на NSC; **root `NamespaceSnapshotContent`** имеет **`ownerReferences` → этот OK** (**controller**). TTL из конфига. Это **не** follow на MCR и **не** generic `ret-mcr-*`. После удаления root снимка при **Retain** NSC (и MCP) остаются, пока жив OK; после TTL — удаление OK → GC NSC и каскад вниз — зона Deckhouse ObjectKeeper controller и политики модуля.
+1. **Root / snapshot (N2a, `namespacesnapshot_capture.go`):** cluster-scoped OK **`ret-nssnap-…`**: **`FollowObjectWithTTL`** на **root `NamespaceSnapshot`**; **без** `metadata.ownerReferences` на NSC; **root `SnapshotContent`** имеет **`ownerReferences` → этот OK** (**controller**). TTL из конфига. Это **не** follow на MCR и **не** generic `ret-mcr-*`. После удаления root снимка при **Retain** NSC (и MCP) остаются, пока жив OK; после TTL — удаление OK → GC NSC и каскад вниз — зона Deckhouse ObjectKeeper controller и политики модуля.
 2. **Manifest capture (generic MCR-путь):** OK **`ret-mcr-*`** в **FollowObject** на **ManifestCaptureRequest**; MCP через ownerRef на этот OK. Для **namespace N2a** этот путь **не** используется для финального MCP (см. вводный абзац §4.3).
 
 **Инвариант:** **ManifestCaptureRequest** в N2a имеет **`metadata.ownerReferences` → `NamespaceSnapshot`** (**controller: true**, тот же namespace), чтобы при **полном удалении** root из API garbage collector убрал «зависший» in-flight MCR без отдельного `Delete` из `reconcileDelete`. MCR по-прежнему создаётся **NamespaceSnapshot controller** на время capture; **ManifestCheckpointController** исполняет **MCR → MCP** (+ chunks). Статусы **NS/NSC** пишет **NamespaceSnapshot controller** по наблюдению MCP; после успешного завершения MCR **удаляется** явно контроллером (§4.7) — совместимо с ownerRef; публичная «истина» — **NSC + `manifestCheckpointName` + MCP**.
@@ -131,7 +131,7 @@
 - **`boundSnapshotContentName`** (уже есть) + **`conditions`** (+ при необходимости **`observedGeneration`**, временные метки — по мере появления в CRD).
 - **Без** `manifestCaptureRequestName` и любых полей MCR на root: MCR — **implementation detail**, создаётся в namespace capture, но **не** часть публичного контракта root.
 
-**`NamespaceSnapshotContent.status` (N2a, публично):**
+**`SnapshotContent.status` (N2a, публично):**
 
 - **`manifestCheckpointName`** (cluster-scoped имя готового **ManifestCheckpoint**) — каноническая ссылка на persisted manifest-результат.
 - **`conditions`** (в т.ч. готовность к download, ошибки capture).
@@ -139,7 +139,7 @@
 
 **Источник `Ready=True` на root (N2a):** только после того, как на **NSC** зафиксированы persisted результат (MCP + согласованные chunks) и согласованные **conditions**, а не по факту «создали MCR».
 
-**Минимальный первый PR по CRD (N2a, не раздувать):** в **`NamespaceSnapshotContent.status`** добавить **`manifestCheckpointName`** (string, omitempty) рядом с уже существующими **`conditions`**. Поля **`capturedAt`**, **`resourceCount`**, **`observedGeneration`** на NSC — **отложить** до отдельного PR/ADR, если достаточно conditions + `manifestCheckpointName`. На **`NamespaceSnapshot.status`** без изменений объёма: уже есть **`observedGeneration`**, **`boundSnapshotContentName`**, **`conditions`** — публично **без** MCR (§4.4).
+**Минимальный первый PR по CRD (N2a, не раздувать):** в **`SnapshotContent.status`** добавить **`manifestCheckpointName`** (string, omitempty) рядом с уже существующими **`conditions`**. Поля **`capturedAt`**, **`resourceCount`**, **`observedGeneration`** на NSC — **отложить** до отдельного PR/ADR, если достаточно conditions + `manifestCheckpointName`. На **`NamespaceSnapshot.status`** без изменений объёма: уже есть **`observedGeneration`**, **`boundSnapshotContentName`**, **`conditions`** — публично **без** MCR (§4.4).
 
 ---
 
@@ -161,7 +161,7 @@
 - `events`, `leases`, `endpointslices` (core / coordination / discovery — по фактическим GVR в кластере).
 - `replicasets`, `controllerrevisions` — derived/controller-owned; не дублировать workload.
 - **PodDisruptionBudget** — в первом наборе **не включать**; включение — отдельное решение.
-- Все **внутренние** объекты snapshotter: `NamespaceSnapshot`, `NamespaceSnapshotContent`, `ManifestCaptureRequest`, `ManifestCheckpoint`, `ManifestCheckpointContentChunk`, `ObjectKeeper` (и пр. CR модуля по списку), служебные объекты runner/MCR (по **labels/prefixes** — зафиксировать в коде рядом с allowlist).
+- Все **внутренние** объекты snapshotter: `NamespaceSnapshot`, `SnapshotContent`, `ManifestCaptureRequest`, `ManifestCheckpoint`, `ManifestCheckpointContentChunk`, `ObjectKeeper` (и пр. CR модуля по списку), служебные объекты runner/MCR (по **labels/prefixes** — зафиксировать в коде рядом с allowlist).
 - Любые GVR не из таблицы выше — **не** захватывать в N2a (fail-closed расширение только через изменение SSOT-списка).
 
 Профиль должен быть **один** в коде (или генерироваться из одного источника); ad-hoc «снять всё» запрещён (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
@@ -177,7 +177,7 @@
 | Generic: ObjectKeeper для MCR в **`FollowObject`** (следует за UID MCR) | Да, если **нет** аннотации bound NSC на MCR (`ret-mcr-*`, см. ~L297–L363). |
 | Generic: имя OK **`ret-mcr-<namespace>-<mcrName>`** | Да. |
 | Generic: **ManifestCheckpoint** **ownerReference → ObjectKeeper** `ret-mcr-…` (controller) | Да на generic-пути. |
-| **Namespace N2a:** при **`AnnotationBoundNamespaceSnapshotContent`** — **ManifestCheckpoint** **ownerReference → `NamespaceSnapshotContent`** (controller), **без** `ret-mcr-*` | Да (~L272–L296). |
+| **Namespace N2a:** при **`AnnotationBoundSnapshotContent`** — **ManifestCheckpoint** **ownerReference → `SnapshotContent`** (controller), **без** `ret-mcr-*` | Да (~L272–L296). |
 | **Chunks** **ownerReference → ManifestCheckpoint** | Да (поток create chunks). |
 | Root OK **`ret-nssnap-…`**: **`FollowObjectWithTTL`** на **`NamespaceSnapshot`**; **NSC `ownerReferences` → этот OK** | Да, `namespacesnapshot_capture.go` (`ensureNamespaceSnapshotRootObjectKeeper`). |
 
@@ -205,7 +205,7 @@
 
 7. **Immutability `spec.targets`:** расхождение снимаемого плана с live namespace → **`CapturePlanDrift`** (пока MCR ещё существует; см. integration-тест: drift проверяется **до** удаления MCR). Стабильный порядок targets — отсортированный набор (`BuildManifestCaptureTargets`).
 
-**Публичный статус root** — без полей MCR (§4.4). **Каноническая ссылка на артефакт** после success — **`NamespaceSnapshotContent.status.manifestCheckpointName`**.
+**Публичный статус root** — без полей MCR (§4.4). **Каноническая ссылка на артефакт** после success — **`SnapshotContent.status.manifestCheckpointName`**.
 
 ---
 
@@ -213,12 +213,12 @@
 
 ### 5.1 Normal flow (логические шаги)
 
-**Watch:** контроллер подписан на **`NamespaceSnapshot`** и на связанный **`NamespaceSnapshotContent`** (enqueue по `spec.namespaceSnapshotRef`), чтобы изменения content (в т.ч. ручной repair) снова прогоняли reconcile root без отдельного события на root.
+**Watch:** контроллер подписан на **`NamespaceSnapshot`** и на связанный **`SnapshotContent`** (enqueue по `spec.namespaceSnapshotRef`), чтобы изменения content (в т.ч. ручной repair) снова прогоняли reconcile root без отдельного события на root.
 
 1. Fetch; при удалении — §5.2.
 2. Ensure finalizer на root.
 3. Validation (namespace существует, class/policy валидна, spec консистентен) — §7.
-4. Ensure **NamespaceSnapshotContent** + запись bind в status root и ссылки root↔content — §4.2; ensure **ObjectKeeper** по ТЗ — §4.3 (**N2a+**).
+4. Ensure **SnapshotContent** + запись bind в status root и ссылки root↔content — §4.2; ensure **ObjectKeeper** по ТЗ — §4.3 (**N2a+**).
 5. **Reconcile capture** (N2a): ensure временного **MCR** → observe **MCP** через manifest-линию; при альтернативной реализации — Job/runner по [`implementation-plan.md`](implementation-plan.md) §2.4.1.
 6. По успеху: записать **`manifestCheckpointName`** и условия на **NSC**, **`Ready`** на root (включая агрегацию по **`childrenSnapshotRefs`**, §11.1), затем **удалить MCR** (§4.7).
 7. Не выполнять тяжёлую работу list/watch namespace в горячем пути, если она перенесена в MCR/controller capture path (политика ресурсов apiserver).
@@ -232,22 +232,22 @@
 1. **N2a и MCR при удалении root (текущая реализация `reconcileDelete`):**
    - После **успешного** capture MCR уже **удалён** контроллером (§4.7); при **Retain** типичный сценарий удаления root — **без** MCR в API.
    - **In-flight MCR** (пока не сработал явный delete после success): при **полном** исчезновении **`NamespaceSnapshot`** из API garbage collector удаляет MCR по **`ownerReferences` → NamespaceSnapshot** (§4.3, §4.7 п.3). **`reconcileDelete` по-прежнему не вызывает** явный `Delete(ManifestCaptureRequest)`.
-   - **`reconcileDelete` не** удаляет MCP/chunks: снимается финализатор с root при политике на NSC; артефакты следуют жизненному циклу **NamespaceSnapshotContent** (см. комментарий в коде).
+   - **`reconcileDelete` не** удаляет MCP/chunks: снимается финализатор с root при политике на NSC; артефакты следуют жизненному циклу **SnapshotContent** (см. комментарий в коде).
    - **Generic** отмена через цепочку **MCR→OK→MCP** относится к **не-namespace** пути manifest-линии.
 2. Если **deletionPolicy = Delete** (или эквивалент для артефакта): инициировать **удаление объекта в backend**; дождаться подтверждения **или** зафиксировать best-effort + явное условие/событие **Warning** (не оставлять поведение неопределённым в коде без комментария в spec).
-3. Довести **NamespaceSnapshotContent** до согласованного терминального состояния (артефакт удалён или помечен retained согласно политике), снять с content финализаторы, допускающие удаление; согласовать с **ObjectKeeper** по ТЗ.
+3. Довести **SnapshotContent** до согласованного терминального состояния (артефакт удалён или помечен retained согласно политике), снять с content финализаторы, допускающие удаление; согласовать с **ObjectKeeper** по ТЗ.
 4. Снять финализатор с **NamespaceSnapshot**, удалить root.
 
-**Инвариант:** финализатор root **снимается только после** того, как NamespaceSnapshotContent достиг **согласованного с deletion policy терминального состояния**; не раньше.
+**Инвариант:** финализатор root **снимается только после** того, как SnapshotContent достиг **согласованного с deletion policy терминального состояния**; не раньше.
 
-**Скелет (Phase 2, API-объект content):** при **DeletionPolicy=Delete** на `NamespaceSnapshotContent` контроллер вызывает `Delete` на CR и **не** снимает финализатор с root, пока `Get(NamespaceSnapshotContent)` не вернёт **NotFound** (requeue до исчезновения объекта из API).
+**Скелет (Phase 2, API-объект content):** при **DeletionPolicy=Delete** на `SnapshotContent` контроллер вызывает `Delete` на CR и **не** снимает финализатор с root, пока `Get(SnapshotContent)` не вернёт **NotFound** (requeue до исчезновения объекта из API).
 
-При **Retain:** артефакт и при необходимости **NamespaceSnapshotContent** переживают root — явный итог reconcile (**conditions** на content и ссылки orphaning). См. ТЗ в `snapshot-rework`.
+При **Retain:** артефакт и при необходимости **SnapshotContent** переживают root — явный итог reconcile (**conditions** на content и ссылки orphaning). См. ТЗ в `snapshot-rework`.
 
 ### 5.3 Recovery after restart
 
 - Восстановление связи root ↔ content по §4.2.
-- Если capture **уже завершён:** MCR **может отсутствовать**; ориентир **`NamespaceSnapshotContent.status.manifestCheckpointName`** и готовый **MCP** (быстрый путь reconcile без пересоздания MCR — §4.7 п.6).
+- Если capture **уже завершён:** MCR **может отсутствовать**; ориентир **`SnapshotContent.status.manifestCheckpointName`** и готовый **MCP** (быстрый путь reconcile без пересоздания MCR — §4.7 п.6).
 - Если capture **в процессе:** MCR по имени **§4.7 п.1**, MCP по формуле от UID MCR.
 - Идемпотентный ensure без дублирования тяжёлой работы (см. код `reconcileCaptureN2a`).
 
@@ -257,7 +257,7 @@
 
 - **Conditions** — **единственный** нормативный источник истины для операторов и автоматизации на `NamespaceSnapshot` (нет дублирующего `status.phase`). Решение: [`decisions/namespace-snapshot-status-surface.md`](decisions/namespace-snapshot-status-surface.md).
 
-**Минимальный lifecycle** — выражается **только** через conditions и поля фактов (имя привязанного **NamespaceSnapshotContent**, `observedGeneration`). Полный перечень публичных полей статуса для **N2a** — §4.4; агрегация parent для **N2b** — §11.1.
+**Минимальный lifecycle** — выражается **только** через conditions и поля фактов (имя привязанного **SnapshotContent**, `observedGeneration`). Полный перечень публичных полей статуса для **N2a** — §4.4; агрегация parent для **N2b** — §11.1.
 
 ```text
 (нет Bound / Bound=False) → Bound=True → … capture … → Ready=True
@@ -265,7 +265,7 @@
 Удаление root: финализатор + cleanup (§5.2); отдельного «phase Deleting» в API не требуется — достаточно conditions и deletionTimestamp.
 ```
 
-- **Bound=True** — NamespaceSnapshotContent создан и согласован с root (поля ссылок по §4.2).
+- **Bound=True** — SnapshotContent создан и согласован с root (поля ссылок по §4.2).
 - **Ready=True** — на **N1**: placeholder/fake capture (скелет). На **N2a+**: **persisted** manifest-результат (в т.ч. готовый **ManifestCheckpoint** и согласованный статус на NSC), не промежуточное состояние MCR без MCP. На **N2b** для parent — см. §11 (агрегация детей).
 - **Ready=False** с устойчивым reason — терминальная ошибка пользователя/конфигурации (см. §7.1).
 - **Progressing** / **CaptureStarted** / **ArtifactStored** — по мере появления реального manifest capture (**N2a**); смысл «идёт capture» задаётся **condition**, не отдельным enum в status.
@@ -330,7 +330,7 @@
 
 ### 8.5 Ownership (MVP)
 
-- Жизненный цикл артефакта в backend **управляется через пару** NamespaceSnapshot → **NamespaceSnapshotContent** (политика удаления на content / class): root инициирует сценарии, content отражает фактическое состояние хранения.
+- Жизненный цикл артефакта в backend **управляется через пару** NamespaceSnapshot → **SnapshotContent** (политика удаления на content / class): root инициирует сценарии, content отражает фактическое состояние хранения.
 - **Deletion policy** определяет, удаляется ли артефакт при удалении root или сохраняется (Retain).
 - **Backend / repository GC** не считается **основным** механизмом консистентности для MVP: он может существовать как вспомогательный, но оператор должен понимать гарантии из reconcile + policy, а не полагаться на неявный GC.
 - **Повторное использование артефакта и шаринг ссылок** между несколькими root в MVP **не поддерживаются** (**unsupported**); не оформлять как «тихий» edge case без отдельного контракта.
@@ -348,7 +348,7 @@
 - **N2a — download одного снимка:** отдаёт **только** манифесты **этого** root/content (один MCP / его chunks), **без** дочерних snapshot и без data payloads.
 - **N2b — aggregated download:** отдаёт манифесты **parent + subtree** (обход по **`childrenSnapshotContentRefs`** / согласованному graph), **только манифесты**, **без** data payloads.
 - **Материализация:** каждый content-node пишет свой **`status.manifestCheckpointName`** на MCP собственного scope. Parent MCP **не** содержит child manifests; дочерние MCP участвуют в E5 exclude и в aggregated read только через content graph.
-- **Own scope `NamespaceSnapshot`:** root MCR/MCP содержит только namespace-scoped allowlist resources. Kubernetes **`Namespace`** object не захватывается. Если после exclude root own scope пустой, создаётся empty MCP (0 objects), а `NamespaceSnapshotContent.status.manifestCheckpointName` всё равно заполняется.
+- **Own scope `NamespaceSnapshot`:** root MCR/MCP содержит только namespace-scoped allowlist resources. Kubernetes **`Namespace`** object не захватывается. Если после exclude root own scope пустой, создаётся empty MCP (0 objects), а `SnapshotContent.status.manifestCheckpointName` всё равно заполняется.
 - **Read-path:** для N2a и N2b по умолчанию **не** хранить отдельный заранее собранный архив в etcd/storage; **read-only агрегация на чтении** из существующих **MCP + chunks** (склейка через `ArchiveService` или эквивалент). Предматериализованный артефакт — только если отдельное ADR/этап.
 
 #### 8.7.1 Практика API и ошибок (N2a, текущий код)
@@ -356,7 +356,7 @@
 - **Endpoint одного снимка (уже есть):** HTTP **`GET`** … **`/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<manifestCheckpointName>/manifests`** — реализация **`ArchiveHandler.HandleGetManifests`** (`internal/api/archive_handler.go`): загрузка MCP, проверка **Ready**, затем **`ArchiveService.GetArchiveFromCheckpoint`** (склейка chunks).
 - **MCP не Ready:** ответ **409 Conflict** с телом Kubernetes **Status** (`checkpoint not ready`) — клиент не считает снимок готовым к выгрузке.
 - **MCP не найден:** **404**.
-- **Нет chunk / checksum mismatch / прочая поломка при склейке:** **500 InternalError** (как сейчас при ошибке `GetArchiveFromCheckpoint`); логирование с деталями. **N2a:** это **не** автоматически снимает **`Ready=True`** на `NamespaceSnapshot`/`NamespaceSnapshotContent` при одном неудачном запросе download (операционный сбой чтения ≠ откат capture). Отдельная condition уровня **ArtifactUnreadable** / reconcile, пересобирающий MCP — **после N2a**, если понадобится.
+- **Нет chunk / checksum mismatch / прочая поломка при склейке:** **500 InternalError** (как сейчас при ошибке `GetArchiveFromCheckpoint`); логирование с деталями. **N2a:** это **не** автоматически снимает **`Ready=True`** на `NamespaceSnapshot`/`SnapshotContent` при одном неудачном запросе download (операционный сбой чтения ≠ откат capture). Отдельная condition уровня **ArtifactUnreadable** / reconcile, пересобирающий MCP — **после N2a**, если понадобится.
 - **N2b aggregated download (PR4):** нормативный контракт — [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../spec/namespace-snapshot-aggregated-manifests-pr4.md) (endpoint `…/namespaces/{ns}/namespacesnapshots/{name}/manifests`, fail-whole, обход NSC, `ArchiveService`). Generic usecase умеет стартовать от произвольного registered content-node; HTTP route для curl от любого snapshot/content node — отдельное расширение API. **N2a** single-MCP путь — без изменений (строка выше).
 
 ---
@@ -379,10 +379,10 @@ spec:
 
 ## 10. MCR and manifest track
 
-- **Источник правды после успешного N2a:** `NamespaceSnapshot` + **`NamespaceSnapshotContent`** + **`manifestCheckpointName`** → **ManifestCheckpoint** (+ chunks); MCR **отсутствует** в API. Публичный контракт статусов — §4.4.
+- **Источник правды после успешного N2a:** `NamespaceSnapshot` + **`SnapshotContent`** + **`manifestCheckpointName`** → **ManifestCheckpoint** (+ chunks); MCR **отсутствует** в API. Публичный контракт статусов — §4.4.
 - **`ManifestCaptureRequest`:** **временный** внутренний объект на время capture; **не** в статусе root (§4.4). **`ManifestCheckpoint`** — persisted артефакт, для namespace-пути с **ownerRef на NSC** (§4.3, §4.6).
 - **Разделение ответственности (N2a):**
-  - **`NamespaceSnapshot` controller:** ensure **NamespaceSnapshotContent**; ensure **root OK** `ret-nssnap-…` (**`FollowObjectWithTTL`** на root snapshot, **NSC → ownerRef на OK**, §4.3.2); ensure **MCR** с **ownerRef** на root **`NamespaceSnapshot`** (§4.7 п.3) и при необходимости **удаление** **MCR** по **§4.7**; observe **MCP**; пишет **status** на **NamespaceSnapshot** и **NamespaceSnapshotContent**; **Ready** по persisted MCP.
+  - **`NamespaceSnapshot` controller:** ensure **SnapshotContent**; ensure **root OK** `ret-nssnap-…` (**`FollowObjectWithTTL`** на root snapshot, **NSC → ownerRef на OK**, §4.3.2); ensure **MCR** с **ownerRef** на root **`NamespaceSnapshot`** (§4.7 п.3) и при необходимости **удаление** **MCR** по **§4.7**; observe **MCP**; пишет **status** на **NamespaceSnapshot** и **SnapshotContent**; **Ready** по persisted MCP.
   - **`ManifestCheckpointController`:** исполняет **MCR → ManifestCheckpoint** (+ chunks); на **generic** пути — OK **`ret-mcr-*`**; на **namespace-bound** пути — MCP сразу под **NSC**, без **`ret-mcr-*`** для MCP; **не** пишет публичный статус NS/NSC.
 - Публично наружу: статус root/content по §4.4; **Ready** не выводить без persisted MCP (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
 
@@ -395,16 +395,16 @@ spec:
 **`NamespaceSnapshot` Ready=True означает:**
 
 - Root валиден (runtime validation прошла).
-- `NamespaceSnapshotContent` создан и **корректно привязан** к root.
+- `SnapshotContent` создан и **корректно привязан** к root.
 - Capture **завершён успешно** (в терминах §9 — без провала fail-closed).
 - Артефакт манифестов **persisted** (для **N2a+** — готовый **ManifestCheckpoint**/chunks; для **N1** — допускается placeholder).
-- Метаданные артефакта записаны в `NamespaceSnapshotContent.status` (или согласованное поле).
+- Метаданные артефакта записаны в `SnapshotContent.status` (или согласованное поле).
 - Дальнейший reconcile **не ожидает** незавершённых операций capture для этого поколения spec.
 - Для **N2b** (parent): см. **§11.1**.
 
 ### 11.1 N2b — политика агрегации Ready (design lock)
 
-- **`Ready=True` у parent** только если: **собственный** persisted manifest-результат (N2a: **ManifestCheckpoint** на parent `NamespaceSnapshotContent`, как сегодня в коде) **и** все **required** дочерние snapshot (по graph из **`childrenSnapshotRefs`** / доменной логике) также **`Ready=True`**.
+- **`Ready=True` у parent** только если: **собственный** persisted manifest-результат (N2a: **ManifestCheckpoint** на parent `SnapshotContent`, как сегодня в коде) **и** все **required** дочерние snapshot (по graph из **`childrenSnapshotRefs`** / доменной логике) также **`Ready=True`**.
 - **Child в процессе** (не bound, нет `Ready`, `Ready=False` с не-терминальной причиной N2a): parent **`Ready=False`**, reason **`ChildSnapshotPending`** (`pkg/snapshot.ReasonChildSnapshotPending`); message поясняет этап (ожидание bind child content / ожидание `Ready=True` у child; при не-терминальном **`Ready=False`** у child в message передаются **reason и при наличии message** child для observability).
 - **Child в терминальном сбое** N2a (`Ready=False` с причиной из allowlist терминальных root-capture ошибок): parent **`Ready=False`**, reason **`ChildSnapshotFailed`** (`pkg/snapshot.ReasonChildSnapshotFailed`); message содержит имя child и reason/message child.
 - Успешный parent после агрегации: **`Ready=True`**, reason **`Completed`** (`pkg/snapshot.ReasonCompleted`), как у N2a leaf после MCP.
@@ -414,7 +414,7 @@ spec:
 
 | Child state (resolved child snapshot по ref) | Parent `Ready` | Parent `Ready` reason |
 |-------------------------------------------|----------------|------------------------|
-| Нет привязанного `NamespaceSnapshotContent` / child reconcile в процессе | `False` | `ChildSnapshotPending` |
+| Нет привязанного `SnapshotContent` / child reconcile в процессе | `False` | `ChildSnapshotPending` |
 | `Ready` отсутствует или `Unknown` | `False` | `ChildSnapshotPending` |
 | `Ready=False` с не-терминальной причиной (например `ManifestCheckpointPending`) | `False` | `ChildSnapshotPending` |
 | `Ready=False` с терминальной причиной N2a (whitelist в коде) | `False` | `ChildSnapshotFailed` |
@@ -433,7 +433,7 @@ spec:
 **Выбрано:** namespaced root — [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md).
 
 - Проще делегирование прав и UX относительно владельцев namespace; resolved target namespace на текущем этапе = `metadata.namespace` у `NamespaceSnapshot`.
-- `NamespaceSnapshotContent` остаётся **cluster-scoped**; права на content и OK — отдельно от namespaced root (см. RBAC в шаблонах модуля и будущий N2).
+- `SnapshotContent` остаётся **cluster-scoped**; права на content и OK — отдельно от namespaced root (см. RBAC в шаблонах модуля и будущий N2).
 
 ---
 
@@ -455,7 +455,7 @@ spec:
 
 ## 14. Bootstrap / registry / RBAC impact
 
-- Зарегистрировать пару **`NamespaceSnapshot` / `NamespaceSnapshotContent`** в `pkg/unifiedbootstrap` (и при необходимости DSC): resolve, watches, RBAC в шаблонах. **Убрать** использование **generic `SnapshotContent`** как носителя для namespace root (**без** миграции — целевая схема сразу NSC).
+- Зарегистрировать пару **`NamespaceSnapshot` / `SnapshotContent`** в `pkg/unifiedbootstrap` (и при необходимости DSC): resolve, watches, RBAC в шаблонах. **Убрать** использование **generic `SnapshotContent`** как носителя для namespace root (**без** миграции — целевая схема сразу NSC).
 - Не смешивать в одном PR без необходимости с треками M1/M2 (manifest) и крупными изменениями R3 — см. [`implementation-plan.md`](implementation-plan.md).
 
 ---
@@ -467,7 +467,7 @@ spec:
 - **N2b:** integration — дерево, refs, parent Ready, aggregated download (manifests-only).
 - **N3:** envtest — recovery после рестарта контроллера поверх закрытого N2a (и при необходимости N2b).
 - **N4+:** лимиты большого namespace, таймауты; затем кейсы **N5** (data и полный ТЗ).
-- Идемпотентность ensure **NamespaceSnapshotContent**, OK, MCR/MCP и stable naming — отдельные кейсы.
+- Идемпотентность ensure **SnapshotContent**, OK, MCR/MCP и stable naming — отдельные кейсы.
 
 ---
 
@@ -479,7 +479,7 @@ spec:
 
 1. **Chosen option** в [`decisions/namespace-snapshot-scope.md`](decisions/namespace-snapshot-scope.md) (≠ TBD) — §13.1.
 2. Сверка apiVersion/group NS и NSC: ТЗ `snapshot-rework` ↔ CRD в репозитории.
-3. Пара **`NamespaceSnapshot` / `NamespaceSnapshotContent`** и **conditions-only** — decisions; root/content binding §4.2; ObjectKeeper — §4.3 + ТЗ.
+3. Пара **`NamespaceSnapshot` / `SnapshotContent`** и **conditions-only** — decisions; root/content binding §4.2; ObjectKeeper — §4.3 + ТЗ.
 
 ### N1 — CRD / API / skeleton lifecycle
 
@@ -489,7 +489,7 @@ spec:
 
 SSOT: **§2.4.1** и **§2.4.2** (декомпозиция N2b по PR) в [`implementation-plan.md`](implementation-plan.md).
 
-- **N2a:** OK + **MCR→ManifestCheckpoint** + запись результата в **`NamespaceSnapshotContent.status`** + **Ready** только по persisted MCP + download **одного** снимка; data — placeholders.
+- **N2a:** OK + **MCR→ManifestCheckpoint** + запись результата в **`SnapshotContent.status`** + **Ready** только по persisted MCP + download **одного** снимка; data — placeholders.
 - **N2b:** дочерние snapshot/content, **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, агрегированный **Ready** parent, **aggregated manifests download** subtree; всё ещё без data-flow. Вход в N2b — с **PR1** (только поля графа + docs/spec), см. **§2.4.2**.
 
 §8 — логический контракт манифестов; физическое хранение N2a согласовать с MCP/chunks и download path в коде.
@@ -514,4 +514,4 @@ Data-layer (volume/VSC/VCR), полный export/import, restore с данным
 |------|-----------------|
 | A. API / object lifecycle (NamespaceSnapshot controller) | Финализатор, content ensure, **conditions** (без `status.phase`), вызов domain capture, удаление |
 | B. Domain capture | План захвата, сериализация, запись в backend, возврат metadata/result |
-| C. Shared runtime / unified | Bind/sync для пары **NamespaceSnapshot / NamespaceSnapshotContent** (и при необходимости общие хелперы conditions с другими snapshot-типами) |
+| C. Shared runtime / unified | Bind/sync для пары **NamespaceSnapshot / SnapshotContent** (и при необходимости общие хелперы conditions с другими snapshot-типами) |

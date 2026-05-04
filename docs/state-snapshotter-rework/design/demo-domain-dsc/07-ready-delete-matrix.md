@@ -1,12 +1,12 @@
 # `Ready` / Failed / Delete: матрица по kinds (v1)
 
-**Статус:** Historical design (частично реализовано).  
+**Статус:** Historical design (частично реализовано).
 > ⚠️ This document contains historical and potentially outdated design decisions.
 > Current normative behavior is defined in:
 > - [`spec/system-spec.md`](../../spec/system-spec.md)
 > - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
 
-**Базовая модель:** единый condition **`Ready`** — [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) §A.4.  
+**Базовая модель:** единый condition **`Ready`** — [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) §A.4.
 **Связь:** дерево — [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md); dedup — [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md).
 
 **Не использовать:** отдельный condition **`SubtreeReady`**, поля **`domainSubtreeSummary`**, **`domainCoverage`** в CR.
@@ -16,7 +16,7 @@
 ## 1. Единый `Ready`: каскад успеха (снизу вверх)
 
 1. **Лист** (например `DemoVirtualDiskSnapshot`): **`Ready=True`** только когда выполнены **все** его жёсткие зависимости (§2 таблица leaf).
-2. **Промежуточный** узел (`DemoVirtualMachineSnapshot`) и **корень** при оценке **детей**: **`Ready=True`** только если **все обязательные** дети из **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** (с учётом **INV-R2a**) **готовы**. **Как прочитать готовность одного дочернего узла** — **одинаково** для всех контроллеров:
+2. **Промежуточный** узел demo VM и **корень** при оценке **детей**: **`Ready=True`** только если **все обязательные** дети из snapshot refs и content refs (с учётом **INV-R2a**) **готовы**. **Как прочитать готовность одного дочернего узла** — **одинаково** для всех контроллеров:
    1. Если у **snapshot**-ребёнка в API есть **свой** condition **`Ready`** → каскад опирается **только** на него (и на отсутствие противоречия с API).
    2. Иначе → по **первичной классификации** §3: обычно источник — **owning `*SnapshotContent`**, пока не получена классифицированная **`reason`** снизу.
    3. Если ни (1), ни (2) по контракту типа **не** применимы → **ошибка модели** (**spec**); родитель остаётся **`Ready=False`** до исправления.
@@ -47,7 +47,7 @@
 | Зависимость | Условие |
 |-------------|---------|
 | **Volume** | `VolumeSnapshot` **ReadyToUse** (или принятая политика CSI). |
-| **Manifest** | `DemoVirtualDiskSnapshotContent`: MCP **Ready**, chunks консистентны (правила N2a). |
+| **Manifest** | `SnapshotContent`: MCP **Ready**, chunks консистентны (правила N2a). |
 | **Итог** | **Оба** выполнены. **INV-R1 (fail-closed):** частичная готовность → **`Ready=False`**, `VolumeSnapshotNotReady` / `ManifestCheckpointNotReady` / аналог. |
 
 ---
@@ -95,19 +95,19 @@
 
 ### 4.1. Успех, затем удалена chunk / сломан MCP
 
-1. Дерево было **`Ready=True`**.  
-2. Администратор удаляет **chunk** манифеста (или ломает MCP).  
-3. По **приоритету первичной классификации** §3 (п.1–2): при наличии condition на **MCP** / checkpoint — сигнал оттуда; иначе первым выставляет **`Ready=False`** на **`DemoVirtualDiskSnapshotContent`** (или иной owning **`*SnapshotContent`**) → **`reason`**: **`ManifestChunkMissing`** / **`ManifestCheckpointMissing`**, `message` с деталями.  
+1. Дерево было **`Ready=True`**.
+2. Администратор удаляет **chunk** манифеста (или ломает MCP).
+3. По **приоритету первичной классификации** §3 (п.1–2): при наличии condition на **MCP** / checkpoint — сигнал оттуда; иначе первым выставляет **`Ready=False`** на **`SnapshotContent`** (или иной owning **`*SnapshotContent`**) → **`reason`**: **`ManifestChunkMissing`** / **`ManifestCheckpointMissing`**, `message` с деталями.
 4. Каскад: **disk content** → **disk snapshot** → **VM snapshot** → **root `NamespaceSnapshot`**: на каждом уровне **`Ready=False`**, причина **отражает первопричину** (не молчаливый False).
 
 ### 4.2. Успех, затем удалён дочерний **Snapshot**
 
-1. После успеха удалён например **`DemoVirtualDiskSnapshot`** (ручное удаление / GC).  
+1. После успеха удалён например **`DemoVirtualDiskSnapshot`** (ручное удаление / GC).
 2. Родитель (`DemoVirtualMachineSnapshot` или root) при reconcile: ребёнок отсутствует в API при том, что он **обязателен** по refs/политике → **`Ready=False`**, **`reason`**: **`ChildSnapshotMissing`**, `message` с именем/типом.
 
 ### 4.3. Успех, затем удалён дочерний **SnapshotContent**
 
-1. Удалён **`DemoVirtualDiskSnapshotContent`** (или другой обязательный content).  
+1. Удалён **`SnapshotContent`** (или другой обязательный content).
 2. Snapshot-родитель при reconcile → **`Ready=False`**, **`reason`**: **`ChildSnapshotContentMissing`** (или согласованный код), каскад дальше вверх как в §3.
 
 ---

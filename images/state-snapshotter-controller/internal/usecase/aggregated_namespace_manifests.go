@@ -58,14 +58,12 @@ type AggregatedNamespaceManifests struct {
 }
 
 // NewAggregatedNamespaceManifests creates an aggregated-manifests service for the manifests subresource.
-// graphLive supplies DSC/bootstrap snapshot↔content pairs so heterogeneous childrenSnapshotContentRefs can be traversed without domain imports,
-// with at most one TryRefresh on an unregistered dedicated-content ref (same contract as E5 subtree walk).
 func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphLive snapshotgraphregistry.LiveReader) *AggregatedNamespaceManifests {
 	return &AggregatedNamespaceManifests{client: c, archive: a, graphLive: graphLive}
 }
 
 // BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../namespace-snapshot-aggregated-manifests-pr4.md
-// When the NamespaceSnapshot is gone but retained NamespaceSnapshotContent still exists (same spec ref name/namespace), resolves content by listing.
+// When the NamespaceSnapshot is gone but retained SnapshotContent still exists (same spec ref name/namespace), resolves content by listing.
 func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
 	nsSnap := &storagev1alpha1.NamespaceSnapshot{}
 	err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, nsSnap)
@@ -74,12 +72,12 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, 
 		if bound == "" {
 			return nil, NewAggregatedStatusError(http.StatusConflict, "Conflict", "boundSnapshotContentName is empty")
 		}
-		return s.marshalAggregatedFromRootNSC(ctx, bound)
+		return s.marshalAggregatedFromRootContent(ctx, bound)
 	}
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get NamespaceSnapshot: %w", err)
 	}
-	bound, ferr := s.findRetainedRootNSCName(ctx, namespace, snapshotName)
+	bound, ferr := s.findRetainedRootContentName(ctx, namespace, snapshotName)
 	if ferr != nil {
 		return nil, ferr
 	}
@@ -87,14 +85,14 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, 
 		return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
 			fmt.Sprintf("NamespaceSnapshot %s/%s not found", namespace, snapshotName))
 	}
-	return s.marshalAggregatedFromRootNSC(ctx, bound)
+	return s.marshalAggregatedFromRootContent(ctx, bound)
 }
 
-func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootNSC(ctx context.Context, rootNSC string) ([]byte, error) {
+func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootContent(ctx context.Context, rootContent string) ([]byte, error) {
 	visited := make(map[string]struct{})
 	seenKeys := make(map[string]struct{})
 	objects := make([]map[string]interface{}, 0)
-	if err := s.walkNSC(ctx, rootNSC, visited, &objects, seenKeys); err != nil {
+	if err := s.walkContent(ctx, rootContent, visited, &objects, seenKeys); err != nil {
 		return nil, err
 	}
 	out, err := json.Marshal(objects)
@@ -105,32 +103,18 @@ func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootNSC(ctx context.
 }
 
 // BuildAggregatedJSONFromContent returns aggregated manifests starting from any registered content node.
-// NamespaceSnapshotContent roots use the typed walk; dedicated content roots require the live graph registry.
 func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromContent(ctx context.Context, contentGVK schema.GroupVersionKind, contentName string) ([]byte, error) {
 	if contentName == "" || contentGVK.Empty() {
 		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "content GVK and name are required")
 	}
-	if contentGVK == NamespaceSnapshotContentGVK() {
-		return s.marshalAggregatedFromRootNSC(ctx, contentName)
-	}
-
-	reg, err := s.currentAggregatedRegistry(ctx)
-	if err != nil {
-		return nil, err
-	}
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(contentGVK)
-	if err := s.client.Get(ctx, client.ObjectKey{Name: contentName}, u); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("%s %q not found", contentGVK.String(), contentName))
-		}
-		return nil, fmt.Errorf("get %s %q: %w", contentGVK.String(), contentName, err)
+	if contentGVK != SnapshotContentGVK() {
+		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("unsupported content resource %s", contentGVK.String()))
 	}
 
 	visited := make(map[string]struct{})
 	seenKeys := make(map[string]struct{})
 	objects := make([]map[string]interface{}, 0)
-	if err := s.walkDedicatedContent(ctx, contentGVK, contentName, u, reg, visited, &objects, seenKeys); err != nil {
+	if err := s.walkContent(ctx, contentName, visited, &objects, seenKeys); err != nil {
 		return nil, err
 	}
 	out, err := json.Marshal(objects)
@@ -146,15 +130,6 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromSnapshot(ctx conte
 	if snapshotName == "" || namespace == "" || snapshotGVK.Empty() {
 		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
 	}
-	reg, err := s.currentAggregatedRegistry(ctx)
-	if err != nil {
-		return nil, err
-	}
-	contentGVK, err := reg.ResolveSnapshotContentGVKBySnapshotGVK(snapshotGVK)
-	if err != nil {
-		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("unsupported snapshot resource %s", snapshotGVK.String()))
-	}
-
 	snap := &unstructured.Unstructured{}
 	snap.SetGroupVersionKind(snapshotGVK)
 	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, snap); err != nil {
@@ -170,7 +145,7 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromSnapshot(ctx conte
 	if contentName == "" {
 		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "boundSnapshotContentName is empty")
 	}
-	return s.BuildAggregatedJSONFromContent(ctx, contentGVK, contentName)
+	return s.BuildAggregatedJSONFromContent(ctx, SnapshotContentGVK(), contentName)
 }
 
 // IsRegisteredSnapshotGVK checks the live graph registry for an exact Snapshot GVK match.
@@ -202,23 +177,25 @@ func (s *AggregatedNamespaceManifests) currentAggregatedRegistry(ctx context.Con
 	return reg, nil
 }
 
-// findRetainedRootNSCName is a retained-read helper when the NamespaceSnapshot object is already deleted.
-// It lists cluster NamespaceSnapshotContent and picks the newest (by CreationTimestamp) whose
-// spec.namespaceSnapshotRef matches (namespace, snapshotName). If several retained contents exist for the same
+// findRetainedRootContentName is a retained-read helper when the NamespaceSnapshot object is already deleted.
+// It lists cluster SnapshotContent and picks the newest (by CreationTimestamp) whose
+// spec.snapshotRef matches (namespace, snapshotName). If several retained contents exist for the same
 // name (recreated snapshots), this is a best-effort policy for the aggregated manifests subresource only;
 // it is not a strong multi-version product contract.
-func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Context, namespace, snapshotName string) (string, error) {
-	var list storagev1alpha1.NamespaceSnapshotContentList
+func (s *AggregatedNamespaceManifests) findRetainedRootContentName(ctx context.Context, namespace, snapshotName string) (string, error) {
+	var list storagev1alpha1.SnapshotContentList
 	if err := s.client.List(ctx, &list); err != nil {
-		return "", fmt.Errorf("list NamespaceSnapshotContent: %w", err)
+		return "", fmt.Errorf("list SnapshotContent: %w", err)
 	}
 	var best string
 	// Use MinInt64 so clients without CreationTimestamp (e.g. envtest/fake) still pick a retained root;
 	// zero metav1.Time encodes as a large negative UnixNano(), which is still > MinInt64.
 	var bestTs int64 = math.MinInt64
 	for i := range list.Items {
-		snapshotRef := list.Items[i].Spec.NamespaceSnapshotRef
-		if snapshotRef.Namespace != namespace || snapshotRef.Name != snapshotName {
+		snapshotRef := list.Items[i].Spec.SnapshotRef
+		if snapshotRef.APIVersion != storagev1alpha1.SchemeGroupVersion.String() ||
+			snapshotRef.Kind != "NamespaceSnapshot" ||
+			snapshotRef.Namespace != namespace || snapshotRef.Name != snapshotName {
 			continue
 		}
 		ts := list.Items[i].CreationTimestamp.UnixNano()
@@ -230,53 +207,28 @@ func (s *AggregatedNamespaceManifests) findRetainedRootNSCName(ctx context.Conte
 	return best, nil
 }
 
-// walkNSC visits NamespaceSnapshotContent nodes for aggregated manifests (N2b PR4).
+// walkContent visits SnapshotContent nodes for aggregated manifests.
 // Traversal uses only status.childrenSnapshotContentRefs on each node (see
 // docs/state-snapshotter-rework/spec/namespace-snapshot-aggregated-manifests-pr4.md §2.2).
-// It does not list NamespaceSnapshotContent or NamespaceSnapshot to discover children,
+// It does not list SnapshotContent or NamespaceSnapshot to discover children,
 // and does not follow status.childrenSnapshotRefs on NamespaceSnapshot — consistent with
 // system-spec §3.4 (INV-REF-C1): empty or absent content refs mean no further descent from that node.
 //
-// Graph DFS is shared with WalkNamespaceSnapshotContentSubtree / WalkNamespaceSnapshotContentSubtreeWithRegistry
-// (namespacesnapshot_content_graph.go) so domain code and aggregation use the same ref-only walk (§3-E4).
-// Dedicated snapshot content nodes under childrenSnapshotContentRefs contribute their own MCPs via hooks.
-func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName string, _ map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
-	visit := func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
-		mcpName := nsc.Status.ManifestCheckpointName
+// Graph DFS is shared with WalkSnapshotContentSubtree so domain code and aggregation use the same ref-only walk.
+func (s *AggregatedNamespaceManifests) walkContent(ctx context.Context, contentName string, _ map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
+	visit := func(ctx context.Context, content *storagev1alpha1.SnapshotContent) error {
+		mcpName := content.Status.ManifestCheckpointName
 		if mcpName == "" {
 			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-				fmt.Sprintf("manifestCheckpointName is empty for NamespaceSnapshotContent %q", nsc.Name))
+				fmt.Sprintf("manifestCheckpointName is empty for SnapshotContent %q", content.Name))
 		}
 		return s.appendObjectsFromManifestCheckpoint(ctx, mcpName, objects, seenKeys)
 	}
-	hooks := &DedicatedContentVisitHooks{
-		Visit: func(ctx context.Context, gvk schema.GroupVersionKind, contentName string, u *unstructured.Unstructured, _ bool) error {
-			mcpName, _, err := unstructured.NestedString(u.Object, "status", "manifestCheckpointName")
-			if err != nil {
-				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-					fmt.Sprintf("%s %q: invalid status.manifestCheckpointName: %v", gvk.String(), contentName, err))
-			}
-			if mcpName == "" {
-				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-					fmt.Sprintf("manifestCheckpointName is empty for %s %q", gvk.String(), contentName))
-			}
-			return s.appendObjectsFromManifestCheckpoint(ctx, mcpName, objects, seenKeys)
-		},
-	}
-	var err error
-	switch {
-	case s.graphLive != nil:
-		err = WalkNamespaceSnapshotContentSubtreeWithRegistryMaybeRefresh(ctx, s.client, nscName, visit, s.graphLive, hooks)
-	default:
-		err = WalkNamespaceSnapshotContentSubtree(ctx, s.client, nscName, visit)
-	}
+	err := WalkSnapshotContentSubtree(ctx, s.client, contentName, visit)
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady) {
-		return NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady", err.Error())
-	}
-	if errors.Is(err, ErrNamespaceSnapshotContentCycle) {
+	if errors.Is(err, ErrSnapshotContentCycle) {
 		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
 	}
 	if apierrors.IsNotFound(err) {
@@ -287,53 +239,6 @@ func (s *AggregatedNamespaceManifests) walkNSC(ctx context.Context, nscName stri
 		return err
 	}
 	return err
-}
-
-func (s *AggregatedNamespaceManifests) walkDedicatedContent(
-	ctx context.Context,
-	gvk schema.GroupVersionKind,
-	contentName string,
-	u *unstructured.Unstructured,
-	reg *snapshot.GVKRegistry,
-	visited map[string]struct{},
-	objects *[]map[string]interface{},
-	seenKeys map[string]struct{},
-) error {
-	visit := func(ctx context.Context, nsc *storagev1alpha1.NamespaceSnapshotContent) error {
-		if nsc.Status.ManifestCheckpointName == "" {
-			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-				fmt.Sprintf("manifestCheckpointName is empty for NamespaceSnapshotContent %q", nsc.Name))
-		}
-		return s.appendObjectsFromManifestCheckpoint(ctx, nsc.Status.ManifestCheckpointName, objects, seenKeys)
-	}
-	hooks := &DedicatedContentVisitHooks{
-		Visit: func(ctx context.Context, childGVK schema.GroupVersionKind, childContentName string, child *unstructured.Unstructured, _ bool) error {
-			mcpName, _, err := unstructured.NestedString(child.Object, "status", "manifestCheckpointName")
-			if err != nil {
-				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-					fmt.Sprintf("%s %q: invalid status.manifestCheckpointName: %v", childGVK.String(), childContentName, err))
-			}
-			if mcpName == "" {
-				return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-					fmt.Sprintf("manifestCheckpointName is empty for %s %q", childGVK.String(), childContentName))
-			}
-			return s.appendObjectsFromManifestCheckpoint(ctx, mcpName, objects, seenKeys)
-		},
-	}
-	if err := walkDedicatedSnapshotContentSubtree(ctx, s.client, contentName, gvk, u, visited, visit, reg, hooks); err != nil {
-		if errors.Is(err, ErrNamespaceSnapshotContentCycle) {
-			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
-		}
-		if apierrors.IsNotFound(err) {
-			return NewAggregatedStatusError(http.StatusNotFound, "NotFound", err.Error())
-		}
-		var st *AggregatedStatusError
-		if errors.As(err, &st) {
-			return err
-		}
-		return err
-	}
-	return nil
 }
 
 func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(

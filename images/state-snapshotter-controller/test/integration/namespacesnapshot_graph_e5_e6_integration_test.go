@@ -41,7 +41,7 @@ import (
 )
 
 // mergeChildGraphIntoRoot wires status.childrenSnapshotRefs on the root NamespaceSnapshot and the matching
-// childrenSnapshotContentRefs entry on the root NamespaceSnapshotContent (integration seed only).
+// childrenSnapshotContentRefs entry on the root SnapshotContent (integration seed only).
 func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootName, childNSSName, childNSCName string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		p := &storagev1alpha1.NamespaceSnapshot{}
@@ -71,9 +71,9 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 		}
 		rootNSC := p.Status.BoundSnapshotContentName
 		if rootNSC == "" {
-			return fmt.Errorf("root has no bound NamespaceSnapshotContent yet")
+			return fmt.Errorf("root has no bound SnapshotContent yet")
 		}
-		pc := &storagev1alpha1.NamespaceSnapshotContent{}
+		pc := &storagev1alpha1.SnapshotContent{}
 		if err := c.Get(ctx, client.ObjectKey{Name: rootNSC}, pc); err != nil {
 			return err
 		}
@@ -85,8 +85,8 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 			}
 		}
 		if !foundC {
-			pc.Status.ChildrenSnapshotContentRefs = append(append([]storagev1alpha1.NamespaceSnapshotContentChildRef(nil), pc.Status.ChildrenSnapshotContentRefs...),
-				storagev1alpha1.NamespaceSnapshotContentChildRef{Name: childNSCName})
+			pc.Status.ChildrenSnapshotContentRefs = append(append([]storagev1alpha1.SnapshotContentChildRef(nil), pc.Status.ChildrenSnapshotContentRefs...),
+				storagev1alpha1.SnapshotContentChildRef{Name: childNSCName})
 			if err := c.Status().Update(ctx, pc); err != nil {
 				return err
 			}
@@ -174,11 +174,11 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 		Eventually(func(g Gomega) {
 			p := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
-			pc := &storagev1alpha1.NamespaceSnapshotContent{}
+			pc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: p.Status.BoundSnapshotContentName}, pc)).To(Succeed())
 			g.Expect(pc.Status.ChildrenSnapshotContentRefs).NotTo(BeEmpty())
 			chName := pc.Status.ChildrenSnapshotContentRefs[0].Name
-			chNSC := &storagev1alpha1.NamespaceSnapshotContent{}
+			chNSC := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: chName}, chNSC)).To(Succeed())
 
 			mcrName := namespacemanifest.NamespaceSnapshotMCRName(p.UID)

@@ -37,8 +37,6 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&NamespaceSnapshot{},
 		&NamespaceSnapshotList{},
-		&NamespaceSnapshotContent{},
-		&NamespaceSnapshotContentList{},
 		&SnapshotContent{},
 		&SnapshotContentList{},
 	)

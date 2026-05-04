@@ -58,16 +58,12 @@ type DomainSpecificSnapshotControllerSpec struct {
 }
 
 // +k8s:deepcopy-gen=true
-// SnapshotResourceMappingEntry maps resource / snapshot / content CRDs (plural.resource.group form).
+// SnapshotResourceMappingEntry maps resource CRDs to snapshot CRDs (plural.resource.group form).
 type SnapshotResourceMappingEntry struct {
 	// +kubebuilder:validation:Required
 	ResourceCRDName string `json:"resourceCRDName"`
 	// +kubebuilder:validation:Required
 	SnapshotCRDName string `json:"snapshotCRDName"`
-	// ContentCRDName is deprecated and kept for compatibility with the current v1alpha1 registration flow.
-	// Target architecture uses the common storage.deckhouse.io SnapshotContent for all snapshot kinds.
-	// +kubebuilder:validation:Required
-	ContentCRDName string `json:"contentCRDName"`
 	// Priority is used when ordering orchestration across mappings (lower runs first).
 	// +kubebuilder:validation:Minimum=0
 	Priority int32 `json:"priority,omitempty"`

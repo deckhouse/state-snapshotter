@@ -68,7 +68,6 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 					{
 						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-						ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 					},
 				},
 			},
@@ -134,7 +133,6 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 					{
 						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-						ContentCRDName:  "demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io",
 					},
 				},
 			},
