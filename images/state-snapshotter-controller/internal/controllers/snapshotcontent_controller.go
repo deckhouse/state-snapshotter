@@ -34,6 +34,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 // SnapshotContentController reconciles generic XxxxSnapshotContent resources
@@ -170,7 +171,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	for _, gvk := range gvksToCheck {
 		obj.SetGroupVersionKind(gvk)
-		err = r.Get(ctx, contentKey, obj)
+		err = r.APIReader.Get(ctx, contentKey, obj)
 		if err != nil {
 			if errors.IsNotFound(err) {
 				continue
@@ -270,14 +271,21 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Step 3: Consistency checks and Ready condition
-	// Check if artifacts exist and set Ready condition
-	if err := r.checkConsistencyAndSetReady(ctx, contentLike, obj); err != nil {
-		logger.Error(err, "Failed to check consistency")
-		// Non-fatal: continue reconciliation
+	// Common SnapshotContent status is owned by namespace/demo snapshot controllers.
+	// The generic content controller keeps only lifecycle/finalizer ownership for it.
+	if !isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
+		if err := r.checkConsistencyAndSetReady(ctx, contentLike, obj); err != nil {
+			logger.Error(err, "Failed to check consistency")
+			// Non-fatal: continue reconciliation
+		}
 	}
 
 	logger.Info("SnapshotContent reconciliation completed")
 	return ctrl.Result{}, nil
+}
+
+func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
+	return gvk == unifiedbootstrap.CommonSnapshotContentGVK()
 }
 
 // cascadeRemoveFinalizersFromChildren removes finalizers from child SnapshotContent objects
@@ -305,16 +313,20 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 
 	var childErrors []error
 	for _, childRef := range childrenRefs {
-		// Resolve child Content GVK through registry
-		childContentGVK, err := r.GVKRegistry.ResolveSnapshotContentGVK(childRef.Kind)
-		if err != nil {
-			// Fallback: derive from parent Content GVK if registry doesn't know
-			childContentGVK = schema.GroupVersionKind{
-				Group:   contentGVK.Group,
-				Version: contentGVK.Version,
-				Kind:    childRef.Kind,
+		childContentGVK := contentGVK
+		if childRef.Kind != "" && !isCommonSnapshotContentGVK(contentGVK) {
+			// Resolve child Content GVK through registry for legacy generic content shapes.
+			resolvedGVK, err := r.GVKRegistry.ResolveSnapshotContentGVK(childRef.Kind)
+			if err != nil {
+				// Fallback: derive from parent Content GVK if registry doesn't know
+				resolvedGVK = schema.GroupVersionKind{
+					Group:   contentGVK.Group,
+					Version: contentGVK.Version,
+					Kind:    childRef.Kind,
+				}
+				logger.V(1).Info("Child Content GVK not found in registry, using fallback", "kind", childRef.Kind)
 			}
-			logger.V(1).Info("Child Content GVK not found in registry, using fallback", "kind", childRef.Kind)
+			childContentGVK = resolvedGVK
 		}
 
 		childObj := &unstructured.Unstructured{}

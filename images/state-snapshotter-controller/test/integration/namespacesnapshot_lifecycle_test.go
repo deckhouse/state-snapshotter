@@ -103,7 +103,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			g.Expect(wantMCP).NotTo(BeEmpty())
 			mcp := &ssv1alpha1.ManifestCheckpoint{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: wantMCP}, mcp)).To(Succeed())
-			g.Expect(mcpOwnerRefToRootNSC(mcp.OwnerReferences, fresh.Status.BoundSnapshotContentName, sc.UID)).To(BeTrue())
+			g.Expect(mcpOwnerRefToRootContent(mcp.OwnerReferences, fresh.Status.BoundSnapshotContentName, sc.UID)).To(BeTrue())
 			for _, ref := range mcp.OwnerReferences {
 				g.Expect(ref.Kind).NotTo(Equal("ObjectKeeper"), "N2a path must not retain MCP via ret-mcr ObjectKeeper")
 			}

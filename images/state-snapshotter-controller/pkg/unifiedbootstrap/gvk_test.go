@@ -117,6 +117,14 @@ func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing
 	}
 }
 
+func TestAppendGVKIfMissing_DoesNotDuplicateCommonSnapshotContent(t *testing.T) {
+	common := CommonSnapshotContentGVK()
+	out := AppendGVKIfMissing([]schema.GroupVersionKind{common}, common)
+	if len(out) != 1 {
+		t.Fatalf("expected common SnapshotContent GVK to stay unique, got %v", out)
+	}
+}
+
 func TestDefaultGraphRegistryBuiltInPairs_containsOnlyNamespaceSnapshot(t *testing.T) {
 	pairs := DefaultGraphRegistryBuiltInPairs()
 	if len(pairs) != 1 {

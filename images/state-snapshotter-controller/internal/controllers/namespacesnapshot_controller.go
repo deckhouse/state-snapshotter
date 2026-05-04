@@ -169,7 +169,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	_ = ns
 
-	expectedName := namespaceSnapshotContentName(nsSnap)
+	expectedName := snapshotContentName(nsSnap)
 
 	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
 		nsSnap.Status.BoundSnapshotContentName = ""
@@ -404,7 +404,7 @@ func snapshotSubjectRefMatches(ref storagev1alpha1.SnapshotSubjectRef, ns *stora
 		ref.UID == ns.UID
 }
 
-func namespaceSnapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string {
+func snapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string {
 	uid := strings.ReplaceAll(string(ns.UID), "-", "")
 	return fmt.Sprintf("ns-%s", uid)
 }
@@ -412,7 +412,7 @@ func namespaceSnapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string 
 // snapshotContentObjectMeta builds metadata for a new SnapshotContent.
 func snapshotContentObjectMeta(nsSnap *storagev1alpha1.NamespaceSnapshot) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
-		Name:       namespaceSnapshotContentName(nsSnap),
+		Name:       snapshotContentName(nsSnap),
 		Finalizers: []string{snapshot.FinalizerParentProtect},
 	}
 }

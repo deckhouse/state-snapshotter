@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -94,10 +95,14 @@ var _ = Describe("Integration: NamespaceSnapshot N1 boundary (mismatch + recover
 		// Accept AlreadyExists and patch spec to the mismatched ref so the scenario stays deterministic.
 		if err := k8sClient.Create(ctx, badContent); err != nil {
 			Expect(apierrors.IsAlreadyExists(err)).To(BeTrue(), "unexpected error creating SnapshotContent: %v", err)
-			existing := &storagev1alpha1.SnapshotContent{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, existing)).To(Succeed())
-			existing.Spec.SnapshotRef = badRef
-			Expect(k8sClient.Update(ctx, existing)).To(Succeed())
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				existing := &storagev1alpha1.SnapshotContent{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, existing); err != nil {
+					return err
+				}
+				existing.Spec.SnapshotRef = badRef
+				return k8sClient.Update(ctx, existing)
+			})).To(Succeed())
 		}
 
 		Eventually(func(g Gomega) {

@@ -110,12 +110,12 @@ func aggManifestNotReadyMCP(name, srcNS string, chunks []ssv1alpha1.ChunkInfo, t
 	return cp
 }
 
-func aggManifestNSC(name, mcpName string, children ...string) *storagev1alpha1.SnapshotContent {
+func aggManifestContent(name, mcpName string, children ...string) *storagev1alpha1.SnapshotContent {
 	var refs []storagev1alpha1.SnapshotContentChildRef
 	for _, c := range children {
 		refs = append(refs, storagev1alpha1.SnapshotContentChildRef{Name: c})
 	}
-	nsc := &storagev1alpha1.SnapshotContent{
+	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
@@ -131,10 +131,10 @@ func aggManifestNSC(name, mcpName string, children ...string) *storagev1alpha1.S
 			ChildrenSnapshotContentRefs: refs,
 		},
 	}
-	meta.SetStatusCondition(&nsc.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	return nsc
+	return content
 }
 
 func aggManifestNS(bound string) *storagev1alpha1.NamespaceSnapshot {
@@ -160,7 +160,7 @@ func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
 	_ = cl.Create(context.Background(), ch)
 	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
 	_ = cl.Create(context.Background(), mcp)
-	root := aggManifestNSC("root-nsc", "mcp-root")
+	root := aggManifestContent("root-content", "mcp-root")
 	_ = cl.Create(context.Background(), root)
 	// No NamespaceSnapshot object — retained content only.
 
@@ -199,9 +199,9 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 	_ = cl.Create(context.Background(), ch)
 	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
 	_ = cl.Create(context.Background(), mcp)
-	root := aggManifestNSC("root-nsc", "mcp-root")
+	root := aggManifestContent("root-content", "mcp-root")
 	_ = cl.Create(context.Background(), root)
-	ns := aggManifestNS("root-nsc")
+	ns := aggManifestNS("root-content")
 	_ = cl.Create(context.Background(), ns)
 
 	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
@@ -217,7 +217,7 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 	}
 }
 
-func TestAggregatedNamespaceManifests_UnreferencedChildNSCNotWalked(t *testing.T) {
+func TestAggregatedNamespaceManifests_UnreferencedChildSnapshotContentNotWalked(t *testing.T) {
 	// §3-E3 / INV-REF-C1: an extra SnapshotContent+MCP may exist in the cluster, but if the root
 	// content node has empty childrenSnapshotContentRefs, aggregation MUST NOT reach it (no list/search fallback).
 	scheme := aggManifestTestScheme(t)
@@ -243,12 +243,12 @@ func TestAggregatedNamespaceManifests_UnreferencedChildNSCNotWalked(t *testing.T
 		_ = cl.Create(context.Background(), mcp)
 	}
 
-	orphan := aggManifestNSC("orphan-nsc", "mcp-orphan")
+	orphan := aggManifestContent("orphan-content", "mcp-orphan")
 	_ = cl.Create(context.Background(), orphan)
 
-	root := aggManifestNSC("root-nsc", "mcp-root") // no childrenSnapshotContentRefs
+	root := aggManifestContent("root-content", "mcp-root") // no childrenSnapshotContentRefs
 	_ = cl.Create(context.Background(), root)
-	ns := aggManifestNS("root-nsc")
+	ns := aggManifestNS("root-content")
 	_ = cl.Create(context.Background(), ns)
 
 	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
@@ -295,14 +295,14 @@ func TestAggregatedNamespaceManifests_ParentTwoChildren_OrderAndDedup(t *testing
 	}
 
 	// child-b before child-c lexicographically
-	childB := aggManifestNSC("child-b", "mcp-b")
-	childC := aggManifestNSC("child-c", "mcp-c")
+	childB := aggManifestContent("child-b", "mcp-b")
+	childC := aggManifestContent("child-c", "mcp-c")
 	_ = cl.Create(context.Background(), childB)
 	_ = cl.Create(context.Background(), childC)
 
-	root := aggManifestNSC("root-nsc", "mcp-root", "child-c", "child-b") // unsorted input; walk sorts
+	root := aggManifestContent("root-content", "mcp-root", "child-c", "child-b") // unsorted input; walk sorts
 	_ = cl.Create(context.Background(), root)
-	ns := aggManifestNS("root-nsc")
+	ns := aggManifestNS("root-content")
 	_ = cl.Create(context.Background(), ns)
 
 	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
@@ -348,12 +348,12 @@ func TestAggregatedNamespaceManifests_ChildContentNodeMCPIncluded(t *testing.T) 
 		_ = cl.Create(context.Background(), mcp)
 	}
 
-	diskContent := aggManifestNSC("disk-content", "mcp-disk")
+	diskContent := aggManifestContent("disk-content", "mcp-disk")
 	_ = cl.Create(context.Background(), diskContent)
 
-	root := aggManifestNSC("root-nsc", "mcp-root", "disk-content")
+	root := aggManifestContent("root-content", "mcp-root", "disk-content")
 	_ = cl.Create(context.Background(), root)
-	ns := aggManifestNS("root-nsc")
+	ns := aggManifestNS("root-content")
 	_ = cl.Create(context.Background(), ns)
 
 	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
@@ -393,8 +393,8 @@ func TestAggregatedNamespaceManifests_FromContentNode(t *testing.T) {
 		_ = cl.Create(context.Background(), mcp)
 	}
 
-	_ = cl.Create(context.Background(), aggManifestNSC("disk-content", "mcp-disk"))
-	_ = cl.Create(context.Background(), aggManifestNSC("vm-content", "mcp-vm", "disk-content"))
+	_ = cl.Create(context.Background(), aggManifestContent("disk-content", "mcp-disk"))
+	_ = cl.Create(context.Background(), aggManifestContent("vm-content", "mcp-vm", "disk-content"))
 
 	raw, err := agg.BuildAggregatedJSONFromContent(context.Background(), SnapshotContentGVK(), "vm-content")
 	if err != nil {
@@ -425,12 +425,12 @@ func TestAggregatedNamespaceManifests_ChildContentWithoutMCPFailsClosed(t *testi
 	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 	_ = cl.Create(context.Background(), mcp)
 
-	diskContent := aggManifestNSC("disk-content", "")
+	diskContent := aggManifestContent("disk-content", "")
 	_ = cl.Create(context.Background(), diskContent)
 
-	root := aggManifestNSC("root-nsc", "mcp-root", "disk-content")
+	root := aggManifestContent("root-content", "mcp-root", "disk-content")
 	_ = cl.Create(context.Background(), root)
-	ns := aggManifestNS("root-nsc")
+	ns := aggManifestNS("root-content")
 	_ = cl.Create(context.Background(), ns)
 
 	_, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
@@ -470,9 +470,9 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 	t.Run("mcp not found 404", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
-		root := aggManifestNSC("root-nsc", "missing-mcp")
+		root := aggManifestContent("root-content", "missing-mcp")
 		_ = cl.Create(ctx, root)
-		ns := aggManifestNS("root-nsc")
+		ns := aggManifestNS("root-content")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -481,9 +481,9 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		}
 	})
 
-	t.Run("nsc not found 404", func(t *testing.T) {
+	t.Run("content not found 404", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-			aggManifestNS("no-such-nsc"),
+			aggManifestNS("no-such-content"),
 		).Build()
 		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
@@ -504,9 +504,9 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		_ = cl.Create(ctx, ch)
 		mcp := aggManifestNotReadyMCP("mcp-bad", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
 		_ = cl.Create(ctx, mcp)
-		root := aggManifestNSC("root-nsc", "mcp-bad")
+		root := aggManifestContent("root-content", "mcp-bad")
 		_ = cl.Create(ctx, root)
-		ns := aggManifestNS("root-nsc")
+		ns := aggManifestNS("root-content")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -529,11 +529,11 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 			mcp := aggManifestReadyMCP(name, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 			_ = cl.Create(ctx, mcp)
 		}
-		child := aggManifestNSC("child-nsc", "mcp-child")
+		child := aggManifestContent("child-content", "mcp-child")
 		_ = cl.Create(ctx, child)
-		root := aggManifestNSC("root-nsc", "mcp-root", "child-nsc")
+		root := aggManifestContent("root-content", "mcp-root", "child-content")
 		_ = cl.Create(ctx, root)
-		ns := aggManifestNS("root-nsc")
+		ns := aggManifestNS("root-content")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -555,11 +555,11 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 			mcp := aggManifestReadyMCP(pair.cp, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 			_ = cl.Create(ctx, mcp)
 		}
-		a := aggManifestNSC("nsc-a", "mcp-a", "nsc-b")
-		b := aggManifestNSC("nsc-b", "mcp-b", "nsc-a")
+		a := aggManifestContent("content-a", "mcp-a", "content-b")
+		b := aggManifestContent("content-b", "mcp-b", "content-a")
 		_ = cl.Create(ctx, a)
 		_ = cl.Create(ctx, b)
-		ns := aggManifestNS("nsc-a")
+		ns := aggManifestNS("content-a")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError
@@ -571,10 +571,10 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 	t.Run("missing manifestCheckpointName 500", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
-		nsc := aggManifestNSC("root-nsc", "x")
-		nsc.Status.ManifestCheckpointName = ""
-		_ = cl.Create(ctx, nsc)
-		ns := aggManifestNS("root-nsc")
+		content := aggManifestContent("root-content", "x")
+		content.Status.ManifestCheckpointName = ""
+		_ = cl.Create(ctx, content)
+		ns := aggManifestNS("root-content")
 		_ = cl.Create(ctx, ns)
 		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
 		var st *AggregatedStatusError

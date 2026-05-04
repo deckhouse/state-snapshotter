@@ -2,15 +2,15 @@
 
 ## Status
 
-**Accepted** — целевая модель внедрения. Детальный поток, поля и примеры — **только** в [`snapshot-rework/`](../../../snapshot-rework/) (файлы в этом каталоге для контракта **не меняем** в пользу `docs/`; инженерные документы здесь только план поставки и ссылки).
+**Historical / superseded by common `SnapshotContent` model.** Нормативный контракт сейчас — [`../spec/system-spec.md`](../../spec/system-spec.md); `snapshot-rework/` остаётся длинной историей решений, если явно помечено как historical.
 
 **Согласованность:** binding root ↔ content, Ready, artifact ownership, политика удаления — выводить из ТЗ в `snapshot-rework` и этого design. **Gate по API scope** (cluster vs namespaced root) — [`namespace-snapshot-scope.md`](namespace-snapshot-scope.md).
 
 ## Context
 
-Нужен явный носитель результата снимка namespace в паре с **`NamespaceSnapshot`**, по тому же паттерну, что и другие доменные `XxxSnapshot` / `SnapshotContent`. Общий **`SnapshotContent`** (`storage.deckhouse.io`) для **корня** namespace-snapshot **не** используем: целевая пара — **`NamespaceSnapshot` + `SnapshotContent`**.
+Нужен явный носитель результата снимка namespace в паре с **`NamespaceSnapshot`**, по тому же паттерну, что и другие доменные `XxxSnapshot` / `SnapshotContent`. Текущая целевая пара — **`NamespaceSnapshot` + общий `SnapshotContent`**.
 
-Удержание артефактов и связь с **ObjectKeeper** — как в ТЗ (`snapshot-rework`), без отдельной «миграции» с промежуточной схемы: реализацию **сразу** ведём к NS + NSC + OK.
+Удержание артефактов и связь с **ObjectKeeper** — как в ТЗ (`snapshot-rework`), без отдельной «миграции» с промежуточной схемы: реализацию **сразу** ведём к NS + SnapshotContent + OK.
 
 ## Decision
 
@@ -20,15 +20,15 @@
 
 ## Consequences
 
-- **Bootstrap / unified:** пара GVK `NamespaceSnapshot` / `SnapshotContent` в desired list, DSC при необходимости; убрать опору на generic `SnapshotContent` **именно как носитель результата** для этого root.
-- **Код:** новые/обновлённые типы, CRD, reconciler(ы), тесты — под NSC + OK; **не** закладывать миграцию со старого пути через `SnapshotContent` для namespace root.
+- **Bootstrap / unified:** пара GVK `NamespaceSnapshot` / общий `SnapshotContent` в desired list, DSC при необходимости.
+- **Код:** новые/обновлённые типы, CRD, reconciler(ы), тесты — под SnapshotContent + OK; **не** закладывать миграцию со старого пути через `SnapshotContent` для namespace root.
 - **Документы в `docs/`:** остаются планом поставки и выжимкой; **истина по сценарию** — `snapshot-rework/`.
 
 ## Supersedes
 
-Ранее зафиксированный вариант «MVP только через общий `SnapshotContent`» для пары namespace root — **снят** этим решением.
+Ранее зафиксированный вариант отдельного namespace content — **снят** текущей common-content моделью.
 
 ## Alternatives considered (кратко)
 
-1. **Только generic `SnapshotContent`** — отклонено для целевой поставки (остаётся возможным для других видов снимков в unified-модели, но не как носитель для namespace root по текущему ТЗ).
-2. **Миграция с SnapshotContent на NSC** — не требуется: делаем сразу NSC.
+1. **Отдельный namespace content** — superseded: текущий runtime использует общий `SnapshotContent`.
+2. **Миграционный dual-mode** — не требуется для v0: legacy content API/CRD удалены.

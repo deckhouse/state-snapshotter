@@ -251,21 +251,21 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 
 	controllerTrue := func() *bool { b := true; return &b }()
 
-	nscBoundName := ""
+	boundContentName := ""
 	if mcr.Annotations != nil {
-		nscBoundName = mcr.Annotations[namespacemanifest.AnnotationBoundSnapshotContent]
+		boundContentName = mcr.Annotations[namespacemanifest.AnnotationBoundSnapshotContent]
 	}
 
 	var mcpOwnerRefs []metav1.OwnerReference
 
-	if nscBoundName != "" {
+	if boundContentName != "" {
 		r.Logger.Info("NamespaceSnapshot-bound capture: MCP ownerRef -> SnapshotContent",
-			"snapshotContent", nscBoundName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+			"snapshotContent", boundContentName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
 		r.updateProcessingMessage(ctx, mcr, "Resolving SnapshotContent for checkpoint ownerRef...")
 		boundContent := &snapstorage.SnapshotContent{}
-		if err := r.Get(ctx, client.ObjectKey{Name: nscBoundName}, boundContent); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: boundContentName}, boundContent); err != nil {
 			if errors.IsNotFound(err) {
-				msg := fmt.Sprintf("SnapshotContent %q not found", nscBoundName)
+				msg := fmt.Sprintf("SnapshotContent %q not found", boundContentName)
 				if ferr := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, msg); ferr != nil {
 					if errors.IsNotFound(ferr) {
 						return ctrl.Result{}, nil
@@ -274,7 +274,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				}
 				return ctrl.Result{}, fmt.Errorf("%s", msg)
 			}
-			return ctrl.Result{}, fmt.Errorf("get SnapshotContent %q: %w", nscBoundName, err)
+			return ctrl.Result{}, fmt.Errorf("get SnapshotContent %q: %w", boundContentName, err)
 		}
 		mcpOwnerRefs = []metav1.OwnerReference{{
 			APIVersion: snapstorage.SchemeGroupVersion.String(),

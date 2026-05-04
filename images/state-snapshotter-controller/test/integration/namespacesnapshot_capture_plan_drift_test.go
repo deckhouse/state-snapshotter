@@ -40,7 +40,7 @@ import (
 )
 
 var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func() {
-	It("sets CapturePlanDrift on root and NSC when allowlisted resources change after MCR is fixed (no silent spec.targets update)", func() {
+	It("sets CapturePlanDrift on root and SnapshotContent when allowlisted resources change after MCR is fixed (no silent spec.targets update)", func() {
 		ctx := context.Background()
 		contentName := ""
 

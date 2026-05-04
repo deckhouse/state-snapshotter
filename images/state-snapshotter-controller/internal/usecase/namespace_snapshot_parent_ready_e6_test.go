@@ -249,12 +249,12 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_GetErrorPropagates(t *tes
 func TestClassifyGenericChildSnapshotReady_TerminalVsPending(t *testing.T) {
 	t.Parallel()
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
-	u := demoSnapshotUnstructuredReady("ns", "x", gvk, "nsc", metav1.ConditionFalse, "CapturePlanDrift")
+	u := demoSnapshotUnstructuredReady("ns", "x", gvk, "content", metav1.ConditionFalse, "CapturePlanDrift")
 	c, msg := ClassifyGenericChildSnapshotReady(u, gvk, "ns", "x")
 	if c != NamespaceSnapshotChildReadyClassFailed || msg == "" {
 		t.Fatalf("got %v %q", c, msg)
 	}
-	u2 := demoSnapshotUnstructuredReady("ns", "y", gvk, "nsc2", metav1.ConditionFalse, "ManifestCheckpointPending")
+	u2 := demoSnapshotUnstructuredReady("ns", "y", gvk, "content2", metav1.ConditionFalse, "ManifestCheckpointPending")
 	c2, _ := ClassifyGenericChildSnapshotReady(u2, gvk, "ns", "y")
 	if c2 != NamespaceSnapshotChildReadyClassPending {
 		t.Fatalf("got %v", c2)
@@ -266,7 +266,7 @@ func TestClassifyNamespaceSnapshotChildReady_DelegatesToGeneric(t *testing.T) {
 	ch := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "leaf"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			BoundSnapshotContentName: "nsc",
+			BoundSnapshotContentName: "content",
 			Conditions: []metav1.Condition{{
 				Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: snapshot.ReasonCompleted,
 			}},

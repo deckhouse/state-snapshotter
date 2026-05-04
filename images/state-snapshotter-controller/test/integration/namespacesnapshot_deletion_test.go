@@ -41,21 +41,21 @@ import (
 )
 
 // objectKeeperHasControllerOwnerRefToSnapshotContent is true when ObjectKeeper lists SnapshotContent
-// as a controlling ownerReference (OK→NSC). Retained root contract is the opposite: root SnapshotContent must
-// depend on ObjectKeeper (NSC→OK) so TTL expiry on OK drives GC of the tree below NSC.
-func objectKeeperHasControllerOwnerRefToSnapshotContent(refs []metav1.OwnerReference, nscName string, nscUID types.UID) bool {
+// as a controlling ownerReference (OK→SnapshotContent). Retained root contract is the opposite: root SnapshotContent must
+// depend on ObjectKeeper (SnapshotContent→OK) so TTL expiry on OK drives GC of the tree below SnapshotContent.
+func objectKeeperHasControllerOwnerRefToSnapshotContent(refs []metav1.OwnerReference, contentName string, contentUID types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
 		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" &&
-			ref.Name == nscName && ref.UID == nscUID {
+			ref.Name == contentName && ref.UID == contentUID {
 			return true
 		}
 	}
 	return false
 }
 
-// rootNSCOwnerRefToObjectKeeper is true when root SnapshotContent has a controlling ownerRef to the root ObjectKeeper (TTL anchor).
-func rootNSCOwnerRefToObjectKeeper(refs []metav1.OwnerReference, okName string, okUID types.UID) bool {
+// rootContentOwnerRefToObjectKeeper is true when root SnapshotContent has a controlling ownerRef to the root ObjectKeeper (TTL anchor).
+func rootContentOwnerRefToObjectKeeper(refs []metav1.OwnerReference, okName string, okUID types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
 		if ref.APIVersion == "deckhouse.io/v1alpha1" && ref.Kind == "ObjectKeeper" &&
@@ -66,8 +66,8 @@ func rootNSCOwnerRefToObjectKeeper(refs []metav1.OwnerReference, okName string, 
 	return false
 }
 
-// mcpOwnerRefToRootNSC is true when ManifestCheckpoint has a controlling ownerRef to the root SnapshotContent (namespace-snapshot capture path).
-func mcpOwnerRefToRootNSC(refs []metav1.OwnerReference, name string, uid types.UID) bool {
+// mcpOwnerRefToRootContent is true when ManifestCheckpoint has a controlling ownerRef to the root SnapshotContent (namespace-snapshot capture path).
+func mcpOwnerRefToRootContent(refs []metav1.OwnerReference, name string, uid types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
 		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" &&
@@ -281,10 +281,10 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, &ssv1alpha1.ManifestCheckpoint{})).To(Succeed())
 		}).WithTimeout(90 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
-		nsc := &storagev1alpha1.SnapshotContent{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, nsc)).To(Succeed())
-		for i := range nsc.OwnerReferences {
-			Expect(nsc.OwnerReferences[i].Kind).NotTo(Equal("NamespaceSnapshot"),
+		content := &storagev1alpha1.SnapshotContent{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, content)).To(Succeed())
+		for i := range content.OwnerReferences {
+			Expect(content.OwnerReferences[i].Kind).NotTo(Equal("NamespaceSnapshot"),
 				"root SnapshotContent must not use ownerReferences to NamespaceSnapshot (bind is spec.namespaceSnapshotRef only)")
 		}
 		ok := &deckhousev1alpha1.ObjectKeeper{}
@@ -298,13 +298,13 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Expect(ok.Spec.Mode).To(Equal("FollowObjectWithTTL"))
 		Expect(ok.Spec.TTL).NotTo(BeNil())
 		Expect(ok.Spec.TTL.Duration).To(Equal(config.DefaultSnapshotRootOKTTL))
-		Expect(objectKeeperHasControllerOwnerRefToSnapshotContent(ok.OwnerReferences, contentName, nsc.UID)).To(BeFalse(),
-			"root ObjectKeeper must not list SnapshotContent as a controlling ownerRef; retained anchor is NSC→OK")
-		Expect(rootNSCOwnerRefToObjectKeeper(nsc.OwnerReferences, okName, ok.UID)).To(BeTrue())
+		Expect(objectKeeperHasControllerOwnerRefToSnapshotContent(ok.OwnerReferences, contentName, content.UID)).To(BeFalse(),
+			"root ObjectKeeper must not list SnapshotContent as a controlling ownerRef; retained anchor is SnapshotContent→OK")
+		Expect(rootContentOwnerRefToObjectKeeper(content.OwnerReferences, okName, ok.UID)).To(BeTrue())
 
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, mcp)).To(Succeed())
-		Expect(mcpOwnerRefToRootNSC(mcp.OwnerReferences, contentName, nsc.UID)).To(BeTrue())
+		Expect(mcpOwnerRefToRootContent(mcp.OwnerReferences, contentName, content.UID)).To(BeTrue())
 
 		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName},

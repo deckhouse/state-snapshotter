@@ -84,8 +84,8 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentMCPContributes(t *test
 	ch := aggManifestCreateChunk("ch-dedicated", "mcp-dedicated", d1, c1)
 	mcpDedicated := aggManifestReadyMCP("mcp-dedicated", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: c1}}, 1)
 
-	nscRoot := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
 		},
@@ -103,10 +103,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentMCPContributes(t *test
 		},
 	}
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ch, mcpDedicated, nscRoot, disk, diskContent, rootNS).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ch, mcpDedicated, rootContentObj, disk, diskContent, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
 	if err != nil {
 		t.Fatalf("collectRunSubtreeManifestExcludeKeys: %v", err)
 	}
@@ -122,8 +122,8 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentWithoutMCPPends(t *tes
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
-	nscRoot := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
 		},
@@ -141,10 +141,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentWithoutMCPPends(t *tes
 		},
 	}
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, disk, diskContent, rootNS).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rootContentObj, disk, diskContent, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
 	if err == nil {
 		t.Fatal("expected pending error when dedicated content has no manifestCheckpointName")
 	}
@@ -157,8 +157,8 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentMCPNotReadyPends(t *te
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
-	nscRoot := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
 		},
@@ -177,10 +177,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentMCPNotReadyPends(t *te
 		},
 	}
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, disk, diskContent, mcpPending, rootNS).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rootContentObj, disk, diskContent, mcpPending, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
 	if err == nil {
 		t.Fatal("expected pending error when dedicated content ManifestCheckpoint is not Ready")
 	}
@@ -205,26 +205,26 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 	chOrphan := aggManifestCreateChunk("ch-orphan", "mcp-orphan", dOrphan, cOrphan)
 	mcpOrphan := aggManifestReadyMCP("mcp-orphan", "ns1", []ssv1alpha1.ChunkInfo{{Name: chOrphan.Name, Index: 0, Checksum: cOrphan}}, 1)
 
-	nscRoot := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-nsc"}},
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-content"}},
 		},
 	}
-	nscChild := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "child-nsc"},
+	childContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-child",
 		},
 	}
-	meta.SetStatusCondition(&nscChild.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&childContentObj.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
 
 	childSnap := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			BoundSnapshotContentName: "child-nsc",
+			BoundSnapshotContentName: "child-content",
 		},
 	}
 
@@ -241,23 +241,23 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 		},
 	}
 
-	nscOrphan := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "orphan-nsc"},
+	orphanContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-orphan",
 		},
 	}
-	meta.SetStatusCondition(&nscOrphan.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&orphanContentObj.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		ch, mcpChild, chOrphan, mcpOrphan,
-		nscRoot, nscChild, nscOrphan, childSnap, rootNS,
+		rootContentObj, childContentObj, orphanContentObj, childSnap, rootNS,
 	).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
 	if err != nil {
 		t.Fatalf("collectRunSubtreeManifestExcludeKeys: %v", err)
 	}
@@ -279,8 +279,8 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
-	nscRoot := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
 	disk := fixtureSnapshotUnstructured("missing-from-graph")
@@ -296,12 +296,12 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 			},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, disk, rootNS).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rootContentObj, disk, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
 	if err == nil {
-		t.Fatal("expected error when child content is not linked from root NSC graph")
+		t.Fatal("expected error when child content is not linked from root SnapshotContent graph")
 	}
 	if !errors.Is(err, ErrRunGraphChildNotReachable) {
 		t.Fatalf("expected ErrRunGraphChildNotReachable, got %v", err)
@@ -312,22 +312,22 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
-	nscRoot := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-nsc"}},
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-content"}},
 		},
 	}
-	nscChild := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "child-nsc"},
+	childContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-broken",
 		},
 	}
-	meta.SetStatusCondition(&nscChild.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&childContentObj.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	disk := fixtureSnapshotUnstructured("child-nsc")
+	disk := fixtureSnapshotUnstructured("child-content")
 	rootNS := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
 		Status: storagev1alpha1.NamespaceSnapshotStatus{
@@ -340,10 +340,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 			},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nscRoot, nscChild, disk, rootNS).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rootContentObj, childContentObj, disk, rootNS).Build()
 	arch := NewArchiveService(cl, cl, log)
 
-	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-nsc")
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
 	if err == nil {
 		t.Fatal("expected error when ManifestCheckpoint is missing / not readable")
 	}

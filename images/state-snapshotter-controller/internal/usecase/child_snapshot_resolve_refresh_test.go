@@ -74,7 +74,7 @@ func TestResolveChildSnapshotRefToBoundContentName_NamespaceSnapshot(t *testing.
 	})
 	child.SetNamespace("ns1")
 	child.SetName("child1")
-	_ = unstructured.SetNestedField(child.Object, "nsc-child", "status", "boundSnapshotContentName")
+	_ = unstructured.SetNestedField(child.Object, "content-child", "status", "boundSnapshotContentName")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child).Build()
 	ref := storagev1alpha1.NamespaceSnapshotChildRef{
@@ -86,7 +86,7 @@ func TestResolveChildSnapshotRefToBoundContentName_NamespaceSnapshot(t *testing.
 	if err != nil {
 		t.Fatalf("ResolveChildSnapshotRefToBoundContentName: %v", err)
 	}
-	if out != "nsc-child" {
+	if out != "content-child" {
 		t.Fatalf("bound content: got %q", out)
 	}
 }

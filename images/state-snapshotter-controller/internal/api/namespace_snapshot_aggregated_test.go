@@ -84,8 +84,8 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	})
 	_ = cl.Create(context.Background(), mcp)
 
-	nsc := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
@@ -97,14 +97,14 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-root"},
 	}
-	meta.SetStatusCondition(&nsc.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	_ = cl.Create(context.Background(), nsc)
+	_ = cl.Create(context.Background(), content)
 
 	ns := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
-		Status:     storagev1alpha1.NamespaceSnapshotStatus{BoundSnapshotContentName: "root-nsc"},
+		Status:     storagev1alpha1.NamespaceSnapshotStatus{BoundSnapshotContentName: "root-content"},
 	}
 	_ = cl.Create(context.Background(), ns)
 
@@ -173,8 +173,8 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	})
 	_ = cl.Create(context.Background(), mcp)
 
-	nsc := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-nsc"},
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
@@ -186,14 +186,14 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-root"},
 	}
-	meta.SetStatusCondition(&nsc.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
-	_ = cl.Create(context.Background(), nsc)
+	_ = cl.Create(context.Background(), content)
 
 	ns := &storagev1alpha1.NamespaceSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
-		Status:     storagev1alpha1.NamespaceSnapshotStatus{BoundSnapshotContentName: "root-nsc"},
+		Status:     storagev1alpha1.NamespaceSnapshotStatus{BoundSnapshotContentName: "root-content"},
 	}
 	_ = cl.Create(context.Background(), ns)
 

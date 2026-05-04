@@ -45,7 +45,7 @@ func TestSnapshotContentNodeFromSnapshotContent(t *testing.T) {
 }
 
 func TestSnapshotContentNodeFromSnapshotContentRoot(t *testing.T) {
-	nsc := &storagev1alpha1.SnapshotContent{
+	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-root",
@@ -55,7 +55,7 @@ func TestSnapshotContentNodeFromSnapshotContentRoot(t *testing.T) {
 		},
 	}
 
-	node := snapshotContentNodeFromSnapshotContent(nsc)
+	node := snapshotContentNodeFromSnapshotContent(content)
 	if node.GVK != SnapshotContentGVK() || node.Name != "root-content" || node.ManifestCheckpointName != "mcp-root" {
 		t.Fatalf("unexpected node: %#v", node)
 	}

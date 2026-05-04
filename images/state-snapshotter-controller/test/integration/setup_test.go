@@ -691,6 +691,7 @@ var _ = BeforeSuite(func() {
 	)
 	genericSnapGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(runtimeSnapGVKs, runtimeContentGVKs)
 	genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(runtimeSnapGVKs, runtimeContentGVKs)
+	genericContentGVKs = unifiedbootstrap.AppendGVKIfMissing(genericContentGVKs, unifiedbootstrap.CommonSnapshotContentGVK())
 	snapshotController, err := controllers.NewSnapshotController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),

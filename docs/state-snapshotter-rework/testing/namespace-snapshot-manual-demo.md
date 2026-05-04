@@ -82,7 +82,7 @@ echo "BOUND=${BOUND}  MCP=${MCP}  OK=${OK_NAME}  MCR(ожидаемо нет)=${
 kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o yaml
 ```
 
-**5b. Cluster content + кто владелец (NSC → OK)**
+**5b. Cluster content + кто владелец (SnapshotContent → OK)**
 
 ```bash
 kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
@@ -96,7 +96,7 @@ kubectl get objectkeepers.deckhouse.io "${OK_NAME}" -o wide
 kubectl get objectkeepers.deckhouse.io "${OK_NAME}" -o jsonpath='{.spec}' | jq .
 ```
 
-**5d. ManifestCheckpoint (владелец — NSC)**
+**5d. ManifestCheckpoint (владелец — SnapshotContent)**
 
 ```bash
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" -o wide
@@ -123,14 +123,14 @@ kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/na
 
 **5h. Один фразовый вывод для аудитории**
 
-- OK следует за **NamespaceSnapshot** (`FollowObjectWithTTL`), **NSC** зависит от **OK**.
-- **MCP** зависит от **NSC**. **MCR** был только на время capture.
+- OK следует за **NamespaceSnapshot** (`FollowObjectWithTTL`), **SnapshotContent** зависит от **OK**.
+- **MCP** зависит от **SnapshotContent**. **MCR** был только на время capture.
 
 ---
 
 ## Шаг 6 — удалить снимок и показать retained read
 
-Снимок из API уходит; **NSC** и **MCP** остаются; aggregated по **тому же URL** обычно ещё отвечает.
+Снимок из API уходит; **SnapshotContent** и **MCP** остаются; aggregated по **тому же URL** обычно ещё отвечает.
 
 ```bash
 kubectl -n default delete namespacesnapshots.storage.deckhouse.io demo-ns-snap --wait=true
@@ -142,7 +142,7 @@ kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/na
 
 ## Шаг 7 — ничего не удалять руками: ждём TTL на ObjectKeeper, потом GC
 
-Не вызывайте `kubectl delete` на **NSC**, **MCP** или **OK** — так вы демонстрируете «прод»: после удаления снимка живёт **OK** до **`spec.ttl`**, его снимает **Deckhouse**, затем **GC** убирает **NSC → MCP → chunks**.
+Не вызывайте `kubectl delete` на **SnapshotContent**, **MCP** или **OK** — так вы демонстрируете «прод»: после удаления снимка живёт **OK** до **`spec.ttl`**, его снимает **Deckhouse**, затем **GC** убирает **SnapshotContent → MCP → chunks**.
 
 Узнать TTL на кластере:
 
@@ -155,7 +155,7 @@ kubectl get objectkeepers.deckhouse.io "${OK_NAME}" -o jsonpath='{.spec.ttl}{"\n
 ```bash
 sleep 90
 kubectl get objectkeepers.deckhouse.io "${OK_NAME}" 2>&1 || echo "OK удалён"
-kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" 2>&1 || echo "NSC удалён"
+kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" 2>&1 || echo "SnapshotContent удалён"
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" 2>&1 || echo "MCP удалён"
 ```
 

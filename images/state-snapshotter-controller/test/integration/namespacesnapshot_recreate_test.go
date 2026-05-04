@@ -39,7 +39,7 @@ import (
 )
 
 var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", func() {
-	It("after deleting root and creating another with the same name, binds a new NSC and MCR by new UID and reaches Ready", func() {
+	It("after deleting root and creating another with the same name, binds a new SnapshotContent and MCR by new UID and reaches Ready", func() {
 		ctx := context.Background()
 		contentName1 := ""
 		contentName2 := ""

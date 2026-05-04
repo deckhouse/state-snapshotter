@@ -263,7 +263,7 @@ func main() {
 
 		genericSnapshotGVKs, _ := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
 		genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotContentGVKs(snapshotGVKs, snapshotContentGVKs)
-		genericContentGVKs = append(genericContentGVKs, unifiedbootstrap.CommonSnapshotContentGVK())
+		genericContentGVKs = unifiedbootstrap.AppendGVKIfMissing(genericContentGVKs, unifiedbootstrap.CommonSnapshotContentGVK())
 
 		snapshotController, err := controllers.NewSnapshotController(
 			mgr.GetClient(),

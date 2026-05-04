@@ -120,6 +120,16 @@ func FilterGenericSnapshotContentGVKs(snapshotGVKs, contentGVKs []schema.GroupVe
 	return out
 }
 
+// AppendGVKIfMissing appends gvk only when the same Group/Version/Kind is not already present.
+func AppendGVKIfMissing(gvks []schema.GroupVersionKind, gvk schema.GroupVersionKind) []schema.GroupVersionKind {
+	for _, existing := range gvks {
+		if existing == gvk {
+			return gvks
+		}
+	}
+	return append(gvks, gvk)
+}
+
 // DedupeSnapshotContentGVKs returns unique SnapshotContent GVKs preserving first-seen order.
 func DedupeSnapshotContentGVKs(pairs []UnifiedGVKPair) []schema.GroupVersionKind {
 	seen := make(map[string]struct{})

@@ -42,7 +42,7 @@ import (
 
 // mergeChildGraphIntoRoot wires status.childrenSnapshotRefs on the root NamespaceSnapshot and the matching
 // childrenSnapshotContentRefs entry on the root SnapshotContent (integration seed only).
-func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootName, childNSSName, childNSCName string) error {
+func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootName, childNSSName, childSnapshotContentName string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		p := &storagev1alpha1.NamespaceSnapshot{}
 		if err := c.Get(ctx, types.NamespacedName{Namespace: rootNS, Name: rootName}, p); err != nil {
@@ -69,24 +69,24 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 		if err := c.Get(ctx, types.NamespacedName{Namespace: rootNS, Name: rootName}, p); err != nil {
 			return err
 		}
-		rootNSC := p.Status.BoundSnapshotContentName
-		if rootNSC == "" {
+		rootContentName := p.Status.BoundSnapshotContentName
+		if rootContentName == "" {
 			return fmt.Errorf("root has no bound SnapshotContent yet")
 		}
 		pc := &storagev1alpha1.SnapshotContent{}
-		if err := c.Get(ctx, client.ObjectKey{Name: rootNSC}, pc); err != nil {
+		if err := c.Get(ctx, client.ObjectKey{Name: rootContentName}, pc); err != nil {
 			return err
 		}
 		foundC := false
 		for _, r := range pc.Status.ChildrenSnapshotContentRefs {
-			if r.Name == childNSCName {
+			if r.Name == childSnapshotContentName {
 				foundC = true
 				break
 			}
 		}
 		if !foundC {
 			pc.Status.ChildrenSnapshotContentRefs = append(append([]storagev1alpha1.SnapshotContentChildRef(nil), pc.Status.ChildrenSnapshotContentRefs...),
-				storagev1alpha1.SnapshotContentChildRef{Name: childNSCName})
+				storagev1alpha1.SnapshotContentChildRef{Name: childSnapshotContentName})
 			if err := c.Status().Update(ctx, pc); err != nil {
 				return err
 			}
@@ -126,7 +126,7 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 		Expect(k8sClient.Create(ctx, child)).To(Succeed())
 
 		childKey := types.NamespacedName{Namespace: nsName, Name: childName}
-		var childNSC string
+		var childSnapshotContent string
 		Eventually(func(g Gomega) {
 			ch := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, childKey, ch)).To(Succeed())
@@ -134,7 +134,7 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 			g.Expect(b).NotTo(BeNil())
 			g.Expect(b.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(ch.Status.BoundSnapshotContentName).NotTo(BeEmpty())
-			childNSC = ch.Status.BoundSnapshotContentName
+			childSnapshotContent = ch.Status.BoundSnapshotContentName
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -162,7 +162,7 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 			g.Expect(b.Status).To(Equal(metav1.ConditionTrue))
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
-		Expect(mergeChildGraphIntoRoot(ctx, k8sClient, nsName, parentName, childName, childNSC)).To(Succeed())
+		Expect(mergeChildGraphIntoRoot(ctx, k8sClient, nsName, parentName, childName, childSnapshotContent)).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			p := &storagev1alpha1.NamespaceSnapshot{}
@@ -178,17 +178,17 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: p.Status.BoundSnapshotContentName}, pc)).To(Succeed())
 			g.Expect(pc.Status.ChildrenSnapshotContentRefs).NotTo(BeEmpty())
 			chName := pc.Status.ChildrenSnapshotContentRefs[0].Name
-			chNSC := &storagev1alpha1.SnapshotContent{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: chName}, chNSC)).To(Succeed())
+			chSnapshotContent := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: chName}, chSnapshotContent)).To(Succeed())
 
 			mcrName := namespacemanifest.NamespaceSnapshotMCRName(p.UID)
-			if chNSC.Status.ManifestCheckpointName == "" {
+			if chSnapshotContent.Status.ManifestCheckpointName == "" {
 				err := k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: mcrName}, &ssv1alpha1.ManifestCaptureRequest{})
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "root MCR must not exist before child subtree has manifestCheckpointName")
 				g.Expect(false).To(BeTrue(), "waiting for child snapshot content manifestCheckpointName")
 			}
 			mcp := &ssv1alpha1.ManifestCheckpoint{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: chNSC.Status.ManifestCheckpointName}, mcp)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: chSnapshotContent.Status.ManifestCheckpointName}, mcp)).To(Succeed())
 			rc := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
 			if rc == nil || rc.Status != metav1.ConditionTrue {
 				err := k8sClient.Get(ctx, types.NamespacedName{Namespace: nsName, Name: mcrName}, &ssv1alpha1.ManifestCaptureRequest{})

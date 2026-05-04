@@ -297,7 +297,7 @@ EOF
 PVC/VCR в этот smoke не добавляйте.
 
 v0 common-content note: this smoke validates only `storage.deckhouse.io/SnapshotContent`
-as the active content resource. Dedicated content CRDs are not expected in the cluster.
+as the active content resource. Common SnapshotContent CRDs are not expected in the cluster.
 
 Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-nssnap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
@@ -321,12 +321,12 @@ wait_snapshot_ready namespacesnapshot root-no-dsc 120
 Проверка binding root -> content:
 
 ```shell
-ROOT_NO_DSC_NSC=$(kubectl -n "$NS" get namespacesnapshot root-no-dsc -o jsonpath='{.status.boundSnapshotContentName}')
-test -n "$ROOT_NO_DSC_NSC"
-kubectl get snapshotcontent "$ROOT_NO_DSC_NSC" -o yaml
+ROOT_NO_DSC_CONTENT=$(kubectl -n "$NS" get namespacesnapshot root-no-dsc -o jsonpath='{.status.boundSnapshotContentName}')
+test -n "$ROOT_NO_DSC_CONTENT"
+kubectl get snapshotcontent "$ROOT_NO_DSC_CONTENT" -o yaml
 
-wait_content_mcp "$ROOT_NO_DSC_NSC" 120
-ROOT_NO_DSC_MCP=$(kubectl get snapshotcontent "$ROOT_NO_DSC_NSC" -o jsonpath='{.status.manifestCheckpointName}')
+wait_content_mcp "$ROOT_NO_DSC_CONTENT" 120
+ROOT_NO_DSC_MCP=$(kubectl get snapshotcontent "$ROOT_NO_DSC_CONTENT" -o jsonpath='{.status.manifestCheckpointName}')
 kubectl get manifestcheckpoint "$ROOT_NO_DSC_MCP" -o yaml
 ```
 
@@ -558,9 +558,9 @@ done
 Content checks:
 
 ```shell
-ROOT_FULL_NSC=$(kubectl -n "$NS" get namespacesnapshot root-full -o jsonpath='{.status.boundSnapshotContentName}')
-wait_content_mcp "$ROOT_FULL_NSC" 180
-kubectl get snapshotcontent "$ROOT_FULL_NSC" -o json \
+ROOT_FULL_CONTENT=$(kubectl -n "$NS" get namespacesnapshot root-full -o jsonpath='{.status.boundSnapshotContentName}')
+wait_content_mcp "$ROOT_FULL_CONTENT" 180
+kubectl get snapshotcontent "$ROOT_FULL_CONTENT" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
 
 VM_CONTENT=$(kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o jsonpath='{.status.boundSnapshotContentName}')

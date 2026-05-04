@@ -35,7 +35,7 @@ Generic **`NamespaceSnapshot`** reconciler **не** получает `if demoKin
 |-----------|---------|
 | Пользователь / CI | **Root** `NamespaceSnapshot` (и далее стандартный bind **одного** root `SnapshotContent`). |
 | **Demo domain controllers** | Demo VM/Disk snapshot objects, common content status updates, **VolumeSnapshot** / VCR, **MCR/MCP** по политике leaf — **не** вложенные **`NamespaceSnapshot`**. Запись в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на root (и у промежуточных узлов) — **merge-safe** (**INV-REF-M1** / **INV-REF-M2**, [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) §1): патчи **не** перетирают чужие элементы и **не** заменяют список целиком; при нескольких писателях — **согласованный** контракт (единый writer, **merge** по ключу элемента ref, **RetryOnConflict** и т.д. — **[`spec/system-spec.md`](../../spec/system-spec.md) §3** и код PR5). |
-| Generic NS controller | Root MCR→MCP pipeline, обновление root NSC/NS статусов, **вычисление** exclude для generic capture по фактам API и дереву refs. |
+| Generic NS controller | Root MCR→MCP pipeline, обновление root SnapshotContent/NS статусов, **вычисление** exclude для generic capture по фактам API и дереву refs. |
 
 **Demo orchestrator** — **опционально**: те же функции (синхронизация доменного дерева с root, помощь в refs) могут жить **целиком** в доменных контроллерах. Если выделяется отдельным бинарником/пакетом, он **не** вводит отдельной модели дерева и **не** является источником истины поверх **`children*Refs`**; **не** второй control-plane с неявным SoT.
 

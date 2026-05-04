@@ -71,7 +71,7 @@ Integration coverage:
 - child degradation is reflected by parent;
 - aggregated read returns root and child subtree manifests;
 - root own MCP contains only namespace-scoped allowlist objects and excludes child MCP objects;
-- read from dedicated content returns only that node and descendants;
+- read from common SnapshotContent returns only that node and descendants;
 - child controller does not patch parent graph.
 
 ## Final Checks

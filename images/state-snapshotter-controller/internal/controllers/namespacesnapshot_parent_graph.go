@@ -264,16 +264,16 @@ func (r *NamespaceSnapshotReconciler) patchSnapshotContentChildrenFromSnapshotRe
 
 	changed := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		nsc := &storagev1alpha1.SnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, nsc); err != nil {
+		content := &storagev1alpha1.SnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}
-		if snapshotContentChildRefsEqualIgnoreOrder(nsc.Status.ChildrenSnapshotContentRefs, desired) {
+		if snapshotContentChildRefsEqualIgnoreOrder(content.Status.ChildrenSnapshotContentRefs, desired) {
 			return nil
 		}
-		nsc.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.SnapshotContentChildRef(nil), desired...)
+		content.Status.ChildrenSnapshotContentRefs = append([]storagev1alpha1.SnapshotContentChildRef(nil), desired...)
 		changed = true
-		return r.Client.Status().Update(ctx, nsc)
+		return r.Client.Status().Update(ctx, content)
 	})
 	return changed, err
 }

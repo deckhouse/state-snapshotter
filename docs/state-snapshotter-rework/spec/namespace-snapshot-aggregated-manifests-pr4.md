@@ -18,7 +18,7 @@ Normative contract for implementation and tests. **SSOT** for this HTTP surface;
 - Export/import workflows
 - Pre-materialized archives
 - **Capture-time** domain expansion (which objects belong in the snapshot, child `YyyySnapshot` wiring) — domain controllers; not this SSOT
-- Heterogeneous **domain** edges beyond what this document normatively interprets for the NSC read-path (see PR5 / system-spec **§3**)
+- Heterogeneous **domain** edges beyond what this document normatively interprets for the SnapshotContent read-path (see PR5 / system-spec **§3**)
 
 ## 2. Source of truth
 
@@ -63,7 +63,7 @@ For each `SnapshotContent`:
 2. Must have non-empty `status.manifestCheckpointName` → otherwise **500**
 3. **Read artifact:** call **`ArchiveService.GetArchiveFromCheckpoint`** for that ManifestCheckpoint (§4). **404** if ManifestCheckpoint not found; **409** if ManifestCheckpoint exists but is **not Ready** (same semantics as single-MCP `/manifests`, [`namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §8.7.1); **500** for chunk decode / checksum / other archive failures covered in §7.1.
 
-**Relationship to NSC `Ready`:** the **authoritative** gate for «can we read this node’s manifests» is **ManifestCheckpoint readiness**, enforced inside **`GetArchiveFromCheckpoint`** (step 3). The handler **MAY** additionally return **409** when `SnapshotContent` `Ready` is not `True` **if** that is consistent with N2b status semantics in design (**§4.4**, **§11**); that check is **not** a substitute for step 3.
+**Relationship to SnapshotContent `Ready`:** the **authoritative** gate for «can we read this node’s manifests» is **ManifestCheckpoint readiness**, enforced inside **`GetArchiveFromCheckpoint`** (step 3). The handler **MAY** additionally return **409** when `SnapshotContent` `Ready` is not `True` **if** that is consistent with N2b status semantics in design (**§4.4**, **§11**); that check is **not** a substitute for step 3.
 
 ### 3.2 Cycle protection
 
@@ -186,7 +186,7 @@ Implementation requires:
 
 ### 10.3 Readiness checks
 
-**MUST:** fail the request with **409** when **`GetArchiveFromCheckpoint`** reports ManifestCheckpoint not Ready (step §3.1.3). **MAY:** fail with **409** on NSC `Ready!=True` when that matches N2b design; **never** skip step 3 in favor of NSC `Ready` alone.
+**MUST:** fail the request with **409** when **`GetArchiveFromCheckpoint`** reports ManifestCheckpoint not Ready (step §3.1.3). **MAY:** fail with **409** on SnapshotContent `Ready!=True` when that matches N2b design; **never** skip step 3 in favor of SnapshotContent `Ready` alone.
 
 ## 11. Compatibility
 

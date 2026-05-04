@@ -117,7 +117,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		}
 		Expect(k8sClient.Create(testCtx, root)).To(Succeed())
 
-		var rootNSC string
+		var rootContentName string
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
@@ -125,7 +125,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			g.Expect(rc).NotTo(BeNil())
 			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(r.Status.BoundSnapshotContentName).NotTo(BeEmpty())
-			rootNSC = r.Status.BoundSnapshotContentName
+			rootContentName = r.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		var diskSnapshotName string
@@ -156,10 +156,10 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			nsc := &storagev1alpha1.SnapshotContent{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootNSC}, nsc)).To(Succeed())
+			content := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootContentName}, content)).To(Succeed())
 			var found bool
-			for _, ch := range nsc.Status.ChildrenSnapshotContentRefs {
+			for _, ch := range content.Status.ChildrenSnapshotContentRefs {
 				if ch.Name == contentName {
 					found = true
 					break
@@ -168,16 +168,16 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 			g.Expect(found).To(BeTrue(), "root SnapshotContent should reference demo disk content")
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		var nscVisited []string
-		err := usecase.WalkSnapshotContentSubtree(testCtx, k8sClient, rootNSC,
-			func(_ context.Context, nsc *storagev1alpha1.SnapshotContent) error {
-				nscVisited = append(nscVisited, nsc.Name)
+		var contentVisited []string
+		err := usecase.WalkSnapshotContentSubtree(testCtx, k8sClient, rootContentName,
+			func(_ context.Context, content *storagev1alpha1.SnapshotContent) error {
+				contentVisited = append(contentVisited, content.Name)
 				return nil
 			},
 		)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(nscVisited).NotTo(BeEmpty())
-		Expect(nscVisited).To(ContainElement(contentName), "ref-only walk should visit SnapshotContent leaf via same childrenSnapshotContentRefs graph")
+		Expect(contentVisited).NotTo(BeEmpty())
+		Expect(contentVisited).To(ContainElement(contentName), "ref-only walk should visit SnapshotContent leaf via same childrenSnapshotContentRefs graph")
 
 		Eventually(func(g Gomega) {
 			content := &storagev1alpha1.SnapshotContent{}
