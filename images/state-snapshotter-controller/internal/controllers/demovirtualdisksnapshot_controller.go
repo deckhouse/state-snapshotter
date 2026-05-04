@@ -69,9 +69,9 @@ func validateDiskParentRef(s *demov1alpha1.DemoVirtualDiskSnapshot) error {
 		return fmt.Errorf("spec.parentSnapshotRef.name is required")
 	}
 	switch ref.Kind {
-	case "NamespaceSnapshot":
+	case KindNamespaceSnapshot:
 		if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
-			return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", ref.APIVersion)
+			return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for %s parent", ref.APIVersion, KindNamespaceSnapshot)
 		}
 	case KindDemoVirtualMachineSnapshot:
 		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {

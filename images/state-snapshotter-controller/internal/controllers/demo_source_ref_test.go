@@ -105,7 +105,7 @@ func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) 
 				Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
 					ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 						APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-						Kind:       "NamespaceSnapshot",
+						Kind:       KindNamespaceSnapshot,
 						Name:       "root",
 					},
 					SourceRef: tt.sourceRef,
@@ -133,7 +133,7 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 		Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
 			ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       "NamespaceSnapshot",
+				Kind:       KindNamespaceSnapshot,
 				Name:       "root",
 			},
 			SourceRef: demov1alpha1.SnapshotSourceRef{
@@ -167,7 +167,7 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
 				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
+					Kind:       KindNamespaceSnapshot,
 					Name:       "root",
 				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{
@@ -322,7 +322,7 @@ func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChi
 				Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
 					ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 						APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-						Kind:       "NamespaceSnapshot",
+						Kind:       KindNamespaceSnapshot,
 						Name:       "root",
 					},
 					SourceRef: tt.sourceRef,
@@ -351,7 +351,7 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 		Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
 			ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       "NamespaceSnapshot",
+				Kind:       KindNamespaceSnapshot,
 				Name:       "root",
 			},
 			SourceRef: demov1alpha1.SnapshotSourceRef{
@@ -405,7 +405,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 			Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
 				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
+					Kind:       KindNamespaceSnapshot,
 					Name:       "root",
 				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{

@@ -104,11 +104,11 @@ func validateVMParentRef(s *demov1alpha1.DemoVirtualMachineSnapshot) error {
 	if ref.Name == "" {
 		return fmt.Errorf("spec.parentSnapshotRef.name is required")
 	}
-	if ref.Kind != "NamespaceSnapshot" {
-		return fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported (only NamespaceSnapshot)", ref.Kind)
+	if ref.Kind != KindNamespaceSnapshot {
+		return fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported (only %s)", ref.Kind, KindNamespaceSnapshot)
 	}
 	if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
-		return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for NamespaceSnapshot parent", ref.APIVersion)
+		return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for %s parent", ref.APIVersion, KindNamespaceSnapshot)
 	}
 	return nil
 }
