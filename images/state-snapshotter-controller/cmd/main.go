@@ -210,14 +210,14 @@ func main() {
 	}
 	log.Info("NamespaceGenericSnapshotBinderController added to manager")
 
-	if err := controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr); err != nil {
+	if err := controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr, cfgParams); err != nil {
 		log.Error(err, "Failed to add DemoVirtualDiskGenericSnapshotBinderController to manager")
 		cancel()
 		os.Exit(1)
 	}
 	log.Info("DemoVirtualDiskGenericSnapshotBinderController added to manager")
 
-	if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr); err != nil {
+	if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, cfgParams); err != nil {
 		log.Error(err, "Failed to add DemoVirtualMachineGenericSnapshotBinderController to manager")
 		cancel()
 		os.Exit(1)

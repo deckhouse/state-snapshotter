@@ -370,6 +370,11 @@ wait_snapshot_ready namespacesnapshot root-no-dsc 120
 ROOT_NO_DSC_CONTENT=$(kubectl -n "$NS" get namespacesnapshot root-no-dsc -o jsonpath='{.status.boundSnapshotContentName}')
 test -n "$ROOT_NO_DSC_CONTENT"
 kubectl get snapshotcontent "$ROOT_NO_DSC_CONTENT" -o yaml
+ROOT_NO_DSC_OK=$(kubectl -n "$NS" get namespacesnapshot root-no-dsc -o json \
+  | jq -r '.metadata.ownerReferences[]? | select(.kind=="ObjectKeeper") | .name' | head -n 1)
+test -n "$ROOT_NO_DSC_OK"
+kubectl get snapshotcontent "$ROOT_NO_DSC_CONTENT" -o json \
+  | jq -e --arg ok "$ROOT_NO_DSC_OK" '.metadata.ownerReferences[]? | select(.kind=="ObjectKeeper" and .name==$ok)'
 
 wait_content_mcp "$ROOT_NO_DSC_CONTENT" 120
 wait_content_ready "$ROOT_NO_DSC_CONTENT" 180
@@ -634,6 +639,30 @@ kubectl get snapshotcontent "$DISK_CONTENT" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
 kubectl get snapshotcontent "$DISK_CONTENT" -o json \
   | jq -e '(.status.childrenSnapshotContentRefs // []) | length == 0'
+
+ROOT_FULL_OK=$(kubectl -n "$NS" get namespacesnapshot root-full -o json \
+  | jq -r '.metadata.ownerReferences[]? | select(.kind=="ObjectKeeper") | .name' | head -n 1)
+test -n "$ROOT_FULL_OK"
+kubectl get objectkeeper "$ROOT_FULL_OK" -o json \
+  | jq -e '(.metadata.ownerReferences // []) | length == 0'
+kubectl get objectkeeper "$ROOT_FULL_OK" -o json \
+  | jq -e '.spec.followObjectRef.kind == "NamespaceSnapshot" and .spec.followObjectRef.name == "root-full"'
+kubectl -n "$NS" get namespacesnapshot root-full -o json \
+  | jq -e --arg ok "$ROOT_FULL_OK" '.metadata.ownerReferences[]? | select(.kind=="ObjectKeeper" and .name==$ok)'
+kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o json \
+  | jq -e --arg parent "root-full" '.metadata.ownerReferences[]? | select(.kind=="NamespaceSnapshot" and .name==$parent)'
+kubectl -n "$NS" get demovirtualdisksnapshot "$CHILD_DISK" -o json \
+  | jq -e --arg parent "$CHILD_VM" '.metadata.ownerReferences[]? | select(.kind=="DemoVirtualMachineSnapshot" and .name==$parent)'
+kubectl get snapshotcontent "$ROOT_FULL_CONTENT" -o json \
+  | jq -e --arg ok "$ROOT_FULL_OK" '.metadata.ownerReferences[]? | select(.kind=="ObjectKeeper" and .name==$ok)'
+kubectl get snapshotcontent "$VM_CONTENT" -o json \
+  | jq -e --arg parent "$ROOT_FULL_CONTENT" '.metadata.ownerReferences[]? | select(.kind=="SnapshotContent" and .name==$parent)'
+kubectl get snapshotcontent "$DISK_CONTENT" -o json \
+  | jq -e --arg parent "$VM_CONTENT" '.metadata.ownerReferences[]? | select(.kind=="SnapshotContent" and .name==$parent)'
+for content in "$ROOT_FULL_CONTENT" "$VM_CONTENT" "$DISK_CONTENT"; do
+  kubectl get snapshotcontent "$content" -o json \
+    | jq -e 'all(.metadata.ownerReferences[]?; (.kind | endswith("Snapshot")) | not)'
+done
 ```
 
 Ожидаемо:
@@ -643,6 +672,9 @@ kubectl get snapshotcontent "$DISK_CONTENT" -o json \
 - common `SnapshotContent` objects have `Ready=True`;
 - content objects с children имеют `status.childrenSnapshotContentRefs`;
 - disk leaf content has empty `childrenSnapshotContentRefs`.
+- root Snapshot and root `SnapshotContent` have ownerRef to one `ObjectKeeper`, while the `ObjectKeeper` follows the root Snapshot and has no ownerReferences;
+- child Snapshots have ownerRef to their parent Snapshot;
+- child `SnapshotContent` ownerRef points to parent `SnapshotContent`, never to child Snapshot.
 
 ## 10. Aggregated read API checks
 
@@ -762,7 +794,7 @@ kubectl delete domainspecificsnapshotcontroller smoke-demo-vm-disk --ignore-not-
 kubectl delete ns "$NS" --wait=false
 ```
 
-Cleanup не должен требовать, чтобы вообще ничего не осталось. Текущая Retain/ObjectKeeper модель может намеренно оставлять cluster-scoped artifacts.
+Cleanup не должен требовать, чтобы вообще ничего не осталось. Текущая Retain/ObjectKeeper модель может намеренно оставлять cluster-scoped artifacts. Root `ObjectKeeper` with TTL is the lifecycle anchor; after TTL expiry / root ObjectKeeper removal, Kubernetes GC may remove root Snapshot, root `SnapshotContent`, child content tree, and artifacts owned by contents. Snapshot deletion alone is not the retained content lifecycle anchor.
 
 Test-only RBAC из раздела 7 можно удалить только после завершения smoke и финальной проверки controller logs. Если controller может рестартовать сразу после smoke, оставьте RBAC применённым до появления внешнего RBAC controller/hook.
 

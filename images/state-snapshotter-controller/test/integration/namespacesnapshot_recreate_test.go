@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
@@ -105,6 +106,13 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 
 		// MCR was removed after first capture success; same metadata.name must still be usable for a new snapshot.
 		Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
+		// The retained root ObjectKeeper is the lifecycle anchor for the old run.
+		// A same-name Snapshot cannot steal it; simulate TTL expiry before reusing the name.
+		oldOKName := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsName, snapName)
+		Expect(k8sClient.Delete(ctx, &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: oldOKName}})).To(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: oldOKName}, &deckhousev1alpha1.ObjectKeeper{}))).To(BeTrue())
+		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		snap2 := &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: nsName},

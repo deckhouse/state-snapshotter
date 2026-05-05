@@ -465,23 +465,11 @@ func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx 
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: childName}, child); err != nil {
 			return err
 		}
-		ownerRef := metav1.OwnerReference{
-			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-			Kind:       "SnapshotContent",
-			Name:       parentContentObj.GetName(),
-			UID:        parentContentObj.GetUID(),
-			Controller: func() *bool { b := true; return &b }(),
-		}
-		refs, changed, err := snapshotContentControllerOwnerRefsForHandoff(child.OwnerReferences, ownerRef)
-		if err != nil {
-			return fmt.Errorf("child SnapshotContent %s: %w", childName, err)
-		}
-		if !changed {
-			return nil
-		}
-		base := child.DeepCopy()
-		child.OwnerReferences = refs
-		return r.Client.Patch(ctx, child, client.MergeFrom(base))
+		parent := &storagev1alpha1.SnapshotContent{}
+		parent.Name = parentContentObj.GetName()
+		parent.UID = parentContentObj.GetUID()
+		_, err := ensureLifecycleOwnerRef(ctx, r.Client, child, snapshotContentOwnerReference(parent))
+		return err
 	})
 }
 

@@ -291,7 +291,7 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, content)).To(Succeed())
 		for i := range content.OwnerReferences {
 			Expect(content.OwnerReferences[i].Kind).NotTo(Equal("NamespaceSnapshot"),
-				"root SnapshotContent must not use ownerReferences to NamespaceSnapshot (bind is spec.namespaceSnapshotRef only)")
+				"root SnapshotContent must not use ownerReferences to short-lived Snapshot")
 		}
 		ok := &deckhousev1alpha1.ObjectKeeper{}
 		okName := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsName, snap.Name)
@@ -304,8 +304,13 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Expect(ok.Spec.Mode).To(Equal("FollowObjectWithTTL"))
 		Expect(ok.Spec.TTL).NotTo(BeNil())
 		Expect(ok.Spec.TTL.Duration).To(Equal(config.DefaultSnapshotRootOKTTL))
+		Expect(ok.OwnerReferences).To(BeEmpty(), "root ObjectKeeper must follow Snapshot via spec.followObjectRef, not ownerRef")
 		Expect(objectKeeperHasControllerOwnerRefToSnapshotContent(ok.OwnerReferences, contentName, content.UID)).To(BeFalse(),
 			"root ObjectKeeper must not list SnapshotContent as a controlling ownerRef; retained anchor is SnapshotContent→OK")
+		freshRoot := &storagev1alpha1.NamespaceSnapshot{}
+		Expect(k8sClient.Get(ctx, key, freshRoot)).To(Succeed())
+		Expect(rootContentOwnerRefToObjectKeeper(freshRoot.OwnerReferences, okName, ok.UID)).To(BeTrue(),
+			"root NamespaceSnapshot must share the root ObjectKeeper lifecycle owner")
 		Expect(rootContentOwnerRefToObjectKeeper(content.OwnerReferences, okName, ok.UID)).To(BeTrue())
 
 		mcp := &ssv1alpha1.ManifestCheckpoint{}

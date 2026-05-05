@@ -26,6 +26,7 @@
 - **Always-on runtime startup (v0):** `NamespaceSnapshot`, common `SnapshotContent`, `DemoVirtualDiskSnapshot`, `DemoVirtualMachineSnapshot`, DSC reconciler, graph registry, `GenericSnapshotBinderController`, `unifiedruntime.Syncer`, and dynamic hot-add watches are initialized on the single runtime path. DSC управляет не фактом запуска этих controllers, а тем, входит ли domain kind в **graph registry** и `NamespaceSnapshot` discovery.
 - **Common content model (v0):** `storage.deckhouse.io/SnapshotContent` is the only active cluster-scoped content carrier and has no live reverse reference to the source snapshot. It exposes immutable `spec` (`backupRepositoryName`, `deletionPolicy`), publisher-owned `status.manifestCheckpointName`, `status.childrenSnapshotContentRefs`, optional cluster artifact **`status.dataRef`** (`apiVersion`/`kind`/`name`), and validator-owned `status.conditions`. DSC mapping is `resourceCRDName -> snapshotCRDName`; the content side is fixed to common `SnapshotContent`. Snapshot-domain controllers own planning/execution and publish result refs into bound content status. `SnapshotContentController` validates persisted content refs and owns only content readiness conditions; it does **not** read live Snapshot objects, does **not** read MCR/VCR requests, and does **not** create execution requests. Snapshot-level `Ready` mirrors bound content `Ready`. `SnapshotContent.status.dataRef` MUST NOT point to `VolumeCaptureRequest`, `DataExport`, or any other execution request; v0 first expected data artifact kind is cluster-scoped `VolumeSnapshotContent` or an equivalent final artifact.
 - **Request → artifact → content lifecycle:** snapshot controllers create MCR/VCR-style execution requests, set ownerRef → owning snapshot, store temporary request names in snapshot status, and publish durable result refs to the bound `SnapshotContent`. Request controllers create MCP/data artifacts and protect them through ObjectKeeper until handoff. `SnapshotContentController` validates the final artifacts and ensures artifact ownerRef → `SnapshotContent`. Snapshot controllers may clear request names and delete requests only after the explicit artifact chain is complete: content status references the artifact, the artifact exists, is `Ready=True`, and is owned by that `SnapshotContent`.
+- **Snapshot lifecycle ownerRef model:** every `XxxxSnapshot` and every `SnapshotContent` has exactly one lifecycle owner. A root snapshot-run is anchored by one root `ObjectKeeper` in `FollowObjectWithTTL` mode: root Snapshot has `ownerRef -> ObjectKeeper`, root `SnapshotContent` has `ownerRef -> same ObjectKeeper`, and the ObjectKeeper follows the root Snapshot through `spec.followObjectRef`. Child Snapshot ownerRef points to parent Snapshot; child `SnapshotContent` ownerRef points to parent `SnapshotContent`; artifacts referenced from `SnapshotContent.status` are owned by that `SnapshotContent`. `SnapshotContent` MUST NOT be owned by a short-lived Snapshot.
 - **R3 ✅ (ядро):** явный слой state в `pkg/unifiedruntime`; интеграционный proof hot-add — `test/integration/unified_runtime_hot_add_test.go`; Prometheus gauges + лог при «stale» active (ключ есть в monotonic active, но выпал из resolved). **Опционально:** доп. proof-сценарии — по плану.
 - **Цель (ядро):** регистрация типов через DSC + **RBACReady** + активация watch без рестарта для новых eligible типов — реализовано для additive-пути; симметричное снятие watch — нет.
 - **Manifest / MCR / ManifestCheckpoint** — отдельный трек от unified registry snapshot-типов; не смешивать с DSC.
@@ -83,6 +84,34 @@
 - **MUST:** child graph delegation имеет приоритет над own scope: resource, вынесенный в child snapshot subtree, не должен дублироваться в own MCR родителя.
 - **MUST:** каждый materialized content-node имеет собственный **`status.manifestCheckpointName`** на MCP только своего own scope; parent MCP **MUST NOT** служить контейнером всего subtree. MCP **может быть пустым** (0 objects), если own scope после exclude пустой. Объединение parent + child MCP выполняется только на read-path по **`childrenSnapshotContentRefs`**.
 - **MUST:** own scope **`NamespaceSnapshot`** состоит только из namespace-scoped resources из root allowlist. **`NamespaceSnapshot`** остаётся namespaced built-in snapshot type, не регистрируется через DSC/CSD, и **не** захватывает cluster-scoped Kubernetes **`Namespace`** object. Resolved target namespace = **`NamespaceSnapshot.metadata.namespace`**; **`spec.namespace`** / **`spec.targetNamespace`** не вводятся.
+
+### §3.2.2. Snapshot lifecycle ownerRef model
+
+```text
+Every Snapshot MUST have exactly one lifecycle owner.
+Root Snapshot:
+  ownerRef -> root ObjectKeeperWithTTL
+Child Snapshot:
+  ownerRef -> parent Snapshot
+
+Every SnapshotContent MUST have exactly one lifecycle owner.
+Root SnapshotContent:
+  ownerRef -> the same root ObjectKeeperWithTTL as root Snapshot
+Child SnapshotContent:
+  ownerRef -> parent SnapshotContent
+
+Artifacts referenced by SnapshotContent.status:
+  ownerRef -> owning SnapshotContent
+```
+
+- **MUST:** root `ObjectKeeper` in `FollowObjectWithTTL` mode is the lifecycle anchor for one snapshot-run. The root Snapshot and root `SnapshotContent` both have ownerRef to the same root ObjectKeeper. The ObjectKeeper follows the root Snapshot via `spec.followObjectRef` and MUST NOT have ownerRef to Snapshot. When TTL expires and the ObjectKeeper is removed, Kubernetes GC can remove the root Snapshot, the retained `SnapshotContent` tree, and artifacts owned by contents.
+- **MUST:** a Snapshot without parent Snapshot ownerRef is a root Snapshot. Any Snapshot kind can be root and must be restorable/exportable independently, including standalone demo Snapshot kinds.
+- **MUST:** child Snapshot ownerRef points to its parent Snapshot; child `SnapshotContent` ownerRef points to its parent `SnapshotContent`; MCP / future VSC or equivalent final data artifacts ownerRef points to the owning `SnapshotContent`.
+- **MUST NOT:** leave Snapshot or `SnapshotContent` without lifecycle ownerRef after reconcile convergence.
+- **MUST NOT:** set `SnapshotContent.ownerReferences` to a short-lived Snapshot.
+- **MUST NOT:** silently steal Snapshot or `SnapshotContent` from another parent/root lifecycle owner. Conflicting lifecycle ownerRef is a fail-closed condition; unrelated non-controller ownerRefs may be preserved.
+- **MUST:** a same namespace/name root Snapshot run reuses the retained root ObjectKeeper only for the same snapshot UID. If the old run's root ObjectKeeper is still retained, a newly created root Snapshot with the same namespace/name MUST fail closed until that ObjectKeeper expires or is removed; it MUST NOT steal the retained ObjectKeeper.
+- **NOTE:** temporary ObjectKeeper protection for execution artifacts before handoff is separate from the root TTL ObjectKeeper. Request objects such as MCR/VCR remain temporary and may be owned by the Snapshot for in-flight GC; they are deleted only after final artifacts are bound to `SnapshotContent`.
 
 ### §3.3. Удаление элемента из refs
 

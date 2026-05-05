@@ -33,6 +33,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -40,17 +41,23 @@ import (
 // MCR creation, snapshot-level Ready, and binding to common SnapshotContent.
 // Content status/result aggregation stays in SnapshotContentController.
 type DemoVirtualDiskSnapshotReconciler struct {
-	Client client.Client
+	Client    client.Client
+	APIReader client.Reader
+	Config    *config.Options
 }
 
-func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager) error {
+func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 	// RBAC is not generated from kubebuilder markers in this module.
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on DSC.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
-		Complete(&DemoVirtualDiskSnapshotReconciler{Client: mgr.GetClient()})
+		Complete(&DemoVirtualDiskSnapshotReconciler{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config:    cfg,
+		})
 }
 
 func demoVirtualDiskSnapshotContentName(namespace, name string) string {
@@ -112,7 +119,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
-	if err := r.ensureContent(ctx, s, contentName); err != nil {
+	contentOwnerRef, res, err := r.ensureDemoDiskSnapshotLifecycle(ctx, s)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if res.Requeue || res.RequeueAfter > 0 {
+		return res, nil
+	}
+	if err := r.ensureContent(ctx, s, contentName, *contentOwnerRef); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := patchDemoVirtualDiskSnapshotBound(ctx, r.Client, req.NamespacedName, contentName); err != nil {
@@ -200,11 +214,41 @@ func patchDemoVirtualDiskSnapshotGraphReady(
 	})
 }
 
-func (r *DemoVirtualDiskSnapshotReconciler) ensureContent(ctx context.Context, _ *demov1alpha1.DemoVirtualDiskSnapshot, contentName string) error {
+func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskSnapshotLifecycle(ctx context.Context, s *demov1alpha1.DemoVirtualDiskSnapshot) (*metav1.OwnerReference, ctrl.Result, error) {
+	if parentRef := snapshotParentOwnerRef(s); parentRef != nil {
+		contentOwnerRef, pending, err := resolveParentSnapshotContentOwnerRef(ctx, r.Client, s)
+		if err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		if pending {
+			if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, client.ObjectKeyFromObject(s), metav1.ConditionFalse, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("waiting for parent %s/%s bound SnapshotContent", parentRef.Kind, parentRef.Name)); err != nil {
+				return nil, ctrl.Result{}, err
+			}
+			return nil, ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+		}
+		return contentOwnerRef, ctrl.Result{}, nil
+	}
+
+	ok, res, err := ensureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, s, demov1alpha1.SchemeGroupVersion.WithKind(KindDemoVirtualDiskSnapshot))
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	if res.Requeue || res.RequeueAfter > 0 {
+		return nil, res, nil
+	}
+	if _, err := ensureLifecycleOwnerRef(ctx, r.Client, s, rootObjectKeeperOwnerReference(ok)); err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	ref := rootObjectKeeperOwnerReference(ok)
+	return &ref, ctrl.Result{}, nil
+}
+
+func (r *DemoVirtualDiskSnapshotReconciler) ensureContent(ctx context.Context, _ *demov1alpha1.DemoVirtualDiskSnapshot, contentName string, ownerRef metav1.OwnerReference) error {
 	existing := &storagev1alpha1.SnapshotContent{}
 	err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, existing)
 	if err == nil {
-		return nil
+		_, err := ensureLifecycleOwnerRef(ctx, r.Client, existing, ownerRef)
+		return err
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -216,8 +260,11 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureContent(ctx context.Context, _
 	// This controller owns only a subset of fields and must avoid
 	// accidental overwrites of fields owned by other controllers.
 	content := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: contentName},
-		Spec:       storagev1alpha1.SnapshotContentSpec{},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            contentName,
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
+		},
+		Spec: storagev1alpha1.SnapshotContentSpec{},
 	}
 	return r.Client.Create(ctx, content)
 }

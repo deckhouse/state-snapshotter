@@ -205,22 +205,52 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	contentName := snapshotLike.GetStatusContentName()
+
 	// Step 3: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef)
-	var objectKeeper *deckhousev1alpha1.ObjectKeeper
+	var contentOwnerRef *metav1.OwnerReference
 	if snapshot.IsRootSnapshot(obj) {
 		var result ctrl.Result
 		var err error
-		objectKeeper, result, err = r.ensureObjectKeeper(ctx, snapshotLike, obj, "")
+		objectKeeper, result, err := ensureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, obj, obj.GetObjectKind().GroupVersionKind())
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if result.Requeue {
+		if result.Requeue || result.RequeueAfter > 0 {
 			return result, nil
+		}
+		if _, err := ensureLifecycleOwnerRef(ctx, r.Client, obj, rootObjectKeeperOwnerReference(objectKeeper)); err != nil {
+			return ctrl.Result{}, err
+		}
+		ref := rootObjectKeeperOwnerReference(objectKeeper)
+		contentOwnerRef = &ref
+	} else {
+		ref, pending, err := resolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		contentOwnerRef = ref
+	}
+	if contentName != "" && contentOwnerRef != nil {
+		contentGVK, err := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to resolve SnapshotContent GVK: %w", err)
+		}
+		contentObj := &unstructured.Unstructured{}
+		contentObj.SetGroupVersionKind(contentGVK)
+		if err := r.Get(ctx, client.ObjectKey{Name: contentName}, contentObj); err == nil {
+			if changed, err := ensureLifecycleOwnerRef(ctx, r.Client, contentObj, *contentOwnerRef); err != nil {
+				return ctrl.Result{}, err
+			} else if changed {
+				return ctrl.Result{Requeue: true}, nil
+			}
 		}
 	}
 
 	// Step 4: Create SnapshotContent if it doesn't exist
-	contentName := snapshotLike.GetStatusContentName()
 	if contentName == "" {
 		// Generate deterministic name
 		contentName = snapshotbinding.StableContentName(obj.GetName(), obj.GetUID())
@@ -294,34 +324,16 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 
 		contentObj.Object["spec"] = spec
 
-		// Set ownerRef: ObjectKeeper for root snapshots, Snapshot for children
-		var ownerRef metav1.OwnerReference
-		if objectKeeper != nil {
-			// Root snapshot: ObjectKeeper owns SnapshotContent
-			ownerRef = metav1.OwnerReference{
-				APIVersion: DeckhouseAPIVersion,
-				Kind:       KindObjectKeeper,
-				Name:       objectKeeper.Name,
-				UID:        objectKeeper.UID,
-				Controller: func() *bool { b := true; return &b }(),
-			}
-		} else {
-			// Child snapshot: Snapshot owns SnapshotContent (will be updated later by parent)
-			ownerRef = metav1.OwnerReference{
-				APIVersion: obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
-				Kind:       obj.GetKind(),
-				Name:       obj.GetName(),
-				UID:        obj.GetUID(),
-				Controller: func() *bool { b := true; return &b }(),
-			}
+		if contentOwnerRef == nil {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-		contentObj.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
+		contentObj.SetOwnerReferences([]metav1.OwnerReference{*contentOwnerRef})
 
 		if err := r.Create(ctx, contentObj); err != nil {
 			logger.Error(err, "Failed to create SnapshotContent", "name", contentName)
 			return ctrl.Result{}, err
 		}
-		logger.Info("Created SnapshotContent", "name", contentName, "owner", ownerRef.Kind)
+		logger.Info("Created SnapshotContent", "name", contentName, "owner", contentOwnerRef.Kind)
 
 		if err := snapshotbinding.PatchUnstructuredBoundContentName(ctx, r.Client, req.NamespacedName, snapshotGVK, contentName); err != nil {
 			logger.Error(err, "Failed to update Snapshot status.boundSnapshotContentName")

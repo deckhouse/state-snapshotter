@@ -48,6 +48,22 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 		if err := c.Get(ctx, types.NamespacedName{Namespace: rootNS, Name: rootName}, p); err != nil {
 			return err
 		}
+		controller := true
+		child := &storagev1alpha1.NamespaceSnapshot{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: rootNS, Name: childNSSName}, child); err != nil {
+			return err
+		}
+		childBase := child.DeepCopy()
+		child.OwnerReferences = replaceControllerOwnerRefForIntegration(child.OwnerReferences, metav1.OwnerReference{
+			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+			Kind:       "NamespaceSnapshot",
+			Name:       p.Name,
+			UID:        p.UID,
+			Controller: &controller,
+		})
+		if err := c.Patch(ctx, child, client.MergeFrom(childBase)); err != nil {
+			return err
+		}
 		want := storagev1alpha1.NamespaceSnapshotChildRef{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 			Kind:       "NamespaceSnapshot",
@@ -77,6 +93,21 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 		if err := c.Get(ctx, client.ObjectKey{Name: rootContentName}, pc); err != nil {
 			return err
 		}
+		childContent := &storagev1alpha1.SnapshotContent{}
+		if err := c.Get(ctx, client.ObjectKey{Name: childSnapshotContentName}, childContent); err != nil {
+			return err
+		}
+		childContentBase := childContent.DeepCopy()
+		childContent.OwnerReferences = replaceControllerOwnerRefForIntegration(childContent.OwnerReferences, metav1.OwnerReference{
+			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+			Kind:       "SnapshotContent",
+			Name:       pc.Name,
+			UID:        pc.UID,
+			Controller: &controller,
+		})
+		if err := c.Patch(ctx, childContent, client.MergeFrom(childContentBase)); err != nil {
+			return err
+		}
 		foundC := false
 		for _, r := range pc.Status.ChildrenSnapshotContentRefs {
 			if r.Name == childSnapshotContentName {
@@ -93,6 +124,19 @@ func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootN
 		}
 		return nil
 	})
+}
+
+func replaceControllerOwnerRefForIntegration(existing []metav1.OwnerReference, desired metav1.OwnerReference) []metav1.OwnerReference {
+	// Test-only graph grafting for synthetic NamespaceSnapshot trees.
+	// Production ownerRef changes must go through lifecycle helpers that fail closed on conflicting owners.
+	out := make([]metav1.OwnerReference, 0, len(existing)+1)
+	for _, ref := range existing {
+		if ref.Controller != nil && *ref.Controller {
+			continue
+		}
+		out = append(out, ref)
+	}
+	return append(out, desired)
 }
 
 var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapshot kind fixture)", func() {

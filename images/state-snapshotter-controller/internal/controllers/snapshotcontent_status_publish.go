@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -98,23 +97,8 @@ func ensureChildSnapshotContentOwnedByParentContent(ctx context.Context, c clien
 			}
 			return err
 		}
-		ownerRef := metav1.OwnerReference{
-			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-			Kind:       "SnapshotContent",
-			Name:       parent.Name,
-			UID:        parent.UID,
-			Controller: func() *bool { b := true; return &b }(),
-		}
-		refs, changed, err := snapshotContentControllerOwnerRefsForHandoff(child.OwnerReferences, ownerRef)
-		if err != nil {
-			return fmt.Errorf("child SnapshotContent %s: %w", childName, err)
-		}
-		if !changed {
-			return nil
-		}
-		base := child.DeepCopy()
-		child.OwnerReferences = refs
-		return c.Patch(ctx, child, client.MergeFrom(base))
+		_, err := ensureLifecycleOwnerRef(ctx, c, child, snapshotContentOwnerReference(parent))
+		return err
 	})
 }
 

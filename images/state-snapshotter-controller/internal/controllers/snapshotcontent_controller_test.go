@@ -140,7 +140,7 @@ func TestEnsureChildSnapshotContentOwnedByParentDoesNotStealConflictingOwner(t *
 	}
 }
 
-func TestEnsureChildSnapshotContentOwnedByParentHandoffPreservesUnrelatedRefs(t *testing.T) {
+func TestEnsureChildSnapshotContentOwnedByParentRejectsSnapshotOwner(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
@@ -160,8 +160,36 @@ func TestEnsureChildSnapshotContentOwnedByParentHandoffPreservesUnrelatedRefs(t 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
+	if err := r.ensureChildSnapshotContentOwnedByParent(ctx, "child-content", parent); err == nil {
+		t.Fatal("expected child content ownerRef to Snapshot to fail closed")
+	}
+	fresh := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(ctx, client.ObjectKey{Name: "child-content"}, fresh); err != nil {
+		t.Fatalf("get child content: %v", err)
+	}
+	assertHasOwnerRef(t, fresh.OwnerReferences, "demo.test/v1", "DemoVirtualDiskSnapshot", "child-snapshot", true)
+	assertHasOwnerRef(t, fresh.OwnerReferences, unrelated.APIVersion, unrelated.Kind, unrelated.Name, false)
+}
+
+func TestEnsureChildSnapshotContentOwnedByParentPreservesUnrelatedRefs(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add storage scheme: %v", err)
+	}
+	unrelated := metav1.OwnerReference{APIVersion: "example.io/v1", Kind: "AuditAnchor", Name: "audit"}
+	child := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "child-content",
+			OwnerReferences: []metav1.OwnerReference{unrelated},
+		},
+	}
+	parent := snapshotContentUnstructuredForOwnerTest("parent-content", "parent-uid")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
 	if err := r.ensureChildSnapshotContentOwnedByParent(ctx, "child-content", parent); err != nil {
-		t.Fatalf("handoff child content ownerRef: %v", err)
+		t.Fatalf("set child content ownerRef: %v", err)
 	}
 	fresh := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(ctx, client.ObjectKey{Name: "child-content"}, fresh); err != nil {
@@ -169,7 +197,6 @@ func TestEnsureChildSnapshotContentOwnedByParentHandoffPreservesUnrelatedRefs(t 
 	}
 	assertHasOwnerRef(t, fresh.OwnerReferences, storagev1alpha1.SchemeGroupVersion.String(), "SnapshotContent", "parent-content", true)
 	assertHasOwnerRef(t, fresh.OwnerReferences, unrelated.APIVersion, unrelated.Kind, unrelated.Name, false)
-	assertNoOwnerRef(t, fresh.OwnerReferences, "demo.test/v1", "DemoVirtualDiskSnapshot", "child-snapshot")
 }
 
 func TestEnsureManifestCheckpointOwnedByContentDoesNotStealConflictingContentOwner(t *testing.T) {

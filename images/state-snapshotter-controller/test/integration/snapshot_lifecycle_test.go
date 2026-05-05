@@ -231,6 +231,18 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			Expect(ownerRefs).To(HaveLen(1), "SnapshotContent should have one ownerRef")
 			// For root snapshot, owner should be ObjectKeeper
 			Expect(ownerRefs[0].Kind).To(Equal("ObjectKeeper"), "Owner should be ObjectKeeper for root snapshot")
+			Expect(ownerRefs[0].Controller).NotTo(BeNil())
+			Expect(*ownerRefs[0].Controller).To(BeTrue())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, snapshotObj)
+			Expect(err).NotTo(HaveOccurred(), "Snapshot should still exist (no orphan)")
+			snapshotOwnerRefs := snapshotObj.GetOwnerReferences()
+			Expect(snapshotOwnerRefs).To(HaveLen(1), "root Snapshot should have one lifecycle ownerRef")
+			Expect(snapshotOwnerRefs[0].Kind).To(Equal("ObjectKeeper"))
+			Expect(snapshotOwnerRefs[0].Name).To(Equal(ownerRefs[0].Name), "root Snapshot and SnapshotContent should share one ObjectKeeper")
 
 			// INVARIANT: SnapshotContent has finalizer
 			finalizers := contentObj.GetFinalizers()
@@ -240,14 +252,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// Verify by checking that contentName matches the actual SnapshotContent name
 			Expect(contentObj.GetName()).To(Equal(contentName), "SnapshotContent name should match Snapshot.status.boundSnapshotContentName")
 
-			// INVARIANT: No orphans - SnapshotContent references existing Snapshot
-			// This is verified by successful Get() above
-			// Additional check: verify Snapshot still exists
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      snapshotObj.GetName(),
-				Namespace: snapshotObj.GetNamespace(),
-			}, snapshotObj)
-			Expect(err).NotTo(HaveOccurred(), "Snapshot should still exist (no orphan)")
+			// INVARIANT: No orphans - root Snapshot and SnapshotContent share a live ObjectKeeper owner.
 		})
 
 		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {

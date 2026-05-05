@@ -36,7 +36,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
@@ -440,97 +439,28 @@ func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *s
 // spec.mode is always FollowObjectWithTTL; spec.followObjectRef targets the root NamespaceSnapshot; spec.ttl is
 // SnapshotRootOKTTL from controller config (env override or built-in default). Execution-chain ObjectKeepers (MCR) stay FollowObject without TTL.
 func (r *NamespaceSnapshotReconciler) ensureNamespaceSnapshotRootObjectKeeper(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.SnapshotContent) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	name := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsSnap.Namespace, nsSnap.Name)
-	ok := &deckhousev1alpha1.ObjectKeeper{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: name}, ok)
-
-	ttl := config.DefaultSnapshotRootOKTTL
-	if r.Config != nil && r.Config.SnapshotRootOKTTL > 0 {
-		ttl = r.Config.SnapshotRootOKTTL
-	}
-	followSnap := &deckhousev1alpha1.FollowObjectRef{
-		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-		Kind:       "NamespaceSnapshot",
-		Namespace:  nsSnap.Namespace,
-		Name:       nsSnap.Name,
-		UID:        string(nsSnap.UID),
-	}
-	spec := deckhousev1alpha1.ObjectKeeperSpec{
-		Mode:            ObjectKeeperModeFollowObjectWithTTL,
-		FollowObjectRef: followSnap,
-		TTL:             &metav1.Duration{Duration: ttl},
-	}
-
-	okMatches := func(o *deckhousev1alpha1.ObjectKeeper) bool {
-		if o.Spec.Mode != spec.Mode {
-			return false
-		}
-		if o.Spec.FollowObjectRef == nil || spec.FollowObjectRef == nil {
-			return false
-		}
-		fr := o.Spec.FollowObjectRef
-		want := spec.FollowObjectRef
-		if fr.APIVersion != want.APIVersion || fr.Kind != want.Kind || fr.Name != want.Name || fr.Namespace != want.Namespace || fr.UID != want.UID {
-			return false
-		}
-		if o.Spec.TTL == nil || spec.TTL == nil || o.Spec.TTL.Duration != spec.TTL.Duration {
-			return false
-		}
-		return true
-	}
-
-	switch {
-	case apierrors.IsNotFound(err):
-		ok = &deckhousev1alpha1.ObjectKeeper{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: DeckhouseAPIVersion,
-				Kind:       KindObjectKeeper,
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: name,
-			},
-			Spec: spec,
-		}
-		if err := r.Client.Create(ctx, ok); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("create ObjectKeeper %s: %w", name, err)
-		}
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ok); err != nil {
-			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-		}
-		logger.Info("created root ObjectKeeper for NamespaceSnapshot", "objectKeeper", name, "mode", spec.Mode)
-		patchRes, err := r.ensureRootSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
-		if err != nil {
-			return nil, ctrl.Result{}, err
-		}
-		if patchRes.Requeue || patchRes.RequeueAfter > 0 {
-			return ok, patchRes, nil
-		}
-		return ok, ctrl.Result{}, nil
-	case err != nil:
+	ok, res, err := ensureRootObjectKeeperWithTTL(
+		ctx,
+		r.Client,
+		r.APIReader,
+		r.Config,
+		nsSnap,
+		storagev1alpha1.SchemeGroupVersion.WithKind(KindNamespaceSnapshot),
+	)
+	if err != nil {
 		return nil, ctrl.Result{}, err
-	default:
-		if !okMatches(ok) {
-			// Correct our declared spec in place. ObjectKeeper lifecycle and deletion are owned by the
-			// Deckhouse ObjectKeeper controller; we do not delete OKs from this reconciler.
-			ok.Spec = spec
-			if err := r.Client.Update(ctx, ok); err != nil {
-				return nil, ctrl.Result{}, fmt.Errorf("update ObjectKeeper %s (spec drift): %w", name, err)
-			}
-			logger.Info("updated root ObjectKeeper spec (corrected drift)", "objectKeeper", name)
-			if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, ok); err != nil {
-				return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-			}
-		}
-		patchRes, err := r.ensureRootSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
-		if err != nil {
-			return nil, ctrl.Result{}, err
-		}
-		if patchRes.Requeue || patchRes.RequeueAfter > 0 {
-			return ok, patchRes, nil
-		}
-		return ok, ctrl.Result{}, nil
 	}
+	if res.Requeue || res.RequeueAfter > 0 {
+		return ok, res, nil
+	}
+	patchRes, err := r.ensureRootSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	if patchRes.Requeue || patchRes.RequeueAfter > 0 {
+		return ok, patchRes, nil
+	}
+	return ok, ctrl.Result{}, nil
 }
 
 // ensureRootSnapshotContentOwnedByObjectKeeper patches root SnapshotContent to reference the root ObjectKeeper.
@@ -539,29 +469,14 @@ func (r *NamespaceSnapshotReconciler) ensureRootSnapshotContentOwnedByObjectKeep
 	content *storagev1alpha1.SnapshotContent,
 	ok *deckhousev1alpha1.ObjectKeeper,
 ) (ctrl.Result, error) {
-	want := namespaceSnapshotRootContentOwnerReferenceToOK(ok)
-	for _, ref := range content.OwnerReferences {
-		if ref.APIVersion == want.APIVersion && ref.Kind == want.Kind && ref.Name == want.Name && ref.UID == want.UID {
-			return ctrl.Result{}, nil
-		}
-	}
-	base := content.DeepCopy()
-	content.OwnerReferences = append(content.OwnerReferences, want)
-	if err := r.Client.Patch(ctx, content, client.MergeFrom(base)); err != nil {
+	changed, err := ensureLifecycleOwnerRef(ctx, r.Client, content, rootObjectKeeperOwnerReference(ok))
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{Requeue: true}, nil
-}
-
-func namespaceSnapshotRootContentOwnerReferenceToOK(ok *deckhousev1alpha1.ObjectKeeper) metav1.OwnerReference {
-	b := true
-	return metav1.OwnerReference{
-		APIVersion: DeckhouseAPIVersion,
-		Kind:       KindObjectKeeper,
-		Name:       ok.Name,
-		UID:        ok.UID,
-		Controller: &b,
+	if changed {
+		return ctrl.Result{Requeue: true}, nil
 	}
+	return ctrl.Result{}, nil
 }
 
 // namespaceSnapshotOwnerReferenceForMCR is set on ManifestCaptureRequest so Kubernetes GC removes the

@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -184,6 +185,7 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if snap.Status.BoundSnapshotContentName != contentName {
 		t.Fatalf("expected bound content %q, got %q", contentName, snap.Status.BoundSnapshotContentName)
 	}
+	assertDemoSnapshotOwnedBy(t, snap, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualDiskSnapshot, "snap"))
 	ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected Ready=True Completed, got %#v", ready)
@@ -195,6 +197,8 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
 		t.Fatalf("get content after ready: %v", err)
 	}
+	assertDemoOwnerRef(t, content.OwnerReferences, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualDiskSnapshot, "snap"), true)
+	assertNoSnapshotContentOwnerRefToSnapshot(t, content)
 	if content.Status.ManifestCheckpointName != "mcp-disk" {
 		t.Fatalf("expected content MCP link %q, got %q", "mcp-disk", content.Status.ManifestCheckpointName)
 	}
@@ -457,6 +461,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if vmSnap.Status.BoundSnapshotContentName != vmContentName {
 		t.Fatalf("expected VM bound content %q, got %q", vmContentName, vmSnap.Status.BoundSnapshotContentName)
 	}
+	assertDemoSnapshotOwnedBy(t, vmSnap, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualMachineSnapshot, "snap"))
 	ready = meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected VM Ready=True Completed, got %#v", ready)
@@ -467,9 +472,16 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if vmContent.Status.ManifestCheckpointName != "mcp-vm" {
 		t.Fatalf("expected VM content MCP link %q, got %q", "mcp-vm", vmContent.Status.ManifestCheckpointName)
 	}
+	assertDemoOwnerRef(t, vmContent.OwnerReferences, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualMachineSnapshot, "snap"), true)
+	assertNoSnapshotContentOwnerRefToSnapshot(t, vmContent)
 	if !snapshotContentChildRefsEqualIgnoreOrder(vmContent.Status.ChildrenSnapshotContentRefs, []storagev1alpha1.SnapshotContentChildRef{{Name: diskContentName}}) {
 		t.Fatalf("unexpected VM content child refs: %#v", vmContent.Status.ChildrenSnapshotContentRefs)
 	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: diskContentName}, diskContent); err != nil {
+		t.Fatalf("get disk content after parent publish: %v", err)
+	}
+	assertDemoOwnerRef(t, diskContent.OwnerReferences, storagev1alpha1.SchemeGroupVersion.String(), "SnapshotContent", vmContentName, true)
+	assertNoSnapshotContentOwnerRefToSnapshot(t, diskContent)
 	if vmContent.Status.DataRef != nil {
 		t.Fatalf("state-only VM content must not require or set dataRef, got %#v", vmContent.Status.DataRef)
 	}
@@ -609,6 +621,9 @@ func newDemoSourceRefFakeClient(t *testing.T, initObjs ...client.Object) client.
 	if err := demov1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add demo scheme: %v", err)
 	}
+	if err := deckhousev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add deckhouse scheme: %v", err)
+	}
 	statusSubresources := []client.Object{
 		&demov1alpha1.DemoVirtualDiskSnapshot{},
 		&storagev1alpha1.SnapshotContent{},
@@ -709,4 +724,28 @@ func assertOwnerRefPresent(t *testing.T, refs []metav1.OwnerReference, apiVersio
 		}
 	}
 	t.Fatalf("expected ownerRef %s/%s/%s in %#v", apiVersion, kind, name, refs)
+}
+
+func assertDemoOwnerRef(t *testing.T, refs []metav1.OwnerReference, apiVersion, kind, name string, controller bool) {
+	t.Helper()
+	for _, ref := range refs {
+		if ref.APIVersion != apiVersion || ref.Kind != kind || ref.Name != name {
+			continue
+		}
+		gotController := ref.Controller != nil && *ref.Controller
+		if gotController != controller {
+			t.Fatalf("ownerRef %s/%s/%s controller=%v, want %v", apiVersion, kind, name, gotController, controller)
+		}
+		return
+	}
+	t.Fatalf("expected ownerRef %s/%s/%s in %#v", apiVersion, kind, name, refs)
+}
+
+func assertNoSnapshotContentOwnerRefToSnapshot(t *testing.T, content *storagev1alpha1.SnapshotContent) {
+	t.Helper()
+	for _, ref := range content.OwnerReferences {
+		if ref.Kind == KindNamespaceSnapshot || ref.Kind == KindDemoVirtualDiskSnapshot || ref.Kind == KindDemoVirtualMachineSnapshot {
+			t.Fatalf("SnapshotContent %s must not be owned by Snapshot %s/%s", content.Name, ref.Kind, ref.Name)
+		}
+	}
 }

@@ -242,7 +242,7 @@
 
 **Скелет (Phase 2, API-объект content):** при **DeletionPolicy=Delete** на `SnapshotContent` контроллер вызывает `Delete` на CR и **не** снимает финализатор с root, пока `Get(SnapshotContent)` не вернёт **NotFound** (requeue до исчезновения объекта из API).
 
-При **Retain:** артефакт и при необходимости **SnapshotContent** переживают root — явный итог reconcile (**conditions** на content и ссылки orphaning). См. ТЗ в `snapshot-rework`.
+При **Retain:** root `ObjectKeeper` with TTL является lifecycle anchor для root Snapshot и root `SnapshotContent`; retained content tree переживает обычное удаление Snapshot до TTL/удаления ObjectKeeper, но не становится ownerless. См. ТЗ в `snapshot-rework`.
 
 ### 5.3 Recovery after restart
 

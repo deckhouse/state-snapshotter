@@ -132,6 +132,24 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	rootOK, res, err := ensureRootObjectKeeperWithTTL(
+		ctx,
+		r.Client,
+		r.APIReader,
+		r.Config,
+		nsSnap,
+		storagev1alpha1.SchemeGroupVersion.WithKind(KindNamespaceSnapshot),
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if res.Requeue || res.RequeueAfter > 0 {
+		return res, nil
+	}
+	if _, err := ensureLifecycleOwnerRef(ctx, r.Client, nsSnap, rootObjectKeeperOwnerReference(rootOK)); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	var ns corev1.Namespace
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Namespace}, &ns); err != nil {
 		if errors.IsNotFound(err) {
@@ -164,7 +182,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content)
+	err = r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content)
 	if errors.IsNotFound(err) {
 		if nsSnap.Status.BoundSnapshotContentName != "" {
 			nsSnap.Status.BoundSnapshotContentName = ""
@@ -178,6 +196,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 
 		om := snapshotContentObjectMeta(nsSnap)
+		om.OwnerReferences = []metav1.OwnerReference{rootObjectKeeperOwnerReference(rootOK)}
 		newContent := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: om,
 			Spec:       desiredSnapshotContentSpec(nsSnap),

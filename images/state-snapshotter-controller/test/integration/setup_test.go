@@ -705,8 +705,8 @@ var _ = BeforeSuite(func() {
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
-	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr)).To(Succeed())
-	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr)).To(Succeed())
+	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
+	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
 
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,
