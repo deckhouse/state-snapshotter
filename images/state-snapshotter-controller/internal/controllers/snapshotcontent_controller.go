@@ -30,18 +30,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
-	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
@@ -59,7 +57,7 @@ import (
 // - Reads existing manifest/data result objects and aggregates Ready
 // - Publishes SnapshotContent.status fields (MCP/data refs and child content refs)
 // - Handles deletion (cascade finalizers removal)
-// - Does NOT create SnapshotContent (that's SnapshotController's responsibility)
+// - Does NOT create SnapshotContent (that's GenericSnapshotBinderController's responsibility)
 //
 // Architecture:
 // - Uses dynamic client for low-level get/list operations
@@ -82,8 +80,9 @@ type SnapshotContentController struct {
 	// This allows domain modules to register their snapshot content types
 	SnapshotContentGVKs []schema.GroupVersionKind
 
-	watchMu               sync.RWMutex
-	activeContentWatchSet map[string]struct{} // SnapshotContent GVK String()
+	watchMu                sync.RWMutex
+	activeContentWatchSet  map[string]struct{} // SnapshotContent GVK String()
+	activeSnapshotWatchSet map[string]struct{} // Snapshot GVK String() -> status watch registered with manager
 }
 
 // NewSnapshotContentController creates a new SnapshotContentController with validated dependencies
@@ -145,16 +144,17 @@ func NewSnapshotContentController(
 	}
 
 	return &SnapshotContentController{
-		Client:                client,
-		APIReader:             apiReader,
-		Scheme:                scheme,
-		RESTMapper:            restMapper,
-		clusterGVKs:           clusterGVKs,
-		namespacedGVKs:        namespacedGVKs,
-		Config:                cfg,
-		GVKRegistry:           registry,
-		SnapshotContentGVKs:   snapshotContentGVKs,
-		activeContentWatchSet: make(map[string]struct{}),
+		Client:                 client,
+		APIReader:              apiReader,
+		Scheme:                 scheme,
+		RESTMapper:             restMapper,
+		clusterGVKs:            clusterGVKs,
+		namespacedGVKs:         namespacedGVKs,
+		Config:                 cfg,
+		GVKRegistry:            registry,
+		SnapshotContentGVKs:    snapshotContentGVKs,
+		activeContentWatchSet:  make(map[string]struct{}),
+		activeSnapshotWatchSet: make(map[string]struct{}),
 	}, nil
 }
 
@@ -413,7 +413,7 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 	}
 	plan.childrenRefs = childRefs
 
-	mcpName, mcpReady, mcpFailed, mcpMessage, err := r.resolveCommonContentManifestCheckpoint(ctx, obj, snapshotRef, snapObj)
+	mcpName, mcpReady, mcpFailed, mcpMessage, err := r.resolveCommonContentManifestCheckpoint(ctx, obj, snapObj)
 	if err != nil {
 		return plan, err
 	}
@@ -530,7 +530,7 @@ func (r *SnapshotContentController) resolveCommonContentChildren(ctx context.Con
 	return refs, true, "", "", nil
 }
 
-func (r *SnapshotContentController) resolveCommonContentManifestCheckpoint(ctx context.Context, contentObj *unstructured.Unstructured, ref storagev1alpha1.SnapshotSubjectRef, snapObj *unstructured.Unstructured) (string, bool, bool, string, error) {
+func (r *SnapshotContentController) resolveCommonContentManifestCheckpoint(ctx context.Context, contentObj, snapObj *unstructured.Unstructured) (string, bool, bool, string, error) {
 	existingMCPName, _, err := unstructured.NestedString(contentObj.Object, "status", "manifestCheckpointName")
 	if err != nil {
 		return "", false, false, "", err
@@ -541,18 +541,26 @@ func (r *SnapshotContentController) resolveCommonContentManifestCheckpoint(ctx c
 			return "", false, false, "", err
 		}
 		if ready || failed {
+			if ready {
+				if err := r.ensureManifestCheckpointOwnedByContent(ctx, mcpName, contentObj); err != nil {
+					return "", false, false, "", err
+				}
+			}
 			return mcpName, ready, failed, msg, nil
 		}
 	}
 
-	mcrName := commonContentManifestCaptureRequestName(ref, snapObj)
+	mcrName, _, err := unstructured.NestedString(snapObj.Object, "status", "manifestCaptureRequestName")
+	if err != nil {
+		return "", false, false, "", err
+	}
 	if mcrName == "" {
-		return "", false, false, "waiting for ManifestCaptureRequest name", nil
+		return "", false, false, "waiting for snapshot status.manifestCaptureRequestName", nil
 	}
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: mcrName}, mcr); err != nil {
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: snapObj.GetNamespace(), Name: mcrName}, mcr); err != nil {
 		if errors.IsNotFound(err) {
-			return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s", ref.Namespace, mcrName), nil
+			return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s", snapObj.GetNamespace(), mcrName), nil
 		}
 		return "", false, false, "", err
 	}
@@ -561,9 +569,43 @@ func (r *SnapshotContentController) resolveCommonContentManifestCheckpoint(ctx c
 		if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonFailed {
 			return "", false, true, cond.Message, nil
 		}
-		return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s checkpoint", ref.Namespace, mcrName), nil
+		return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s checkpoint", snapObj.GetNamespace(), mcrName), nil
 	}
-	return r.resolveManifestCheckpointReady(ctx, mcr.Status.CheckpointName)
+	mcpName, ready, failed, msg, err := r.resolveManifestCheckpointReady(ctx, mcr.Status.CheckpointName)
+	if err != nil {
+		return "", false, false, "", err
+	}
+	if ready {
+		if err := r.ensureManifestCheckpointOwnedByContent(ctx, mcpName, contentObj); err != nil {
+			return "", false, false, "", err
+		}
+	}
+	return mcpName, ready, failed, msg, nil
+}
+
+func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx context.Context, mcpName string, contentObj *unstructured.Unstructured) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		mcp := &ssv1alpha1.ManifestCheckpoint{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+			return err
+		}
+		ownerRef := metav1.OwnerReference{
+			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+			Kind:       "SnapshotContent",
+			Name:       contentObj.GetName(),
+			UID:        contentObj.GetUID(),
+			Controller: func() *bool { b := true; return &b }(),
+		}
+		if len(mcp.OwnerReferences) == 1 {
+			existing := mcp.OwnerReferences[0]
+			if existing.APIVersion == ownerRef.APIVersion && existing.Kind == ownerRef.Kind && existing.Name == ownerRef.Name && existing.UID == ownerRef.UID {
+				return nil
+			}
+		}
+		base := mcp.DeepCopy()
+		mcp.OwnerReferences = []metav1.OwnerReference{ownerRef}
+		return r.Client.Patch(ctx, mcp, client.MergeFrom(base))
+	})
 }
 
 func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.Context, mcpName string) (string, bool, bool, string, error) {
@@ -585,25 +627,6 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 		return mcp.Name, false, true, cond.Message, nil
 	}
 	return mcp.Name, false, false, cond.Message, nil
-}
-
-func commonContentManifestCaptureRequestName(ref storagev1alpha1.SnapshotSubjectRef, snapObj *unstructured.Unstructured) string {
-	switch {
-	case ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == KindNamespaceSnapshot:
-		uid := ref.UID
-		if uid == "" {
-			uid = snapObj.GetUID()
-		}
-		if uid == "" {
-			return ""
-		}
-		return namespacemanifest.NamespaceSnapshotMCRName(uid)
-	case ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && (ref.Kind == KindDemoVirtualDiskSnapshot || ref.Kind == KindDemoVirtualMachineSnapshot):
-		return demoSnapshotManifestCaptureRequestName(ref.Kind, ref.Namespace, ref.Name)
-	default:
-		name, _, _ := unstructured.NestedString(snapObj.Object, "status", "manifestCaptureRequestName")
-		return name
-	}
 }
 
 func (r *SnapshotContentController) resolveDataReadiness(_ context.Context, _ *unstructured.Unstructured) (bool, string, string, error) {
@@ -980,7 +1003,7 @@ func (r *SnapshotContentController) namespacedGVKsSnapshot() []schema.GroupVersi
 
 // AddWatchForContent registers a SnapshotContent GVK with the manager at runtime. Idempotent per content GVK.
 // On Complete failure, slice entries appended in this call are removed; registry is reverted only if at least
-// one such slice was extended (same bootstrap-protection idea as SnapshotController.AddWatchForPair).
+// one such slice was extended (same bootstrap-protection idea as GenericSnapshotBinderController.AddWatchForPair).
 func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
@@ -1059,6 +1082,16 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 	return nil
 }
 
+// AddSnapshotStatusWatch registers a snapshot status watch that maps
+// status.boundSnapshotContentName changes back to the bound common SnapshotContent.
+// Snapshot GVKs are supplied by bootstrap/DSC runtime wiring; this controller must
+// not hardcode domain snapshot kinds.
+func (r *SnapshotContentController) AddSnapshotStatusWatch(mgr ctrl.Manager, snapshotGVK schema.GroupVersionKind) error {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	return r.addSnapshotStatusWatchLocked(mgr, snapshotGVK)
+}
+
 // SetupWithManager sets up the controller with the Manager
 // Registers watches for all registered SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
@@ -1084,7 +1117,6 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
-		r.addCommonSnapshotStatusWatches(mgr, builder, gvk)
 		if err := builder.Complete(r); err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
 		}
@@ -1093,28 +1125,27 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
-func (r *SnapshotContentController) addCommonSnapshotStatusWatches(_ ctrl.Manager, builder *ctrlbuilder.Builder, contentGVK schema.GroupVersionKind) {
-	if !isCommonSnapshotContentGVK(contentGVK) {
-		return
+func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manager, snapshotGVK schema.GroupVersionKind) error {
+	if r.activeSnapshotWatchSet == nil {
+		r.activeSnapshotWatchSet = make(map[string]struct{})
 	}
-	for _, snapshotGVK := range commonContentStatusSnapshotWatchGVKs() {
-		if _, err := r.RESTMapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version); err != nil {
-			continue
-		}
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(snapshotGVK)
-		builder.Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent))
+	key := snapshotGVK.String()
+	if _, ok := r.activeSnapshotWatchSet[key]; ok {
+		return nil
 	}
-}
-
-func commonContentStatusSnapshotWatchGVKs() []schema.GroupVersionKind {
-	return []schema.GroupVersionKind{
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		{Group: storagev1alpha1.SchemeGroupVersion.Group, Version: storagev1alpha1.SchemeGroupVersion.Version, Kind: KindNamespaceSnapshot},
-		{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: KindDemoVirtualDiskSnapshot},
-		{Group: demov1alpha1.SchemeGroupVersion.Group, Version: demov1alpha1.SchemeGroupVersion.Version, Kind: KindDemoVirtualMachineSnapshot},
-		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
+	if _, err := r.RESTMapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version); err != nil {
+		return fmt.Errorf("RESTMapping for snapshot status watch %s: %w", snapshotGVK.String(), err)
 	}
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(snapshotGVK)
+	if err := ctrl.NewControllerManagedBy(mgr).
+		Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent)).
+		Named(fmt.Sprintf("snapshotcontent-snapshot-%s-%s", snapshotGVK.Group, snapshotGVK.Kind)).
+		Complete(r); err != nil {
+		return fmt.Errorf("setup SnapshotContent snapshot status watch for %s: %w", snapshotGVK.String(), err)
+	}
+	r.activeSnapshotWatchSet[key] = struct{}{}
+	return nil
 }
 
 func mapSnapshotStatusToBoundCommonContent(_ context.Context, obj client.Object) []reconcile.Request {

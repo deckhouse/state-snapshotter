@@ -142,11 +142,11 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 		// PRECONDITION:
 		// - envtest running
 		// - CRDs installed (TestSnapshot, TestSnapshotContent, ObjectKeeper)
-		// - Controllers running (SnapshotController, SnapshotContentController)
+		// - Controllers running (GenericSnapshotBinderController, SnapshotContentController)
 		//
 		// ACTIONS:
 		// 1. Create TestSnapshot (root, no parent)
-		// 2. Wait for TestSnapshotContent creation (via SnapshotController)
+		// 2. Wait for TestSnapshotContent creation (via GenericSnapshotBinderController)
 		// 3. Wait for finalizer addition (via SnapshotContentController)
 		// 4. Simulate domain controller: set HandledByDomainSpecificController=True on SnapshotContent
 		// 5. Simulate readiness: set Ready=True on SnapshotContent
@@ -191,7 +191,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Step 1.5: Simulate domain controller: set HandledByDomainSpecificController=True on Snapshot
-			// SnapshotController waits for this condition before creating SnapshotContent
+			// GenericSnapshotBinderController waits for this condition before creating SnapshotContent
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
@@ -215,8 +215,8 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err = k8sClient.Status().Update(ctx, freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Step 2: Wait for TestSnapshotContent creation (via SnapshotController)
-			// This verifies CRD + RBAC + SnapshotController wiring
+			// Step 2: Wait for TestSnapshotContent creation (via GenericSnapshotBinderController)
+			// This verifies CRD + RBAC + GenericSnapshotBinderController wiring
 			Eventually(func() string {
 				freshSnapshot := &unstructured.Unstructured{}
 				freshSnapshot.SetGroupVersionKind(snapshotGVK)
@@ -315,7 +315,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Step 6: Wait for Ready=True on Snapshot (HARD ASSERTION - only truly terminal point)
-			// This verifies SnapshotController propagation and end-to-end readiness
+			// This verifies GenericSnapshotBinderController propagation and end-to-end readiness
 			// Use explicit reconcile trigger to ensure propagation happens
 			Eventually(func() bool {
 				// Explicitly trigger reconcile to ensure propagation happens
@@ -426,7 +426,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 		// - GC: Kubernetes GC handles ownerRef cleanup
 		//
 		// VERIFIES:
-		// - SnapshotController doesn't delete SnapshotContent directly
+		// - GenericSnapshotBinderController doesn't delete SnapshotContent directly
 		// - SnapshotContentController removes finalizer on orphaning
 		// - GC correctly handles deletion
 		// - Lifecycle model works end-to-end
@@ -690,7 +690,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 		//
 		// PRECONDITION:
 		// - envtest running
-		// - Controllers running (SnapshotController, SnapshotContentController)
+		// - Controllers running (GenericSnapshotBinderController, SnapshotContentController)
 		// - RBAC configured (in production) or disabled (in envtest)
 		//
 		// ACTIONS:

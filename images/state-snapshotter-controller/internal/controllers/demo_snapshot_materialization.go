@@ -93,6 +93,31 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	return mcr, nil
 }
 
+func cleanupDemoSnapshotManifestCaptureRequest(ctx context.Context, c client.Client, mcr *ssv1alpha1.ManifestCaptureRequest) error {
+	if mcr == nil {
+		return nil
+	}
+	err := c.Delete(ctx, mcr)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func demoSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, c client.Reader, key types.NamespacedName) (bool, error) {
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := c.Get(ctx, key, mcr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	ready := meta.FindStatusCondition(mcr.Status.Conditions, ssv1alpha1.ManifestCaptureRequestConditionTypeReady)
+	return ready != nil &&
+		ready.Status == metav1.ConditionTrue &&
+		ready.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonCompleted, nil
+}
+
 func demoManifestCheckpointReady(
 	ctx context.Context,
 	c client.Client,

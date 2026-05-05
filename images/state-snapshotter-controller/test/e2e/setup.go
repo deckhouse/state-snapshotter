@@ -55,7 +55,7 @@ var (
 	ctx                context.Context
 	cancel             context.CancelFunc
 	mgr                ctrl.Manager
-	snapshotController *controllers.SnapshotController
+	snapshotController *controllers.GenericSnapshotBinderController
 	contentController  *controllers.SnapshotContentController
 )
 
@@ -426,7 +426,7 @@ var _ = BeforeSuite(func() {
 	err = mcpController.SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
-	// Setup unified snapshots controllers (SnapshotController and SnapshotContentController)
+	// Setup unified snapshots controllers (GenericSnapshotBinderController and SnapshotContentController)
 	// These controllers work with TestSnapshot/TestSnapshotContent for E2E tests
 	snapshotGVK := schema.GroupVersionKind{
 		Group:   "test.deckhouse.io",
@@ -439,7 +439,7 @@ var _ = BeforeSuite(func() {
 		Kind:    "TestSnapshotContent",
 	}
 
-	snapshotController, err = controllers.NewSnapshotController(
+	snapshotController, err = controllers.NewGenericSnapshotBinderController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetScheme(),

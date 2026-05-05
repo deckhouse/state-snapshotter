@@ -36,7 +36,7 @@ func TestMapSnapshotContentToSnapshot_AllowsClusterSnapshotWithoutNamespace(t *t
 		t.Fatalf("register content gvk: %v", err)
 	}
 
-	controller := &SnapshotController{
+	controller := &GenericSnapshotBinderController{
 		GVKRegistry:  registry,
 		SnapshotGVKs: []schema.GroupVersionKind{{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "ClusterSnapshot"}},
 	}
@@ -72,7 +72,7 @@ func TestMapSnapshotContentToSnapshot_AllowsClusterSnapshotWithoutNamespace(t *t
 
 func TestMapSnapshotContentToSnapshot_MissingSnapshotRefKindSkips(t *testing.T) {
 	registry := snapshot.NewGVKRegistry()
-	controller := &SnapshotController{
+	controller := &GenericSnapshotBinderController{
 		GVKRegistry: registry,
 	}
 

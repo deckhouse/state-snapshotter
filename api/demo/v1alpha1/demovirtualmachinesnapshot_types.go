@@ -53,6 +53,9 @@ type DemoVirtualMachineSnapshotStatus struct {
 	// BoundSnapshotContentName is the cluster-scoped SnapshotContent name, once created.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
+	// ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
+	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
+
 	// Conditions report readiness (e.g. Ready=True for generic parent E6 aggregation).
 	// +optional
 	// +listType=map

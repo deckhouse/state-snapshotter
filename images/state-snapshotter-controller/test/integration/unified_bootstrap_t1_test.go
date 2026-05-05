@@ -50,7 +50,7 @@ var _ = Describe("Integration T1: unified bootstrap without optional snapshot CR
 			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent",
 		}))
 
-		snapshotController, err := controllers.NewSnapshotController(
+		snapshotController, err := controllers.NewGenericSnapshotBinderController(
 			k8sClient,
 			mgr.GetAPIReader(),
 			scheme,

@@ -204,25 +204,25 @@ func main() {
 	log.Info("ManifestCheckpointController added to manager")
 
 	if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
-		log.Error(err, "Failed to add NamespaceSnapshotController to manager")
+		log.Error(err, "Failed to add NamespaceGenericSnapshotBinderController to manager")
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("NamespaceSnapshotController added to manager")
+	log.Info("NamespaceGenericSnapshotBinderController added to manager")
 
 	if err := controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr); err != nil {
-		log.Error(err, "Failed to add DemoVirtualDiskSnapshotController to manager")
+		log.Error(err, "Failed to add DemoVirtualDiskGenericSnapshotBinderController to manager")
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("DemoVirtualDiskSnapshotController added to manager")
+	log.Info("DemoVirtualDiskGenericSnapshotBinderController added to manager")
 
 	if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr); err != nil {
-		log.Error(err, "Failed to add DemoVirtualMachineSnapshotController to manager")
+		log.Error(err, "Failed to add DemoVirtualMachineGenericSnapshotBinderController to manager")
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("DemoVirtualMachineSnapshotController added to manager")
+	log.Info("DemoVirtualMachineGenericSnapshotBinderController added to manager")
 
 	contentController, err := controllers.NewSnapshotContentController(
 		mgr.GetClient(),
@@ -277,8 +277,15 @@ func main() {
 	}
 
 	genericSnapshotGVKs, genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
+	for _, snapshotGVK := range snapshotGVKs {
+		if err := contentController.AddSnapshotStatusWatch(mgr, snapshotGVK); err != nil {
+			log.Error(err, "Failed to setup SnapshotContentController snapshot status watch", "snapshotGVK", snapshotGVK.String())
+			cancel()
+			os.Exit(1)
+		}
+	}
 
-	snapshotController, err := controllers.NewSnapshotController(
+	snapshotController, err := controllers.NewGenericSnapshotBinderController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetScheme(),
@@ -286,18 +293,18 @@ func main() {
 		nil,
 	)
 	if err != nil {
-		log.Error(err, "Failed to create SnapshotController")
+		log.Error(err, "Failed to create GenericSnapshotBinderController")
 		cancel()
 		os.Exit(1)
 	}
 	for i := range genericSnapshotGVKs {
 		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
-			log.Error(err, "Failed to setup SnapshotController watch", "snapshotGVK", genericSnapshotGVKs[i].String(), "snapshotContentGVK", genericContentGVKs[i].String())
+			log.Error(err, "Failed to setup GenericSnapshotBinderController watch", "snapshotGVK", genericSnapshotGVKs[i].String(), "snapshotContentGVK", genericContentGVKs[i].String())
 			cancel()
 			os.Exit(1)
 		}
 	}
-	log.Info("SnapshotController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
+	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
 	unifiedSync := unifiedruntime.NewSyncer(
 		mgr,

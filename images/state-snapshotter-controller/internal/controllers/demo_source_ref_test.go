@@ -451,7 +451,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if !equality.Semantic.DeepEqual(mcr.Spec.Targets, expectedTargets) {
 		t.Fatalf("unexpected VM MCR targets: %#v", mcr.Spec.Targets)
 	}
-	assertNoDemoDiskSnapshots(t, cl)
+	assertDemoDiskSnapshotsCount(t, cl, 1)
 
 	baseMCR := mcr.DeepCopy()
 	mcr.Status.CheckpointName = "mcp-vm"
@@ -512,8 +512,8 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		t.Fatalf("unexpected VM child refs: %#v", vmSnap.Status.ChildrenSnapshotRefs)
 	}
 	ready := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonChildSnapshotPending {
-		t.Fatalf("expected Ready=False ChildSnapshotPending before child ready, got %#v", ready)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonManifestCapturePending {
+		t.Fatalf("expected Ready=False mirrored content pending before child content ready, got %#v", ready)
 	}
 
 	diskContentName := "disk-content"
@@ -680,11 +680,16 @@ func assertNoDemoVMContents(t *testing.T, cl client.Client) {
 
 func assertNoDemoDiskSnapshots(t *testing.T, cl client.Client) {
 	t.Helper()
+	assertDemoDiskSnapshotsCount(t, cl, 0)
+}
+
+func assertDemoDiskSnapshotsCount(t *testing.T, cl client.Client, want int) {
+	t.Helper()
 	snaps := &demov1alpha1.DemoVirtualDiskSnapshotList{}
 	if err := cl.List(context.Background(), snaps); err != nil {
 		t.Fatalf("list disk snapshots: %v", err)
 	}
-	if len(snaps.Items) != 0 {
-		t.Fatalf("expected no disk snapshots, got %d", len(snaps.Items))
+	if len(snaps.Items) != want {
+		t.Fatalf("expected %d disk snapshots, got %d", want, len(snaps.Items))
 	}
 }

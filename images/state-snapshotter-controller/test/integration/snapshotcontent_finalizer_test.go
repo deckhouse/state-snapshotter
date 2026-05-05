@@ -57,7 +57,7 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 	//
 	// PRECONDITION:
 	// - Snapshot exists
-	// - SnapshotContent exists (created by SnapshotController)
+	// - SnapshotContent exists (created by GenericSnapshotBinderController)
 	//
 	// ACTIONS:
 	// 1. SnapshotContentController.Reconcile(ctx, req)
@@ -129,9 +129,9 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 			err = k8sClient.Status().Update(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Create SnapshotContent via SnapshotController
+			// Create SnapshotContent via GenericSnapshotBinderController
 			// Create controllers for this test
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,

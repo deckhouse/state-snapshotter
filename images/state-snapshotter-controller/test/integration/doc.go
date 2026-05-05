@@ -20,7 +20,7 @@ limitations under the License.
 // through their public interfaces (Reconcile methods).
 //
 // Test categories:
-// - SnapshotController: Create path, Deletion path (propagation), Consistency checks
+// - GenericSnapshotBinderController: Create path, Deletion path (propagation), Consistency checks
 // - SnapshotContentController: Finalizer management, Orphaning, Cascade deletion
 //
 // These tests verify controller behavior, not implementation details.

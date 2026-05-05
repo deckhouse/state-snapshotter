@@ -91,99 +91,98 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 		}
 	})
 
-
-Describe("Orphaning - Snapshot Deleted", func() {
-	It("should not remove finalizer based on snapshot deletion (handled by SnapshotController)", func() {
-		// PRECONDITION: Create Snapshot
-		snapshotObj := &unstructured.Unstructured{}
-		snapshotObj.SetGroupVersionKind(snapshotGVK)
-		snapshotObj.SetName("test-orphaning-snapshot")
-		snapshotObj.SetNamespace("default")
-		snapshotObj.Object["spec"] = map[string]interface{}{
-			"backupClassName": "test-backup-class",
-		}
-
-		err := k8sClient.Create(ctx, snapshotObj)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Simulate domain controller
-		snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-		Expect(err).NotTo(HaveOccurred())
-		snapshot.SetCondition(
-			snapshotLike,
-			snapshot.ConditionHandledByDomainSpecificController,
-			metav1.ConditionTrue,
-			"Processed",
-			"Domain controller processed snapshot",
-		)
-		snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
-		err = k8sClient.Status().Update(ctx, snapshotObj)
-		Expect(err).NotTo(HaveOccurred())
-
-		contentCtrl, err := controllers.NewSnapshotContentController(
-			k8sClient,
-			mgr.GetAPIReader(),
-			scheme,
-			mgr.GetRESTMapper(),
-			testCfg,
-			[]schema.GroupVersionKind{contentGVK},
-		)
-		Expect(err).NotTo(HaveOccurred())
-
-		snapshotCtrl, err := controllers.NewSnapshotController(
-			k8sClient,
-			mgr.GetAPIReader(),
-			scheme,
-			testCfg,
-			[]schema.GroupVersionKind{snapshotGVK},
-		)
-		Expect(err).NotTo(HaveOccurred())
-
-		req := ctrl.Request{
-			NamespacedName: types.NamespacedName{
-				Name:      snapshotObj.GetName(),
-				Namespace: snapshotObj.GetNamespace(),
-			},
-		}
-
-		_, err = snapshotCtrl.Reconcile(ctx, req)
-		Expect(err).NotTo(HaveOccurred())
-
-		var contentName string
-		Eventually(func() bool {
-			freshSnapshot := &unstructured.Unstructured{}
-			freshSnapshot.SetGroupVersionKind(snapshotGVK)
-			err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
-				Name:      snapshotObj.GetName(),
-				Namespace: snapshotObj.GetNamespace(),
-			}, freshSnapshot)
-			if err != nil {
-				return false
+	Describe("Orphaning - Snapshot Deleted", func() {
+		It("should not remove finalizer based on snapshot deletion (handled by GenericSnapshotBinderController)", func() {
+			// PRECONDITION: Create Snapshot
+			snapshotObj := &unstructured.Unstructured{}
+			snapshotObj.SetGroupVersionKind(snapshotGVK)
+			snapshotObj.SetName("test-orphaning-snapshot")
+			snapshotObj.SetNamespace("default")
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
 			}
-			like, err := snapshot.ExtractSnapshotLike(freshSnapshot)
-			if err != nil {
-				return false
+
+			err := k8sClient.Create(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate domain controller
+			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+			snapshot.SetCondition(
+				snapshotLike,
+				snapshot.ConditionHandledByDomainSpecificController,
+				metav1.ConditionTrue,
+				"Processed",
+				"Domain controller processed snapshot",
+			)
+			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
+			err = k8sClient.Status().Update(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			contentCtrl, err := controllers.NewSnapshotContentController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				mgr.GetRESTMapper(),
+				testCfg,
+				[]schema.GroupVersionKind{contentGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				},
 			}
-			contentName = like.GetStatusContentName()
-			return contentName != ""
-		}, "10s", "100ms").Should(BeTrue())
 
-		_, _ = contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}})
-		contentObj := &unstructured.Unstructured{}
-		contentObj.SetGroupVersionKind(contentGVK)
-		Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
-		Expect(contentObj.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect))
+			_, err = snapshotCtrl.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
 
-		err = k8sClient.Delete(ctx, snapshotObj)
-		Expect(err).NotTo(HaveOccurred())
+			var contentName string
+			Eventually(func() bool {
+				freshSnapshot := &unstructured.Unstructured{}
+				freshSnapshot.SetGroupVersionKind(snapshotGVK)
+				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, freshSnapshot)
+				if err != nil {
+					return false
+				}
+				like, err := snapshot.ExtractSnapshotLike(freshSnapshot)
+				if err != nil {
+					return false
+				}
+				contentName = like.GetStatusContentName()
+				return contentName != ""
+			}, "10s", "100ms").Should(BeTrue())
 
-		_, err = contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}})
-		Expect(err).NotTo(HaveOccurred())
+			_, _ = contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}})
+			contentObj := &unstructured.Unstructured{}
+			contentObj.SetGroupVersionKind(contentGVK)
+			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
+			Expect(contentObj.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect))
 
-		freshContent := &unstructured.Unstructured{}
-		freshContent.SetGroupVersionKind(contentGVK)
-		Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, freshContent)).To(Succeed())
-		Expect(freshContent.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect))
+			err = k8sClient.Delete(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}})
+			Expect(err).NotTo(HaveOccurred())
+
+			freshContent := &unstructured.Unstructured{}
+			freshContent.SetGroupVersionKind(contentGVK)
+			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, freshContent)).To(Succeed())
+			Expect(freshContent.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect))
+		})
 	})
-})
 })

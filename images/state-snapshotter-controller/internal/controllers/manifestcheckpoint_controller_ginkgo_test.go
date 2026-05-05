@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
@@ -436,13 +437,23 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctrl.APIReader = finalizeClient
 		})
 
-		It("should finalize MCR when checkpoint exists but MCR is not finalized", func() {
+		It("should keep MCR processing when checkpoint exists but is not handed off to SnapshotContent", func() {
 			checkpointName := "mcp-test-finalize"
 
 			// Create checkpoint first
 			checkpoint := &storagev1alpha1.ManifestCheckpoint{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: checkpointName,
+				},
+				Status: storagev1alpha1.ManifestCheckpointStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             storagev1alpha1.ManifestCheckpointConditionReasonCompleted,
+							LastTransitionTime: metav1.Now(),
+						},
+					},
 				},
 			}
 			Expect(finalizeClient.Create(ctx, checkpoint)).To(Succeed())
@@ -471,22 +482,80 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Verify MCR was finalized
+			// Verify MCR published the checkpoint but is not finalized until handoff.
 			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(finalizeClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
 
-			// Check Ready=True
+			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			Expect(readyCond).ToNot(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing))
+			Expect(updatedMCR.Status.CheckpointName).To(Equal(checkpointName))
+			Expect(updatedMCR.Status.CompletionTimestamp).To(BeNil())
+			Expect(updatedMCR.Annotations).To(BeNil())
+		})
+
+		It("should finalize MCR when checkpoint exists and is handed off to SnapshotContent", func() {
+			checkpointName := "mcp-test-handed-off"
+
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: checkpointName,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: snapstorage.SchemeGroupVersion.String(),
+							Kind:       "SnapshotContent",
+							Name:       "content-test",
+							UID:        types.UID("content-uid"),
+						},
+					},
+				},
+				Status: storagev1alpha1.ManifestCheckpointStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             storagev1alpha1.ManifestCheckpointConditionReasonCompleted,
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			}
+			Expect(finalizeClient.Create(ctx, checkpoint)).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mcr-handed-off",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CheckpointName: checkpointName,
+					Conditions:     []metav1.Condition{},
+				},
+			}
+			Expect(finalizeClient.Create(ctx, mcr)).To(Succeed())
+
+			req := controllerruntime.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      mcr.Name,
+					Namespace: mcr.Namespace,
+				},
+			}
+			result, err := ctrl.Reconcile(ctx, req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(finalizeClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
+
 			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyCond).ToNot(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
-
-			// Check CompletionTimestamp set
 			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
-
-			// Check TTL annotation added
 			Expect(updatedMCR.Annotations).ToNot(BeNil())
 			Expect(updatedMCR.Annotations[AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
 		})

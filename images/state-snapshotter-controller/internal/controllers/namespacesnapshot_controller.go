@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -44,7 +45,10 @@ import (
 	liblogger "github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// NamespaceSnapshotReconciler binds root NamespaceSnapshot to common SnapshotContent and drives manifest capture (MCR->MCP); status via conditions only (no status.phase).
+// NamespaceSnapshotReconciler owns namespace root discovery, top-level child
+// snapshot refs, MCR creation for the namespace own manifest scope, and binding
+// the root to common SnapshotContent. SnapshotContent status/result aggregation
+// stays in SnapshotContentController.
 // Root SnapshotContent is not owned by NamespaceSnapshot (spec.snapshotRef + status only).
 type NamespaceSnapshotReconciler struct {
 	Client                client.Client
@@ -385,13 +389,13 @@ func (r *NamespaceSnapshotReconciler) updateNamespaceSnapshotRemoveFinalizer(ctx
 
 func desiredSnapshotContentSpec(nsSnap *storagev1alpha1.NamespaceSnapshot) storagev1alpha1.SnapshotContentSpec {
 	return storagev1alpha1.SnapshotContentSpec{
-		SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
-			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-			Kind:       KindNamespaceSnapshot,
-			Name:       nsSnap.Name,
-			Namespace:  nsSnap.Namespace,
-			UID:        nsSnap.UID,
-		},
+		SnapshotRef: snapshotbinding.SnapshotSubjectRef(
+			storagev1alpha1.SchemeGroupVersion.String(),
+			KindNamespaceSnapshot,
+			nsSnap.Name,
+			nsSnap.Namespace,
+			nsSnap.UID,
+		),
 		DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 	}
 }

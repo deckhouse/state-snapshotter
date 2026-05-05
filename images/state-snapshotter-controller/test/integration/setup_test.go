@@ -690,7 +690,7 @@ var _ = BeforeSuite(func() {
 		ctrl.Log.WithName("integration-unified-runtime-bootstrap"),
 	)
 	genericSnapGVKs, genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotGVKPairs(runtimeSnapGVKs, runtimeContentGVKs)
-	snapshotController, err := controllers.NewSnapshotController(
+	snapshotController, err := controllers.NewGenericSnapshotBinderController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		scheme,
@@ -713,6 +713,9 @@ var _ = BeforeSuite(func() {
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())
+	for _, snapshotGVK := range runtimeSnapGVKs {
+		Expect(contentController.AddSnapshotStatusWatch(mgr, snapshotGVK)).To(Succeed())
+	}
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())

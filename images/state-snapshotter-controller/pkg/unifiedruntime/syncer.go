@@ -27,11 +27,11 @@ type Syncer struct {
 	log       logr.Logger
 	bootstrap []unifiedbootstrap.UnifiedGVKPair
 	reader    client.Reader
-	snap      *controllers.SnapshotController
+	snap      *controllers.GenericSnapshotBinderController
 	content   *controllers.SnapshotContentController
 
 	lastState LayeredGVKState
-	// activeSnapshotGVKKeys: snapshot GVK String() for which both Snapshot and SnapshotContent watches
+	// activeSnapshotGVKKeys: snapshot GVK String() for which the required runtime watches
 	// were successfully registered at least once in this process (monotonic; not cleared when resolved drops).
 	activeSnapshotGVKKeys map[string]struct{}
 }
@@ -44,7 +44,7 @@ func NewSyncer(
 	log logr.Logger,
 	bootstrap []unifiedbootstrap.UnifiedGVKPair,
 	reader client.Reader,
-	snap *controllers.SnapshotController,
+	snap *controllers.GenericSnapshotBinderController,
 	content *controllers.SnapshotContentController,
 ) *Syncer {
 	registerUnifiedRuntimeMetrics()
@@ -113,7 +113,12 @@ func (s *Syncer) Sync(ctx context.Context) error {
 
 	for i := range state.ResolvedSnapshotGVKs {
 		snapGVK, contentGVK := state.ResolvedSnapshotGVKs[i], state.ResolvedContentGVKs[i]
+		if err := s.content.AddSnapshotStatusWatch(s.mgr, snapGVK); err != nil {
+			s.log.Error(err, "add SnapshotContent snapshot status watch failed", "snapshot", snapGVK.String())
+			continue
+		}
 		if unifiedbootstrap.IsDedicatedSnapshotControllerKind(snapGVK.Kind) {
+			s.activeSnapshotGVKKeys[snapGVK.String()] = struct{}{}
 			continue
 		}
 		if err := s.snap.AddWatchForPair(s.mgr, snapGVK, contentGVK); err != nil {

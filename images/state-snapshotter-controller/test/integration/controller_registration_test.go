@@ -38,14 +38,14 @@ var _ = Describe("Integration: Controller Registration", func() {
 	// IMPORTANT: This test uses a DIFFERENT GVK (RegistrationTestSnapshot) to avoid conflicts
 	// with other integration tests that use TestSnapshot GVK.
 	//
-	// INTERFACE: controllers.NewSnapshotController, controllers.NewSnapshotContentController
+	// INTERFACE: controllers.NewGenericSnapshotBinderController, controllers.NewSnapshotContentController
 	//
 	// PRECONDITIONS:
 	// - Manager is running (from BeforeSuite)
 	// - Test CRDs are installed (TestSnapshot, TestSnapshotContent)
 	//
 	// ACTIONS:
-	// 1. Create SnapshotController with production-like GVKs (using isolated GVK)
+	// 1. Create GenericSnapshotBinderController with production-like GVKs (using isolated GVK)
 	// 2. Create SnapshotContentController with production-like GVKs (using isolated GVK)
 	// 3. Setup controllers with manager (same pattern as main.go)
 	//
@@ -73,16 +73,16 @@ var _ = Describe("Integration: Controller Registration", func() {
 			// {Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshotContent"},
 		}
 
-		// Create SnapshotController (same pattern as main.go)
-		snapshotCtrl, err := controllers.NewSnapshotController(
+		// Create GenericSnapshotBinderController (same pattern as main.go)
+		snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 			k8sClient,
 			mgr.GetAPIReader(),
 			scheme,
 			testCfg,
 			snapshotGVKs,
 		)
-		Expect(err).NotTo(HaveOccurred(), "SnapshotController should be created without errors")
-		Expect(snapshotCtrl).NotTo(BeNil(), "SnapshotController should not be nil")
+		Expect(err).NotTo(HaveOccurred(), "GenericSnapshotBinderController should be created without errors")
+		Expect(snapshotCtrl).NotTo(BeNil(), "GenericSnapshotBinderController should not be nil")
 
 		// Create SnapshotContentController (same pattern as main.go)
 		contentCtrl, err := controllers.NewSnapshotContentController(

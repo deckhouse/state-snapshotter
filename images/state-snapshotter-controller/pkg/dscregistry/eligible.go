@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package dscregistry derives unified snapshot GVK pairs from DomainSpecificSnapshotController
-// for wiring SnapshotController / SnapshotContentController (R2 phase 2).
+// for wiring GenericSnapshotBinderController / SnapshotContentController (R2 phase 2).
 package dscregistry
 
 import (

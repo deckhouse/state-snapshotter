@@ -36,21 +36,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// SnapshotController reconciles generic XxxxSnapshot resources
+// GenericSnapshotBinderController reconciles registered generic XxxxSnapshot resources.
 //
-// This controller works with any CRD that implements the SnapshotLike interface
-// and follows the unified snapshot pattern from ADR.
+// It owns snapshot -> common SnapshotContent binding and writes
+// status.boundSnapshotContentName on the snapshot. It does not own
+// SnapshotContent.status; result aggregation is handled by SnapshotContentController.
 //
 // Architecture:
 // - Uses dynamic client for low-level get/list operations
 // - Converts to typed SnapshotLike interface for business logic
 // - Centralized conditions management through pkg/snapshot/conditions
 // - Creates SnapshotContent and ObjectKeeper for root snapshots
-type SnapshotController struct {
+type GenericSnapshotBinderController struct {
 	client.Client
 	APIReader client.Reader // Required: for reading ObjectKeeper directly from API server after creation
 	Scheme    *runtime.Scheme
@@ -67,14 +69,14 @@ type SnapshotController struct {
 	activeSnapshotWatchSet map[string]struct{} // snapshot GVK String() -> watch registered with manager
 }
 
-// NewSnapshotController creates a new SnapshotController with validated dependencies
-func NewSnapshotController(
+// NewGenericSnapshotBinderController creates a new GenericSnapshotBinderController with validated dependencies
+func NewGenericSnapshotBinderController(
 	client client.Client,
 	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	cfg *config.Options,
 	snapshotGVKs []schema.GroupVersionKind,
-) (*SnapshotController, error) {
+) (*GenericSnapshotBinderController, error) {
 	if client == nil {
 		return nil, fmt.Errorf("Client must not be nil")
 	}
@@ -106,7 +108,7 @@ func NewSnapshotController(
 		}
 	}
 
-	return &SnapshotController{
+	return &GenericSnapshotBinderController{
 		Client:                 client,
 		APIReader:              apiReader,
 		Scheme:                 scheme,
@@ -120,7 +122,7 @@ func NewSnapshotController(
 // Reconcile processes a Snapshot resource
 //
 // Step 1 (Skeleton): Only create path - no deletion, no propagation
-func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("snapshot", req.NamespacedName)
 	logger.Info("Reconciling Snapshot")
 
@@ -218,7 +220,7 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 	contentName := snapshotLike.GetStatusContentName()
 	if contentName == "" {
 		// Generate deterministic name
-		contentName = snapshot.GenerateSnapshotContentName(obj.GetName(), string(obj.GetUID()))
+		contentName = snapshotbinding.StableContentName(obj.GetName(), obj.GetUID())
 
 		// Create SnapshotContent
 		snapshotGVK := obj.GetObjectKind().GroupVersionKind()
@@ -279,12 +281,13 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		// Set spec.snapshotRef
 		// CRD requires apiVersion/kind/name and namespace for namespaced snapshots.
-		snapshotRef := map[string]interface{}{
-			"apiVersion": obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
-			"kind":       obj.GetKind(),
-			"name":       obj.GetName(),
-			"namespace":  obj.GetNamespace(),
-		}
+		snapshotRef := snapshotbinding.SnapshotSubjectRefMap(
+			obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+			obj.GetKind(),
+			obj.GetName(),
+			obj.GetNamespace(),
+			"",
+		)
 		spec := map[string]interface{}{
 			"snapshotRef": snapshotRef,
 		}
@@ -328,21 +331,13 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		logger.Info("Created SnapshotContent", "name", contentName, "owner", ownerRef.Kind)
 
-		// Update Snapshot status.boundSnapshotContentName (as per CRD schema)
-		status := obj.Object["status"]
-		if status == nil {
-			status = make(map[string]interface{})
-			obj.Object["status"] = status
-		}
-		statusMap := status.(map[string]interface{})
-		statusMap["boundSnapshotContentName"] = contentName
-
-		if err := r.Status().Update(ctx, obj); err != nil {
+		if err := snapshotbinding.PatchUnstructuredBoundContentName(ctx, r.Client, req.NamespacedName, snapshotGVK, contentName); err != nil {
 			logger.Error(err, "Failed to update Snapshot status.boundSnapshotContentName")
 			return ctrl.Result{}, err
 		}
 		// Log both field names for backward compatibility with log parsers
 		logger.Info("Updated Snapshot status.boundSnapshotContentName", "boundSnapshotContentName", contentName, "contentName", contentName)
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Step 4.5: Populate SnapshotContent links from MCR/VCR (if present and Ready)
@@ -381,9 +376,9 @@ func (r *SnapshotController) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 // ensureSnapshotContentLinks is intentionally a no-op for content status ownership.
-// SnapshotController owns Snapshot orchestration and binding only; SnapshotContentController owns
+// GenericSnapshotBinderController owns Snapshot orchestration and binding only; SnapshotContentController owns
 // SnapshotContent.status (MCP/data refs, child content refs, and Ready aggregation).
-func (r *SnapshotController) ensureSnapshotContentLinks(
+func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
 	ctx context.Context,
 	snapshotLike snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
@@ -396,7 +391,7 @@ func (r *SnapshotController) ensureSnapshotContentLinks(
 	return false, nil
 }
 
-func (r *SnapshotController) removeSnapshotContentFinalizer(
+func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
 	ctx context.Context,
 	snapshotLike snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
@@ -405,7 +400,7 @@ func (r *SnapshotController) removeSnapshotContentFinalizer(
 	if contentName == "" && obj.GetUID() != "" {
 		// Fallback to deterministic name to avoid race when status not yet set.
 		// UID is available only after the Snapshot is persisted.
-		contentName = snapshot.GenerateSnapshotContentName(obj.GetName(), string(obj.GetUID()))
+		contentName = snapshotbinding.StableContentName(obj.GetName(), obj.GetUID())
 	}
 	if contentName == "" {
 		return nil
@@ -449,7 +444,7 @@ func (r *SnapshotController) removeSnapshotContentFinalizer(
 }
 
 // updateSnapshotStatus updates the status of the Snapshot object
-func (r *SnapshotController) updateSnapshotStatus(ctx context.Context, obj *unstructured.Unstructured, snapshotLike snapshot.SnapshotLike) error {
+func (r *GenericSnapshotBinderController) updateSnapshotStatus(ctx context.Context, obj *unstructured.Unstructured, snapshotLike snapshot.SnapshotLike) error {
 	// Sync conditions from wrapper to unstructured object
 	conditions := snapshotLike.GetStatusConditions()
 	snapshot.SyncConditionsToUnstructured(obj, conditions)
@@ -460,7 +455,7 @@ func (r *SnapshotController) updateSnapshotStatus(ctx context.Context, obj *unst
 // ensureObjectKeeper creates or gets ObjectKeeper for root snapshot
 // Returns ObjectKeeper, ctrl.Result (for requeue), and error
 // contentName is optional - used only for updating ownerRef if ObjectKeeper already exists
-func (r *SnapshotController) ensureObjectKeeper(
+func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 	ctx context.Context,
 	_ snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
@@ -540,7 +535,7 @@ func (r *SnapshotController) ensureObjectKeeper(
 			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another Snapshot (UID mismatch)", retainerName)
 		}
 		wantSpec := r.desiredUnifiedRootObjectKeeperSpec(obj)
-		if !unifiedRootObjectKeeperSpecMatches(&wantSpec, objectKeeper) {
+		if !genericBinderObjectKeeperSpecMatches(&wantSpec, objectKeeper) {
 			objectKeeper.Spec = wantSpec
 			if err := r.Update(ctx, objectKeeper); err != nil {
 				return nil, ctrl.Result{}, fmt.Errorf("update ObjectKeeper %s (spec drift): %w", retainerName, err)
@@ -555,7 +550,7 @@ func (r *SnapshotController) ensureObjectKeeper(
 	}
 }
 
-func (r *SnapshotController) desiredUnifiedRootObjectKeeperSpec(obj *unstructured.Unstructured) deckhousev1alpha1.ObjectKeeperSpec {
+func (r *GenericSnapshotBinderController) desiredUnifiedRootObjectKeeperSpec(obj *unstructured.Unstructured) deckhousev1alpha1.ObjectKeeperSpec {
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	ttl := config.DefaultSnapshotRootOKTTL
 	if r.Config != nil && r.Config.SnapshotRootOKTTL > 0 {
@@ -574,7 +569,7 @@ func (r *SnapshotController) desiredUnifiedRootObjectKeeperSpec(obj *unstructure
 	}
 }
 
-func unifiedRootObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSpec, got *deckhousev1alpha1.ObjectKeeper) bool {
+func genericBinderObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSpec, got *deckhousev1alpha1.ObjectKeeper) bool {
 	if got.Spec.Mode != want.Mode {
 		return false
 	}
@@ -596,7 +591,7 @@ func unifiedRootObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSpec
 // - Parent exists and is not being deleted
 // - Parent was Ready=True
 // This implements the tree consistency rule from deletion algorithm
-func (r *SnapshotController) propagateReadyFalseToParent(
+func (r *GenericSnapshotBinderController) propagateReadyFalseToParent(
 	ctx context.Context,
 	_ snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
@@ -708,35 +703,20 @@ func (r *SnapshotController) propagateReadyFalseToParent(
 	return r.propagateReadyFalseToParent(ctx, parentLike, parentObj)
 }
 
-// checkConsistencyAndSetReady checks if SnapshotContent and children exist and sets Ready condition
-// According to ADR: Ready=False выставляется только для ранее успешных объектов
-func (r *SnapshotController) checkConsistencyAndSetReady(
+// checkConsistencyAndSetReady mirrors the bound SnapshotContent Ready condition.
+// GenericSnapshotBinderController does not aggregate children; SnapshotContent is
+// the single source of truth for final readiness.
+func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	ctx context.Context,
 	snapshotLike snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
 ) error {
 	logger := log.FromContext(ctx)
-	wasReady := snapshot.IsReady(snapshotLike)
-
-	// Step 1: Check if SnapshotContent exists
 	contentName := snapshotLike.GetStatusContentName()
 	if contentName == "" {
-		if wasReady {
-			// Content was lost - set Ready=False
-			snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
-				snapshot.ReasonContentMissing, "SnapshotContent not found")
-			snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
-			if err := r.Status().Update(ctx, obj); err != nil {
-				return fmt.Errorf("failed to update Ready=False: %w", err)
-			}
-			logger.Info("SnapshotContent missing, set Ready=False")
-			// Propagate Ready=False to parent
-			return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
-		}
-		return nil // Content missing, but Snapshot was never Ready
+		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}
 
-	// Step 2: Get SnapshotContent and check its Ready state
 	contentGVK, err := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
 	if err != nil {
 		return fmt.Errorf("failed to resolve SnapshotContent GVK: %w", err)
@@ -747,122 +727,59 @@ func (r *SnapshotController) checkConsistencyAndSetReady(
 
 	if err := r.APIReader.Get(ctx, contentKey, contentObj); err != nil {
 		if errors.IsNotFound(err) {
-			if wasReady {
-				// Content was deleted - set Ready=False
-				snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
-					snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
-				snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
-				if err := r.Status().Update(ctx, obj); err != nil {
-					return fmt.Errorf("failed to update Ready=False: %w", err)
-				}
-				logger.Info("SnapshotContent deleted, set Ready=False", "content", contentName)
-				// Propagate Ready=False to parent
-				return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
-			}
-			return nil // Content missing, but Snapshot was never Ready
+			return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
 		}
 		return fmt.Errorf("failed to get SnapshotContent: %w", err)
 	}
 
-	// Check if Content is being deleted
 	if !contentObj.GetDeletionTimestamp().IsZero() {
-		if wasReady {
-			// Content is being deleted - set Ready=False
-			snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
-				snapshot.ReasonDeleting, fmt.Sprintf("SnapshotContent %s is being deleted", contentName))
-			snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
-			if err := r.Status().Update(ctx, obj); err != nil {
-				return fmt.Errorf("failed to update Ready=False: %w", err)
-			}
-			logger.Info("SnapshotContent deleting, set Ready=False", "content", contentName)
-			// Propagate Ready=False to parent
-			return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
-		}
-		return nil
+		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonDeleting, fmt.Sprintf("SnapshotContent %s is being deleted", contentName))
 	}
 
-	// Check Content Ready condition
 	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
 	if err != nil {
 		return fmt.Errorf("failed to extract SnapshotContentLike: %w", err)
 	}
-
-	if !snapshot.IsReady(contentLike) {
-		if wasReady {
-			// Content is not Ready - set Ready=False
-			readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
-			reason := snapshot.ReasonContentMissing
-			message := fmt.Sprintf("SnapshotContent %s is not Ready", contentName)
-			if readyCond != nil {
-				reason = readyCond.Reason
-				message = fmt.Sprintf("SnapshotContent %s: %s", contentName, readyCond.Message)
-			}
-			snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse, reason, message)
-			snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
-			if err := r.Status().Update(ctx, obj); err != nil {
-				return fmt.Errorf("failed to update Ready=False: %w", err)
-			}
-			logger.Info("SnapshotContent not Ready, set Ready=False", "content", contentName, "reason", reason)
-			// Propagate Ready=False to parent
-			return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
-		}
-		return nil // Content not Ready, but Snapshot was never Ready
+	readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
+	status := metav1.ConditionFalse
+	reason := snapshot.ReasonContentMissing
+	message := fmt.Sprintf("SnapshotContent %s has no Ready condition", contentName)
+	if readyCond != nil {
+		status = readyCond.Status
+		reason = readyCond.Reason
+		message = readyCond.Message
 	}
-
-	// Step 3: Check if all child Snapshots exist
-	childrenRefs := snapshotLike.GetStatusChildrenSnapshotRefs()
-	for _, childRef := range childrenRefs {
-		// Skip if Snapshot is being deleted (cascade deletion)
-		if !obj.GetDeletionTimestamp().IsZero() {
-			continue
-		}
-
-		childExists, err := r.checkChildSnapshotExists(ctx, &childRef)
-		if err != nil {
-			return fmt.Errorf("failed to check child Snapshot: %w", err)
-		}
-
-		if !childExists {
-			if wasReady {
-				// Child was deleted - set Ready=False
-				snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse,
-					snapshot.ReasonChildSnapshotMissing,
-					fmt.Sprintf("Child Snapshot %s/%s not found", childRef.Namespace, childRef.Name))
-				snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
-				if err := r.Status().Update(ctx, obj); err != nil {
-					return fmt.Errorf("failed to update Ready=False: %w", err)
-				}
-				logger.Info("Child Snapshot missing, set Ready=False",
-					"child", fmt.Sprintf("%s/%s", childRef.Namespace, childRef.Name))
-				// Propagate Ready=False to parent
-				return r.propagateReadyFalseToParent(ctx, snapshotLike, obj)
-			}
-			return nil // Child missing, but Snapshot was never Ready
-		}
+	if status == metav1.ConditionTrue && snapshot.IsInProgress(snapshotLike) {
+		snapshot.SetCondition(snapshotLike, snapshot.ConditionInProgress, metav1.ConditionFalse,
+			snapshot.ReasonCompleted, "SnapshotContent is ready")
 	}
+	logger.V(1).Info("Mirroring SnapshotContent Ready", "content", contentName, "status", status, "reason", reason)
+	return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message)
+}
 
-	// All checks passed - set Ready=True if not already set
-	if !wasReady {
-		// Check if InProgress should be cleared
-		if snapshot.IsInProgress(snapshotLike) {
-			snapshot.SetCondition(snapshotLike, snapshot.ConditionInProgress, metav1.ConditionFalse,
-				snapshot.ReasonCompleted, "SnapshotContent and children are ready")
-		}
-		snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, metav1.ConditionTrue,
-			snapshot.ReasonCompleted, "SnapshotContent and all children are ready")
-		snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
-		if err := r.Status().Update(ctx, obj); err != nil {
-			return fmt.Errorf("failed to update Ready=True: %w", err)
-		}
-		logger.Info("All checks passed, set Ready=True")
+func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+	snapshotLike snapshot.SnapshotLike,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	cur := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
+	if cur != nil && cur.Status == status && cur.Reason == reason && cur.Message == message {
+		return nil
 	}
-
+	snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, status, reason, message)
+	snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
+	if err := r.Status().Update(ctx, obj); err != nil {
+		return fmt.Errorf("failed to mirror SnapshotContent Ready: %w", err)
+	}
 	return nil
 }
 
 // checkChildSnapshotExists checks if a child Snapshot exists
 // Uses APIReader for read-after-write consistency
-func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, childRef *snapshot.ObjectRef) (bool, error) {
+func (r *GenericSnapshotBinderController) checkChildSnapshotExists(ctx context.Context, childRef *snapshot.ObjectRef) (bool, error) {
 	if childRef == nil {
 		return false, nil
 	}
@@ -909,11 +826,11 @@ func (r *SnapshotController) checkChildSnapshotExists(ctx context.Context, child
 
 // getSnapshotContentGVK derives SnapshotContent GVK from Snapshot GVK using registry
 // Example: virtualization.deckhouse.io/v1alpha1.VirtualMachineSnapshot -> virtualization.deckhouse.io/v1alpha1.VirtualMachineSnapshotContent
-func (r *SnapshotController) getSnapshotContentGVK(snapshotGVK schema.GroupVersionKind) (schema.GroupVersionKind, error) {
+func (r *GenericSnapshotBinderController) getSnapshotContentGVK(snapshotGVK schema.GroupVersionKind) (schema.GroupVersionKind, error) {
 	return r.GVKRegistry.ResolveSnapshotContentGVK(snapshotGVK.Kind)
 }
 
-func (r *SnapshotController) snapshotGVKsSnapshot() []schema.GroupVersionKind {
+func (r *GenericSnapshotBinderController) snapshotGVKsSnapshot() []schema.GroupVersionKind {
 	r.watchMu.RLock()
 	defer r.watchMu.RUnlock()
 	out := make([]schema.GroupVersionKind, len(r.SnapshotGVKs))
@@ -923,7 +840,7 @@ func (r *SnapshotController) snapshotGVKsSnapshot() []schema.GroupVersionKind {
 
 // registerSnapshotWatch calls builder.Complete. When the manager is already running, this relies on
 // controller-runtime allowing new runnables via Add — behavior is runtime-sensitive; upgrade c-r with care.
-func (r *SnapshotController) registerSnapshotWatch(mgr ctrl.Manager, gvk, contentGVK schema.GroupVersionKind) error {
+func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager, gvk, contentGVK schema.GroupVersionKind) error {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
 	contentObj := &unstructured.Unstructured{}
@@ -945,7 +862,7 @@ func (r *SnapshotController) registerSnapshotWatch(mgr ctrl.Manager, gvk, conten
 // If watch setup fails after a new slice entry was appended, that entry is removed and registry entries
 // matching this exact pair are reverted (see GVKRegistry.RevertSnapshotRegistrationIfExact). If the
 // snapshot GVK was already in the slice (bootstrap), registry is not reverted on failure.
-func (r *SnapshotController) AddWatchForPair(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
+func (r *GenericSnapshotBinderController) AddWatchForPair(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
 	if r.activeSnapshotWatchSet == nil {
@@ -985,7 +902,7 @@ func (r *SnapshotController) AddWatchForPair(mgr ctrl.Manager, snapshotGVK, cont
 // SetupWithManager sets up the controller with the Manager
 // Registers watches for all registered Snapshot GVKs and their corresponding SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
-func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
+func (r *GenericSnapshotBinderController) SetupWithManager(mgr ctrl.Manager) error {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
 	if r.activeSnapshotWatchSet == nil {
@@ -1009,10 +926,10 @@ func (r *SnapshotController) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // mapSnapshotContentToSnapshot maps SnapshotContent to its corresponding Snapshot for reconcile
-// This ensures SnapshotController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
+// This ensures GenericSnapshotBinderController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
 // Signature matches handler.MapFunc = TypedMapFunc[client.Object, reconcile.Request]
 // which is func(context.Context, client.Object) []reconcile.Request
-func (r *SnapshotController) mapSnapshotContentToSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
+func (r *GenericSnapshotBinderController) mapSnapshotContentToSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
 	contentObj, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return nil

@@ -42,7 +42,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 	// It serves as the foundation for all other integration tests.
 	//
 	// CONTRACT:
-	// - SnapshotController creates SnapshotContent
+	// - GenericSnapshotBinderController creates SnapshotContent
 	// - SnapshotContentController accepts the object and adds finalizer
 	// - Linkage is stable: 1 Snapshot → 1 SnapshotContent
 	// - No orphans exist
@@ -76,14 +76,14 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 	})
 
 	Describe("Basic Lifecycle Contract", func() {
-		// INTERFACE: SnapshotController.Reconcile + SnapshotContentController.Reconcile
+		// INTERFACE: GenericSnapshotBinderController.Reconcile + SnapshotContentController.Reconcile
 		//
 		// PRECONDITION:
 		// - Snapshot created by user
 		// - Snapshot has HandledByDomainSpecificController=True (simulated)
 		//
 		// ACTIONS:
-		// 1. SnapshotController.Reconcile creates SnapshotContent
+		// 1. GenericSnapshotBinderController.Reconcile creates SnapshotContent
 		// 2. SnapshotContentController.Reconcile adds finalizer
 		// 3. Verify linkage and invariants
 		//
@@ -106,7 +106,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 
 		It("should establish stable Snapshot ↔ SnapshotContent linkage", func() {
 			// Create controllers for this test (without registering with manager to avoid conflicts)
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
@@ -156,7 +156,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Status().Update(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// ACTIONS Step 1: SnapshotController creates SnapshotContent
+			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			// Use Eventually to wait for the controller to process the snapshot
 			req := ctrl.Request{
 				NamespacedName: types.NamespacedName{
@@ -165,7 +165,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				},
 			}
 
-			// Wait for SnapshotController to process and create SnapshotContent
+			// Wait for GenericSnapshotBinderController to process and create SnapshotContent
 			var contentName string
 			Eventually(func() bool {
 				_, err := snapshotCtrl.Reconcile(ctx, req)
@@ -255,7 +255,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		})
 
 		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {
-			// INTERFACE: SnapshotController.checkConsistencyAndSetReady
+			// INTERFACE: GenericSnapshotBinderController.checkConsistencyAndSetReady
 			//
 			// PRECONDITION:
 			// - Snapshot created with HandledByDomainSpecificController=True
@@ -266,7 +266,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// 2. Trigger Snapshot reconciliation
 			//
 			// EXPECTED BEHAVIOR:
-			// - SnapshotController.checkConsistencyAndSetReady is called after SnapshotContent creation
+			// - GenericSnapshotBinderController.checkConsistencyAndSetReady is called after SnapshotContent creation
 			// - Snapshot Ready=True is set automatically when SnapshotContent is Ready=True
 			// - This verifies the fix: checkConsistencyAndSetReady is called after creating SnapshotContent
 			//
@@ -279,7 +279,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// - checkConsistencyAndSetReady is called automatically after SnapshotContent creation
 
 			// Create controllers for this test (without registering with manager to avoid conflicts)
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
@@ -330,7 +330,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Status().Update(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// ACTIONS Step 1: SnapshotController creates SnapshotContent
+			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			req := ctrl.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      snapshotObj.GetName(),
@@ -443,7 +443,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			readyCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
 			Expect(readyCond).NotTo(BeNil(), "Ready condition should exist")
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "Ready should be True")
-			Expect(readyCond.Reason).To(Equal(snapshot.ReasonCompleted), "Reason should be Completed")
+			Expect(readyCond.Reason).To(Equal(snapshot.ReasonReady), "Reason should mirror SnapshotContent")
 
 			// Verify SnapshotContent is Ready=True
 			err = k8sClient.Get(ctx, types.NamespacedName{

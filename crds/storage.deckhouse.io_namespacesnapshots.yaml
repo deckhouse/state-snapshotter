@@ -144,6 +144,11 @@ spec:
                   - type
                   type: object
                 type: array
+              manifestCaptureRequestName:
+                description: |-
+                  ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
+                  SnapshotContentController reads it to aggregate SnapshotContent.status; it is cleared after the result is bound.
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the metadata.generation the controller
                   last reconciled into this status.

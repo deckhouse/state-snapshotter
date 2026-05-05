@@ -35,21 +35,21 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: SnapshotController - Consistency Checks", func() {
-	// PHASE 2.1: Integration: SnapshotController - Consistency Checks
+var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Checks", func() {
+	// PHASE 2.1: Integration: GenericSnapshotBinderController - Consistency Checks
 	//
-	// This test suite verifies that SnapshotController correctly handles inconsistent states:
+	// This test suite verifies that GenericSnapshotBinderController correctly handles inconsistent states:
 	// - Detects inconsistency (missing Content, wrong Content, terminal states)
 	// - Signals inconsistency through status/conditions
 	// - Does NOT attempt to fix inconsistency imperatively
 	// - Remains idempotent
 	//
-	// INTERFACE: controllers.SnapshotController.Reconcile + checkConsistencyAndSetReady
+	// INTERFACE: controllers.GenericSnapshotBinderController.Reconcile + checkConsistencyAndSetReady
 	//
 	// INVARIANT:
-	// - SnapshotController does NOT "self-heal" lost Content
-	// - SnapshotController does NOT delete or recreate objects
-	// - SnapshotController only signals problems through conditions
+	// - GenericSnapshotBinderController does NOT "self-heal" lost Content
+	// - GenericSnapshotBinderController does NOT delete or recreate objects
+	// - GenericSnapshotBinderController only signals problems through conditions
 
 	var (
 		ctx         context.Context
@@ -134,7 +134,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			Expect(err).NotTo(HaveOccurred())
 
 			// Create controller
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
@@ -150,7 +150,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 				},
 			}
 
-			// ACTIONS: SnapshotController.Reconcile
+			// ACTIONS: GenericSnapshotBinderController.Reconcile
 			// Controller should check consistency and set Ready=False
 			Eventually(func() bool {
 				_, _ = snapshotCtrl.Reconcile(ctx, req)
@@ -279,7 +279,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			Expect(err).NotTo(HaveOccurred())
 
 			// Create controller
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
@@ -295,11 +295,11 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 				},
 			}
 
-			// ACTIONS: SnapshotController.Reconcile
+			// ACTIONS: GenericSnapshotBinderController.Reconcile
 			_, err = snapshotCtrl.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 
-			// EXPECTED BEHAVIOR: Ready=False NOT set (guard blocks)
+			// EXPECTED BEHAVIOR: Ready mirrors missing SnapshotContent even if the snapshot was never Ready.
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
@@ -312,11 +312,9 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			Expect(err).NotTo(HaveOccurred())
 
 			readyCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
-			// Ready condition should NOT exist OR should NOT be False (guard blocks)
-			// If Ready condition exists, it should not be False (guard blocks)
-			if readyCond != nil {
-				Expect(readyCond.Status).NotTo(Equal(metav1.ConditionFalse), "Ready=False should NOT be set (guard blocks for never-ready snapshots)")
-			}
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(snapshot.ReasonContentMissing))
 
 			// InProgress should remain
 			inProgressCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionInProgress)
@@ -381,7 +379,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			Expect(err).NotTo(HaveOccurred())
 
 			// Create controller
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
@@ -397,7 +395,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 				},
 			}
 
-			// ACTIONS: SnapshotController.Reconcile
+			// ACTIONS: GenericSnapshotBinderController.Reconcile
 			// Controller should detect Content doesn't exist and set Ready=False
 			Eventually(func() bool {
 				_, _ = snapshotCtrl.Reconcile(ctx, req)
@@ -569,7 +567,7 @@ var _ = Describe("Integration: SnapshotController - Consistency Checks", func() 
 			Expect(initialReadyCond.Status).To(Equal(metav1.ConditionTrue), "Initial Ready should be True")
 
 			// Create controller
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,

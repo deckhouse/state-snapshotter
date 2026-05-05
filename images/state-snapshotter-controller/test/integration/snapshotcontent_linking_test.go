@@ -39,7 +39,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-var _ = Describe("Integration: SnapshotController - MCR linking", func() {
+var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", func() {
 	var (
 		ctx         context.Context
 		snapshotGVK schema.GroupVersionKind
@@ -52,7 +52,7 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		contentGVK = unifiedbootstrap.CommonSnapshotContentGVK()
 	})
 
-	It("SnapshotContentController should link ManifestCheckpointName and Ready into common SnapshotContent when MCR is Ready", func() {
+	It("SnapshotContentController should hand off ManifestCheckpoint before MCR becomes Ready", func() {
 		// Create Snapshot
 		snapshotObj := &unstructured.Unstructured{}
 		snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -90,11 +90,13 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 			fresh := &storagev1alpha1.ManifestCaptureRequest{}
 			g.Expect(k8sClient.Get(ctx, mcrKey, fresh)).To(Succeed())
 			g.Expect(fresh.Status.CheckpointName).NotTo(BeEmpty())
-			ready := meta.FindStatusCondition(fresh.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			mcpName = fresh.Status.CheckpointName
+			mcp := &storagev1alpha1.ManifestCheckpoint{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: mcpName}, mcp)).To(Succeed())
+			ready := meta.FindStatusCondition(mcp.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
-			mcpName = fresh.Status.CheckpointName
+			g.Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCheckpointConditionReasonCompleted))
 		}).WithTimeout(120 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 		Expect(mcpName).NotTo(BeEmpty())
 
@@ -117,7 +119,7 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 		snapshotObj.Object["status"] = status
 		Expect(k8sClient.Status().Update(ctx, snapshotObj)).To(Succeed())
 
-		snapshotCtrl, err := controllers.NewSnapshotController(
+		snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 			k8sClient,
 			mgr.GetAPIReader(),
 			scheme,
@@ -174,6 +176,12 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 			contentObj := &unstructured.Unstructured{}
 			contentObj.SetGroupVersionKind(contentGVK)
 			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
+			freshSnapshot := &unstructured.Unstructured{}
+			freshSnapshot.SetGroupVersionKind(snapshotGVK)
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshSnapshot)).To(Succeed())
+			mcrName, _, err := unstructured.NestedString(freshSnapshot.Object, "status", "manifestCaptureRequestName")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(mcrName).To(Equal(mcr.Name))
 
 			contentStatus, _ := contentObj.Object["status"].(map[string]interface{})
 			g.Expect(contentStatus).NotTo(BeNil())
@@ -182,6 +190,15 @@ var _ = Describe("Integration: SnapshotController - MCR linking", func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(snapshot.IsReady(contentLike)).To(BeTrue())
 		}, "30s", "200ms").Should(Succeed(), "SnapshotContentController should link MCP and set common content Ready")
+
+		Eventually(func(g Gomega) {
+			fresh := &storagev1alpha1.ManifestCaptureRequest{}
+			g.Expect(k8sClient.Get(ctx, mcrKey, fresh)).To(Succeed())
+			ready := meta.FindStatusCondition(fresh.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
+		}, "30s", "200ms").Should(Succeed(), "MCR should complete only after MCP ownerRef is handed off to SnapshotContent")
 
 		_, err = snapshotCtrl.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())

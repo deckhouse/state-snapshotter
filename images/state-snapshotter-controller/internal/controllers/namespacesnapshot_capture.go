@@ -302,31 +302,11 @@ func (r *NamespaceSnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyRe
 	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)}
 	staleMCR := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := r.Client.Get(ctx, mcrKey, staleMCR); err == nil {
-		// MCR can remain while E6 was !allClear (children not ready). MCP is already Ready — retry E6 so
-		// child-driven reconciles can finish without requiring another MCP completion cycle.
-		res, err := r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
-		if err != nil {
-			return true, res, err
+		readyCond := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshot.ConditionReady)
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse && readyCond.Reason == "CapturePlanDrift" {
+			return true, ctrl.Result{}, nil
 		}
-		freshNS := &storagev1alpha1.NamespaceSnapshot{}
-		nsKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-		var gerr error
-		if r.APIReader != nil {
-			gerr = r.APIReader.Get(ctx, nsKey, freshNS)
-		} else {
-			gerr = r.Client.Get(ctx, nsKey, freshNS)
-		}
-		if gerr != nil {
-			return true, ctrl.Result{}, gerr
-		}
-		rc := meta.FindStatusCondition(freshNS.Status.Conditions, snapshot.ConditionReady)
-		if rc != nil && rc.Status == metav1.ConditionTrue && rc.Reason == snapshot.ReasonCompleted {
-			return true, res, nil
-		}
-		// MCP is already Ready while MCR still exists (E6 gate). Do not fall through to
-		// BuildRootNamespaceManifestCaptureTargets — that path treats the subtree as capture-pending
-		// and prevents E6 from converging. Return done=true so this reconcile ends after E6/requeue.
-		return true, res, nil
+		return false, ctrl.Result{}, nil
 	} else if !apierrors.IsNotFound(err) {
 		return true, ctrl.Result{}, err
 	}
@@ -338,7 +318,7 @@ func (r *NamespaceSnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyRe
 func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.NamespaceSnapshot,
-	mcpName string,
+	_ string,
 ) (ctrl.Result, error) {
 	fresh := &storagev1alpha1.NamespaceSnapshot{}
 	nsKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
@@ -388,15 +368,8 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 		}
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
-	allClear, res, err := r.reconcileChildrenRefsE6ParentReadyOrPatch(ctx, fresh, false, "", true)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !allClear {
-		return res, nil
-	}
 	ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
+	if ready == nil || ready.Status != contentReady.Status || ready.Reason != contentReady.Reason || ready.Message != contentReady.Message {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			cur := &storagev1alpha1.NamespaceSnapshot{}
 			if err := r.Client.Get(ctx, nsKey, cur); err != nil {
@@ -405,9 +378,9 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 			cur.Status.ObservedGeneration = cur.Generation
 			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 				Type:               snapshot.ConditionReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             snapshot.ReasonCompleted,
-				Message:            namespaceSnapshotReadyMessage(mcpName),
+				Status:             contentReady.Status,
+				Reason:             contentReady.Reason,
+				Message:            contentReady.Message,
 				ObservedGeneration: cur.Generation,
 			})
 			return r.Client.Status().Update(ctx, cur)
@@ -419,14 +392,35 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 	if err := r.Client.Get(ctx, nsKey, post); err != nil {
 		return ctrl.Result{}, err
 	}
+	mcrReady, err := r.namespaceSnapshotManifestCaptureRequestReadyForCleanup(ctx, post)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !mcrReady {
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
 	if err := r.deleteNamespaceSnapshotManifestCaptureRequest(ctx, post); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.patchNamespaceSnapshotManifestCaptureRequestName(ctx, post, ""); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
-func namespaceSnapshotReadyMessage(mcpName string) string {
-	return fmt.Sprintf("manifest capture complete (ManifestCheckpoint %s)", mcpName)
+func (r *NamespaceSnapshotReconciler) namespaceSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (bool, error) {
+	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)}
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := r.Client.Get(ctx, key, mcr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	ready := meta.FindStatusCondition(mcr.Status.Conditions, ssv1alpha1.ManifestCaptureRequestConditionTypeReady)
+	return ready != nil &&
+		ready.Status == metav1.ConditionTrue &&
+		ready.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonCompleted, nil
 }
 
 func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
@@ -681,6 +675,9 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 		if err := r.Client.Get(ctx, key, created); err != nil {
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
+		if err := r.patchNamespaceSnapshotManifestCaptureRequestName(ctx, nsSnap, name); err != nil {
+			return nil, ctrl.Result{}, err
+		}
 		return created, ctrl.Result{}, nil
 	case err != nil:
 		return nil, ctrl.Result{}, err
@@ -713,8 +710,27 @@ func (r *NamespaceSnapshotReconciler) ensureManifestCaptureRequest(ctx context.C
 		if !manifestTargetsEqual(existing.Spec.Targets, specTargets) {
 			return nil, ctrl.Result{}, fmt.Errorf("%w: ManifestCaptureRequest %s spec.targets differ from current resolved capture targets; delete the MCR to retry with a fresh plan", errManifestCapturePlanDrift, key.String())
 		}
+		if err := r.patchNamespaceSnapshotManifestCaptureRequestName(ctx, nsSnap, name); err != nil {
+			return nil, ctrl.Result{}, err
+		}
 		return existing, ctrl.Result{}, nil
 	}
+}
+
+func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotManifestCaptureRequestName(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, name string) error {
+	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		if fresh.Status.ManifestCaptureRequestName == name {
+			return nil
+		}
+		base := fresh.DeepCopy()
+		fresh.Status.ManifestCaptureRequestName = name
+		return r.Client.Status().Patch(ctx, fresh, client.MergeFrom(base))
+	})
 }
 
 // manifestTargetsEqual compares capture plans in canonical order (APIVersion, Kind, Name).

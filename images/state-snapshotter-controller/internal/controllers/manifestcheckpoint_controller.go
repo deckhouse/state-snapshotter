@@ -139,19 +139,12 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Guard: Check if checkpoint already exists (idempotency check)
-	// If checkpoint exists but MCR is not terminal, finalize MCR status
+	// Guard: Check if checkpoint already exists (idempotency check).
+	// MCR Ready=True is delayed until the checkpoint is handed off to SnapshotContent.
 	if mcr.Status.CheckpointName != "" {
 		var checkpoint storagev1alpha1.ManifestCheckpoint
 		if err := r.Get(ctx, client.ObjectKey{Name: mcr.Status.CheckpointName}, &checkpoint); err == nil {
-			// Checkpoint exists - finalize MCR status (idempotent finalization)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", mcr.Status.CheckpointName)); err != nil {
-				if errors.IsNotFound(err) {
-					return ctrl.Result{}, nil
-				}
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
+			return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &checkpoint)
 		}
 		// Checkpoint doesn't exist - proceed with normal processing
 	}
@@ -352,20 +345,14 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}}
 	}
 
-	// If checkpoint already exists → finalize MCR (idempotent finalization)
-	// This handles the case where checkpoint was created but MCR status update failed
+	// If checkpoint already exists → publish checkpointName and wait for SnapshotContent handoff.
+	// This handles the case where checkpoint was created but MCR status update failed.
 	var existingCheckpoint storagev1alpha1.ManifestCheckpoint
 	if err := r.Get(ctx, client.ObjectKey{Name: checkpointName}, &existingCheckpoint); err == nil {
-		r.Logger.Info("Checkpoint already exists, finalizing MCR",
+		r.Logger.Info("Checkpoint already exists, checking SnapshotContent handoff before MCR completion",
 			"checkpoint", checkpointName)
 		mcr.Status.CheckpointName = checkpointName
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", checkpointName)); err != nil {
-			if errors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &existingCheckpoint)
 	}
 
 	// Create ManifestCheckpoint: ownerRef -> SnapshotContent (namespace snapshot capture) or ObjectKeeper (generic MCR capture).
@@ -532,26 +519,82 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"chunks", len(chunks),
 		"totalObjects", totalObjects)
 
-	// Update MCR status
+	// Publish checkpointName now, but keep MCR Processing until SnapshotContent owns the artifact.
 	mcr.Status.CheckpointName = checkpointName
-	if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s created successfully", checkpointName)); err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
+	if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpointName, fmt.Sprintf("Checkpoint %s created; waiting for SnapshotContent ownerRef handoff", checkpointName)); err != nil {
 		return ctrl.Result{}, err
 	}
+	return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, checkpoint)
+}
 
-	// NOTE: ObjectKeeper uses FollowObject mode (no TTL)
-	// ObjectKeeper follows MCR lifecycle and is automatically deleted when MCR is deleted
-	// TTL and request cleanup are handled by MCR controller, not ObjectKeeper
-
-	r.Logger.Info("ManifestCaptureRequest processed successfully",
-		"name", mcr.Name,
-		"checkpoint", checkpointName,
-		"chunks", len(chunks),
-		"objects", totalObjects)
-
+func (r *ManifestCheckpointController) finalizeMCRIfCheckpointHandedOff(
+	ctx context.Context,
+	mcr *storagev1alpha1.ManifestCaptureRequest,
+	checkpoint *storagev1alpha1.ManifestCheckpoint,
+) (ctrl.Result, error) {
+	ready := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
+	if ready == nil {
+		if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpoint.Name, fmt.Sprintf("Checkpoint %s has no Ready condition yet", checkpoint.Name)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	if ready.Status == metav1.ConditionFalse && ready.Reason == storagev1alpha1.ManifestCheckpointConditionReasonFailed {
+		mcr.Status.CheckpointName = checkpoint.Name
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, ready.Message); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if ready.Status != metav1.ConditionTrue {
+		if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpoint.Name, ready.Message); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	if !manifestCheckpointOwnedBySnapshotContent(checkpoint) {
+		if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpoint.Name, fmt.Sprintf("Checkpoint %s is Ready; waiting for SnapshotContent ownerRef handoff", checkpoint.Name)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	mcr.Status.CheckpointName = checkpoint.Name
+	if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s handed off to SnapshotContent", checkpoint.Name)); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
+}
+
+func manifestCheckpointOwnedBySnapshotContent(checkpoint *storagev1alpha1.ManifestCheckpoint) bool {
+	for _, ref := range checkpoint.OwnerReferences {
+		if ref.APIVersion == snapstorage.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *ManifestCheckpointController) markMCRCheckpointPendingHandoff(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest, checkpointName, message string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.ManifestCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+			return err
+		}
+		current.Status.CheckpointName = checkpointName
+		readyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+		transitionTime := metav1.Now()
+		if readyCondition != nil && readyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
+			transitionTime = readyCondition.LastTransitionTime
+		}
+		setSingleCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
+			Message:            message,
+			LastTransitionTime: transitionTime,
+		})
+		return r.Status().Update(ctx, current)
+	})
 }
 
 func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest) ([]unstructured.Unstructured, error) {

@@ -45,13 +45,13 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// TestSnapshotControllerGinkgo is the entry point for SnapshotController Ginkgo tests
+// TestGenericSnapshotBinderControllerGinkgo is the entry point for GenericSnapshotBinderController Ginkgo tests
 // This suite is only compiled when build tag unit_ginkgo is set.
 // By default, this file is excluded from builds to avoid confusion.
 // Functionality is covered by integration tests in test/integration/.
-func TestSnapshotControllerGinkgo(t *testing.T) {
+func TestGenericSnapshotBinderControllerGinkgo(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "SnapshotController Suite")
+	RunSpecs(t, "GenericSnapshotBinderController Suite")
 }
 
 // contentCaptureClient wraps a client.Client to capture SnapshotContent objects created via Create
@@ -116,7 +116,7 @@ func (c *contentCaptureClient) Get(ctx context.Context, key client.ObjectKey, ob
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
-var _ = Describe("SnapshotController - SnapshotContent Creation", func() {
+var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", func() {
 	var (
 		ctx         context.Context
 		k8sClient   client.Client
@@ -156,12 +156,12 @@ var _ = Describe("SnapshotController - SnapshotContent Creation", func() {
 			// NOTE: Unit test with fake client is too complex due to CRD limitations for unstructured objects.
 			// This functionality is covered by integration tests:
 			// - test/integration/snapshot_lifecycle_test.go: "should create SnapshotContent with correct spec"
-			// - The controller code explicitly sets snapshotRef.kind at line 279 in snapshot_controller.go:
+			// - The controller code explicitly sets snapshotRef.kind at line 279 in generic_snapshot_binder_controller.go:
 			//   if snapshotGVK.Kind != "" {
 			//       snapshotRef["kind"] = snapshotGVK.Kind
 			//   }
 			Skip("Unit test with fake client is too complex due to CRD limitations. This is covered by integration tests.")
-			// This test verifies that SnapshotController sets snapshotRef.kind when creating SnapshotContent.
+			// This test verifies that GenericSnapshotBinderController sets snapshotRef.kind when creating SnapshotContent.
 			// Since fake client doesn't fully support CRD operations for unstructured objects,
 			// we use a wrapper client to capture the Create call and verify the spec.
 
@@ -215,7 +215,7 @@ var _ = Describe("SnapshotController - SnapshotContent Creation", func() {
 			}
 
 			// Create controller
-			controller, err := NewSnapshotController(
+			controller, err := NewGenericSnapshotBinderController(
 				wrapperClient,
 				wrapperClient, // Use wrapper for both client and APIReader
 				scheme,

@@ -35,32 +35,32 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
-	// PHASE 2.1: Integration: SnapshotController - Deletion Path
+var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path", func() {
+	// PHASE 2.1: Integration: GenericSnapshotBinderController - Deletion Path
 	//
-	// This test verifies that SnapshotController correctly handles Snapshot deletion:
-	// - SnapshotController NEVER deletes SnapshotContent directly
-	// - SnapshotController does NOT break Content lifecycle
-	// - SnapshotController removes SnapshotContent finalizer on Snapshot deletion
-	// - SnapshotController only propagates Ready=False to parent (if applicable)
+	// This test verifies that GenericSnapshotBinderController correctly handles Snapshot deletion:
+	// - GenericSnapshotBinderController NEVER deletes SnapshotContent directly
+	// - GenericSnapshotBinderController does NOT break Content lifecycle
+	// - GenericSnapshotBinderController removes SnapshotContent finalizer on Snapshot deletion
+	// - GenericSnapshotBinderController only propagates Ready=False to parent (if applicable)
 	//
-	// INTERFACE: controllers.SnapshotController.Reconcile
+	// INTERFACE: controllers.GenericSnapshotBinderController.Reconcile
 	//
 	// PRECONDITION:
 	// - Snapshot exists
-	// - SnapshotContent exists (created by SnapshotController)
+	// - SnapshotContent exists (created by GenericSnapshotBinderController)
 	// - SnapshotContent has finalizer
 	//
 	// ACTIONS:
 	// 1. Delete Snapshot (sets deletionTimestamp)
-	// 2. SnapshotController.Reconcile(ctx, req)
+	// 2. GenericSnapshotBinderController.Reconcile(ctx, req)
 	// 3. Check SnapshotContent still exists
 	// 4. Check SnapshotContent finalizer removed
 	// 5. Check SnapshotContent ownerRef unchanged
 	//
 	// EXPECTED BEHAVIOR:
-	// - SnapshotContent still exists (NOT deleted by SnapshotController)
-	// - SnapshotContent finalizer is removed by SnapshotController on parent deletion
+	// - SnapshotContent still exists (NOT deleted by GenericSnapshotBinderController)
+	// - SnapshotContent finalizer is removed by GenericSnapshotBinderController on parent deletion
 	// - SnapshotContent ownerRef unchanged (lifecycle not broken)
 	// - SnapshotContent can be managed by SnapshotContentController (orphaning)
 	//
@@ -69,7 +69,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 	//
 	// INVARIANT:
 	// - See GLOBAL INVARIANTS G1 (Controllers MUST NOT delete objects directly, ONLY remove finalizers)
-	// - SnapshotController responsibility: orchestration, NOT lifecycle management
+	// - GenericSnapshotBinderController responsibility: orchestration, NOT lifecycle management
 	// - SnapshotContentController responsibility: lifecycle management (finalizers, deletion)
 
 	var (
@@ -125,7 +125,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Create controllers
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
@@ -144,7 +144,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Create SnapshotContent via SnapshotController
+			// Create SnapshotContent via GenericSnapshotBinderController
 			req := ctrl.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      snapshotObj.GetName(),
@@ -245,7 +245,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 				return freshSnapshot.GetDeletionTimestamp() != nil
 			}, "10s", "100ms").Should(BeTrue(), "Snapshot should have deletionTimestamp set")
 
-			// ACTIONS Step 2: SnapshotController.Reconcile
+			// ACTIONS Step 2: GenericSnapshotBinderController.Reconcile
 			_, err = snapshotCtrl.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -257,19 +257,19 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 					Name: contentName,
 				}, freshContent)
 				return err == nil
-			}, "10s", "100ms").Should(BeTrue(), "SnapshotContent should still exist (NOT deleted by SnapshotController)")
+			}, "10s", "100ms").Should(BeTrue(), "SnapshotContent should still exist (NOT deleted by GenericSnapshotBinderController)")
 
 			// ACTIONS Step 4: Check SnapshotContent finalizers
-			// SnapshotController removes parent-protect finalizer on Snapshot deletion
+			// GenericSnapshotBinderController removes parent-protect finalizer on Snapshot deletion
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 				Name: contentName,
 			}, contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// SnapshotController should NOT have removed finalizer directly
+			// GenericSnapshotBinderController should NOT have removed finalizer directly
 			// (SnapshotContentController will handle it via orphaning, but that's separate)
-			// We verify that SnapshotContent still exists and wasn't deleted by SnapshotController
-			Expect(contentObj.GetName()).To(Equal(contentName), "SnapshotContent should still exist (NOT deleted by SnapshotController)")
+			// We verify that SnapshotContent still exists and wasn't deleted by GenericSnapshotBinderController
+			Expect(contentObj.GetName()).To(Equal(contentName), "SnapshotContent should still exist (NOT deleted by GenericSnapshotBinderController)")
 
 			// ACTIONS Step 5: Check SnapshotContent ownerRef unchanged
 			Expect(contentObj.GetOwnerReferences()).To(Equal(originalOwnerRefs), "SnapshotContent ownerRef should be unchanged (lifecycle not broken)")
@@ -325,7 +325,7 @@ var _ = Describe("Integration: SnapshotController - Deletion Path", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Create controller
-			snapshotCtrl, err := controllers.NewSnapshotController(
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
