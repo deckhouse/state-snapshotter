@@ -181,9 +181,17 @@ var _ = Describe("Integration: NamespaceSnapshot N1 boundary (mismatch + recover
 			bound := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionBound)
 			g.Expect(bound).NotTo(BeNil())
 			g.Expect(bound.Status).To(Equal(metav1.ConditionTrue))
+			graphReady := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionGraphReady)
+			g.Expect(graphReady).NotTo(BeNil())
+			g.Expect(graphReady.Status).To(Equal(metav1.ConditionTrue))
 			ready := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			content := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, content)).To(Succeed())
+			contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(contentReady).NotTo(BeNil())
+			g.Expect(contentReady.Status).To(Equal(metav1.ConditionTrue))
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		Consistently(func(g Gomega) {

@@ -73,11 +73,48 @@ func PatchUnstructuredBoundContentName(ctx context.Context, c client.Client, key
 			return err
 		}
 		if current == contentName {
-			return nil
+			return setUnstructuredGraphReady(ctx, c, obj)
 		}
 		if err := unstructured.SetNestedField(obj.Object, contentName, "status", "boundSnapshotContentName"); err != nil {
 			return fmt.Errorf("set status.boundSnapshotContentName: %w", err)
 		}
+		setUnstructuredGraphReadyCondition(obj)
 		return c.Status().Update(ctx, obj)
 	})
+}
+
+func setUnstructuredGraphReady(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
+	if !setUnstructuredGraphReadyCondition(obj) {
+		return nil
+	}
+	return c.Status().Update(ctx, obj)
+}
+
+func setUnstructuredGraphReadyCondition(obj *unstructured.Unstructured) bool {
+	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	want := map[string]interface{}{
+		"type":               snapshot.ConditionGraphReady,
+		"status":             "True",
+		"reason":             snapshot.ReasonCompleted,
+		"message":            "generic snapshot has no child graph",
+		"observedGeneration": obj.GetGeneration(),
+	}
+	for i, raw := range conditions {
+		cond, ok := raw.(map[string]interface{})
+		if !ok || cond["type"] != snapshot.ConditionGraphReady {
+			continue
+		}
+		if cond["status"] == want["status"] &&
+			cond["reason"] == want["reason"] &&
+			cond["message"] == want["message"] &&
+			cond["observedGeneration"] == want["observedGeneration"] {
+			return false
+		}
+		conditions[i] = want
+		_ = unstructured.SetNestedSlice(obj.Object, conditions, "status", "conditions")
+		return true
+	}
+	conditions = append(conditions, want)
+	_ = unstructured.SetNestedSlice(obj.Object, conditions, "status", "conditions")
+	return true
 }

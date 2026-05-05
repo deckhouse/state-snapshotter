@@ -10,7 +10,7 @@
 
 **Три оси (кратко):** дерево — **`children*Refs`**; готовность — **`Ready`** по refs + зависимостям; lifecycle — **ownerRef**/финализаторы ([`05` §3](05-tree-and-graph-invariants.md) таблица «Три оси», [`08` B](08-universal-snapshot-tree-model.md)).
 
-**Parent link:** `parentSnapshotRef` у доменных snapshot — универсальная ссылка на parent snapshot-узел в namespace-local graph. Ограничения на допустимые parent kinds относятся к текущей реализации конкретного доменного контроллера, а не к общей target-модели graph/E6.
+**Parent link:** доменный parent controller ставит **ownerReference** на создаваемый child snapshot. Это lifecycle/back-reference/requeue helper; логическое дерево для traversal задаётся parent-owned `status.childrenSnapshotRefs`.
 
 **Traversal (единый вход в логическое дерево):** обход для **`Ready`**, для **вычисляемого** dedup/exclude и для любого агрегированного чтения по **целевой** модели PR5 стартует с root **`NamespaceSnapshot`** и продолжается **только** по **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**; **не** по **ownerRef**, **не** по DSC и **не** по «ожидаемой схеме» kinds ([`05`](05-tree-and-graph-invariants.md) §1–§2).
 

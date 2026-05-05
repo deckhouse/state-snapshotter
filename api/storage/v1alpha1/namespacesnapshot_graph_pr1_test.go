@@ -81,9 +81,9 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 				{Name: "child-content-1"},
 			},
 			DataRef: &SnapshotDataRef{
-				Kind:      "VolumeSnapshotContent",
-				Name:      "vsc-1",
-				Namespace: "data-ns",
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshotContent",
+				Name:       "vsc-1",
 			},
 		},
 	}
@@ -104,9 +104,13 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	if got := out.Status.ChildrenSnapshotContentRefs; len(got) != 1 || got[0].Name != "child-content-1" {
 		t.Fatalf("ChildrenSnapshotContentRefs: got %#v", got)
 	}
-	if out.Status.DataRef == nil || out.Status.DataRef.Kind != "VolumeSnapshotContent" ||
-		out.Status.DataRef.Name != "vsc-1" || out.Status.DataRef.Namespace != "data-ns" {
+	if out.Status.DataRef == nil || out.Status.DataRef.APIVersion != "snapshot.storage.k8s.io/v1" ||
+		out.Status.DataRef.Kind != "VolumeSnapshotContent" ||
+		out.Status.DataRef.Name != "vsc-1" {
 		t.Fatalf("DataRef: got %#v", out.Status.DataRef)
+	}
+	if out.Status.DataRef.Kind == "VolumeCaptureRequest" {
+		t.Fatalf("DataRef must reference a durable artifact, not an execution request: %#v", out.Status.DataRef)
 	}
 
 	var raw map[string]interface{}
@@ -124,6 +128,15 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	}
 	if _, ok := item["namespace"]; ok {
 		t.Fatalf("did not expect namespace key in child content ref JSON: %#v", item)
+	}
+	dataRef := status["dataRef"].(map[string]interface{})
+	if dataRef["apiVersion"] != "snapshot.storage.k8s.io/v1" ||
+		dataRef["kind"] != "VolumeSnapshotContent" ||
+		dataRef["name"] != "vsc-1" {
+		t.Fatalf("expected dataRef apiVersion/kind/name artifact ref, got %#v", dataRef)
+	}
+	if _, ok := dataRef["namespace"]; ok {
+		t.Fatalf("did not expect namespace key in cluster artifact dataRef JSON: %#v", dataRef)
 	}
 }
 

@@ -37,52 +37,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-func TestDemoVirtualDiskSnapshot_InvalidParentRefDoesNotCreateContentOrMCR(t *testing.T) {
-	tests := []struct {
-		name      string
-		parentRef demov1alpha1.SnapshotParentRef
-	}{
-		{
-			name: "missing parentRef",
-		},
-		{
-			name: "wrong kind",
-			parentRef: demov1alpha1.SnapshotParentRef{
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       "UnsupportedSnapshot",
-				Name:       "root",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualDiskSnapshot{
-				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
-				Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-					ParentSnapshotRef: tt.parentRef,
-					SourceRef: demov1alpha1.SnapshotSourceRef{
-						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-						Kind:       KindDemoVirtualDisk,
-						Name:       "disk-a",
-					},
-				},
-			})
-			reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl}
-			if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}); err != nil {
-				t.Fatalf("reconcile failed: %v", err)
-			}
-
-			snap := getDemoDiskSnapshot(t, cl)
-			ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
-			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidParentRef" {
-				t.Fatalf("expected Ready=False InvalidParentRef, got %#v", ready)
-			}
-			assertNoDemoDiskContents(t, cl)
-			assertNoDemoMCRs(t, cl)
-		})
-	}
-}
-
 func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -105,11 +59,6 @@ func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) 
 			cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualDiskSnapshot{
 				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
 				Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-					ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-						APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-						Kind:       KindNamespaceSnapshot,
-						Name:       "root",
-					},
 					SourceRef: tt.sourceRef,
 				},
 			})
@@ -133,11 +82,6 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 	cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualDiskSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
 		Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-			ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       KindNamespaceSnapshot,
-				Name:       "root",
-			},
 			SourceRef: demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       KindDemoVirtualDisk,
@@ -167,11 +111,6 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 		&demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       KindNamespaceSnapshot,
-					Name:       "root",
-				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       KindDemoVirtualDisk,
@@ -249,6 +188,10 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected Ready=True Completed, got %#v", ready)
 	}
+	graphReady := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionGraphReady)
+	if graphReady == nil || graphReady.Status != metav1.ConditionTrue {
+		t.Fatalf("expected GraphReady=True for leaf disk snapshot, got %#v", graphReady)
+	}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
 		t.Fatalf("get content after ready: %v", err)
 	}
@@ -259,52 +202,8 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if contentReady == nil || contentReady.Status != metav1.ConditionTrue || contentReady.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected content Ready=True Completed, got %#v", contentReady)
 	}
-}
-
-func TestDemoVirtualMachineSnapshot_InvalidParentRefDoesNotCreateContentMCROrChildren(t *testing.T) {
-	tests := []struct {
-		name      string
-		parentRef demov1alpha1.SnapshotParentRef
-	}{
-		{
-			name: "missing parentRef",
-		},
-		{
-			name: "wrong kind",
-			parentRef: demov1alpha1.SnapshotParentRef{
-				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       KindDemoVirtualMachineSnapshot,
-				Name:       "parent-vm",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualMachineSnapshot{
-				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
-				Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-					ParentSnapshotRef: tt.parentRef,
-					SourceRef: demov1alpha1.SnapshotSourceRef{
-						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-						Kind:       KindDemoVirtualMachine,
-						Name:       "vm-a",
-					},
-				},
-			})
-			reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl}
-			if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}); err != nil {
-				t.Fatalf("reconcile failed: %v", err)
-			}
-
-			snap := getDemoVMSnapshot(t, cl)
-			ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
-			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidParentRef" {
-				t.Fatalf("expected Ready=False InvalidParentRef, got %#v", ready)
-			}
-			assertNoDemoVMContents(t, cl)
-			assertNoDemoMCRs(t, cl)
-			assertNoDemoDiskSnapshots(t, cl)
-		})
+	if content.Status.DataRef != nil {
+		t.Fatalf("state-only snapshot content must not require or set dataRef, got %#v", content.Status.DataRef)
 	}
 }
 
@@ -330,11 +229,6 @@ func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChi
 			cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualMachineSnapshot{
 				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
 				Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-					ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-						APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-						Kind:       KindNamespaceSnapshot,
-						Name:       "root",
-					},
 					SourceRef: tt.sourceRef,
 				},
 			})
@@ -359,11 +253,6 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 	cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualMachineSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
 		Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-			ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       KindNamespaceSnapshot,
-				Name:       "root",
-			},
 			SourceRef: demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       KindDemoVirtualMachine,
@@ -413,11 +302,6 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		&demov1alpha1.DemoVirtualMachineSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
 			Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       KindNamespaceSnapshot,
-					Name:       "root",
-				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       KindDemoVirtualMachine,
@@ -496,6 +380,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}) {
 		t.Fatalf("unexpected child sourceRef: %#v", child.Spec.SourceRef)
 	}
+	assertDemoSnapshotOwnedBy(t, child, demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualMachineSnapshot, "snap")
 	diskSnapshots := &demov1alpha1.DemoVirtualDiskSnapshotList{}
 	if err := cl.List(context.Background(), diskSnapshots, client.InNamespace("ns1")); err != nil {
 		t.Fatalf("list disk snapshots: %v", err)
@@ -510,6 +395,10 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		Name:       childName,
 	}}) {
 		t.Fatalf("unexpected VM child refs: %#v", vmSnap.Status.ChildrenSnapshotRefs)
+	}
+	graphReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionGraphReady)
+	if graphReady == nil || graphReady.Status != metav1.ConditionTrue {
+		t.Fatalf("expected VM GraphReady=True after writing child refs, got %#v", graphReady)
 	}
 	ready := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonManifestCapturePending {
@@ -579,6 +468,77 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}
 	if !snapshotContentChildRefsEqualIgnoreOrder(vmContent.Status.ChildrenSnapshotContentRefs, []storagev1alpha1.SnapshotContentChildRef{{Name: diskContentName}}) {
 		t.Fatalf("unexpected VM content child refs: %#v", vmContent.Status.ChildrenSnapshotContentRefs)
+	}
+	if vmContent.Status.DataRef != nil {
+		t.Fatalf("state-only VM content must not require or set dataRef, got %#v", vmContent.Status.DataRef)
+	}
+}
+
+func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *testing.T) {
+	vmUID := types.UID("vm-uid")
+	childName := demoVirtualMachineDiskSnapshotName("ns1", "snap", "disk-owned")
+	conflictingOwner := metav1.OwnerReference{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       KindDemoVirtualMachineSnapshot,
+		Name:       "other-vm-snapshot",
+		UID:        types.UID("other-uid"),
+	}
+	cl := newDemoSourceRefFakeClient(t,
+		&demov1alpha1.DemoVirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "vm-a", Namespace: "ns1", UID: vmUID},
+		},
+		&demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "disk-owned",
+				Namespace: "ns1",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       KindDemoVirtualMachine,
+					Name:       "vm-a",
+					UID:        vmUID,
+				}},
+			},
+		},
+		&demov1alpha1.DemoVirtualDiskSnapshot{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            childName,
+				Namespace:       "ns1",
+				OwnerReferences: []metav1.OwnerReference{conflictingOwner},
+			},
+			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
+				SourceRef: demov1alpha1.SnapshotSourceRef{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       KindDemoVirtualDisk,
+					Name:       "disk-owned",
+				},
+			},
+		},
+		&demov1alpha1.DemoVirtualMachineSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
+			Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
+				SourceRef: demov1alpha1.SnapshotSourceRef{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       KindDemoVirtualMachine,
+					Name:       "vm-a",
+				},
+			},
+		},
+	)
+	reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl}
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}})
+	if err == nil {
+		t.Fatalf("expected conflicting child ownerRef to fail closed")
+	}
+
+	child := &demov1alpha1.DemoVirtualDiskSnapshot{}
+	if getErr := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: childName}, child); getErr != nil {
+		t.Fatalf("get child snapshot: %v", getErr)
+	}
+	assertDemoSnapshotOwnedBy(t, child, conflictingOwner.APIVersion, conflictingOwner.Kind, conflictingOwner.Name)
+	vmSnap := getDemoVMSnapshot(t, cl)
+	graphReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionGraphReady)
+	if graphReady == nil || graphReady.Status != metav1.ConditionFalse || graphReady.Reason != snapshot.ReasonCreateChildFailed {
+		t.Fatalf("expected GraphReady=False CreateChildFailed, got %#v", graphReady)
 	}
 }
 
@@ -692,4 +652,14 @@ func assertDemoDiskSnapshotsCount(t *testing.T, cl client.Client, want int) {
 	if len(snaps.Items) != want {
 		t.Fatalf("expected %d disk snapshots, got %d", want, len(snaps.Items))
 	}
+}
+
+func assertDemoSnapshotOwnedBy(t *testing.T, obj client.Object, apiVersion, kind, name string) {
+	t.Helper()
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == apiVersion && ref.Kind == kind && ref.Name == name {
+			return
+		}
+	}
+	t.Fatalf("expected %s/%s to be owned by %s %s/%s, got %#v", obj.GetNamespace(), obj.GetName(), apiVersion, kind, name, obj.GetOwnerReferences())
 }

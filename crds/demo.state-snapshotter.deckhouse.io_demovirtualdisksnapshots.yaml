@@ -43,24 +43,6 @@ spec:
             description: DemoVirtualDiskSnapshotSpec defines the desired state of
               DemoVirtualDiskSnapshot.
             properties:
-              parentSnapshotRef:
-                description: |-
-                  ParentSnapshotRef identifies the parent snapshot node (namespace-local graph).
-                  Current demo controller implementation supports NamespaceSnapshot and
-                  DemoVirtualMachineSnapshot as parent kinds; the generic graph model is not
-                  limited to this pair.
-                properties:
-                  apiVersion:
-                    type: string
-                  kind:
-                    type: string
-                  name:
-                    type: string
-                required:
-                - apiVersion
-                - kind
-                - name
-                type: object
               sourceRef:
                 description: SourceRef identifies the DemoVirtualDisk captured by
                   this snapshot.
@@ -80,7 +62,6 @@ spec:
                 - name
                 type: object
             required:
-            - parentSnapshotRef
             - sourceRef
             type: object
           status:

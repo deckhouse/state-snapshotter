@@ -151,16 +151,21 @@ spec:
                   type: object
                 type: array
               dataRef:
-                description: DataRef optional reference to data artifact/content produced
-                  by data path.
+                description: |-
+                  DataRef optionally references a durable data artifact produced by the data path.
+                  It MUST NOT reference an execution request such as VolumeCaptureRequest/DataExport.
                 properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
                   kind:
+                    minLength: 1
                     type: string
                   name:
-                    type: string
-                  namespace:
+                    minLength: 1
                     type: string
                 required:
+                - apiVersion
                 - kind
                 - name
                 type: object

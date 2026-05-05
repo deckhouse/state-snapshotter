@@ -410,17 +410,7 @@ func (r *NamespaceSnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 
 func (r *NamespaceSnapshotReconciler) namespaceSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (bool, error) {
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.NamespaceSnapshotMCRName(nsSnap.UID)}
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := r.Client.Get(ctx, key, mcr); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, err
-	}
-	ready := meta.FindStatusCondition(mcr.Status.Conditions, ssv1alpha1.ManifestCaptureRequestConditionTypeReady)
-	return ready != nil &&
-		ready.Status == metav1.ConditionTrue &&
-		ready.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonCompleted, nil
+	return manifestCaptureRequestSafeToDelete(ctx, r.Client, key, nsSnap.Status.BoundSnapshotContentName)
 }
 
 func (r *NamespaceSnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {

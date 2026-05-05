@@ -262,13 +262,11 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 			ObjectMeta: metav1.ObjectMeta{Name: "manual-disk", Namespace: nsName},
 		})).To(Succeed())
 		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDiskSnapshot{
-			ObjectMeta: metav1.ObjectMeta{Name: "manual-disk-snapshot", Namespace: nsName},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "manual-disk-snapshot",
+				Namespace: nsName,
+			},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
-					Name:       "manual-parent",
-				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       "DemoVirtualDisk",

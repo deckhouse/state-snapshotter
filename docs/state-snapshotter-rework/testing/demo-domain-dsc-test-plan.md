@@ -5,7 +5,7 @@
 
 **Модель:** **heterogeneous** дерево через общие **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**; **один** condition **`Ready`** (каскад успеха и деградации); **dedup вычисляется** из API, **без** persisted `domainCoverage` / **`SubtreeReady`**.
 
-`parentSnapshotRef` трактуется как универсальная parent-ссылка в namespace-local graph; в demo-сценариях текущие supported parent kinds проверяются как поведение конкретных контроллеров, но не как закрытый enum общей модели.
+Parent/back-reference задаётся Kubernetes ownerRef child snapshot → parent snapshot; persisted graph для demo-сценариев проверяется через parent-owned `status.childrenSnapshotRefs`.
 
 **Уровни:** `go test -tags integration ./test/integration/...` / при необходимости cluster smoke — [`e2e-testing-strategy.md`](e2e-testing-strategy.md).
 

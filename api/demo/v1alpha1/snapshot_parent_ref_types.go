@@ -16,13 +16,6 @@ limitations under the License.
 
 package v1alpha1
 
-// SnapshotParentRef identifies the namespace-local parent snapshot node.
-type SnapshotParentRef struct {
-	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
-}
-
 // SnapshotSourceRef identifies the namespace-local source object captured by a snapshot.
 type SnapshotSourceRef struct {
 	// +kubebuilder:validation:MinLength=1

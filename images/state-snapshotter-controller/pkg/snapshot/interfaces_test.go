@@ -363,8 +363,9 @@ func TestSnapshotContentLike_GettersArePure(t *testing.T) {
 		Name: "parent-snapshot",
 	}
 	initialDataRef := &ObjectRef{
-		Kind: "VolumeSnapshotContent",
-		Name: "vsc-1",
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshotContent",
+		Name:       "vsc-1",
 	}
 
 	obj := &testSnapshotContentLike{

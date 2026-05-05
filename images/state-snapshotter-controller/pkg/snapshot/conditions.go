@@ -38,8 +38,8 @@ const (
 	// ConditionDataReady indicates data is ready (VCR Ready=True, if applicable)
 	ConditionDataReady = "DataReady"
 
-	// ConditionChildrenSnapshotsReady indicates all child snapshots are ready
-	ConditionChildrenSnapshotsReady = "ChildrenSnapshotsReady"
+	// ConditionGraphReady indicates the snapshot controller finished child graph planning.
+	ConditionGraphReady = "GraphReady"
 
 	// ConditionHandledByDomainSpecificController indicates domain controller has started processing
 	ConditionHandledByDomainSpecificController = "HandledByDomainSpecificController"
@@ -68,6 +68,14 @@ const (
 	// ReasonChildSnapshotFailed is set on a parent NamespaceSnapshot (E6) when any required child snapshot has a terminal
 	// Ready=False (see usecase.ChildSnapshotTerminalReadyReasons).
 	ReasonChildSnapshotFailed = "ChildSnapshotFailed"
+)
+
+// Reasons for GraphReady=False.
+const (
+	ReasonChildGraphPending   = "ChildGraphPending"
+	ReasonListFailed          = "ListFailed"
+	ReasonCreateChildFailed   = "CreateChildFailed"
+	ReasonGraphPlanningFailed = "GraphPlanningFailed"
 )
 
 // Reasons for Ready=True

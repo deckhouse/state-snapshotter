@@ -270,6 +270,9 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	graphChanged, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
 	if err != nil {
+		if patchErr := r.patchNamespaceSnapshotGraphReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshot.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
+			return ctrl.Result{}, patchErr
+		}
 		return ctrl.Result{}, err
 	}
 	if graphChanged {

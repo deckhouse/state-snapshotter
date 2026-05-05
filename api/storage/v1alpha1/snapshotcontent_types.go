@@ -68,11 +68,18 @@ type SnapshotSubjectRef struct {
 	UID        types.UID `json:"uid,omitempty"`
 }
 
+// SnapshotDataRef points to a durable data artifact produced by the data path.
+// It MUST reference a final artifact such as VolumeSnapshotContent or equivalent.
+// It MUST NOT reference execution requests such as VolumeCaptureRequest.
+// v0 intended target: VolumeSnapshotContent or equivalent final artifact.
 // +k8s:deepcopy-gen=true
 type SnapshotDataRef struct {
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace,omitempty"`
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -85,7 +92,8 @@ type SnapshotContentStatus struct {
 	// +optional
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
-	// DataRef optional reference to data artifact/content produced by data path.
+	// DataRef optionally references a durable data artifact produced by the data path.
+	// It MUST NOT reference an execution request such as VolumeCaptureRequest/DataExport.
 	// +optional
 	DataRef *SnapshotDataRef `json:"dataRef,omitempty"`
 

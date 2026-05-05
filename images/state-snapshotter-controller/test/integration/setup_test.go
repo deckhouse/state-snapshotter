@@ -69,6 +69,10 @@ var (
 	integrationGraphRegProvider *snapshotgraphregistry.Provider
 )
 
+func ptrInt64(v int64) *int64 {
+	return &v
+}
+
 // integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
 // from graph built-ins and eligible DSC rows. Demo domain pairs are intentionally DSC-gated here.
 func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
@@ -323,10 +327,11 @@ var _ = BeforeSuite(func() {
 										"dataRef": {
 											Type: "object",
 											Properties: map[string]apiextensionsv1.JSONSchemaProps{
-												"kind":      {Type: "string"},
-												"name":      {Type: "string"},
-												"namespace": {Type: "string"},
+												"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
+												"kind":       {Type: "string", MinLength: ptrInt64(1)},
+												"name":       {Type: "string", MinLength: ptrInt64(1)},
 											},
+											Required: []string{"apiVersion", "kind", "name"},
 										},
 										"conditions": {
 											Type: "array",
@@ -473,10 +478,11 @@ var _ = BeforeSuite(func() {
 										"dataRef": {
 											Type: "object",
 											Properties: map[string]apiextensionsv1.JSONSchemaProps{
-												"kind":      {Type: "string"},
-												"name":      {Type: "string"},
-												"namespace": {Type: "string"},
+												"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
+												"kind":       {Type: "string", MinLength: ptrInt64(1)},
+												"name":       {Type: "string", MinLength: ptrInt64(1)},
 											},
+											Required: []string{"apiVersion", "kind", "name"},
 										},
 										"conditions": {
 											Type: "array",

@@ -35,13 +35,6 @@ type DemoVirtualDiskSnapshot struct {
 // DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot.
 // +k8s:deepcopy-gen=true
 type DemoVirtualDiskSnapshotSpec struct {
-	// ParentSnapshotRef identifies the parent snapshot node (namespace-local graph).
-	// Current demo controller implementation supports NamespaceSnapshot and
-	// DemoVirtualMachineSnapshot as parent kinds; the generic graph model is not
-	// limited to this pair.
-	// +kubebuilder:validation:Required
-	ParentSnapshotRef SnapshotParentRef `json:"parentSnapshotRef"`
-
 	// SourceRef identifies the DemoVirtualDisk captured by this snapshot.
 	// +kubebuilder:validation:Required
 	SourceRef SnapshotSourceRef `json:"sourceRef"`

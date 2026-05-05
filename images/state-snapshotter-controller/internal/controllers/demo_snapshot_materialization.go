@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -104,18 +105,8 @@ func cleanupDemoSnapshotManifestCaptureRequest(ctx context.Context, c client.Cli
 	return err
 }
 
-func demoSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, c client.Reader, key types.NamespacedName) (bool, error) {
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := c.Get(ctx, key, mcr); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, err
-	}
-	ready := meta.FindStatusCondition(mcr.Status.Conditions, ssv1alpha1.ManifestCaptureRequestConditionTypeReady)
-	return ready != nil &&
-		ready.Status == metav1.ConditionTrue &&
-		ready.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonCompleted, nil
+func demoSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, c client.Reader, key types.NamespacedName, contentName string) (bool, error) {
+	return manifestCaptureRequestSafeToDelete(ctx, c, key, contentName)
 }
 
 func demoManifestCheckpointReady(
@@ -170,10 +161,66 @@ func commonSnapshotContentReadyForSnapshot(ctx context.Context, c client.Reader,
 }
 
 func demoSnapshotOwnerReference(apiVersion, kind, name string, uid types.UID) metav1.OwnerReference {
+	controller := true
 	return metav1.OwnerReference{
 		APIVersion: apiVersion,
 		Kind:       kind,
 		Name:       name,
 		UID:        uid,
+		Controller: &controller,
 	}
+}
+
+func demoSnapshotOwnerRefMatches(ref, desired metav1.OwnerReference) bool {
+	if ref.APIVersion != desired.APIVersion || ref.Kind != desired.Kind || ref.Name != desired.Name {
+		return false
+	}
+	return desired.UID == "" || ref.UID == "" || ref.UID == desired.UID
+}
+
+func ensureDemoSnapshotOwnerRef(obj client.Object, desired metav1.OwnerReference) error {
+	for _, ref := range obj.GetOwnerReferences() {
+		if demoSnapshotOwnerRefMatches(ref, desired) {
+			refs := []metav1.OwnerReference{desired}
+			if !ownerReferencesEqual(obj.GetOwnerReferences(), refs) {
+				obj.SetOwnerReferences(refs)
+			}
+			return nil
+		}
+		if isSnapshotParentOwnerRef(ref) {
+			return fmt.Errorf("child snapshot %s/%s is already owned by %s/%s", obj.GetNamespace(), obj.GetName(), ref.Kind, ref.Name)
+		}
+	}
+	obj.SetOwnerReferences([]metav1.OwnerReference{desired})
+	return nil
+}
+
+func isSnapshotParentOwnerRef(ref metav1.OwnerReference) bool {
+	if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == KindNamespaceSnapshot {
+		return true
+	}
+	if ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ref.Kind == KindDemoVirtualMachineSnapshot {
+		return true
+	}
+	return false
+}
+
+func ownerReferencesEqual(left, right []metav1.OwnerReference) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].APIVersion != right[i].APIVersion ||
+			left[i].Kind != right[i].Kind ||
+			left[i].Name != right[i].Name ||
+			left[i].UID != right[i].UID {
+			return false
+		}
+		leftController := left[i].Controller != nil && *left[i].Controller
+		rightController := right[i].Controller != nil && *right[i].Controller
+		if leftController != rightController {
+			return false
+		}
+	}
+	return true
 }

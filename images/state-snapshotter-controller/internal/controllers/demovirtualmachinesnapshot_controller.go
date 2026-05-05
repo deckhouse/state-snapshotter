@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"sort"
 
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,15 +70,12 @@ func demoVirtualMachineDiskSnapshotName(namespace, vmSnapshotName, sourceDiskNam
 }
 
 func mapDemoDiskSnapshotToParentVM(_ context.Context, o client.Object) []reconcile.Request {
-	disk, ok := o.(*demov1alpha1.DemoVirtualDiskSnapshot)
-	if !ok {
-		return nil
+	for _, ref := range o.GetOwnerReferences() {
+		if ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ref.Kind == KindDemoVirtualMachineSnapshot && ref.Name != "" {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: o.GetNamespace(), Name: ref.Name}}}
+		}
 	}
-	ref := disk.Spec.ParentSnapshotRef
-	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != KindDemoVirtualMachineSnapshot || ref.Name == "" {
-		return nil
-	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: disk.Namespace, Name: ref.Name}}}
+	return nil
 }
 
 func validateVMSourceRef(s *demov1alpha1.DemoVirtualMachineSnapshot) (string, error) {
@@ -94,26 +90,6 @@ func validateVMSourceRef(s *demov1alpha1.DemoVirtualMachineSnapshot) (string, er
 		return "", fmt.Errorf("spec.sourceRef.name is required")
 	}
 	return ref.Name, nil
-}
-
-func validateVMParentRef(s *demov1alpha1.DemoVirtualMachineSnapshot) error {
-	ref := s.Spec.ParentSnapshotRef
-	if ref.APIVersion == "" {
-		return fmt.Errorf("spec.parentSnapshotRef.apiVersion is required")
-	}
-	if ref.Kind == "" {
-		return fmt.Errorf("spec.parentSnapshotRef.kind is required")
-	}
-	if ref.Name == "" {
-		return fmt.Errorf("spec.parentSnapshotRef.name is required")
-	}
-	if ref.Kind != KindNamespaceSnapshot {
-		return fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported (only %s)", ref.Kind, KindNamespaceSnapshot)
-	}
-	if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
-		return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for %s parent", ref.APIVersion, KindNamespaceSnapshot)
-	}
-	return nil
 }
 
 func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -131,13 +107,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	// Deletion is handled by higher-level lifecycle (no finalizers here).
 	// This controller is materialization-only.
 	if s.DeletionTimestamp != nil {
-		return ctrl.Result{}, nil
-	}
-
-	if err := validateVMParentRef(s); err != nil {
-		if patchErr := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidParentRef", err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
-		}
 		return ctrl.Result{}, nil
 	}
 
@@ -187,9 +156,18 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 	childRefs, err := r.ensureDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
+		if patchErr := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonCreateChildFailed, err.Error()); patchErr != nil {
+			return ctrl.Result{}, patchErr
+		}
 		return ctrl.Result{}, err
 	}
 	if err := patchDemoVirtualMachineSnapshotChildrenRefs(ctx, r.Client, req.NamespacedName, childRefs); err != nil {
+		if patchErr := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
+			return ctrl.Result{}, patchErr
+		}
+		return ctrl.Result{}, err
+	}
+	if err := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "child graph planned"); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -206,7 +184,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, contentMessage); err != nil {
 		return ctrl.Result{}, err
 	}
-	mcrReady, err := demoSnapshotManifestCaptureRequestReadyForCleanup(ctx, r.Client, client.ObjectKeyFromObject(mcr))
+	mcrReady, err := demoSnapshotManifestCaptureRequestReadyForCleanup(ctx, r.Client, client.ObjectKeyFromObject(mcr), contentName)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -298,11 +276,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 				)},
 			},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				ParentSnapshotRef: demov1alpha1.SnapshotParentRef{
-					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       KindDemoVirtualMachineSnapshot,
-					Name:       vm.Name,
-				},
 				SourceRef: demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       KindDemoVirtualDisk,
@@ -318,11 +291,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 	if err != nil {
 		return err
 	}
-	desiredParentRef := demov1alpha1.SnapshotParentRef{
-		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       KindDemoVirtualMachineSnapshot,
-		Name:       vm.Name,
-	}
 	desiredSourceRef := demov1alpha1.SnapshotSourceRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       KindDemoVirtualDisk,
@@ -334,15 +302,14 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 		vm.Name,
 		vm.UID,
 	)}
-	if equality.Semantic.DeepEqual(child.Spec.ParentSnapshotRef, desiredParentRef) &&
-		equality.Semantic.DeepEqual(child.Spec.SourceRef, desiredSourceRef) &&
-		equality.Semantic.DeepEqual(child.GetOwnerReferences(), desiredOwnerRefs) {
+	base := child.DeepCopy()
+	if err := ensureDemoSnapshotOwnerRef(child, desiredOwnerRefs[0]); err != nil {
+		return err
+	}
+	if child.Spec.SourceRef == desiredSourceRef && ownerReferencesEqual(child.GetOwnerReferences(), desiredOwnerRefs) {
 		return nil
 	}
-	base := child.DeepCopy()
-	child.Spec.ParentSnapshotRef = desiredParentRef
 	child.Spec.SourceRef = desiredSourceRef
-	child.SetOwnerReferences(desiredOwnerRefs)
 	return r.Client.Patch(ctx, child, client.MergeFrom(base))
 }
 
@@ -354,6 +321,35 @@ func demoDiskOwnedByVM(disk *demov1alpha1.DemoVirtualDisk, vm *demov1alpha1.Demo
 		return ref.UID == "" || ref.UID == vm.UID
 	}
 	return false
+}
+
+func patchDemoVirtualMachineSnapshotGraphReady(
+	ctx context.Context,
+	c client.Client,
+	vmKey types.NamespacedName,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
+		if err := c.Get(ctx, vmKey, o); err != nil {
+			return err
+		}
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionGraphReady); rc != nil &&
+			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
+			return nil
+		}
+		base := o.DeepCopy()
+		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionGraphReady,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: o.Generation,
+		})
+		return c.Status().Patch(ctx, o, client.MergeFrom(base))
+	})
 }
 
 func patchDemoVirtualMachineSnapshotChildrenRefs(

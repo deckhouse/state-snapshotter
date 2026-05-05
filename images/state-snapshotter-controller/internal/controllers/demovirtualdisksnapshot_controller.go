@@ -59,32 +59,6 @@ func demoVirtualDiskSnapshotContentName(namespace, name string) string {
 	return "demodiskc-" + hex.EncodeToString(sum[:10])
 }
 
-func validateDiskParentRef(s *demov1alpha1.DemoVirtualDiskSnapshot) error {
-	ref := s.Spec.ParentSnapshotRef
-	if ref.APIVersion == "" {
-		return fmt.Errorf("spec.parentSnapshotRef.apiVersion is required")
-	}
-	if ref.Kind == "" {
-		return fmt.Errorf("spec.parentSnapshotRef.kind is required")
-	}
-	if ref.Name == "" {
-		return fmt.Errorf("spec.parentSnapshotRef.name is required")
-	}
-	switch ref.Kind {
-	case KindNamespaceSnapshot:
-		if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() {
-			return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for %s parent", ref.APIVersion, KindNamespaceSnapshot)
-		}
-	case KindDemoVirtualMachineSnapshot:
-		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
-			return fmt.Errorf("spec.parentSnapshotRef.apiVersion %q is not supported for %s parent", ref.APIVersion, KindDemoVirtualMachineSnapshot)
-		}
-	default:
-		return fmt.Errorf("spec.parentSnapshotRef.kind %q is not supported", ref.Kind)
-	}
-	return nil
-}
-
 func validateDiskSourceRef(s *demov1alpha1.DemoVirtualDiskSnapshot) (string, error) {
 	ref := s.Spec.SourceRef
 	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
@@ -117,13 +91,6 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
-	if err := validateDiskParentRef(s); err != nil {
-		if patchErr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidParentRef", err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
-		}
-		return ctrl.Result{}, nil
-	}
-
 	sourceName, err := validateDiskSourceRef(s)
 	if err != nil {
 		if patchErr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidSourceRef", err.Error()); patchErr != nil {
@@ -140,6 +107,9 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	}
+	if err := patchDemoVirtualDiskSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "leaf snapshot has no child graph"); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
@@ -180,7 +150,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, contentMessage); err != nil {
 		return ctrl.Result{}, err
 	}
-	mcrReady, err := demoSnapshotManifestCaptureRequestReadyForCleanup(ctx, r.Client, client.ObjectKeyFromObject(mcr))
+	mcrReady, err := demoSnapshotManifestCaptureRequestReadyForCleanup(ctx, r.Client, client.ObjectKeyFromObject(mcr), contentName)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -194,6 +164,35 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func patchDemoVirtualDiskSnapshotGraphReady(
+	ctx context.Context,
+	c client.Client,
+	diskKey types.NamespacedName,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		if err := c.Get(ctx, diskKey, o); err != nil {
+			return err
+		}
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionGraphReady); rc != nil &&
+			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
+			return nil
+		}
+		base := o.DeepCopy()
+		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionGraphReady,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: o.Generation,
+		})
+		return c.Status().Patch(ctx, o, client.MergeFrom(base))
+	})
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) ensureContent(ctx context.Context, snap *demov1alpha1.DemoVirtualDiskSnapshot, contentName string) error {

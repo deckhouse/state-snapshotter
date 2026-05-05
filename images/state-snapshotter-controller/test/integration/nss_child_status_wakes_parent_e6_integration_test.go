@@ -144,7 +144,12 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 
 		diskKey := types.NamespacedName{Namespace: nsName, Name: diskSnapshotName}
 		d0 := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		Expect(k8sClient.Get(testCtx, diskKey, d0)).To(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(testCtx, diskKey, d0)).To(Succeed())
+			rc := meta.FindStatusCondition(d0.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(rc).NotTo(BeNil())
+			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue))
+		}).WithTimeout(30 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 		genBefore := d0.GetGeneration()
 		Expect(genBefore).NotTo(BeZero())
 

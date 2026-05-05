@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -34,6 +35,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
@@ -46,7 +48,8 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 		return false, err
 	}
 	if len(mappings) == 0 {
-		return false, nil
+		changed, err := r.patchNamespaceSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, nil)
+		return changed, err
 	}
 
 	var desiredRefs []storagev1alpha1.NamespaceSnapshotChildRef
@@ -83,13 +86,12 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 	}
 	sortNamespaceSnapshotChildRefs(desiredRefs)
 
-	statusChanged, effectiveRefs, err := r.patchNamespaceSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
+	statusChanged, err := r.patchNamespaceSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
 	if err != nil {
 		return false, err
 	}
 
 	_ = content
-	_ = effectiveRefs
 	return statusChanged, nil
 }
 
@@ -122,11 +124,6 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 					"namespace": nsSnap.Namespace,
 				},
 				"spec": map[string]interface{}{
-					"parentSnapshotRef": map[string]interface{}{
-						"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
-						"kind":       "NamespaceSnapshot",
-						"name":       nsSnap.Name,
-					},
 					"sourceRef": map[string]interface{}{
 						"apiVersion": resourceGVK.GroupVersion().String(),
 						"kind":       resourceGVK.Kind,
@@ -136,24 +133,22 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 			},
 		}
 		child.SetGroupVersionKind(gvk)
-		child.SetOwnerReferences([]metav1.OwnerReference{{
-			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-			Kind:       "NamespaceSnapshot",
-			Name:       nsSnap.Name,
-			UID:        nsSnap.UID,
-		}})
+		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "NamespaceSnapshot", nsSnap.Name, nsSnap.UID)})
 		return r.Client.Create(ctx, child)
 	}
 	base := child.DeepCopy()
 	changed := false
+	if err := ensureDemoSnapshotOwnerRef(child, demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "NamespaceSnapshot", nsSnap.Name, nsSnap.UID)); err != nil {
+		return err
+	}
+	if !ownerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
+		changed = true
+	}
 	if child.Object["spec"] == nil {
 		child.Object["spec"] = map[string]interface{}{}
 		changed = true
 	}
 	spec, _ := child.Object["spec"].(map[string]interface{})
-	if ensureParentSnapshotRefSpec(spec, nsSnap.Name) {
-		changed = true
-	}
 	if ensureSourceRefSpec(spec, resourceGVK, resourceName) {
 		changed = true
 	}
@@ -161,20 +156,6 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 		return r.Client.Patch(ctx, child, client.MergeFrom(base))
 	}
 	return nil
-}
-
-func ensureParentSnapshotRefSpec(spec map[string]interface{}, nsSnapName string) bool {
-	want := map[string]interface{}{
-		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
-		"kind":       "NamespaceSnapshot",
-		"name":       nsSnapName,
-	}
-	got, _ := spec["parentSnapshotRef"].(map[string]interface{})
-	if got != nil && got["apiVersion"] == want["apiVersion"] && got["kind"] == want["kind"] && got["name"] == want["name"] {
-		return false
-	}
-	spec["parentSnapshotRef"] = want
-	return true
 }
 
 func ensureSourceRefSpec(spec map[string]interface{}, resourceGVK schema.GroupVersionKind, resourceName string) bool {
@@ -195,7 +176,7 @@ func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotChildrenRefs(
 	ctx context.Context,
 	parent types.NamespacedName,
 	desired []storagev1alpha1.NamespaceSnapshotChildRef,
-) (bool, []storagev1alpha1.NamespaceSnapshotChildRef, error) {
+) (bool, error) {
 	changed := false
 	var effective []storagev1alpha1.NamespaceSnapshotChildRef
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -204,15 +185,60 @@ func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotChildrenRefs(
 			return err
 		}
 		effective = mergeNamespaceSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
-		if namespaceSnapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) {
+		graphReady := meta.FindStatusCondition(cur.Status.Conditions, snapshot.ConditionGraphReady)
+		graphReadyCurrent := graphReady != nil &&
+			graphReady.Status == metav1.ConditionTrue &&
+			graphReady.Reason == snapshot.ReasonCompleted &&
+			graphReady.ObservedGeneration == cur.Generation
+		if namespaceSnapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && graphReadyCurrent {
 			return nil
 		}
 		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), effective...)
 		cur.Status.ObservedGeneration = cur.Generation
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionGraphReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             snapshot.ReasonCompleted,
+			Message:            "child graph planned",
+			ObservedGeneration: cur.Generation,
+		})
 		changed = true
 		return r.Client.Status().Update(ctx, cur)
 	})
-	return changed, effective, err
+	return changed, err
+}
+
+func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotGraphReady(
+	ctx context.Context,
+	key types.NamespacedName,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.NamespaceSnapshot{}
+		if err := r.Client.Get(ctx, key, cur); err != nil {
+			return err
+		}
+		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshot.ConditionGraphReady)
+		if existing != nil &&
+			existing.Status == status &&
+			existing.Reason == reason &&
+			existing.Message == message &&
+			existing.ObservedGeneration == cur.Generation {
+			return nil
+		}
+		base := cur.DeepCopy()
+		cur.Status.ObservedGeneration = cur.Generation
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionGraphReady,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: cur.Generation,
+		})
+		return r.Client.Status().Patch(ctx, cur, client.MergeFrom(base))
+	})
 }
 
 func mergeNamespaceSnapshotManagedChildRefs(current, desired []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {

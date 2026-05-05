@@ -43,22 +43,6 @@ spec:
             description: DemoVirtualMachineSnapshotSpec defines the desired state
               of DemoVirtualMachineSnapshot.
             properties:
-              parentSnapshotRef:
-                description: |-
-                  ParentSnapshotRef identifies the parent snapshot node (namespace-local graph).
-                  Current demo controller implementation supports NamespaceSnapshot as parent kind.
-                properties:
-                  apiVersion:
-                    type: string
-                  kind:
-                    type: string
-                  name:
-                    type: string
-                required:
-                - apiVersion
-                - kind
-                - name
-                type: object
               sourceRef:
                 description: SourceRef identifies the DemoVirtualMachine captured
                   by this snapshot.
@@ -78,7 +62,6 @@ spec:
                 - name
                 type: object
             required:
-            - parentSnapshotRef
             - sourceRef
             type: object
           status:

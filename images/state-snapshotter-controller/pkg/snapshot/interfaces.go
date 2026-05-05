@@ -23,9 +23,10 @@ import (
 
 // ObjectRef represents a reference to a Kubernetes object
 type ObjectRef struct {
-	Kind      string
-	Name      string
-	Namespace string // Only for namespaced resources
+	APIVersion string
+	Kind       string
+	Name       string
+	Namespace  string // Only for namespaced resources
 }
 
 // SnapshotLike is a typed interface for any XxxxSnapshot resource.
@@ -135,7 +136,8 @@ type SnapshotContentLike interface {
 	// Contract: Pure function, idempotent, no side effects.
 	GetStatusManifestCheckpointName() string
 
-	// GetStatusDataRef returns the data reference (VSC or PV).
+	// GetStatusDataRef returns the durable data artifact reference (for example VSC).
+	// It must not point at execution requests such as VCR/DataExport.
 	// Returns nil if not applicable.
 	// Contract: Pure function, idempotent, no side effects.
 	GetStatusDataRef() *ObjectRef

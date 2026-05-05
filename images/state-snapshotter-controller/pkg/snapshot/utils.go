@@ -574,6 +574,9 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRef() *ObjectRef {
 	}
 
 	ref := &ObjectRef{}
+	if apiVersion, ok := dataRefRaw["apiVersion"].(string); ok {
+		ref.APIVersion = apiVersion
+	}
 	if kind, ok := dataRefRaw["kind"].(string); ok {
 		ref.Kind = kind
 	}

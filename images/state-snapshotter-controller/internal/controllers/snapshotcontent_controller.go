@@ -407,7 +407,18 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		return plan, err
 	}
 
-	childRefs, childrenReady, childReason, childMessage, err := r.resolveCommonContentChildren(ctx, snapObj)
+	graphReady := meta.FindStatusCondition(extractConditionsFromUnstructured(snapObj), snapshot.ConditionGraphReady)
+	if graphReady == nil || graphReady.Status != metav1.ConditionTrue {
+		plan.readyReason = snapshot.ReasonChildGraphPending
+		if graphReady != nil && graphReady.Message != "" {
+			plan.readyMessage = graphReady.Message
+		} else {
+			plan.readyMessage = "waiting for snapshot GraphReady=True"
+		}
+		return plan, nil
+	}
+
+	childRefs, childrenReady, childReason, childMessage, err := r.resolveCommonContentChildren(ctx, obj, snapObj)
 	if err != nil {
 		return plan, err
 	}
@@ -472,7 +483,7 @@ func snapshotRefFromCommonContent(obj *unstructured.Unstructured) (storagev1alph
 	return ref, nil
 }
 
-func (r *SnapshotContentController) resolveCommonContentChildren(ctx context.Context, snapObj *unstructured.Unstructured) ([]storagev1alpha1.SnapshotContentChildRef, bool, string, string, error) {
+func (r *SnapshotContentController) resolveCommonContentChildren(ctx context.Context, parentContentObj, snapObj *unstructured.Unstructured) ([]storagev1alpha1.SnapshotContentChildRef, bool, string, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(snapObj.Object, "status", "childrenSnapshotRefs")
 	if err != nil {
 		return nil, false, "", "", err
@@ -514,6 +525,9 @@ func (r *SnapshotContentController) resolveCommonContentChildren(ctx context.Con
 			}
 			return refs, false, "", "", err
 		}
+		if err := r.ensureChildSnapshotContentOwnedByParent(ctx, boundName, parentContentObj); err != nil {
+			return refs, false, "", "", err
+		}
 		childLike, err := snapshot.ExtractSnapshotContentLike(childContent)
 		if err != nil {
 			return refs, false, "", "", err
@@ -528,6 +542,64 @@ func (r *SnapshotContentController) resolveCommonContentChildren(ctx context.Con
 	}
 	sortSnapshotContentChildRefs(refs)
 	return refs, true, "", "", nil
+}
+
+func extractConditionsFromUnstructured(obj *unstructured.Unstructured) []metav1.Condition {
+	rawConditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	conditions := make([]metav1.Condition, 0, len(rawConditions))
+	for _, raw := range rawConditions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		condition := metav1.Condition{}
+		if t, _ := m["type"].(string); t != "" {
+			condition.Type = t
+		}
+		if s, _ := m["status"].(string); s != "" {
+			condition.Status = metav1.ConditionStatus(s)
+		}
+		if r, _ := m["reason"].(string); r != "" {
+			condition.Reason = r
+		}
+		if msg, _ := m["message"].(string); msg != "" {
+			condition.Message = msg
+		}
+		conditions = append(conditions, condition)
+	}
+	return conditions
+}
+
+func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx context.Context, childName string, parentContentObj *unstructured.Unstructured) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		child := &storagev1alpha1.SnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: childName}, child); err != nil {
+			return err
+		}
+		ownerRef := metav1.OwnerReference{
+			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+			Kind:       "SnapshotContent",
+			Name:       parentContentObj.GetName(),
+			UID:        parentContentObj.GetUID(),
+			Controller: func() *bool { b := true; return &b }(),
+		}
+		for _, ref := range child.OwnerReferences {
+			if ref.APIVersion == ownerRef.APIVersion && ref.Kind == ownerRef.Kind {
+				if ref.Name != ownerRef.Name || (ref.UID != "" && ownerRef.UID != "" && ref.UID != ownerRef.UID) {
+					return fmt.Errorf("child SnapshotContent %s is already owned by SnapshotContent %s", childName, ref.Name)
+				}
+			}
+		}
+		if len(child.OwnerReferences) == 1 {
+			existing := child.OwnerReferences[0]
+			if existing.APIVersion == ownerRef.APIVersion && existing.Kind == ownerRef.Kind && existing.Name == ownerRef.Name && existing.UID == ownerRef.UID {
+				return nil
+			}
+		}
+		base := child.DeepCopy()
+		child.OwnerReferences = []metav1.OwnerReference{ownerRef}
+		return r.Client.Patch(ctx, child, client.MergeFrom(base))
+	})
 }
 
 func (r *SnapshotContentController) resolveCommonContentManifestCheckpoint(ctx context.Context, contentObj, snapObj *unstructured.Unstructured) (string, bool, bool, string, error) {
@@ -630,9 +702,10 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 }
 
 func (r *SnapshotContentController) resolveDataReadiness(_ context.Context, _ *unstructured.Unstructured) (bool, string, string, error) {
-	// Extension point for reading already-created VolumeSnapshotContent/DataExport
-	// results. Creation of data-path requests stays in the domain snapshot controllers.
-	// State-only demo and namespace snapshots currently have no data artifact requirement.
+	// v0: no data path yet; state-only snapshots do not require dataRef.
+	// Future data path must publish SnapshotContent.status.dataRef only after the
+	// final artifact exists, is Ready, and has ownerRef -> SnapshotContent.
+	// dataRef is apiVersion/kind/name for a durable artifact, never a request ref.
 	return true, "", "", nil
 }
 
@@ -797,7 +870,8 @@ func (r *SnapshotContentController) checkConsistencyAndSetReady(
 		}
 	}
 
-	// Check VolumeSnapshotContent if present (dataRef)
+	// Check durable data artifact if present. dataRef must point to the final artifact
+	// (for example VolumeSnapshotContent), not to an execution request.
 	dataRef := contentLike.GetStatusDataRef()
 	if dataRef != nil && dataRef.Kind == "VolumeSnapshotContent" {
 		exists, err := r.checkArtifactExists(ctx, "VolumeSnapshotContent", dataRef.Name, "snapshot.storage.k8s.io/v1")
@@ -1116,6 +1190,7 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		obj.SetGroupVersionKind(gvk)
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
+			Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotContentToParentContent)).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
 		if err := builder.Complete(r); err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
@@ -1158,4 +1233,13 @@ func mapSnapshotStatusToBoundCommonContent(_ context.Context, obj client.Object)
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: boundName}}}
+}
+
+func mapSnapshotContentToParentContent(_ context.Context, obj client.Object) []reconcile.Request {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
+		}
+	}
+	return nil
 }

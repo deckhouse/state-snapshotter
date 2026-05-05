@@ -713,6 +713,7 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 ) error {
 	logger := log.FromContext(ctx)
 	contentName := snapshotLike.GetStatusContentName()
+	snapshot.SetCondition(snapshotLike, snapshot.ConditionGraphReady, metav1.ConditionTrue, snapshot.ReasonCompleted, "generic snapshot has no child graph")
 	if contentName == "" {
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}
