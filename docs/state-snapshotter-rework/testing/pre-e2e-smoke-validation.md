@@ -81,7 +81,27 @@ kubectl get crd | grep -E 'namespacesnapshots|snapshotcontents|demovirtual|domai
 - `NamespaceSnapshot` / `SnapshotContent`;
 - `ManifestCaptureRequest` / `ManifestCheckpoint`;
 - `DomainSpecificSnapshotController`;
-- demo VM/Disk resources, snapshots and contents.
+- demo VM/Disk resources and snapshots.
+
+Dedicated NamespaceSnapshotContent / Demo*SnapshotContent CRDs are not expected in the cluster.
+Only common `storage.deckhouse.io/SnapshotContent` is expected:
+
+```shell
+kubectl get crd snapshotcontents.storage.deckhouse.io
+
+kubectl get crd namespacesnapshotcontents.storage.deckhouse.io 2>/dev/null && {
+  echo "unexpected legacy NamespaceSnapshotContent CRD exists" >&2
+  exit 1
+} || true
+kubectl get crd demovirtualmachinesnapshotcontents.demo.state-snapshotter.deckhouse.io 2>/dev/null && {
+  echo "unexpected legacy DemoVirtualMachineSnapshotContent CRD exists" >&2
+  exit 1
+} || true
+kubectl get crd demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse.io 2>/dev/null && {
+  echo "unexpected legacy DemoVirtualDiskSnapshotContent CRD exists" >&2
+  exit 1
+} || true
+```
 
 ## 2. Schema `childrenSnapshotRefs`: без namespace
 
@@ -93,9 +113,15 @@ kubectl explain namespacesnapshot.status.childrenSnapshotRefs.name
 
 # Ожидаемо поле не существует:
 kubectl explain namespacesnapshot.status.childrenSnapshotRefs.namespace
+
+# Ожидаемо поле не существует:
+kubectl explain snapshotcontent.spec.snapshotRef && {
+  echo "unexpected SnapshotContent.spec.snapshotRef exists" >&2
+  exit 1
+} || true
 ```
 
-`childrenSnapshotRefs` содержит только `apiVersion`, `kind`, `name`; namespace child snapshot не хранится и не должен появляться в schema.
+`childrenSnapshotRefs` содержит только `apiVersion`, `kind`, `name`; namespace child snapshot не хранится и не должен появляться в schema. `SnapshotContent.spec.snapshotRef` также не должен существовать: retained content self-contained и не имеет live reverse dependency на snapshot.
 
 ## 3. Логи контроллера до smoke
 
@@ -136,6 +162,22 @@ wait_content_mcp() {
     | jq -e '.status.manifestCheckpointName | select(. != null and . != "")' >/dev/null; do
     if [ "$elapsed" -ge "$timeout" ]; then
       echo "timeout waiting for SnapshotContent/$content manifestCheckpointName" >&2
+      kubectl get snapshotcontent "$content" -o yaml >&2 || true
+      return 1
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+}
+
+wait_content_ready() {
+  local content="$1"
+  local timeout="${2:-120}"
+  local elapsed=0
+  until kubectl get snapshotcontent "$content" -o json \
+    | jq -e '.status.conditions[]? | select(.type=="Ready" and .status=="True")' >/dev/null; do
+    if [ "$elapsed" -ge "$timeout" ]; then
+      echo "timeout waiting for SnapshotContent/$content Ready=True" >&2
       kubectl get snapshotcontent "$content" -o yaml >&2 || true
       return 1
     fi
@@ -299,7 +341,9 @@ EOF
 PVC/VCR в этот smoke не добавляйте.
 
 v0 common-content note: this smoke validates only `storage.deckhouse.io/SnapshotContent`
-as the active content resource. Common SnapshotContent CRDs are not expected in the cluster.
+as the active content resource. Dedicated `NamespaceSnapshotContent` /
+`Demo*SnapshotContent` CRDs are not expected in the cluster. Only common
+`storage.deckhouse.io/SnapshotContent` is expected.
 
 Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-nssnap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
@@ -328,6 +372,7 @@ test -n "$ROOT_NO_DSC_CONTENT"
 kubectl get snapshotcontent "$ROOT_NO_DSC_CONTENT" -o yaml
 
 wait_content_mcp "$ROOT_NO_DSC_CONTENT" 120
+wait_content_ready "$ROOT_NO_DSC_CONTENT" 180
 ROOT_NO_DSC_MCP=$(kubectl get snapshotcontent "$ROOT_NO_DSC_CONTENT" -o jsonpath='{.status.manifestCheckpointName}')
 kubectl get manifestcheckpoint "$ROOT_NO_DSC_MCP" -o yaml
 ```
@@ -466,6 +511,12 @@ kubectl get --raw \
 
 ## 9. VM + Disk DSC: полный parent/child graph
 
+Disk-only DSC удаляем перед VM+Disk DSC, чтобы не получить ожидаемый `KindConflict` на `DemoVirtualDiskSnapshot` mapping.
+
+```shell
+kubectl delete domainspecificsnapshotcontroller smoke-demo-disk-only --ignore-not-found
+```
+
 Создайте или обновите DSC так, чтобы eligible mappings включали VM и Disk:
 
 ```shell
@@ -562,24 +613,36 @@ Content checks:
 ```shell
 ROOT_FULL_CONTENT=$(kubectl -n "$NS" get namespacesnapshot root-full -o jsonpath='{.status.boundSnapshotContentName}')
 wait_content_mcp "$ROOT_FULL_CONTENT" 180
+wait_content_ready "$ROOT_FULL_CONTENT" 180
 kubectl get snapshotcontent "$ROOT_FULL_CONTENT" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
+kubectl get snapshotcontent "$ROOT_FULL_CONTENT" -o json \
+  | jq -e '.status.childrenSnapshotContentRefs | length >= 1'
 
 VM_CONTENT=$(kubectl -n "$NS" get demovirtualmachinesnapshot "$CHILD_VM" -o jsonpath='{.status.boundSnapshotContentName}')
+wait_content_mcp "$VM_CONTENT" 180
+wait_content_ready "$VM_CONTENT" 180
 kubectl get snapshotcontent "$VM_CONTENT" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
+kubectl get snapshotcontent "$VM_CONTENT" -o json \
+  | jq -e '.status.childrenSnapshotContentRefs | length >= 1'
 
 DISK_CONTENT=$(kubectl -n "$NS" get demovirtualdisksnapshot "$CHILD_DISK" -o jsonpath='{.status.boundSnapshotContentName}')
+wait_content_mcp "$DISK_CONTENT" 180
+wait_content_ready "$DISK_CONTENT" 180
 kubectl get snapshotcontent "$DISK_CONTENT" -o json \
   | jq '.status.manifestCheckpointName, .status.childrenSnapshotContentRefs'
+kubectl get snapshotcontent "$DISK_CONTENT" -o json \
+  | jq -e '(.status.childrenSnapshotContentRefs // []) | length == 0'
 ```
 
 Ожидаемо:
 
 - snapshots имеют `Ready=True Completed`;
 - content objects имеют `status.manifestCheckpointName`;
+- common `SnapshotContent` objects have `Ready=True`;
 - content objects с children имеют `status.childrenSnapshotContentRefs`;
-- не проверяйте `Content Ready=True`, если конкретный content CRD этого не гарантирует.
+- disk leaf content has empty `childrenSnapshotContentRefs`.
 
 ## 10. Aggregated read API checks
 
@@ -658,7 +721,7 @@ kubectl get --raw \
 
 ## 11. Negative generic API checks
 
-Для `kubectl get --raw` проверяйте Kubernetes Status `reason`; команда вернёт non-zero на error response. Если нужен HTTP status, используйте `curl` к Kubernetes API server с kubeconfig client cert из раздела 0.
+Для `kubectl get --raw` проверяйте Kubernetes Status `reason` либо отрендеренный `kubectl` error (`Error from server (...)`); команда вернёт non-zero на error response. Если нужен HTTP status, используйте `curl` к Kubernetes API server с kubeconfig client cert из раздела 0.
 
 ```shell
 set +e
@@ -669,7 +732,7 @@ status=$?
 set -e
 
 test "$status" -ne 0
-grep -q '"reason"[[:space:]]*:[[:space:]]*"NotFound"' /tmp/not-found-response.txt
+grep -Eq '("reason"[[:space:]]*:[[:space:]]*"NotFound"|Error from server \(NotFound\))' /tmp/not-found-response.txt
 ```
 
 ```shell
@@ -681,7 +744,7 @@ status=$?
 set -e
 
 test "$status" -ne 0
-grep -q '"reason"[[:space:]]*:[[:space:]]*"BadRequest"' /tmp/bad-request-response.txt
+grep -Eq '("reason"[[:space:]]*:[[:space:]]*"BadRequest"|Error from server \(BadRequest\))' /tmp/bad-request-response.txt
 ```
 
 Duplicate `409 Conflict` можно оставить optional/manual-hard, если нет удобного ручного способа создать duplicate MCP contents.
