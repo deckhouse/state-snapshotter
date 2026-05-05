@@ -25,6 +25,14 @@ CTRL_NS=d8-state-snapshotter
 CTRL_DEPLOY=controller
 ```
 
+Для одноразового прогона можно использовать фиксированный `NS=nss-smoke`. Для
+частых повторных прогонов лучше перейти на уникальное имя, чтобы retained
+`ObjectKeeper` / `SnapshotContent` от предыдущего run не влияли на новый run:
+
+```shell
+NS="nss-smoke-$(date +%Y%m%d%H%M%S)"
+```
+
 Если в конкретном окружении deployment называется иначе, выставьте `CTRL_DEPLOY` по выводу `kubectl get deploy -n "$CTRL_NS"`.
 
 Для JSON-проверок ниже нужен `jq`.
@@ -303,6 +311,25 @@ kubectl -n "$NS" get namespacesnapshot root-full -o json \
 ## 5. Подготовка namespace и demo resources
 
 ```shell
+kubectl delete ns "$NS" --ignore-not-found --wait=true --timeout=180s
+kubectl delete domainspecificsnapshotcontroller smoke-demo-disk-only --ignore-not-found
+kubectl delete domainspecificsnapshotcontroller smoke-demo-vm-disk --ignore-not-found
+
+# Future preferred cleanup once smoke-created ObjectKeepers are labeled:
+kubectl delete objectkeeper \
+  -l smoke.state-snapshotter.deckhouse.io/run="$NS" \
+  --ignore-not-found
+
+# Temporary cleanup for repeated fixed-namespace runs. These retained MCR
+# ObjectKeepers can otherwise produce UID-mismatch retries if generated MCR
+# names are reused before TTL cleanup.
+kubectl get objectkeepers -o name 2>/dev/null \
+  | while read -r ok; do
+      case "$ok" in
+        *"ret-mcr-${NS}-"*) kubectl delete "$ok" ;;
+      esac
+    done
+
 kubectl create ns "$NS"
 
 kubectl -n "$NS" create configmap smoke-cm \
@@ -345,7 +372,7 @@ as the active content resource. Dedicated `NamespaceSnapshotContent` /
 `Demo*SnapshotContent` CRDs are not expected in the cluster. Only common
 `storage.deckhouse.io/SnapshotContent` is expected.
 
-Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-nssnap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
+Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-nssnap-nss-smoke-*` или `ObjectKeeper ... belongs to another MCR (UID mismatch)` для `ret-mcr-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
 ## 6. Базовый flow без DSC
 
@@ -416,7 +443,7 @@ kubectl get --raw \
 
 Production target model: RBAC for domain/custom snapshot resources is granted by an external Deckhouse RBAC controller/hook. The state-snapshotter controller does not grant these permissions to itself, and static production RBAC stays domain-agnostic.
 
-In real-cluster smoke/e2e, apply explicit test-only RBAC before setting any DSC `RBACReady=True`. This emulates the external RBAC controller. Keep this RBAC applied until smoke is finished if the controller may restart; otherwise a restart can fail during cache sync on demo watches.
+In real-cluster smoke/e2e, apply explicit test-only RBAC before setting any DSC `RBACReady=True`. This emulates the external RBAC controller. If the controller is started or restarted during smoke, apply this RBAC before that start/restart whenever possible; otherwise cache sync for demo informers can fail with `forbidden` list/watch errors. Keep this RBAC applied until smoke is finished if the controller may restart.
 
 ```shell
 apply_demo_domain_rbac "$CTRL_NS" controller
