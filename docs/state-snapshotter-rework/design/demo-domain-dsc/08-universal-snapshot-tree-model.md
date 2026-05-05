@@ -6,7 +6,7 @@
 > - [`spec/system-spec.md`](../../spec/system-spec.md)
 > - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
 
-**Коротко:** snapshot-система — это **обобщённое дерево heterogeneous `*Snapshot` / `*SnapshotContent`**, связь через **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, единый **`Ready`**, каскадная деградация снизу вверх и **вычисляемый** dedup; **`NamespaceSnapshot`** — текущий верхний узел, **не** особый тип правил.
+**Коротко:** snapshot-система — это **обобщённое дерево heterogeneous `*Snapshot` / `*SnapshotContent`**, связь через **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, единый **`Ready`**, каскадная деградация снизу вверх и **вычисляемый** dedup; **`Snapshot`** — текущий верхний узел, **не** особый тип правил.
 
 ---
 
@@ -16,7 +16,7 @@
 
 Любой snapshot в системе — **узел дерева**, независимо от типа:
 
-- `NamespaceSnapshot`, `DemoVirtualMachineSnapshot`, `DemoVirtualDiskSnapshot`, любой будущий **`XxxxSnapshot`**.
+- `Snapshot`, `DemoVirtualMachineSnapshot`, `DemoVirtualDiskSnapshot`, любой будущий **`XxxxSnapshot`**.
 
 Для каждого — соответствующий **`SnapshotContent`** (зафиксированный результат: данные + манифесты).
 
@@ -32,11 +32,11 @@
   - **`status.childrenSnapshotRefs`** на snapshot;
   - **`status.childrenSnapshotContentRefs`** на content.
 
-Дерево **heterogeneous**: дети другого типа (например `NamespaceSnapshot` → `DemoVirtualMachineSnapshot` → `DemoVirtualDiskSnapshot`). Модель **не привязана** к конкретным GVK на уровне правил: generic-логика опирается на **refs + conditions**, без знания «demo-kind» по имени типа.
+Дерево **heterogeneous**: дети другого типа (например `Snapshot` → `DemoVirtualMachineSnapshot` → `DemoVirtualDiskSnapshot`). Модель **не привязана** к конкретным GVK на уровне правил: generic-логика опирается на **refs + conditions**, без знания «demo-kind» по имени типа.
 
 **Жёсткая граница (полный состав дерева run):** всё, что **не** перечислено в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на пути от root этого run, **не** входит в **логическое** дерево snapshot-run, **даже** если объект есть в API. Обход, агрегация **`Ready`** и вычисление dedup **игнорируют** такие объекты как узлы дерева (см. [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) **INV-REF1**, **INV-S0** в [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md)).
 
-**Согласование с текущим spec/runtime:** для `childrenSnapshotRefs` используется strict ref `{ apiVersion, kind, name }`; namespace дочернего snapshot **не хранится в ref** и всегда берётся из namespace родительского `NamespaceSnapshot`. Отдельные cross-namespace refs не являются частью текущего API-контракта.
+**Согласование с текущим spec/runtime:** для `childrenSnapshotRefs` используется strict ref `{ apiVersion, kind, name }`; namespace дочернего snapshot **не хранится в ref** и всегда берётся из namespace родительского `Snapshot`. Отдельные cross-namespace refs не являются частью текущего API-контракта.
 
 ### A.3. Роли уровней
 
@@ -44,9 +44,9 @@
 |---------|---------|------------------|
 | **Leaf** | `DemoVirtualDiskSnapshot` | Данные (VS, MCP, chunks…), **собственный** `Ready` |
 | **Intermediate** | `DemoVirtualMachineSnapshot` | Агрегация детей, свои зависимости, проброс состояния вверх |
-| **Root** | сейчас `NamespaceSnapshot` | Верхняя агрегация, итоговое состояние снимка |
+| **Root** | сейчас `Snapshot` | Верхняя агрегация, итоговое состояние снимка |
 
-`NamespaceSnapshot` — **один из** типов snapshot; root только потому, что **пока** нет уровня выше namespace (в будущем возможен например `ClusterSnapshot` → тогда NS станет промежуточным). **Формального** отличия правил дерева нет: те же refs, тот же `Ready`, те же правила каскада.
+`Snapshot` — **один из** типов snapshot; root только потому, что **пока** нет уровня выше namespace (в будущем возможен например `ClusterSnapshot` → тогда NS станет промежуточным). **Формального** отличия правил дерева нет: те же refs, тот же `Ready`, те же правила каскада.
 
 ### A.4. `Ready` — единая модель
 

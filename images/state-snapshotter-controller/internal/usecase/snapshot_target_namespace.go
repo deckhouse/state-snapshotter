@@ -18,11 +18,11 @@ package usecase
 
 import storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 
-// ResolveNamespaceSnapshotTargetNamespace is the single place that maps a NamespaceSnapshot
+// ResolveSnapshotTargetNamespace is the single place that maps a Snapshot
 // object to the Kubernetes namespace being captured.
 //
-// NamespaceSnapshot is namespaced, so the resolved target namespace is metadata.namespace.
-func ResolveNamespaceSnapshotTargetNamespace(nsSnap *storagev1alpha1.NamespaceSnapshot) string {
+// Snapshot is namespaced, so the resolved target namespace is metadata.namespace.
+func ResolveSnapshotTargetNamespace(nsSnap *storagev1alpha1.Snapshot) string {
 	if nsSnap == nil {
 		return ""
 	}

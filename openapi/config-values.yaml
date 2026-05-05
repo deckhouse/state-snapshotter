@@ -22,6 +22,6 @@ properties:
     type: string
     default: ""
     description: |
-      Optional Go duration for root snapshot ObjectKeeper FollowObjectWithTTL (NamespaceSnapshot + unified XxxxSnapshot), e.g. "24h", "168h".
+      Optional Go duration for root snapshot ObjectKeeper FollowObjectWithTTL (Snapshot + unified XxxxSnapshot), e.g. "24h", "168h".
       Empty = omit env; controller uses built-in default (currently 1m for TTL-chain debugging; override via env for prod). Maps to STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL.
       If unset, the controller binary also accepts STATE_SNAPSHOTTER_NS_ROOT_OK_TTL for the same setting.

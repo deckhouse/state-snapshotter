@@ -328,7 +328,7 @@ func (in *DemoVirtualMachineSnapshotStatus) DeepCopyInto(out *DemoVirtualMachine
 	}
 	if in.ChildrenSnapshotRefs != nil {
 		in, out := &in.ChildrenSnapshotRefs, &out.ChildrenSnapshotRefs
-		*out = make([]storagev1alpha1.NamespaceSnapshotChildRef, len(*in))
+		*out = make([]storagev1alpha1.SnapshotChildRef, len(*in))
 		copy(*out, *in)
 	}
 }

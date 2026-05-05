@@ -46,7 +46,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
+func TestSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = ssv1alpha1.AddToScheme(scheme)
 	_ = storagev1alpha1.AddToScheme(scheme)
@@ -97,9 +97,9 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	})
 	_ = cl.Create(context.Background(), content)
 
-	ns := &storagev1alpha1.NamespaceSnapshot{
+	ns := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
-		Status:     storagev1alpha1.NamespaceSnapshotStatus{BoundSnapshotContentName: "root-content"},
+		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "root-content"},
 	}
 	_ = cl.Create(context.Background(), ns)
 
@@ -112,7 +112,7 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/namespacesnapshots/snap/manifests")
+	resp, err := http.Get(srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/snapshots/snap/manifests")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	}
 }
 
-func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
+func TestSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = ssv1alpha1.AddToScheme(scheme)
 	_ = storagev1alpha1.AddToScheme(scheme)
@@ -180,9 +180,9 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	})
 	_ = cl.Create(context.Background(), content)
 
-	ns := &storagev1alpha1.NamespaceSnapshot{
+	ns := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
-		Status:     storagev1alpha1.NamespaceSnapshotStatus{BoundSnapshotContentName: "root-content"},
+		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "root-content"},
 	}
 	_ = cl.Create(context.Background(), ns)
 
@@ -195,7 +195,7 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	req, err := http.NewRequest(http.MethodGet, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/namespacesnapshots/snap/manifests", nil)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/snapshots/snap/manifests", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

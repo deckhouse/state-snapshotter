@@ -43,19 +43,19 @@ func TestCollectRunSubtreeManifestExcludeKeys_RegistryNotRequired(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
-	childSnap := &storagev1alpha1.NamespaceSnapshot{
+	childSnap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
+		Status: storagev1alpha1.SnapshotStatus{
 			BoundSnapshotContentName: "child-content",
 		},
 	}
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
+					Kind:       "Snapshot",
 					Name:       "ch1",
 				},
 			},
@@ -87,19 +87,19 @@ func TestCollectRunSubtreeManifestExcludeKeys_DescendantSnapshotContentWithoutMC
 		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
-	childSnap := &storagev1alpha1.NamespaceSnapshot{
+	childSnap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
+		Status: storagev1alpha1.SnapshotStatus{
 			BoundSnapshotContentName: "child-content",
 		},
 	}
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
+					Kind:       "Snapshot",
 					Name:       "ch1",
 				},
 			},
@@ -125,17 +125,17 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotBoundNoExclude(t *testing.
 		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
-	childSnap := &storagev1alpha1.NamespaceSnapshot{
+	childSnap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
-		Status:     storagev1alpha1.NamespaceSnapshotStatus{},
+		Status:     storagev1alpha1.SnapshotStatus{},
 	}
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
+					Kind:       "Snapshot",
 					Name:       "ch1",
 				},
 			},

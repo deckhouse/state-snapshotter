@@ -22,7 +22,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-func namespaceSnapshotChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotChildRef) bool {
+func snapshotChildRefsEqual(a, b []storagev1alpha1.SnapshotChildRef) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -35,17 +35,17 @@ func namespaceSnapshotChildRefsEqual(a, b []storagev1alpha1.NamespaceSnapshotChi
 	return true
 }
 
-func namespaceSnapshotChildRefKey(ref storagev1alpha1.NamespaceSnapshotChildRef) string {
+func snapshotChildRefKey(ref storagev1alpha1.SnapshotChildRef) string {
 	return ref.APIVersion + "\x00" + ref.Kind + "\x00" + ref.Name
 }
 
-// mergeNamespaceSnapshotChildRefs returns a new slice: all entries from existing, then each upsert overwrites
+// mergeSnapshotChildRefs returns a new slice: all entries from existing, then each upsert overwrites
 // or appends by key (apiVersion, kind, name). Result is sorted for stable status (spec §3.2 / INV-REF-M1).
-func mergeNamespaceSnapshotChildRefs(existing, upsert []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
-	m := make(map[string]storagev1alpha1.NamespaceSnapshotChildRef, len(existing)+len(upsert))
+func mergeSnapshotChildRefs(existing, upsert []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
+	m := make(map[string]storagev1alpha1.SnapshotChildRef, len(existing)+len(upsert))
 	order := make([]string, 0, len(existing)+len(upsert))
-	add := func(ref storagev1alpha1.NamespaceSnapshotChildRef) {
-		k := namespaceSnapshotChildRefKey(ref)
+	add := func(ref storagev1alpha1.SnapshotChildRef) {
+		k := snapshotChildRefKey(ref)
 		if _, ok := m[k]; !ok {
 			order = append(order, k)
 		}
@@ -58,24 +58,24 @@ func mergeNamespaceSnapshotChildRefs(existing, upsert []storagev1alpha1.Namespac
 		add(upsert[i])
 	}
 	sort.Strings(order)
-	out := make([]storagev1alpha1.NamespaceSnapshotChildRef, 0, len(order))
+	out := make([]storagev1alpha1.SnapshotChildRef, 0, len(order))
 	for _, k := range order {
 		out = append(out, m[k])
 	}
 	return out
 }
 
-func namespaceSnapshotChildRefsEqualIgnoreOrder(a, b []storagev1alpha1.NamespaceSnapshotChildRef) bool {
+func snapshotChildRefsEqualIgnoreOrder(a, b []storagev1alpha1.SnapshotChildRef) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	sa := namespaceSnapshotChildRefsSortedCopy(a)
-	sb := namespaceSnapshotChildRefsSortedCopy(b)
-	return namespaceSnapshotChildRefsEqual(sa, sb)
+	sa := snapshotChildRefsSortedCopy(a)
+	sb := snapshotChildRefsSortedCopy(b)
+	return snapshotChildRefsEqual(sa, sb)
 }
 
-func namespaceSnapshotChildRefsSortedCopy(src []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
-	cp := append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), src...)
+func snapshotChildRefsSortedCopy(src []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
+	cp := append([]storagev1alpha1.SnapshotChildRef(nil), src...)
 	sort.Slice(cp, func(i, j int) bool {
 		if cp[i].APIVersion != cp[j].APIVersion {
 			return cp[i].APIVersion < cp[j].APIVersion
@@ -142,23 +142,23 @@ func snapshotContentChildRefsSortedCopy(src []storagev1alpha1.SnapshotContentChi
 	return cp
 }
 
-// removeNamespaceSnapshotChildRefsByKeys returns existing refs minus any whose key (apiVersion,kind,name) appears in remove (INV-REF-M2: caller must only pass keys it owns).
-func removeNamespaceSnapshotChildRefsByKeys(existing, remove []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
+// removeSnapshotChildRefsByKeys returns existing refs minus any whose key (apiVersion,kind,name) appears in remove (INV-REF-M2: caller must only pass keys it owns).
+func removeSnapshotChildRefsByKeys(existing, remove []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
 	if len(remove) == 0 {
-		return namespaceSnapshotChildRefsSortedCopy(existing)
+		return snapshotChildRefsSortedCopy(existing)
 	}
 	rm := make(map[string]struct{}, len(remove))
 	for i := range remove {
-		rm[namespaceSnapshotChildRefKey(remove[i])] = struct{}{}
+		rm[snapshotChildRefKey(remove[i])] = struct{}{}
 	}
-	var out []storagev1alpha1.NamespaceSnapshotChildRef
+	var out []storagev1alpha1.SnapshotChildRef
 	for i := range existing {
-		if _, drop := rm[namespaceSnapshotChildRefKey(existing[i])]; drop {
+		if _, drop := rm[snapshotChildRefKey(existing[i])]; drop {
 			continue
 		}
 		out = append(out, existing[i])
 	}
-	return namespaceSnapshotChildRefsSortedCopy(out)
+	return snapshotChildRefsSortedCopy(out)
 }
 
 // removeSnapshotContentChildRefsByKeys drops child content refs listed in remove (by Name).

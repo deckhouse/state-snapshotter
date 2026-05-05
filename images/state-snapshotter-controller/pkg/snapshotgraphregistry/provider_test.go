@@ -46,11 +46,11 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func namespaceSnapshotRESTMapper(t *testing.T) meta.RESTMapper {
+func snapshotRESTMapper(t *testing.T) meta.RESTMapper {
 	t.Helper()
 	gv := schema.GroupVersion{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion}
 	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
-	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshot"}
+	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}
 	m.Add(snap, meta.RESTScopeNamespace)
 	m.Add(content, meta.RESTScopeRoot)
@@ -58,10 +58,10 @@ func namespaceSnapshotRESTMapper(t *testing.T) meta.RESTMapper {
 }
 
 func TestProvider_CurrentNilBeforeRefresh(t *testing.T) {
-	mapper := namespaceSnapshotRESTMapper(t)
+	mapper := snapshotRESTMapper(t)
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	pair := unifiedbootstrap.UnifiedGVKPair{
-		Snapshot:        schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "NamespaceSnapshot"},
+		Snapshot:        schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "Snapshot"},
 		SnapshotContent: schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "SnapshotContent"},
 	}
 	cfg := &config.Options{
@@ -84,7 +84,7 @@ func TestProvider_CurrentNilBeforeRefresh(t *testing.T) {
 }
 
 func TestProvider_ReplaceCurrentSwapsAtomically(t *testing.T) {
-	mapper := namespaceSnapshotRESTMapper(t)
+	mapper := snapshotRESTMapper(t)
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	cfg := &config.Options{UnifiedBootstrapMode: config.UnifiedBootstrapEmpty}
 	p, err := NewProvider(cfg, mapper, cl, logr.Discard())
@@ -104,7 +104,7 @@ func TestProvider_ReplaceCurrentSwapsAtomically(t *testing.T) {
 }
 
 func TestProvider_ConcurrentCurrentDuringReplaceCurrent(t *testing.T) {
-	mapper := namespaceSnapshotRESTMapper(t)
+	mapper := snapshotRESTMapper(t)
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	cfg := &config.Options{UnifiedBootstrapMode: config.UnifiedBootstrapEmpty}
 	p, err := NewProvider(cfg, mapper, cl, logr.Discard())

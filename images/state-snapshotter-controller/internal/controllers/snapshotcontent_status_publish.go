@@ -55,7 +55,7 @@ func publishSnapshotContentChildrenFromSnapshotRefs(
 	c client.Client,
 	parentNamespace string,
 	parentContentName string,
-	childSnapshotRefs []storagev1alpha1.NamespaceSnapshotChildRef,
+	childSnapshotRefs []storagev1alpha1.SnapshotChildRef,
 ) (bool, error) {
 	if parentContentName == "" {
 		return false, nil

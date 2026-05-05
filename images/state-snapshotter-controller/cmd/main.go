@@ -62,7 +62,7 @@ import (
 var (
 	resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
-		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (NamespaceSnapshot, SnapshotContent, ...)
+		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (Snapshot, SnapshotContent, ...)
 		demov1alpha1.AddToScheme,      // demo.state-snapshotter.deckhouse.io (PR5a demo domain)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
@@ -160,7 +160,7 @@ func main() {
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
 	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
-	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (NamespaceSnapshot, SnapshotContent)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (Snapshot, SnapshotContent)
 	_ = demov1alpha1.AddToScheme(fullScheme)      // demo.state-snapshotter.deckhouse.io (PR5a)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
@@ -203,7 +203,7 @@ func main() {
 	}
 	log.Info("ManifestCheckpointController added to manager")
 
-	if err := controllers.AddNamespaceSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
+	if err := controllers.AddSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
 		log.Error(err, "Failed to add NamespaceGenericSnapshotBinderController to manager")
 		cancel()
 		os.Exit(1)

@@ -37,10 +37,10 @@ func TestFindParentsReferencingChildSnapshot_MatchesGVKAndName(t *testing.T) {
 	child.SetNamespace("ns-a")
 	child.SetName("snap-1")
 
-	parent := &storagev1alpha1.NamespaceSnapshot{
+	parent := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "parent"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: "demo.test/v1",
 					Kind:       "DemoSnap",
@@ -60,7 +60,7 @@ func TestFindParentsReferencingChildSnapshot_MatchesGVKAndName(t *testing.T) {
 	}
 }
 
-// Namespace-local run tree: a NamespaceSnapshot in another namespace must not be returned because
+// Namespace-local run tree: a Snapshot in another namespace must not be returned because
 // parent lookup is scoped to child namespace only.
 func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing.T) {
 	ctx := context.Background()
@@ -70,18 +70,18 @@ func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing
 	child.SetNamespace("ns-a")
 	child.SetName("snap-1")
 
-	parentSame := &storagev1alpha1.NamespaceSnapshot{
+	parentSame := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "root"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{APIVersion: "demo.test/v1", Kind: "DemoSnap", Name: "snap-1"},
 			},
 		},
 	}
-	parentOther := &storagev1alpha1.NamespaceSnapshot{
+	parentOther := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-b", Name: "other-root"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{APIVersion: "demo.test/v1", Kind: "DemoSnap", Name: "snap-1"},
 			},
 		},
@@ -105,10 +105,10 @@ func TestFindParentsReferencingChildSnapshot_SameNameDifferentGVKNoFalsePositive
 	child.SetNamespace("ns1")
 	child.SetName("x")
 
-	parent := &storagev1alpha1.NamespaceSnapshot{
+	parent := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "parent"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: "demo.test/v1",
 					Kind:       "KindA",

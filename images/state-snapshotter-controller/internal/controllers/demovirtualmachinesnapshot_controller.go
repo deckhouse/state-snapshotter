@@ -281,7 +281,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureContent(ctx context.Context
 	return r.Client.Create(ctx, content)
 }
 
-func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, source *demov1alpha1.DemoVirtualMachine) ([]storagev1alpha1.NamespaceSnapshotChildRef, error) {
+func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, source *demov1alpha1.DemoVirtualMachine) ([]storagev1alpha1.SnapshotChildRef, error) {
 	disks := &demov1alpha1.DemoVirtualDiskList{}
 	if err := r.Client.List(ctx, disks, client.InNamespace(vm.Namespace)); err != nil {
 		return nil, err
@@ -290,7 +290,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(
 		return disks.Items[i].Name < disks.Items[j].Name
 	})
 
-	var refs []storagev1alpha1.NamespaceSnapshotChildRef
+	var refs []storagev1alpha1.SnapshotChildRef
 	for i := range disks.Items {
 		disk := &disks.Items[i]
 		if !demoDiskOwnedByVM(disk, source) {
@@ -300,7 +300,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(
 		if err := r.ensureDemoVirtualMachineDiskChild(ctx, vm, disk, childName); err != nil {
 			return nil, err
 		}
-		refs = append(refs, storagev1alpha1.NamespaceSnapshotChildRef{
+		refs = append(refs, storagev1alpha1.SnapshotChildRef{
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 			Kind:       KindDemoVirtualDiskSnapshot,
 			Name:       childName,
@@ -406,18 +406,18 @@ func patchDemoVirtualMachineSnapshotChildrenRefs(
 	ctx context.Context,
 	c client.Client,
 	parent types.NamespacedName,
-	desired []storagev1alpha1.NamespaceSnapshotChildRef,
+	desired []storagev1alpha1.SnapshotChildRef,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
 		if err := c.Get(ctx, parent, o); err != nil {
 			return err
 		}
-		if namespaceSnapshotChildRefsEqualIgnoreOrder(desired, o.Status.ChildrenSnapshotRefs) {
+		if snapshotChildRefsEqualIgnoreOrder(desired, o.Status.ChildrenSnapshotRefs) {
 			return nil
 		}
 		base := o.DeepCopy()
-		o.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), desired...)
+		o.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), desired...)
 		return c.Status().Patch(ctx, o, client.MergeFrom(base))
 	})
 }

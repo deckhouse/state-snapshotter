@@ -36,36 +36,32 @@ func CommonSnapshotContentGVK() schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"}
 }
 
-// DefaultNamespaceSnapshotPair returns the built-in NamespaceSnapshot pair used
+// DefaultSnapshotPair returns the built-in Snapshot pair used
 // by graph registry defaults and generic runtime bootstrap.
-func DefaultNamespaceSnapshotPair() UnifiedGVKPair {
+func DefaultSnapshotPair() UnifiedGVKPair {
 	return UnifiedGVKPair{
-		Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
+		Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 		SnapshotContent: CommonSnapshotContentGVK(),
 	}
 }
 
 // DefaultGraphRegistryBuiltInPairs lists Snapshot↔SnapshotContent pairs that are
-// active in the NamespaceSnapshot graph registry without a DSC. Domain-specific
+// active in the Snapshot graph registry without a DSC. Domain-specific
 // demo pairs intentionally are not built in: they enter discovery only through
 // eligible DomainSpecificSnapshotController resources.
 func DefaultGraphRegistryBuiltInPairs() []UnifiedGVKPair {
 	return []UnifiedGVKPair{
-		DefaultNamespaceSnapshotPair(),
+		DefaultSnapshotPair(),
 	}
 }
 
 // DefaultUnifiedRuntimeBootstrapPairs lists static bootstrap pairs for the
 // generic unified Snapshot/SnapshotContent runtime. This is separate from graph
 // registry built-ins: runtime startup support must not activate domain kinds in
-// NamespaceSnapshot discovery.
+// Snapshot discovery.
 func DefaultUnifiedRuntimeBootstrapPairs() []UnifiedGVKPair {
 	return []UnifiedGVKPair{
-		{
-			Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-			SnapshotContent: CommonSnapshotContentGVK(),
-		},
-		DefaultNamespaceSnapshotPair(),
+		DefaultSnapshotPair(),
 		{
 			Snapshot:        schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
 			SnapshotContent: CommonSnapshotContentGVK(),

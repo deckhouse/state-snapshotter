@@ -40,18 +40,18 @@ Some documents in this directory are historical design notes. Treat them as cont
 
 ## Назначение
 
-Reference для **heterogeneous** доменного дерева под **текущим** root **`NamespaceSnapshot`**, на базе **общей** snapshot-модели ([`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md)):
+Reference для **heterogeneous** доменного дерева под **текущим** root **`Snapshot`**, на базе **общей** snapshot-модели ([`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md)):
 
 - дерево — **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** для **любых** `XxxxSnapshot` / `SnapshotContent`, без отдельных `domainChild*` и без «особого» graph API только для namespace;
 - **dedup** — **вычисляется** при reconcile из API, **не** хранится в `status`/аннотациях;
 - **готовность и деградация** — единый condition **`Ready`**, каскад снизу вверх и обратная деградация с сохранением **`reason`/`message`**;
-- **`NamespaceSnapshot`** — текущий верхний узел архитектуры, **не** отдельный класс правил дерева ([`08`](08-universal-snapshot-tree-model.md) §A.3).
+- **`Snapshot`** — текущий верхний узел архитектуры, **не** отдельный класс правил дерева ([`08`](08-universal-snapshot-tree-model.md) §A.3).
 
 **Слой PR5 vs generic §3-E*:** код и тесты **демо-доменного контроллера** (первый реальный writer **`children*Refs`** в heterogeneous flow) — это **PR5** таблицы **[`implementation-plan.md`](../implementation-plan.md) §2.4.2** и этот пакет документов; это **не** отдельный этап **§3-E1…E6** того же плана (**E1–E6** готовят **generic** контракт и реализацию в модуле, **PR5** впервые использует контракт в **domain flow**). Порядок и нарезка PR5a/PR5b — в **§2.4.4** плана.
 
-**Граница startup / graph activation:** dedicated demo controllers стартуют всегда и могут reconciler'ить вручную созданные demo snapshot объекты без DSC. Это не активирует demo kinds в `NamespaceSnapshot` discovery. Graph registry built-in содержит только `NamespaceSnapshot`→ common content; demo VM/Disk пары появляются в discovery только через eligible DSC.
+**Граница startup / graph activation:** dedicated demo controllers стартуют всегда и могут reconciler'ить вручную созданные demo snapshot объекты без DSC. Это не активирует demo kinds в `Snapshot` discovery. Graph registry built-in содержит только `Snapshot`→ common content; demo VM/Disk пары появляются в discovery только через eligible DSC.
 
-**Граница generic / demo (имплементация):** reconciler **`NamespaceSnapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge graph built-ins ∪ eligible DSC, **refresh после reconcile DSC**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
+**Граница generic / demo (имплементация):** reconciler **`Snapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge graph built-ins ∪ eligible DSC, **refresh после reconcile DSC**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
 
 **Reference controller contract (current runtime):** a demo domain snapshot controller owns validation of `sourceRef`, creation of its own common `SnapshotContent`, creation of an MCR for its own source object, publication of request names / `GraphReady`, and mirroring bound content `Ready`. A domain parent controller also owns child snapshot creation for nested resources, child ownerRefs, and its own `childrenSnapshotRefs`. It does **not** own root/parent refs, `RBACReady`, RBAC creation, parent content status, or content-level Ready aggregation. Invalid user spec is reported as `Ready=False` and must not create content, MCR, or child snapshots.
 
@@ -59,13 +59,13 @@ Reference для **heterogeneous** доменного дерева под **те
 
 **Reference RBAC model:** demo/domain controllers intentionally omit kubebuilder RBAC markers. Required permissions are documented as contract and granted externally by the Deckhouse RBAC controller/hook before DSC `RBACReady=True`; they are not generated from controller code comments.
 
-**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; generic **E5/E6** и доменные **PR5a/PR5b** в коде опираются на registry и **`children*Refs`**, без отдельного временного child-**NamespaceSnapshot** scaffold в runtime (см. **[`spec/system-spec.md`](../../spec/system-spec.md) §3.8** и **§2.4.2**/**§2.4.4** [`implementation-plan.md`](../implementation-plan.md)).
+**Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; generic **E5/E6** и доменные **PR5a/PR5b** в коде опираются на registry и **`children*Refs`**, без отдельного временного child-**Snapshot** scaffold в runtime (см. **[`spec/system-spec.md`](../../spec/system-spec.md) §3.8** и **§2.4.2**/**§2.4.4** [`implementation-plan.md`](../implementation-plan.md)).
 
 ## ADR (кратко)
 
 | | |
 |--|--|
-| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`NamespaceSnapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — **реальный** heterogeneous tree на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
+| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`Snapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — **реальный** heterogeneous tree на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
 | **Инвариант** | Generic не повторно захватывает ресурс, покрытый subtree; **ownerRef** — только жизненный цикл/GC ([`08`](08-universal-snapshot-tree-model.md) часть B). |
 | **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. |
 
@@ -94,7 +94,7 @@ Reference для **heterogeneous** доменного дерева под **те
 
 ## Связь с существующими SSOT
 
-- [`namespace-snapshot-controller.md`](../namespace-snapshot-controller.md), [`implementation-plan.md`](../implementation-plan.md) §2.4, [`spec/system-spec.md`](../../spec/system-spec.md).
+- [`snapshot-controller.md`](../snapshot-controller.md), [`implementation-plan.md`](../implementation-plan.md) §2.4, [`spec/system-spec.md`](../../spec/system-spec.md).
 - Aggregated read: [`spec/snapshot-aggregated-read.md`](../../spec/snapshot-aggregated-read.md).
-- PR4 history: [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../../spec/namespace-snapshot-aggregated-manifests-pr4.md).
+- PR4 history: [`spec/snapshot-aggregated-manifests-pr4.md`](../../spec/snapshot-aggregated-manifests-pr4.md).
 - DSC: [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md).

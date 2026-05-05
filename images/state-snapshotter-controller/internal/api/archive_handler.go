@@ -331,9 +331,9 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 				Verbs:      []string{"get"},
 			},
 			{
-				Name:       "namespacesnapshots/manifests",
+				Name:       "snapshots/manifests",
 				Namespaced: true,
-				Kind:       "NamespaceSnapshot",
+				Kind:       "Snapshot",
 				Verbs:      []string{"get"},
 			},
 		},

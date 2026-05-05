@@ -29,7 +29,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// countingLive starts with an empty registry; first TryRefresh installs NamespaceSnapshot mapping.
+// countingLive starts with an empty registry; first TryRefresh installs Snapshot mapping.
 type countingLive struct {
 	reg          *snapshot.GVKRegistry
 	refreshCalls int32
@@ -43,7 +43,7 @@ func (c *countingLive) TryRefresh(context.Context) error {
 	atomic.AddInt32(&c.refreshCalls, 1)
 	r := snapshot.NewGVKRegistry()
 	gv := "storage.deckhouse.io/v1alpha1"
-	if err := r.RegisterSnapshotContentMapping("NamespaceSnapshot", gv, "SnapshotContent", gv); err != nil {
+	if err := r.RegisterSnapshotContentMapping("Snapshot", gv, "SnapshotContent", gv); err != nil {
 		return err
 	}
 	c.reg = r
@@ -65,21 +65,21 @@ func TestEnsureGVKRegistryFromLive_RefreshesOnceThenReturnsRegistry(t *testing.T
 	}
 }
 
-func TestResolveChildSnapshotRefToBoundContentName_NamespaceSnapshot(t *testing.T) {
+func TestResolveChildSnapshotRefToBoundContentName_Snapshot(t *testing.T) {
 	ctx := context.Background()
 	scheme := rootCaptureTestScheme(t)
 	child := &unstructured.Unstructured{}
 	child.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot",
+		Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot",
 	})
 	child.SetNamespace("ns1")
 	child.SetName("child1")
 	_ = unstructured.SetNestedField(child.Object, "content-child", "status", "boundSnapshotContentName")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child).Build()
-	ref := storagev1alpha1.NamespaceSnapshotChildRef{
+	ref := storagev1alpha1.SnapshotChildRef{
 		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-		Kind:       "NamespaceSnapshot",
+		Kind:       "Snapshot",
 		Name:       "child1",
 	}
 	out, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, ref, "ns1")

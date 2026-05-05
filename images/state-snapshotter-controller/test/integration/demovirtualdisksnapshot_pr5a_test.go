@@ -39,7 +39,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// PR5a: one demo kind, merge-safe refs on root NamespaceSnapshot + root SnapshotContent, plus one DSC row for registration smoke.
+// PR5a: one demo kind, merge-safe refs on root Snapshot + root SnapshotContent, plus one DSC row for registration smoke.
 var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Serial, func() {
 	const dscName = "integration-pr5a-demo-disk-dsc"
 
@@ -111,15 +111,15 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		}
 		Expect(k8sClient.Create(testCtx, diskResource)).To(Succeed())
 
-		root := &storagev1alpha1.NamespaceSnapshot{
+		root := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(testCtx, root)).To(Succeed())
 
 		var rootContentName string
 		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(rc).NotTo(BeNil())
@@ -130,7 +130,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 
 		var diskSnapshotName string
 		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			diskSnapshotName = ""
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
@@ -139,7 +139,7 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 					break
 				}
 			}
-			g.Expect(diskSnapshotName).NotTo(BeEmpty(), "root NamespaceSnapshot should list demo disk snapshot in childrenSnapshotRefs")
+			g.Expect(diskSnapshotName).NotTo(BeEmpty(), "root Snapshot should list demo disk snapshot in childrenSnapshotRefs")
 		}).WithTimeout(45 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		var contentName string

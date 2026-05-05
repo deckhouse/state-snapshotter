@@ -72,7 +72,7 @@ func PairsExcludingSnapshotKinds(pairs []UnifiedGVKPair, skipKinds ...string) []
 // DedicatedSnapshotControllerKinds lists Snapshot root kinds reconciled outside the generic
 // GenericSnapshotBinderController. Unified runtime sync must not call AddWatchForPair for these.
 var DedicatedSnapshotControllerKinds = []string{
-	"NamespaceSnapshot",
+	"Snapshot",
 	// PR5a demo domain: reconciled by DemoVirtualDiskSnapshotReconciler, not GenericSnapshotBinderController.
 	"DemoVirtualDiskSnapshot",
 	// PR5b demo domain: reconciled by DemoVirtualMachineSnapshotReconciler, not GenericSnapshotBinderController.

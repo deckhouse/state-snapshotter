@@ -1,10 +1,10 @@
-# Демо: NamespaceSnapshot в `default` (N2a)
+# Демо: Snapshot в `default` (N2a)
 
 Линейная инструкция для показа на **живом кластере** (модуль **state-snapshotter**, поды в `d8-state-snapshotter`). Думать во время показа почти не нужно: идите **сверху вниз**, копируйте блоки по порядку.
 
 **Зафиксировано в этом документе:** namespace **`default`**, имя снимка **`demo-ns-snap`**. Нужно другое имя — сделайте поиск-замену `demo-ns-snap` → своё имя во всех командах.
 
-Нормативка (зачем так устроено): [`../design/namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §4–§5.
+Нормативка (зачем так устроено): [`../design/snapshot-controller.md`](../design/snapshot-controller.md) §4–§5.
 
 ---
 
@@ -21,18 +21,18 @@
 Без ресурса из allowlist capture не стартует. Достаточно ConfigMap:
 
 ```bash
-kubectl -n default create configmap demo-ns-snapshot-cm --from-literal=demo=namespace-snapshot \
+kubectl -n default create configmap demo-ns-snapshot-cm --from-literal=demo=snapshot \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 ---
 
-## Шаг 2 — создать NamespaceSnapshot
+## Шаг 2 — создать Snapshot
 
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: storage.deckhouse.io/v1alpha1
-kind: NamespaceSnapshot
+kind: Snapshot
 metadata:
   name: demo-ns-snap
   namespace: default
@@ -49,12 +49,12 @@ EOF
 ```bash
 deadline=$((SECONDS + 600))
 while (( SECONDS < deadline )); do
-  kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o json 2>/dev/null | jq -e \
+  kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o json 2>/dev/null | jq -e \
     '.status.boundSnapshotContentName != null and (.status.boundSnapshotContentName | length > 0) and
      (.status.conditions // [] | map(select(.type == "Ready")) | .[0].status == "True")' >/dev/null 2>&1 && break
   sleep 3
 done
-kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o wide
+kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o wide
 ```
 
 Если зависло — `kubectl describe` на снимок и логи контроллера в `d8-state-snapshotter`.
@@ -64,10 +64,10 @@ kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o w
 ## Шаг 4 — выписать имена (один блок, потом все команды ниже без правок)
 
 ```bash
-export BOUND=$(kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.status.boundSnapshotContentName}')
+export BOUND=$(kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.status.boundSnapshotContentName}')
 export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}')
 export OK_NAME=ret-nssnap-default-demo-ns-snap
-export SNAP_UID=$(kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.metadata.uid}')
+export SNAP_UID=$(kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.metadata.uid}')
 export MCR_NAME="nss-${SNAP_UID}"
 echo "BOUND=${BOUND}  MCP=${MCP}  OK=${OK_NAME}  MCR(ожидаемо нет)=${MCR_NAME}"
 ```
@@ -79,7 +79,7 @@ echo "BOUND=${BOUND}  MCP=${MCP}  OK=${OK_NAME}  MCR(ожидаемо нет)=${
 **5a. Корень**
 
 ```bash
-kubectl -n default get namespacesnapshots.storage.deckhouse.io demo-ns-snap -o yaml
+kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o yaml
 ```
 
 **5b. Cluster content + кто владелец (SnapshotContent → OK)**
@@ -89,7 +89,7 @@ kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
 kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.metadata.ownerReferences}' | jq .
 ```
 
-**5c. ObjectKeeper (follow на NamespaceSnapshot, TTL)**
+**5c. ObjectKeeper (follow на Snapshot, TTL)**
 
 ```bash
 kubectl get objectkeepers.deckhouse.io "${OK_NAME}" -o wide
@@ -118,12 +118,12 @@ kubectl -n default get manifestcapturerequests.state-snapshotter.deckhouse.io "$
 **5g. Aggregated read (снимок ещё жив)**
 
 ```bash
-kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/namespacesnapshots/demo-ns-snap/manifests" | jq 'length'
+kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/snapshots/demo-ns-snap/manifests" | jq 'length'
 ```
 
 **5h. Один фразовый вывод для аудитории**
 
-- OK следует за **NamespaceSnapshot** (`FollowObjectWithTTL`), **SnapshotContent** зависит от **OK**.
+- OK следует за **Snapshot** (`FollowObjectWithTTL`), **SnapshotContent** зависит от **OK**.
 - **MCP** зависит от **SnapshotContent**. **MCR** был только на время capture.
 
 ---
@@ -133,9 +133,9 @@ kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/na
 Снимок из API уходит; **SnapshotContent** и **MCP** остаются; aggregated по **тому же URL** обычно ещё отвечает.
 
 ```bash
-kubectl -n default delete namespacesnapshots.storage.deckhouse.io demo-ns-snap --wait=true
+kubectl -n default delete snapshots.storage.deckhouse.io demo-ns-snap --wait=true
 kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
-kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/namespacesnapshots/demo-ns-snap/manifests" | jq 'length'
+kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/snapshots/demo-ns-snap/manifests" | jq 'length'
 ```
 
 ---
@@ -183,7 +183,7 @@ kubectl -n default delete configmap demo-ns-snapshot-cm --ignore-not-found
 
 | Ресурс | `kubectl` group |
 |--------|-----------------|
-| NamespaceSnapshot | `namespacesnapshots.storage.deckhouse.io` |
+| Snapshot | `snapshots.storage.deckhouse.io` |
 | SnapshotContent | `snapshotcontents.storage.deckhouse.io` |
 | ObjectKeeper | `objectkeepers.deckhouse.io` |
 | ManifestCheckpoint | `manifestcheckpoints.state-snapshotter.deckhouse.io` |
@@ -195,7 +195,7 @@ kubectl -n default delete configmap demo-ns-snapshot-cm --ignore-not-found
 ## Приложение C — discovery (опционально, до шага 1)
 
 ```bash
-kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1" | jq '.resources[] | select(.name=="namespacesnapshots/manifests")'
+kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1" | jq '.resources[] | select(.name=="snapshots/manifests")'
 ```
 
 Ожидается `"namespaced": true`.

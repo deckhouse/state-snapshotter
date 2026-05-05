@@ -39,7 +39,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func() {
+var _ = Describe("Integration: Snapshot CapturePlanDrift (N2a)", func() {
 	It("sets CapturePlanDrift on root and SnapshotContent when allowlisted resources change after MCR is fixed (no silent spec.targets update)", func() {
 		ctx := context.Background()
 		contentName := ""
@@ -48,7 +48,7 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "nss-drift-",
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-capture-plan-drift",
+					"state-snapshotter.deckhouse.io/test": "snapshot-capture-plan-drift",
 				},
 			},
 		}
@@ -67,32 +67,32 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 		}
 		Expect(k8sClient.Create(ctx, cm1)).To(Succeed())
 
-		snap := &storagev1alpha1.NamespaceSnapshot{
+		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "snap",
 				Namespace: nsName,
 			},
-			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec: storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
 		contentName = fmt.Sprintf("ns-%s", strings.ReplaceAll(string(snap.UID), "-", ""))
 
-		mcrKey := client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(snap.UID)}
+		mcrKey := client.ObjectKey{Namespace: nsName, Name: namespacemanifest.SnapshotMCRName(snap.UID)}
 		controller := true
 		mcr := &ssv1alpha1.ManifestCaptureRequest{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      mcrKey.Name,
 				Namespace: mcrKey.Namespace,
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/namespace-snapshot-uid": string(snap.UID),
+					"state-snapshotter.deckhouse.io/snapshot-uid": string(snap.UID),
 				},
 				Annotations: map[string]string{
 					namespacemanifest.AnnotationBoundSnapshotContent: contentName,
 				},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
+					Kind:       "Snapshot",
 					Name:       snap.Name,
 					UID:        snap.UID,
 					Controller: &controller,
@@ -115,18 +115,18 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 		Expect(k8sClient.Create(ctx, cm2)).To(Succeed())
 		// Wait until root binding exists with an already-stale frozen MCR plan.
 		Eventually(func(g Gomega) {
-			fresh := &storagev1alpha1.NamespaceSnapshot{}
+			fresh := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(contentName))
 		}).WithTimeout(30 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
 
-		rootForMCR := &storagev1alpha1.NamespaceSnapshot{}
+		rootForMCR := &storagev1alpha1.Snapshot{}
 		Expect(k8sClient.Get(ctx, key, rootForMCR)).To(Succeed())
 
-		Expect(mcrOwnerRefToNamespaceSnapshot(mcr.OwnerReferences, rootForMCR.Name, rootForMCR.UID)).To(BeTrue(), "MCR must be owned by root NamespaceSnapshot for in-flight GC")
+		Expect(mcrOwnerRefToSnapshot(mcr.OwnerReferences, rootForMCR.Name, rootForMCR.UID)).To(BeTrue(), "MCR must be owned by root Snapshot for in-flight GC")
 
-		snapFresh := &storagev1alpha1.NamespaceSnapshot{}
+		snapFresh := &storagev1alpha1.Snapshot{}
 		Expect(k8sClient.Get(ctx, key, snapFresh)).To(Succeed())
 		base := snapFresh.DeepCopy()
 		if snapFresh.Annotations == nil {
@@ -136,7 +136,7 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 		Expect(k8sClient.Patch(ctx, snapFresh, client.MergeFrom(base))).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			root := &storagev1alpha1.NamespaceSnapshot{}
+			root := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, root)).To(Succeed())
 			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
@@ -147,13 +147,13 @@ var _ = Describe("Integration: NamespaceSnapshot CapturePlanDrift (N2a)", func()
 		}).WithTimeout(90 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
 
 		// MCR still exists with frozen spec.targets; operator deletes MCR to retry with a fresh plan.
-		root := &storagev1alpha1.NamespaceSnapshot{}
+		root := &storagev1alpha1.Snapshot{}
 		Expect(k8sClient.Get(ctx, key, root)).To(Succeed())
 		mcr = &ssv1alpha1.ManifestCaptureRequest{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{
 			Namespace: nsName,
-			Name:      namespacemanifest.NamespaceSnapshotMCRName(root.UID),
+			Name:      namespacemanifest.SnapshotMCRName(root.UID),
 		}, mcr)).To(Succeed())
-		Expect(mcrOwnerRefToNamespaceSnapshot(mcr.OwnerReferences, root.Name, root.UID)).To(BeTrue())
+		Expect(mcrOwnerRefToSnapshot(mcr.OwnerReferences, root.Name, root.UID)).To(BeTrue())
 	})
 })

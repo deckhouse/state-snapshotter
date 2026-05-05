@@ -74,7 +74,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 	return out, nil
 }
 
-// EligibleResourceSnapshotMappings returns DSC resource→snapshot mappings used by NamespaceSnapshot
+// EligibleResourceSnapshotMappings returns DSC resource→snapshot mappings used by Snapshot
 // parent-owned graph construction. Invalid or cluster-scoped resource rows are skipped fail-closed.
 func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]EligibleResourceSnapshotMapping, error) {
 	var list ssv1alpha1.DomainSpecificSnapshotControllerList

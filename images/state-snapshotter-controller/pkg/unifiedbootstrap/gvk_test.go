@@ -42,7 +42,7 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 	pairs := []UnifiedGVKPair{
 		{Snapshot: snap, SnapshotContent: content},
 		{
-			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "NamespaceSnapshot"},
+			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"},
 			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"},
 		},
 	}
@@ -106,7 +106,7 @@ func TestFilterGenericSnapshotGVKPairs_skipsDemoVirtualDiskAndVMSnapshots(t *tes
 func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing.T) {
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
+		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 	}
 	contentGVKs := []schema.GroupVersionKind{
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
@@ -126,13 +126,13 @@ func TestAppendGVKIfMissing_DoesNotDuplicateCommonSnapshotContent(t *testing.T) 
 	}
 }
 
-func TestDefaultGraphRegistryBuiltInPairs_containsOnlyNamespaceSnapshot(t *testing.T) {
+func TestDefaultGraphRegistryBuiltInPairs_containsOnlySnapshot(t *testing.T) {
 	pairs := DefaultGraphRegistryBuiltInPairs()
 	if len(pairs) != 1 {
 		t.Fatalf("expected one graph built-in pair, got %d: %v", len(pairs), pairs)
 	}
-	if pairs[0].Snapshot.Kind != "NamespaceSnapshot" || pairs[0].SnapshotContent.Kind != "SnapshotContent" {
-		t.Fatalf("expected NamespaceSnapshot graph built-in, got %v", pairs[0])
+	if pairs[0].Snapshot.Kind != "Snapshot" || pairs[0].SnapshotContent.Kind != "SnapshotContent" {
+		t.Fatalf("expected Snapshot graph built-in, got %v", pairs[0])
 	}
 	for _, p := range pairs {
 		switch p.Snapshot.Kind {

@@ -37,12 +37,12 @@ func TestRootObjectKeeperNameIsDNS1123Safe(t *testing.T) {
 		want       string
 	}{
 		{
-			name:       "NamespaceSnapshot keeps legacy stable name",
+			name:       "Snapshot keeps legacy stable name",
 			namespace:  "ns1",
 			apiVersion: storagev1alpha1.SchemeGroupVersion.String(),
-			kind:       KindNamespaceSnapshot,
+			kind:       KindSnapshot,
 			snapshot:   "snap",
-			want:       namespacemanifest.NamespaceSnapshotRootObjectKeeperName("ns1", "snap"),
+			want:       namespacemanifest.SnapshotRootObjectKeeperName("ns1", "snap"),
 		},
 		{
 			name:       "apiVersion slash is hashed out",

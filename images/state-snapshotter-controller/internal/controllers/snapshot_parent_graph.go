@@ -38,21 +38,21 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
+func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	ctx context.Context,
-	nsSnap *storagev1alpha1.NamespaceSnapshot,
+	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 ) (bool, error) {
-	mappings, err := dscregistry.EligibleResourceSnapshotMappings(ctx, r.namespaceSnapshotReader())
+	mappings, err := dscregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader())
 	if err != nil {
 		return false, err
 	}
 	if len(mappings) == 0 {
-		changed, err := r.patchNamespaceSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, nil)
+		changed, err := r.patchSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, nil)
 		return changed, err
 	}
 
-	var desiredRefs []storagev1alpha1.NamespaceSnapshotChildRef
+	var desiredRefs []storagev1alpha1.SnapshotChildRef
 	for _, mapping := range mappings {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(mapping.ResourceGVK)
@@ -73,20 +73,20 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 				// and skipped fail-closed when the owner domain is not registered.
 				continue
 			}
-			childName := namespaceSnapshotChildSnapshotName(nsSnap.Name, mapping.ResourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName())
+			childName := snapshotChildSnapshotName(nsSnap.Name, mapping.ResourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName())
 			if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, mapping.ResourceGVK, resource.GetName()); err != nil {
 				return false, err
 			}
-			desiredRefs = append(desiredRefs, storagev1alpha1.NamespaceSnapshotChildRef{
+			desiredRefs = append(desiredRefs, storagev1alpha1.SnapshotChildRef{
 				APIVersion: mapping.SnapshotGVK.GroupVersion().String(),
 				Kind:       mapping.SnapshotGVK.Kind,
 				Name:       childName,
 			})
 		}
 	}
-	sortNamespaceSnapshotChildRefs(desiredRefs)
+	sortSnapshotChildRefs(desiredRefs)
 
-	statusChanged, err := r.patchNamespaceSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
+	statusChanged, err := r.patchSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
 	if err != nil {
 		return false, err
 	}
@@ -95,14 +95,14 @@ func (r *NamespaceSnapshotReconciler) reconcileParentOwnedChildGraph(
 	return statusChanged, nil
 }
 
-func namespaceSnapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName string) string {
+func snapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName string) string {
 	sum := sha256.Sum256([]byte(parentName + "|" + resourceGVK + "|" + snapshotGVK + "|" + resourceName))
 	return "nss-child-" + hex.EncodeToString(sum[:10])
 }
 
-func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
+func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 	ctx context.Context,
-	nsSnap *storagev1alpha1.NamespaceSnapshot,
+	nsSnap *storagev1alpha1.Snapshot,
 	name string,
 	gvk schema.GroupVersionKind,
 	resourceGVK schema.GroupVersionKind,
@@ -133,12 +133,12 @@ func (r *NamespaceSnapshotReconciler) ensureParentOwnedChildSnapshot(
 			},
 		}
 		child.SetGroupVersionKind(gvk)
-		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "NamespaceSnapshot", nsSnap.Name, nsSnap.UID)})
+		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)})
 		return r.Client.Create(ctx, child)
 	}
 	base := child.DeepCopy()
 	changed := false
-	if err := ensureDemoSnapshotOwnerRef(child, demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "NamespaceSnapshot", nsSnap.Name, nsSnap.UID)); err != nil {
+	if err := ensureDemoSnapshotOwnerRef(child, demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)); err != nil {
 		return err
 	}
 	if !ownerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
@@ -172,28 +172,28 @@ func ensureSourceRefSpec(spec map[string]interface{}, resourceGVK schema.GroupVe
 	return true
 }
 
-func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotChildrenRefs(
+func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
 	ctx context.Context,
 	parent types.NamespacedName,
-	desired []storagev1alpha1.NamespaceSnapshotChildRef,
+	desired []storagev1alpha1.SnapshotChildRef,
 ) (bool, error) {
 	changed := false
-	var effective []storagev1alpha1.NamespaceSnapshotChildRef
+	var effective []storagev1alpha1.SnapshotChildRef
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.NamespaceSnapshot{}
+		cur := &storagev1alpha1.Snapshot{}
 		if err := r.Client.Get(ctx, parent, cur); err != nil {
 			return err
 		}
-		effective = mergeNamespaceSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
+		effective = mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
 		graphReady := meta.FindStatusCondition(cur.Status.Conditions, snapshot.ConditionGraphReady)
 		graphReadyCurrent := graphReady != nil &&
 			graphReady.Status == metav1.ConditionTrue &&
 			graphReady.Reason == snapshot.ReasonCompleted &&
 			graphReady.ObservedGeneration == cur.Generation
-		if namespaceSnapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && graphReadyCurrent {
+		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && graphReadyCurrent {
 			return nil
 		}
-		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.NamespaceSnapshotChildRef(nil), effective...)
+		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), effective...)
 		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionGraphReady,
@@ -208,7 +208,7 @@ func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotChildrenRefs(
 	return changed, err
 }
 
-func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotGraphReady(
+func (r *SnapshotReconciler) patchSnapshotGraphReady(
 	ctx context.Context,
 	key types.NamespacedName,
 	status metav1.ConditionStatus,
@@ -216,7 +216,7 @@ func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotGraphReady(
 	message string,
 ) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.NamespaceSnapshot{}
+		cur := &storagev1alpha1.Snapshot{}
 		if err := r.Client.Get(ctx, key, cur); err != nil {
 			return err
 		}
@@ -241,24 +241,24 @@ func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotGraphReady(
 	})
 }
 
-func mergeNamespaceSnapshotManagedChildRefs(current, desired []storagev1alpha1.NamespaceSnapshotChildRef) []storagev1alpha1.NamespaceSnapshotChildRef {
-	merged := make([]storagev1alpha1.NamespaceSnapshotChildRef, 0, len(current)+len(desired))
+func mergeSnapshotManagedChildRefs(current, desired []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
+	merged := make([]storagev1alpha1.SnapshotChildRef, 0, len(current)+len(desired))
 	for _, ref := range current {
-		if namespaceSnapshotOwnsGeneratedChildRef(ref) {
+		if snapshotOwnsGeneratedChildRef(ref) {
 			continue
 		}
 		merged = append(merged, ref)
 	}
 	merged = append(merged, desired...)
-	sortNamespaceSnapshotChildRefs(merged)
+	sortSnapshotChildRefs(merged)
 	return merged
 }
 
-func namespaceSnapshotOwnsGeneratedChildRef(ref storagev1alpha1.NamespaceSnapshotChildRef) bool {
+func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 	return strings.HasPrefix(ref.Name, "nss-child-")
 }
 
-func sortNamespaceSnapshotChildRefs(refs []storagev1alpha1.NamespaceSnapshotChildRef) {
+func sortSnapshotChildRefs(refs []storagev1alpha1.SnapshotChildRef) {
 	sort.Slice(refs, func(i, j int) bool {
 		return fmt.Sprintf("%s/%s/%s", refs[i].APIVersion, refs[i].Kind, refs[i].Name) <
 			fmt.Sprintf("%s/%s/%s", refs[j].APIVersion, refs[j].Kind, refs[j].Name)

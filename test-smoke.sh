@@ -8,7 +8,7 @@
 #
 # Example:
 #   ./test-smoke.sh default Snapshot my-local-class
-#   ./test-smoke.sh d8-backup NamespaceSnapshot my-local-class
+#   ./test-smoke.sh d8-backup Snapshot my-local-class
 #   ./test-smoke.sh default Snapshot  # Uses default: my-local-class
 #
 # Note: backupClassName is required and must reference an existing BackupClass

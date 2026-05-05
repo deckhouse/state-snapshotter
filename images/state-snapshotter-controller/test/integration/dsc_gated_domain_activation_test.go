@@ -52,21 +52,21 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		Expect(integrationSnapshotGraphRegistryRefresh(context.Background())).To(Succeed())
 	})
 
-	It("ignores demo resources in NamespaceSnapshot discovery without DSC", func() {
+	It("ignores demo resources in Snapshot discovery without DSC", func() {
 		testCtx := context.Background()
 		nsName := createIntegrationNamespace(testCtx, "dsc-gated-no-dsc-")
 
 		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDisk{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: nsName},
 		})).To(Succeed())
-		Expect(k8sClient.Create(testCtx, &storagev1alpha1.NamespaceSnapshot{
+		Expect(k8sClient.Create(testCtx, &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		})).To(Succeed())
 
 		var rootContentName string
 		Eventually(func(g Gomega) {
-			root := &storagev1alpha1.NamespaceSnapshot{}
+			root := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, root)).To(Succeed())
 			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
@@ -85,29 +85,29 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		Expect(diskSnapshots.Items).To(BeEmpty())
 	})
 
-	It("hot-adds demo discovery for new NamespaceSnapshots after DSC eligibility", func() {
+	It("hot-adds demo discovery for new Snapshots after DSC eligibility", func() {
 		testCtx := context.Background()
 		nsName := createIntegrationNamespace(testCtx, "dsc-gated-hot-add-")
 
 		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDisk{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: nsName},
 		})).To(Succeed())
-		Expect(k8sClient.Create(testCtx, &storagev1alpha1.NamespaceSnapshot{
+		Expect(k8sClient.Create(testCtx, &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "before-dsc", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		})).To(Succeed())
-		waitNamespaceSnapshotReadyWithoutDemoChildren(testCtx, nsName, "before-dsc")
+		waitSnapshotReadyWithoutDemoChildren(testCtx, nsName, "before-dsc")
 
 		createEligibleDemoDiskDSC(testCtx, dscName)
 		integrationWaitGraphRegistryKind("DemoVirtualDiskSnapshot")
 
-		Expect(k8sClient.Create(testCtx, &storagev1alpha1.NamespaceSnapshot{
+		Expect(k8sClient.Create(testCtx, &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "after-dsc", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		})).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			root := &storagev1alpha1.NamespaceSnapshot{}
+			root := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "after-dsc"}, root)).To(Succeed())
 			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
@@ -143,14 +143,14 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		createEligibleDemoDiskDSC(testCtx, dscName)
 		integrationWaitGraphRegistryKind("DemoVirtualDiskSnapshot")
 
-		Expect(k8sClient.Create(testCtx, &storagev1alpha1.NamespaceSnapshot{
+		Expect(k8sClient.Create(testCtx, &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		})).To(Succeed())
 
 		var rootContentName string
 		Eventually(func(g Gomega) {
-			root := &storagev1alpha1.NamespaceSnapshot{}
+			root := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, root)).To(Succeed())
 			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
@@ -207,14 +207,14 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		integrationWaitGraphRegistryKind("DemoVirtualMachineSnapshot")
 		integrationWaitGraphRegistryKind("DemoVirtualDiskSnapshot")
 
-		Expect(k8sClient.Create(testCtx, &storagev1alpha1.NamespaceSnapshot{
+		Expect(k8sClient.Create(testCtx, &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		})).To(Succeed())
 
 		var vmSnapshotName string
 		Eventually(func(g Gomega) {
-			root := &storagev1alpha1.NamespaceSnapshot{}
+			root := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, root)).To(Succeed())
 			g.Expect(root.Status.ChildrenSnapshotRefs).To(ContainElement(SatisfyAll(
 				HaveField("APIVersion", demov1alpha1.SchemeGroupVersion.String()),
@@ -243,7 +243,7 @@ var _ = Describe("Integration: DSC-gated demo domain activation", Serial, func()
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			root := &storagev1alpha1.NamespaceSnapshot{}
+			root := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, root)).To(Succeed())
 			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
@@ -301,9 +301,9 @@ func createIntegrationNamespace(ctx context.Context, generateName string) string
 	return nsName
 }
 
-func waitNamespaceSnapshotReadyWithoutDemoChildren(ctx context.Context, namespace, name string) {
+func waitSnapshotReadyWithoutDemoChildren(ctx context.Context, namespace, name string) {
 	Eventually(func(g Gomega) {
-		root := &storagev1alpha1.NamespaceSnapshot{}
+		root := &storagev1alpha1.Snapshot{}
 		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, root)).To(Succeed())
 		ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
 		g.Expect(ready).NotTo(BeNil())

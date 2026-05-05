@@ -35,8 +35,8 @@
 # Dry-run (показать что будет удалено)
 ./test-cleanup.sh --all --dry-run
 
-# Очистить NamespaceSnapshot
-./test-cleanup.sh --snapshot-name test-smoke-1234567890 --snapshot-kind NamespaceSnapshot
+# Очистить Snapshot
+./test-cleanup.sh --snapshot-name test-smoke-1234567890 --snapshot-kind Snapshot
 ```
 
 ## Что очищает скрипт

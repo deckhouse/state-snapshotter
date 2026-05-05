@@ -38,7 +38,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// E6 + dynamic child watch: root NamespaceSnapshot reaches Ready=Completed with a referenced
+// E6 + dynamic child watch: root Snapshot reaches Ready=Completed with a referenced
 // DemoVirtualDiskSnapshot child (same graph class as PR5a). A follow-up status-only patch on the
 // child (Ready=True message tweak, no spec / generation bump) must not break parent convergence —
 // guards against predicates or relay paths that ignore status-only updates.
@@ -113,15 +113,15 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 		}
 		Expect(k8sClient.Create(testCtx, diskResource)).To(Succeed())
 
-		root := &storagev1alpha1.NamespaceSnapshot{
+		root := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(testCtx, root)).To(Succeed())
 
 		var diskSnapshotName string
 		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			diskSnapshotName = ""
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
@@ -130,11 +130,11 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 					break
 				}
 			}
-			g.Expect(diskSnapshotName).NotTo(BeEmpty(), "root NamespaceSnapshot should list demo disk snapshot in childrenSnapshotRefs")
+			g.Expect(diskSnapshotName).NotTo(BeEmpty(), "root Snapshot should list demo disk snapshot in childrenSnapshotRefs")
 		}).WithTimeout(45 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(rc).NotTo(BeNil())
@@ -166,7 +166,7 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 		Expect(d1.GetGeneration()).To(Equal(genBefore), "status-only patches must not bump spec generation")
 
 		Consistently(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(rc).NotTo(BeNil())

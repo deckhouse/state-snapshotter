@@ -52,10 +52,10 @@ const (
 	// to a production-oriented branch, restore a safe built-in default (e.g. 168*time.Hour) or rely solely
 	// on env in chart/values — otherwise retained root content may disappear far faster than operators expect.
 	DefaultSnapshotRootOKTTL = 1 * time.Minute
-	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try EnvNamespaceSnapshotRootOKTTLAlt, then default.
+	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try EnvSnapshotRootOKTTLAlt, then default.
 	EnvSnapshotRootOKTTL = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"
-	// EnvNamespaceSnapshotRootOKTTLAlt: second env var name for the same duration; read when EnvSnapshotRootOKTTL is unset or non-positive.
-	EnvNamespaceSnapshotRootOKTTLAlt = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
+	// EnvSnapshotRootOKTTLAlt: second env var name for the same duration; read when EnvSnapshotRootOKTTL is unset or non-positive.
+	EnvSnapshotRootOKTTLAlt = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
 )
 
 type Options struct {
@@ -80,7 +80,7 @@ type Options struct {
 	UnifiedBootstrapMode        UnifiedBootstrapMode
 	UnifiedBootstrapCustomPairs []unifiedbootstrap.UnifiedGVKPair
 
-	// SnapshotRootOKTTL: duration for root snapshot ObjectKeeper FollowObjectWithTTL (NamespaceSnapshot + unified XxxxSnapshot).
+	// SnapshotRootOKTTL: duration for root snapshot ObjectKeeper FollowObjectWithTTL (Snapshot + unified XxxxSnapshot).
 	// Resolved at startup: env override if >0, else built-in DefaultSnapshotRootOKTTL.
 	SnapshotRootOKTTL time.Duration
 }
@@ -151,7 +151,7 @@ func resolveSnapshotRootOKTTL() time.Duration {
 	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTL); ok {
 		return d
 	}
-	if d, ok := positiveDurationFromEnv(EnvNamespaceSnapshotRootOKTTLAlt); ok {
+	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTLAlt); ok {
 		return d
 	}
 	return DefaultSnapshotRootOKTTL

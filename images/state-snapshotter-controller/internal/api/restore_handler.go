@@ -74,28 +74,12 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 			}
 			switch subresource {
 			case "manifests":
-				h.HandleGetSnapshotManifests(w, r, namespace, snapshotName)
+				h.HandleSnapshotAggregatedManifests(w, r, namespace, snapshotName)
 			case "manifests-with-data-restoration":
 				h.HandleGetSnapshotManifestsWithDataRestoration(w, r, namespace, snapshotName)
 			default:
 				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 			}
-		case "namespacesnapshots":
-			if len(parts) != 4 {
-				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
-				return
-			}
-			if r.Method != http.MethodGet {
-				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
-				return
-			}
-			snapName := parts[2]
-			sub := parts[3]
-			if sub != "manifests" {
-				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
-				return
-			}
-			h.HandleNamespaceSnapshotAggregatedManifests(w, r, namespace, snapName)
 		default:
 			if len(parts) != 4 {
 				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
@@ -171,7 +155,7 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 	h.logger.Info("Returned manifests-with-data-restoration", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
 }
 
-func (h *RestoreHandler) HandleNamespaceSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
+func (h *RestoreHandler) HandleSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
 	start := time.Now()
 	if h.nsAggregated == nil {
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "aggregated manifests handler not configured")
@@ -183,7 +167,7 @@ func (h *RestoreHandler) HandleNamespaceSnapshotAggregatedManifests(w http.Respo
 		return
 	}
 	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned NamespaceSnapshot aggregated manifests", "namespaceSnapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+	h.logger.Info("Returned Snapshot aggregated manifests", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
 }
 
 func (h *RestoreHandler) HandleGenericSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {

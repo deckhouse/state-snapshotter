@@ -5,7 +5,7 @@
 
 ## Concept
 
-Every snapshot resource is a restore point. A root `NamespaceSnapshot`, a child domain snapshot, and a leaf snapshot all point to a `SnapshotContent`-like object through `status.boundSnapshotContentName`.
+Every snapshot resource is a restore point. A root `Snapshot`, a child domain snapshot, and a leaf snapshot all point to a `SnapshotContent`-like object through `status.boundSnapshotContentName`.
 
 The content graph is the read model:
 
@@ -13,7 +13,7 @@ The content graph is the read model:
 Snapshot -> SnapshotContent -> ManifestCheckpoint -> childrenSnapshotContentRefs -> child SnapshotContent ...
 ```
 
-`NamespaceSnapshot` is not special for aggregation. It uses the same model as any other `XxxSnapshot`; the legacy `NamespaceSnapshot` endpoint remains for compatibility.
+`Snapshot` is not special for aggregation. It uses the same model as any other `XxxSnapshot`; the legacy `Snapshot` endpoint remains for compatibility.
 
 ## Aggregation
 

@@ -167,6 +167,6 @@ func (s *NamespaceArchiveService) cleanResourceForBackup(u *unstructured.Unstruc
 	return common.CleanObjectForSnapshot(u, nil)
 }
 
-// Methods that use NamespaceSnapshot (CreateNamespaceArchive, createConfigMapsWithYAML, etc.)
+// Methods that use Snapshot (CreateNamespaceArchive, createConfigMapsWithYAML, etc.)
 // are not used in state-snapshotter module and have been removed.
 // Only getNamespaceResources and cleanResourceForBackup are used here.

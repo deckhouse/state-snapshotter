@@ -252,7 +252,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	var mcpOwnerRefs []metav1.OwnerReference
 
 	if boundContentName != "" {
-		r.Logger.Info("NamespaceSnapshot-bound capture: MCP ownerRef -> SnapshotContent",
+		r.Logger.Info("Snapshot-bound capture: MCP ownerRef -> SnapshotContent",
 			"snapshotContent", boundContentName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
 		r.updateProcessingMessage(ctx, mcr, "Resolving SnapshotContent for checkpoint ownerRef...")
 		boundContent := &snapstorage.SnapshotContent{}
@@ -355,7 +355,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &existingCheckpoint)
 	}
 
-	// Create ManifestCheckpoint: ownerRef -> SnapshotContent (namespace snapshot capture) or ObjectKeeper (generic MCR capture).
+	// Create ManifestCheckpoint: ownerRef -> SnapshotContent (snapshot capture) or ObjectKeeper (generic MCR capture).
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",

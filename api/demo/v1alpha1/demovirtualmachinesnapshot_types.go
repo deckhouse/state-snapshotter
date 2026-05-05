@@ -25,7 +25,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovmsnap
-// DemoVirtualMachineSnapshot is an intermediate demo snapshot node (PR5b) under root NamespaceSnapshot; disk snapshots may attach here.
+// DemoVirtualMachineSnapshot is an intermediate demo snapshot node (PR5b) under root Snapshot; disk snapshots may attach here.
 type DemoVirtualMachineSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -63,7 +63,7 @@ type DemoVirtualMachineSnapshotStatus struct {
 	// +listMapKey=apiVersion
 	// +listMapKey=kind
 	// +listMapKey=name
-	ChildrenSnapshotRefs []storagev1alpha1.NamespaceSnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
+	ChildrenSnapshotRefs []storagev1alpha1.SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 }
 
 // +kubebuilder:object:root=true

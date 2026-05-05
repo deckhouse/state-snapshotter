@@ -46,13 +46,13 @@
 
 Путаница часто возникает, потому что оба объекта «про модуль» и «про снимки», но **DSC — реестр типов для unified контроллера**, а **MCR — операция захвата**, живущая в другом контуре (см. D1 «manifest line» в [`../README.md`](../README.md)).
 
-MCR остаётся строго namespaced capture request: все targets должны быть namespaced resources в namespace MCR. Cluster-scoped resources, включая Kubernetes `Namespace`, не захватываются через MCR. Empty MCR допустим и создаёт empty MCP (0 objects), что используется для пустого root `NamespaceSnapshot` own scope.
+MCR остаётся строго namespaced capture request: все targets должны быть namespaced resources в namespace MCR. Cluster-scoped resources, включая Kubernetes `Namespace`, не захватываются через MCR. Empty MCR допустим и создаёт empty MCP (0 objects), что используется для пустого root `Snapshot` own scope.
 
 ---
 
 ## RBAC «из DSC» в смысле эксплуатации
 
-- Static controller RBAC covers only core state-snapshotter resources, MCR/MCP/chunks, `NamespaceSnapshot` / `SnapshotContent`, ObjectKeeper, and the standard root `NamespaceSnapshot` manifest allowlist.
+- Static controller RBAC covers only core state-snapshotter resources, MCR/MCP/chunks, `Snapshot` / `SnapshotContent`, ObjectKeeper, and the standard root `Snapshot` manifest allowlist.
 - Source of truth for static production controller RBAC is the Helm template `templates/controller/rbac-for-us.yaml`, not `+kubebuilder:rbac` markers in controller code.
 - Controller code under `images/state-snapshotter-controller/internal/controllers/` MUST NOT use `+kubebuilder:rbac` markers; update the Helm template for static core permissions instead.
 - Domain/demo resources are not part of the static production controller RBAC contract.

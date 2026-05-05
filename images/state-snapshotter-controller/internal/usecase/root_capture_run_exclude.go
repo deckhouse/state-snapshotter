@@ -46,8 +46,8 @@ var (
 	ErrSubtreeManifestCaptureFailed = errors.New("subtree manifest capture failed for root exclude")
 )
 
-// BuildRootNamespaceManifestCaptureTargets builds NamespaceSnapshot own targets for the resolved
-// target namespace: namespace-scoped allowlist targets, then, when the root NamespaceSnapshot has
+// BuildRootNamespaceManifestCaptureTargets builds Snapshot own targets for the resolved
+// target namespace: namespace-scoped allowlist targets, then, when the root Snapshot has
 // status.childrenSnapshotRefs, subtracts manifest objects already captured in descendant content-node
 // ManifestCheckpoints reachable only via that ref graph.
 // It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
@@ -65,13 +65,13 @@ func BuildRootNamespaceManifestCaptureTargets(
 	arch *ArchiveService,
 	dyn dynamic.Interface,
 	c client.Reader,
-	rootNS *storagev1alpha1.NamespaceSnapshot,
+	rootNS *storagev1alpha1.Snapshot,
 	rootContentName string,
 ) ([]namespacemanifest.ManifestTarget, error) {
 	if arch == nil {
 		return nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
 	}
-	targetNamespace := ResolveNamespaceSnapshotTargetNamespace(rootNS)
+	targetNamespace := ResolveSnapshotTargetNamespace(rootNS)
 	base, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, targetNamespace)
 	if err != nil {
 		return nil, err
@@ -91,7 +91,7 @@ func collectRunSubtreeManifestExcludeKeys(
 	ctx context.Context,
 	arch *ArchiveService,
 	c client.Reader,
-	rootNS *storagev1alpha1.NamespaceSnapshot,
+	rootNS *storagev1alpha1.Snapshot,
 	rootContentName string,
 ) (map[string]struct{}, error) {
 	visited := make(map[string]struct{})

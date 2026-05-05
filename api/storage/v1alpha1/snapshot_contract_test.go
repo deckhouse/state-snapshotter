@@ -24,9 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-func TestNamespaceSnapshot_UnifiedBindFieldUsesBoundSnapshotContentName(t *testing.T) {
-	ns := NamespaceSnapshot{
-		Status: NamespaceSnapshotStatus{
+func TestSnapshot_UnifiedBindFieldUsesBoundSnapshotContentName(t *testing.T) {
+	ns := Snapshot{
+		Status: SnapshotStatus{
 			BoundSnapshotContentName: "ns-abc",
 		},
 	}
@@ -42,7 +42,7 @@ func TestNamespaceSnapshot_UnifiedBindFieldUsesBoundSnapshotContentName(t *testi
 	}
 
 	if _, ok := m["contentName"]; ok {
-		t.Fatal("contentName must not be used on NamespaceSnapshot status; use boundSnapshotContentName for all snapshot roots")
+		t.Fatal("contentName must not be used on Snapshot status; use boundSnapshotContentName for all snapshot roots")
 	}
 	if m["boundSnapshotContentName"] != "ns-abc" {
 		t.Fatalf("expected boundSnapshotContentName in JSON, got %v", m["boundSnapshotContentName"])

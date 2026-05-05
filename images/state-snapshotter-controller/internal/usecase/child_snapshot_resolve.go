@@ -33,8 +33,8 @@ import (
 
 const SnapshotContentKind = "SnapshotContent"
 
-// RefGVK parses apiVersion/kind from a NamespaceSnapshotChildRef (strict; no registry).
-func RefGVK(ref storagev1alpha1.NamespaceSnapshotChildRef) (schema.GroupVersionKind, error) {
+// RefGVK parses apiVersion/kind from a SnapshotChildRef (strict; no registry).
+func RefGVK(ref storagev1alpha1.SnapshotChildRef) (schema.GroupVersionKind, error) {
 	if ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
 		return schema.GroupVersionKind{}, fmt.Errorf("childrenSnapshotRefs entry must set apiVersion, kind, and name")
 	}
@@ -47,7 +47,7 @@ func RefGVK(ref storagev1alpha1.NamespaceSnapshotChildRef) (schema.GroupVersionK
 
 // GetChildSnapshot resolves one status.childrenSnapshotRefs entry with a single Get (strict GVK).
 // parentSnapshotNamespace is always used for child namespace (namespace-local snapshot run).
-func GetChildSnapshot(ctx context.Context, c client.Reader, ref storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (*unstructured.Unstructured, schema.GroupVersionKind, error) {
+func GetChildSnapshot(ctx context.Context, c client.Reader, ref storagev1alpha1.SnapshotChildRef, parentSnapshotNamespace string) (*unstructured.Unstructured, schema.GroupVersionKind, error) {
 	gvk, err := RefGVK(ref)
 	if err != nil {
 		return nil, schema.GroupVersionKind{}, err
@@ -69,7 +69,7 @@ func GetChildSnapshot(ctx context.Context, c client.Reader, ref storagev1alpha1.
 }
 
 // ResolveChildSnapshotRefToBoundContentName returns status.boundSnapshotContentName for a strict child ref.
-func ResolveChildSnapshotRefToBoundContentName(ctx context.Context, c client.Reader, ref storagev1alpha1.NamespaceSnapshotChildRef, parentSnapshotNamespace string) (string, error) {
+func ResolveChildSnapshotRefToBoundContentName(ctx context.Context, c client.Reader, ref storagev1alpha1.SnapshotChildRef, parentSnapshotNamespace string) (string, error) {
 	u, gvk, err := GetChildSnapshot(ctx, c, ref, parentSnapshotNamespace)
 	if err != nil {
 		return "", err

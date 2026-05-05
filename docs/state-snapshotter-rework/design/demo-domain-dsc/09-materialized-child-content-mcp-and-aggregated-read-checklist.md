@@ -20,15 +20,15 @@ Related design note:
 - Child controllers do not self-register in parent status.
 - Parent `Ready` is derived from own MCP state and direct children state.
 - Aggregated read combines MCPs only in the API/usecase layer.
-- Dedicated demo controllers can reconcile manual demo snapshots without DSC, but `NamespaceSnapshot` discovery sees demo resources only through eligible DSC mappings.
+- Dedicated demo controllers can reconcile manual demo snapshots without DSC, but `Snapshot` discovery sees demo resources only through eligible DSC mappings.
 
 ## OwnerRef Filtering Examples
 
 - VM snapshot may include resources owned by the VM when they are part of VM own scope.
 - VM snapshot must not include resources owned by a disk object; they belong to disk snapshot scope.
 - Disk snapshot may include resources owned by the disk object when they are part of disk own scope.
-- `NamespaceSnapshot` top-level DSC discovery must skip resources with `ownerReferences`; owned resources are covered by the owner domain subtree when that owner is registered and skipped fail-closed when it is not.
-- `NamespaceSnapshot` root own MCP must not accidentally include domain-owned resources delegated to child snapshots or skipped by ownerRef filtering.
+- `Snapshot` top-level DSC discovery must skip resources with `ownerReferences`; owned resources are covered by the owner domain subtree when that owner is registered and skipped fail-closed when it is not.
+- `Snapshot` root own MCP must not accidentally include domain-owned resources delegated to child snapshots or skipped by ownerRef filtering.
 
 ## Validation Cases
 
@@ -63,7 +63,7 @@ Unit coverage:
 
 Integration coverage:
 
-- `NamespaceSnapshot` creates top-level child snapshots through DSC;
+- `Snapshot` creates top-level child snapshots through DSC;
 - `DemoVirtualMachineSnapshot` creates child disk snapshots;
 - `DemoVirtualDiskSnapshot` works standalone;
 - disk-only DSC skips a VM-owned disk instead of creating it as a direct root child;
@@ -86,7 +86,7 @@ go test -tags=integration ./test/integration/... -count=1
 
 ```shell
 rg "<old expected/current graph model identifiers>"
-rg "childrenSnapshotRefs.*namespace|NamespaceSnapshotChildRef.*Namespace"
+rg "childrenSnapshotRefs.*namespace|SnapshotChildRef.*Namespace"
 rg "DemoVirtual" images/state-snapshotter-controller/internal/usecase
 rg "patch.*childrenSnapshotRefs" images/state-snapshotter-controller/internal/controllers
 ```
@@ -108,7 +108,7 @@ After implementation:
    - `childrenSnapshotRefs`;
    - `manifestCheckpointName`;
    - `aggregated read`.
-3. Ensure `NamespaceSnapshot` is described as a normal controller with a separate DSC discovery mechanism, not as a special root type.
+3. Ensure `Snapshot` is described as a normal controller with a separate DSC discovery mechanism, not as a special root type.
 4. Ensure lifecycle and aggregated-read algorithm details are linked to normative/design documents instead of being copied here.
 
 Docs are part of the result, not a side artifact. After the change, code and docs must describe the same model.

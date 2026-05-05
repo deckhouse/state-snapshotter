@@ -17,7 +17,7 @@ limitations under the License.
 package controllers
 
 const (
-	KindNamespaceSnapshot          = "NamespaceSnapshot"
+	KindSnapshot                   = "Snapshot"
 	KindDemoVirtualDiskSnapshot    = "DemoVirtualDiskSnapshot"
 	KindDemoVirtualMachineSnapshot = "DemoVirtualMachineSnapshot"
 	KindDemoVirtualDisk            = "DemoVirtualDisk"

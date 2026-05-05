@@ -16,16 +16,16 @@ limitations under the License.
 
 package v1alpha1
 
-// NamespaceSnapshotChildRef identifies one child snapshot object in the run tree (element of
+// SnapshotChildRef identifies one child snapshot object in the run tree (element of
 // status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
 // generic code resolves the object with a single client Get — no registry scan and no ambiguity.
 //
-// Snapshot-run tree is namespace-local to the root NamespaceSnapshot: the child object MUST live
+// Snapshot-run tree is namespace-local to the root Snapshot: the child object MUST live
 // in the same namespace as that parent. Namespace is implicit and always taken from parent
-// NamespaceSnapshot namespace. Cross-namespace refs are not part of this model.
+// Snapshot namespace. Cross-namespace refs are not part of this model.
 //
 // +k8s:deepcopy-gen=true
-type NamespaceSnapshotChildRef struct {
+type SnapshotChildRef struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`

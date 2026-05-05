@@ -30,16 +30,16 @@ const CheckpointNamePrefix = "mcp-"
 // AnnotationBoundSnapshotContent on ManifestCaptureRequest: ManifestCheckpoint ownerRef targets this SnapshotContent.
 const AnnotationBoundSnapshotContent = "state-snapshotter.deckhouse.io/bound-snapshot-content"
 
-// NamespaceSnapshotMCRName returns the deterministic ManifestCaptureRequest name for a NamespaceSnapshot root (design §4.7).
-func NamespaceSnapshotMCRName(uid types.UID) string {
-	return fmt.Sprintf("nss-%s", uid)
+// SnapshotMCRName returns the deterministic ManifestCaptureRequest name for a Snapshot root (design §4.7).
+func SnapshotMCRName(uid types.UID) string {
+	return fmt.Sprintf("snap-%s", uid)
 }
 
-// NamespaceSnapshotRootObjectKeeperName is the cluster-scoped ObjectKeeper name for root retention (FollowObjectWithTTL on NamespaceSnapshot; see controller config).
+// SnapshotRootObjectKeeperName is the cluster-scoped ObjectKeeper name for root retention (FollowObjectWithTTL on Snapshot; see controller config).
 // Namespace disambiguates same snapshot name in different namespaces. If the root is recreated with the same name,
 // the controller deletes a stale OK that still follows the previous SnapshotContent UID before creating one for the new generation.
-func NamespaceSnapshotRootObjectKeeperName(namespace, snapshotName string) string {
-	return fmt.Sprintf("ret-nssnap-%s-%s", namespace, snapshotName)
+func SnapshotRootObjectKeeperName(namespace, snapshotName string) string {
+	return fmt.Sprintf("ret-snap-%s-%s", namespace, snapshotName)
 }
 
 // GenerateManifestCheckpointNameFromUID returns the deterministic ManifestCheckpoint name for a ManifestCaptureRequest UID.

@@ -16,8 +16,8 @@ Bash-скрипт для проверки работы контроллера un
 # Тест с Snapshot в namespace default
 ./test-smoke.sh default Snapshot
 
-# Тест с NamespaceSnapshot в namespace d8-backup
-./test-smoke.sh d8-backup NamespaceSnapshot
+# Тест с Snapshot в namespace d8-backup
+./test-smoke.sh d8-backup Snapshot
 ```
 
 ## Что проверяет скрипт

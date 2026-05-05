@@ -77,7 +77,7 @@ Unified/generic runtime в v0 имеет один режим: DSC reconciler, gr
 | Переменная | Смысл |
 |------------|--------|
 | `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS` | Пусто — встроенный unified-runtime bootstrap (`DefaultUnifiedRuntimeBootstrapPairs()`, legacy alias `DefaultDesiredUnifiedSnapshotPairs()`). Это не graph registry built-ins. Литералы `empty` / `none` / `dsc-only` — пустой статический bootstrap (только eligible DSC). Иначе кастом: пары через `;`, внутри пары `snapGVK|contentGVK`, каждый GVK как `group/version/Kind`. |
-| `STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL` | Опционально: длительность `spec.ttl` у корневого ObjectKeeper в режиме **`FollowObjectWithTTL`** (root `NamespaceSnapshot` и unified `XxxxSnapshot`). Формат Go `time.ParseDuration` (`24h`, `168h`, …). Не задана или ≤0 — используется встроенный дефолт контроллера (см. `pkg/config`). Алиас: `STATE_SNAPSHOTTER_NS_ROOT_OK_TTL` (если основная не задана). Value Helm: `stateSnapshotter.snapshotRootOkTtl`. |
+| `STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL` | Опционально: длительность `spec.ttl` у корневого ObjectKeeper в режиме **`FollowObjectWithTTL`** (root `Snapshot` и unified `XxxxSnapshot`). Формат Go `time.ParseDuration` (`24h`, `168h`, …). Не задана или ≤0 — используется встроенный дефолт контроллера (см. `pkg/config`). Алиас: `STATE_SNAPSHOTTER_NS_ROOT_OK_TTL` (если основная не задана). Value Helm: `stateSnapshotter.snapshotRootOkTtl`. |
 
 Неверная строка bootstrap → в лог пишется предупреждение и используется **дефолтный** список.
 

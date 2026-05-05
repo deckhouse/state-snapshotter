@@ -6,7 +6,7 @@ This document defines the aggregated manifest read contract for snapshot restore
 
 ## Restore Point Model
 
-Any registered `XxxSnapshot` is a restore point. A root `NamespaceSnapshot`, a domain snapshot, and a leaf snapshot all resolve to a content node through `status.boundSnapshotContentName`.
+Any registered `XxxSnapshot` is a restore point. A root `Snapshot`, a domain snapshot, and a leaf snapshot all resolve to a content node through `status.boundSnapshotContentName`.
 
 Aggregated read MAY start from any snapshot node or directly from any content node. Snapshot-starting reads first resolve:
 
@@ -26,10 +26,10 @@ GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{names
 
 `{resource}` is the plural resource name of a registered namespaced snapshot type. The API layer resolves `{resource}/{name}` to the exact registered snapshot GVK, reads the snapshot in `{namespace}`, resolves its bound content GVK through the graph registry, and runs the same aggregated read usecase.
 
-The existing `NamespaceSnapshot` endpoint remains backward-compatible:
+The existing `Snapshot` endpoint remains backward-compatible:
 
 ```text
-GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/namespacesnapshots/{name}/manifests
+GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/snapshots/{name}/manifests
 ```
 
 It is a compatibility route over the same aggregated content graph model.

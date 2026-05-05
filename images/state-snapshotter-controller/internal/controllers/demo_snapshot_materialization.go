@@ -207,7 +207,7 @@ func ensureDemoSnapshotOwnerRef(obj client.Object, desired metav1.OwnerReference
 }
 
 func isSnapshotParentOwnerRef(ref metav1.OwnerReference) bool {
-	if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == KindNamespaceSnapshot {
+	if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == KindSnapshot {
 		return true
 	}
 	if ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ref.Kind == KindDemoVirtualMachineSnapshot {

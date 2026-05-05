@@ -93,7 +93,7 @@ func integrationObjectsContainKind(objects []map[string]interface{}, kind string
 	return false
 }
 
-// PR5b: DemoVirtualMachineSnapshot under root NamespaceSnapshot; DemoVirtualDiskSnapshot as child under VM; ref-only walk sees VM content then disk content.
+// PR5b: DemoVirtualMachineSnapshot under root Snapshot; DemoVirtualDiskSnapshot as child under VM; ref-only walk sees VM content then disk content.
 var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM", Serial, func() {
 	const dscName = "integration-pr5b-demo-vm-dsc"
 
@@ -183,15 +183,15 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		}
 		Expect(k8sClient.Create(testCtx, diskResource)).To(Succeed())
 
-		root := &storagev1alpha1.NamespaceSnapshot{
+		root := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(testCtx, root)).To(Succeed())
 
 		var rootContentName string
 		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			b := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionBound)
 			g.Expect(b).NotTo(BeNil())
@@ -202,7 +202,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 
 		var vmSnapshotName string
 		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			vmSnapshotName = ""
 			for _, ch := range r.Status.ChildrenSnapshotRefs {
@@ -211,7 +211,7 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 					break
 				}
 			}
-			g.Expect(vmSnapshotName).NotTo(BeEmpty(), "root NamespaceSnapshot should list VM snapshot")
+			g.Expect(vmSnapshotName).NotTo(BeEmpty(), "root Snapshot should list VM snapshot")
 		}).WithTimeout(45 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
 		var vmContentName string
@@ -291,13 +291,13 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Expect(visited).To(ContainElement(vmContentName))
 		Expect(visited).To(ContainElement(diskContentName))
 
-		// E6: after NamespaceSnapshot publishes childrenSnapshotRefs, root becomes Ready=True only when
+		// E6: after Snapshot publishes childrenSnapshotRefs, root becomes Ready=True only when
 		// all referenced child snapshot objects are ready.
 		Eventually(func(g Gomega) {
-			r := &storagev1alpha1.NamespaceSnapshot{}
+			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
 			rc := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionReady)
-			g.Expect(rc).NotTo(BeNil(), "root NamespaceSnapshot has no Ready condition; status=%+v", r.Status)
+			g.Expect(rc).NotTo(BeNil(), "root Snapshot has no Ready condition; status=%+v", r.Status)
 			g.Expect(rc.Status).To(Equal(metav1.ConditionTrue), "root Ready: reason=%q message=%q", rc.Reason, rc.Message)
 			g.Expect(rc.Reason).To(Equal(snapshot.ReasonCompleted), "root Ready: status=%s message=%q", rc.Status, rc.Message)
 		}).WithTimeout(120 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())

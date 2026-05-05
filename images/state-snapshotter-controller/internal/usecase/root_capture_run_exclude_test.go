@@ -92,10 +92,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentMCPContributes(t *test
 	}
 	disk := fixtureSnapshotUnstructured("disk-content")
 	diskContent := fixtureContent("disk-content", "mcp-dedicated")
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{{
 				APIVersion: "generic.state-snapshotter.test/v1",
 				Kind:       "FixtureDomainSnapshot",
 				Name:       "disk-a",
@@ -130,10 +130,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentWithoutMCPPends(t *tes
 	}
 	disk := fixtureSnapshotUnstructured("disk-content")
 	diskContent := fixtureContent("disk-content", "")
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{{
 				APIVersion: "generic.state-snapshotter.test/v1",
 				Kind:       "FixtureDomainSnapshot",
 				Name:       "disk-a",
@@ -166,10 +166,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildContentMCPNotReadyPends(t *te
 	disk := fixtureSnapshotUnstructured("disk-content")
 	diskContent := fixtureContent("disk-content", "mcp-pending")
 	mcpPending := &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "mcp-pending"}}
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{{
 				APIVersion: "generic.state-snapshotter.test/v1",
 				Kind:       "FixtureDomainSnapshot",
 				Name:       "disk-a",
@@ -221,20 +221,20 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
 
-	childSnap := &storagev1alpha1.NamespaceSnapshot{
+	childSnap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
+		Status: storagev1alpha1.SnapshotStatus{
 			BoundSnapshotContentName: "child-content",
 		},
 	}
 
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "NamespaceSnapshot",
+					Kind:       "Snapshot",
 					Name:       "ch1",
 				},
 			},
@@ -284,10 +284,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ChildNotReachableFails(t *testing.
 		Status:     storagev1alpha1.SnapshotContentStatus{},
 	}
 	disk := fixtureSnapshotUnstructured("missing-from-graph")
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: "generic.state-snapshotter.test/v1",
 					Kind:       "FixtureDomainSnapshot",
@@ -328,10 +328,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
 	disk := fixtureSnapshotUnstructured("child-content")
-	rootNS := &storagev1alpha1.NamespaceSnapshot{
+	rootNS := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
-			ChildrenSnapshotRefs: []storagev1alpha1.NamespaceSnapshotChildRef{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
 				{
 					APIVersion: "generic.state-snapshotter.test/v1",
 					Kind:       "FixtureDomainSnapshot",

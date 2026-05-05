@@ -19,7 +19,7 @@ package namespacemanifest
 import "fmt"
 
 // ManifestTargetDedupKey matches aggregated manifest identity (apiVersion|kind|namespace|name).
-// NamespaceSnapshot root capture is namespaced-only; snapshotNamespace is the target namespace.
+// Snapshot root capture is namespaced-only; snapshotNamespace is the target namespace.
 func ManifestTargetDedupKey(snapshotNamespace string, t ManifestTarget) string {
 	ns := snapshotNamespace
 	if ns == "" {

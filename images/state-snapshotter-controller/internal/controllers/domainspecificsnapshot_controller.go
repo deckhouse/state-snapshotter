@@ -68,7 +68,7 @@ type DomainSpecificSnapshotControllerReconciler struct {
 	// nil remains valid for focused unit tests.
 	UnifiedRuntimeSync func(context.Context) error
 
-	// GraphRegistryRefresh rebuilds the generic NamespaceSnapshot graph GVK registry. Production wiring
+	// GraphRegistryRefresh rebuilds the generic Snapshot graph GVK registry. Production wiring
 	// always provides it; nil remains valid for focused unit tests.
 	GraphRegistryRefresh func(context.Context) error
 }

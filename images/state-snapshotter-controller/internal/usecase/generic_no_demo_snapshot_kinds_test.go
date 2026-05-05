@@ -53,7 +53,7 @@ func TestProductionSourcesDoNotNameDemoSnapshotKinds(t *testing.T) {
 			}
 			if strings.Contains(path, string(filepath.Separator)+"controllers"+string(filepath.Separator)) {
 				base := filepath.Base(path)
-				if !strings.HasPrefix(base, "namespacesnapshot_") {
+				if !strings.HasPrefix(base, "snapshot_") {
 					return nil
 				}
 			}

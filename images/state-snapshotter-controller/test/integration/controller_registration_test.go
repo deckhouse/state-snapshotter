@@ -62,7 +62,7 @@ var _ = Describe("Integration: Controller Registration", func() {
 			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"},
 			// In production (main.go), these would be:
 			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "NamespaceSnapshot"},
+			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 			// {Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
 		}
 		snapshotContentGVKs := []schema.GroupVersionKind{
@@ -112,7 +112,7 @@ var _ = Describe("Integration: Controller Registration", func() {
 
 	It("should initialize unified runtime and graph registry hooks in integration wiring", func() {
 		Expect(unifiedSyncer).NotTo(BeNil(), "unifiedruntime.Syncer must be initialized in the single always-on runtime path")
-		Expect(integrationGraphRegProvider).NotTo(BeNil(), "NamespaceSnapshot graph registry provider must be initialized")
+		Expect(integrationGraphRegProvider).NotTo(BeNil(), "Snapshot graph registry provider must be initialized")
 		Expect(integrationSnapshotGraphRegistryRefresh(ctx)).To(Succeed(), "DSC hot-add graph refresh path must be callable")
 	})
 })

@@ -42,12 +42,12 @@ import (
 	liblogger "github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// NamespaceSnapshotReconciler owns namespace root discovery, top-level child
+// SnapshotReconciler owns namespace root discovery, top-level child
 // snapshot refs, MCR creation for the namespace own manifest scope, and binding
 // the root to common SnapshotContent. SnapshotContent status/result aggregation
 // stays in SnapshotContentController.
-// Root SnapshotContent is not owned by NamespaceSnapshot; binding lives in NamespaceSnapshot status.
-type NamespaceSnapshotReconciler struct {
+// Root SnapshotContent is not owned by Snapshot; binding lives in Snapshot status.
+type SnapshotReconciler struct {
 	Client                client.Client
 	APIReader             client.Reader
 	Dynamic               dynamic.Interface
@@ -56,40 +56,40 @@ type NamespaceSnapshotReconciler struct {
 	Archive               *usecase.ArchiveService
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
 	Mgr                   ctrl.Manager
-	childWatchMgr         *namespaceSnapshotDynamicWatchManager
+	childWatchMgr         *snapshotDynamicWatchManager
 }
 
 // e6ChildStatusReader returns the client used for E6 child snapshot reads.
 // The split-client cache is invalidated by watch-driven updates in the same manager process; using the
 // API reader here can return unstructured objects whose status shape is harder to parse consistently
 // for demo CRDs in envtest.
-func (r *NamespaceSnapshotReconciler) e6ChildStatusReader() client.Reader {
+func (r *SnapshotReconciler) e6ChildStatusReader() client.Reader {
 	return r.Client
 }
 
-// namespaceSnapshotReader returns a reader that prefers the API reader for NamespaceSnapshot reads.
-// The NamespaceSnapshot controller owns status.childrenSnapshotRefs; the split client cache can lag
+// snapshotReader returns a reader that prefers the API reader for Snapshot reads.
+// The Snapshot controller owns status.childrenSnapshotRefs; the split client cache can lag
 // behind status updates and a subsequent Status().Update would otherwise wipe fresh graph refs.
-func (r *NamespaceSnapshotReconciler) namespaceSnapshotReader() client.Reader {
+func (r *SnapshotReconciler) snapshotReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
 	}
 	return r.Client
 }
 
-// AddNamespaceSnapshotControllerToManager registers the NamespaceSnapshot reconciler.
+// AddSnapshotControllerToManager registers the Snapshot reconciler.
 // snapshotGraphRegistry provides DSC/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
-// Child snapshot watches are registered dynamically from the live registry (see namespaceSnapshotDynamicWatchManager).
-func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
+// Child snapshot watches are registered dynamically from the live registry (see snapshotDynamicWatchManager).
+func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}
 	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
 	if err != nil {
-		return fmt.Errorf("namespace snapshot controller: dynamic client: %w", err)
+		return fmt.Errorf("snapshot controller: dynamic client: %w", err)
 	}
 	logImpl, _ := liblogger.NewLogger("error")
-	r := &NamespaceSnapshotReconciler{
+	r := &SnapshotReconciler{
 		Client:                mgr.GetClient(),
 		APIReader:             mgr.GetAPIReader(),
 		Dynamic:               dyn,
@@ -99,16 +99,16 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
 	}
-	r.childWatchMgr = newNamespaceSnapshotDynamicWatchManager(mgr, r)
+	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&storagev1alpha1.NamespaceSnapshot{})
+		For(&storagev1alpha1.Snapshot{})
 	return b.Complete(r)
 }
 
-func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log.FromContext(ctx).V(1).Info("reconcile NamespaceSnapshot", "namespaceSnapshot", req.NamespacedName)
-	nsSnap := &storagev1alpha1.NamespaceSnapshot{}
-	if err := r.namespaceSnapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
+func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log.FromContext(ctx).V(1).Info("reconcile Snapshot", "snapshot", req.NamespacedName)
+	nsSnap := &storagev1alpha1.Snapshot{}
+	if err := r.snapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -125,7 +125,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return r.reconcileDelete(ctx, nsSnap)
 	}
 
-	if snapshot.AddFinalizer(nsSnap, snapshot.FinalizerNamespaceSnapshot) {
+	if snapshot.AddFinalizer(nsSnap, snapshot.FinalizerSnapshot) {
 		if err := r.Client.Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -138,7 +138,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		r.APIReader,
 		r.Config,
 		nsSnap,
-		storagev1alpha1.SchemeGroupVersion.WithKind(KindNamespaceSnapshot),
+		storagev1alpha1.SchemeGroupVersion.WithKind(KindSnapshot),
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -232,7 +232,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			Type:               snapshot.ConditionBound,
 			Status:             metav1.ConditionTrue,
 			Reason:             "ContentBound",
-			Message:            "SnapshotContent exists and references this NamespaceSnapshot",
+			Message:            "SnapshotContent exists and references this Snapshot",
 			ObservedGeneration: nsSnap.Generation,
 		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -246,7 +246,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	graphChanged, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
 	if err != nil {
-		if patchErr := r.patchNamespaceSnapshotGraphReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshot.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
+		if patchErr := r.patchSnapshotGraphReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshot.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, err
@@ -264,7 +264,7 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
 }
 
-func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot, expectedName string) (ctrl.Result, error) {
+func (r *SnapshotReconciler) finishReconcileWithExistingContent(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, expectedName string) (ctrl.Result, error) {
 	content := &storagev1alpha1.SnapshotContent{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
@@ -284,11 +284,11 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 	return ctrl.Result{Requeue: true}, nil
 }
 
-// reconcileDelete removes the NamespaceSnapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR;
+// reconcileDelete removes the Snapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR;
 // retained manifest artifacts follow SnapshotContent lifecycle (separate from snapshot object deletion).
-func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.NamespaceSnapshot) (ctrl.Result, error) {
+func (r *SnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) (ctrl.Result, error) {
 	key := client.ObjectKeyFromObject(nsSnap)
-	fresh := &storagev1alpha1.NamespaceSnapshot{}
+	fresh := &storagev1alpha1.Snapshot{}
 	if err := r.Client.Get(ctx, key, fresh); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -300,10 +300,10 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 	}
 
 	if fresh.Status.BoundSnapshotContentName == "" {
-		if err := r.updateNamespaceSnapshotRemoveFinalizer(ctx, key); err != nil {
+		if err := r.updateSnapshotRemoveFinalizer(ctx, key); err != nil {
 			return ctrl.Result{}, err
 		}
-		log.FromContext(ctx).V(1).Info("namespace snapshot delete reconcile done (no bound content)")
+		log.FromContext(ctx).V(1).Info("snapshot delete reconcile done (no bound content)")
 		return ctrl.Result{}, nil
 	}
 
@@ -311,7 +311,7 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 	content := &storagev1alpha1.SnapshotContent{}
 	err := r.Client.Get(ctx, contentKey, content)
 	if errors.IsNotFound(err) {
-		if err := r.updateNamespaceSnapshotRemoveFinalizer(ctx, key); err != nil {
+		if err := r.updateSnapshotRemoveFinalizer(ctx, key); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -333,16 +333,16 @@ func (r *NamespaceSnapshotReconciler) reconcileDelete(ctx context.Context, nsSna
 		}
 	}
 
-	if err := r.updateNamespaceSnapshotRemoveFinalizer(ctx, key); err != nil {
+	if err := r.updateSnapshotRemoveFinalizer(ctx, key); err != nil {
 		return ctrl.Result{}, err
 	}
-	log.FromContext(ctx).V(1).Info("namespace snapshot delete reconcile done")
+	log.FromContext(ctx).V(1).Info("snapshot delete reconcile done")
 	return ctrl.Result{}, nil
 }
 
-func (r *NamespaceSnapshotReconciler) updateNamespaceSnapshotRemoveFinalizer(ctx context.Context, key client.ObjectKey) error {
+func (r *SnapshotReconciler) updateSnapshotRemoveFinalizer(ctx context.Context, key client.ObjectKey) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.NamespaceSnapshot{}
+		cur := &storagev1alpha1.Snapshot{}
 		if err := r.Client.Get(ctx, key, cur); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
@@ -352,26 +352,26 @@ func (r *NamespaceSnapshotReconciler) updateNamespaceSnapshotRemoveFinalizer(ctx
 		if cur.DeletionTimestamp == nil {
 			return nil
 		}
-		if !snapshot.RemoveFinalizer(cur, snapshot.FinalizerNamespaceSnapshot) {
+		if !snapshot.RemoveFinalizer(cur, snapshot.FinalizerSnapshot) {
 			return nil
 		}
 		return r.Client.Update(ctx, cur)
 	})
 }
 
-func desiredSnapshotContentSpec(_ *storagev1alpha1.NamespaceSnapshot) storagev1alpha1.SnapshotContentSpec {
+func desiredSnapshotContentSpec(_ *storagev1alpha1.Snapshot) storagev1alpha1.SnapshotContentSpec {
 	return storagev1alpha1.SnapshotContentSpec{
 		DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 	}
 }
 
-func snapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string {
+func snapshotContentName(ns *storagev1alpha1.Snapshot) string {
 	uid := strings.ReplaceAll(string(ns.UID), "-", "")
 	return fmt.Sprintf("ns-%s", uid)
 }
 
 // snapshotContentObjectMeta builds metadata for a new SnapshotContent.
-func snapshotContentObjectMeta(nsSnap *storagev1alpha1.NamespaceSnapshot) metav1.ObjectMeta {
+func snapshotContentObjectMeta(nsSnap *storagev1alpha1.Snapshot) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:       snapshotContentName(nsSnap),
 		Finalizers: []string{snapshot.FinalizerParentProtect},

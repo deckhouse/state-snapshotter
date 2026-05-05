@@ -20,7 +20,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: DemoVirtualMachineSnapshot is an intermediate demo snapshot node
-          (PR5b) under root NamespaceSnapshot; disk snapshots may attach here.
+          (PR5b) under root Snapshot; disk snapshots may attach here.
         properties:
           apiVersion:
             description: |-
@@ -77,13 +77,13 @@ spec:
                   DemoVirtualDiskSnapshot) under this VM snapshot.
                 items:
                   description: |-
-                    NamespaceSnapshotChildRef identifies one child snapshot object in the run tree (element of
+                    SnapshotChildRef identifies one child snapshot object in the run tree (element of
                     status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
                     generic code resolves the object with a single client Get — no registry scan and no ambiguity.
 
-                    Snapshot-run tree is namespace-local to the root NamespaceSnapshot: the child object MUST live
+                    Snapshot-run tree is namespace-local to the root Snapshot: the child object MUST live
                     in the same namespace as that parent. Namespace is implicit and always taken from parent
-                    NamespaceSnapshot namespace. Cross-namespace refs are not part of this model.
+                    Snapshot namespace. Cross-namespace refs are not part of this model.
                   properties:
                     apiVersion:
                       type: string

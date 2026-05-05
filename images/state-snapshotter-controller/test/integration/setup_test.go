@@ -631,7 +631,7 @@ var _ = BeforeSuite(func() {
 		"registrationtestsnapshotcontents.test.deckhouse.io",
 		"namespacedtestsnapshotcontents.test.deckhouse.io",
 		"backupclasses.storage.deckhouse.io",
-		"namespacesnapshots.storage.deckhouse.io",
+		"snapshots.storage.deckhouse.io",
 		"snapshotcontents.storage.deckhouse.io",
 		"demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 		"demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
@@ -704,7 +704,7 @@ var _ = BeforeSuite(func() {
 	}
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
-	Expect(controllers.AddNamespaceSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
+	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
 	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
 	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
 

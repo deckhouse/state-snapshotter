@@ -36,17 +36,17 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
-// namespaceSnapshotDynamicWatchManager registers one controller-runtime controller per child snapshot GVK
-// so parent NamespaceSnapshot reconciles when a referenced child snapshot changes (additive after startup).
-type namespaceSnapshotDynamicWatchManager struct {
+// snapshotDynamicWatchManager registers one controller-runtime controller per child snapshot GVK
+// so parent Snapshot reconciles when a referenced child snapshot changes (additive after startup).
+type snapshotDynamicWatchManager struct {
 	mu      sync.Mutex
 	mgr     ctrl.Manager
-	main    *NamespaceSnapshotReconciler
+	main    *SnapshotReconciler
 	watched map[string]struct{}
 }
 
-func newNamespaceSnapshotDynamicWatchManager(mgr ctrl.Manager, main *NamespaceSnapshotReconciler) *namespaceSnapshotDynamicWatchManager {
-	return &namespaceSnapshotDynamicWatchManager{
+func newSnapshotDynamicWatchManager(mgr ctrl.Manager, main *SnapshotReconciler) *snapshotDynamicWatchManager {
+	return &snapshotDynamicWatchManager{
 		mgr:     mgr,
 		main:    main,
 		watched: make(map[string]struct{}),
@@ -54,7 +54,7 @@ func newNamespaceSnapshotDynamicWatchManager(mgr ctrl.Manager, main *NamespaceSn
 }
 
 // EnsureWatches registers missing watches for every snapshot kind in the live graph registry.
-func (m *namespaceSnapshotDynamicWatchManager) EnsureWatches(ctx context.Context, live snapshotgraphregistry.LiveReader) error {
+func (m *snapshotDynamicWatchManager) EnsureWatches(ctx context.Context, live snapshotgraphregistry.LiveReader) error {
 	if m == nil || m.mgr == nil || live == nil {
 		return nil
 	}
@@ -74,7 +74,7 @@ func (m *namespaceSnapshotDynamicWatchManager) EnsureWatches(ctx context.Context
 	return nil
 }
 
-func (m *namespaceSnapshotDynamicWatchManager) ensureWatchLocked(ctx context.Context, gvk schema.GroupVersionKind) error {
+func (m *snapshotDynamicWatchManager) ensureWatchLocked(ctx context.Context, gvk schema.GroupVersionKind) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := gvk.String()
@@ -107,11 +107,11 @@ func controllerRuntimeNameForChildWatch(gvk schema.GroupVersionKind) string {
 	return "nss-chw-" + hex.EncodeToString(sum[:6])
 }
 
-// nssChildSnapshotWatchRelay forwards child snapshot events to parent NamespaceSnapshot reconciles.
+// nssChildSnapshotWatchRelay forwards child snapshot events to parent Snapshot reconciles.
 type nssChildSnapshotWatchRelay struct {
 	gvk    schema.GroupVersionKind
 	client client.Client
-	main   *NamespaceSnapshotReconciler
+	main   *SnapshotReconciler
 }
 
 func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -146,19 +146,19 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 	if len(reqs) == 0 {
 		bound, hasBound, _ := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
 		if hasBound && bound != "" {
-			// Domain controllers may patch child status (bound) before the parent NamespaceSnapshot lists the
+			// Domain controllers may patch child status (bound) before the parent Snapshot lists the
 			// child in status.childrenSnapshotRefs; retry shortly instead of dropping the event.
-			logger.Info("nss child relay: bound child but no parent NamespaceSnapshot matched yet; requeue")
+			logger.Info("nss child relay: bound child but no parent Snapshot matched yet; requeue")
 			return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
-		logger.Info("nss child relay: no NamespaceSnapshot parents reference this child (strict ref mismatch or empty graph)")
+		logger.Info("nss child relay: no Snapshot parents reference this child (strict ref mismatch or empty graph)")
 		return ctrl.Result{}, nil
 	}
 	parentNames := make([]string, 0, len(reqs))
 	for _, pr := range reqs {
 		parentNames = append(parentNames, pr.Namespace+"/"+pr.Name)
 	}
-	logger.Info("nss child relay: enqueuing parent NamespaceSnapshot reconciles", "parentCount", len(reqs), "parents", parentNames)
+	logger.Info("nss child relay: enqueuing parent Snapshot reconciles", "parentCount", len(reqs), "parents", parentNames)
 
 	var best ctrl.Result
 	var firstErr error

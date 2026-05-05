@@ -29,9 +29,9 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// childSnapshotRefMatchesUnstructuredChild reports whether a strict NamespaceSnapshotChildRef
+// childSnapshotRefMatchesUnstructuredChild reports whether a strict SnapshotChildRef
 // identifies the same object as an unstructured child snapshot from the API.
-func childSnapshotRefMatchesUnstructuredChild(ref storagev1alpha1.NamespaceSnapshotChildRef, child *unstructured.Unstructured, childName string) bool {
+func childSnapshotRefMatchesUnstructuredChild(ref storagev1alpha1.SnapshotChildRef, child *unstructured.Unstructured, childName string) bool {
 	if ref.Name != childName || ref.APIVersion == "" || ref.Kind == "" {
 		return false
 	}
@@ -45,10 +45,10 @@ func childSnapshotRefMatchesUnstructuredChild(ref storagev1alpha1.NamespaceSnaps
 	return refGVK == child.GroupVersionKind()
 }
 
-// findParentsReferencingChildSnapshot returns reconcile requests for NamespaceSnapshot parents whose
+// findParentsReferencingChildSnapshot returns reconcile requests for Snapshot parents whose
 // status.childrenSnapshotRefs match the child's apiVersion, kind, and name.
 //
-// Snapshot-run tree is namespace-local: only NamespaceSnapshot objects in the child's namespace are
+// Snapshot-run tree is namespace-local: only Snapshot objects in the child's namespace are
 // considered (no cluster-wide list).
 func findParentsReferencingChildSnapshot(ctx context.Context, c client.Reader, child *unstructured.Unstructured) []reconcile.Request {
 	if child == nil {
@@ -61,9 +61,9 @@ func findParentsReferencingChildSnapshot(ctx context.Context, c client.Reader, c
 		return nil
 	}
 
-	list := &storagev1alpha1.NamespaceSnapshotList{}
+	list := &storagev1alpha1.SnapshotList{}
 	if err := c.List(ctx, list, client.InNamespace(childNS)); err != nil {
-		log.FromContext(ctx).Error(err, "findParentsReferencingChildSnapshot: list NamespaceSnapshot", "namespace", childNS)
+		log.FromContext(ctx).Error(err, "findParentsReferencingChildSnapshot: list Snapshot", "namespace", childNS)
 		return nil
 	}
 	var out []reconcile.Request

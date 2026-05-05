@@ -326,10 +326,10 @@ func TestHandleAPIResourceListDiscovery_SubresourcesOnly(t *testing.T) {
 	if _, exists := resources["snapshots/manifests-with-data-restoration"]; !exists {
 		t.Fatalf("snapshots/manifests-with-data-restoration missing in discovery")
 	}
-	if ns, exists := resources["namespacesnapshots/manifests"]; !exists {
-		t.Fatalf("namespacesnapshots/manifests missing in discovery")
-	} else if !ns.Namespaced || ns.Kind != "NamespaceSnapshot" {
-		t.Fatalf("namespacesnapshots/manifests has wrong discovery: %+v", ns)
+	if ns, exists := resources["snapshots/manifests"]; !exists {
+		t.Fatalf("snapshots/manifests missing in discovery")
+	} else if !ns.Namespaced || ns.Kind != "Snapshot" {
+		t.Fatalf("snapshots/manifests has wrong discovery: %+v", ns)
 	}
 }
 

@@ -37,8 +37,8 @@ const (
 	// FinalizerArtifactProtect prevents deletion of artifacts (MCP/VSC)
 	// while they are linked from SnapshotContent.
 	FinalizerArtifactProtect = "snapshot.deckhouse.io/artifact-protect"
-	// FinalizerNamespaceSnapshot blocks NamespaceSnapshot deletion until cleanup completes.
-	FinalizerNamespaceSnapshot = "namespacesnapshot.finalizers.deckhouse.io"
+	// FinalizerSnapshot blocks Snapshot deletion until cleanup completes.
+	FinalizerSnapshot = "snapshot.finalizers.deckhouse.io"
 	// AnnotationParentDeleted marks SnapshotContent as detached from parent Snapshot.
 	AnnotationParentDeleted = "snapshot.deckhouse.io/parent-deleted"
 )

@@ -49,7 +49,7 @@ var n2aNamespacedGVR = []schema.GroupVersionResource{
 // BuildManifestCaptureTargets is N2a-only: it includes namespace-scoped resources
 // from the built-in allowlist without List pagination.
 // Large namespaces are intentionally unsupported until hardening; do not treat this as production-complete
-// capture enumeration (see design namespace-snapshot-controller.md §4.5 / §5.1 and implementation-plan).
+// capture enumeration (see design snapshot-controller.md §4.5 / §5.1 and implementation-plan).
 //
 // The returned slice is sorted by (APIVersion, Kind, Name) for stable MCR spec and drift checks.
 func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, namespace string) ([]ManifestTarget, error) {

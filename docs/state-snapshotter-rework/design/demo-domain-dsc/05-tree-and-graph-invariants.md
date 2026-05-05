@@ -10,7 +10,7 @@
 
 **Не вводить** отдельных полей `domainChild*Refs`, `domainCoverage`, `domainSubtreeSummary` и отдельного condition `SubtreeReady` — используются **общие** **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** и единый **`Ready`**.
 
-**Лоб:** **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** — это **универсальная** модель дерева для **любого** `XxxxSnapshot` / `SnapshotContent` в системе, **не** namespace-specific и **не** demo-only механизм; `NamespaceSnapshot` — один из типов узла, использующий те же поля.
+**Лоб:** **`childrenSnapshotRefs`** и **`childrenSnapshotContentRefs`** — это **универсальная** модель дерева для **любого** `XxxxSnapshot` / `SnapshotContent` в системе, **не** namespace-specific и **не** demo-only механизм; `Snapshot` — один из типов узла, использующий те же поля.
 
 ---
 
@@ -28,18 +28,18 @@
 
 **Принцип:** состав дочерних узлов **не** задаётся статическим «разрешённым списком kinds» в generic и **не** сводится к `if kind == VM → создать Disk`. **Логическое дерево** задают **контроллеры** (доменные через **DSC** и политику **`spec`**, generic — root namespace capture), **отражая** связи в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**. **Generic** при обходе для dedup / **`Ready`** / aggregated **опирается только на это отражение**, а не на «все подходящие объекты в API» как на дерево. Нормативное разделение **capture-time domain expansion** vs **traversal сохранённого графа** — **[`spec/system-spec.md`](../../spec/system-spec.md) §3.0**.
 
-**INV-T1.** Под **root `NamespaceSnapshot`** **не** создаётся **вложенный** **`NamespaceSnapshot`** (дети — **heterogeneous** kinds). Это **политика** demo/PR5-трека, **не** утверждение, что `NamespaceSnapshot` отличается от других `XxxxSnapshot` по модели узла; «root» — текущий продуктовый потолок, а не отдельный kube-тип «доменного контроллера».
+**INV-T1.** Под **root `Snapshot`** **не** создаётся **вложенный** **`Snapshot`** (дети — **heterogeneous** kinds). Это **политика** demo/PR5-трека, **не** утверждение, что `Snapshot` отличается от других `XxxxSnapshot` по модели узла; «root» — текущий продуктовый потолок, а не отдельный kube-тип «доменного контроллера».
 
-**INV-T2 (доменная политика demo v1, не generic).** В рамках одного snapshot-run **доменные** контроллеры **не** должны создавать более **одного** активного **`DemoVirtualDiskSnapshot`** на один **`pvcUID`**. Диск **не** может одновременно быть **standalone** под root и частью subtree **VM** (один родительский контейнер: либо **`DemoVirtualMachineSnapshot`**, либо root **`NamespaceSnapshot`** — `spec.parentRef` oneOf или эквивалент в реализации). Соблюдение **INV-T2** — ответственность **доменной** логики; **generic** её **не** реализует и **не** интерпретирует **`pvcUID`** / продуктовые правила диска.
+**INV-T2 (доменная политика demo v1, не generic).** В рамках одного snapshot-run **доменные** контроллеры **не** должны создавать более **одного** активного **`DemoVirtualDiskSnapshot`** на один **`pvcUID`**. Диск **не** может одновременно быть **standalone** под root и частью subtree **VM** (один родительский контейнер: либо **`DemoVirtualMachineSnapshot`**, либо root **`Snapshot`** — `spec.parentRef` oneOf или эквивалент в реализации). Соблюдение **INV-T2** — ответственность **доменной** логики; **generic** её **не** реализует и **не** интерпретирует **`pvcUID`** / продуктовые правила диска.
 
 ### Как появляются дети
 
 | Шаг | Кто | Результат |
 |-----|-----|-------------|
-| 1 | Пользователь / CI (и при необходимости generic) | Создаётся root **`NamespaceSnapshot`** (и bind root **`SnapshotContent`**) |
+| 1 | Пользователь / CI (и при необходимости generic) | Создаётся root **`Snapshot`** (и bind root **`SnapshotContent`**) |
 | 2 | **Доменные** контроллеры (через **DSC**) | По доменной логике и **`spec`** создают дочерние snapshot’ы / content (**VM**, **disk**, при необходимости **VolumeSnapshot** и т.д.) |
 | 3 | Те же (или согласованные) контроллеры | Заполняют **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** на родителях |
-| 4 | **Generic** `NamespaceSnapshot` reconciler | Обходит дерево **по refs** (dedup, **`Ready`**, aggregated — без жёсткого списка «разрешённых детей») |
+| 4 | **Generic** `Snapshot` reconciler | Обходит дерево **по refs** (dedup, **`Ready`**, aggregated — без жёсткого списка «разрешённых детей») |
 
 Шаги **логические**, **не** гарантия строгого порядка во времени: допустимы «сначала объект в API, потом запись в refs, потом generic»; система **eventually consistent**, корректность — через **идемпотентные** повторные reconcile, а не через синхронный pipeline 1→2→3→4.
 
@@ -63,7 +63,7 @@
 - disk snapshot соответствует **одному** PVC (**1:1** в v1);
 - **INV-T2** — доменная политика demo (см. выше), другие домены в будущем могут задавать иные правила.
 
-**Generic и «знание типов»:** reconciler **`NamespaceSnapshot`** **не** ведёт allowlist доменных kinds и **не** ветвится по бизнес-смыслу типа. Он **не** знает продуктовой **иерархии** kinds (что «диск под VM», что «VM под root NS»): известна только **топология** по refs, шаг за шагом, плюс **`conditions`** узлов — **без** семантики «disk принадлежит VM». Он опирается на **универсальный контракт**: **(а)** дочерний объект **существует** в API по ссылке из элемента refs (**`apiVersion/kind/name`**; namespace дочернего snapshot не хранится в ref и берётся от parent `NamespaceSnapshot`); **(б)** на узле действуют **стандартные** **`conditions`** (в т.ч. единый **`Ready`**) и общие правила их интерпретации ([`07`](07-ready-delete-matrix.md), [`08`](08-universal-snapshot-tree-model.md)). Так generic остаётся расширяемым при новых DSC-типах **без** правок «если DemoDisk».
+**Generic и «знание типов»:** reconciler **`Snapshot`** **не** ведёт allowlist доменных kinds и **не** ветвится по бизнес-смыслу типа. Он **не** знает продуктовой **иерархии** kinds (что «диск под VM», что «VM под root NS»): известна только **топология** по refs, шаг за шагом, плюс **`conditions`** узлов — **без** семантики «disk принадлежит VM». Он опирается на **универсальный контракт**: **(а)** дочерний объект **существует** в API по ссылке из элемента refs (**`apiVersion/kind/name`**; namespace дочернего snapshot не хранится в ref и берётся от parent `Snapshot`); **(б)** на узле действуют **стандартные** **`conditions`** (в т.ч. единый **`Ready`**) и общие правила их интерпретации ([`07`](07-ready-delete-matrix.md), [`08`](08-universal-snapshot-tree-model.md)). Так generic остаётся расширяемым при новых DSC-типах **без** правок «если DemoDisk».
 
 ---
 
@@ -73,7 +73,7 @@
 
 | Правило | Содержание |
 |---------|------------|
-| **R1** | На **`NamespaceSnapshot.status.childrenSnapshotRefs`** — **прямые** дети **того run**, которые контроллеры **фактически** создали и записали в refs (**любые** поддерживаемые DSC типы, а не заранее зафиксированная таблица «родитель → kinds»). |
+| **R1** | На **`Snapshot.status.childrenSnapshotRefs`** — **прямые** дети **того run**, которые контроллеры **фактически** создали и записали в refs (**любые** поддерживаемые DSC типы, а не заранее зафиксированная таблица «родитель → kinds»). |
 | **R2** | Форма графа **наблюдаема** по refs: например, диски под VM snapshot перечисляются у **`DemoVirtualMachineSnapshot.status.childrenSnapshotRefs`**, а не дублируются как прямые дети root, **если** так задано доменной политикой записи refs. Обход для aggregated / dedup / **`Ready`** — от корня по **единой** модели refs. |
 | **R3** | **`childrenSnapshotContentRefs`** на **`SnapshotContent`** строит **`SnapshotContentController`** из parent **`childrenSnapshotRefs`** и bound content child snapshots. Это производный content graph для traversal/aggregation; source-of-truth для ownership graph остаётся на snapshot refs. |
 | **R4** | Корневой **`SnapshotContent`** несёт **`manifestCheckpointName`** для **root** namespace MCP; MCP доменных leaf — на **`SnapshotContent`** (и при необходимости на VM snapshot content). |
@@ -86,14 +86,14 @@
 
 ## 3. Граница generic vs domain
 
-### Generic controller (например `NamespaceSnapshot`)
+### Generic controller (например `Snapshot`)
 
 | # | Обязанность |
 |---|-------------|
 | G1 | **Идемпотентно** работает через **общую модель дерева**: читает **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, резолвит детей по элементу refs, читает их **`conditions`** (прежде всего **`Ready`**) по **универсальному** контракту — **без** доменных kind-веток и **без** продуктовых правил вроде **INV-T2**. Соблюдает **INV-REF1** и **INV-REF-C1** (§1): **не** достраивает дерево / content из API в обход refs. |
 | G2 | Перед root manifest/volume capture — **вычисляет** dedup из **живого API** по обходу дерева из §2 + VS/MCP/chunks ([`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md) §4). **Не** хранить и **не** читать coverage в CR. |
 | G3 | Агрегирует **`Ready`** на root **только** из **`Ready`** детей (каскад §1 в [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md)) и собственных зависимостей root MCP. **Без** отдельных summary-полей и **без** `SubtreeReady`. |
-| G4 | Не создаёт **вложенный** **`NamespaceSnapshot`** под root (**INV-T1**); не создаёт **Demo*** CRD. |
+| G4 | Не создаёт **вложенный** **`Snapshot`** под root (**INV-T1**); не создаёт **Demo*** CRD. |
 
 ### Только demo controllers
 
@@ -123,10 +123,10 @@
 
 | Объект | ownerRef → |
 |--------|------------|
-| `DemoVirtualMachineSnapshot` | root `NamespaceSnapshot` |
+| `DemoVirtualMachineSnapshot` | root `Snapshot` |
 | `SnapshotContent` | `DemoVirtualMachineSnapshot` |
 | `DemoVirtualDiskSnapshot` (под VM) | `DemoVirtualMachineSnapshot` |
-| `DemoVirtualDiskSnapshot` (standalone) | root `NamespaceSnapshot` |
+| `DemoVirtualDiskSnapshot` (standalone) | root `Snapshot` |
 | `SnapshotContent` | `DemoVirtualDiskSnapshot` |
 | `VolumeSnapshot` | **Типовой** вариант demo v1: **ownerRef** на `DemoVirtualDiskSnapshot`; иначе лейблы + финализаторы ([`08`](08-universal-snapshot-tree-model.md) B.6–B.7). **Не** обязательная на все будущие схемы привязка. |
 

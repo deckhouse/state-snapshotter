@@ -134,7 +134,7 @@ func aggregatedManifestsIntegrationStartServer() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresource", func() {
+var _ = Describe("Integration: Snapshot aggregated manifests subresource", func() {
 	It("returns aggregated manifests for parent-only (N2a lifecycle)", func() {
 		ctx := context.Background()
 		ns := &corev1.Namespace{
@@ -150,14 +150,14 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: nsName}, Data: map[string]string{"k": "v"}}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
-		snap := &storagev1alpha1.NamespaceSnapshot{
+		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			f := &storagev1alpha1.NamespaceSnapshot{}
+			f := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: "snap"}, f)).To(Succeed())
 			rc := meta.FindStatusCondition(f.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(rc).NotTo(BeNil())
@@ -167,7 +167,7 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/namespacesnapshots/snap/manifests", srv.URL, nsName)
+		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests", srv.URL, nsName)
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
@@ -190,7 +190,7 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 				break
 			}
 		}
-		Expect(foundConfigMap).To(BeTrue(), "NamespaceSnapshot own MCP should include namespace-scoped allowlist manifests")
+		Expect(foundConfigMap).To(BeTrue(), "Snapshot own MCP should include namespace-scoped allowlist manifests")
 	})
 
 	It("returns aggregated manifests for parent + one manual child SnapshotContent (disjoint MCP objects)", func() {
@@ -208,15 +208,15 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: nsName}, Data: map[string]string{"k": "v"}}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
-		snap := &storagev1alpha1.NamespaceSnapshot{
+		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		var rootContentName string
 		Eventually(func(g Gomega) {
-			f := &storagev1alpha1.NamespaceSnapshot{}
+			f := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: "snap"}, f)).To(Succeed())
 			rc := meta.FindStatusCondition(f.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(rc).NotTo(BeNil())
@@ -239,7 +239,7 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/namespacesnapshots/snap/manifests", srv.URL, nsName)
+		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests", srv.URL, nsName)
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
@@ -281,15 +281,15 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: nsName}, Data: map[string]string{"k": "v"}}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
-		snap := &storagev1alpha1.NamespaceSnapshot{
+		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		var rootContentName string
 		Eventually(func(g Gomega) {
-			f := &storagev1alpha1.NamespaceSnapshot{}
+			f := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: "snap"}, f)).To(Succeed())
 			rc := meta.FindStatusCondition(f.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(rc).NotTo(BeNil())
@@ -323,7 +323,7 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/namespacesnapshots/snap/manifests", srv.URL, nsName)
+		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests", srv.URL, nsName)
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
@@ -350,10 +350,10 @@ var _ = Describe("Integration: NamespaceSnapshot aggregated manifests subresourc
 		Expect(ia).To(BeNumerically("<", ib), "child-a before child-b lexicographically")
 	})
 
-	It("returns 404 for missing NamespaceSnapshot", func() {
+	It("returns 404 for missing Snapshot", func() {
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/namespacesnapshots/does-not-exist-agg/manifests"
+		url := srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/snapshots/does-not-exist-agg/manifests"
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()

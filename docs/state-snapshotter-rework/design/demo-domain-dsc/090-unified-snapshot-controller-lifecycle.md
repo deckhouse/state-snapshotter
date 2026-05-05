@@ -51,7 +51,7 @@ runtime migration is explicitly performed.
 
 **VM:** `DemoVirtualMachineSnapshotController` owns VM-level materialization and creates disk child snapshots for disk resources. Its own MCP contains the source `DemoVirtualMachine`; VM-owned disks are delegated to child `DemoVirtualDiskSnapshot` nodes.
 
-**Namespace:** `NamespaceSnapshotController` owns namespace-level materialization for namespace-scoped allowlist resources only. It does not capture the cluster-scoped Kubernetes `Namespace` object. Empty own scope is represented by an empty MCP with `status.manifestCheckpointName` set. The `NamespaceSnapshot` CR remains namespaced; resolved target namespace is `NamespaceSnapshot.metadata.namespace`, and this change does not add `spec.namespace` / `spec.targetNamespace`. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
+**Namespace:** `SnapshotController` owns namespace-level materialization for namespace-scoped allowlist resources only. It does not capture the cluster-scoped Kubernetes `Namespace` object. Empty own scope is represented by an empty MCP with `status.manifestCheckpointName` set. The `Snapshot` CR remains namespaced; resolved target namespace is `Snapshot.metadata.namespace`, and this change does not add `spec.namespace` / `spec.targetNamespace`. It uses DSC/registry only to discover top-level domain resources and create their child snapshots.
 
 **E5 exclude:** root capture excludes objects already present in descendant content-node MCPs, including dedicated `SnapshotContent` nodes reached through `childrenSnapshotContentRefs`.
 
@@ -67,5 +67,5 @@ Aggregated read is generic traversal over the content graph. The normative API, 
 - Child owns only its own snapshot, content, MCR/MCP, and `Ready`.
 - Aggregated read is the only place where parent and child MCPs are combined.
 - `manifestCheckpointName` is required for materialized content traversal; empty scope is represented by an empty MCP.
-- `NamespaceSnapshot` differs only by DSC-based discovery, not by special root semantics.
+- `Snapshot` differs only by DSC-based discovery, not by special root semantics.
 - Generic/usecase code remains domain-agnostic.

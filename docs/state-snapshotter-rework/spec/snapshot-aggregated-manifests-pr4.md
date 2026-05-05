@@ -1,4 +1,4 @@
-# NamespaceSnapshot aggregated manifests download (N2b PR4)
+# Snapshot aggregated manifests download (N2b PR4)
 
 Normative contract for implementation and tests. **SSOT** for this HTTP surface; do not duplicate long fragments elsewhere — link here.
 
@@ -24,12 +24,12 @@ Normative contract for implementation and tests. **SSOT** for this HTTP surface;
 
 ### 2.1 Root object
 
-The request is initiated by **`NamespaceSnapshot`** (namespaced).
+The request is initiated by **`Snapshot`** (namespaced).
 
 Root is resolved as:
 
 ```text
-NamespaceSnapshot
+Snapshot
   → status.boundSnapshotContentName
   → SnapshotContent (root)
 ```
@@ -48,7 +48,7 @@ Each ref contains **`name`** (cluster-scoped `SnapshotContent`).
 
 **Important**
 
-- `childrenSnapshotRefs` (on `NamespaceSnapshot`) are **not** used for this aggregated-manifests traversal.
+- `childrenSnapshotRefs` (on `Snapshot`) are **not** used for this aggregated-manifests traversal.
 - Only the persisted `SnapshotContent` ref graph is canonical for this endpoint.
 
 ## 3. Traversal algorithm
@@ -61,7 +61,7 @@ For each `SnapshotContent`:
 
 1. Must exist → otherwise **404**
 2. Must have non-empty `status.manifestCheckpointName` → otherwise **500**
-3. **Read artifact:** call **`ArchiveService.GetArchiveFromCheckpoint`** for that ManifestCheckpoint (§4). **404** if ManifestCheckpoint not found; **409** if ManifestCheckpoint exists but is **not Ready** (same semantics as single-MCP `/manifests`, [`namespace-snapshot-controller.md`](../design/namespace-snapshot-controller.md) §8.7.1); **500** for chunk decode / checksum / other archive failures covered in §7.1.
+3. **Read artifact:** call **`ArchiveService.GetArchiveFromCheckpoint`** for that ManifestCheckpoint (§4). **404** if ManifestCheckpoint not found; **409** if ManifestCheckpoint exists but is **not Ready** (same semantics as single-MCP `/manifests`, [`snapshot-controller.md`](../design/snapshot-controller.md) §8.7.1); **500** for chunk decode / checksum / other archive failures covered in §7.1.
 
 **Relationship to SnapshotContent `Ready`:** the **authoritative** gate for «can we read this node’s manifests» is **ManifestCheckpoint readiness**, enforced inside **`GetArchiveFromCheckpoint`** (step 3). The handler **MAY** additionally return **409** when `SnapshotContent` `Ready` is not `True` **if** that is consistent with N2b status semantics in design (**§4.4**, **§11**); that check is **not** a substitute for step 3.
 
@@ -100,7 +100,7 @@ Objects are identified by **`(apiVersion, kind, namespace, name)`**. If a duplic
 ### 6.1 Endpoint
 
 ```http
-GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/namespacesnapshots/{name}/manifests
+GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/snapshots/{name}/manifests
 ```
 
 ### 6.2 Response
@@ -128,7 +128,7 @@ This endpoint is **fail-whole**.
 
 | Case | Code |
 |------|------|
-| `NamespaceSnapshot` not found | 404 |
+| `Snapshot` not found | 404 |
 | `SnapshotContent` not found | 404 |
 | `ManifestCheckpoint` not found | 404 |
 | `ManifestCheckpoint` not Ready (enforced via `GetArchiveFromCheckpoint`) | 409 |

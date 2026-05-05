@@ -30,15 +30,15 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// patchNamespaceSnapshotReadyFromE6 applies PickParentReadyReasonE6 outcome (Ready=False branch) on the parent NamespaceSnapshot.
-func (r *NamespaceSnapshotReconciler) patchNamespaceSnapshotReadyFromE6(
+// patchSnapshotReadyFromE6 applies PickParentReadyReasonE6 outcome (Ready=False branch) on the parent Snapshot.
+func (r *SnapshotReconciler) patchSnapshotReadyFromE6(
 	ctx context.Context,
 	parentKey types.NamespacedName,
 	reason string,
 	msg string,
 ) (ctrl.Result, error) {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		nsSnap := &storagev1alpha1.NamespaceSnapshot{}
+		nsSnap := &storagev1alpha1.Snapshot{}
 		if err := r.Client.Get(ctx, parentKey, nsSnap); err != nil {
 			return err
 		}

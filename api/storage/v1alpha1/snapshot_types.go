@@ -22,32 +22,32 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=nssnap
+// +kubebuilder:resource:scope=Namespaced,shortName=snap
 // +kubebuilder:printcolumn:name="Content",type=string,JSONPath=`.status.boundSnapshotContentName`
-// NamespaceSnapshot requests a namespace state/configuration snapshot (MVP: design namespace-snapshot-controller.md).
-type NamespaceSnapshot struct {
+// Snapshot requests a namespace state/configuration snapshot (MVP: design snapshot-controller.md).
+type Snapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   NamespaceSnapshotSpec   `json:"spec,omitempty"`
-	Status NamespaceSnapshotStatus `json:"status,omitempty"`
+	Spec   SnapshotSpec   `json:"spec,omitempty"`
+	Status SnapshotStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type NamespaceSnapshotList struct {
+type SnapshotList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []NamespaceSnapshot `json:"items"`
+	Items           []Snapshot `json:"items"`
 }
 
 // +k8s:deepcopy-gen=true
-type NamespaceSnapshotSpec struct {
+type SnapshotSpec struct {
 	// SnapshotClassName optionally selects class/policy (aligned with unified snapshot model; resolution is N2+).
 	SnapshotClassName string `json:"snapshotClassName,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
-type NamespaceSnapshotStatus struct {
+type SnapshotStatus struct {
 	// ObservedGeneration is the metadata.generation the controller last reconciled into this status.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -62,11 +62,11 @@ type NamespaceSnapshotStatus struct {
 
 	// ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
 	// in the N2b run tree. Generic reconcile resolves each child with one Get by ref GVK (no demo-kind
-	// branching and no registry scan for child selection); it is not limited to NamespaceSnapshot.
-	// Child namespace is implicit and always equals parent NamespaceSnapshot namespace.
+	// branching and no registry scan for child selection); it is not limited to Snapshot.
+	// Child namespace is implicit and always equals parent Snapshot namespace.
 	// Populated by domain controllers or merge helpers that own graph edges.
 	// +optional
-	ChildrenSnapshotRefs []NamespaceSnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
+	ChildrenSnapshotRefs []SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 
 	// Conditions represent the latest observations (Ready, Bound, Failed, etc.).
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

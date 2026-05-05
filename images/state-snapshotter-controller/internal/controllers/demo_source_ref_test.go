@@ -393,7 +393,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		t.Fatalf("expected only owned disk child snapshot, got %d", len(diskSnapshots.Items))
 	}
 	vmSnap := getDemoVMSnapshot(t, cl)
-	if !namespaceSnapshotChildRefsEqualIgnoreOrder(vmSnap.Status.ChildrenSnapshotRefs, []storagev1alpha1.NamespaceSnapshotChildRef{{
+	if !snapshotChildRefsEqualIgnoreOrder(vmSnap.Status.ChildrenSnapshotRefs, []storagev1alpha1.SnapshotChildRef{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       KindDemoVirtualDiskSnapshot,
 		Name:       childName,
@@ -744,7 +744,7 @@ func assertDemoOwnerRef(t *testing.T, refs []metav1.OwnerReference, apiVersion, 
 func assertNoSnapshotContentOwnerRefToSnapshot(t *testing.T, content *storagev1alpha1.SnapshotContent) {
 	t.Helper()
 	for _, ref := range content.OwnerReferences {
-		if ref.Kind == KindNamespaceSnapshot || ref.Kind == KindDemoVirtualDiskSnapshot || ref.Kind == KindDemoVirtualMachineSnapshot {
+		if ref.Kind == KindSnapshot || ref.Kind == KindDemoVirtualDiskSnapshot || ref.Kind == KindDemoVirtualMachineSnapshot {
 			t.Fatalf("SnapshotContent %s must not be owned by Snapshot %s/%s", content.Name, ref.Kind, ref.Name)
 		}
 	}

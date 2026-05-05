@@ -100,8 +100,8 @@ func demoSnapshotUnstructuredReady(ns, name string, gvk schema.GroupVersionKind,
 	return u
 }
 
-func refDemoDisk(name string) storagev1alpha1.NamespaceSnapshotChildRef {
-	return storagev1alpha1.NamespaceSnapshotChildRef{
+func refDemoDisk(name string) storagev1alpha1.SnapshotChildRef {
+	return storagev1alpha1.SnapshotChildRef{
 		APIVersion: "demo.example.com/v1",
 		Kind:       "DemoDiskSnapshot",
 		Name:       name,
@@ -112,7 +112,7 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_InvalidRefFieldsFailed(t 
 	t.Parallel()
 	ctx := context.Background()
 	cl := fake.NewClientBuilder().Build()
-	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.NamespaceSnapshotChildRef{
+	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "", Kind: "X", Name: "n"},
 	}, "ns")
 	if err != nil {
@@ -130,7 +130,7 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_UsesParentNamespace(t *te
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	u := demoSnapshotUnstructuredReady(ns, "disk-a", gvk, "c1", metav1.ConditionTrue, snapshot.ReasonCompleted)
 	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
-	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.NamespaceSnapshotChildRef{
+	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "demo.example.com/v1", Kind: "DemoDiskSnapshot", Name: "disk-a"},
 	}, ns)
 	if err != nil {
@@ -149,8 +149,8 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_DoesNotReadOtherNamespace
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	other := demoSnapshotUnstructuredReady(nsOther, "disk-a", gvk, "c1", metav1.ConditionTrue, snapshot.ReasonCompleted)
 	cl := fake.NewClientBuilder().WithRuntimeObjects(other).Build()
-	ref := storagev1alpha1.NamespaceSnapshotChildRef{APIVersion: "demo.example.com/v1", Kind: "DemoDiskSnapshot", Name: "disk-a"}
-	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.NamespaceSnapshotChildRef{ref}, nsParent)
+	ref := storagev1alpha1.SnapshotChildRef{APIVersion: "demo.example.com/v1", Kind: "DemoDiskSnapshot", Name: "disk-a"}
+	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.SnapshotChildRef{ref}, nsParent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_GenericChildCompleted(t *
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	u := demoSnapshotUnstructuredReady(ns, "disk-a", gvk, "content-1", metav1.ConditionTrue, snapshot.ReasonCompleted)
 	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
-	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.NamespaceSnapshotChildRef{
+	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("disk-a"),
 	}, ns)
 	if err != nil {
@@ -187,7 +187,7 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_SameNameDifferentKindsBot
 	a := demoSnapshotUnstructuredReady(ns, name, gvkA, "c1", metav1.ConditionTrue, snapshot.ReasonCompleted)
 	b := demoSnapshotUnstructuredReady(ns, name, gvkB, "c2", metav1.ConditionTrue, snapshot.ReasonCompleted)
 	cl := fake.NewClientBuilder().WithRuntimeObjects(a, b).Build()
-	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.NamespaceSnapshotChildRef{
+	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "generic.state-snapshotter.test/v1", Kind: "SnapA", Name: name},
 		{APIVersion: "generic.state-snapshotter.test/v1", Kind: "SnapB", Name: name},
 	}, ns)
@@ -203,7 +203,7 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_NotFoundPending(t *testin
 	t.Parallel()
 	ctx := context.Background()
 	cl := fake.NewClientBuilder().Build()
-	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.NamespaceSnapshotChildRef{
+	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("missing"),
 	}, "ns")
 	if err != nil {
@@ -222,7 +222,7 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_MultiPending(t *testing.T
 	a := demoSnapshotUnstructuredReady(ns, "a", gvk, "", "", "")
 	b := demoSnapshotUnstructuredReady(ns, "b", gvk, "z", metav1.ConditionTrue, snapshot.ReasonCompleted)
 	cl := fake.NewClientBuilder().WithRuntimeObjects(a, b).Build()
-	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.NamespaceSnapshotChildRef{
+	sum, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("a"),
 		refDemoDisk("b"),
 	}, ns)
@@ -238,7 +238,7 @@ func TestSummarizeChildrenSnapshotRefsForParentReadyE6_GetErrorPropagates(t *tes
 	t.Parallel()
 	ctx := context.Background()
 	bad := errGetClient{err: errors.New("get failed")}
-	_, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, bad, []storagev1alpha1.NamespaceSnapshotChildRef{
+	_, err := SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, bad, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("x"),
 	}, "ns")
 	if err == nil {
@@ -251,29 +251,29 @@ func TestClassifyGenericChildSnapshotReady_TerminalVsPending(t *testing.T) {
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	u := demoSnapshotUnstructuredReady("ns", "x", gvk, "content", metav1.ConditionFalse, "CapturePlanDrift")
 	c, msg := ClassifyGenericChildSnapshotReady(u, gvk, "ns", "x")
-	if c != NamespaceSnapshotChildReadyClassFailed || msg == "" {
+	if c != SnapshotChildReadyClassFailed || msg == "" {
 		t.Fatalf("got %v %q", c, msg)
 	}
 	u2 := demoSnapshotUnstructuredReady("ns", "y", gvk, "content2", metav1.ConditionFalse, "ManifestCheckpointPending")
 	c2, _ := ClassifyGenericChildSnapshotReady(u2, gvk, "ns", "y")
-	if c2 != NamespaceSnapshotChildReadyClassPending {
+	if c2 != SnapshotChildReadyClassPending {
 		t.Fatalf("got %v", c2)
 	}
 }
 
-func TestClassifyNamespaceSnapshotChildReady_DelegatesToGeneric(t *testing.T) {
+func TestClassifySnapshotChildReady_DelegatesToGeneric(t *testing.T) {
 	t.Parallel()
-	ch := &storagev1alpha1.NamespaceSnapshot{
+	ch := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "leaf"},
-		Status: storagev1alpha1.NamespaceSnapshotStatus{
+		Status: storagev1alpha1.SnapshotStatus{
 			BoundSnapshotContentName: "content",
 			Conditions: []metav1.Condition{{
 				Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: snapshot.ReasonCompleted,
 			}},
 		},
 	}
-	c, msg := ClassifyNamespaceSnapshotChildReady(ch)
-	if c != NamespaceSnapshotChildReadyClassCompleted || msg != "" {
+	c, msg := ClassifySnapshotChildReady(ch)
+	if c != SnapshotChildReadyClassCompleted || msg != "" {
 		t.Fatalf("got %v %q", c, msg)
 	}
 }

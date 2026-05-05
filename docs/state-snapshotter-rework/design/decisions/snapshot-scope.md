@@ -1,10 +1,10 @@
-# Decision: NamespaceSnapshot API scope (cluster-scoped vs namespaced)
+# Decision: Snapshot API scope (cluster-scoped vs namespaced)
 
 ## Status
 
 **Resolved** — для текущей поставки (MVP и код в репозитории) выбран **namespaced** root; детали ниже в **Chosen option**.
 
-Связанный design: [`../namespace-snapshot-controller.md`](../namespace-snapshot-controller.md) (§12, §13).
+Связанный design: [`../snapshot-controller.md`](../snapshot-controller.md) (§12, §13).
 
 ## Context
 
@@ -26,19 +26,19 @@
 
 ## Chosen option
 
-**Namespaced** — `NamespaceSnapshot` живёт в том же namespace, который снимается на текущем этапе (без отдельного `spec.source` для смены цели). Это снижает сложность RBAC, admission и SAR относительно cluster-scoped root и достаточно для N0–N1 и скелета N2.
+**Namespaced** — `Snapshot` живёт в том же namespace, который снимается на текущем этапе (без отдельного `spec.source` для смены цели). Это снижает сложность RBAC, admission и SAR относительно cluster-scoped root и достаточно для N0–N1 и скелета N2.
 
 ## Consequences
 
 После заполнения **Chosen option** обновить:
 
-- [`../namespace-snapshot-controller.md`](../namespace-snapshot-controller.md) §4.1, §12, §13.1 (пункт перестаёт блокировать; при желании оставить ссылку «решено в namespace-snapshot-scope.md»);
+- [`../snapshot-controller.md`](../snapshot-controller.md) §4.1, §12, §13.1 (пункт перестаёт блокировать; при желании оставить ссылку «решено в snapshot-scope.md»);
 - CRD OpenAPI, RBAC, тесты и будущую выдержку в `spec/system-spec.md`.
 
 ## Gate
 
 **Критерий допуска N1 (runtime skeleton):** **Chosen option** ≠ TBD — выполнено.
 
-**N1** (см. [`../namespace-snapshot-controller.md`](../namespace-snapshot-controller.md) §16) не начинать, пока критерий не выполнен. Эквивалент в другом нормативном документе допустим **только** со ссылкой отсюда.
+**N1** (см. [`../snapshot-controller.md`](../snapshot-controller.md) §16) не начинать, пока критерий не выполнен. Эквивалент в другом нормативном документе допустим **только** со ссылкой отсюда.
 
 После заполнения Chosen option поле **Status** в этом файле можно обновить (например на Resolved) для навигации, но это **не** меняет критерий: истина — содержимое **Chosen option**.

@@ -35,7 +35,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
-// AggregatedStatusError carries HTTP status for NamespaceSnapshot aggregated manifests (see spec doc linked on BuildAggregatedJSON).
+// AggregatedStatusError carries HTTP status for Snapshot aggregated manifests (see spec doc linked on BuildAggregatedJSON).
 type AggregatedStatusError struct {
 	HTTPStatus int
 	Reason     string
@@ -49,7 +49,7 @@ func NewAggregatedStatusError(httpStatus int, reason, message string) *Aggregate
 	return &AggregatedStatusError{HTTPStatus: httpStatus, Reason: reason, Message: message}
 }
 
-// AggregatedNamespaceManifests builds a single JSON array of manifest objects for a NamespaceSnapshot subtree.
+// AggregatedNamespaceManifests builds a single JSON array of manifest objects for a Snapshot subtree.
 type AggregatedNamespaceManifests struct {
 	client    client.Client
 	archive   *ArchiveService
@@ -61,9 +61,9 @@ func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphLi
 	return &AggregatedNamespaceManifests{client: c, archive: a, graphLive: graphLive}
 }
 
-// BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../namespace-snapshot-aggregated-manifests-pr4.md
+// BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../snapshot-aggregated-manifests-pr4.md
 func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
-	nsSnap := &storagev1alpha1.NamespaceSnapshot{}
+	nsSnap := &storagev1alpha1.Snapshot{}
 	err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, nsSnap)
 	if err == nil {
 		bound := nsSnap.Status.BoundSnapshotContentName
@@ -73,10 +73,10 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, 
 		return s.marshalAggregatedFromRootContent(ctx, bound)
 	}
 	if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("get NamespaceSnapshot: %w", err)
+		return nil, fmt.Errorf("get Snapshot: %w", err)
 	}
 	return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
-		fmt.Sprintf("NamespaceSnapshot %s/%s not found", namespace, snapshotName))
+		fmt.Sprintf("Snapshot %s/%s not found", namespace, snapshotName))
 }
 
 func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootContent(ctx context.Context, rootContent string) ([]byte, error) {
@@ -170,9 +170,9 @@ func (s *AggregatedNamespaceManifests) currentAggregatedRegistry(ctx context.Con
 
 // walkContent visits SnapshotContent nodes for aggregated manifests.
 // Traversal uses only status.childrenSnapshotContentRefs on each node (see
-// docs/state-snapshotter-rework/spec/namespace-snapshot-aggregated-manifests-pr4.md §2.2).
-// It does not list SnapshotContent or NamespaceSnapshot to discover children,
-// and does not follow status.childrenSnapshotRefs on NamespaceSnapshot — consistent with
+// docs/state-snapshotter-rework/spec/snapshot-aggregated-manifests-pr4.md §2.2).
+// It does not list SnapshotContent or Snapshot to discover children,
+// and does not follow status.childrenSnapshotRefs on Snapshot — consistent with
 // system-spec §3.4 (INV-REF-C1): empty or absent content refs mean no further descent from that node.
 //
 // Graph DFS is shared with WalkSnapshotContentSubtree so domain code and aggregation use the same ref-only walk.

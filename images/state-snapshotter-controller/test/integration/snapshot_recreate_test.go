@@ -39,7 +39,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", func() {
+var _ = Describe("Integration: Snapshot recreate (stale MCR / §4.7)", func() {
 	It("after deleting root and creating another with the same name, binds a new SnapshotContent and MCR by new UID and reaches Ready", func() {
 		ctx := context.Background()
 		contentName1 := ""
@@ -49,7 +49,7 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "nss-recreate-",
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-recreate",
+					"state-snapshotter.deckhouse.io/test": "snapshot-recreate",
 				},
 			},
 		}
@@ -74,33 +74,33 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 		snapName := "snap"
 		key := types.NamespacedName{Namespace: nsName, Name: snapName}
 
-		snap1 := &storagev1alpha1.NamespaceSnapshot{
+		snap1 := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap1)).To(Succeed())
 
 		var uid1 types.UID
 		var mcrKey1 client.ObjectKey
 		Eventually(func(g Gomega) {
-			fresh := &storagev1alpha1.NamespaceSnapshot{}
+			fresh := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			uid1 = fresh.UID
 			contentName1 = fresh.Status.BoundSnapshotContentName
-			mcrKey1 = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(uid1)}
+			mcrKey1 = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.SnapshotMCRName(uid1)}
 			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		}).WithTimeout(90 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
+		Expect(k8sClient.Delete(ctx, &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: nsName},
 		})).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			err := k8sClient.Get(ctx, key, &storagev1alpha1.NamespaceSnapshot{})
+			err := k8sClient.Get(ctx, key, &storagev1alpha1.Snapshot{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
@@ -108,29 +108,29 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 		Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 		// The retained root ObjectKeeper is the lifecycle anchor for the old run.
 		// A same-name Snapshot cannot steal it; simulate TTL expiry before reusing the name.
-		oldOKName := namespacemanifest.NamespaceSnapshotRootObjectKeeperName(nsName, snapName)
+		oldOKName := namespacemanifest.SnapshotRootObjectKeeperName(nsName, snapName)
 		Expect(k8sClient.Delete(ctx, &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: oldOKName}})).To(Succeed())
 		Eventually(func(g Gomega) {
 			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: oldOKName}, &deckhousev1alpha1.ObjectKeeper{}))).To(BeTrue())
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		snap2 := &storagev1alpha1.NamespaceSnapshot{
+		snap2 := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: nsName},
-			Spec:       storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec:       storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap2)).To(Succeed())
 
 		var uid2 types.UID
 		var mcrKey2 client.ObjectKey
 		Eventually(func(g Gomega) {
-			fresh := &storagev1alpha1.NamespaceSnapshot{}
+			fresh := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.UID).NotTo(Equal(uid1))
 			uid2 = fresh.UID
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(Equal(contentName1))
 			contentName2 = fresh.Status.BoundSnapshotContentName
-			mcrKey2 = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.NamespaceSnapshotMCRName(uid2)}
+			mcrKey2 = client.ObjectKey{Namespace: nsName, Name: namespacemanifest.SnapshotMCRName(uid2)}
 			g.Expect(mcrKey2).NotTo(Equal(mcrKey1))
 			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey2, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)

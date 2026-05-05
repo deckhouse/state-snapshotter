@@ -31,15 +31,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
 func rootObjectKeeperName(snapshotNamespace, snapshotAPIVersion, snapshotKind, snapshotName string) string {
-	if snapshotAPIVersion == storagev1alpha1.SchemeGroupVersion.String() && snapshotKind == KindNamespaceSnapshot {
-		return namespacemanifest.NamespaceSnapshotRootObjectKeeperName(snapshotNamespace, snapshotName)
+	if snapshotAPIVersion == storagev1alpha1.SchemeGroupVersion.String() && snapshotKind == KindSnapshot {
+		return namespacemanifest.SnapshotRootObjectKeeperName(snapshotNamespace, snapshotName)
 	}
 	sum := sha256.Sum256([]byte(snapshotAPIVersion + "|" + snapshotKind + "|" + snapshotNamespace + "/" + snapshotName))
 	return "ret-snap-" + hex.EncodeToString(sum[:10])
@@ -248,22 +247,13 @@ func resolveParentSnapshotContentOwnerRef(ctx context.Context, c client.Client, 
 
 	var parentContentName string
 	switch {
-	case parentRef.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && parentRef.Kind == KindNamespaceSnapshot:
-		parent := &storagev1alpha1.NamespaceSnapshot{}
+	case parentRef.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && parentRef.Kind == KindSnapshot:
+		parent := &storagev1alpha1.Snapshot{}
 		if err := c.Get(ctx, client.ObjectKey{Namespace: child.GetNamespace(), Name: parentRef.Name}, parent); err != nil {
 			return nil, false, err
 		}
 		if parentRef.UID != "" && parent.UID != parentRef.UID {
-			return nil, false, fmt.Errorf("parent NamespaceSnapshot %s/%s UID mismatch", child.GetNamespace(), parentRef.Name)
-		}
-		parentContentName = parent.Status.BoundSnapshotContentName
-	case parentRef.APIVersion == demov1alpha1.SchemeGroupVersion.String() && parentRef.Kind == KindDemoVirtualMachineSnapshot:
-		parent := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := c.Get(ctx, client.ObjectKey{Namespace: child.GetNamespace(), Name: parentRef.Name}, parent); err != nil {
-			return nil, false, err
-		}
-		if parentRef.UID != "" && parent.UID != parentRef.UID {
-			return nil, false, fmt.Errorf("parent DemoVirtualMachineSnapshot %s/%s UID mismatch", child.GetNamespace(), parentRef.Name)
+			return nil, false, fmt.Errorf("parent Snapshot %s/%s UID mismatch", child.GetNamespace(), parentRef.Name)
 		}
 		parentContentName = parent.Status.BoundSnapshotContentName
 	default:

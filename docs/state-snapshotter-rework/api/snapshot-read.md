@@ -12,7 +12,7 @@ Examples:
 
 ```bash
 curl -s \
-  https://<api-host>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/namespacesnapshots/root/manifests
+  https://<api-host>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/root/manifests
 
 curl -s \
   https://<api-host>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualmachinesnapshots/vm-1/manifests
@@ -23,15 +23,15 @@ curl -s \
 
 The response is `application/json`: an array of Kubernetes manifest objects from the requested snapshot subtree.
 
-## Legacy NamespaceSnapshot Endpoint
+## Legacy Snapshot Endpoint
 
 This endpoint remains supported:
 
 ```text
-GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/namespacesnapshots/{name}/manifests
+GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/snapshots/{name}/manifests
 ```
 
-It has the same aggregated read semantics for `NamespaceSnapshot` and is kept for backward compatibility.
+It has the same aggregated read semantics for `Snapshot` and is kept for backward compatibility.
 
 ## MCP-Level Endpoints
 

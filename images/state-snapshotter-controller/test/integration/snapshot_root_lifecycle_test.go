@@ -41,7 +41,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
+var _ = Describe("Integration: Snapshot lifecycle", func() {
 	It("binds SnapshotContent and reaches Ready with manifestCheckpointName on content (N2a)", func() {
 		ctx := context.Background()
 
@@ -49,7 +49,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "nss-lifecycle-",
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-lifecycle",
+					"state-snapshotter.deckhouse.io/test": "snapshot-lifecycle",
 				},
 			},
 		}
@@ -65,18 +65,18 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 		}
 		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
 
-		snap := &storagev1alpha1.NamespaceSnapshot{
+		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "snap",
 				Namespace: nsName,
 			},
-			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec: storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
 		Eventually(func(g Gomega) {
-			fresh := &storagev1alpha1.NamespaceSnapshot{}
+			fresh := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 
@@ -94,7 +94,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
 			g.Expect(sc.Spec.DeletionPolicy).To(Equal(storagev1alpha1.SnapshotContentDeletionPolicyRetain))
 
-			mcrName := namespacemanifest.NamespaceSnapshotMCRName(fresh.UID)
+			mcrName := namespacemanifest.SnapshotMCRName(fresh.UID)
 			g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsName, Name: mcrName}, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
 			wantMCP := sc.Status.ManifestCheckpointName
 			g.Expect(wantMCP).NotTo(BeEmpty())
@@ -122,7 +122,7 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "nss-notargets-",
 				Labels: map[string]string{
-					"state-snapshotter.deckhouse.io/test": "namespacesnapshot-no-targets",
+					"state-snapshotter.deckhouse.io/test": "snapshot-no-targets",
 				},
 			},
 		}
@@ -132,18 +132,18 @@ var _ = Describe("Integration: NamespaceSnapshot lifecycle", func() {
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
 
-		snap := &storagev1alpha1.NamespaceSnapshot{
+		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "snap",
 				Namespace: nsName,
 			},
-			Spec: storagev1alpha1.NamespaceSnapshotSpec{},
+			Spec: storagev1alpha1.SnapshotSpec{},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
 		Eventually(func(g Gomega) {
-			fresh := &storagev1alpha1.NamespaceSnapshot{}
+			fresh := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)

@@ -38,7 +38,7 @@ func TestResolveChildSnapshotRefToBoundContentName_SameNameDifferentKinds(t *tes
 	b := childSnapUnstructured(ns, name, gvkB, "content-b")
 	cl := fake.NewClientBuilder().WithRuntimeObjects(a, b).Build()
 
-	refA := storagev1alpha1.NamespaceSnapshotChildRef{
+	refA := storagev1alpha1.SnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
 		Kind:       "FixtureDomainSnapshotA",
 		Name:       name,
@@ -47,7 +47,7 @@ func TestResolveChildSnapshotRefToBoundContentName_SameNameDifferentKinds(t *tes
 	if err != nil || out != "content-a" {
 		t.Fatalf("ref A: got %q err=%v", out, err)
 	}
-	refB := storagev1alpha1.NamespaceSnapshotChildRef{
+	refB := storagev1alpha1.SnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
 		Kind:       "FixtureDomainSnapshotB",
 		Name:       name,
@@ -68,7 +68,7 @@ func TestResolveChildSnapshotRefToBoundContentName_UsesParentNamespace(t *testin
 		Kind:    "FixtureDomainSnapshotA",
 	}, "content-x")
 	cl := fake.NewClientBuilder().WithRuntimeObjects(child).Build()
-	got, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, storagev1alpha1.NamespaceSnapshotChildRef{
+	got, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, storagev1alpha1.SnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
 		Kind:       "FixtureDomainSnapshotA",
 		Name:       "x",

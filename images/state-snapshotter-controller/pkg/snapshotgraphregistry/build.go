@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package snapshotgraphregistry builds and refreshes the generic NamespaceSnapshot graph GVK registry
+// Package snapshotgraphregistry builds and refreshes the generic Snapshot graph GVK registry
 // from graph built-ins, eligible DomainSpecificSnapshotController rows, and RESTMapper discovery.
 package snapshotgraphregistry
 

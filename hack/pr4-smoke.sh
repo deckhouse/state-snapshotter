@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# PR4 smoke: retained NamespaceSnapshot lifecycle on namespace default (unified deletion algorithm).
+# PR4 smoke: retained Snapshot lifecycle on namespace default (unified deletion algorithm).
 #
 # Prerequisites: kubectl, jq; curl optional for gzip.
 # Never deletes namespace default.
 #
-# Controller must expose aggregated subresource. Root ObjectKeeper uses FollowObjectWithTTL on NamespaceSnapshot;
+# Controller must expose aggregated subresource. Root ObjectKeeper uses FollowObjectWithTTL on Snapshot;
 # spec.ttl comes from STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL or STATE_SNAPSHOTTER_NS_ROOT_OK_TTL or built-in default (see pkg/config).
 # Physical delete after TTL is driven by Deckhouse ObjectKeeper controller, not this module.
 # Optional sleep step checks whether content/MCP were removed by your cluster/ObjectKeeper policy; set PR4_SMOKE_SKIP_TTL=1 to skip.
@@ -13,14 +13,14 @@
 # post-delete retained snapshot/MCP/aggregated, root ObjectKeeper contract — unless skipped below.
 #
 # Optional:
-#   PR4_SMOKE_NS_SNAP_RESOURCE     default: namespacesnapshots.storage.deckhouse.io
+#   PR4_SMOKE_NS_SNAP_RESOURCE     default: snapshots.storage.deckhouse.io
 #   PR4_SMOKE_SKIP_GZIP            1 = skip kubectl proxy + curl gzip
 #   PR4_SMOKE_PROXY_PORT           default 18443
 #   PR4_SMOKE_SKIP_TTL             1 = skip TTL wait and post-TTL checks (WARN-only when run)
 #   PR4_SMOKE_SKIP_OK_CONTRACT     1 = skip root ObjectKeeper contract (clusters without deckhouse.io ObjectKeeper)
 #   PR4_SMOKE_REQUIRE_TTL          1 = after TTL wait, require content (and MCP if set) gone — fail if still present
 #   PR4_SMOKE_TTL_LOG_EVERY_SEC    progress log interval during strict TTL wait (default 30)
-#   PR4_SMOKE_EXTRA_SNAPSHOT       optional second NamespaceSnapshot name under default for extra .../snapshots/<name>/manifests probe
+#   PR4_SMOKE_EXTRA_SNAPSHOT       optional second Snapshot name under default for extra .../snapshots/<name>/manifests probe
 #
 # Usage: ./hack/pr4-smoke.sh
 # Cleanup retained objects after a run: ./hack/pr4-smoke-cleanup.sh
@@ -29,7 +29,7 @@ set -euo pipefail
 
 SUBAPI="subresources.state-snapshotter.deckhouse.io"
 SUBVER="v1alpha1"
-NS_SNAP_RES="${PR4_SMOKE_NS_SNAP_RESOURCE:-namespacesnapshots.storage.deckhouse.io}"
+NS_SNAP_RES="${PR4_SMOKE_NS_SNAP_RESOURCE:-snapshots.storage.deckhouse.io}"
 WAIT_SEC="${PR4_SMOKE_WAIT_SEC:-300}"
 POLL_SEC="${PR4_SMOKE_POLL_SEC:-5}"
 PROXY_PORT="${PR4_SMOKE_PROXY_PORT:-18443}"
@@ -104,7 +104,7 @@ log "== PR4 smoke: namespace=${NS} snapshot=${SNAP_NAME}"
 log "== 1. Discovery"
 DISC="/apis/${SUBAPI}/${SUBVER}"
 disc_json=$(kubectl get --raw "${DISC}")
-echo "${disc_json}" | jq -e --arg n "namespacesnapshots/manifests" \
+echo "${disc_json}" | jq -e --arg n "snapshots/manifests" \
 	'.resources[] | select(.name == $n) | .namespaced == true' >/dev/null
 log "OK discovery"
 
@@ -120,14 +120,14 @@ else
 	log "cm1 already exists"
 fi
 
-log "== 3. Remove stale NamespaceSnapshot if present"
+log "== 3. Remove stale Snapshot if present"
 kubectl -n "${NS}" delete "${NS_SNAP_RES}" "${SNAP_NAME}" --ignore-not-found=true --wait=true 2>/dev/null || true
 sleep 2
 
-log "== 4. Create NamespaceSnapshot ${SNAP_NAME}"
+log "== 4. Create Snapshot ${SNAP_NAME}"
 kubectl -n "${NS}" apply -f - <<EOF
 apiVersion: storage.deckhouse.io/v1alpha1
-kind: NamespaceSnapshot
+kind: Snapshot
 metadata:
   name: ${SNAP_NAME}
 spec: {}
@@ -179,10 +179,10 @@ else
 	if ! echo "${ok_json}" | jq -e --arg suid "${SNAP_UID}" \
 		'(.spec.mode == "FollowObjectWithTTL")
 			and (.spec.ttl != null)
-			and (.spec.followObjectRef.kind == "NamespaceSnapshot")
+			and (.spec.followObjectRef.kind == "Snapshot")
 			and (.spec.followObjectRef.uid == $suid)
 			and ([ .metadata.ownerReferences[]? | select(.kind == "SnapshotContent") ] | length == 0)' >/dev/null; then
-		log "ERROR: ObjectKeeper ${OK_NAME} contract mismatch (expect FollowObjectWithTTL on NamespaceSnapshot, no ownerRef to SnapshotContent)"
+		log "ERROR: ObjectKeeper ${OK_NAME} contract mismatch (expect FollowObjectWithTTL on Snapshot, no ownerRef to SnapshotContent)"
 		exit 1
 	fi
 	nsc_json=$(kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" -o json) || {
@@ -194,10 +194,10 @@ else
 		log "ERROR: SnapshotContent ${BOUND} must have controller ownerRef -> ObjectKeeper ${OK_NAME}"
 		exit 1
 	fi
-	log "OK retained root chain: OK follow NamespaceSnapshot; content ownerRef -> OK"
+	log "OK retained root chain: OK follow Snapshot; content ownerRef -> OK"
 fi
 
-AGG_PATH="/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/namespacesnapshots/${SNAP_NAME}/manifests"
+AGG_PATH="/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/snapshots/${SNAP_NAME}/manifests"
 TMP=$(mktemp)
 
 log "== 6. Aggregated GET (before root delete)"
@@ -206,12 +206,12 @@ jq -e 'type == "array" and length >= 1' "${TMP}" >/dev/null
 jq -e '[.[] | select(.kind == "ConfigMap" and .metadata.name == "cm1")] | length >= 1' "${TMP}" >/dev/null
 log "OK aggregated contains ConfigMap cm1"
 
-log "== 7. Delete NamespaceSnapshot"
+log "== 7. Delete Snapshot"
 kubectl -n "${NS}" delete "${NS_SNAP_RES}" "${SNAP_NAME}" --wait=true
 
 log "== 8. Post-delete: snapshot gone, retained tree present"
 ! kubectl -n "${NS}" get "${NS_SNAP_RES}" "${SNAP_NAME}" >/dev/null 2>&1 || {
-	log "ERROR: NamespaceSnapshot still exists"
+	log "ERROR: Snapshot still exists"
 	exit 1
 }
 kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" >/dev/null
@@ -319,7 +319,7 @@ fi
 log "== 13. Negative 404"
 NEG_NAME="does-not-exist-$RANDOM"
 set +e
-neg_out=$(kubectl get --raw "/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/namespacesnapshots/${NEG_NAME}/manifests" 2>&1)
+neg_out=$(kubectl get --raw "/apis/${SUBAPI}/${SUBVER}/namespaces/${NS}/snapshots/${NEG_NAME}/manifests" 2>&1)
 neg_rc=$?
 set -e
 if [[ "${neg_rc}" -eq 0 ]]; then

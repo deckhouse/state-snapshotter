@@ -22,12 +22,12 @@ import (
 	"testing"
 )
 
-func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T) {
-	ns := NamespaceSnapshot{
-		Status: NamespaceSnapshotStatus{
+func TestSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T) {
+	ns := Snapshot{
+		Status: SnapshotStatus{
 			BoundSnapshotContentName: "parent-content",
-			ChildrenSnapshotRefs: []NamespaceSnapshotChildRef{
-				{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "NamespaceSnapshot", Name: "child1"},
+			ChildrenSnapshotRefs: []SnapshotChildRef{
+				{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child1"},
 			},
 		},
 	}
@@ -37,7 +37,7 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var out NamespaceSnapshot
+	var out Snapshot
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 		t.Fatalf("ChildrenSnapshotRefs len: got %d want 1 (full %#v)", len(got), got)
 	}
 	if got := out.Status.ChildrenSnapshotRefs[0]; got.Name != "child1" ||
-		got.APIVersion != "storage.deckhouse.io/v1alpha1" || got.Kind != "NamespaceSnapshot" {
+		got.APIVersion != "storage.deckhouse.io/v1alpha1" || got.Kind != "Snapshot" {
 		t.Fatalf("ChildrenSnapshotRefs[0]: got %#v", got)
 	}
 
@@ -65,7 +65,7 @@ func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T
 	}
 	item := refs[0].(map[string]interface{})
 	if item["name"] != "child1" ||
-		item["apiVersion"] != "storage.deckhouse.io/v1alpha1" || item["kind"] != "NamespaceSnapshot" {
+		item["apiVersion"] != "storage.deckhouse.io/v1alpha1" || item["kind"] != "Snapshot" {
 		t.Fatalf("expected JSON keys apiVersion/kind/name, got %#v", item)
 	}
 	if _, ok := item["namespace"]; ok {
@@ -140,9 +140,9 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestNamespaceSnapshotStatus_ChildrenSnapshotRefs_OmittedWhenEmpty(t *testing.T) {
-	ns := NamespaceSnapshot{
-		Status: NamespaceSnapshotStatus{
+func TestSnapshotStatus_ChildrenSnapshotRefs_OmittedWhenEmpty(t *testing.T) {
+	ns := Snapshot{
+		Status: SnapshotStatus{
 			BoundSnapshotContentName: "x",
 		},
 	}
