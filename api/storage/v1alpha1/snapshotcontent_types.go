@@ -49,6 +49,7 @@ type SnapshotContentList struct {
 // +k8s:deepcopy-gen=true
 type SnapshotContentSpec struct {
 	// SnapshotRef points to the snapshot root (e.g. NamespaceSnapshot). Kind must match the root CRD.
+	// Current runtime uses it to finish content aggregation; a later refactor should remove this dependency.
 	SnapshotRef SnapshotSubjectRef `json:"snapshotRef"`
 
 	// BackupRepositoryName optional; used when snapshot class resolves to a backup repository.

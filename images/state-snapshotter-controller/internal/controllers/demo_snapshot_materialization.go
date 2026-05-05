@@ -179,19 +179,30 @@ func demoSnapshotOwnerRefMatches(ref, desired metav1.OwnerReference) bool {
 }
 
 func ensureDemoSnapshotOwnerRef(obj client.Object, desired metav1.OwnerReference) error {
+	refs := make([]metav1.OwnerReference, 0, len(obj.GetOwnerReferences())+1)
+	desiredSet := false
 	for _, ref := range obj.GetOwnerReferences() {
 		if demoSnapshotOwnerRefMatches(ref, desired) {
-			refs := []metav1.OwnerReference{desired}
-			if !ownerReferencesEqual(obj.GetOwnerReferences(), refs) {
-				obj.SetOwnerReferences(refs)
+			if !desiredSet {
+				refs = append(refs, desired)
+				desiredSet = true
 			}
-			return nil
+			continue
 		}
 		if isSnapshotParentOwnerRef(ref) {
 			return fmt.Errorf("child snapshot %s/%s is already owned by %s/%s", obj.GetNamespace(), obj.GetName(), ref.Kind, ref.Name)
 		}
+		if ref.Controller != nil && *ref.Controller {
+			return fmt.Errorf("child snapshot %s/%s already has controller ownerRef %s/%s", obj.GetNamespace(), obj.GetName(), ref.Kind, ref.Name)
+		}
+		refs = append(refs, ref)
 	}
-	obj.SetOwnerReferences([]metav1.OwnerReference{desired})
+	if !desiredSet {
+		refs = append(refs, desired)
+	}
+	if !ownerReferencesEqual(obj.GetOwnerReferences(), refs) {
+		obj.SetOwnerReferences(refs)
+	}
 	return nil
 }
 

@@ -583,21 +583,15 @@ func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx 
 			UID:        parentContentObj.GetUID(),
 			Controller: func() *bool { b := true; return &b }(),
 		}
-		for _, ref := range child.OwnerReferences {
-			if ref.APIVersion == ownerRef.APIVersion && ref.Kind == ownerRef.Kind {
-				if ref.Name != ownerRef.Name || (ref.UID != "" && ownerRef.UID != "" && ref.UID != ownerRef.UID) {
-					return fmt.Errorf("child SnapshotContent %s is already owned by SnapshotContent %s", childName, ref.Name)
-				}
-			}
+		refs, changed, err := snapshotContentControllerOwnerRefsForHandoff(child.OwnerReferences, ownerRef)
+		if err != nil {
+			return fmt.Errorf("child SnapshotContent %s: %w", childName, err)
 		}
-		if len(child.OwnerReferences) == 1 {
-			existing := child.OwnerReferences[0]
-			if existing.APIVersion == ownerRef.APIVersion && existing.Kind == ownerRef.Kind && existing.Name == ownerRef.Name && existing.UID == ownerRef.UID {
-				return nil
-			}
+		if !changed {
+			return nil
 		}
 		base := child.DeepCopy()
-		child.OwnerReferences = []metav1.OwnerReference{ownerRef}
+		child.OwnerReferences = refs
 		return r.Client.Patch(ctx, child, client.MergeFrom(base))
 	})
 }
@@ -668,16 +662,44 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 			UID:        contentObj.GetUID(),
 			Controller: func() *bool { b := true; return &b }(),
 		}
-		if len(mcp.OwnerReferences) == 1 {
-			existing := mcp.OwnerReferences[0]
-			if existing.APIVersion == ownerRef.APIVersion && existing.Kind == ownerRef.Kind && existing.Name == ownerRef.Name && existing.UID == ownerRef.UID {
-				return nil
-			}
+		refs, changed, err := snapshotContentControllerOwnerRefsForHandoff(mcp.OwnerReferences, ownerRef)
+		if err != nil {
+			return fmt.Errorf("ManifestCheckpoint %s: %w", mcpName, err)
+		}
+		if !changed {
+			return nil
 		}
 		base := mcp.DeepCopy()
-		mcp.OwnerReferences = []metav1.OwnerReference{ownerRef}
+		mcp.OwnerReferences = refs
 		return r.Client.Patch(ctx, mcp, client.MergeFrom(base))
 	})
+}
+
+func snapshotContentControllerOwnerRefsForHandoff(existing []metav1.OwnerReference, desired metav1.OwnerReference) ([]metav1.OwnerReference, bool, error) {
+	out := make([]metav1.OwnerReference, 0, len(existing)+1)
+	desiredSet := false
+	for _, ref := range existing {
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" {
+			if ref.Name != desired.Name || (ref.UID != "" && desired.UID != "" && ref.UID != desired.UID) {
+				return nil, false, fmt.Errorf("already owned by SnapshotContent %s", ref.Name)
+			}
+			if !desiredSet {
+				out = append(out, desired)
+				desiredSet = true
+			}
+			continue
+		}
+		if ref.Controller != nil && *ref.Controller {
+			// Handoff replaces the old controller owner (for example ObjectKeeper or child Snapshot)
+			// with SnapshotContent while preserving non-controller references.
+			continue
+		}
+		out = append(out, ref)
+	}
+	if !desiredSet {
+		out = append(out, desired)
+	}
+	return out, !ownerReferencesEqual(existing, out), nil
 }
 
 func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.Context, mcpName string) (string, bool, bool, string, error) {

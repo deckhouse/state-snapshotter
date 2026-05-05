@@ -59,6 +59,12 @@ func TestIsMCRSafeToDeleteRequiresContentLinkedReadyOwnedMCP(t *testing.T) {
 			},
 		},
 		{
+			name: "not safe when MCP Ready but ownerRef is another SnapshotContent",
+			mutate: func(_ *ssv1alpha1.ManifestCaptureRequest, _ *storagev1alpha1.SnapshotContent, mcp *ssv1alpha1.ManifestCheckpoint) {
+				mcp.OwnerReferences[0].Name = "other-content"
+			},
+		},
+		{
 			name: "not safe when SnapshotContent has not published manifestCheckpointName",
 			mutate: func(_ *ssv1alpha1.ManifestCaptureRequest, content *storagev1alpha1.SnapshotContent, _ *ssv1alpha1.ManifestCheckpoint) {
 				content.Status.ManifestCheckpointName = ""

@@ -53,8 +53,9 @@ spec:
                 - Delete
                 type: string
               snapshotRef:
-                description: SnapshotRef points to the snapshot root (e.g. NamespaceSnapshot).
-                  Kind must match the root CRD.
+                description: |-
+                  SnapshotRef points to the snapshot root (e.g. NamespaceSnapshot). Kind must match the root CRD.
+                  Current runtime uses it to finish content aggregation; a later refactor should remove this dependency.
                 properties:
                   apiVersion:
                     type: string

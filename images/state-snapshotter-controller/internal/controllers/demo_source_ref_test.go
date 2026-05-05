@@ -542,6 +542,42 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 	}
 }
 
+func TestEnsureDemoSnapshotOwnerRefPreservesUnrelatedRefs(t *testing.T) {
+	unrelated := metav1.OwnerReference{APIVersion: "example.io/v1", Kind: "AuditAnchor", Name: "audit"}
+	child := &demov1alpha1.DemoVirtualDiskSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "child",
+			Namespace:       "ns1",
+			OwnerReferences: []metav1.OwnerReference{unrelated},
+		},
+	}
+	desired := demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualMachineSnapshot, "vm-snap", "vm-uid")
+
+	if err := ensureDemoSnapshotOwnerRef(child, desired); err != nil {
+		t.Fatalf("ensure demo snapshot ownerRef: %v", err)
+	}
+	assertDemoSnapshotOwnedBy(t, child, desired.APIVersion, desired.Kind, desired.Name)
+	assertOwnerRefPresent(t, child.GetOwnerReferences(), unrelated.APIVersion, unrelated.Kind, unrelated.Name)
+}
+
+func TestEnsureDemoSnapshotOwnerRefIsIdempotent(t *testing.T) {
+	desired := demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualMachineSnapshot, "vm-snap", "vm-uid")
+	child := &demov1alpha1.DemoVirtualDiskSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "child",
+			Namespace:       "ns1",
+			OwnerReferences: []metav1.OwnerReference{desired},
+		},
+	}
+
+	if err := ensureDemoSnapshotOwnerRef(child, desired); err != nil {
+		t.Fatalf("ensure demo snapshot ownerRef: %v", err)
+	}
+	if len(child.OwnerReferences) != 1 || !demoSnapshotOwnerRefMatches(child.OwnerReferences[0], desired) {
+		t.Fatalf("ownerRefs changed unexpectedly: %#v", child.OwnerReferences)
+	}
+}
+
 func reconcileCommonSnapshotContentStatusForTest(t *testing.T, cl client.Client, contentName string) {
 	t.Helper()
 	content := &storagev1alpha1.SnapshotContent{}
@@ -662,4 +698,14 @@ func assertDemoSnapshotOwnedBy(t *testing.T, obj client.Object, apiVersion, kind
 		}
 	}
 	t.Fatalf("expected %s/%s to be owned by %s %s/%s, got %#v", obj.GetNamespace(), obj.GetName(), apiVersion, kind, name, obj.GetOwnerReferences())
+}
+
+func assertOwnerRefPresent(t *testing.T, refs []metav1.OwnerReference, apiVersion, kind, name string) {
+	t.Helper()
+	for _, ref := range refs {
+		if ref.APIVersion == apiVersion && ref.Kind == kind && ref.Name == name {
+			return
+		}
+	}
+	t.Fatalf("expected ownerRef %s/%s/%s in %#v", apiVersion, kind, name, refs)
 }
