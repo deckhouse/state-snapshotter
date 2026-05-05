@@ -52,33 +52,10 @@ spec:
                 - Retain
                 - Delete
                 type: string
-              snapshotRef:
-                description: |-
-                  SnapshotRef points to the snapshot root (e.g. NamespaceSnapshot). Kind must match the root CRD.
-                  Current runtime uses it to finish content aggregation; a later refactor should remove this dependency.
-                properties:
-                  apiVersion:
-                    type: string
-                  kind:
-                    type: string
-                  name:
-                    type: string
-                  namespace:
-                    type: string
-                  uid:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
-                    type: string
-                required:
-                - apiVersion
-                - kind
-                - name
-                type: object
-            required:
-            - snapshotRef
             type: object
+            x-kubernetes-validations:
+            - message: SnapshotContent spec is immutable
+              rule: self == oldSelf
           status:
             properties:
               childrenSnapshotContentRefs:

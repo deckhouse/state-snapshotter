@@ -474,13 +474,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			contentObj := &unstructured.Unstructured{}
 			contentObj.SetGroupVersionKind(contentGVK)
 			contentObj.SetName(contentName)
-			contentObj.Object["spec"] = map[string]interface{}{
-				"snapshotRef": map[string]interface{}{
-					"kind":      snapshotGVK.Kind,
-					"name":      snapshotObj.GetName(),
-					"namespace": snapshotObj.GetNamespace(),
-				},
-			}
+			contentObj.Object["spec"] = map[string]interface{}{}
 
 			err = k8sClient.Create(ctx, contentObj)
 			Expect(err).NotTo(HaveOccurred())

@@ -21,6 +21,8 @@ package integration
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -189,7 +191,17 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
-		var contentName string
+		contentName := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(snap.UID), "-", ""))
+		Expect(k8sClient.Create(ctx, &storagev1alpha1.SnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       contentName,
+				Finalizers: []string{snapshot.FinalizerParentProtect},
+			},
+			Spec: storagev1alpha1.SnapshotContentSpec{
+				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyDelete,
+			},
+		})).To(Succeed())
+
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.NamespaceSnapshot{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
@@ -197,14 +209,8 @@ var _ = Describe("Integration: NamespaceSnapshot deletion semantics", func() {
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			contentName = fresh.Status.BoundSnapshotContentName
+			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(contentName))
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
-
-		sc := &storagev1alpha1.SnapshotContent{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc)).To(Succeed())
-		base := sc.DeepCopy()
-		sc.Spec.DeletionPolicy = storagev1alpha1.SnapshotContentDeletionPolicyDelete
-		Expect(k8sClient.Patch(ctx, sc, client.MergeFrom(base))).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, &storagev1alpha1.NamespaceSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snap.Name, Namespace: nsName},

@@ -49,6 +49,16 @@ func manifestCaptureRequestSafeToDelete(
 	return isMCRSafeToDelete(mcr, content, mcp), nil
 }
 
+func manifestCheckpointNameFromRequest(mcr *ssv1alpha1.ManifestCaptureRequest) string {
+	if mcr == nil {
+		return ""
+	}
+	if mcr.Status.CheckpointName != "" {
+		return mcr.Status.CheckpointName
+	}
+	return ""
+}
+
 // isMCRSafeToDelete encodes the handoff invariant:
 // SnapshotContent.status.manifestCheckpointName must point at an existing Ready MCP,
 // and that MCP must already be owned by the same SnapshotContent.

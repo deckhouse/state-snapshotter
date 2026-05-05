@@ -223,6 +223,9 @@ func (r *NamespaceSnapshotReconciler) reconcileCaptureN2a(
 	}
 
 	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+	if err := publishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
+		return ctrl.Result{}, err
+	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if apierrors.IsNotFound(err) {

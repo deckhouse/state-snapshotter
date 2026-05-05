@@ -100,7 +100,7 @@ func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl c
 }
 
 // aggregatedManifestsIntegrationMustCreateSnapshotContent creates a SnapshotContent and writes status (Create ignores .Status on CRD).
-func aggregatedManifestsIntegrationMustCreateSnapshotContent(ctx context.Context, cl client.Client, name, snapNS, snapName, mcpName string, children ...string) {
+func aggregatedManifestsIntegrationMustCreateSnapshotContent(ctx context.Context, cl client.Client, name, _, _, mcpName string, children ...string) {
 	var refs []storagev1alpha1.SnapshotContentChildRef
 	for _, c := range children {
 		refs = append(refs, storagev1alpha1.SnapshotContentChildRef{Name: c})
@@ -108,12 +108,6 @@ func aggregatedManifestsIntegrationMustCreateSnapshotContent(ctx context.Context
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: storagev1alpha1.SnapshotContentSpec{
-			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       "NamespaceSnapshot",
-				Name:       snapName,
-				Namespace:  snapNS,
-			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
 	}

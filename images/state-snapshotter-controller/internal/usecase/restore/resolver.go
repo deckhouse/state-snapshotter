@@ -68,49 +68,7 @@ func (r *Resolver) ResolveSnapshotTree(ctx context.Context, snapshotNamespace, s
 		return r.buildTree(ctx, contentGVK, rootContent)
 	}
 
-	rootContent, err := r.findRootContentBySnapshotRef(ctx, contentGVK, snapshotNamespace, snapshotName)
-	if err != nil {
-		return nil, err
-	}
-	return r.buildTree(ctx, contentGVK, rootContent)
-}
-
-func (r *Resolver) findRootContentBySnapshotRef(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*unstructured.Unstructured, error) {
-	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   gvk.Group,
-		Version: gvk.Version,
-		Kind:    gvk.Kind + "List",
-	})
-	if err := r.client.List(ctx, list); err != nil {
-		return nil, fmt.Errorf("failed to list %s: %w", gvk.String(), err)
-	}
-
-	var matches []*unstructured.Unstructured
-	for i := range list.Items {
-		item := &list.Items[i]
-		contentLike, err := snapshot.ExtractSnapshotContentLike(item)
-		if err != nil {
-			continue
-		}
-		ref := contentLike.GetSpecSnapshotRef()
-		if ref == nil {
-			continue
-		}
-		if ref.Name == snapshotName && ref.Namespace == snapshotNamespace {
-			matches = append(matches, item)
-		}
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("%w: SnapshotContent not found for snapshot %s/%s", ErrNotReady, snapshotNamespace, snapshotName)
-	}
-	if len(matches) > 1 {
-		return nil, fmt.Errorf("%w: multiple SnapshotContent objects found for snapshot %s/%s", ErrContractViolation, snapshotNamespace, snapshotName)
-	}
-	if err := ensureReady(matches[0]); err != nil {
-		return nil, err
-	}
-	return matches[0], nil
+	return nil, fmt.Errorf("%w: snapshot %s/%s has empty boundSnapshotContentName", ErrNotReady, snapshotNamespace, snapshotName)
 }
 
 func (r *Resolver) buildTree(ctx context.Context, contentGVK schema.GroupVersionKind, root *unstructured.Unstructured) (*SnapshotContentNode, error) {

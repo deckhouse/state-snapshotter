@@ -32,12 +32,9 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -49,7 +46,7 @@ import (
 // snapshot refs, MCR creation for the namespace own manifest scope, and binding
 // the root to common SnapshotContent. SnapshotContent status/result aggregation
 // stays in SnapshotContentController.
-// Root SnapshotContent is not owned by NamespaceSnapshot (spec.snapshotRef + status only).
+// Root SnapshotContent is not owned by NamespaceSnapshot; binding lives in NamespaceSnapshot status.
 type NamespaceSnapshotReconciler struct {
 	Client                client.Client
 	APIReader             client.Reader
@@ -104,26 +101,8 @@ func AddNamespaceSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Optio
 	}
 	r.childWatchMgr = newNamespaceSnapshotDynamicWatchManager(mgr, r)
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&storagev1alpha1.NamespaceSnapshot{}).
-		Watches(
-			&storagev1alpha1.SnapshotContent{},
-			handler.EnqueueRequestsFromMapFunc(mapSnapshotContentToNamespaceSnapshot),
-		)
+		For(&storagev1alpha1.NamespaceSnapshot{})
 	return b.Complete(r)
-}
-
-// mapSnapshotContentToNamespaceSnapshot requeues the NamespaceSnapshot named in
-// spec.snapshotRef when cluster-scoped content changes (spec repair, drift injection in tests, etc.).
-func mapSnapshotContentToNamespaceSnapshot(_ context.Context, o client.Object) []reconcile.Request {
-	content, ok := o.(*storagev1alpha1.SnapshotContent)
-	if !ok {
-		return nil
-	}
-	ref := content.Spec.SnapshotRef
-	if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() || ref.Kind != KindNamespaceSnapshot || ref.Namespace == "" || ref.Name == "" {
-		return nil
-	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}}}
 }
 
 func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -227,28 +206,6 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	if !snapshotSubjectRefMatches(content.Spec.SnapshotRef, nsSnap) {
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
-		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "ContentRefMismatch",
-			Message:            fmt.Sprintf("SnapshotContent %q does not reference this NamespaceSnapshot", expectedName),
-			ObservedGeneration: nsSnap.Generation,
-		})
-		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionBound,
-			Status:             metav1.ConditionFalse,
-			Reason:             "ContentRefMismatch",
-			Message:            "SnapshotContent snapshotRef does not match this object",
-			ObservedGeneration: nsSnap.Generation,
-		})
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		nsSnap.Status.BoundSnapshotContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
@@ -278,6 +235,13 @@ func (r *NamespaceSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if graphChanged {
 		return ctrl.Result{Requeue: true}, nil
 	}
+	graphPublished, err := publishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !graphPublished {
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
 }
 
@@ -286,27 +250,13 @@ func (r *NamespaceSnapshotReconciler) finishReconcileWithExistingContent(ctx con
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	if !snapshotSubjectRefMatches(content.Spec.SnapshotRef, nsSnap) {
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
-		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "ContentRefMismatch",
-			Message:            fmt.Sprintf("existing SnapshotContent %q does not reference this NamespaceSnapshot", expectedName),
-			ObservedGeneration: nsSnap.Generation,
-		})
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
 	nsSnap.Status.BoundSnapshotContentName = expectedName
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 		Type:               snapshot.ConditionBound,
 		Status:             metav1.ConditionTrue,
 		Reason:             "ContentExists",
-		Message:            "SnapshotContent already existed with matching snapshotRef",
+		Message:            "SnapshotContent already exists",
 		ObservedGeneration: nsSnap.Generation,
 	})
 	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -390,25 +340,10 @@ func (r *NamespaceSnapshotReconciler) updateNamespaceSnapshotRemoveFinalizer(ctx
 	})
 }
 
-func desiredSnapshotContentSpec(nsSnap *storagev1alpha1.NamespaceSnapshot) storagev1alpha1.SnapshotContentSpec {
+func desiredSnapshotContentSpec(_ *storagev1alpha1.NamespaceSnapshot) storagev1alpha1.SnapshotContentSpec {
 	return storagev1alpha1.SnapshotContentSpec{
-		SnapshotRef: snapshotbinding.SnapshotSubjectRef(
-			storagev1alpha1.SchemeGroupVersion.String(),
-			KindNamespaceSnapshot,
-			nsSnap.Name,
-			nsSnap.Namespace,
-			nsSnap.UID,
-		),
 		DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 	}
-}
-
-func snapshotSubjectRefMatches(ref storagev1alpha1.SnapshotSubjectRef, ns *storagev1alpha1.NamespaceSnapshot) bool {
-	return ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() &&
-		ref.Kind == KindNamespaceSnapshot &&
-		ref.Name == ns.Name &&
-		ref.Namespace == ns.Namespace &&
-		ref.UID == ns.UID
 }
 
 func snapshotContentName(ns *storagev1alpha1.NamespaceSnapshot) string {

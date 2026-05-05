@@ -309,16 +309,6 @@ var _ = BeforeSuite(func() {
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
 									Type: "object",
-									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"snapshotRef": {
-											Type: "object",
-											Properties: map[string]apiextensionsv1.JSONSchemaProps{
-												"kind":      {Type: "string"},
-												"name":      {Type: "string"},
-												"namespace": {Type: "string"},
-											},
-										},
-									},
 								},
 								"status": {
 									Type: "object",
@@ -460,16 +450,6 @@ var _ = BeforeSuite(func() {
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
 									Type: "object",
-									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"snapshotRef": {
-											Type: "object",
-											Properties: map[string]apiextensionsv1.JSONSchemaProps{
-												"kind":      {Type: "string"},
-												"name":      {Type: "string"},
-												"namespace": {Type: "string"},
-											},
-										},
-									},
 								},
 								"status": {
 									Type: "object",

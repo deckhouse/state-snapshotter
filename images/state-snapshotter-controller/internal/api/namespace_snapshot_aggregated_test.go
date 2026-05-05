@@ -88,12 +88,6 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Spec: storagev1alpha1.SnapshotContentSpec{
-			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       "NamespaceSnapshot",
-				Name:       "snap",
-				Namespace:  "ns1",
-			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-root"},
@@ -177,12 +171,6 @@ func TestNamespaceSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Spec: storagev1alpha1.SnapshotContentSpec{
-			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       "NamespaceSnapshot",
-				Name:       "snap",
-				Namespace:  "ns1",
-			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-root"},

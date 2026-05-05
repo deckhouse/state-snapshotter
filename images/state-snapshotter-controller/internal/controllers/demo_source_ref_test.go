@@ -401,22 +401,23 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		t.Fatalf("expected VM GraphReady=True after writing child refs, got %#v", graphReady)
 	}
 	ready := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonManifestCapturePending {
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonChildSnapshotPending {
 		t.Fatalf("expected Ready=False mirrored content pending before child content ready, got %#v", ready)
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {
+		t.Fatalf("get VM content while child pending: %v", err)
+	}
+	if vmContent.Status.ManifestCheckpointName != "" {
+		t.Fatalf("parent content must not publish manifest ref before child content graph is complete, got %q", vmContent.Status.ManifestCheckpointName)
+	}
+	if len(vmContent.Status.ChildrenSnapshotContentRefs) != 0 {
+		t.Fatalf("parent content must not publish incomplete child content refs, got %#v", vmContent.Status.ChildrenSnapshotContentRefs)
 	}
 
 	diskContentName := "disk-content"
 	if err := cl.Create(context.Background(), &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: diskContentName},
-		Spec: storagev1alpha1.SnapshotContentSpec{
-			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
-				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-				Kind:       KindDemoVirtualDiskSnapshot,
-				Name:       childName,
-				Namespace:  "ns1",
-				UID:        child.UID,
-			},
-		},
+		Spec:       storagev1alpha1.SnapshotContentSpec{},
 	}); err != nil {
 		t.Fatalf("create disk content: %v", err)
 	}

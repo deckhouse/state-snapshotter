@@ -196,37 +196,6 @@ func (w *unstructuredSnapshotWrapper) SetSelfLink(selfLink string) {
 }
 
 func (w *unstructuredSnapshotWrapper) GetSpecSnapshotRef() *ObjectRef {
-	// Extract from spec.xxxxName or spec.snapshotRef
-	// NOTE: Common controller should NOT guess domain-specific field names
-	// If this returns nil, it means either:
-	// 1. This is a root snapshot (no source object)
-	// 2. Domain controller should populate canonical spec.snapshotRef
-	spec, ok := w.obj.Object["spec"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
-	// First, try canonical spec.snapshotRef (preferred)
-	if snapshotRefRaw, ok := spec["snapshotRef"].(map[string]interface{}); ok {
-		ref := &ObjectRef{}
-		if kind, ok := snapshotRefRaw["kind"].(string); ok {
-			ref.Kind = kind
-		}
-		if name, ok := snapshotRefRaw["name"].(string); ok {
-			ref.Name = name
-		}
-		if ns, ok := snapshotRefRaw["namespace"].(string); ok {
-			ref.Namespace = ns
-		} else {
-			ref.Namespace = w.obj.GetNamespace()
-		}
-		if ref.Kind != "" && ref.Name != "" {
-			return ref
-		}
-	}
-
-	// If no canonical ref, return nil
-	// Domain controllers should populate spec.snapshotRef for non-root snapshots
 	return nil
 }
 
@@ -530,26 +499,7 @@ func (w *unstructuredSnapshotContentWrapper) SetSelfLink(selfLink string) {
 }
 
 func (w *unstructuredSnapshotContentWrapper) GetSpecSnapshotRef() *ObjectRef {
-	spec, ok := w.obj.Object["spec"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	snapshotRefRaw, ok := spec["snapshotRef"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
-	ref := &ObjectRef{}
-	if kind, ok := snapshotRefRaw["kind"].(string); ok {
-		ref.Kind = kind
-	}
-	if name, ok := snapshotRefRaw["name"].(string); ok {
-		ref.Name = name
-	}
-	if ns, ok := snapshotRefRaw["namespace"].(string); ok {
-		ref.Namespace = ns
-	}
-	return ref
+	return nil
 }
 
 func (w *unstructuredSnapshotContentWrapper) GetStatusManifestCheckpointName() string {

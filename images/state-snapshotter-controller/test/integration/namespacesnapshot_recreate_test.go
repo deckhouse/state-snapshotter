@@ -132,9 +132,9 @@ var _ = Describe("Integration: NamespaceSnapshot recreate (stale MCR / §4.7)", 
 
 		sc := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName1}, sc)).To(Succeed())
-		Expect(sc.Spec.SnapshotRef.UID).To(Equal(uid1))
+		Expect(sc.Name).To(Equal(contentName1))
 		sc2 := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName2}, sc2)).To(Succeed())
-		Expect(sc2.Spec.SnapshotRef.UID).To(Equal(uid2))
+		Expect(sc2.Name).To(Equal(contentName2))
 	})
 })

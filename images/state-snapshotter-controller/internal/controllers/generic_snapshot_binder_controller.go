@@ -28,14 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -43,9 +41,9 @@ import (
 
 // GenericSnapshotBinderController reconciles registered generic XxxxSnapshot resources.
 //
-// It owns snapshot -> common SnapshotContent binding and writes
-// status.boundSnapshotContentName on the snapshot. It does not own
-// SnapshotContent.status; result aggregation is handled by SnapshotContentController.
+// It owns snapshot -> common SnapshotContent binding, writes status.boundSnapshotContentName,
+// and publishes result refs such as SnapshotContent.status.manifestCheckpointName.
+// SnapshotContentController validates those refs and owns the Ready condition.
 //
 // Architecture:
 // - Uses dynamic client for low-level get/list operations
@@ -170,7 +168,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 				// Non-fatal: continue with deletion
 			}
 		}
-		// Remove finalizer from SnapshotContent on parent deletion (watch-driven, no snapshotRef)
+		// Remove finalizer from SnapshotContent on parent deletion (watch-driven, no reverse content ref).
 		if err := r.removeSnapshotContentFinalizer(ctx, snapshotLike, obj); err != nil {
 			logger.Error(err, "Failed to remove SnapshotContent finalizer on snapshot deletion")
 			// Non-fatal: continue with deletion
@@ -192,6 +190,11 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
 			logger.Error(err, "Failed to check consistency")
 			// Non-fatal: continue reconciliation
+		}
+		// SnapshotContent no longer has a reverse watch back to Snapshot. Keep polling
+		// pending content so Snapshot Ready eventually mirrors content Ready.
+		if !snapshot.IsReady(snapshotLike) {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		return ctrl.Result{}, nil
 	}
@@ -279,18 +282,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 			}
 		}
 
-		// Set spec.snapshotRef
-		// CRD requires apiVersion/kind/name and namespace for namespaced snapshots.
-		snapshotRef := snapshotbinding.SnapshotSubjectRefMap(
-			obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
-			obj.GetKind(),
-			obj.GetName(),
-			obj.GetNamespace(),
-			"",
-		)
-		spec := map[string]interface{}{
-			"snapshotRef": snapshotRef,
-		}
+		spec := map[string]interface{}{}
 
 		// Add required fields from BackupClass
 		if backupRepositoryName == "" {
@@ -361,13 +353,15 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	// Step 6: Check consistency and set Ready condition
 	// Only check if SnapshotContent already exists (has been processed by SnapshotContentController)
 	// This avoids checking consistency in a "half-assembled" state where SnapshotContent
-	// might not have finalizer or Ready condition yet.
-	// If SnapshotContent is not ready yet, the next reconcile (triggered by SnapshotContentController
-	// setting Ready=True) will set Snapshot Ready=True.
+	// might not have finalizer or Ready condition yet. SnapshotContent has no reverse
+	// reference to wake this Snapshot, so pending content is mirrored through polling.
 	if snapshotLike.GetStatusContentName() != "" {
 		if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
 			logger.Error(err, "Failed to check consistency after creating SnapshotContent")
 			// Non-fatal: will retry on next reconcile
+		}
+		if !snapshot.IsReady(snapshotLike) {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 	}
 
@@ -375,19 +369,35 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	return ctrl.Result{}, nil
 }
 
-// ensureSnapshotContentLinks is intentionally a no-op for content status ownership.
-// GenericSnapshotBinderController owns Snapshot orchestration and binding only; SnapshotContentController owns
-// SnapshotContent.status (MCP/data refs, child content refs, and Ready aggregation).
+// ensureSnapshotContentLinks publishes generic result refs into the bound SnapshotContent.
+// SnapshotContentController must not read live Snapshot or MCR objects; it only validates
+// refs already persisted on SnapshotContent.status.
 func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
 	ctx context.Context,
-	snapshotLike snapshot.SnapshotLike,
+	_ snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
 	contentName string,
 ) (bool, error) {
-	_ = ctx
-	_ = snapshotLike
-	_ = obj
-	_ = contentName
+	mcrName, _, err := unstructured.NestedString(obj.Object, "status", "manifestCaptureRequestName")
+	if err != nil {
+		return false, err
+	}
+	if mcrName == "" {
+		return false, nil
+	}
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: mcrName}, mcr); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	if mcr.Status.CheckpointName == "" {
+		return true, nil
+	}
+	if err := publishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcr.Status.CheckpointName); err != nil {
+		return false, err
+	}
 	return false, nil
 }
 
@@ -841,19 +851,11 @@ func (r *GenericSnapshotBinderController) snapshotGVKsSnapshot() []schema.GroupV
 
 // registerSnapshotWatch calls builder.Complete. When the manager is already running, this relies on
 // controller-runtime allowing new runnables via Add — behavior is runtime-sensitive; upgrade c-r with care.
-func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager, gvk, contentGVK schema.GroupVersionKind) error {
+func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager, gvk, _ schema.GroupVersionKind) error {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
-	contentObj := &unstructured.Unstructured{}
-	contentObj.SetGroupVersionKind(contentGVK)
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(obj).
-		Watches(
-			contentObj,
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-				return r.mapSnapshotContentToSnapshot(ctx, o)
-			}),
-		).
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 	return builder.Complete(r)
 }
@@ -924,75 +926,4 @@ func (r *GenericSnapshotBinderController) SetupWithManager(mgr ctrl.Manager) err
 		r.activeSnapshotWatchSet[key] = struct{}{}
 	}
 	return nil
-}
-
-// mapSnapshotContentToSnapshot maps SnapshotContent to its corresponding Snapshot for reconcile
-// This ensures GenericSnapshotBinderController reconciles Snapshot when SnapshotContent changes (e.g., becomes Ready=True)
-// Signature matches handler.MapFunc = TypedMapFunc[client.Object, reconcile.Request]
-// which is func(context.Context, client.Object) []reconcile.Request
-func (r *GenericSnapshotBinderController) mapSnapshotContentToSnapshot(ctx context.Context, obj client.Object) []reconcile.Request {
-	contentObj, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		return nil
-	}
-
-	// Extract snapshotRef from SnapshotContent spec
-	spec, ok := contentObj.Object["spec"].(map[string]interface{})
-	if !ok {
-		log.FromContext(ctx).V(1).Info("SnapshotContent spec is missing or invalid", "content", contentObj.GetName())
-		return nil
-	}
-
-	snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
-	if !ok {
-		log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef is missing or invalid", "content", contentObj.GetName())
-		return nil
-	}
-
-	kind, ok := snapshotRef["kind"].(string)
-	if !ok || kind == "" {
-		log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef.kind is missing", "content", contentObj.GetName())
-		return nil
-	}
-
-	name, ok := snapshotRef["name"].(string)
-	if !ok || name == "" {
-		log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef.name is missing", "content", contentObj.GetName())
-		return nil
-	}
-
-	namespace, ok := snapshotRef["namespace"].(string)
-	if !ok || namespace == "" {
-		if kind != "ClusterSnapshot" {
-			log.FromContext(ctx).V(1).Info("SnapshotContent spec.snapshotRef.namespace is missing", "content", contentObj.GetName(), "kind", kind)
-			return nil
-		}
-	}
-
-	// Determine Snapshot Kind from SnapshotContent GVK (registry-aware)
-	contentGVK := contentObj.GroupVersionKind()
-	snapshotKind, err := r.GVKRegistry.ResolveSnapshotKindByContentGVK(contentGVK)
-	if err != nil {
-		log.FromContext(ctx).V(1).Info("Snapshot Kind resolution failed for SnapshotContent", "content", contentObj.GetName(), "gvk", contentGVK.String(), "error", err)
-		return nil
-	}
-
-	snapshotGVK, err := r.GVKRegistry.ResolveSnapshotGVK(snapshotKind)
-	if err != nil {
-		log.FromContext(ctx).V(1).Info("Snapshot GVK not registered for SnapshotContent", "snapshotKind", snapshotKind, "content", contentObj.GetName(), "error", err)
-		return nil
-	}
-	if snapshotGVK.Group != contentGVK.Group {
-		log.FromContext(ctx).V(1).Info("Snapshot GVK group mismatch for SnapshotContent", "snapshotKind", snapshotKind, "snapshotGroup", snapshotGVK.Group, "contentGroup", contentGVK.Group, "content", contentObj.GetName())
-		return nil
-	}
-
-	return []reconcile.Request{
-		{
-			NamespacedName: types.NamespacedName{
-				Name:      name,
-				Namespace: namespace,
-			},
-		},
-	}
 }

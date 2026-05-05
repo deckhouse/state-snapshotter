@@ -170,6 +170,18 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 			g.Expect(contentName).NotTo(BeEmpty())
 		}, "30s", "200ms").Should(Succeed(), "Snapshot should bind common SnapshotContent")
 
+		// The snapshot controller owns publisher fields and records the final MCP ref on content.
+		Eventually(func(g Gomega) {
+			_, err := snapshotCtrl.Reconcile(ctx, req)
+			g.Expect(err).NotTo(HaveOccurred())
+			contentObj := &unstructured.Unstructured{}
+			contentObj.SetGroupVersionKind(contentGVK)
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
+			gotMCPName, _, err := unstructured.NestedString(contentObj.Object, "status", "manifestCheckpointName")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(gotMCPName).To(Equal(mcpName))
+		}, "30s", "200ms").Should(Succeed(), "Snapshot controller should publish MCP ref to SnapshotContent")
+
 		Eventually(func(g Gomega) {
 			_, err := contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}})
 			g.Expect(err).NotTo(HaveOccurred())

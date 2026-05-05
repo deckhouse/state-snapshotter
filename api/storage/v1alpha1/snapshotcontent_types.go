@@ -35,6 +35,7 @@ type SnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="SnapshotContent spec is immutable"
 	Spec   SnapshotContentSpec   `json:"spec,omitempty"`
 	Status SnapshotContentStatus `json:"status,omitempty"`
 }
@@ -48,10 +49,6 @@ type SnapshotContentList struct {
 
 // +k8s:deepcopy-gen=true
 type SnapshotContentSpec struct {
-	// SnapshotRef points to the snapshot root (e.g. NamespaceSnapshot). Kind must match the root CRD.
-	// Current runtime uses it to finish content aggregation; a later refactor should remove this dependency.
-	SnapshotRef SnapshotSubjectRef `json:"snapshotRef"`
-
 	// BackupRepositoryName optional; used when snapshot class resolves to a backup repository.
 	BackupRepositoryName string `json:"backupRepositoryName,omitempty"`
 

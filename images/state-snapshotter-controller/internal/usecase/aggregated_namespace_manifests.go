@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strings"
 
@@ -63,7 +62,6 @@ func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphLi
 }
 
 // BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../namespace-snapshot-aggregated-manifests-pr4.md
-// When the NamespaceSnapshot is gone but retained SnapshotContent still exists (same spec ref name/namespace), resolves content by listing.
 func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
 	nsSnap := &storagev1alpha1.NamespaceSnapshot{}
 	err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, nsSnap)
@@ -77,15 +75,8 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, 
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get NamespaceSnapshot: %w", err)
 	}
-	bound, ferr := s.findRetainedRootContentName(ctx, namespace, snapshotName)
-	if ferr != nil {
-		return nil, ferr
-	}
-	if bound == "" {
-		return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
-			fmt.Sprintf("NamespaceSnapshot %s/%s not found", namespace, snapshotName))
-	}
-	return s.marshalAggregatedFromRootContent(ctx, bound)
+	return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
+		fmt.Sprintf("NamespaceSnapshot %s/%s not found", namespace, snapshotName))
 }
 
 func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootContent(ctx context.Context, rootContent string) ([]byte, error) {
@@ -175,36 +166,6 @@ func (s *AggregatedNamespaceManifests) currentAggregatedRegistry(ctx context.Con
 		return nil, NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady", snapshotgraphregistry.ErrGraphRegistryNotReady.Error())
 	}
 	return reg, nil
-}
-
-// findRetainedRootContentName is a retained-read helper when the NamespaceSnapshot object is already deleted.
-// It lists cluster SnapshotContent and picks the newest (by CreationTimestamp) whose
-// spec.snapshotRef matches (namespace, snapshotName). If several retained contents exist for the same
-// name (recreated snapshots), this is a best-effort policy for the aggregated manifests subresource only;
-// it is not a strong multi-version product contract.
-func (s *AggregatedNamespaceManifests) findRetainedRootContentName(ctx context.Context, namespace, snapshotName string) (string, error) {
-	var list storagev1alpha1.SnapshotContentList
-	if err := s.client.List(ctx, &list); err != nil {
-		return "", fmt.Errorf("list SnapshotContent: %w", err)
-	}
-	var best string
-	// Use MinInt64 so clients without CreationTimestamp (e.g. envtest/fake) still pick a retained root;
-	// zero metav1.Time encodes as a large negative UnixNano(), which is still > MinInt64.
-	var bestTs int64 = math.MinInt64
-	for i := range list.Items {
-		snapshotRef := list.Items[i].Spec.SnapshotRef
-		if snapshotRef.APIVersion != storagev1alpha1.SchemeGroupVersion.String() ||
-			snapshotRef.Kind != "NamespaceSnapshot" ||
-			snapshotRef.Namespace != namespace || snapshotRef.Name != snapshotName {
-			continue
-		}
-		ts := list.Items[i].CreationTimestamp.UnixNano()
-		if ts >= bestTs {
-			bestTs = ts
-			best = list.Items[i].Name
-		}
-	}
-	return best, nil
 }
 
 // walkContent visits SnapshotContent nodes for aggregated manifests.

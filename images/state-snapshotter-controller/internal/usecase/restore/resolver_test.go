@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -123,7 +122,7 @@ func TestResolveSnapshotTree_ContentNotReady(t *testing.T) {
 	}
 }
 
-func TestResolveSnapshotTree_FallbackBySnapshotRef(t *testing.T) {
+func TestResolveSnapshotTree_RequiresBoundSnapshotContentName(t *testing.T) {
 	scheme := runtime.NewScheme()
 	scheme.AddKnownTypeWithName(snapshotGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(contentGVK, &unstructured.Unstructured{})
@@ -146,38 +145,15 @@ func TestResolveSnapshotTree_FallbackBySnapshotRef(t *testing.T) {
 		},
 	}}
 
-	content := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-		"kind":       "SnapshotContent",
-		"metadata": map[string]interface{}{
-			"name": "content-1",
-		},
-		"spec": map[string]interface{}{
-			"snapshotRef": map[string]interface{}{
-				"name":      "snap-1",
-				"namespace": "default",
-			},
-		},
-		"status": map[string]interface{}{
-			"manifestCheckpointName": "mcp-1",
-			"conditions": []interface{}{
-				map[string]interface{}{
-					"type":   "Ready",
-					"status": "True",
-				},
-			},
-		},
-	}}
-
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot, content).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
 	resolver := NewResolver(client)
 
-	node, err := resolver.ResolveSnapshotTree(context.Background(), "default", "snap-1")
-	if err != nil {
-		t.Fatalf("ResolveSnapshotTree failed: %v", err)
+	_, err := resolver.ResolveSnapshotTree(context.Background(), "default", "snap-1")
+	if err == nil {
+		t.Fatal("expected error for snapshot without bound content")
 	}
-	if node.Content.GetName() != "content-1" {
-		t.Fatalf("expected content-1, got %s", node.Content.GetName())
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("expected ErrNotReady, got %v", err)
 	}
 }
 
@@ -273,67 +249,4 @@ func TestResolveSnapshotTree_ChildMissing(t *testing.T) {
 	if !errors.Is(err, ErrContractViolation) {
 		t.Fatalf("expected ErrContractViolation, got %v", err)
 	}
-}
-
-func TestResolveSnapshotTree_MultipleSnapshotRefMatches(t *testing.T) {
-	scheme := runtime.NewScheme()
-	scheme.AddKnownTypeWithName(snapshotGVK, &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(contentGVK, &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: contentGVK.Group, Version: contentGVK.Version, Kind: contentGVK.Kind + "List"}, &unstructured.UnstructuredList{})
-
-	snapshot := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-		"kind":       "Snapshot",
-		"metadata": map[string]interface{}{
-			"name":      "snap-1",
-			"namespace": "default",
-		},
-		"status": map[string]interface{}{
-			"conditions": []interface{}{
-				map[string]interface{}{
-					"type":   "Ready",
-					"status": "True",
-				},
-			},
-		},
-	}}
-
-	content1 := newContentWithRef("content-1")
-	content2 := newContentWithRef("content-2")
-
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot, content1, content2).Build()
-	resolver := NewResolver(client)
-
-	_, err := resolver.ResolveSnapshotTree(context.Background(), "default", "snap-1")
-	if err == nil {
-		t.Fatal("expected error for multiple SnapshotContent matches")
-	}
-	if !errors.Is(err, ErrContractViolation) {
-		t.Fatalf("expected ErrContractViolation, got %v", err)
-	}
-}
-
-func newContentWithRef(name string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-		"kind":       "SnapshotContent",
-		"metadata": map[string]interface{}{
-			"name": name,
-		},
-		"spec": map[string]interface{}{
-			"snapshotRef": map[string]interface{}{
-				"name":      "snap-1",
-				"namespace": "default",
-			},
-		},
-		"status": map[string]interface{}{
-			"manifestCheckpointName": "mcp-1",
-			"conditions": []interface{}{
-				map[string]interface{}{
-					"type":   "Ready",
-					"status": string(metav1.ConditionTrue),
-				},
-			},
-		},
-	}}
 }

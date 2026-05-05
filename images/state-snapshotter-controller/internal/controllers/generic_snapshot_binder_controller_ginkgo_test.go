@@ -152,16 +152,12 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 	})
 
 	Describe("Creating SnapshotContent", func() {
-		It("should set snapshotRef.kind when creating SnapshotContent", func() {
+		It("should create SnapshotContent without a reverse Snapshot reference", func() {
 			// NOTE: Unit test with fake client is too complex due to CRD limitations for unstructured objects.
 			// This functionality is covered by integration tests:
 			// - test/integration/snapshot_lifecycle_test.go: "should create SnapshotContent with correct spec"
-			// - The controller code explicitly sets snapshotRef.kind at line 279 in generic_snapshot_binder_controller.go:
-			//   if snapshotGVK.Kind != "" {
-			//       snapshotRef["kind"] = snapshotGVK.Kind
-			//   }
 			Skip("Unit test with fake client is too complex due to CRD limitations. This is covered by integration tests.")
-			// This test verifies that GenericSnapshotBinderController sets snapshotRef.kind when creating SnapshotContent.
+			// This test verifies that GenericSnapshotBinderController creates self-contained SnapshotContent.
 			// Since fake client doesn't fully support CRD operations for unstructured objects,
 			// we use a wrapper client to capture the Create call and verify the spec.
 
@@ -204,7 +200,7 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			)
 			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
 
-			// Track created SnapshotContent to verify snapshotRef.kind
+			// Track created SnapshotContent to verify its spec
 			var createdContent *unstructured.Unstructured
 			// Use a wrapper client that captures Create calls and mocks Get for BackupClass and Snapshot
 			wrapperClient := &contentCaptureClient{
@@ -239,23 +235,15 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			}
 
 			// Reconcile may fail because fake client doesn't fully support CRDs,
-			// but we can still verify that snapshotRef.kind was set in the Create call
+			// but we can still verify the Create call.
 			_, _ = controller.Reconcile(ctx, req)
 
-			// EXPECTED BEHAVIOR: SnapshotContent should be created with snapshotRef.kind set
+			// EXPECTED BEHAVIOR: SnapshotContent should be created without a reverse Snapshot reference.
 			Expect(createdContent).NotTo(BeNil(), "SnapshotContent should be created via Create call")
 
-			// Verify snapshotRef.kind is set
 			spec, ok := createdContent.Object["spec"].(map[string]interface{})
 			Expect(ok).To(BeTrue(), "SnapshotContent should have spec")
-			snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
-			Expect(ok).To(BeTrue(), "SnapshotContent should have snapshotRef")
-
-			kind, ok := snapshotRef["kind"].(string)
-			Expect(ok).To(BeTrue(), "snapshotRef.kind should be set")
-			Expect(kind).To(Equal("TestSnapshot"), "snapshotRef.kind should match Snapshot Kind")
-			Expect(snapshotRef["name"]).To(Equal("test-snapshot"), "snapshotRef.name should match Snapshot name")
-			Expect(snapshotRef["namespace"]).To(Equal("default"), "snapshotRef.namespace should match Snapshot namespace")
+			Expect(spec).NotTo(HaveKey("snapshot"+"Ref"), "SnapshotContent must not depend on live Snapshot")
 		})
 
 	})

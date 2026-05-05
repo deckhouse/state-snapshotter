@@ -49,7 +49,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 	//
 	// INVARIANTS:
 	// - Snapshot.status.boundSnapshotContentName → SnapshotContent.name
-	// - SnapshotContent.spec.snapshotRef → Snapshot reference
+	// - SnapshotContent has no reverse runtime dependency on Snapshot
 	// - SnapshotContent.ownerRef is set correctly
 	// - SnapshotContent has finalizer
 
@@ -90,7 +90,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		// EXPECTED BEHAVIOR:
 		// - SnapshotContent exists
 		// - Snapshot.status.boundSnapshotContentName is set
-		// - SnapshotContent.spec.snapshotRef points to Snapshot
+		// - SnapshotContent.spec has no reverse Snapshot reference
 		// - SnapshotContent.ownerRef is set (ObjectKeeper for root)
 		// - SnapshotContent has finalizer
 		//
@@ -100,7 +100,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		//
 		// INVARIANTS:
 		// - Snapshot.status.boundSnapshotContentName → SnapshotContent.name
-		// - SnapshotContent.spec.snapshotRef → Snapshot reference
+		// - SnapshotContent has no reverse runtime dependency on Snapshot
 		// - SnapshotContent.ownerRef is correct
 		// - SnapshotContent.finalizers contains "snapshot.deckhouse.io/parent-protect"
 
@@ -221,14 +221,10 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			}, contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// INVARIANT: SnapshotContent.spec.snapshotRef → Snapshot reference
+			// INVARIANT: SnapshotContent.spec does not include a reverse Snapshot reference.
 			spec, ok := contentObj.Object["spec"].(map[string]interface{})
 			Expect(ok).To(BeTrue(), "SnapshotContent should have spec")
-			snapshotRef, ok := spec["snapshotRef"].(map[string]interface{})
-			Expect(ok).To(BeTrue(), "SnapshotContent.spec.snapshotRef should exist")
-			// Note: snapshotRef.kind is optional (fallback logic handles it)
-			Expect(snapshotRef["name"]).To(Equal(snapshotObj.GetName()), "snapshotRef.name should match Snapshot name")
-			Expect(snapshotRef["namespace"]).To(Equal(snapshotObj.GetNamespace()), "snapshotRef.namespace should match Snapshot namespace")
+			Expect(spec).NotTo(HaveKey("snapshot"+"Ref"), "SnapshotContent must be self-contained")
 
 			// INVARIANT: SnapshotContent.ownerRef is set correctly
 			ownerRefs := contentObj.GetOwnerReferences()
@@ -373,7 +369,21 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			_, err = contentCtrl.Reconcile(ctx, contentReq)
 			Expect(err).NotTo(HaveOccurred())
 
-			// ACTIONS Step 3: Set SnapshotContent Ready=True
+			// ACTIONS Step 3: Snapshot Ready mirror must keep polling while content is pending.
+			result, err := snapshotCtrl.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", time.Duration(0)), "generic binder must poll pending content because SnapshotContent has no reverse Snapshot watch")
+
+			freshPendingSnapshot := &unstructured.Unstructured{}
+			freshPendingSnapshot.SetGroupVersionKind(snapshotGVK)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshPendingSnapshot)).To(Succeed())
+			pendingLike, err := snapshot.ExtractSnapshotLike(freshPendingSnapshot)
+			Expect(err).NotTo(HaveOccurred())
+			pendingReady := snapshot.GetCondition(pendingLike, snapshot.ConditionReady)
+			Expect(pendingReady).NotTo(BeNil())
+			Expect(pendingReady.Status).To(Equal(metav1.ConditionFalse))
+
+			// ACTIONS Step 4: Set SnapshotContent Ready=True
 			contentObj := &unstructured.Unstructured{}
 			contentObj.SetGroupVersionKind(contentGVK)
 			err = k8sClient.Get(ctx, types.NamespacedName{
@@ -403,7 +413,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Status().Update(ctx, contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// ACTIONS Step 4: Trigger Snapshot reconciliation
+			// ACTIONS Step 5: Trigger Snapshot reconciliation
 			// This should call checkConsistencyAndSetReady and set Ready=True on Snapshot
 			_, err = snapshotCtrl.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())

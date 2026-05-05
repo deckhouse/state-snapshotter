@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"testing"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -72,60 +71,31 @@ func TestSnapshotContentControllerCascadeRemoveFinalizersFromCommonChildren(t *t
 	}
 }
 
-func TestBuildCommonSnapshotContentStatusPlanWaitsForGraphReady(t *testing.T) {
+func TestBuildCommonSnapshotContentStatusPlanUsesPersistedRefsOnly(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storage scheme: %v", err)
 	}
 
-	snap := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
-		"kind":       "NamespaceSnapshot",
-		"metadata": map[string]interface{}{
-			"name":      "snap",
-			"namespace": "ns",
-		},
-		"status": map[string]interface{}{
-			"conditions": []interface{}{map[string]interface{}{
-				"type":               snapshot.ConditionGraphReady,
-				"status":             string(metav1.ConditionFalse),
-				"reason":             snapshot.ReasonGraphPlanningFailed,
-				"message":            "planning failed",
-				"lastTransitionTime": metav1.Now().Format(time.RFC3339),
-			}},
-		},
-	}}
-	snap.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("NamespaceSnapshot"))
 	content := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
 		"kind":       "SnapshotContent",
 		"metadata": map[string]interface{}{
 			"name": "content",
 		},
-		"spec": map[string]interface{}{
-			"snapshotRef": map[string]interface{}{
-				"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
-				"kind":       "NamespaceSnapshot",
-				"name":       "snap",
-				"namespace":  "ns",
-			},
-		},
 	}}
 	content.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(snap).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonChildGraphPending {
-		t.Fatalf("expected content pending on GraphReady=False, got status=%s reason=%s", plan.readyStatus, plan.readyReason)
-	}
-	if plan.manifestCheckpointName != "" {
-		t.Fatalf("content must not publish manifest checkpoint while graph is stale, got %q", plan.manifestCheckpointName)
+	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCapturePending {
+		t.Fatalf("expected content pending on missing persisted manifest ref, got status=%s reason=%s", plan.readyStatus, plan.readyReason)
 	}
 }
 

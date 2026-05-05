@@ -57,7 +57,7 @@ type NamespaceSnapshotStatus struct {
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
 	// ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
-	// SnapshotContentController reads it to aggregate SnapshotContent.status; it is cleared after the result is bound.
+	// Snapshot controllers use it as execution state and clear it after the result is published to SnapshotContent.
 	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
 
 	// ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)

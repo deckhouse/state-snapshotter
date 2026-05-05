@@ -33,7 +33,7 @@ runtime migration is explicitly performed.
 
 **OwnerReference filtering:** a controller excludes resources owned by a different domain object from its own MCR. Those resources belong to a child snapshot or to namespace-level fallback.
 
-**Readiness aggregation:** parent snapshot `Ready` mirrors bound `SnapshotContent Ready`; `SnapshotContentController` derives parent content readiness by reading every child listed in `status.childrenSnapshotRefs`. Child state is not copied into the parent list.
+**Readiness aggregation:** parent snapshot `Ready` mirrors bound `SnapshotContent Ready`; snapshot controllers publish `SnapshotContent.status.childrenSnapshotContentRefs` from `status.childrenSnapshotRefs`, and `SnapshotContentController` derives parent content readiness by validating those persisted child content refs. Child state is not copied into the parent list.
 
 **Reference domain controller contract (current runtime):** a domain snapshot controller validates its own `spec.sourceRef`, creates its own cluster-scoped `SnapshotContent`, creates an MCR for its own source object, publishes request names / `GraphReady`, and mirrors bound content `Ready`. A domain parent controller (for example VM) also creates child snapshots for nested domain resources, sets ownerRefs on them, and publishes its own `status.childrenSnapshotRefs`. User spec errors are represented as `Ready=False` conditions (for example `InvalidSourceRef`) rather than reconcile errors, and must not create content, MCR, or child snapshots.
 

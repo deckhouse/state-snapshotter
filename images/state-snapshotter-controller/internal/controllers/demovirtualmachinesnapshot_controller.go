@@ -36,7 +36,6 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -170,6 +169,19 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	if err := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "child graph planned"); err != nil {
 		return ctrl.Result{}, err
 	}
+	graphPublished, err := publishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, s.Namespace, contentName, childRefs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !graphPublished {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonChildSnapshotPending, "waiting for child content objects to bind"); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+	if err := publishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, manifestCheckpointNameFromRequest(mcr)); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	contentReady, contentReason, contentMessage, err := commonSnapshotContentReadyForSnapshot(ctx, r.Client, contentName)
 	if err != nil {
@@ -200,7 +212,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	return ctrl.Result{}, nil
 }
 
-func (r *DemoVirtualMachineSnapshotReconciler) ensureContent(ctx context.Context, snap *demov1alpha1.DemoVirtualMachineSnapshot, contentName string) error {
+func (r *DemoVirtualMachineSnapshotReconciler) ensureContent(ctx context.Context, _ *demov1alpha1.DemoVirtualMachineSnapshot, contentName string) error {
 	existing := &storagev1alpha1.SnapshotContent{}
 	err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, existing)
 	if err == nil {
@@ -211,22 +223,13 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureContent(ctx context.Context
 	}
 
 	// VM content is cluster-scoped and intentionally retained/managed separately.
-	// This VM controller owns snapshot binding/child snapshot refs only; content
-	// status/MCP links and child content refs are published by SnapshotContentController.
+	// This controller publishes result refs; SnapshotContentController validates them.
 	// We intentionally do not use controllerutil.CreateOrUpdate here.
 	// This controller owns only a subset of fields and must avoid
 	// accidental overwrites of fields owned by other controllers.
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: contentName},
-		Spec: storagev1alpha1.SnapshotContentSpec{
-			SnapshotRef: snapshotbinding.SnapshotSubjectRef(
-				demov1alpha1.SchemeGroupVersion.String(),
-				KindDemoVirtualMachineSnapshot,
-				snap.Name,
-				snap.Namespace,
-				snap.UID,
-			),
-		},
+		Spec:       storagev1alpha1.SnapshotContentSpec{},
 	}
 	return r.Client.Create(ctx, content)
 }

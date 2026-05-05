@@ -118,12 +118,6 @@ func aggManifestContent(name, mcpName string, children ...string) *storagev1alph
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: storagev1alpha1.SnapshotContentSpec{
-			SnapshotRef: storagev1alpha1.SnapshotSubjectRef{
-				Kind:       "NamespaceSnapshot",
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Name:       aggManifestTestSnapName,
-				Namespace:  aggManifestTestSnapNamespace,
-			},
 			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
@@ -146,7 +140,7 @@ func aggManifestNS(bound string) *storagev1alpha1.NamespaceSnapshot {
 	}
 }
 
-func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
+func TestAggregatedNamespaceManifests_RetainedContentReadByContentName(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -162,9 +156,9 @@ func TestAggregatedNamespaceManifests_RetainedWithoutSnapshot(t *testing.T) {
 	_ = cl.Create(context.Background(), mcp)
 	root := aggManifestContent("root-content", "mcp-root")
 	_ = cl.Create(context.Background(), root)
-	// No NamespaceSnapshot object — retained content only.
+	// No NamespaceSnapshot object: retained content is addressed directly by content name.
 
-	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	raw, err := agg.BuildAggregatedJSONFromContent(context.Background(), SnapshotContentGVK(), root.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

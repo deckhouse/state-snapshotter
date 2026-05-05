@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 
@@ -312,11 +311,9 @@ func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
 }
 
 type commonContentStatusPlan struct {
-	manifestCheckpointName string
-	childrenRefs           []storagev1alpha1.SnapshotContentChildRef
-	readyStatus            metav1.ConditionStatus
-	readyReason            string
-	readyMessage           string
+	readyStatus  metav1.ConditionStatus
+	readyReason  string
+	readyMessage string
 }
 
 func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
@@ -335,19 +332,6 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	}
 
 	changed := false
-	if existing, _ := statusMap["manifestCheckpointName"].(string); existing != plan.manifestCheckpointName {
-		if plan.manifestCheckpointName == "" {
-			delete(statusMap, "manifestCheckpointName")
-		} else {
-			statusMap["manifestCheckpointName"] = plan.manifestCheckpointName
-		}
-		changed = true
-	}
-	if !snapshotObjectRefsEqualStorageContentRefs(contentLike.GetStatusChildrenSnapshotContentRefs(), plan.childrenRefs) {
-		statusMap["childrenSnapshotContentRefs"] = snapshotContentChildRefsToUnstructured(plan.childrenRefs)
-		changed = true
-	}
-
 	desired := metav1.Condition{
 		Type:               snapshot.ConditionReady,
 		Status:             plan.readyStatus,
@@ -389,46 +373,19 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		readyMessage: "waiting for manifest capture",
 	}
 
-	snapshotRef, err := snapshotRefFromCommonContent(obj)
+	mcpName, _, err := unstructured.NestedString(obj.Object, "status", "manifestCheckpointName")
 	if err != nil {
-		plan.readyReason = snapshot.ReasonContentMissing
-		plan.readyMessage = err.Error()
-		return plan, nil
-	}
-	snapObj := &unstructured.Unstructured{}
-	snapObj.SetAPIVersion(snapshotRef.APIVersion)
-	snapObj.SetKind(snapshotRef.Kind)
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: snapshotRef.Namespace, Name: snapshotRef.Name}, snapObj); err != nil {
-		if errors.IsNotFound(err) {
-			plan.readyReason = snapshot.ReasonContentMissing
-			plan.readyMessage = fmt.Sprintf("snapshot %s/%s not found", snapshotRef.Namespace, snapshotRef.Name)
-			return plan, nil
-		}
 		return plan, err
 	}
-
-	graphReady := meta.FindStatusCondition(extractConditionsFromUnstructured(snapObj), snapshot.ConditionGraphReady)
-	if graphReady == nil || graphReady.Status != metav1.ConditionTrue {
-		plan.readyReason = snapshot.ReasonChildGraphPending
-		if graphReady != nil && graphReady.Message != "" {
-			plan.readyMessage = graphReady.Message
-		} else {
-			plan.readyMessage = "waiting for snapshot GraphReady=True"
-		}
+	if mcpName == "" {
+		plan.readyMessage = "waiting for SnapshotContent.status.manifestCheckpointName"
 		return plan, nil
 	}
 
-	childRefs, childrenReady, childReason, childMessage, err := r.resolveCommonContentChildren(ctx, obj, snapObj)
+	mcpReady, mcpFailed, mcpMessage, err := r.validateCommonContentManifestCheckpoint(ctx, obj, mcpName)
 	if err != nil {
 		return plan, err
 	}
-	plan.childrenRefs = childRefs
-
-	mcpName, mcpReady, mcpFailed, mcpMessage, err := r.resolveCommonContentManifestCheckpoint(ctx, obj, snapObj)
-	if err != nil {
-		return plan, err
-	}
-	plan.manifestCheckpointName = mcpName
 	if mcpFailed {
 		plan.readyReason = "ManifestCheckpointFailed"
 		plan.readyMessage = mcpMessage
@@ -449,6 +406,10 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyMessage = dataMessage
 		return plan, nil
 	}
+	childrenReady, childReason, childMessage, err := r.validateCommonContentChildren(ctx, obj)
+	if err != nil {
+		return plan, err
+	}
 	if !childrenReady {
 		plan.readyReason = childReason
 		plan.readyMessage = childMessage
@@ -461,113 +422,41 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 	return plan, nil
 }
 
-func snapshotRefFromCommonContent(obj *unstructured.Unstructured) (storagev1alpha1.SnapshotSubjectRef, error) {
-	ref := storagev1alpha1.SnapshotSubjectRef{}
-	refMap, ok, err := unstructured.NestedMap(obj.Object, "spec", "snapshotRef")
+func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, string, string, error) {
+	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
-		return ref, err
+		return false, "", "", err
 	}
-	if !ok {
-		return ref, fmt.Errorf("spec.snapshotRef is missing")
-	}
-	ref.APIVersion, _ = refMap["apiVersion"].(string)
-	ref.Kind, _ = refMap["kind"].(string)
-	ref.Name, _ = refMap["name"].(string)
-	ref.Namespace, _ = refMap["namespace"].(string)
-	if uid, _ := refMap["uid"].(string); uid != "" {
-		ref.UID = types.UID(uid)
-	}
-	if ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
-		return ref, fmt.Errorf("spec.snapshotRef apiVersion/kind/name are required")
-	}
-	return ref, nil
-}
-
-func (r *SnapshotContentController) resolveCommonContentChildren(ctx context.Context, parentContentObj, snapObj *unstructured.Unstructured) ([]storagev1alpha1.SnapshotContentChildRef, bool, string, string, error) {
-	rawRefs, _, err := unstructured.NestedSlice(snapObj.Object, "status", "childrenSnapshotRefs")
-	if err != nil {
-		return nil, false, "", "", err
-	}
-	var refs []storagev1alpha1.SnapshotContentChildRef
 	for _, raw := range rawRefs {
 		refMap, ok := raw.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		apiVersion, _ := refMap["apiVersion"].(string)
-		kind, _ := refMap["kind"].(string)
 		name, _ := refMap["name"].(string)
-		if apiVersion == "" || kind == "" || name == "" {
+		if name == "" {
 			continue
 		}
-		child := &unstructured.Unstructured{}
-		child.SetAPIVersion(apiVersion)
-		child.SetKind(kind)
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: snapObj.GetNamespace(), Name: name}, child); err != nil {
-			if errors.IsNotFound(err) {
-				return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child snapshot %s/%s not found", kind, name), nil
-			}
-			return refs, false, "", "", err
-		}
-		boundName, _, err := unstructured.NestedString(child.Object, "status", "boundSnapshotContentName")
-		if err != nil {
-			return refs, false, "", "", err
-		}
-		if boundName == "" {
-			return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child snapshot %s/%s has no bound SnapshotContent", kind, name), nil
-		}
-		refs = append(refs, storagev1alpha1.SnapshotContentChildRef{Name: boundName})
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: boundName}, childContent); err != nil {
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
-				return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s not found", boundName), nil
+				return false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s not found", name), nil
 			}
-			return refs, false, "", "", err
-		}
-		if err := r.ensureChildSnapshotContentOwnedByParent(ctx, boundName, parentContentObj); err != nil {
-			return refs, false, "", "", err
+			return false, "", "", err
 		}
 		childLike, err := snapshot.ExtractSnapshotContentLike(childContent)
 		if err != nil {
-			return refs, false, "", "", err
+			return false, "", "", err
 		}
 		if !snapshot.IsReady(childLike) {
 			readyCond := snapshot.GetCondition(childLike, snapshot.ConditionReady)
 			if readyCond != nil && readyCond.Status == metav1.ConditionFalse && readyCond.Reason == snapshot.ReasonChildSnapshotFailed {
-				return refs, false, snapshot.ReasonChildSnapshotFailed, readyCond.Message, nil
+				return false, snapshot.ReasonChildSnapshotFailed, readyCond.Message, nil
 			}
-			return refs, false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s is not Ready", boundName), nil
+			return false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s is not Ready", name), nil
 		}
 	}
-	sortSnapshotContentChildRefs(refs)
-	return refs, true, "", "", nil
-}
-
-func extractConditionsFromUnstructured(obj *unstructured.Unstructured) []metav1.Condition {
-	rawConditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	conditions := make([]metav1.Condition, 0, len(rawConditions))
-	for _, raw := range rawConditions {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		condition := metav1.Condition{}
-		if t, _ := m["type"].(string); t != "" {
-			condition.Type = t
-		}
-		if s, _ := m["status"].(string); s != "" {
-			condition.Status = metav1.ConditionStatus(s)
-		}
-		if r, _ := m["reason"].(string); r != "" {
-			condition.Reason = r
-		}
-		if msg, _ := m["message"].(string); msg != "" {
-			condition.Message = msg
-		}
-		conditions = append(conditions, condition)
-	}
-	return conditions
+	return true, "", "", nil
 }
 
 func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx context.Context, childName string, parentContentObj *unstructured.Unstructured) error {
@@ -596,57 +485,17 @@ func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx 
 	})
 }
 
-func (r *SnapshotContentController) resolveCommonContentManifestCheckpoint(ctx context.Context, contentObj, snapObj *unstructured.Unstructured) (string, bool, bool, string, error) {
-	existingMCPName, _, err := unstructured.NestedString(contentObj.Object, "status", "manifestCheckpointName")
+func (r *SnapshotContentController) validateCommonContentManifestCheckpoint(ctx context.Context, contentObj *unstructured.Unstructured, mcpName string) (bool, bool, string, error) {
+	resolvedMCPName, ready, failed, msg, err := r.resolveManifestCheckpointReady(ctx, mcpName)
 	if err != nil {
-		return "", false, false, "", err
-	}
-	if existingMCPName != "" {
-		mcpName, ready, failed, msg, err := r.resolveManifestCheckpointReady(ctx, existingMCPName)
-		if err != nil {
-			return "", false, false, "", err
-		}
-		if ready || failed {
-			if ready {
-				if err := r.ensureManifestCheckpointOwnedByContent(ctx, mcpName, contentObj); err != nil {
-					return "", false, false, "", err
-				}
-			}
-			return mcpName, ready, failed, msg, nil
-		}
-	}
-
-	mcrName, _, err := unstructured.NestedString(snapObj.Object, "status", "manifestCaptureRequestName")
-	if err != nil {
-		return "", false, false, "", err
-	}
-	if mcrName == "" {
-		return "", false, false, "waiting for snapshot status.manifestCaptureRequestName", nil
-	}
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: snapObj.GetNamespace(), Name: mcrName}, mcr); err != nil {
-		if errors.IsNotFound(err) {
-			return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s", snapObj.GetNamespace(), mcrName), nil
-		}
-		return "", false, false, "", err
-	}
-	if mcr.Status.CheckpointName == "" {
-		cond := meta.FindStatusCondition(mcr.Status.Conditions, ssv1alpha1.ManifestCaptureRequestConditionTypeReady)
-		if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonFailed {
-			return "", false, true, cond.Message, nil
-		}
-		return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s checkpoint", snapObj.GetNamespace(), mcrName), nil
-	}
-	mcpName, ready, failed, msg, err := r.resolveManifestCheckpointReady(ctx, mcr.Status.CheckpointName)
-	if err != nil {
-		return "", false, false, "", err
+		return false, false, "", err
 	}
 	if ready {
-		if err := r.ensureManifestCheckpointOwnedByContent(ctx, mcpName, contentObj); err != nil {
-			return "", false, false, "", err
+		if err := r.ensureManifestCheckpointOwnedByContent(ctx, resolvedMCPName, contentObj); err != nil {
+			return false, false, "", err
 		}
 	}
-	return mcpName, ready, failed, msg, nil
+	return ready, failed, msg, nil
 }
 
 func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx context.Context, mcpName string, contentObj *unstructured.Unstructured) error {
@@ -729,36 +578,6 @@ func (r *SnapshotContentController) resolveDataReadiness(_ context.Context, _ *u
 	// final artifact exists, is Ready, and has ownerRef -> SnapshotContent.
 	// dataRef is apiVersion/kind/name for a durable artifact, never a request ref.
 	return true, "", "", nil
-}
-
-func snapshotContentChildRefsToUnstructured(refs []storagev1alpha1.SnapshotContentChildRef) []interface{} {
-	out := make([]interface{}, 0, len(refs))
-	for _, ref := range refs {
-		out = append(out, map[string]interface{}{"name": ref.Name})
-	}
-	return out
-}
-
-func snapshotObjectRefsEqualStorageContentRefs(left []snapshot.ObjectRef, right []storagev1alpha1.SnapshotContentChildRef) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	leftNames := make([]string, 0, len(left))
-	for _, ref := range left {
-		leftNames = append(leftNames, ref.Name)
-	}
-	rightNames := make([]string, 0, len(right))
-	for _, ref := range right {
-		rightNames = append(rightNames, ref.Name)
-	}
-	sort.Strings(leftNames)
-	sort.Strings(rightNames)
-	for i := range leftNames {
-		if leftNames[i] != rightNames[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // cascadeRemoveFinalizersFromChildren removes finalizers from child SnapshotContent objects
