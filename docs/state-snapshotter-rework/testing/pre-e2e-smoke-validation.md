@@ -82,6 +82,12 @@ curl --cacert "$TMP_CERT_DIR/ca.crt" \
 
 ```shell
 kubectl get crd | grep -E 'snapshots|snapshotcontents|demovirtual|customsnapshotdefinitions|manifestcapture|manifestcheckpoints'
+kubectl get crd customsnapshotdefinitions.state-snapshotter.deckhouse.io
+
+kubectl get crd domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io 2>/dev/null && {
+  echo "unexpected legacy custom snapshot definition CRD exists" >&2
+  exit 1
+} || true
 ```
 
 Ожидаемо есть CRD для:
@@ -109,6 +115,12 @@ kubectl get crd demovirtualdisksnapshotcontents.demo.state-snapshotter.deckhouse
   echo "unexpected legacy DemoVirtualDiskSnapshotContent CRD exists" >&2
   exit 1
 } || true
+```
+
+After applying current manifests to a real cluster that previously had the old API installed, delete the superseded CRD explicitly:
+
+```shell
+kubectl delete crd domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io --ignore-not-found
 ```
 
 ## 2. Schema `childrenSnapshotRefs`: без namespace
@@ -378,7 +390,7 @@ as the active content resource. Dedicated `SnapshotContent` /
 
 Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Execution ObjectKeepers for MCR are UID-aware: recreating an MCR with the same name creates a different `ret-mcr-*` ObjectKeeper, so stale request keepers should not block the new request. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-snap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
-## 6. Базовый flow без CSD
+## 6. CSD registration: базовый flow без CSD
 
 Создайте root snapshot без demo CSD:
 
@@ -467,7 +479,7 @@ apply_demo_domain_rbac "$CTRL_NS" controller
 
 Invariant for the rest of this smoke: `RBACReady=True` means the test-only RBAC above is already effective.
 
-## 8. Disk-only CSD + ownerRef filtering
+## 8. CSD eligibility: Disk-only CSD + ownerRef filtering
 
 Создайте eligible CSD только для disk snapshot kind:
 
@@ -496,7 +508,7 @@ done
 mark_csd_rbac_ready smoke-demo-disk-only
 ```
 
-Дождитесь, пока graph registry refresh увидит CSD (обычно через reconcile/logs; при необходимости перезапустите controller только если это предусмотрено текущим runbook).
+Дождитесь, пока graph registry refresh увидит CSD (обычно через reconcile/logs; при необходимости перезапустите controller только если это предусмотрено текущим runbook). This is the CSD dynamic watch activation boundary: after eligibility, new root snapshots may see the newly registered snapshot kind without a controller restart.
 
 Создайте snapshot:
 
@@ -557,7 +569,7 @@ kubectl get --raw \
 
 Ожидаемо в `/tmp/root-disk-only-manifests.json` нет VM-owned `DemoVirtualDisk/disk-vm` ни как direct child subtree, ни как root MCP payload. Direct disk child MCP должен содержать `DemoVirtualDisk/disk-standalone`.
 
-## 9. VM + Disk CSD: полный parent/child graph
+## 9. CSD graph activation: VM + Disk CSD полный parent/child graph
 
 Disk-only CSD удаляем перед VM+Disk CSD, чтобы не получить ожидаемый `KindConflict` на `DemoVirtualDiskSnapshot` mapping.
 
@@ -593,6 +605,8 @@ done
 
 mark_csd_rbac_ready smoke-demo-vm-disk
 ```
+
+This step also validates CSD dynamic watch activation for the full demo graph: after VM+Disk CSD eligibility, newly created root snapshots discover VM children and VM snapshots discover Disk children through CSD-backed graph registry state.
 
 Создайте snapshot:
 

@@ -25,7 +25,7 @@ Bash-скрипт для проверки работы контроллера un
 1. **Создание Snapshot** - создает тестовый Snapshot
 2. **Создание SnapshotContent** - проверяет автоматическое создание SnapshotContent
 3. **Finalizer** - проверяет добавление finalizer на SnapshotContent
-4. **Domain Controller Simulation** - устанавливает condition HandledByDomainSpecificController
+4. **Custom Snapshot Controller Simulation** - устанавливает condition `HandledByCustomSnapshotController`
 5. **Ready State** - устанавливает Ready=True на SnapshotContent и проверяет propagation на Snapshot
 6. **ObjectKeeper** - проверяет создание ObjectKeeper (best-effort, для root snapshots)
 7. **Orphaning** - удаляет Snapshot и проверяет удаление finalizer с SnapshotContent

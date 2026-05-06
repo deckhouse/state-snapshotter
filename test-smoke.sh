@@ -373,20 +373,20 @@ EOF
         exit 1
     fi
     
-    # Test 2: Simulate domain controller (set HandledByDomainSpecificController condition)
+    # Test 2: Simulate custom snapshot controller (set HandledByCustomSnapshotController condition)
     # IMPORTANT: SnapshotController waits for this condition before creating SnapshotContent
     log_info ""
     log_info "═══════════════════════════════════════════════════════════════"
-    log_info "Test 2: Simulate domain controller"
+    log_info "Test 2: Simulate custom snapshot controller"
     log_info "═══════════════════════════════════════════════════════════════"
     
     local snapshot_resource="${SNAPSHOT_KIND,,}s.${SNAPSHOT_API_GROUP}"
     
     if [[ "${SKIP_DOMAIN_SIMULATION:-false}" == "true" ]]; then
-        log_warn "Skipping domain controller simulation (CRD does not support conditions)"
+        log_warn "Skipping custom snapshot controller simulation (CRD does not support conditions)"
         log_warn "SnapshotContent will NOT be created - this is expected"
     else
-        log_info "Setting HandledByDomainSpecificController=True condition..."
+        log_info "Setting HandledByCustomSnapshotController=True condition..."
         
         # CRITICAL: Must use --subresource=status to patch status subresource
         # Without --subresource=status, Kubernetes will reject status.conditions
@@ -400,10 +400,10 @@ EOF
             local patch_payload=$(jq -n --arg time "$transition_time" '{
                 "status": {
                     "conditions": [{
-                        "type": "HandledByDomainSpecificController",
+                        "type": "HandledByCustomSnapshotController",
                         "status": "True",
                         "reason": "Processed",
-                        "message": "Domain controller processed snapshot",
+                        "message": "Custom snapshot controller processed snapshot",
                         "lastTransitionTime": $time
                     }]
                 }
@@ -423,9 +423,9 @@ EOF
             # Verify condition was set
             sleep 1  # Small delay for API to update
             local condition_status=$(kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" \
-                -o jsonpath='{.status.conditions[?(@.type=="HandledByDomainSpecificController")].status}' 2>/dev/null || echo "")
+                -o jsonpath='{.status.conditions[?(@.type=="HandledByCustomSnapshotController")].status}' 2>/dev/null || echo "")
             if [[ "$condition_status" == "True" ]]; then
-                log_success "Domain controller condition set and verified"
+                log_success "Custom snapshot controller condition set and verified"
             else
                 log_error "Condition was not set correctly (status: $condition_status)"
                 log_info "Snapshot status:"

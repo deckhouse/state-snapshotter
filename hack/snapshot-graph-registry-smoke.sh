@@ -67,6 +67,9 @@ fi
 
 kubectl get crd customsnapshotdefinitions.state-snapshotter.deckhouse.io >/dev/null 2>&1 || \
 	fail "CSD CRD not installed on cluster"
+if kubectl get crd domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io >/dev/null 2>&1; then
+	fail "legacy domainspecificsnapshotcontrollers CRD is still installed"
+fi
 
 if [[ -n "$AUTO_NS" ]]; then
 	kubectl create namespace "$WORK_NS" >/dev/null

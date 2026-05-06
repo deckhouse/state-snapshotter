@@ -180,9 +180,9 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	}
 
 	// Step 1: Barrier - Wait for HandledByCustomSnapshotController
-	// Domain controller must process the snapshot first (create MCR/VCR, set conditions)
+	// Custom snapshot controller must process the snapshot first (create MCR/VCR, set conditions).
 	if !snapshot.HasCondition(snapshotLike, snapshot.ConditionHandledByCustomSnapshotController, metav1.ConditionTrue) {
-		logger.V(1).Info("Waiting for domain controller to handle snapshot")
+		logger.V(1).Info("Waiting for custom snapshot controller to handle snapshot")
 		return ctrl.Result{}, nil
 	}
 
