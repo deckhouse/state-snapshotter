@@ -37,7 +37,7 @@
 
 **Same-name root recreate:** retained root `ObjectKeeper` identity is bound to one snapshot UID through `ObjectKeeper.spec.followObjectRef.UID`. Same namespace/name root Snapshot cannot reuse retained root ObjectKeeper if that ObjectKeeper follows an old Snapshot UID. A new root Snapshot with the same namespace/name must fail closed or wait until old root ObjectKeeper expires/is removed.
 
-**Latest pre-e2e smoke:** 2026-04-29 пройден на реальном кластере с test-only domain RBAC до `RBACReady=True` (no-DSC root, disk-only DSC, VM+Disk DSC, content tree, MCP/chunks, namespace-relative aggregated API output, negative API и cleanup). 2026-05-06 повторный PR4 smoke после UID-aware MCR OK прошёл до retained read after root delete; найден и исправлен read-path gap для `/snapshots/{name}/manifests` после удаления root Snapshot. Требуется redeploy и повтор `hack/pr4-smoke.sh`.
+**Latest pre-e2e smoke:** 2026-04-29 пройден на реальном кластере с test-only domain RBAC до `RBACReady=True` (no-DSC root, disk-only DSC, VM+Disk DSC, content tree, MCP/chunks, namespace-relative aggregated API output, negative API и cleanup). 2026-05-06 PR4 smoke после UID-aware MCR OK и retained-read hardening прошёл на текущем временном поведении `/snapshots/{name}/manifests` после root delete. **TODO:** долгосрочно retained manifests должны читаться через durable `/snapshotcontents/{contentName}/manifests`; deleted Snapshot name через root ObjectKeeper не является целевым retained read API.
 
 **Для команды (одно предложение):** **E1–E6**: граф по **`children*Refs`**, E5 exclude через registry, E6 parent content **`Ready`** агрегируется `SnapshotContentController`, snapshot **`Ready`** только зеркалит bound content, child→parent через dynamic watches.
 

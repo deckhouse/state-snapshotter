@@ -23,7 +23,17 @@ curl -s \
 
 The response is `application/json`: an array of Kubernetes manifest objects from the requested snapshot subtree.
 
-For the legacy `snapshots/{name}/manifests` route, retained reads by deleted Snapshot name remain available while the root `ObjectKeeper` and root `SnapshotContent` exist. The lookup uses `ObjectKeeper.spec.followObjectRef` for the deleted `Snapshot` plus exactly one `SnapshotContent` ownerRef to that ObjectKeeper.
+## TODO: Retained Manifest Read API
+
+Current `/snapshots/{name}/manifests` route is semantically a live Snapshot route. After the Snapshot object is deleted, this route should return `404 Snapshot not found`.
+
+Retained manifests should be read through a durable content route:
+
+```text
+GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/{contentName}/manifests
+```
+
+`SnapshotContent` is the retained source of truth after Snapshot deletion. Do not rely on resolving deleted Snapshot name through root ObjectKeeper as the long-term API contract. ObjectKeeper is lifecycle/TTL infrastructure, not the retained read identifier. Current root ObjectKeeper-based retained lookup is temporary behavior / implementation detail until the durable content route exists.
 
 ## MCP-Level Endpoints
 
@@ -42,12 +52,10 @@ Use the generic aggregated endpoint when the expected result is the full snapsho
 | Case | Status |
 |------|--------|
 | Snapshot not found | `404 Not Found` |
-| Root ObjectKeeper exists but retained SnapshotContent is absent | `404 Not Found` |
 | `status.boundSnapshotContentName` is empty | `400 Bad Request` |
 | Resource is not a registered snapshot resource | `400 Bad Request` |
 | Cluster-scoped snapshot resource | `400 Bad Request` |
 | Duplicate object in subtree | `409 Conflict` |
-| Multiple retained SnapshotContents for one root ObjectKeeper | `409 Conflict` |
 | Graph registry unavailable | `503 Service Unavailable` |
 
 Duplicate object errors include:

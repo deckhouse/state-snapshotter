@@ -439,6 +439,8 @@ kubectl -n "$NS" get snapshot root-no-dsc -o json \
 
 Aggregated read через legacy/generic `snapshots` route:
 
+TODO: retained manifest read API. This route is a live Snapshot route. After the Snapshot is deleted, the long-term contract should return `404 Snapshot not found` here and read retained manifests through durable `/snapshotcontents/{contentName}/manifests`. Current deleted-Snapshot-name resolution through root ObjectKeeper is temporary behavior / implementation detail and should not be used as the long-term retained read identifier.
+
 ```shell
 kubectl get --raw \
   "$API_PATH_BASE/snapshots/root-no-dsc/manifests" \
