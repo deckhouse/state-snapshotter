@@ -14,12 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package snapshot
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"sort"
 	"time"
 
@@ -37,7 +40,7 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
@@ -144,8 +147,8 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			(hasSubtree && errors.Is(err, usecase.ErrRunGraphChildNotReachable)) ||
 			(hasSubtree && errors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady))
 		if transientChildGraph {
-			cur := meta.FindStatusCondition(freshParent.Status.Conditions, snapshot.ConditionReady)
-			if cur != nil && cur.Reason == snapshot.ReasonChildSnapshotFailed {
+			cur := meta.FindStatusCondition(freshParent.Status.Conditions, snapshotpkg.ConditionReady)
+			if cur != nil && cur.Reason == snapshotpkg.ReasonChildSnapshotFailed {
 				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 			}
 			var reason string
@@ -164,14 +167,14 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 					ChildPendingMessage:           usecase.JoinNonEmpty(sum.PendingParts, "; "),
 					SelfCaptureComplete:           false,
 				})
-				if out.Reason == snapshot.ReasonChildSnapshotFailed {
+				if out.Reason == snapshotpkg.ReasonChildSnapshotFailed {
 					parentKey := types.NamespacedName{Namespace: freshParent.Namespace, Name: freshParent.Name}
 					return r.patchSnapshotReadyFromE6(ctx, parentKey, out.Reason, out.Message)
 				}
 				reason = out.Reason
 				msg = out.Message
 			} else {
-				reason = snapshot.ReasonChildSnapshotPending
+				reason = snapshotpkg.ReasonChildSnapshotPending
 				msg = err.Error()
 			}
 			// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
@@ -181,7 +184,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 				}
 			}
 			meta.SetStatusCondition(&freshParent.Status.Conditions, metav1.Condition{
-				Type:               snapshot.ConditionReady,
+				Type:               snapshotpkg.ConditionReady,
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            msg,
@@ -222,14 +225,14 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	}
 
 	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
-	if err := publishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
+	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if apierrors.IsNotFound(err) {
 			meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-				Type:               snapshot.ConditionReady,
+				Type:               snapshotpkg.ConditionReady,
 				Status:             metav1.ConditionFalse,
 				Reason:             "ManifestCheckpointPending",
 				Message:            fmt.Sprintf("waiting for ManifestCheckpoint %q", mcpName),
@@ -256,7 +259,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			return r.failCapture(ctx, nsSnap, content, "ManifestCheckpointFailed", msg)
 		}
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
+			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            msg,
@@ -304,7 +307,7 @@ func (r *SnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyReady(
 	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
 	staleMCR := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := r.Client.Get(ctx, mcrKey, staleMCR); err == nil {
-		readyCond := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshot.ConditionReady)
+		readyCond := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
 		if readyCond != nil && readyCond.Status == metav1.ConditionFalse && readyCond.Reason == "CapturePlanDrift" {
 			return true, ctrl.Result{}, nil
 		}
@@ -343,9 +346,9 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 		}
 		return ctrl.Result{}, err
 	}
-	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
+	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionReady)
 	if contentReady == nil || contentReady.Status != metav1.ConditionTrue {
-		reason := snapshot.ReasonManifestCapturePending
+		reason := snapshotpkg.ReasonManifestCapturePending
 		message := fmt.Sprintf("waiting for SnapshotContent %q Ready", content.Name)
 		if contentReady != nil {
 			reason = contentReady.Reason
@@ -358,7 +361,7 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 			}
 			cur.Status.ObservedGeneration = cur.Generation
 			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-				Type:               snapshot.ConditionReady,
+				Type:               snapshotpkg.ConditionReady,
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            message,
@@ -370,7 +373,7 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 		}
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
-	ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
+	ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady)
 	if ready == nil || ready.Status != contentReady.Status || ready.Reason != contentReady.Reason || ready.Message != contentReady.Message {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			cur := &storagev1alpha1.Snapshot{}
@@ -379,7 +382,7 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 			}
 			cur.Status.ObservedGeneration = cur.Generation
 			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-				Type:               snapshot.ConditionReady,
+				Type:               snapshotpkg.ConditionReady,
 				Status:             contentReady.Status,
 				Reason:             contentReady.Reason,
 				Message:            contentReady.Message,
@@ -412,13 +415,13 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 
 func (r *SnapshotReconciler) snapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) (bool, error) {
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
-	return manifestCaptureRequestSafeToDelete(ctx, r.Client, key, nsSnap.Status.BoundSnapshotContentName)
+	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.Client, key, nsSnap.Status.BoundSnapshotContentName)
 }
 
 func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionReady,
+		Type:               snapshotpkg.ConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            msg,
@@ -439,13 +442,13 @@ func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1a
 // spec.mode is always FollowObjectWithTTL; spec.followObjectRef targets the root Snapshot; spec.ttl is
 // SnapshotRootOKTTL from controller config (env override or built-in default). Execution-chain ObjectKeepers (MCR) stay FollowObject without TTL.
 func (r *SnapshotReconciler) ensureSnapshotRootObjectKeeper(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
-	ok, res, err := ensureRootObjectKeeperWithTTL(
+	ok, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
 		ctx,
 		r.Client,
 		r.APIReader,
 		r.Config,
 		nsSnap,
-		storagev1alpha1.SchemeGroupVersion.WithKind(KindSnapshot),
+		storagev1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindSnapshot),
 	)
 	if err != nil {
 		return nil, ctrl.Result{}, err
@@ -469,7 +472,7 @@ func (r *SnapshotReconciler) ensureRootSnapshotContentOwnedByObjectKeeper(
 	content *storagev1alpha1.SnapshotContent,
 	ok *deckhousev1alpha1.ObjectKeeper,
 ) (ctrl.Result, error) {
-	changed, err := ensureLifecycleOwnerRef(ctx, r.Client, content, rootObjectKeeperOwnerReference(ok))
+	changed, err := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, content, controllercommon.RootObjectKeeperOwnerReference(ok))
 	if err != nil {
 		return ctrl.Result{}, err
 	}

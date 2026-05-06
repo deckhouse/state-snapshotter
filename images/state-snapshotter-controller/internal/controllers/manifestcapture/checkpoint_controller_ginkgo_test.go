@@ -14,10 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package manifestcapture
 
 import (
 	"context"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"testing"
 	"time"
 
@@ -131,7 +132,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctrl.setTTLAnnotation(mcr)
 
 			Expect(mcr.Annotations).ToNot(BeNil())
-			Expect(mcr.Annotations[AnnotationKeyTTL]).To(Equal("168h"))
+			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("168h"))
 		})
 
 		It("should not overwrite existing TTL annotation", func() {
@@ -140,14 +141,14 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 					Name:      "test-mcr",
 					Namespace: "default",
 					Annotations: map[string]string{
-						AnnotationKeyTTL: "24h",
+						controllercommon.AnnotationKeyTTL: "24h",
 					},
 				},
 			}
 
 			ctrl.setTTLAnnotation(mcr)
 
-			Expect(mcr.Annotations[AnnotationKeyTTL]).To(Equal("24h"))
+			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("24h"))
 		})
 
 		It("should use config TTL when available", func() {
@@ -161,7 +162,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 
 			ctrl.setTTLAnnotation(mcr)
 
-			Expect(mcr.Annotations[AnnotationKeyTTL]).To(Equal("72h"))
+			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("72h"))
 		})
 	})
 
@@ -557,7 +558,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
 			Expect(updatedMCR.Annotations).ToNot(BeNil())
-			Expect(updatedMCR.Annotations[AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
+			Expect(updatedMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
 		})
 	})
 })
@@ -619,8 +620,8 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: DeckhouseAPIVersion,
-					Kind:       KindObjectKeeper,
+					APIVersion: controllercommon.DeckhouseAPIVersion,
+					Kind:       controllercommon.KindObjectKeeper,
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name: retainerName,
@@ -686,8 +687,8 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 					Name: "mcp-test-123",
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: DeckhouseAPIVersion,
-							Kind:       KindObjectKeeper,
+							APIVersion: controllercommon.DeckhouseAPIVersion,
+							Kind:       controllercommon.KindObjectKeeper,
 							Name:       retainerName,
 							UID:        objectKeeper.UID,
 							Controller: func() *bool { b := true; return &b }(),
@@ -711,7 +712,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 			Expect(len(createdCheckpoint.OwnerReferences)).To(Equal(1))
 			ownerRef := createdCheckpoint.OwnerReferences[0]
-			Expect(ownerRef.Kind).To(Equal(KindObjectKeeper))
+			Expect(ownerRef.Kind).To(Equal(controllercommon.KindObjectKeeper))
 			Expect(ownerRef.Name).To(Equal(retainerName))
 			Expect(ownerRef.UID).To(Equal(objectKeeper.UID))
 			Expect(*ownerRef.Controller).To(BeTrue())
@@ -924,7 +925,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			finalMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, finalMCR)).To(Succeed())
 			Expect(finalMCR.Annotations).ToNot(BeNil())
-			Expect(finalMCR.Annotations[AnnotationKeyTTL]).To(Equal("10m"))
+			Expect(finalMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("10m"))
 			// Verify status is still intact
 			ready = meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())

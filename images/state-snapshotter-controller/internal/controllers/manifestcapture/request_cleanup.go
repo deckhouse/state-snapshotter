@@ -1,4 +1,4 @@
-package controllers
+package manifestcapture
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
-func manifestCaptureRequestSafeToDelete(
+func ManifestCaptureRequestSafeToDelete(
 	ctx context.Context,
 	reader client.Reader,
 	key client.ObjectKey,
@@ -49,7 +49,7 @@ func manifestCaptureRequestSafeToDelete(
 	return isMCRSafeToDelete(mcr, content, mcp), nil
 }
 
-func manifestCheckpointNameFromRequest(mcr *ssv1alpha1.ManifestCaptureRequest) string {
+func ManifestCheckpointNameFromRequest(mcr *ssv1alpha1.ManifestCaptureRequest) string {
 	if mcr == nil {
 		return ""
 	}

@@ -19,12 +19,80 @@ package controllers
 import (
 	"context"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/demo"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/dsc"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/genericbinder"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
+	snapshotcontroller "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
+
+type GenericSnapshotBinderController = genericbinder.GenericSnapshotBinderController
+type SnapshotContentController = snapshotcontent.SnapshotContentController
+type ManifestCheckpointController = manifestcapture.ManifestCheckpointController
+type DomainSpecificSnapshotControllerReconciler = dsc.DomainSpecificSnapshotControllerReconciler
+
+func NewGenericSnapshotBinderController(
+	c client.Client,
+	apiReader client.Reader,
+	scheme *runtime.Scheme,
+	cfg *config.Options,
+	snapshotGVKs []schema.GroupVersionKind,
+) (*GenericSnapshotBinderController, error) {
+	return genericbinder.NewGenericSnapshotBinderController(c, apiReader, scheme, cfg, snapshotGVKs)
+}
+
+func NewSnapshotContentController(
+	c client.Client,
+	apiReader client.Reader,
+	scheme *runtime.Scheme,
+	restMapper meta.RESTMapper,
+	cfg *config.Options,
+	snapshotContentGVKs []schema.GroupVersionKind,
+) (*SnapshotContentController, error) {
+	return snapshotcontent.NewSnapshotContentController(c, apiReader, scheme, restMapper, cfg, snapshotContentGVKs)
+}
+
+func NewManifestCheckpointController(
+	c client.Client,
+	apiReader client.Reader,
+	scheme *runtime.Scheme,
+	log logger.LoggerInterface,
+	cfg *config.Options,
+) (*ManifestCheckpointController, error) {
+	return manifestcapture.NewManifestCheckpointController(c, apiReader, scheme, log, cfg)
+}
+
+func NewDomainSpecificSnapshotControllerReconciler(
+	c client.Client,
+	scheme *runtime.Scheme,
+	log logger.LoggerInterface,
+	cfg *config.Options,
+) (*DomainSpecificSnapshotControllerReconciler, error) {
+	return dsc.NewDomainSpecificSnapshotControllerReconciler(c, scheme, log, cfg)
+}
+
+func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
+	return snapshotcontroller.AddSnapshotControllerToManager(mgr, cfg, snapshotGraphRegistry)
+}
+
+func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
+	return demo.AddDemoVirtualDiskSnapshotControllerToManager(mgr, cfg)
+}
+
+func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
+	return demo.AddDemoVirtualMachineSnapshotControllerToManager(mgr, cfg)
+}
 
 // AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager
 // and starts TTL scanner as a leader-only runnable.
@@ -36,7 +104,7 @@ func AddManifestCheckpointControllerToManager(
 	log logger.LoggerInterface,
 	cfg *config.Options,
 ) error {
-	reconciler, err := NewManifestCheckpointController(
+	reconciler, err := manifestcapture.NewManifestCheckpointController(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
 		mgr.GetScheme(),
@@ -72,7 +140,7 @@ func AddDomainSpecificSnapshotControllerToManager(
 	unifiedRuntimeSync func(context.Context) error,
 	graphRegistryRefresh func(context.Context) error,
 ) error {
-	rec, err := NewDomainSpecificSnapshotControllerReconciler(
+	rec, err := dsc.NewDomainSpecificSnapshotControllerReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		log,

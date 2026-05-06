@@ -1,4 +1,4 @@
-package controllers
+package snapshotcontent
 
 import (
 	"context"
@@ -10,10 +10,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 )
 
-func publishSnapshotContentManifestCheckpointName(ctx context.Context, c client.Client, contentName, mcpName string) error {
+func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.Client, contentName, mcpName string) error {
 	if contentName == "" || mcpName == "" {
 		return nil
 	}
@@ -31,17 +32,17 @@ func publishSnapshotContentManifestCheckpointName(ctx context.Context, c client.
 	})
 }
 
-func publishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, contentName string, refs []storagev1alpha1.SnapshotContentChildRef) error {
+func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, contentName string, refs []storagev1alpha1.SnapshotContentChildRef) error {
 	if contentName == "" {
 		return nil
 	}
-	sortSnapshotContentChildRefs(refs)
+	controllercommon.SortSnapshotContentChildRefs(refs)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		content := &storagev1alpha1.SnapshotContent{}
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}
-		if snapshotContentChildRefsEqualIgnoreOrder(content.Status.ChildrenSnapshotContentRefs, refs) {
+		if controllercommon.SnapshotContentChildRefsEqualIgnoreOrder(content.Status.ChildrenSnapshotContentRefs, refs) {
 			return nil
 		}
 		base := content.DeepCopy()
@@ -50,7 +51,7 @@ func publishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, co
 	})
 }
 
-func publishSnapshotContentChildrenFromSnapshotRefs(
+func PublishSnapshotContentChildrenFromSnapshotRefs(
 	ctx context.Context,
 	c client.Client,
 	parentNamespace string,
@@ -61,7 +62,7 @@ func publishSnapshotContentChildrenFromSnapshotRefs(
 		return false, nil
 	}
 	if len(childSnapshotRefs) == 0 {
-		return true, publishSnapshotContentChildrenRefs(ctx, c, parentContentName, nil)
+		return true, PublishSnapshotContentChildrenRefs(ctx, c, parentContentName, nil)
 	}
 	parentContent := &storagev1alpha1.SnapshotContent{}
 	if err := c.Get(ctx, client.ObjectKey{Name: parentContentName}, parentContent); err != nil {
@@ -85,7 +86,7 @@ func publishSnapshotContentChildrenFromSnapshotRefs(
 		}
 		out = append(out, storagev1alpha1.SnapshotContentChildRef{Name: childContentName})
 	}
-	return true, publishSnapshotContentChildrenRefs(ctx, c, parentContentName, out)
+	return true, PublishSnapshotContentChildrenRefs(ctx, c, parentContentName, out)
 }
 
 func ensureChildSnapshotContentOwnedByParentContent(ctx context.Context, c client.Client, childName string, parent *storagev1alpha1.SnapshotContent) error {
@@ -97,11 +98,11 @@ func ensureChildSnapshotContentOwnedByParentContent(ctx context.Context, c clien
 			}
 			return err
 		}
-		_, err := ensureLifecycleOwnerRef(ctx, c, child, snapshotContentOwnerReference(parent))
+		_, err := controllercommon.EnsureLifecycleOwnerRef(ctx, c, child, controllercommon.SnapshotContentOwnerReference(parent))
 		return err
 	})
 }
 
-func publishSnapshotContentLeafChildrenRefs(ctx context.Context, c client.Client, contentName string) error {
-	return publishSnapshotContentChildrenRefs(ctx, c, contentName, nil)
+func PublishSnapshotContentLeafChildrenRefs(ctx context.Context, c client.Client, contentName string) error {
+	return PublishSnapshotContentChildrenRefs(ctx, c, contentName, nil)
 }

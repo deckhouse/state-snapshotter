@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package manifestcapture
 
 import (
 	"bytes"
@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"sort"
 	"strings"
 	"time"
@@ -289,8 +290,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		case errors.IsNotFound(err):
 			objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: DeckhouseAPIVersion,
-					Kind:       KindObjectKeeper,
+					APIVersion: controllercommon.DeckhouseAPIVersion,
+					Kind:       controllercommon.KindObjectKeeper,
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name: retainerName,
@@ -338,8 +339,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			r.Logger.Info("ObjectKeeper already exists, using existing", "objectKeeper", retainerName, "uid", objectKeeper.UID)
 		}
 		mcpOwnerRefs = []metav1.OwnerReference{{
-			APIVersion: DeckhouseAPIVersion,
-			Kind:       KindObjectKeeper,
+			APIVersion: controllercommon.DeckhouseAPIVersion,
+			Kind:       controllercommon.KindObjectKeeper,
 			Name:       retainerName,
 			UID:        objectKeeper.UID,
 			Controller: controllerTrue,
@@ -1335,7 +1336,7 @@ func (r *ManifestCheckpointController) finalizeMCR(
 func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.ManifestCaptureRequest) {
 	// Don't overwrite if annotation already exists
 	if mcr.Annotations != nil {
-		if _, exists := mcr.Annotations[AnnotationKeyTTL]; exists {
+		if _, exists := mcr.Annotations[controllercommon.AnnotationKeyTTL]; exists {
 			return
 		}
 	}
@@ -1347,7 +1348,7 @@ func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.Man
 	if r.Config != nil && r.Config.DefaultTTLStr != "" {
 		ttlStr = r.Config.DefaultTTLStr
 	}
-	mcr.Annotations[AnnotationKeyTTL] = ttlStr
+	mcr.Annotations[controllercommon.AnnotationKeyTTL] = ttlStr
 }
 
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {

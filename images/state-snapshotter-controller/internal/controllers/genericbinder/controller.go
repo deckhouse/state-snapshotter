@@ -14,11 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package genericbinder
 
 import (
 	"context"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"strings"
 	"sync"
 	"time"
@@ -212,17 +214,17 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	if snapshot.IsRootSnapshot(obj) {
 		var result ctrl.Result
 		var err error
-		objectKeeper, result, err := ensureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, obj, obj.GetObjectKind().GroupVersionKind())
+		objectKeeper, result, err := controllercommon.EnsureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, obj, obj.GetObjectKind().GroupVersionKind())
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if result.Requeue || result.RequeueAfter > 0 {
 			return result, nil
 		}
-		ref := rootObjectKeeperOwnerReference(objectKeeper)
+		ref := controllercommon.RootObjectKeeperOwnerReference(objectKeeper)
 		contentOwnerRef = &ref
 	} else {
-		ref, pending, err := resolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
+		ref, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -239,7 +241,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		contentObj := &unstructured.Unstructured{}
 		contentObj.SetGroupVersionKind(contentGVK)
 		if err := r.Get(ctx, client.ObjectKey{Name: contentName}, contentObj); err == nil {
-			if changed, err := ensureLifecycleOwnerRef(ctx, r.Client, contentObj, *contentOwnerRef); err != nil {
+			if changed, err := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, contentObj, *contentOwnerRef); err != nil {
 				return ctrl.Result{}, err
 			} else if changed {
 				return ctrl.Result{Requeue: true}, nil
@@ -404,7 +406,7 @@ func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
 	if mcr.Status.CheckpointName == "" {
 		return true, nil
 	}
-	if err := publishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcr.Status.CheckpointName); err != nil {
+	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcr.Status.CheckpointName); err != nil {
 		return false, err
 	}
 	return false, nil
@@ -492,8 +494,8 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 		wantSpec := r.desiredUnifiedRootObjectKeeperSpec(obj)
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
-				APIVersion: DeckhouseAPIVersion,
-				Kind:       KindObjectKeeper,
+				APIVersion: controllercommon.DeckhouseAPIVersion,
+				Kind:       controllercommon.KindObjectKeeper,
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name: retainerName,
@@ -523,8 +525,8 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 				// Update ownerRef: SnapshotContent is retained by ObjectKeeper.
 				contentObj.SetOwnerReferences([]metav1.OwnerReference{
 					{
-						APIVersion: DeckhouseAPIVersion,
-						Kind:       KindObjectKeeper,
+						APIVersion: controllercommon.DeckhouseAPIVersion,
+						Kind:       controllercommon.KindObjectKeeper,
 						Name:       retainerName,
 						UID:        objectKeeper.UID,
 						Controller: func() *bool { b := true; return &b }(),
@@ -576,7 +578,7 @@ func (r *GenericSnapshotBinderController) desiredUnifiedRootObjectKeeperSpec(obj
 		ttl = r.Config.SnapshotRootOKTTL
 	}
 	return deckhousev1alpha1.ObjectKeeperSpec{
-		Mode: ObjectKeeperModeFollowObjectWithTTL,
+		Mode: controllercommon.ObjectKeeperModeFollowObjectWithTTL,
 		FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
 			APIVersion: gvk.GroupVersion().String(),
 			Kind:       gvk.Kind,

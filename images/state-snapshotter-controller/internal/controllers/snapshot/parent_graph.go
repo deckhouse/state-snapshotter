@@ -14,13 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package snapshot
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"sort"
 	"strings"
 
@@ -35,7 +36,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
@@ -133,15 +134,15 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 			},
 		}
 		child.SetGroupVersionKind(gvk)
-		child.SetOwnerReferences([]metav1.OwnerReference{demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)})
+		child.SetOwnerReferences([]metav1.OwnerReference{controllercommon.SnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)})
 		return r.Client.Create(ctx, child)
 	}
 	base := child.DeepCopy()
 	changed := false
-	if err := ensureDemoSnapshotOwnerRef(child, demoSnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)); err != nil {
+	if err := controllercommon.EnsureSnapshotOwnerRef(child, controllercommon.SnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)); err != nil {
 		return err
 	}
-	if !ownerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
+	if !controllercommon.OwnerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
 		changed = true
 	}
 	if child.Object["spec"] == nil {
@@ -185,10 +186,10 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
 			return err
 		}
 		effective = mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
-		graphReady := meta.FindStatusCondition(cur.Status.Conditions, snapshot.ConditionGraphReady)
+		graphReady := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionGraphReady)
 		graphReadyCurrent := graphReady != nil &&
 			graphReady.Status == metav1.ConditionTrue &&
-			graphReady.Reason == snapshot.ReasonCompleted &&
+			graphReady.Reason == snapshotpkg.ReasonCompleted &&
 			graphReady.ObservedGeneration == cur.Generation
 		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && graphReadyCurrent {
 			return nil
@@ -196,9 +197,9 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
 		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), effective...)
 		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionGraphReady,
+			Type:               snapshotpkg.ConditionGraphReady,
 			Status:             metav1.ConditionTrue,
-			Reason:             snapshot.ReasonCompleted,
+			Reason:             snapshotpkg.ReasonCompleted,
 			Message:            "child graph planned",
 			ObservedGeneration: cur.Generation,
 		})
@@ -220,7 +221,7 @@ func (r *SnapshotReconciler) patchSnapshotGraphReady(
 		if err := r.Client.Get(ctx, key, cur); err != nil {
 			return err
 		}
-		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshot.ConditionGraphReady)
+		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionGraphReady)
 		if existing != nil &&
 			existing.Status == status &&
 			existing.Reason == reason &&
@@ -231,7 +232,7 @@ func (r *SnapshotReconciler) patchSnapshotGraphReady(
 		base := cur.DeepCopy()
 		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionGraphReady,
+			Type:               snapshotpkg.ConditionGraphReady,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,

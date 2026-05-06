@@ -14,13 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package snapshotcontent
 
 import (
 	"context"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"strings"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -83,6 +85,8 @@ type SnapshotContentController struct {
 	activeContentWatchSet  map[string]struct{} // SnapshotContent GVK String()
 	activeSnapshotWatchSet map[string]struct{} // Snapshot GVK String() -> status watch registered with manager
 }
+
+const defaultSnapshotContentRequeueAfter = 500 * time.Millisecond
 
 // NewSnapshotContentController creates a new SnapshotContentController with validated dependencies
 func NewSnapshotContentController(
@@ -293,7 +297,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, err
 		}
 		if !ready {
-			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+			return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 		}
 	} else {
 		if err := r.checkConsistencyAndSetReady(ctx, contentLike, obj); err != nil {
@@ -364,6 +368,10 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		return false, err
 	}
 	return plan.readyStatus == metav1.ConditionTrue, nil
+}
+
+func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
+	return r.reconcileCommonSnapshotContentStatus(ctx, obj)
 }
 
 func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
@@ -468,7 +476,7 @@ func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx 
 		parent := &storagev1alpha1.SnapshotContent{}
 		parent.Name = parentContentObj.GetName()
 		parent.UID = parentContentObj.GetUID()
-		_, err := ensureLifecycleOwnerRef(ctx, r.Client, child, snapshotContentOwnerReference(parent))
+		_, err := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, child, controllercommon.SnapshotContentOwnerReference(parent))
 		return err
 	})
 }
@@ -536,7 +544,7 @@ func snapshotContentControllerOwnerRefsForHandoff(existing []metav1.OwnerReferen
 	if !desiredSet {
 		out = append(out, desired)
 	}
-	return out, !ownerReferencesEqual(existing, out), nil
+	return out, !controllercommon.OwnerReferencesEqual(existing, out), nil
 }
 
 func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.Context, mcpName string) (string, bool, bool, string, error) {

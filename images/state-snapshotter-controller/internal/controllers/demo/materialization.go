@@ -14,13 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package demo
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -63,7 +65,7 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	}}
 	err := c.Get(ctx, key, existing)
 	if err == nil {
-		if !manifestTargetsEqual(existing.Spec.Targets, desiredTargets) {
+		if !controllercommon.ManifestTargetsEqual(existing.Spec.Targets, desiredTargets) {
 			base := existing.DeepCopy()
 			existing.Spec.Targets = desiredTargets
 			if err := c.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
@@ -106,14 +108,14 @@ func cleanupDemoSnapshotManifestCaptureRequest(ctx context.Context, c client.Cli
 }
 
 func demoSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, c client.Reader, key types.NamespacedName, contentName string) (bool, error) {
-	return manifestCaptureRequestSafeToDelete(ctx, c, key, contentName)
+	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, c, key, contentName)
 }
 
 func ensureDemoSnapshotContent(ctx context.Context, c client.Client, contentName string, ownerRef metav1.OwnerReference) error {
 	existing := &storagev1alpha1.SnapshotContent{}
 	err := c.Get(ctx, client.ObjectKey{Name: contentName}, existing)
 	if err == nil {
-		_, err := ensureLifecycleOwnerRef(ctx, c, existing, ownerRef)
+		_, err := controllercommon.EnsureLifecycleOwnerRef(ctx, c, existing, ownerRef)
 		return err
 	}
 	if !apierrors.IsNotFound(err) {
@@ -188,38 +190,18 @@ func ensureDemoSnapshotOwnerRef(obj client.Object, desired metav1.OwnerReference
 	if !desiredSet {
 		refs = append(refs, desired)
 	}
-	if !ownerReferencesEqual(obj.GetOwnerReferences(), refs) {
+	if !controllercommon.OwnerReferencesEqual(obj.GetOwnerReferences(), refs) {
 		obj.SetOwnerReferences(refs)
 	}
 	return nil
 }
 
 func isSnapshotParentOwnerRef(ref metav1.OwnerReference) bool {
-	if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == KindSnapshot {
+	if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == controllercommon.KindSnapshot {
 		return true
 	}
-	if ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ref.Kind == KindDemoVirtualMachineSnapshot {
+	if ref.APIVersion == demov1alpha1.SchemeGroupVersion.String() && ref.Kind == controllercommon.KindDemoVirtualMachineSnapshot {
 		return true
 	}
 	return false
-}
-
-func ownerReferencesEqual(left, right []metav1.OwnerReference) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i].APIVersion != right[i].APIVersion ||
-			left[i].Kind != right[i].Kind ||
-			left[i].Name != right[i].Name ||
-			left[i].UID != right[i].UID {
-			return false
-		}
-		leftController := left[i].Controller != nil && *left[i].Controller
-		rightController := right[i].Controller != nil && *right[i].Controller
-		if leftController != rightController {
-			return false
-		}
-	}
-	return true
 }

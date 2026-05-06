@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package common
 
 import (
 	"testing"
@@ -55,20 +55,20 @@ func TestRootObjectKeeperNameIsDNS1123Safe(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := rootObjectKeeperName(tt.namespace, tt.apiVersion, tt.kind, tt.snapshot)
+			got := RootObjectKeeperName(tt.namespace, tt.apiVersion, tt.kind, tt.snapshot)
 			if tt.want != "" && got != tt.want {
-				t.Fatalf("rootObjectKeeperName() = %q, want %q", got, tt.want)
+				t.Fatalf("RootObjectKeeperName() = %q, want %q", got, tt.want)
 			}
 			if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
-				t.Fatalf("rootObjectKeeperName() produced invalid metadata.name %q: %v", got, errs)
+				t.Fatalf("RootObjectKeeperName() produced invalid metadata.name %q: %v", got, errs)
 			}
 		})
 	}
 }
 
 func TestRootObjectKeeperTTLUsesDefaultForNilConfig(t *testing.T) {
-	if got := rootObjectKeeperTTL(nil); got != config.DefaultSnapshotRootOKTTL {
-		t.Fatalf("rootObjectKeeperTTL(nil) = %s, want %s", got, config.DefaultSnapshotRootOKTTL)
+	if got := RootObjectKeeperTTL(nil); got != config.DefaultSnapshotRootOKTTL {
+		t.Fatalf("RootObjectKeeperTTL(nil) = %s, want %s", got, config.DefaultSnapshotRootOKTTL)
 	}
 }
 
@@ -172,4 +172,8 @@ func assertOwnerRefPresentInLifecycleTest(t *testing.T, refs []metav1.OwnerRefer
 		}
 	}
 	t.Fatalf("expected ownerRef %s/%s/%s in %#v", apiVersion, kind, name, refs)
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

@@ -14,13 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package demo
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -69,8 +72,8 @@ func validateDiskSourceRef(s *demov1alpha1.DemoVirtualDiskSnapshot) (string, err
 	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
 		return "", fmt.Errorf("spec.sourceRef.apiVersion must be %q", demov1alpha1.SchemeGroupVersion.String())
 	}
-	if ref.Kind != KindDemoVirtualDisk {
-		return "", fmt.Errorf("spec.sourceRef.kind must be %q", KindDemoVirtualDisk)
+	if ref.Kind != controllercommon.KindDemoVirtualDisk {
+		return "", fmt.Errorf("spec.sourceRef.kind must be %q", controllercommon.KindDemoVirtualDisk)
 	}
 	if ref.Name == "" {
 		return "", fmt.Errorf("spec.sourceRef.name is required")
@@ -108,7 +111,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotFound", fmt.Sprintf("%s %q not found", KindDemoVirtualDisk, sourceName)); err != nil {
+		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotFound", fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -131,7 +134,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	if err := patchDemoVirtualDiskSnapshotBound(ctx, r.Client, req.NamespacedName, contentName); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := publishSnapshotContentLeafChildrenRefs(ctx, r.Client, contentName); err != nil {
+	if err := snapshotcontent.PublishSnapshotContentLeafChildrenRefs(ctx, r.Client, contentName); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -140,11 +143,11 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		r.Client,
 		s.Namespace,
 		s.Name,
-		KindDemoVirtualDiskSnapshot,
+		controllercommon.KindDemoVirtualDiskSnapshot,
 		demov1alpha1.SchemeGroupVersion.String(),
-		KindDemoVirtualDisk,
+		controllercommon.KindDemoVirtualDisk,
 		source.Name,
-		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualDiskSnapshot, s.Name, s.UID),
+		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualDiskSnapshot, s.Name, s.UID),
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -152,7 +155,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := publishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, manifestCheckpointNameFromRequest(mcr)); err != nil {
+	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, manifestcapture.ManifestCheckpointNameFromRequest(mcr)); err != nil {
 		return ctrl.Result{}, err
 	}
 	contentReady, contentReason, contentMessage, err := commonSnapshotContentReadyForSnapshot(ctx, r.Client, contentName)
@@ -214,8 +217,8 @@ func patchDemoVirtualDiskSnapshotGraphReady(
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskSnapshotLifecycle(ctx context.Context, s *demov1alpha1.DemoVirtualDiskSnapshot) (*metav1.OwnerReference, ctrl.Result, error) {
-	if parentRef := snapshotParentOwnerRef(s); parentRef != nil {
-		contentOwnerRef, pending, err := resolveParentSnapshotContentOwnerRef(ctx, r.Client, s)
+	if parentRef := controllercommon.SnapshotParentOwnerRef(s); parentRef != nil {
+		contentOwnerRef, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, s)
 		if err != nil {
 			return nil, ctrl.Result{}, err
 		}
@@ -228,14 +231,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskSnapshotLifecycle(ctx 
 		return contentOwnerRef, ctrl.Result{}, nil
 	}
 
-	ok, res, err := ensureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, s, demov1alpha1.SchemeGroupVersion.WithKind(KindDemoVirtualDiskSnapshot))
+	ok, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, s, demov1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindDemoVirtualDiskSnapshot))
 	if err != nil {
 		return nil, ctrl.Result{}, err
 	}
 	if res.Requeue || res.RequeueAfter > 0 {
 		return nil, res, nil
 	}
-	ref := rootObjectKeeperOwnerReference(ok)
+	ref := controllercommon.RootObjectKeeperOwnerReference(ok)
 	return &ref, ctrl.Result{}, nil
 }
 

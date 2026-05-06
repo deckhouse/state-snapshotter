@@ -21,7 +21,7 @@ The functionality is covered by integration tests in test/integration/.
 To run this suite, use: go test -tags unit_ginkgo ./internal/controllers
 */
 
-package controllers
+package genericbinder
 
 import (
 	"context"

@@ -14,10 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package demo
 
 import (
 	"context"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,8 +30,8 @@ import (
 func TestEnsureDemoSnapshotContentCreatesContentWithOwnerRef(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t)
 	ownerRef := metav1.OwnerReference{
-		APIVersion: DeckhouseAPIVersion,
-		Kind:       KindObjectKeeper,
+		APIVersion: controllercommon.DeckhouseAPIVersion,
+		Kind:       controllercommon.KindObjectKeeper,
 		Name:       "ret-snap-demo",
 		UID:        "ok-uid",
 		Controller: boolPtr(true),
@@ -44,7 +45,7 @@ func TestEnsureDemoSnapshotContentCreatesContentWithOwnerRef(t *testing.T) {
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: "demo-content"}, content); err != nil {
 		t.Fatalf("get created SnapshotContent: %v", err)
 	}
-	if !ownerReferencesEqual(content.OwnerReferences, []metav1.OwnerReference{ownerRef}) {
+	if !controllercommon.OwnerReferencesEqual(content.OwnerReferences, []metav1.OwnerReference{ownerRef}) {
 		t.Fatalf("expected ownerRef %#v, got %#v", ownerRef, content.OwnerReferences)
 	}
 }
@@ -74,6 +75,10 @@ func TestEnsureDemoSnapshotContentAddsLifecycleOwnerToExistingContent(t *testing
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: "demo-content"}, content); err != nil {
 		t.Fatalf("get updated SnapshotContent: %v", err)
 	}
-	assertOwnerRefPresentInLifecycleTest(t, content.OwnerReferences, unrelated.APIVersion, unrelated.Kind, unrelated.Name)
-	assertOwnerRefPresentInLifecycleTest(t, content.OwnerReferences, ownerRef.APIVersion, ownerRef.Kind, ownerRef.Name)
+	assertDemoOwnerRef(t, content.OwnerReferences, unrelated.APIVersion, unrelated.Kind, unrelated.Name, false)
+	assertDemoOwnerRef(t, content.OwnerReferences, ownerRef.APIVersion, ownerRef.Kind, ownerRef.Name, true)
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

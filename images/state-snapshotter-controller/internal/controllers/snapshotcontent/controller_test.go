@@ -1,7 +1,8 @@
-package controllers
+package snapshotcontent
 
 import (
 	"context"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -241,7 +242,7 @@ func TestEnsureManifestCheckpointOwnedByContentHandoffFromObjectKeeper(t *testin
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "mcp",
 			OwnerReferences: []metav1.OwnerReference{
-				{APIVersion: DeckhouseAPIVersion, Kind: KindObjectKeeper, Name: "ret-mcr", Controller: boolPtr(true)},
+				{APIVersion: controllercommon.DeckhouseAPIVersion, Kind: controllercommon.KindObjectKeeper, Name: "ret-mcr", Controller: boolPtr(true)},
 				unrelated,
 			},
 		},
@@ -259,7 +260,7 @@ func TestEnsureManifestCheckpointOwnedByContentHandoffFromObjectKeeper(t *testin
 	}
 	assertHasOwnerRef(t, fresh.OwnerReferences, storagev1alpha1.SchemeGroupVersion.String(), "SnapshotContent", "content", true)
 	assertHasOwnerRef(t, fresh.OwnerReferences, unrelated.APIVersion, unrelated.Kind, unrelated.Name, false)
-	assertNoOwnerRef(t, fresh.OwnerReferences, DeckhouseAPIVersion, KindObjectKeeper, "ret-mcr")
+	assertNoOwnerRef(t, fresh.OwnerReferences, controllercommon.DeckhouseAPIVersion, controllercommon.KindObjectKeeper, "ret-mcr")
 }
 
 func snapshotContentUnstructuredForOwnerTest(name, uid string) *unstructured.Unstructured {

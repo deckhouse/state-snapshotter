@@ -1,4 +1,4 @@
-package controllers
+package manifestcapture
 
 import (
 	"context"
@@ -125,9 +125,9 @@ func TestManifestCaptureRequestSafeToDeleteReadsExplicitArtifactChain(t *testing
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(content, mcr, mcp).Build()
 
-	got, err := manifestCaptureRequestSafeToDelete(ctx, cl, client.ObjectKey{Namespace: "ns", Name: "mcr"}, "content")
+	got, err := ManifestCaptureRequestSafeToDelete(ctx, cl, client.ObjectKey{Namespace: "ns", Name: "mcr"}, "content")
 	if err != nil {
-		t.Fatalf("manifestCaptureRequestSafeToDelete() error: %v", err)
+		t.Fatalf("ManifestCaptureRequestSafeToDelete() error: %v", err)
 	}
 	if !got {
 		t.Fatal("expected MCR to be safe to delete after explicit MCP handoff")

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package common
 
 import (
 	"context"
@@ -36,7 +36,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
-func rootObjectKeeperName(snapshotNamespace, snapshotAPIVersion, snapshotKind, snapshotName string) string {
+func RootObjectKeeperName(snapshotNamespace, snapshotAPIVersion, snapshotKind, snapshotName string) string {
 	if snapshotAPIVersion == storagev1alpha1.SchemeGroupVersion.String() && snapshotKind == KindSnapshot {
 		return namespacemanifest.SnapshotRootObjectKeeperName(snapshotNamespace, snapshotName)
 	}
@@ -44,14 +44,14 @@ func rootObjectKeeperName(snapshotNamespace, snapshotAPIVersion, snapshotKind, s
 	return "ret-snap-" + hex.EncodeToString(sum[:10])
 }
 
-func rootObjectKeeperTTL(cfg *config.Options) time.Duration {
+func RootObjectKeeperTTL(cfg *config.Options) time.Duration {
 	if cfg != nil && cfg.SnapshotRootOKTTL > 0 {
 		return cfg.SnapshotRootOKTTL
 	}
 	return config.DefaultSnapshotRootOKTTL
 }
 
-func ensureRootObjectKeeperWithTTL(
+func EnsureRootObjectKeeperWithTTL(
 	ctx context.Context,
 	c client.Client,
 	apiReader client.Reader,
@@ -62,7 +62,7 @@ func ensureRootObjectKeeperWithTTL(
 	if snapshotObj.GetUID() == "" {
 		return nil, ctrl.Result{Requeue: true}, nil
 	}
-	name := rootObjectKeeperName(snapshotObj.GetNamespace(), snapshotGVK.GroupVersion().String(), snapshotGVK.Kind, snapshotObj.GetName())
+	name := RootObjectKeeperName(snapshotObj.GetNamespace(), snapshotGVK.GroupVersion().String(), snapshotGVK.Kind, snapshotObj.GetName())
 	want := deckhousev1alpha1.ObjectKeeperSpec{
 		Mode: ObjectKeeperModeFollowObjectWithTTL,
 		FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
@@ -72,7 +72,7 @@ func ensureRootObjectKeeperWithTTL(
 			Name:       snapshotObj.GetName(),
 			UID:        string(snapshotObj.GetUID()),
 		},
-		TTL: &metav1.Duration{Duration: rootObjectKeeperTTL(cfg)},
+		TTL: &metav1.Duration{Duration: RootObjectKeeperTTL(cfg)},
 	}
 
 	ok := &deckhousev1alpha1.ObjectKeeper{}
@@ -158,7 +158,7 @@ func rootObjectKeeperSpecMatches(want deckhousev1alpha1.ObjectKeeperSpec, got *d
 	return got.Spec.TTL.Duration == want.TTL.Duration
 }
 
-func rootObjectKeeperOwnerReference(ok *deckhousev1alpha1.ObjectKeeper) metav1.OwnerReference {
+func RootObjectKeeperOwnerReference(ok *deckhousev1alpha1.ObjectKeeper) metav1.OwnerReference {
 	controller := true
 	return metav1.OwnerReference{
 		APIVersion: DeckhouseAPIVersion,
@@ -169,7 +169,7 @@ func rootObjectKeeperOwnerReference(ok *deckhousev1alpha1.ObjectKeeper) metav1.O
 	}
 }
 
-func snapshotContentOwnerReference(content *storagev1alpha1.SnapshotContent) metav1.OwnerReference {
+func SnapshotContentOwnerReference(content *storagev1alpha1.SnapshotContent) metav1.OwnerReference {
 	controller := true
 	return metav1.OwnerReference{
 		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
@@ -180,7 +180,7 @@ func snapshotContentOwnerReference(content *storagev1alpha1.SnapshotContent) met
 	}
 }
 
-func ensureLifecycleOwnerRef(ctx context.Context, c client.Client, obj client.Object, desired metav1.OwnerReference) (bool, error) {
+func EnsureLifecycleOwnerRef(ctx context.Context, c client.Client, obj client.Object, desired metav1.OwnerReference) (bool, error) {
 	refs, changed, err := lifecycleOwnerRefs(obj.GetOwnerReferences(), desired)
 	if err != nil {
 		return false, fmt.Errorf("%s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
@@ -212,7 +212,7 @@ func lifecycleOwnerRefs(existing []metav1.OwnerReference, desired metav1.OwnerRe
 	if !desiredSet {
 		out = append(out, desired)
 	}
-	return out, !ownerReferencesEqual(existing, out), nil
+	return out, !OwnerReferencesEqual(existing, out), nil
 }
 
 func isLifecycleOwnerRef(ref metav1.OwnerReference) bool {
@@ -229,7 +229,7 @@ func ownerRefSameIdentity(ref, desired metav1.OwnerReference) bool {
 		(ref.UID == "" || desired.UID == "" || ref.UID == desired.UID)
 }
 
-func snapshotParentOwnerRef(obj client.Object) *metav1.OwnerReference {
+func SnapshotParentOwnerRef(obj client.Object) *metav1.OwnerReference {
 	for _, ref := range obj.GetOwnerReferences() {
 		if strings.HasSuffix(ref.Kind, "Snapshot") {
 			refCopy := ref
@@ -239,8 +239,8 @@ func snapshotParentOwnerRef(obj client.Object) *metav1.OwnerReference {
 	return nil
 }
 
-func resolveParentSnapshotContentOwnerRef(ctx context.Context, c client.Client, child client.Object) (*metav1.OwnerReference, bool, error) {
-	parentRef := snapshotParentOwnerRef(child)
+func ResolveParentSnapshotContentOwnerRef(ctx context.Context, c client.Client, child client.Object) (*metav1.OwnerReference, bool, error) {
+	parentRef := SnapshotParentOwnerRef(child)
 	if parentRef == nil {
 		return nil, false, nil
 	}
@@ -282,6 +282,26 @@ func resolveParentSnapshotContentOwnerRef(ctx context.Context, c client.Client, 
 	if err := c.Get(ctx, client.ObjectKey{Name: parentContentName}, parentContent); err != nil {
 		return nil, false, err
 	}
-	ref := snapshotContentOwnerReference(parentContent)
+	ref := SnapshotContentOwnerReference(parentContent)
 	return &ref, false, nil
+}
+
+func OwnerReferencesEqual(left, right []metav1.OwnerReference) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].APIVersion != right[i].APIVersion ||
+			left[i].Kind != right[i].Kind ||
+			left[i].Name != right[i].Name ||
+			left[i].UID != right[i].UID {
+			return false
+		}
+		leftController := left[i].Controller != nil && *left[i].Controller
+		rightController := right[i].Controller != nil && *right[i].Controller
+		if leftController != rightController {
+			return false
+		}
+	}
+	return true
 }

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package snapshot
 
 import (
 	"context"
@@ -27,7 +27,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // patchSnapshotReadyFromE6 applies PickParentReadyReasonE6 outcome (Ready=False branch) on the parent Snapshot.
@@ -44,7 +44,7 @@ func (r *SnapshotReconciler) patchSnapshotReadyFromE6(
 		}
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
+			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            msg,

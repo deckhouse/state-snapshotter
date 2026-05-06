@@ -14,11 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package snapshot
 
 import (
 	"context"
 	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"strings"
 	"time"
 
@@ -37,7 +39,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	liblogger "github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -125,20 +127,20 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.reconcileDelete(ctx, nsSnap)
 	}
 
-	if snapshot.AddFinalizer(nsSnap, snapshot.FinalizerSnapshot) {
+	if snapshotpkg.AddFinalizer(nsSnap, snapshotpkg.FinalizerSnapshot) {
 		if err := r.Client.Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	rootOK, res, err := ensureRootObjectKeeperWithTTL(
+	rootOK, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
 		ctx,
 		r.Client,
 		r.APIReader,
 		r.Config,
 		nsSnap,
-		storagev1alpha1.SchemeGroupVersion.WithKind(KindSnapshot),
+		storagev1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindSnapshot),
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -152,7 +154,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if errors.IsNotFound(err) {
 			nsSnap.Status.ObservedGeneration = nsSnap.Generation
 			meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-				Type:               snapshot.ConditionReady,
+				Type:               snapshotpkg.ConditionReady,
 				Status:             metav1.ConditionFalse,
 				Reason:             "NamespaceNotFound",
 				Message:            fmt.Sprintf("namespace %q does not exist", nsSnap.Namespace),
@@ -171,7 +173,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
 		nsSnap.Status.BoundSnapshotContentName = ""
-		meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionBound)
+		meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionBound)
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -183,8 +185,8 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if errors.IsNotFound(err) {
 		if nsSnap.Status.BoundSnapshotContentName != "" {
 			nsSnap.Status.BoundSnapshotContentName = ""
-			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionBound)
-			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshot.ConditionReady)
+			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionBound)
+			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
 			nsSnap.Status.ObservedGeneration = nsSnap.Generation
 			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 				return ctrl.Result{}, err
@@ -193,7 +195,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 
 		om := snapshotContentObjectMeta(nsSnap)
-		om.OwnerReferences = []metav1.OwnerReference{rootObjectKeeperOwnerReference(rootOK)}
+		om.OwnerReferences = []metav1.OwnerReference{controllercommon.RootObjectKeeperOwnerReference(rootOK)}
 		newContent := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: om,
 			Spec:       desiredSnapshotContentSpec(nsSnap),
@@ -207,7 +209,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		nsSnap.Status.BoundSnapshotContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionBound,
+			Type:               snapshotpkg.ConditionBound,
 			Status:             metav1.ConditionTrue,
 			Reason:             "ContentCreated",
 			Message:            "SnapshotContent exists",
@@ -226,7 +228,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		nsSnap.Status.BoundSnapshotContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionBound,
+			Type:               snapshotpkg.ConditionBound,
 			Status:             metav1.ConditionTrue,
 			Reason:             "ContentBound",
 			Message:            "SnapshotContent exists and references this Snapshot",
@@ -243,7 +245,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	graphChanged, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
 	if err != nil {
-		if patchErr := r.patchSnapshotGraphReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshot.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
+		if patchErr := r.patchSnapshotGraphReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, err
@@ -251,7 +253,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if graphChanged {
 		return ctrl.Result{Requeue: true}, nil
 	}
-	graphPublished, err := publishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
+	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -269,7 +271,7 @@ func (r *SnapshotReconciler) finishReconcileWithExistingContent(ctx context.Cont
 	nsSnap.Status.BoundSnapshotContentName = expectedName
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionBound,
+		Type:               snapshotpkg.ConditionBound,
 		Status:             metav1.ConditionTrue,
 		Reason:             "ContentExists",
 		Message:            "SnapshotContent already exists",
@@ -349,7 +351,7 @@ func (r *SnapshotReconciler) updateSnapshotRemoveFinalizer(ctx context.Context, 
 		if cur.DeletionTimestamp == nil {
 			return nil
 		}
-		if !snapshot.RemoveFinalizer(cur, snapshot.FinalizerSnapshot) {
+		if !snapshotpkg.RemoveFinalizer(cur, snapshotpkg.FinalizerSnapshot) {
 			return nil
 		}
 		return r.Client.Update(ctx, cur)
@@ -371,6 +373,6 @@ func snapshotContentName(ns *storagev1alpha1.Snapshot) string {
 func snapshotContentObjectMeta(nsSnap *storagev1alpha1.Snapshot) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:       snapshotContentName(nsSnap),
-		Finalizers: []string{snapshot.FinalizerParentProtect},
+		Finalizers: []string{snapshotpkg.FinalizerParentProtect},
 	}
 }
