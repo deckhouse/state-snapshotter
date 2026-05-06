@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -144,6 +145,36 @@ func aggManifestNS(bound string) *storagev1alpha1.Snapshot {
 	}
 }
 
+func aggManifestRootOK(namespace, snapshotName string) *deckhousev1alpha1.ObjectKeeper {
+	return &deckhousev1alpha1.ObjectKeeper{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ret-snap-" + namespace + "-" + snapshotName,
+			UID:  types.UID("ok-uid-" + namespace + "-" + snapshotName),
+		},
+		Spec: deckhousev1alpha1.ObjectKeeperSpec{
+			Mode: "FollowObjectWithTTL",
+			FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "Snapshot",
+				Namespace:  namespace,
+				Name:       snapshotName,
+				UID:        "snapshot-uid",
+			},
+		},
+	}
+}
+
+func aggManifestOwnContentByOK(content *storagev1alpha1.SnapshotContent, okObj *deckhousev1alpha1.ObjectKeeper) {
+	controller := true
+	content.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "deckhouse.io/v1alpha1",
+		Kind:       "ObjectKeeper",
+		Name:       okObj.Name,
+		UID:        okObj.UID,
+		Controller: &controller,
+	}}
+}
+
 func TestAggregatedNamespaceManifests_RetainedContentReadByContentName(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
 	log, _ := logger.NewLogger("error")
@@ -230,32 +261,10 @@ func TestAggregatedNamespaceManifests_RetainedReadAfterSnapshotDelete(t *testing
 	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
 	_ = cl.Create(context.Background(), mcp)
 
-	controller := true
-	okObj := &deckhousev1alpha1.ObjectKeeper{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "ret-snap-ns1-snap",
-			UID:  types.UID("ok-uid"),
-		},
-		Spec: deckhousev1alpha1.ObjectKeeperSpec{
-			Mode: "FollowObjectWithTTL",
-			FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
-				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-				Kind:       "Snapshot",
-				Namespace:  "ns1",
-				Name:       "snap",
-				UID:        "snapshot-uid",
-			},
-		},
-	}
+	okObj := aggManifestRootOK("ns1", "snap")
 	_ = cl.Create(context.Background(), okObj)
 	root := aggManifestContent("root-content", "mcp-root")
-	root.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: "deckhouse.io/v1alpha1",
-		Kind:       "ObjectKeeper",
-		Name:       okObj.Name,
-		UID:        okObj.UID,
-		Controller: &controller,
-	}}
+	aggManifestOwnContentByOK(root, okObj)
 	_ = cl.Create(context.Background(), root)
 	// No live Snapshot object: retained read resolves through root ObjectKeeper -> SnapshotContent.
 
@@ -273,6 +282,52 @@ func TestAggregatedNamespaceManifests_RetainedReadAfterSnapshotDelete(t *testing
 	meta, ok := arr[0]["metadata"].(map[string]interface{})
 	if !ok || meta["name"] != "retained" {
 		t.Fatalf("unexpected aggregated object: %#v", arr[0])
+	}
+}
+
+func TestAggregatedNamespaceManifests_RetainedReadConflictOnMultipleRootContents(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
+
+	okObj := aggManifestRootOK("ns1", "snap")
+	_ = cl.Create(context.Background(), okObj)
+	first := aggManifestContent("root-a", "mcp-a")
+	aggManifestOwnContentByOK(first, okObj)
+	_ = cl.Create(context.Background(), first)
+	second := aggManifestContent("root-b", "mcp-b")
+	aggManifestOwnContentByOK(second, okObj)
+	_ = cl.Create(context.Background(), second)
+
+	_, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	var st *AggregatedStatusError
+	if !errors.As(err, &st) {
+		t.Fatalf("expected AggregatedStatusError, got %T: %v", err, err)
+	}
+	if st.HTTPStatus != http.StatusConflict || !strings.Contains(st.Message, "multiple retained SnapshotContents") {
+		t.Fatalf("unexpected error: status=%d message=%q", st.HTTPStatus, st.Message)
+	}
+}
+
+func TestAggregatedNamespaceManifests_RetainedReadNotFoundWhenOKHasNoContent(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
+
+	okObj := aggManifestRootOK("ns1", "snap")
+	_ = cl.Create(context.Background(), okObj)
+
+	_, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	var st *AggregatedStatusError
+	if !errors.As(err, &st) {
+		t.Fatalf("expected AggregatedStatusError, got %T: %v", err, err)
+	}
+	if st.HTTPStatus != http.StatusNotFound || !strings.Contains(st.Message, "retained SnapshotContent for Snapshot ns1/snap not found via ObjectKeeper") {
+		t.Fatalf("unexpected error: status=%d message=%q", st.HTTPStatus, st.Message)
 	}
 }
 

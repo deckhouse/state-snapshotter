@@ -105,6 +105,7 @@ func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx contex
 	if err := s.client.List(ctx, contents); err != nil {
 		return "", fmt.Errorf("list SnapshotContent for retained Snapshot %s/%s: %w", namespace, snapshotName, err)
 	}
+	var matches []string
 	for i := range contents.Items {
 		content := &contents.Items[i]
 		for _, ref := range content.OwnerReferences {
@@ -114,11 +115,21 @@ func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx contex
 				ref.UID == ok.UID &&
 				ref.Controller != nil &&
 				*ref.Controller {
-				return content.Name, nil
+				matches = append(matches, content.Name)
+				break
 			}
 		}
 	}
-	return "", apierrors.NewNotFound(storagev1alpha1.SchemeGroupVersion.WithResource("snapshotcontents").GroupResource(), okName)
+	switch len(matches) {
+	case 0:
+		return "", NewAggregatedStatusError(http.StatusNotFound, "NotFound",
+			fmt.Sprintf("retained SnapshotContent for Snapshot %s/%s not found via ObjectKeeper %q", namespace, snapshotName, okName))
+	case 1:
+		return matches[0], nil
+	default:
+		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
+			fmt.Sprintf("multiple retained SnapshotContents for Snapshot %s/%s found via ObjectKeeper %q", namespace, snapshotName, okName))
+	}
 }
 
 func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootContent(ctx context.Context, rootContent string) ([]byte, error) {

@@ -45,7 +45,7 @@
 **Подтверждено базовым прогоном** (read-path + retained + контракт модуля на живом API server):
 
 - subresource **aggregated manifests** отвечает и отдаёт ожидаемый JSON-массив;
-- **retained read** после удаления `Snapshot` выполняется по имени retained `SnapshotContent`; старое имя удалённого `Snapshot` больше не резолвится обратно в content после удаления snapshot;
+- **retained read** после удаления `Snapshot` работает через старое имя `Snapshot`: `/snapshots/{name}/manifests` резолвит retained content по `ObjectKeeper.spec.followObjectRef` и `SnapshotContent.ownerRef -> ObjectKeeper`, пока root OK и root content существуют;
 - **root ObjectKeeper** (шаг 5b скрипта): `spec.followObjectRef` → `Snapshot` (UID root snapshot); у **root `SnapshotContent`** есть **controller `ownerReference` → этот ObjectKeeper** (OK без `ownerReferences` на SnapshotContent);
 - discovery субресурса, опциональный gzip, negative 404 — по сценарию скрипта.
 

@@ -23,6 +23,8 @@ curl -s \
 
 The response is `application/json`: an array of Kubernetes manifest objects from the requested snapshot subtree.
 
+For the legacy `snapshots/{name}/manifests` route, retained reads by deleted Snapshot name remain available while the root `ObjectKeeper` and root `SnapshotContent` exist. The lookup uses `ObjectKeeper.spec.followObjectRef` for the deleted `Snapshot` plus exactly one `SnapshotContent` ownerRef to that ObjectKeeper.
+
 ## MCP-Level Endpoints
 
 MCP endpoints return only one `ManifestCheckpoint` local archive:
@@ -40,10 +42,12 @@ Use the generic aggregated endpoint when the expected result is the full snapsho
 | Case | Status |
 |------|--------|
 | Snapshot not found | `404 Not Found` |
+| Root ObjectKeeper exists but retained SnapshotContent is absent | `404 Not Found` |
 | `status.boundSnapshotContentName` is empty | `400 Bad Request` |
 | Resource is not a registered snapshot resource | `400 Bad Request` |
 | Cluster-scoped snapshot resource | `400 Bad Request` |
 | Duplicate object in subtree | `409 Conflict` |
+| Multiple retained SnapshotContents for one root ObjectKeeper | `409 Conflict` |
 | Graph registry unavailable | `503 Service Unavailable` |
 
 Duplicate object errors include:

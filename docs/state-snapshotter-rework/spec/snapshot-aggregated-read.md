@@ -14,6 +14,15 @@ Aggregated read MAY start from any snapshot node or directly from any content no
 Snapshot -> status.boundSnapshotContentName -> SnapshotContent
 ```
 
+For the compatibility `snapshots/{name}/manifests` route, if the live root `Snapshot` is already deleted, retained read MAY resolve by deleted Snapshot identity while the root retention chain exists:
+
+```text
+ObjectKeeper.spec.followObjectRef -> deleted Snapshot namespace/name
+SnapshotContent.ownerRef -> ObjectKeeper
+```
+
+Exactly one root `SnapshotContent` MUST match that ObjectKeeper. Zero matches returns `404 NotFound`; multiple matches return `409 Conflict`. If the ObjectKeeper has `deletionTimestamp` but the content still exists, the route may keep reading until Kubernetes GC removes the content.
+
 Content-starting reads use the given content node as the traversal root.
 
 ## HTTP API
