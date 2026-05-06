@@ -320,14 +320,18 @@ kubectl delete objectkeeper \
   -l smoke.state-snapshotter.deckhouse.io/run="$NS" \
   --ignore-not-found
 
-# Temporary cleanup for repeated fixed-namespace runs. These retained MCR
-# ObjectKeepers can otherwise produce UID-mismatch retries if generated MCR
-# names are reused before TTL cleanup.
+# Best-effort cleanup for repeated fixed-namespace runs. Execution ObjectKeepers
+# for MCR are UID-aware, so stale request keepers should not block a recreated
+# same-name MCR, but cleaning old smoke artifacts keeps reports easier to read.
 kubectl get objectkeepers -o name 2>/dev/null \
   | while read -r ok; do
-      case "$ok" in
-        *"ret-mcr-${NS}-"*) kubectl delete "$ok" ;;
-      esac
+      kubectl get "$ok" -o json 2>/dev/null \
+        | jq -e --arg ns "$NS" '
+            .metadata.name | startswith("ret-mcr-")
+            and .spec.followObjectRef.kind == "ManifestCaptureRequest"
+            and .spec.followObjectRef.namespace == $ns
+          ' >/dev/null \
+        && kubectl delete "$ok"
     done
 
 kubectl create ns "$NS"
@@ -372,7 +376,7 @@ as the active content resource. Dedicated `SnapshotContent` /
 `Demo*SnapshotContent` CRDs are not expected in the cluster. Only common
 `storage.deckhouse.io/SnapshotContent` is expected.
 
-Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-snap-nss-smoke-*` или `ObjectKeeper ... belongs to another MCR (UID mismatch)` для `ret-mcr-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
+Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Execution ObjectKeepers for MCR are UID-aware: recreating an MCR with the same name creates a different `ret-mcr-*` ObjectKeeper, so stale request keepers should not block the new request. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-snap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
 ## 6. Базовый flow без DSC
 

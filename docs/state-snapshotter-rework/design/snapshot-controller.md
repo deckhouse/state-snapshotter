@@ -100,7 +100,7 @@
 
 Полная схема полей OK — в [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md) и ADR там же. Ниже — **design lock** для N2a/N2b, согласованный с текущим кодом manifest-линии:
 
-- **Общий (generic) путь MCR** в `ManifestCheckpointController`: при отсутствии привязки к SnapshotContent создаётся OK **`ret-mcr-<namespace>-<mcrName>`** в **FollowObject** на MCR; **ManifestCheckpoint** получает `ownerReference` → этот OK; **chunks** → MCP.
+- **Общий (generic) путь MCR** в `ManifestCheckpointController`: при отсутствии привязки к SnapshotContent создаётся UID-aware OK **`ret-mcr-<hash>`** в **FollowObject** на MCR; **ManifestCheckpoint** получает `ownerReference` → этот OK; **chunks** → MCP.
 - **Namespace N2a-путь:** на MCR ставится аннотация **`state-snapshotter.deckhouse.io/bound-snapshot-content`** (имя root SnapshotContent); тогда **ManifestCheckpoint** создаётся с **`ownerReference` → `SnapshotContent`** (**controller: true**), **без** OK `ret-mcr-*` для MCP. MCR после успешного capture удаляется (§4.7) — MCP **не** должен зависеть от дальнейшего существования MCR.
 
 #### 4.3.1 Правило: ownerReference vs ObjectKeeper
@@ -112,7 +112,7 @@
 #### 4.3.2 Два применения ObjectKeeper (не смешивать)
 
 1. **Root / snapshot (N2a, `snapshot_capture.go`):** cluster-scoped OK **`ret-snap-…`**: **`FollowObjectWithTTL`** на **root `Snapshot`**; сам root `Snapshot` не owned by OK; **root `SnapshotContent`** имеет **`ownerReferences` → этот OK** (**controller**). TTL из конфига. Это **не** follow на MCR и **не** generic `ret-mcr-*`. После удаления root снимка при **Retain** SnapshotContent (и MCP) остаются, пока жив OK; после TTL — удаление OK → GC SnapshotContent и каскад вниз — зона Deckhouse ObjectKeeper controller и политики модуля.
-2. **Manifest capture (generic MCR-путь):** OK **`ret-mcr-*`** в **FollowObject** на **ManifestCaptureRequest**; MCP через ownerRef на этот OK. Для **namespace N2a** этот путь **не** используется для финального MCP (см. вводный абзац §4.3).
+2. **Manifest capture (generic MCR-путь):** UID-aware OK **`ret-mcr-*`** в **FollowObject** на **ManifestCaptureRequest**; MCP через ownerRef на этот OK. Для **namespace N2a** этот путь **не** используется для финального MCP (см. вводный абзац §4.3).
 
 **Инвариант:** **ManifestCaptureRequest** в N2a имеет **`metadata.ownerReferences` → `Snapshot`** (**controller: true**, тот же namespace), чтобы при **полном удалении** root из API garbage collector убрал «зависший» in-flight MCR без отдельного `Delete` из `reconcileDelete`. MCR по-прежнему создаётся **Snapshot controller** на время capture; **ManifestCheckpointController** исполняет **MCR → MCP** (+ chunks) и ставит `MCR Ready=True` только после того, как MCP готов и имеет ownerRef на `SnapshotContent`. **Snapshot controller** публикует `SnapshotContent.status.manifestCheckpointName` и пишет статус root snapshot, а **SnapshotContentController** валидирует refs и выставляет `Ready`; после `MCR Ready=True` MCR **удаляется** явно контроллером (§4.7) — совместимо с ownerRef; публичная «истина» — **SnapshotContent + `manifestCheckpointName` + MCP**.
 
@@ -175,7 +175,7 @@
 | Утверждение §4.3 | В коде |
 |------------------|--------|
 | Generic: ObjectKeeper для MCR в **`FollowObject`** (следует за UID MCR) | Да, если **нет** аннотации bound SnapshotContent на MCR (`ret-mcr-*`, см. ~L297–L363). |
-| Generic: имя OK **`ret-mcr-<namespace>-<mcrName>`** | Да. |
+| Generic: имя OK **`ret-mcr-<hash(namespace/name/uid)>`** | Да. |
 | Generic: **ManifestCheckpoint** **ownerReference → ObjectKeeper** `ret-mcr-…` (controller) | Да на generic-пути. |
 | **Namespace N2a:** при **`AnnotationBoundSnapshotContent`** — **ManifestCheckpoint** **ownerReference → `SnapshotContent`** (controller), **без** `ret-mcr-*` | Да (~L272–L296). |
 | **Chunks** **ownerReference → ManifestCheckpoint** | Да (поток create chunks). |

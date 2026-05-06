@@ -101,7 +101,7 @@ func GetFollowObjectRef(u *unstructured.Unstructured) (map[string]interface{}, b
 // 	ctx context.Context,
 // 	mcr *storagev1alpha1.ManifestCaptureRequest,
 // ) (*unstructured.Unstructured, error) {
-// 	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
+// 	retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
 //
 // 	helper := NewObjectKeeperHelper(r.dynamicClient)
 // 	followRef := NewFollowObjectRef(

@@ -114,7 +114,7 @@ Artifacts referenced by SnapshotContent.status:
 - **MUST NOT:** set `SnapshotContent.ownerReferences` to a short-lived Snapshot.
 - **MUST NOT:** silently steal Snapshot or `SnapshotContent` from another parent/root lifecycle owner. Conflicting lifecycle ownerRef is a fail-closed condition; unrelated non-controller ownerRefs may be preserved.
 - **MUST:** a same namespace/name root Snapshot run reuses the retained root ObjectKeeper only for the same snapshot UID recorded in `ObjectKeeper.spec.followObjectRef.UID`. If the old run's root ObjectKeeper is still retained and follows an old Snapshot UID, a newly created root Snapshot with the same namespace/name MUST fail closed until that ObjectKeeper expires or is removed; it MUST NOT reuse that retained ObjectKeeper.
-- **NOTE:** temporary ObjectKeeper protection for execution artifacts before handoff is separate from the root TTL ObjectKeeper. Request objects such as MCR/VCR remain temporary and may be owned by the Snapshot for in-flight GC; they are deleted only after final artifacts are bound to `SnapshotContent`.
+- **NOTE:** temporary ObjectKeeper protection for execution artifacts before handoff is separate from the root TTL ObjectKeeper. Generic execution ObjectKeepers for MCR/VCR-style requests are UID-aware so a recreated request with the same namespace/name does not collide with stale protection from an old request UID. Request objects such as MCR/VCR remain temporary and may be owned by the Snapshot for in-flight GC; they are deleted only after final artifacts are bound to `SnapshotContent`.
 
 ### §3.3. Удаление элемента из refs
 

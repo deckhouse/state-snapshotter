@@ -109,7 +109,7 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Name).To(Equal(mcrName))
 			g.Expect(mcp.Spec.ManifestCaptureRequestRef.UID).NotTo(BeEmpty())
 
-			retMCRKeeper := fmt.Sprintf("ret-mcr-%s-%s", nsName, mcrName)
+			retMCRKeeper := namespacemanifest.ManifestCaptureRequestObjectKeeperName(nsName, mcrName, types.UID(mcp.Spec.ManifestCaptureRequestRef.UID))
 			err := k8sClient.Get(ctx, client.ObjectKey{Name: retMCRKeeper}, &deckhousev1alpha1.ObjectKeeper{})
 			g.Expect(errors.IsNotFound(err)).To(BeTrue())
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())

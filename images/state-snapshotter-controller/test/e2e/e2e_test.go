@@ -39,6 +39,7 @@ import (
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
 const (
@@ -87,9 +88,11 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 		if err := k8sClient.List(ctx, objectKeepers); err == nil {
 			for i := range objectKeepers.Items {
 				ok := &objectKeepers.Items[i]
-				// ADR: Only ONE ObjectKeeper exists per MCR: ret-mcr-{namespace}-{mcrName}
-				// Delete MCR ObjectKeepers for this namespace
-				if strings.HasPrefix(ok.Name, fmt.Sprintf("ret-mcr-%s-", testNS)) {
+				// Delete UID-aware MCR ObjectKeepers for this namespace.
+				if strings.HasPrefix(ok.Name, "ret-mcr-") &&
+					ok.Spec.FollowObjectRef != nil &&
+					ok.Spec.FollowObjectRef.Kind == "ManifestCaptureRequest" &&
+					ok.Spec.FollowObjectRef.Namespace == testNS {
 					_ = k8sClient.Delete(ctx, ok)
 					continue
 				}
@@ -438,7 +441,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
 			// Verify MCR ObjectKeeper
-			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
 			ok := getRetainer(ctx, retainerName)
 
 			Expect(ok.Spec.Mode).To(Equal("FollowObject"))
@@ -461,11 +464,11 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			mcr := waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 			checkpointName := mcr.Status.CheckpointName
 
-			// ADR: Only ONE ObjectKeeper exists: ret-mcr-<namespace>-<mcrName>
+			// ADR: one UID-aware ObjectKeeper exists for this MCR UID.
 			// This ObjectKeeper:
 			// - Uses FollowObject mode to follow MCR (no TTL - TTL is handled by MCR controller)
 			// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
-			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
 			ok := getRetainer(ctx, retainerName)
 
 			// Verify ObjectKeeper follows MCR in FollowObject mode
@@ -512,7 +515,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 			// Get checkpoint and MCR ObjectKeeper
 			mcp := getManifestCheckpoint(ctx, checkpointName)
-			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
 			ok := getRetainer(ctx, retainerName)
 
 			// Verify ObjectKeeper exists and follows MCR
@@ -561,7 +564,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(mcp).NotTo(BeNil())
 
 			// Verify checkpoint has ownerRef to MCR ObjectKeeper
-			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
 			Expect(len(mcp.OwnerReferences)).To(Equal(1))
 			Expect(mcp.OwnerReferences[0].Kind).To(Equal("ObjectKeeper"))
 			Expect(mcp.OwnerReferences[0].Name).To(Equal(retainerName))
@@ -688,9 +691,9 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(hasNamespaceRef).To(BeFalse(), "Checkpoint must NOT have ownerRef to Namespace")
 			Expect(hasObjectKeeperRef).To(BeTrue(), "Checkpoint must have ownerRef to ObjectKeeper")
 
-			// ADR: Only ONE ObjectKeeper exists: ret-mcr-<namespace>-<mcrName>
+			// ADR: one UID-aware ObjectKeeper exists for this MCR UID.
 			// This ObjectKeeper uses FollowObject mode to follow MCR
-			retainerName := fmt.Sprintf("ret-mcr-%s-%s", testNS, TestFixtures.TestMCRName)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
 			var objectKeeper deckhousev1alpha1.ObjectKeeper
 			err := k8sClient.Get(ctx, client.ObjectKey{Name: retainerName}, &objectKeeper)
 			Expect(err).NotTo(HaveOccurred(), "MCR ObjectKeeper should exist")

@@ -277,8 +277,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			Controller: controllerTrue,
 		}}
 	} else {
-		// ADR: Create only ONE ObjectKeeper: ret-mcr-<namespace>-<mcrName> (generic capture path).
-		retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
+		// Generic execution ObjectKeeper names are UID-aware so stale keepers from a deleted MCR
+		// cannot block a recreated request with the same namespace/name.
+		retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
 		r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
 		r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
 

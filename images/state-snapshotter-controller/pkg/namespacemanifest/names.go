@@ -36,10 +36,17 @@ func SnapshotMCRName(uid types.UID) string {
 }
 
 // SnapshotRootObjectKeeperName is the cluster-scoped ObjectKeeper name for root retention (FollowObjectWithTTL on Snapshot; see controller config).
-// Namespace disambiguates same snapshot name in different namespaces. If the root is recreated with the same name,
-// the controller deletes a stale OK that still follows the previous SnapshotContent UID before creating one for the new generation.
+// Root ObjectKeeper name intentionally stays stable for one retained root run. Execution request ObjectKeepers are UID-aware
+// to avoid stale request-name reuse conflicts.
 func SnapshotRootObjectKeeperName(namespace, snapshotName string) string {
 	return fmt.Sprintf("ret-snap-%s-%s", namespace, snapshotName)
+}
+
+// ManifestCaptureRequestObjectKeeperName returns the generic execution ObjectKeeper name for a ManifestCaptureRequest.
+// The name includes a hash of the MCR UID so a recreated request with the same namespace/name cannot collide with a stale OK.
+func ManifestCaptureRequestObjectKeeperName(namespace, name string, uid types.UID) string {
+	hash := sha256.Sum256([]byte(namespace + "|" + name + "|" + string(uid)))
+	return "ret-mcr-" + hex.EncodeToString(hash[:8])
 }
 
 // GenerateManifestCheckpointNameFromUID returns the deterministic ManifestCheckpoint name for a ManifestCaptureRequest UID.

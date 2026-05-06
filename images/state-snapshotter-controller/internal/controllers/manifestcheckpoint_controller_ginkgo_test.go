@@ -578,7 +578,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 		client = fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
+			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			Build()
 	})
 
@@ -616,7 +616,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			Expect(client.Create(ctx, cm)).To(Succeed())
 
 			// Create ObjectKeeper manually (simulating controller behavior)
-			retainerName := "ret-mcr-default-test-mcr"
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: DeckhouseAPIVersion,
@@ -661,7 +661,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 				},
 			}
 
-			retainerName := "ret-mcr-default-test-mcr"
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: retainerName,
@@ -717,7 +717,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			Expect(*ownerRef.Controller).To(BeTrue())
 		})
 
-		It("should validate ObjectKeeper belongs to correct MCR by UID", func() {
+		It("should keep stale same-name MCR ObjectKeeper untouched when request UID changes", func() {
 			mcr1 := &storagev1alpha1.ManifestCaptureRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-mcr",
@@ -734,10 +734,22 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 				},
 			}
 
-			retainerName := "ret-mcr-default-test-mcr"
-			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
+			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: retainerName,
+					Name:      "test-cm",
+					Namespace: "default",
+				},
+			}
+			Expect(client.Create(ctx, cm)).To(Succeed())
+			Expect(client.Create(ctx, mcr2)).To(Succeed())
+
+			oldRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr1.Namespace, mcr1.Name, mcr1.UID)
+			newRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr2.Namespace, mcr2.Name, mcr2.UID)
+			Expect(newRetainerName).ToNot(Equal(oldRetainerName))
+
+			oldObjectKeeper := &deckhousev1alpha1.ObjectKeeper{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: oldRetainerName,
 				},
 				Spec: deckhousev1alpha1.ObjectKeeperSpec{
 					Mode: "FollowObject",
@@ -750,14 +762,29 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 					},
 				},
 			}
-			Expect(client.Create(ctx, objectKeeper)).To(Succeed())
+			Expect(client.Create(ctx, oldObjectKeeper)).To(Succeed())
 
-			// Verify ObjectKeeper belongs to mcr1 (not mcr2)
-			createdOK := &deckhousev1alpha1.ObjectKeeper{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, createdOK)).To(Succeed())
+			testLogger, err := logger.NewLogger("info")
+			Expect(err).NotTo(HaveOccurred())
+			ctrl, err := NewManifestCheckpointController(client, client, scheme, testLogger, &config.Options{
+				DefaultTTL:    10 * time.Minute,
+				DefaultTTLStr: "10m",
+			})
+			Expect(err).NotTo(HaveOccurred())
 
-			Expect(createdOK.Spec.FollowObjectRef.UID).To(Equal(string(mcr1.UID)))
-			Expect(createdOK.Spec.FollowObjectRef.UID).ToNot(Equal(string(mcr2.UID)))
+			_, err = ctrl.Reconcile(ctx, controllerruntime.Request{NamespacedName: types.NamespacedName{Namespace: mcr2.Namespace, Name: mcr2.Name}})
+			Expect(err).NotTo(HaveOccurred())
+
+			oldFresh := &deckhousev1alpha1.ObjectKeeper{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: oldRetainerName}, oldFresh)).To(Succeed())
+			Expect(oldFresh.Spec.FollowObjectRef.UID).To(Equal(string(mcr1.UID)))
+
+			newFresh := &deckhousev1alpha1.ObjectKeeper{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: newRetainerName}, newFresh)).To(Succeed())
+			Expect(newFresh.Spec.FollowObjectRef).NotTo(BeNil())
+			Expect(newFresh.Spec.FollowObjectRef.UID).To(Equal(string(mcr2.UID)))
+			Expect(newFresh.Spec.FollowObjectRef.Name).To(Equal(mcr2.Name))
+			Expect(newFresh.Spec.FollowObjectRef.Namespace).To(Equal(mcr2.Namespace))
 		})
 	})
 })
