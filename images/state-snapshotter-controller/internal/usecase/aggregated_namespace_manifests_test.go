@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"testing"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,6 +54,9 @@ func aggManifestTestScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := storagev1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("AddToScheme storage: %v", err)
+	}
+	if err := deckhousev1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("AddToScheme deckhouse: %v", err)
 	}
 	return s
 }
@@ -208,6 +212,67 @@ func TestAggregatedNamespaceManifests_ParentOnly(t *testing.T) {
 	}
 	if len(arr) != 1 {
 		t.Fatalf("len=%d", len(arr))
+	}
+}
+
+func TestAggregatedNamespaceManifests_RetainedReadAfterSnapshotDelete(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
+
+	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "retained", "namespace": "ns1"}},
+	})
+	ch := aggManifestCreateChunk("ch0", "mcp-root", d1, c1)
+	_ = cl.Create(context.Background(), ch)
+	mcp := aggManifestReadyMCP("mcp-root", "ns1", []ssv1alpha1.ChunkInfo{{Name: "ch0", Index: 0, Checksum: c1}}, 1)
+	_ = cl.Create(context.Background(), mcp)
+
+	controller := true
+	okObj := &deckhousev1alpha1.ObjectKeeper{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ret-snap-ns1-snap",
+			UID:  types.UID("ok-uid"),
+		},
+		Spec: deckhousev1alpha1.ObjectKeeperSpec{
+			Mode: "FollowObjectWithTTL",
+			FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "Snapshot",
+				Namespace:  "ns1",
+				Name:       "snap",
+				UID:        "snapshot-uid",
+			},
+		},
+	}
+	_ = cl.Create(context.Background(), okObj)
+	root := aggManifestContent("root-content", "mcp-root")
+	root.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "deckhouse.io/v1alpha1",
+		Kind:       "ObjectKeeper",
+		Name:       okObj.Name,
+		UID:        okObj.UID,
+		Controller: &controller,
+	}}
+	_ = cl.Create(context.Background(), root)
+	// No live Snapshot object: retained read resolves through root ObjectKeeper -> SnapshotContent.
+
+	raw, err := agg.BuildAggregatedJSON(context.Background(), "ns1", "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 1 {
+		t.Fatalf("len=%d", len(arr))
+	}
+	meta, ok := arr[0]["metadata"].(map[string]interface{})
+	if !ok || meta["name"] != "retained" {
+		t.Fatalf("unexpected aggregated object: %#v", arr[0])
 	}
 }
 

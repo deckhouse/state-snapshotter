@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,6 +32,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
@@ -75,8 +77,48 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, 
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get Snapshot: %w", err)
 	}
+	if bound, retainedErr := s.retainedRootContentForSnapshot(ctx, namespace, snapshotName); retainedErr == nil {
+		return s.marshalAggregatedFromRootContent(ctx, bound)
+	} else if !apierrors.IsNotFound(retainedErr) {
+		return nil, retainedErr
+	}
 	return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
 		fmt.Sprintf("Snapshot %s/%s not found", namespace, snapshotName))
+}
+
+func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx context.Context, namespace, snapshotName string) (string, error) {
+	okName := namespacemanifest.SnapshotRootObjectKeeperName(namespace, snapshotName)
+	ok := &deckhousev1alpha1.ObjectKeeper{}
+	if err := s.client.Get(ctx, client.ObjectKey{Name: okName}, ok); err != nil {
+		return "", err
+	}
+	if ok.Spec.FollowObjectRef == nil ||
+		ok.Spec.FollowObjectRef.APIVersion != storagev1alpha1.SchemeGroupVersion.String() ||
+		ok.Spec.FollowObjectRef.Kind != "Snapshot" ||
+		ok.Spec.FollowObjectRef.Namespace != namespace ||
+		ok.Spec.FollowObjectRef.Name != snapshotName {
+		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
+			fmt.Sprintf("ObjectKeeper %q does not follow Snapshot %s/%s", okName, namespace, snapshotName))
+	}
+
+	contents := &storagev1alpha1.SnapshotContentList{}
+	if err := s.client.List(ctx, contents); err != nil {
+		return "", fmt.Errorf("list SnapshotContent for retained Snapshot %s/%s: %w", namespace, snapshotName, err)
+	}
+	for i := range contents.Items {
+		content := &contents.Items[i]
+		for _, ref := range content.OwnerReferences {
+			if ref.APIVersion == "deckhouse.io/v1alpha1" &&
+				ref.Kind == "ObjectKeeper" &&
+				ref.Name == ok.Name &&
+				ref.UID == ok.UID &&
+				ref.Controller != nil &&
+				*ref.Controller {
+				return content.Name, nil
+			}
+		}
+	}
+	return "", apierrors.NewNotFound(storagev1alpha1.SchemeGroupVersion.WithResource("snapshotcontents").GroupResource(), okName)
 }
 
 func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootContent(ctx context.Context, rootContent string) ([]byte, error) {
