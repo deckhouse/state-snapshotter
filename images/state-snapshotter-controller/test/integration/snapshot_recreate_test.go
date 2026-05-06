@@ -106,8 +106,8 @@ var _ = Describe("Integration: Snapshot recreate (stale MCR / §4.7)", func() {
 
 		// MCR was removed after first capture success; same metadata.name must still be usable for a new snapshot.
 		Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
-		// The retained root ObjectKeeper is the lifecycle anchor for the old run.
-		// A same-name Snapshot cannot steal it; simulate TTL expiry before reusing the name.
+		// The retained root ObjectKeeper follows the old run's Snapshot UID.
+		// A same-name Snapshot cannot reuse it; simulate TTL expiry before reusing the name.
 		oldOKName := namespacemanifest.SnapshotRootObjectKeeperName(nsName, snapName)
 		Expect(k8sClient.Delete(ctx, &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: oldOKName}})).To(Succeed())
 		Eventually(func(g Gomega) {

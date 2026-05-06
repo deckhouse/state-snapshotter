@@ -185,7 +185,7 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if snap.Status.BoundSnapshotContentName != contentName {
 		t.Fatalf("expected bound content %q, got %q", contentName, snap.Status.BoundSnapshotContentName)
 	}
-	assertDemoSnapshotOwnedBy(t, snap, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualDiskSnapshot, "snap"))
+	assertDemoSnapshotNotOwnedBy(t, snap, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualDiskSnapshot, "snap"))
 	ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected Ready=True Completed, got %#v", ready)
@@ -461,7 +461,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if vmSnap.Status.BoundSnapshotContentName != vmContentName {
 		t.Fatalf("expected VM bound content %q, got %q", vmContentName, vmSnap.Status.BoundSnapshotContentName)
 	}
-	assertDemoSnapshotOwnedBy(t, vmSnap, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualMachineSnapshot, "snap"))
+	assertDemoSnapshotNotOwnedBy(t, vmSnap, DeckhouseAPIVersion, KindObjectKeeper, rootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), KindDemoVirtualMachineSnapshot, "snap"))
 	ready = meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected VM Ready=True Completed, got %#v", ready)
@@ -714,6 +714,15 @@ func assertDemoSnapshotOwnedBy(t *testing.T, obj client.Object, apiVersion, kind
 		}
 	}
 	t.Fatalf("expected %s/%s to be owned by %s %s/%s, got %#v", obj.GetNamespace(), obj.GetName(), apiVersion, kind, name, obj.GetOwnerReferences())
+}
+
+func assertDemoSnapshotNotOwnedBy(t *testing.T, obj client.Object, apiVersion, kind, name string) {
+	t.Helper()
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == apiVersion && ref.Kind == kind && ref.Name == name {
+			t.Fatalf("expected %s/%s not to be owned by %s %s/%s, got %#v", obj.GetNamespace(), obj.GetName(), apiVersion, kind, name, obj.GetOwnerReferences())
+		}
+	}
 }
 
 func assertOwnerRefPresent(t *testing.T, refs []metav1.OwnerReference, apiVersion, kind, name string) {

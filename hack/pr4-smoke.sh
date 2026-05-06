@@ -159,14 +159,14 @@ log "OK Ready; content=${BOUND} MCP=${MCP}"
 
 SNAP_UID=$(kubectl -n "${NS}" get "${NS_SNAP_RES}" "${SNAP_NAME}" -o json | jq -r '.metadata.uid')
 MCR_RES="${PR4_SMOKE_MCR_RESOURCE:-manifestcapturerequests.state-snapshotter.deckhouse.io}"
-MCR_NAME="nss-${SNAP_UID}"
+MCR_NAME="snap-${SNAP_UID}"
 log "== 5c. ManifestCaptureRequest absent after capture (temporary request)"
 if kubectl -n "${NS}" get "${MCR_RES}" "${MCR_NAME}" >/dev/null 2>&1; then
 	log "ERROR: ManifestCaptureRequest ${MCR_NAME} still exists after Ready (expected deleted)"
 	exit 1
 fi
 log "OK no ManifestCaptureRequest ${MCR_NAME}"
-OK_NAME="ret-nssnap-${NS}-${SNAP_NAME}"
+OK_NAME="ret-snap-${NS}-${SNAP_NAME}"
 log "== 5b. Root ObjectKeeper contract"
 if [[ "${PR4_SMOKE_SKIP_OK_CONTRACT:-0}" == "1" ]]; then
 	log "SKIP: PR4_SMOKE_SKIP_OK_CONTRACT=1"
@@ -183,6 +183,11 @@ else
 			and (.spec.followObjectRef.uid == $suid)
 			and ([ .metadata.ownerReferences[]? | select(.kind == "SnapshotContent") ] | length == 0)' >/dev/null; then
 		log "ERROR: ObjectKeeper ${OK_NAME} contract mismatch (expect FollowObjectWithTTL on Snapshot, no ownerRef to SnapshotContent)"
+		exit 1
+	fi
+	if ! kubectl -n "${NS}" get "${NS_SNAP_RES}" "${SNAP_NAME}" -o json \
+		| jq -e --arg ok "${OK_NAME}" 'all(.metadata.ownerReferences[]?; .kind != "ObjectKeeper" or .name != $ok)' >/dev/null; then
+		log "ERROR: Snapshot ${SNAP_NAME} must not be owned by ObjectKeeper ${OK_NAME}"
 		exit 1
 	fi
 	nsc_json=$(kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" -o json) || {

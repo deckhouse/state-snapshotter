@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -226,13 +227,22 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			Expect(ok).To(BeTrue(), "SnapshotContent should have spec")
 			Expect(spec).NotTo(HaveKey("snapshot"+"Ref"), "SnapshotContent must be self-contained")
 
-			// INVARIANT: SnapshotContent.ownerRef is set correctly
+			// INVARIANT: SnapshotContent.ownerRef is set correctly.
 			ownerRefs := contentObj.GetOwnerReferences()
 			Expect(ownerRefs).To(HaveLen(1), "SnapshotContent should have one ownerRef")
-			// For root snapshot, owner should be ObjectKeeper
 			Expect(ownerRefs[0].Kind).To(Equal("ObjectKeeper"), "Owner should be ObjectKeeper for root snapshot")
 			Expect(ownerRefs[0].Controller).NotTo(BeNil())
 			Expect(*ownerRefs[0].Controller).To(BeTrue())
+
+			objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownerRefs[0].Name}, objectKeeper)).To(Succeed())
+			Expect(objectKeeper.OwnerReferences).To(BeEmpty(), "root ObjectKeeper must follow Snapshot via spec.followObjectRef, not ownerRef")
+			Expect(objectKeeper.Spec.FollowObjectRef).NotTo(BeNil())
+			Expect(objectKeeper.Spec.FollowObjectRef.APIVersion).To(Equal(snapshotGVK.GroupVersion().String()))
+			Expect(objectKeeper.Spec.FollowObjectRef.Kind).To(Equal(snapshotGVK.Kind))
+			Expect(objectKeeper.Spec.FollowObjectRef.Namespace).To(Equal(snapshotObj.GetNamespace()))
+			Expect(objectKeeper.Spec.FollowObjectRef.Name).To(Equal(snapshotObj.GetName()))
+			Expect(objectKeeper.Spec.FollowObjectRef.UID).To(Equal(string(snapshotObj.GetUID())))
 
 			err = k8sClient.Get(ctx, types.NamespacedName{
 				Name:      snapshotObj.GetName(),
@@ -240,9 +250,9 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			}, snapshotObj)
 			Expect(err).NotTo(HaveOccurred(), "Snapshot should still exist (no orphan)")
 			snapshotOwnerRefs := snapshotObj.GetOwnerReferences()
-			Expect(snapshotOwnerRefs).To(HaveLen(1), "root Snapshot should have one lifecycle ownerRef")
-			Expect(snapshotOwnerRefs[0].Kind).To(Equal("ObjectKeeper"))
-			Expect(snapshotOwnerRefs[0].Name).To(Equal(ownerRefs[0].Name), "root Snapshot and SnapshotContent should share one ObjectKeeper")
+			for _, ref := range snapshotOwnerRefs {
+				Expect(ref.Kind).NotTo(Equal("ObjectKeeper"), "root Snapshot must not be owned by cluster-scoped ObjectKeeper")
+			}
 
 			// INVARIANT: SnapshotContent has finalizer
 			finalizers := contentObj.GetFinalizers()
@@ -252,7 +262,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// Verify by checking that contentName matches the actual SnapshotContent name
 			Expect(contentObj.GetName()).To(Equal(contentName), "SnapshotContent name should match Snapshot.status.boundSnapshotContentName")
 
-			// INVARIANT: No orphans - root Snapshot and SnapshotContent share a live ObjectKeeper owner.
+			// INVARIANT: No orphans - root ObjectKeeper follows Snapshot and owns retained root SnapshotContent.
 		})
 
 		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {

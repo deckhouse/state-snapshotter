@@ -146,9 +146,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if res.Requeue || res.RequeueAfter > 0 {
 		return res, nil
 	}
-	if _, err := ensureLifecycleOwnerRef(ctx, r.Client, nsSnap, rootObjectKeeperOwnerReference(rootOK)); err != nil {
-		return ctrl.Result{}, err
-	}
 
 	var ns corev1.Namespace
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Namespace}, &ns); err != nil {

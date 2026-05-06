@@ -66,9 +66,9 @@ kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o wide
 ```bash
 export BOUND=$(kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.status.boundSnapshotContentName}')
 export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}')
-export OK_NAME=ret-nssnap-default-demo-ns-snap
+export OK_NAME=ret-snap-default-demo-ns-snap
 export SNAP_UID=$(kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.metadata.uid}')
-export MCR_NAME="nss-${SNAP_UID}"
+export MCR_NAME="snap-${SNAP_UID}"
 echo "BOUND=${BOUND}  MCP=${MCP}  OK=${OK_NAME}  MCR(ожидаемо нет)=${MCR_NAME}"
 ```
 

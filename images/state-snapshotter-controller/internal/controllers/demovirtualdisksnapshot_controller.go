@@ -236,9 +236,6 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskSnapshotLifecycle(ctx 
 	if res.Requeue || res.RequeueAfter > 0 {
 		return nil, res, nil
 	}
-	if _, err := ensureLifecycleOwnerRef(ctx, r.Client, s, rootObjectKeeperOwnerReference(ok)); err != nil {
-		return nil, ctrl.Result{}, err
-	}
 	ref := rootObjectKeeperOwnerReference(ok)
 	return &ref, ctrl.Result{}, nil
 }

@@ -31,7 +31,7 @@ runtime migration is explicitly performed.
 
 **Child snapshot creation:** parent controller creates child snapshots and owns graph edges. Child controllers do not patch parent status.
 
-**Lifecycle ownerRefs:** any `XxxSnapshot` can be root. A root Snapshot has `ownerRef -> ObjectKeeper`, its root `SnapshotContent` has `ownerRef -> same ObjectKeeper`, and that ObjectKeeper follows the root Snapshot via `spec.followObjectRef` without having ownerRef back to the Snapshot. A child Snapshot is owned by its parent Snapshot. A child `SnapshotContent` is owned by its parent `SnapshotContent`. `SnapshotContent` is never owned by a short-lived Snapshot and is not ownerless after graph convergence. MCP / future VSC artifacts are owned by the `SnapshotContent` they belong to.
+**Lifecycle ownerRefs:** any `XxxSnapshot` can be root. Its root `SnapshotContent` has `ownerRef -> root ObjectKeeper`. A root ObjectKeeper follows the root Snapshot via `spec.followObjectRef`. The root Snapshot itself is not owned by ObjectKeeper because Snapshot is namespaced and ObjectKeeper is cluster-scoped. A child Snapshot is owned by its parent Snapshot. A child `SnapshotContent` is owned by its parent `SnapshotContent`. `SnapshotContent` is never owned by a short-lived Snapshot and is not ownerless after graph convergence. MCP / future VSC artifacts are owned by the `SnapshotContent` they belong to.
 
 **OwnerReference filtering:** a controller excludes resources owned by a different domain object from its own MCR. Those resources belong to a child snapshot or to namespace-level fallback.
 

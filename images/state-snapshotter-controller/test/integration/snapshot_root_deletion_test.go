@@ -56,7 +56,7 @@ func objectKeeperHasControllerOwnerRefToSnapshotContent(refs []metav1.OwnerRefer
 	return false
 }
 
-// rootContentOwnerRefToObjectKeeper is true when root SnapshotContent has a controlling ownerRef to the root ObjectKeeper (TTL anchor).
+// rootContentOwnerRefToObjectKeeper is true when root content has a controlling ownerRef to the root ObjectKeeper (TTL anchor).
 func rootContentOwnerRefToObjectKeeper(refs []metav1.OwnerReference, okName string, okUID types.UID) bool {
 	for i := range refs {
 		ref := refs[i]
@@ -309,8 +309,8 @@ var _ = Describe("Integration: Snapshot deletion semantics", func() {
 			"root ObjectKeeper must not list SnapshotContent as a controlling ownerRef; retained anchor is SnapshotContent→OK")
 		freshRoot := &storagev1alpha1.Snapshot{}
 		Expect(k8sClient.Get(ctx, key, freshRoot)).To(Succeed())
-		Expect(rootContentOwnerRefToObjectKeeper(freshRoot.OwnerReferences, okName, ok.UID)).To(BeTrue(),
-			"root Snapshot must share the root ObjectKeeper lifecycle owner")
+		Expect(rootContentOwnerRefToObjectKeeper(freshRoot.OwnerReferences, okName, ok.UID)).To(BeFalse(),
+			"root Snapshot must not be owned by cluster-scoped ObjectKeeper")
 		Expect(rootContentOwnerRefToObjectKeeper(content.OwnerReferences, okName, ok.UID)).To(BeTrue())
 
 		mcp := &ssv1alpha1.ManifestCheckpoint{}

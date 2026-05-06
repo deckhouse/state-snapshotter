@@ -219,9 +219,6 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		if result.Requeue || result.RequeueAfter > 0 {
 			return result, nil
 		}
-		if _, err := ensureLifecycleOwnerRef(ctx, r.Client, obj, rootObjectKeeperOwnerReference(objectKeeper)); err != nil {
-			return ctrl.Result{}, err
-		}
 		ref := rootObjectKeeperOwnerReference(objectKeeper)
 		contentOwnerRef = &ref
 	} else {
@@ -523,7 +520,7 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 			contentObj := &unstructured.Unstructured{}
 			contentObj.SetGroupVersionKind(contentGVK)
 			if err := r.Get(ctx, client.ObjectKey{Name: contentName}, contentObj); err == nil {
-				// Update ownerRef: ObjectKeeper owns SnapshotContent
+				// Update ownerRef: SnapshotContent is retained by ObjectKeeper.
 				contentObj.SetOwnerReferences([]metav1.OwnerReference{
 					{
 						APIVersion: DeckhouseAPIVersion,

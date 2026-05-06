@@ -44,7 +44,7 @@ const (
 	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
 
-	// DefaultSnapshotRootOKTTL is spec.ttl on root ObjectKeeper (ret-nssnap-* and unified ret-* snapshot OK)
+	// DefaultSnapshotRootOKTTL is spec.ttl on root ObjectKeeper (ret-snap-* and unified ret-* snapshot OK)
 	// when neither STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL nor STATE_SNAPSHOTTER_NS_ROOT_OK_TTL is set.
 	//
 	// DEBUG ONLY (explicit team choice for TTL/smoke iteration): currently 1m so strict cluster smoke
