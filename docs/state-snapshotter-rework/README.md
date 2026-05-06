@@ -15,7 +15,7 @@
 
 ### 2. Группа `storage.deckhouse.io` (unified «родные» типы)
 
-- Типовые ресурсы модуля: **Snapshot**, **SnapshotContent**, **Snapshot**, **SnapshotContent** (пара для namespace-снимка по ТЗ в [`snapshot-rework/`](../../snapshot-rework/)) и т.д. — то, что перечислено в **bootstrap** (`pkg/unifiedbootstrap`), пока DSC не переопределяет набор. Точная **группа/apiVersion** для NS/SnapshotContent — как в ТЗ `snapshot-rework`, сверка с CRD в репо.
+- Типовые ресурсы модуля: **Snapshot**, **SnapshotContent**, **DomainSpecificSnapshotController**, **ManifestCaptureRequest**, **ManifestCheckpoint** и связанные artifact-ресурсы. Bootstrap-набор snapshot/content пар задаётся в `pkg/unifiedbootstrap`, пока DSC не расширяет набор.
 - Эта линия — **опорная** для единого контроллера снимков в кластере Deckhouse.
 
 ### 3. Manifest line (MCR / ManifestCheckpoint / capture)

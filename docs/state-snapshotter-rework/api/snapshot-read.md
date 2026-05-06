@@ -23,16 +23,6 @@ curl -s \
 
 The response is `application/json`: an array of Kubernetes manifest objects from the requested snapshot subtree.
 
-## Legacy Snapshot Endpoint
-
-This endpoint remains supported:
-
-```text
-GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/snapshots/{name}/manifests
-```
-
-It has the same aggregated read semantics for `Snapshot` and is kept for backward compatibility.
-
 ## MCP-Level Endpoints
 
 MCP endpoints return only one `ManifestCheckpoint` local archive:
