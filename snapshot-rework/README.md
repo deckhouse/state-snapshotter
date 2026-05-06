@@ -1,3 +1,26 @@
+# Historical design notes
+
+This directory contains historical design notes and ADR drafts from earlier snapshot architecture iterations.
+These documents may mention superseded concepts such as:
+
+- `NamespaceSnapshot`
+- `NamespaceSnapshotContent`
+- `Demo*SnapshotContent`
+- `contentCRDName`
+- `SnapshotContent.spec.snapshotRef`
+- `SnapshotContentController` owning all `SnapshotContent.status`
+
+They are kept for context only and are not the current implementation contract.
+Current source of truth:
+
+- `docs/state-snapshotter-rework/spec/system-spec.md`
+- `docs/state-snapshotter-rework/testing/pre-e2e-smoke-validation.md`
+- `docs/state-snapshotter-rework/operations/project-status.md`
+
+Legacy terms are allowed only in explicitly historical documents. Do not use historical documents as implementation instructions without checking the current spec.
+
+---
+
 # snapshot-rework
 
 Здесь лежат **расширенные ADR и черновики** по unified snapshots, DSC и смежным темам. Нормативные выдержки для реализации и тестов — в **[`docs/state-snapshotter-rework/`](../docs/state-snapshotter-rework/)** (spec, design, testing, operations).
@@ -15,4 +38,4 @@
 
 При смене контракта обновляй **`docs/state-snapshotter-rework/spec/system-spec.md`** и при необходимости соответствующий ADR в этом каталоге.
 
-**N2b PR4 (aggregated manifests download):** нормативный контракт — [`spec/namespace-snapshot-aggregated-manifests-pr4.md`](../docs/state-snapshotter-rework/spec/namespace-snapshot-aggregated-manifests-pr4.md); разбиение по PR — [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md) §2.4.2; кластерный smoke — [`testing/e2e-testing-strategy.md`](../docs/state-snapshotter-rework/testing/e2e-testing-strategy.md) (раздел про `hack/pr4-smoke.sh`).
+**N2b PR4 (aggregated manifests download):** current normative contract — [`spec/snapshot-aggregated-read.md`](../docs/state-snapshotter-rework/spec/snapshot-aggregated-read.md) and [`api/snapshot-read.md`](../docs/state-snapshotter-rework/api/snapshot-read.md); разбиение по PR — [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md) §2.4.2; кластерный smoke — [`testing/e2e-testing-strategy.md`](../docs/state-snapshotter-rework/testing/e2e-testing-strategy.md).

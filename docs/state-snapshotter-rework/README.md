@@ -4,6 +4,20 @@
 
 ---
 
+## Current Source Of Truth
+
+The current implementation contract is maintained in:
+
+- `docs/state-snapshotter-rework/spec/system-spec.md`
+- `docs/state-snapshotter-rework/testing/pre-e2e-smoke-validation.md`
+- `docs/state-snapshotter-rework/operations/project-status.md`
+
+Older ADR/design notes may describe superseded stages of the architecture. When documents disagree, the files above take precedence.
+
+Legacy terms are allowed only in explicitly historical documents. Do not use historical documents as implementation instructions without checking the current spec.
+
+---
+
 ## Четыре «линии» продукта (сверху вниз)
 
 Ниже — **логическое** разделение, а не обязательно отдельные бинарники. Так проще понять, где искать CRD, RBAC и документацию.
