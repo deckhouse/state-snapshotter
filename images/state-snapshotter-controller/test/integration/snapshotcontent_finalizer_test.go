@@ -119,7 +119,7 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",

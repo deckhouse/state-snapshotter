@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// ResolveAvailableUnifiedPairs returns bootstrap/DSC pairs where both sides exist in the API (RESTMapper).
+// ResolveAvailableUnifiedPairs returns bootstrap/CSD pairs where both sides exist in the API (RESTMapper).
 func ResolveAvailableUnifiedPairs(mapper meta.RESTMapper, pairs []UnifiedGVKPair, log logr.Logger) []UnifiedGVKPair {
 	var out []UnifiedGVKPair
 	for _, p := range pairs {

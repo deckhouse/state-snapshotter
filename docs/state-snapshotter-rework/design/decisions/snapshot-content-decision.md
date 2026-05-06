@@ -20,7 +20,7 @@
 
 ## Consequences
 
-- **Bootstrap / unified:** пара GVK `Snapshot` / общий `SnapshotContent` в desired list, DSC при необходимости.
+- **Bootstrap / unified:** пара GVK `Snapshot` / общий `SnapshotContent` в desired list, CSD при необходимости.
 - **Код:** новые/обновлённые типы, CRD, reconciler(ы), тесты — под SnapshotContent + OK; **не** закладывать миграцию со старого пути через `SnapshotContent` для namespace root.
 - **Документы в `docs/`:** остаются планом поставки и выжимкой; **истина по сценарию** — `snapshot-rework/`.
 

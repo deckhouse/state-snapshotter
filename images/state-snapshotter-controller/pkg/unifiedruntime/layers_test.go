@@ -47,11 +47,11 @@ func TestLayeredGVKState_ResolvedSnapshotKeySet(t *testing.T) {
 	}
 }
 
-func TestBuildLayeredGVKState_DSCListErrorFallsBackToBootstrap(t *testing.T) {
+func TestBuildLayeredGVKState_CSDListErrorFallsBackToBootstrap(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-	// No state-snapshotter types: List DSC fails.
+	// No state-snapshotter types: List CSD fails.
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	bootstrap := []unifiedbootstrap.UnifiedGVKPair{
 		{
@@ -65,11 +65,11 @@ func TestBuildLayeredGVKState_DSCListErrorFallsBackToBootstrap(t *testing.T) {
 	mapper.Add(bootstrap[0].SnapshotContent, meta.RESTScopeRoot)
 
 	st := BuildLayeredGVKState(ctx, c, mapper, bootstrap, logr.Discard())
-	if st.DSCEligibleError == nil {
-		t.Fatal("expected DSC list error")
+	if st.CSDEligibleError == nil {
+		t.Fatal("expected CSD list error")
 	}
-	if len(st.EligibleFromDSC) != 0 {
-		t.Fatalf("eligible: %d", len(st.EligibleFromDSC))
+	if len(st.EligibleFromCSD) != 0 {
+		t.Fatalf("eligible: %d", len(st.EligibleFromCSD))
 	}
 	if len(st.DesiredMerged) != 1 || st.DesiredMerged[0].Snapshot != bootstrap[0].Snapshot {
 		t.Fatalf("merge: %+v", st.DesiredMerged)
@@ -79,7 +79,7 @@ func TestBuildLayeredGVKState_DSCListErrorFallsBackToBootstrap(t *testing.T) {
 	}
 }
 
-func TestBuildLayeredGVKState_EmptyDSCListMergesBootstrap(t *testing.T) {
+func TestBuildLayeredGVKState_EmptyCSDListMergesBootstrap(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	_ = storagev1alpha1.AddToScheme(scheme)
@@ -93,11 +93,11 @@ func TestBuildLayeredGVKState_EmptyDSCListMergesBootstrap(t *testing.T) {
 	mapper.Add(content, meta.RESTScopeRoot)
 
 	st := BuildLayeredGVKState(ctx, c, mapper, bootstrap, logr.Discard())
-	if st.DSCEligibleError != nil {
-		t.Fatalf("unexpected err: %v", st.DSCEligibleError)
+	if st.CSDEligibleError != nil {
+		t.Fatalf("unexpected err: %v", st.CSDEligibleError)
 	}
-	if len(st.EligibleFromDSC) != 0 {
-		t.Fatalf("eligible dsc: %d", len(st.EligibleFromDSC))
+	if len(st.EligibleFromCSD) != 0 {
+		t.Fatalf("eligible csd: %d", len(st.EligibleFromCSD))
 	}
 	if len(st.ResolvedSnapshotGVKs) < 1 {
 		t.Fatalf("expected at least Snapshot pair resolved, got %d", len(st.ResolvedSnapshotGVKs))

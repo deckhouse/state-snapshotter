@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Cluster smoke: state-snapshotter controller health + optional DSC lifecycle checks for the
-# dynamic snapshot graph registry (GVK pairs from DSC/bootstrap + RESTMapper).
+# Cluster smoke: state-snapshotter controller health + optional CSD lifecycle checks for the
+# dynamic snapshot graph registry (GVK pairs from CSD/bootstrap + RESTMapper).
 #
 # Prerequisites: kubectl, jq.
 # Idempotent: creates a throwaway namespace when REGISTRY_SMOKE_WORK_NS is unset; trap deletes it.
@@ -8,7 +8,7 @@
 # Environment:
 #   REGISTRY_SMOKE_MODULE_NS   Controller namespace (default: d8-state-snapshotter).
 #   REGISTRY_SMOKE_WORK_NS     Fixed workspace namespace (otherwise auto: ssg-smoke-<pid>).
-#   REGISTRY_SMOKE_SKIP_DSC    If 1, skip DSC create/delete/eligibility (only module health + log scan).
+#   REGISTRY_SMOKE_SKIP_CSD    If 1, skip CSD create/delete/eligibility (only module health + log scan).
 #   REGISTRY_SMOKE_LOG_TAIL    Lines of controller logs to scan for panic/fatal (default 400).
 #
 # Usage: bash hack/snapshot-graph-registry-smoke.sh
@@ -17,7 +17,7 @@ set -euo pipefail
 
 MODULE_NS="${REGISTRY_SMOKE_MODULE_NS:-d8-state-snapshotter}"
 LOG_TAIL="${REGISTRY_SMOKE_LOG_TAIL:-400}"
-SKIP_DSC="${REGISTRY_SMOKE_SKIP_DSC:-0}"
+SKIP_CSD="${REGISTRY_SMOKE_SKIP_CSD:-0}"
 
 log() { printf '%s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -60,26 +60,26 @@ else
 	fi
 fi
 
-if [[ "$SKIP_DSC" == "1" ]]; then
-	log "REGISTRY_SMOKE_SKIP_DSC=1 — done (DSC scenarios skipped)."
+if [[ "$SKIP_CSD" == "1" ]]; then
+	log "REGISTRY_SMOKE_SKIP_CSD=1 — done (CSD scenarios skipped)."
 	exit 0
 fi
 
-kubectl get crd domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io >/dev/null 2>&1 || \
-	fail "DSC CRD not installed on cluster"
+kubectl get crd customsnapshotdefinitions.state-snapshotter.deckhouse.io >/dev/null 2>&1 || \
+	fail "CSD CRD not installed on cluster"
 
 if [[ -n "$AUTO_NS" ]]; then
 	kubectl create namespace "$WORK_NS" >/dev/null
 fi
 
-DSC_NAME="ssg-smoke-dsc-${RANDOM}"
-log "== applying temporary DSC ${DSC_NAME} (cluster-scoped) =="
+CSD_NAME="ssg-smoke-csd-${RANDOM}"
+log "== applying temporary CSD ${CSD_NAME} (cluster-scoped) =="
 
 kubectl apply -f - <<EOF
 apiVersion: state-snapshotter.deckhouse.io/v1alpha1
-kind: DomainSpecificSnapshotController
+kind: CustomSnapshotDefinition
 metadata:
-  name: ${DSC_NAME}
+  name: ${CSD_NAME}
 spec:
   ownerModule: smoke-ssg
   snapshotResourceMapping:
@@ -89,29 +89,29 @@ spec:
 EOF
 # (CRD names must match metadata.name in crds/demo.state-snapshotter.deckhouse.io_*.yaml)
 
-log "== waiting for Accepted on DSC =="
+log "== waiting for Accepted on CSD =="
 ACC=""
 for _ in $(seq 1 60); do
-	ACC=$(kubectl get domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io "$DSC_NAME" \
+	ACC=$(kubectl get customsnapshotdefinitions.state-snapshotter.deckhouse.io "$CSD_NAME" \
 		-o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || true)
 	if [[ "$ACC" == "True" ]]; then
-		log "OK: DSC Accepted=True"
+		log "OK: CSD Accepted=True"
 		break
 	fi
 	sleep 2
 done
 if [[ "${ACC:-}" != "True" ]]; then
-	log "WARN: DSC did not reach Accepted=True (demo CRDs may be missing); deleting DSC and exiting 0"
-	kubectl delete domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io "$DSC_NAME" --wait=false >/dev/null 2>&1 || true
+	log "WARN: CSD did not reach Accepted=True (demo CRDs may be missing); deleting CSD and exiting 0"
+	kubectl delete customsnapshotdefinitions.state-snapshotter.deckhouse.io "$CSD_NAME" --wait=false >/dev/null 2>&1 || true
 	exit 0
 fi
 
-log "== deleting DSC (registry must rebuild on next reconcile; no panic) =="
-kubectl delete domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io "$DSC_NAME" --wait=true
+log "== deleting CSD (registry must rebuild on next reconcile; no panic) =="
+kubectl delete customsnapshotdefinitions.state-snapshotter.deckhouse.io "$CSD_NAME" --wait=true
 
 if [[ -n "$CTRL_POD" ]]; then
 	if kubectl logs -n "$MODULE_NS" "$CTRL_POD" --tail="$LOG_TAIL" 2>/dev/null | grep -E 'panic:|fatal error:' >/dev/null; then
-		fail "panic or fatal after DSC delete"
+		fail "panic or fatal after CSD delete"
 	fi
 fi
 

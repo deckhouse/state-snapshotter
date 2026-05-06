@@ -31,4 +31,3 @@ type ObjectReference struct {
 	// +kubebuilder:validation:Required
 	UID string `json:"uid"`
 }
-

@@ -46,9 +46,9 @@ func DefaultSnapshotPair() UnifiedGVKPair {
 }
 
 // DefaultGraphRegistryBuiltInPairs lists Snapshot↔SnapshotContent pairs that are
-// active in the Snapshot graph registry without a DSC. Domain-specific
+// active in the Snapshot graph registry without a CSD. Domain-specific
 // demo pairs intentionally are not built in: they enter discovery only through
-// eligible DomainSpecificSnapshotController resources.
+// eligible CustomSnapshotDefinition resources.
 func DefaultGraphRegistryBuiltInPairs() []UnifiedGVKPair {
 	return []UnifiedGVKPair{
 		DefaultSnapshotPair(),

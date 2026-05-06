@@ -105,7 +105,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 		Expect(err).NotTo(HaveOccurred())
 		snapshot.SetCondition(
 			snapshotLike,
-			snapshot.ConditionHandledByDomainSpecificController,
+			snapshot.ConditionHandledByCustomSnapshotController,
 			metav1.ConditionTrue,
 			"Processed",
 			"Domain controller processed snapshot",

@@ -41,8 +41,8 @@ const (
 	// ConditionGraphReady indicates the snapshot controller finished child graph planning.
 	ConditionGraphReady = "GraphReady"
 
-	// ConditionHandledByDomainSpecificController indicates domain controller has started processing
-	ConditionHandledByDomainSpecificController = "HandledByDomainSpecificController"
+	// ConditionHandledByCustomSnapshotController indicates domain controller has started processing
+	ConditionHandledByCustomSnapshotController = "HandledByCustomSnapshotController"
 
 	// ConditionHandledByCommonController indicates common controller has started processing
 	ConditionHandledByCommonController = "HandledByCommonController"

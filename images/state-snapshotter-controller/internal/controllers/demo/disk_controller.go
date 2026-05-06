@@ -52,7 +52,7 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 	// RBAC is not generated from kubebuilder markers in this module.
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
-	// before RBACReady=True is set on DSC.
+	// before RBACReady=True is set on CSD.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
 		Complete(&DemoVirtualDiskSnapshotReconciler{

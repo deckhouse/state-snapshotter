@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package dscregistry
+package csdregistry
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// EligibleResourceSnapshotMapping is one DSC row resolved to concrete resource, snapshot, and content types.
+// EligibleResourceSnapshotMapping is one CSD row resolved to concrete resource, snapshot, and content types.
 type EligibleResourceSnapshotMapping struct {
 	ResourceGVR     schema.GroupVersionResource
 	ResourceGVK     schema.GroupVersionKind
@@ -37,10 +37,10 @@ type EligibleResourceSnapshotMapping struct {
 }
 
 // EligibleUnifiedGVKPairs returns UnifiedGVKPair entries from every snapshotResourceMapping row
-// of DSC objects that satisfy DSCWatchEligible. Duplicate snapshot GVKs in the output are skipped
+// of CSD objects that satisfy CSDWatchEligible. Duplicate snapshot GVKs in the output are skipped
 // (first wins). Caller should merge with bootstrap pairs; invalid CRDs are skipped (no error).
 func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedbootstrap.UnifiedGVKPair, error) {
-	var list ssv1alpha1.DomainSpecificSnapshotControllerList
+	var list ssv1alpha1.CustomSnapshotDefinitionList
 	if err := c.List(ctx, &list); err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 	var out []unifiedbootstrap.UnifiedGVKPair
 	for i := range list.Items {
 		d := &list.Items[i]
-		if !DSCWatchEligible(d) {
+		if !CSDWatchEligible(d) {
 			continue
 		}
 		for _, entry := range d.Spec.SnapshotResourceMapping {
@@ -74,10 +74,10 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 	return out, nil
 }
 
-// EligibleResourceSnapshotMappings returns DSC resource→snapshot mappings used by Snapshot
+// EligibleResourceSnapshotMappings returns CSD resource→snapshot mappings used by Snapshot
 // parent-owned graph construction. Invalid or cluster-scoped resource rows are skipped fail-closed.
 func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]EligibleResourceSnapshotMapping, error) {
-	var list ssv1alpha1.DomainSpecificSnapshotControllerList
+	var list ssv1alpha1.CustomSnapshotDefinitionList
 	if err := c.List(ctx, &list); err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]E
 	var out []EligibleResourceSnapshotMapping
 	for i := range list.Items {
 		d := &list.Items[i]
-		if !DSCWatchEligible(d) {
+		if !CSDWatchEligible(d) {
 			continue
 		}
 		for _, entry := range d.Spec.SnapshotResourceMapping {

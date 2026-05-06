@@ -137,7 +137,7 @@ func TestDefaultGraphRegistryBuiltInPairs_containsOnlySnapshot(t *testing.T) {
 	for _, p := range pairs {
 		switch p.Snapshot.Kind {
 		case "DemoVirtualMachineSnapshot", "DemoVirtualDiskSnapshot":
-			t.Fatalf("demo pair must be DSC-gated, found graph built-in: %v", p)
+			t.Fatalf("demo pair must be CSD-gated, found graph built-in: %v", p)
 		}
 	}
 }

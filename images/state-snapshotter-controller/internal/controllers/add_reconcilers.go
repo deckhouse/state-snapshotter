@@ -26,8 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/csd"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/demo"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/dsc"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/genericbinder"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	snapshotcontroller "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshot"
@@ -40,7 +40,7 @@ import (
 type GenericSnapshotBinderController = genericbinder.GenericSnapshotBinderController
 type SnapshotContentController = snapshotcontent.SnapshotContentController
 type ManifestCheckpointController = manifestcapture.ManifestCheckpointController
-type DomainSpecificSnapshotControllerReconciler = dsc.DomainSpecificSnapshotControllerReconciler
+type CustomSnapshotDefinitionReconciler = csd.CustomSnapshotDefinitionReconciler
 
 func NewGenericSnapshotBinderController(
 	c client.Client,
@@ -73,13 +73,13 @@ func NewManifestCheckpointController(
 	return manifestcapture.NewManifestCheckpointController(c, apiReader, scheme, log, cfg)
 }
 
-func NewDomainSpecificSnapshotControllerReconciler(
+func NewCustomSnapshotDefinitionReconciler(
 	c client.Client,
 	scheme *runtime.Scheme,
 	log logger.LoggerInterface,
 	cfg *config.Options,
-) (*DomainSpecificSnapshotControllerReconciler, error) {
-	return dsc.NewDomainSpecificSnapshotControllerReconciler(c, scheme, log, cfg)
+) (*CustomSnapshotDefinitionReconciler, error) {
+	return csd.NewCustomSnapshotDefinitionReconciler(c, scheme, log, cfg)
 }
 
 func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
@@ -129,18 +129,18 @@ func AddManifestCheckpointControllerToManager(
 	return nil
 }
 
-// AddDomainSpecificSnapshotControllerToManager registers the DSC reconciler (registry/status).
-// unifiedRuntimeSync runs after each successful full DSC reconcile in production (additive unified watches).
+// AddCustomSnapshotDefinitionControllerToManager registers the CSD reconciler (registry/status).
+// unifiedRuntimeSync runs after each successful full CSD reconcile in production (additive unified watches).
 // graphRegistryRefresh runs after reconcileAll and before unifiedRuntimeSync so generic
-// graph code picks up new eligible DSC pairs without restarting the pod.
-func AddDomainSpecificSnapshotControllerToManager(
+// graph code picks up new eligible CSD pairs without restarting the pod.
+func AddCustomSnapshotDefinitionControllerToManager(
 	mgr ctrl.Manager,
 	log logger.LoggerInterface,
 	cfg *config.Options,
 	unifiedRuntimeSync func(context.Context) error,
 	graphRegistryRefresh func(context.Context) error,
 ) error {
-	rec, err := dsc.NewDomainSpecificSnapshotControllerReconciler(
+	rec, err := csd.NewCustomSnapshotDefinitionReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		log,

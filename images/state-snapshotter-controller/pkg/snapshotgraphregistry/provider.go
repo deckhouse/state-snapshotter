@@ -36,7 +36,7 @@ type Reader interface {
 	Current() *snapshot.GVKRegistry
 }
 
-// Provider holds the latest graph GVK registry, rebuilt on Refresh (e.g. after DSC reconcile).
+// Provider holds the latest graph GVK registry, rebuilt on Refresh (e.g. after CSD reconcile).
 // Current() is lock-free and always returns a fully built *GVKRegistry pointer or nil (atomic load).
 // Refresh/TryRefresh serialize concurrent rebuilds (singleflight-style mutex); the new registry is
 // swapped atomically so readers never observe a half-written registry.
@@ -78,7 +78,7 @@ func (p *Provider) Current() *snapshot.GVKRegistry {
 	return p.reg.Load()
 }
 
-// Refresh rebuilds the registry from bootstrap + eligible DSC + RESTMapper and atomically swaps Current().
+// Refresh rebuilds the registry from bootstrap + eligible CSD + RESTMapper and atomically swaps Current().
 func (p *Provider) Refresh(ctx context.Context) error {
 	return p.refresh(ctx)
 }

@@ -995,7 +995,7 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 
 // AddSnapshotStatusWatch registers a snapshot status watch that maps
 // status.boundSnapshotContentName changes back to the bound common SnapshotContent.
-// Snapshot GVKs are supplied by bootstrap/DSC runtime wiring; this controller must
+// Snapshot GVKs are supplied by bootstrap/CSD runtime wiring; this controller must
 // not hardcode domain snapshot kinds.
 func (r *SnapshotContentController) AddSnapshotStatusWatch(mgr ctrl.Manager, snapshotGVK schema.GroupVersionKind) error {
 	r.watchMu.Lock()

@@ -33,21 +33,21 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Integration: DSC reconciler InvalidSpec", func() {
-	const dupKindName = "integration-dsc-dup-snapshot-kind"
+var _ = Describe("Integration: CSD reconciler InvalidSpec", func() {
+	const dupKindName = "integration-csd-dup-snapshot-kind"
 
 	BeforeEach(func() {
 		for _, n := range []string{dupKindName} {
-			d := &storagev1alpha1.DomainSpecificSnapshotController{}
+			d := &storagev1alpha1.CustomSnapshotDefinition{}
 			d.SetName(n)
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
 		}
 	})
 
 	It("sets Accepted=False InvalidSpec when two mappings repeat the same snapshot kind", func() {
-		dsc := &storagev1alpha1.DomainSpecificSnapshotController{
+		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: dupKindName},
-			Spec: storagev1alpha1.DomainSpecificSnapshotControllerSpec{
+			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
 				OwnerModule: "integration-test",
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
@@ -61,15 +61,15 @@ var _ = Describe("Integration: DSC reconciler InvalidSpec", func() {
 				},
 			},
 		}
-		Expect(k8sClient.Create(ctx, dsc)).To(Succeed())
+		Expect(k8sClient.Create(ctx, csd)).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			cur := &storagev1alpha1.DomainSpecificSnapshotController{}
+			cur := &storagev1alpha1.CustomSnapshotDefinition{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dupKindName}, cur)).To(Succeed())
-			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
+			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.CSDConditionAccepted)
 			g.Expect(acc).NotTo(BeNil())
 			g.Expect(acc.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(acc.Reason).To(Equal(controllers.DSCReasonInvalidSpec))
+			g.Expect(acc.Reason).To(Equal(controllers.CSDReasonInvalidSpec))
 			g.Expect(acc.Message).To(ContainSubstring("duplicate snapshot kind"))
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})

@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package snapshotgraphregistry builds and refreshes the generic Snapshot graph GVK registry
-// from graph built-ins, eligible DomainSpecificSnapshotController rows, and RESTMapper discovery.
+// from graph built-ins, eligible CustomSnapshotDefinition rows, and RESTMapper discovery.
 package snapshotgraphregistry
 
 import (
@@ -27,15 +27,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// BuildRegistry merges graph built-ins + eligible DSC snapshot↔content pairs, filters to GVKs present in the
+// BuildRegistry merges graph built-ins + eligible CSD snapshot↔content pairs, filters to GVKs present in the
 // apiserver (RESTMapper), and returns a new GVKRegistry snapshot (immutable after return).
-// Eligible pairs come from a fresh List of DSC objects each call — deleted or no longer eligible DSC rows
-// disappear from the merged set on the next refresh (no sticky DSC-derived kinds).
+// Eligible pairs come from a fresh List of CSD objects each call — deleted or no longer eligible CSD rows
+// disappear from the merged set on the next refresh (no sticky CSD-derived kinds).
 func BuildRegistry(ctx context.Context, mapper meta.RESTMapper, apiReader client.Reader, cfg *config.Options, log logr.Logger) (*snapshot.GVKRegistry, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("snapshot graph registry: config is nil")
@@ -46,12 +46,12 @@ func BuildRegistry(ctx context.Context, mapper meta.RESTMapper, apiReader client
 	if apiReader == nil {
 		return nil, fmt.Errorf("snapshot graph registry: API reader is nil")
 	}
-	dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, apiReader)
+	csdPairs, err := csdregistry.EligibleUnifiedGVKPairs(ctx, apiReader)
 	if err != nil {
-		log.Info("snapshot graph registry: DSC list/parse failed; using graph built-ins only", "error", err)
-		dscPairs = nil
+		log.Info("snapshot graph registry: CSD list/parse failed; using graph built-ins only", "error", err)
+		csdPairs = nil
 	}
-	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), dscPairs)
+	merged := unifiedbootstrap.MergeBootstrapAndCSDPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), csdPairs)
 	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(mapper, merged, log.WithName("snapshot-graph-registry-build"))
 	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
 	if err != nil {

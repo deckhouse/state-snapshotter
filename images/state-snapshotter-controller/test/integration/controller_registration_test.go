@@ -113,6 +113,6 @@ var _ = Describe("Integration: Controller Registration", func() {
 	It("should initialize unified runtime and graph registry hooks in integration wiring", func() {
 		Expect(unifiedSyncer).NotTo(BeNil(), "unifiedruntime.Syncer must be initialized in the single always-on runtime path")
 		Expect(integrationGraphRegProvider).NotTo(BeNil(), "Snapshot graph registry provider must be initialized")
-		Expect(integrationSnapshotGraphRegistryRefresh(ctx)).To(Succeed(), "DSC hot-add graph refresh path must be callable")
+		Expect(integrationSnapshotGraphRegistryRefresh(ctx)).To(Succeed(), "CSD hot-add graph refresh path must be callable")
 	})
 })

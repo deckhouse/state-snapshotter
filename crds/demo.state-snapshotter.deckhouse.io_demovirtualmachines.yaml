@@ -20,7 +20,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: DemoVirtualMachine is a minimal placeholder "resource" side for
-          DSC mapping (PR5b); not reconciled beyond registration.
+          CSD mapping (PR5b); not reconciled beyond registration.
         properties:
           apiVersion:
             description: |-

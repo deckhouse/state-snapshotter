@@ -1,6 +1,6 @@
-# Demo domain-specific nested snapshot (via DSC)
+# Demo custom snapshot nested snapshot (via CSD)
 
-**Status:** implementation/design package for the current demo-domain-dsc work, non-normative.
+**Status:** implementation/design package for the current demo-domain-csd work, non-normative.
 
 Normative contracts live in:
 
@@ -9,7 +9,7 @@ Normative contracts live in:
 
 This package explains the current work around:
 
-- DSC registration and graph activation for demo snapshot types;
+- CSD registration and graph activation for demo snapshot types;
 - parent/child snapshot tree materialization;
 - dedicated demo controllers for VM and disk snapshots;
 - aggregated manifest read validation for heterogeneous content graphs.
@@ -49,15 +49,15 @@ Reference для **heterogeneous** доменного дерева под **те
 
 **Слой PR5 vs generic §3-E*:** код и тесты **демо-доменного контроллера** (первый реальный writer **`children*Refs`** в heterogeneous flow) — это **PR5** таблицы **[`implementation-plan.md`](../implementation-plan.md) §2.4.2** и этот пакет документов; это **не** отдельный этап **§3-E1…E6** того же плана (**E1–E6** готовят **generic** контракт и реализацию в модуле, **PR5** впервые использует контракт в **domain flow**). Порядок и нарезка PR5a/PR5b — в **§2.4.4** плана.
 
-**Граница startup / graph activation:** dedicated demo controllers стартуют всегда и могут reconciler'ить вручную созданные demo snapshot объекты без DSC. Это не активирует demo kinds в `Snapshot` discovery. Graph registry built-in содержит только `Snapshot`→ common content; demo VM/Disk пары появляются в discovery только через eligible DSC.
+**Граница startup / graph activation:** dedicated demo controllers стартуют всегда и могут reconciler'ить вручную созданные demo snapshot объекты без CSD. Это не активирует demo kinds в `Snapshot` discovery. Graph registry built-in содержит только `Snapshot`→ common content; demo VM/Disk пары появляются в discovery только через eligible CSD.
 
-**Граница generic / demo (имплементация):** reconciler **`Snapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge graph built-ins ∪ eligible DSC, **refresh после reconcile DSC**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** DSC и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
+**Граница generic / demo (имплементация):** reconciler **`Snapshot`**, E5 exclude и PR4 aggregate traversal **не** импортируют demo CRD и **не** содержат веток по именам **`Demo*Snapshot`**. Они используют **`pkg/snapshotgraphregistry.Provider`** (merge graph built-ins ∪ eligible CSD, **refresh после reconcile CSD**, не startup-static снимок) и **`unstructured`** для любых зарегистрированных snapshot/content пар. Демо-типы — **пример consumer'а** CSD и доменной логики (вложенные disk snapshots под VM создаёт **доменный** контроллер, не generic).
 
 **Reference controller contract (current runtime):** a demo domain snapshot controller owns validation of `sourceRef`, creation of its own common `SnapshotContent`, creation of an MCR for its own source object, publication of request names / `GraphReady`, and mirroring bound content `Ready`. A domain parent controller also owns child snapshot creation for nested resources, child ownerRefs, and its own `childrenSnapshotRefs`. It does **not** own root/parent refs, `RBACReady`, RBAC creation, parent content status, or content-level Ready aggregation. Invalid user spec is reported as `Ready=False` and must not create content, MCR, or child snapshots.
 
-**Content ownership:** domain controllers own `XxxSnapshot` behavior, `sourceRef` validation, child snapshot refs, and request lifecycle. The common state-snapshotter layer owns common `SnapshotContent`, ObjectKeeper/Retain, MCP refs, child content refs, and content-tree aggregation. DSC mapping is `resourceCRDName -> snapshotCRDName`; content GVK is fixed to `storage.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
+**Content ownership:** domain controllers own `XxxSnapshot` behavior, `sourceRef` validation, child snapshot refs, and request lifecycle. The common state-snapshotter layer owns common `SnapshotContent`, ObjectKeeper/Retain, MCP refs, child content refs, and content-tree aggregation. CSD mapping is `resourceCRDName -> snapshotCRDName`; content GVK is fixed to `storage.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
 
-**Reference RBAC model:** demo/domain controllers intentionally omit kubebuilder RBAC markers. Required permissions are documented as contract and granted externally by the Deckhouse RBAC controller/hook before DSC `RBACReady=True`; they are not generated from controller code comments.
+**Reference RBAC model:** demo/domain controllers intentionally omit kubebuilder RBAC markers. Required permissions are documented as contract and granted externally by the Deckhouse RBAC controller/hook before CSD `RBACReady=True`; they are not generated from controller code comments.
 
 **Контекст:** N2a/N2b + PR4. Целевая модель этого README — **heterogeneous** дерево и контракты ниже; generic **E5/E6** и доменные **PR5a/PR5b** в коде опираются на registry и **`children*Refs`**, без отдельного временного child-**Snapshot** scaffold в runtime (см. **[`spec/system-spec.md`](../../spec/system-spec.md) §3.8** и **§2.4.2**/**§2.4.4** [`implementation-plan.md`](../implementation-plan.md)).
 
@@ -65,7 +65,7 @@ Reference для **heterogeneous** доменного дерева под **те
 
 | | |
 |--|--|
-| **Решение** | Demo kinds подключены через **DSC**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`Snapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — **реальный** heterogeneous tree на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
+| **Решение** | Demo kinds подключены через **CSD**; те же pipeline **MCR→MCP** / **VCR→VolumeSnapshot**; **без** вложенного **`Snapshot`** под root (**INV-T1** — политика трека и heterogeneous дети, **не** «особый» kind). PR5 — **реальный** heterogeneous tree на **той же универсальной модели refs + `Ready`**, см. [`08`](08-universal-snapshot-tree-model.md). |
 | **Инвариант** | Generic не повторно захватывает ресурс, покрытый subtree; **ownerRef** — только жизненный цикл/GC ([`08`](08-universal-snapshot-tree-model.md) часть B). |
 | **Ограничения** | Код после апрува пакета; PR4 traversal может потребовать расширения под обход из **тех же** `children*Refs` — отдельный шаг в spec. |
 
@@ -74,10 +74,10 @@ Reference для **heterogeneous** доменного дерева под **те
 | # | Файл | Содержание |
 |---|------|------------|
 | 1 | [`01-api.md`](01-api.md) | Demo CRD; **v1** без inventory CRD (**self-contained** `spec`); связь с root через **`children*Refs`**; без вложенного NS под root (**INV-T1**). |
-| 2 | [`02-dsc-wiring.md`](02-dsc-wiring.md) | DSC; demo controllers. |
+| 2 | [`02-csd-wiring.md`](02-csd-wiring.md) | CSD; demo controllers. |
 | 3 | [`03-snapshot-flow.md`](03-snapshot-flow.md) | Поток reconcile; ownerRef ≠ dedup. |
 | 4 | [`04-coverage-dedup.md`](04-coverage-dedup.md) | Dedup (вычисляемый): data + resource; граница run (**INV-S0** в `06`); ownerRef ≠ dedup. |
-| — | [`../../testing/demo-domain-dsc-test-plan.md`](../../testing/demo-domain-dsc-test-plan.md) | Сценарии тестов. |
+| — | [`../../testing/demo-domain-csd-test-plan.md`](../../testing/demo-domain-csd-test-plan.md) | Сценарии тестов. |
 
 ## Документы этапа 2–3 (фиксация + универсальная модель)
 
@@ -97,4 +97,4 @@ Reference для **heterogeneous** доменного дерева под **те
 - [`snapshot-controller.md`](../snapshot-controller.md), [`implementation-plan.md`](../implementation-plan.md) §2.4, [`spec/system-spec.md`](../../spec/system-spec.md).
 - Aggregated read: [`spec/snapshot-aggregated-read.md`](../../spec/snapshot-aggregated-read.md).
 - PR4 history: [`spec/snapshot-aggregated-manifests-pr4.md`](../../spec/snapshot-aggregated-manifests-pr4.md).
-- DSC: [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md).
+- CSD: [`operations/csd-rbac-and-mcr.md`](../../operations/csd-rbac-and-mcr.md).

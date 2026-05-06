@@ -37,20 +37,20 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
-// Serial: mutates the global integration graph registry through DSC refreshes.
-var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Serial, func() {
-	const dscName = "integration-dynamic-graph-registry-dsc"
+// Serial: mutates the global integration graph registry through CSD refreshes.
+var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Serial, func() {
+	const csdName = "integration-dynamic-graph-registry-csd"
 
 	BeforeEach(func() {
-		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
+		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: csdName}}))
 	})
 
 	AfterEach(func() {
-		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
+		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: csdName}}))
 		Expect(integrationSnapshotGraphRegistryRefresh(context.Background())).To(Succeed())
 	})
 
-	It("adds demo disk snapshot kinds after eligible DSC without restarting the process", func() {
+	It("adds demo disk snapshot kinds after eligible CSD without restarting the process", func() {
 		testCtx := context.Background()
 		localCfg := *testCfg
 		localCfg.UnifiedBootstrapMode = config.UnifiedBootstrapEmpty
@@ -60,9 +60,9 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 		Expect(p.Refresh(testCtx)).To(Succeed())
 		Expect(p.Current().RegisteredSnapshotKinds()).NotTo(ContainElement("DemoVirtualDiskSnapshot"))
 
-		dsc := &ssv1alpha1.DomainSpecificSnapshotController{
-			ObjectMeta: metav1.ObjectMeta{Name: dscName},
-			Spec: ssv1alpha1.DomainSpecificSnapshotControllerSpec{
+		csd := &ssv1alpha1.CustomSnapshotDefinition{
+			ObjectMeta: metav1.ObjectMeta{Name: csdName},
+			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
 				OwnerModule: "integration-dynamic-graph",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
@@ -72,21 +72,21 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 				},
 			},
 		}
-		Expect(k8sClient.Create(testCtx, dsc)).To(Succeed())
+		Expect(k8sClient.Create(testCtx, csd)).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			cur := &ssv1alpha1.DomainSpecificSnapshotController{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: dscName}, cur)).To(Succeed())
-			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
+			cur := &ssv1alpha1.CustomSnapshotDefinition{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: csdName}, cur)).To(Succeed())
+			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.CSDConditionAccepted)
 			g.Expect(acc).NotTo(BeNil())
 			g.Expect(acc.Status).To(Equal(metav1.ConditionTrue))
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		hook := &ssv1alpha1.DomainSpecificSnapshotController{}
-		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: dscName}, hook)).To(Succeed())
+		hook := &ssv1alpha1.CustomSnapshotDefinition{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: csdName}, hook)).To(Succeed())
 		gen := hook.GetGeneration()
 		meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-			Type:               controllers.DSCConditionRBACReady,
+			Type:               controllers.CSDConditionRBACReady,
 			Status:             metav1.ConditionTrue,
 			Reason:             "IntegrationHook",
 			Message:            "dynamic graph registry",
@@ -101,7 +101,7 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 			g.Expect(kinds).To(ContainElement("DemoVirtualDiskSnapshot"))
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		Expect(k8sClient.Delete(testCtx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}})).To(Succeed())
+		Expect(k8sClient.Delete(testCtx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: csdName}})).To(Succeed())
 		Eventually(func(g Gomega) {
 			g.Expect(p.Refresh(testCtx)).To(Succeed())
 			kinds := p.Current().RegisteredSnapshotKinds()
@@ -109,25 +109,25 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 
-	It("global registry refresh is fail-closed for demo until DSC", func() {
+	It("global registry refresh is fail-closed for demo until CSD", func() {
 		testCtx := context.Background()
 		Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())
 		Expect(integrationGraphRegProvider.Current().RegisteredSnapshotKinds()).NotTo(ContainElement("DemoVirtualDiskSnapshot"))
 		Expect(integrationGraphRegProvider.Current().RegisteredSnapshotKinds()).NotTo(ContainElement("DemoVirtualMachineSnapshot"))
 	})
 
-	It("global graph registry loses demo disk pair after DSC delete without manual Refresh (DSC reconcile only)", func() {
+	It("global graph registry loses demo disk pair after CSD delete without manual Refresh (CSD reconcile only)", func() {
 		testCtx := context.Background()
-		const globalDSC = "integration-global-graph-dsc-delete"
+		const globalCSD = "integration-global-graph-csd-delete"
 		DeferCleanup(func() {
-			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: globalDSC}}))
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: globalCSD}}))
 			Expect(integrationSnapshotGraphRegistryRefresh(context.Background())).To(Succeed())
 		})
 		Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())
 
-		dsc := &ssv1alpha1.DomainSpecificSnapshotController{
-			ObjectMeta: metav1.ObjectMeta{Name: globalDSC},
-			Spec: ssv1alpha1.DomainSpecificSnapshotControllerSpec{
+		csd := &ssv1alpha1.CustomSnapshotDefinition{
+			ObjectMeta: metav1.ObjectMeta{Name: globalCSD},
+			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
 				OwnerModule: "integration-global-graph-delete",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
@@ -137,21 +137,21 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 				},
 			},
 		}
-		Expect(k8sClient.Create(testCtx, dsc)).To(Succeed())
+		Expect(k8sClient.Create(testCtx, csd)).To(Succeed())
 
 		Eventually(func(g Gomega) {
-			cur := &ssv1alpha1.DomainSpecificSnapshotController{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: globalDSC}, cur)).To(Succeed())
-			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
+			cur := &ssv1alpha1.CustomSnapshotDefinition{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: globalCSD}, cur)).To(Succeed())
+			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.CSDConditionAccepted)
 			g.Expect(acc).NotTo(BeNil())
 			g.Expect(acc.Status).To(Equal(metav1.ConditionTrue))
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		hook := &ssv1alpha1.DomainSpecificSnapshotController{}
-		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: globalDSC}, hook)).To(Succeed())
+		hook := &ssv1alpha1.CustomSnapshotDefinition{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: globalCSD}, hook)).To(Succeed())
 		gen := hook.GetGeneration()
 		meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-			Type:               controllers.DSCConditionRBACReady,
+			Type:               controllers.CSDConditionRBACReady,
 			Status:             metav1.ConditionTrue,
 			Reason:             "IntegrationHook",
 			Message:            "global graph delete test",
@@ -164,14 +164,14 @@ var _ = Describe("Integration: snapshot graph registry (DSC-driven refresh)", Se
 			kinds := integrationGraphRegProvider.Current().RegisteredSnapshotKinds()
 			g.Expect(kinds).To(ContainElement("DemoVirtualDiskSnapshot"))
 		}).WithTimeout(60*time.Second).WithPolling(200*time.Millisecond).Should(Succeed(),
-			"DSC reconciler must run GraphRegistryRefresh after eligibility; demo disk kind should appear")
+			"CSD reconciler must run GraphRegistryRefresh after eligibility; demo disk kind should appear")
 
-		Expect(k8sClient.Delete(testCtx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: globalDSC}})).To(Succeed())
+		Expect(k8sClient.Delete(testCtx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: globalCSD}})).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			kinds := integrationGraphRegProvider.Current().RegisteredSnapshotKinds()
 			g.Expect(kinds).NotTo(ContainElement("DemoVirtualDiskSnapshot"))
 		}).WithTimeout(60*time.Second).WithPolling(200*time.Millisecond).Should(Succeed(),
-			"after DSC delete, next DSC reconcile must refresh graph registry without stale demo kind")
+			"after CSD delete, next CSD reconcile must refresh graph registry without stale demo kind")
 	})
 })

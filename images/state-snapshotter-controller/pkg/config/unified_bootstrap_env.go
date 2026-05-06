@@ -27,13 +27,13 @@ import (
 
 const (
 	// EnvUnifiedBootstrapPairs: unset/empty = use DefaultUnifiedRuntimeBootstrapPairs()
-	// (legacy alias DefaultDesiredUnifiedSnapshotPairs()); literal "empty"/"none"/"dsc-only"
-	// = bootstrap-only-from-DSC (empty static list); else semicolon-separated pairs
+	// (legacy alias DefaultDesiredUnifiedSnapshotPairs()); literal "empty"/"none"/"csd-only"
+	// = bootstrap-only-from-CSD (empty static list); else semicolon-separated pairs
 	// "group/version/Kind|group/version/Kind" (snapshot side | content side).
 	EnvUnifiedBootstrapPairs = "STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS"
 )
 
-// UnifiedBootstrapMode selects the static bootstrap list merged with eligible DSC before RESTMapper resolve.
+// UnifiedBootstrapMode selects the static bootstrap list merged with eligible CSD before RESTMapper resolve.
 type UnifiedBootstrapMode int
 
 const (
@@ -49,7 +49,7 @@ func ParseUnifiedBootstrapPairsEnv(env string) (mode UnifiedBootstrapMode, pairs
 		return UnifiedBootstrapDefault, nil, nil
 	}
 	low := strings.ToLower(s)
-	if low == "empty" || low == "none" || low == "dsc-only" {
+	if low == "empty" || low == "none" || low == "csd-only" {
 		return UnifiedBootstrapEmpty, nil, nil
 	}
 	var out []unifiedbootstrap.UnifiedGVKPair
@@ -111,7 +111,7 @@ func parseGVKTriple(s string) (schema.GroupVersionKind, error) {
 	return schema.GroupVersionKind{Group: group, Version: version, Kind: kind}, nil
 }
 
-// EffectiveUnifiedBootstrapPairs returns the static bootstrap slice for merge with eligible DSC.
+// EffectiveUnifiedBootstrapPairs returns the static bootstrap slice for merge with eligible CSD.
 func (o *Options) EffectiveUnifiedBootstrapPairs() []unifiedbootstrap.UnifiedGVKPair {
 	switch o.UnifiedBootstrapMode {
 	case UnifiedBootstrapDefault:

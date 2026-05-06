@@ -80,7 +80,7 @@ func (r *SnapshotReconciler) snapshotReader() client.Reader {
 }
 
 // AddSnapshotControllerToManager registers the Snapshot reconciler.
-// snapshotGraphRegistry provides DSC/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
+// snapshotGraphRegistry provides CSD/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
 // Child snapshot watches are registered dynamically from the live registry (see snapshotDynamicWatchManager).
 func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
 	if cfg == nil {

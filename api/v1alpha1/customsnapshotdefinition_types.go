@@ -22,38 +22,38 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster,shortName=dssc
+// +kubebuilder:resource:scope=Cluster,shortName=csd
 // +kubebuilder:printcolumn:name="Owner",type=string,JSONPath=`.spec.ownerModule`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
-// DomainSpecificSnapshotController registers unified snapshot types for a platform module (DSC).
+// CustomSnapshotDefinition registers custom snapshot types for platform modules.
 // See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
-type DomainSpecificSnapshotController struct {
+type CustomSnapshotDefinition struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DomainSpecificSnapshotControllerSpec   `json:"spec,omitempty"`
-	Status DomainSpecificSnapshotControllerStatus `json:"status,omitempty"`
+	Spec   CustomSnapshotDefinitionSpec   `json:"spec,omitempty"`
+	Status CustomSnapshotDefinitionStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-type DomainSpecificSnapshotControllerList struct {
+type CustomSnapshotDefinitionList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DomainSpecificSnapshotController `json:"items"`
+	Items           []CustomSnapshotDefinition `json:"items"`
 }
 
 // +k8s:deepcopy-gen=true
-type DomainSpecificSnapshotControllerSpec struct {
+type CustomSnapshotDefinitionSpec struct {
 	// OwnerModule identifies the owning Deckhouse module (audit/RBAC); immutable in v1alpha1.
 	// +kubebuilder:validation:Required
 	OwnerModule string `json:"ownerModule"`
 
-	// SnapshotResourceMapping declares supported snapshot types using CRD names only (v1alpha1).
+	// SnapshotResourceMapping declares source resource CRD -> snapshot CRD mappings.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	SnapshotResourceMapping []SnapshotResourceMappingEntry `json:"snapshotResourceMapping"`
 
-	// ManifestTransformation optional webhook for manifest transforms for this DSC.
+	// ManifestTransformation optional webhook for manifest transforms for this CSD.
 	ManifestTransformation *ManifestTransformation `json:"manifestTransformation,omitempty"`
 }
 
@@ -84,7 +84,7 @@ type ManifestTransformationServiceRef struct {
 }
 
 // +k8s:deepcopy-gen=true
-type DomainSpecificSnapshotControllerStatus struct {
+type CustomSnapshotDefinitionStatus struct {
 	// Conditions include Accepted, RBACReady, Ready (see ADR).
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

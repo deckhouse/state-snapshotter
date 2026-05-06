@@ -51,7 +51,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
@@ -192,7 +192,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := graphRegProvider.Refresh(ctx); err != nil {
-		log.Warning("initial snapshot graph registry refresh failed (generic graph may be empty until DSC reconcile)", "error", err)
+		log.Warning("initial snapshot graph registry refresh failed (generic graph may be empty until CSD reconcile)", "error", err)
 	}
 
 	// Add controllers
@@ -245,26 +245,26 @@ func main() {
 	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", 1)
 
 	// Unified runtime is always on in v0; bootstrap list comes from env defaults or STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
-	dscBootstrapClient, err := client.New(kConfig, client.Options{
+	csdBootstrapClient, err := client.New(kConfig, client.Options{
 		Scheme: scheme,
 		Mapper: mgr.GetRESTMapper(),
 	})
 	if err != nil {
-		log.Error(err, "[main] unable to create client for DSC→unified GVK bootstrap")
+		log.Error(err, "[main] unable to create client for CSD→unified GVK bootstrap")
 		cancel()
 		os.Exit(1)
 	}
-	dscPairs, err := dscregistry.EligibleUnifiedGVKPairs(ctx, dscBootstrapClient)
+	csdPairs, err := csdregistry.EligibleUnifiedGVKPairs(ctx, csdBootstrapClient)
 	if err != nil {
-		log.Warning("DSC list/parse for unified GVK bootstrap failed; using bootstrap-only merge", "error", err)
-		dscPairs = nil
+		log.Warning("CSD list/parse for unified GVK bootstrap failed; using bootstrap-only merge", "error", err)
+		csdPairs = nil
 	} else {
-		log.Info("[main] DSC-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(dscPairs))
+		log.Info("[main] CSD-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(csdPairs))
 	}
 	bootstrapPairs := cfgParams.EffectiveUnifiedBootstrapPairs()
 	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs), "bootstrapMode", cfgParams.UnifiedBootstrapMode)
-	mergedPairs := unifiedbootstrap.MergeBootstrapAndDSCPairs(bootstrapPairs, dscPairs)
-	log.Info("[main] unified GVK pairs after merge (bootstrap + DSC)", "count", len(mergedPairs))
+	mergedPairs := unifiedbootstrap.MergeBootstrapAndCSDPairs(bootstrapPairs, csdPairs)
+	log.Info("[main] unified GVK pairs after merge (bootstrap + CSD)", "count", len(mergedPairs))
 	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
 		mergedPairs,
@@ -315,12 +315,12 @@ func main() {
 		contentController,
 	)
 
-	if err := controllers.AddDomainSpecificSnapshotControllerToManager(mgr, log, cfgParams, unifiedSync.Sync, graphRegProvider.Refresh); err != nil {
-		log.Error(err, "Failed to add DomainSpecificSnapshotController reconciler to manager")
+	if err := controllers.AddCustomSnapshotDefinitionControllerToManager(mgr, log, cfgParams, unifiedSync.Sync, graphRegProvider.Refresh); err != nil {
+		log.Error(err, "Failed to add CustomSnapshotDefinition reconciler to manager")
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("DomainSpecificSnapshotController reconciler added to manager")
+	log.Info("CustomSnapshotDefinition reconciler added to manager")
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.

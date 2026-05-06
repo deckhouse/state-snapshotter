@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -44,7 +44,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 ) (bool, error) {
-	mappings, err := dscregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader())
+	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader())
 	if err != nil {
 		return false, err
 	}

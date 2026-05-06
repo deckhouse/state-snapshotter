@@ -18,10 +18,10 @@ package unifiedbootstrap
 
 import "sort"
 
-// MergeBootstrapAndDSCPairs combines bootstrap defaults with DSC-derived pairs.
-// For the same Snapshot GVK key, the DSC entry wins (overrides bootstrap) so the content side
-// matches the DSC mapping. Order is deterministic (sorted by snapshot GVK string).
-func MergeBootstrapAndDSCPairs(bootstrap, fromDSC []UnifiedGVKPair) []UnifiedGVKPair {
+// MergeBootstrapAndCSDPairs combines bootstrap defaults with CSD-derived pairs.
+// For the same Snapshot GVK key, the CSD entry wins (overrides bootstrap) so the content side
+// matches the CSD mapping. Order is deterministic (sorted by snapshot GVK string).
+func MergeBootstrapAndCSDPairs(bootstrap, fromCSD []UnifiedGVKPair) []UnifiedGVKPair {
 	bySnap := make(map[string]UnifiedGVKPair)
 	order := make([]string, 0)
 	add := func(p UnifiedGVKPair) {
@@ -34,7 +34,7 @@ func MergeBootstrapAndDSCPairs(bootstrap, fromDSC []UnifiedGVKPair) []UnifiedGVK
 	for _, p := range bootstrap {
 		add(p)
 	}
-	for _, p := range fromDSC {
+	for _, p := range fromCSD {
 		add(p)
 	}
 	sort.Strings(order)

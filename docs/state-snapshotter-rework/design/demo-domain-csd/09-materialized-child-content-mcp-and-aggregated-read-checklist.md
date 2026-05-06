@@ -20,20 +20,20 @@ Related design note:
 - Child controllers do not self-register in parent status.
 - Parent `Ready` is derived from own MCP state and direct children state.
 - Aggregated read combines MCPs only in the API/usecase layer.
-- Dedicated demo controllers can reconcile manual demo snapshots without DSC, but `Snapshot` discovery sees demo resources only through eligible DSC mappings.
+- Dedicated demo controllers can reconcile manual demo snapshots without CSD, but `Snapshot` discovery sees demo resources only through eligible CSD mappings.
 
 ## OwnerRef Filtering Examples
 
 - VM snapshot may include resources owned by the VM when they are part of VM own scope.
 - VM snapshot must not include resources owned by a disk object; they belong to disk snapshot scope.
 - Disk snapshot may include resources owned by the disk object when they are part of disk own scope.
-- `Snapshot` top-level DSC discovery must skip resources with `ownerReferences`; owned resources are covered by the owner domain subtree when that owner is registered and skipped fail-closed when it is not.
+- `Snapshot` top-level CSD discovery must skip resources with `ownerReferences`; owned resources are covered by the owner domain subtree when that owner is registered and skipped fail-closed when it is not.
 - `Snapshot` root own MCP must not accidentally include domain-owned resources delegated to child snapshots or skipped by ownerRef filtering.
 
 ## Validation Cases
 
-- Disk-only DSC with `DemoVirtualDisk ownerReference -> DemoVirtualMachine` does not create a direct `DemoVirtualDiskSnapshot` under root.
-- VM+Disk DSC creates `DemoVirtualMachineSnapshot` as a direct root child and creates `DemoVirtualDiskSnapshot` only under the VM subtree.
+- Disk-only CSD with `DemoVirtualDisk ownerReference -> DemoVirtualMachine` does not create a direct `DemoVirtualDiskSnapshot` under root.
+- VM+Disk CSD creates `DemoVirtualMachineSnapshot` as a direct root child and creates `DemoVirtualDiskSnapshot` only under the VM subtree.
 - Root `childrenSnapshotRefs` does not contain VM-owned disk snapshots directly.
 - Root own MCP contains the namespace-level own scope and does not include child snapshot MCP objects.
 - Aggregated read returns the expected subtree and fails on duplicate object identity.
@@ -63,11 +63,11 @@ Unit coverage:
 
 Integration coverage:
 
-- `Snapshot` creates top-level child snapshots through DSC;
+- `Snapshot` creates top-level child snapshots through CSD;
 - `DemoVirtualMachineSnapshot` creates child disk snapshots;
 - `DemoVirtualDiskSnapshot` works standalone;
-- disk-only DSC skips a VM-owned disk instead of creating it as a direct root child;
-- VM+Disk DSC keeps disk under VM subtree, not directly under root;
+- disk-only CSD skips a VM-owned disk instead of creating it as a direct root child;
+- VM+Disk CSD keeps disk under VM subtree, not directly under root;
 - child degradation is reflected by parent;
 - aggregated read returns root and child subtree manifests;
 - root own MCP contains only namespace-scoped allowlist objects and excludes child MCP objects;
@@ -108,7 +108,7 @@ After implementation:
    - `childrenSnapshotRefs`;
    - `manifestCheckpointName`;
    - `aggregated read`.
-3. Ensure `Snapshot` is described as a normal controller with a separate DSC discovery mechanism, not as a special root type.
+3. Ensure `Snapshot` is described as a normal controller with a separate CSD discovery mechanism, not as a special root type.
 4. Ensure lifecycle and aggregated-read algorithm details are linked to normative/design documents instead of being copied here.
 
 Docs are part of the result, not a side artifact. After the change, code and docs must describe the same model.

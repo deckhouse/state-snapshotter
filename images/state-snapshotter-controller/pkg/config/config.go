@@ -75,7 +75,7 @@ type Options struct {
 	// Default: false (filtering disabled by default)
 	EnableFiltering bool
 
-	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible DSC (R5).
+	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible CSD (R5).
 	// See EffectiveUnifiedBootstrapPairs().
 	UnifiedBootstrapMode        UnifiedBootstrapMode
 	UnifiedBootstrapCustomPairs []unifiedbootstrap.UnifiedGVKPair

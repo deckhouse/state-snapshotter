@@ -18,7 +18,7 @@ package controllers
 
 import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/dsc"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/csd"
 )
 
 const (
@@ -45,13 +45,13 @@ const (
 )
 
 const (
-	DSCConditionAccepted  = dsc.DSCConditionAccepted
-	DSCConditionRBACReady = dsc.DSCConditionRBACReady
-	DSCConditionReady     = dsc.DSCConditionReady
+	CSDConditionAccepted  = csd.CSDConditionAccepted
+	CSDConditionRBACReady = csd.CSDConditionRBACReady
+	CSDConditionReady     = csd.CSDConditionReady
 )
 
 const (
-	DSCReasonKindConflict  = dsc.DSCReasonKindConflict
-	DSCReasonInvalidSpec   = dsc.DSCReasonInvalidSpec
-	DSCReadyReasonNotReady = dsc.DSCReadyReasonNotReady
+	CSDReasonKindConflict  = csd.CSDReasonKindConflict
+	CSDReasonInvalidSpec   = csd.CSDReasonInvalidSpec
+	CSDReadyReasonNotReady = csd.CSDReadyReasonNotReady
 )

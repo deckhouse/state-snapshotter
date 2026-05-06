@@ -179,9 +179,9 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Step 1: Barrier - Wait for HandledByDomainSpecificController
+	// Step 1: Barrier - Wait for HandledByCustomSnapshotController
 	// Domain controller must process the snapshot first (create MCR/VCR, set conditions)
-	if !snapshot.HasCondition(snapshotLike, snapshot.ConditionHandledByDomainSpecificController, metav1.ConditionTrue) {
+	if !snapshot.HasCondition(snapshotLike, snapshot.ConditionHandledByCustomSnapshotController, metav1.ConditionTrue) {
 		logger.V(1).Info("Waiting for domain controller to handle snapshot")
 		return ctrl.Result{}, nil
 	}
@@ -872,7 +872,7 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 }
 
 // AddWatchForPair registers Snapshot + SnapshotContent watches for one pair at runtime (after manager.New).
-// Idempotent per snapshot GVK. Uses explicit content GVK (DSC mapping may differ from Kind+"Content").
+// Idempotent per snapshot GVK. Uses explicit content GVK (CSD mapping may differ from Kind+"Content").
 // If watch setup fails after a new slice entry was appended, that entry is removed and registry entries
 // matching this exact pair are reverted (see GVKRegistry.RevertSnapshotRegistrationIfExact). If the
 // snapshot GVK was already in the slice (bootstrap), registry is not reverted on failure.

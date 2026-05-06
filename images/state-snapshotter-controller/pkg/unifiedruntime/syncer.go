@@ -1,5 +1,5 @@
-// Package unifiedruntime applies R2 phase 2b / R3: after DSC status reconciliation, merge bootstrap
-// with eligible DSC mappings and add missing unified Snapshot / SnapshotContent watches without pod restart.
+// Package unifiedruntime applies R2 phase 2b / R3: after CSD status reconciliation, merge bootstrap
+// with eligible CSD mappings and add missing unified Snapshot / SnapshotContent watches without pod restart.
 //
 // Runtime note: each successful add calls controller-runtime builder.Complete while the manager may
 // already be running. That path is supported by controller-runtime (runnables added after Start) but
@@ -38,7 +38,7 @@ type Syncer struct {
 
 // NewSyncer builds a syncer. bootstrap must be the static unified-runtime list
 // (same as DefaultUnifiedRuntimeBootstrapPairs / legacy DefaultDesiredUnifiedSnapshotPairs);
-// eligible DSC pairs are merged on each Sync.
+// eligible CSD pairs are merged on each Sync.
 func NewSyncer(
 	mgr ctrl.Manager,
 	log logr.Logger,
@@ -60,9 +60,9 @@ func NewSyncer(
 }
 
 func copyLayeredState(src LayeredGVKState) LayeredGVKState {
-	out := LayeredGVKState{DSCEligibleError: src.DSCEligibleError}
+	out := LayeredGVKState{CSDEligibleError: src.CSDEligibleError}
 	out.BootstrapDesired = append([]unifiedbootstrap.UnifiedGVKPair(nil), src.BootstrapDesired...)
-	out.EligibleFromDSC = append([]unifiedbootstrap.UnifiedGVKPair(nil), src.EligibleFromDSC...)
+	out.EligibleFromCSD = append([]unifiedbootstrap.UnifiedGVKPair(nil), src.EligibleFromCSD...)
 	out.DesiredMerged = append([]unifiedbootstrap.UnifiedGVKPair(nil), src.DesiredMerged...)
 	out.ResolvedSnapshotGVKs = append([]schema.GroupVersionKind(nil), src.ResolvedSnapshotGVKs...)
 	out.ResolvedContentGVKs = append([]schema.GroupVersionKind(nil), src.ResolvedContentGVKs...)
@@ -90,15 +90,15 @@ func (s *Syncer) ActiveSnapshotGVKKeys() map[string]struct{} {
 	return out
 }
 
-// Sync is safe to call from the DSC reconciler after successful status updates. Errors from individual
+// Sync is safe to call from the CSD reconciler after successful status updates. Errors from individual
 // watch registration are logged; the function returns nil unless a programming invariant breaks.
 func (s *Syncer) Sync(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	state := BuildLayeredGVKState(ctx, s.reader, s.mgr.GetRESTMapper(), s.bootstrap, s.log)
-	if state.DSCEligibleError != nil {
-		s.log.Info("DSC list/parse for unified runtime sync failed; using bootstrap-only merge", "error", state.DSCEligibleError)
+	if state.CSDEligibleError != nil {
+		s.log.Info("CSD list/parse for unified runtime sync failed; using bootstrap-only merge", "error", state.CSDEligibleError)
 	}
 
 	prevResolved := s.lastState.ResolvedSnapshotKeySet()

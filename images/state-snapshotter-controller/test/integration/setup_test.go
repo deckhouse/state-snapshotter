@@ -48,7 +48,7 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
@@ -74,13 +74,13 @@ func ptrInt64(v int64) *int64 {
 }
 
 // integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
-// from graph built-ins and eligible DSC rows. Demo domain pairs are intentionally DSC-gated here.
+// from graph built-ins and eligible CSD rows. Demo domain pairs are intentionally CSD-gated here.
 func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
-	dscPairs, derr := dscregistry.EligibleUnifiedGVKPairs(ctx, mgr.GetAPIReader())
+	csdPairs, derr := csdregistry.EligibleUnifiedGVKPairs(ctx, mgr.GetAPIReader())
 	if derr != nil {
-		dscPairs = nil
+		csdPairs = nil
 	}
-	merged := unifiedbootstrap.MergeBootstrapAndDSCPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), dscPairs)
+	merged := unifiedbootstrap.MergeBootstrapAndCSDPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), csdPairs)
 	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
 		merged,
@@ -89,7 +89,7 @@ func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVe
 	return snapGVKs, contentGVKs, nil
 }
 
-// integrationSnapshotGraphRegistryRefresh rebuilds the integration graph registry (same hook as production DSC→refresh).
+// integrationSnapshotGraphRegistryRefresh rebuilds the integration graph registry (same hook as production CSD→refresh).
 func integrationSnapshotGraphRegistryRefresh(ctx context.Context) error {
 	if integrationGraphRegProvider == nil {
 		return fmt.Errorf("integration graph registry provider is nil")
@@ -531,7 +531,7 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	// Namespace-scoped *SnapshotContent stand-in for DSC InvalidSpec (content must be cluster-scoped) tests.
+	// Namespace-scoped *SnapshotContent stand-in for CSD InvalidSpec (content must be cluster-scoped) tests.
 	namespacedTestSnapshotContentCRD := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "namespacedtestsnapshotcontents.test.deckhouse.io",
@@ -716,7 +716,7 @@ var _ = BeforeSuite(func() {
 		snapshotController,
 		contentController,
 	)
-	Expect(controllers.AddDomainSpecificSnapshotControllerToManager(mgr, integrationLog, testCfg, unifiedSyncer.Sync, integrationSnapshotGraphRegistryRefresh)).To(Succeed())
+	Expect(controllers.AddCustomSnapshotDefinitionControllerToManager(mgr, integrationLog, testCfg, unifiedSyncer.Sync, integrationSnapshotGraphRegistryRefresh)).To(Succeed())
 
 	// Create context
 	ctx, cancel = context.WithCancel(testCtx)

@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/dscregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
@@ -34,18 +34,18 @@ import (
 type LayeredGVKState struct {
 	// BootstrapDesired is a copy of the static bootstrap list passed into the syncer.
 	BootstrapDesired []unifiedbootstrap.UnifiedGVKPair
-	// EligibleFromDSC is dscregistry.EligibleUnifiedGVKPairs (Accepted+RBACReady+generation; CRD-valid rows only).
-	EligibleFromDSC []unifiedbootstrap.UnifiedGVKPair
-	// DSCEligibleError is set when List/parse of DSC failed; merge then uses bootstrap only.
-	DSCEligibleError error
-	// DesiredMerged is MergeBootstrapAndDSCPairs(bootstrap, EligibleFromDSC or nil on list error).
+	// EligibleFromCSD is csdregistry.EligibleUnifiedGVKPairs (Accepted+RBACReady+generation; CRD-valid rows only).
+	EligibleFromCSD []unifiedbootstrap.UnifiedGVKPair
+	// CSDEligibleError is set when List/parse of CSD failed; merge then uses bootstrap only.
+	CSDEligibleError error
+	// DesiredMerged is MergeBootstrapAndCSDPairs(bootstrap, EligibleFromCSD or nil on list error).
 	DesiredMerged []unifiedbootstrap.UnifiedGVKPair
 	// ResolvedSnapshotGVKs and ResolvedContentGVKs are index-aligned; produced by RESTMapper filter.
 	ResolvedSnapshotGVKs []schema.GroupVersionKind
 	ResolvedContentGVKs  []schema.GroupVersionKind
 }
 
-// BuildLayeredGVKState reads DSC (eligible pairs), merges with bootstrap, resolves against the API mapper.
+// BuildLayeredGVKState reads CSD (eligible pairs), merges with bootstrap, resolves against the API mapper.
 func BuildLayeredGVKState(
 	ctx context.Context,
 	reader client.Reader,
@@ -56,18 +56,18 @@ func BuildLayeredGVKState(
 	st := LayeredGVKState{
 		BootstrapDesired: append([]unifiedbootstrap.UnifiedGVKPair(nil), bootstrap...),
 	}
-	eligible, err := dscregistry.EligibleUnifiedGVKPairs(ctx, reader)
+	eligible, err := csdregistry.EligibleUnifiedGVKPairs(ctx, reader)
 	if err != nil {
-		st.DSCEligibleError = err
-		st.EligibleFromDSC = nil
+		st.CSDEligibleError = err
+		st.EligibleFromCSD = nil
 	} else {
-		st.EligibleFromDSC = append([]unifiedbootstrap.UnifiedGVKPair(nil), eligible...)
+		st.EligibleFromCSD = append([]unifiedbootstrap.UnifiedGVKPair(nil), eligible...)
 	}
-	dscForMerge := st.EligibleFromDSC
-	if st.DSCEligibleError != nil {
-		dscForMerge = nil
+	csdForMerge := st.EligibleFromCSD
+	if st.CSDEligibleError != nil {
+		csdForMerge = nil
 	}
-	st.DesiredMerged = unifiedbootstrap.MergeBootstrapAndDSCPairs(bootstrap, dscForMerge)
+	st.DesiredMerged = unifiedbootstrap.MergeBootstrapAndCSDPairs(bootstrap, csdForMerge)
 	st.ResolvedSnapshotGVKs, st.ResolvedContentGVKs = unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mapper, st.DesiredMerged, log)
 	return st

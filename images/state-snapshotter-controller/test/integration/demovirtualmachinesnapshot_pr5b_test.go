@@ -95,22 +95,22 @@ func integrationObjectsContainKind(objects []map[string]interface{}, kind string
 
 // PR5b: DemoVirtualMachineSnapshot under root Snapshot; DemoVirtualDiskSnapshot as child under VM; ref-only walk sees VM content then disk content.
 var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM", Serial, func() {
-	const dscName = "integration-pr5b-demo-vm-dsc"
+	const csdName = "integration-pr5b-demo-vm-csd"
 
 	BeforeEach(func() {
-		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
+		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: csdName}}))
 	})
 
 	AfterEach(func() {
-		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
+		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: csdName}}))
 	})
 
-	It("registers DSC, wires VM snapshot to root, disk under VM, and traverses demo VM content subtree", func() {
+	It("registers CSD, wires VM snapshot to root, disk under VM, and traverses demo VM content subtree", func() {
 		testCtx := context.Background()
 
-		dsc := &ssv1alpha1.DomainSpecificSnapshotController{
-			ObjectMeta: metav1.ObjectMeta{Name: dscName},
-			Spec: ssv1alpha1.DomainSpecificSnapshotControllerSpec{
+		csd := &ssv1alpha1.CustomSnapshotDefinition{
+			ObjectMeta: metav1.ObjectMeta{Name: csdName},
+			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
 				OwnerModule: "integration-pr5b",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
@@ -124,24 +124,24 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 				},
 			},
 		}
-		Expect(k8sClient.Create(testCtx, dsc)).To(Succeed())
+		Expect(k8sClient.Create(testCtx, csd)).To(Succeed())
 		DeferCleanup(func() {
-			_ = client.IgnoreNotFound(k8sClient.Delete(testCtx, &ssv1alpha1.DomainSpecificSnapshotController{ObjectMeta: metav1.ObjectMeta{Name: dscName}}))
+			_ = client.IgnoreNotFound(k8sClient.Delete(testCtx, &ssv1alpha1.CustomSnapshotDefinition{ObjectMeta: metav1.ObjectMeta{Name: csdName}}))
 		})
 
 		Eventually(func(g Gomega) {
-			cur := &ssv1alpha1.DomainSpecificSnapshotController{}
-			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: dscName}, cur)).To(Succeed())
-			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
+			cur := &ssv1alpha1.CustomSnapshotDefinition{}
+			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: csdName}, cur)).To(Succeed())
+			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.CSDConditionAccepted)
 			g.Expect(acc).NotTo(BeNil())
 			g.Expect(acc.Status).To(Equal(metav1.ConditionTrue))
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 
-		hook := &ssv1alpha1.DomainSpecificSnapshotController{}
-		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: dscName}, hook)).To(Succeed())
+		hook := &ssv1alpha1.CustomSnapshotDefinition{}
+		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: csdName}, hook)).To(Succeed())
 		gen := hook.GetGeneration()
 		meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-			Type:               controllers.DSCConditionRBACReady,
+			Type:               controllers.CSDConditionRBACReady,
 			Status:             metav1.ConditionTrue,
 			Reason:             "IntegrationHook",
 			Message:            "pr5b demo vm",

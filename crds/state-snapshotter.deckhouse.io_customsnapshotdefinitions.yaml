@@ -4,16 +4,16 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io
+  name: customsnapshotdefinitions.state-snapshotter.deckhouse.io
 spec:
   group: state-snapshotter.deckhouse.io
   names:
-    kind: DomainSpecificSnapshotController
-    listKind: DomainSpecificSnapshotControllerList
-    plural: domainspecificsnapshotcontrollers
+    kind: CustomSnapshotDefinition
+    listKind: CustomSnapshotDefinitionList
+    plural: customsnapshotdefinitions
     shortNames:
-    - dssc
-    singular: domainspecificsnapshotcontroller
+    - csd
+    singular: customsnapshotdefinition
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -27,7 +27,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          DomainSpecificSnapshotController registers unified snapshot types for a platform module (DSC).
+          CustomSnapshotDefinition registers custom snapshot types for platform modules.
           See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
         properties:
           apiVersion:
@@ -51,7 +51,7 @@ spec:
             properties:
               manifestTransformation:
                 description: ManifestTransformation optional webhook for manifest
-                  transforms for this DSC.
+                  transforms for this CSD.
                 properties:
                   serviceRef:
                     properties:
@@ -71,8 +71,8 @@ spec:
                   immutable in v1alpha1.
                 type: string
               snapshotResourceMapping:
-                description: SnapshotResourceMapping declares supported snapshot types
-                  using CRD names only (v1alpha1).
+                description: SnapshotResourceMapping declares source resource CRD
+                  -> snapshot CRD mappings.
                 items:
                   description: SnapshotResourceMappingEntry maps resource CRDs to
                     snapshot CRDs (plural.resource.group form).

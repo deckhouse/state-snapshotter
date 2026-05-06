@@ -46,7 +46,7 @@ func TestManifestCheckpoint_ManifestCaptureRequestRef(t *testing.T) {
 			},
 		},
 		Status: ManifestCheckpointStatus{
-			TotalObjects:  5,
+			TotalObjects:   5,
 			TotalSizeBytes: 1024,
 			Conditions: []metav1.Condition{
 				{
@@ -81,17 +81,17 @@ func TestManifestCheckpoint_ManifestCaptureRequestRef(t *testing.T) {
 	}
 
 	if unmarshaled.Spec.ManifestCaptureRequestRef.Name != checkpoint.Spec.ManifestCaptureRequestRef.Name {
-		t.Errorf("Expected ManifestCaptureRequestRef.Name %s, got %s", 
+		t.Errorf("Expected ManifestCaptureRequestRef.Name %s, got %s",
 			checkpoint.Spec.ManifestCaptureRequestRef.Name, unmarshaled.Spec.ManifestCaptureRequestRef.Name)
 	}
 
 	if unmarshaled.Spec.ManifestCaptureRequestRef.Namespace != checkpoint.Spec.ManifestCaptureRequestRef.Namespace {
-		t.Errorf("Expected ManifestCaptureRequestRef.Namespace %s, got %s", 
+		t.Errorf("Expected ManifestCaptureRequestRef.Namespace %s, got %s",
 			checkpoint.Spec.ManifestCaptureRequestRef.Namespace, unmarshaled.Spec.ManifestCaptureRequestRef.Namespace)
 	}
 
 	if unmarshaled.Spec.ManifestCaptureRequestRef.UID != checkpoint.Spec.ManifestCaptureRequestRef.UID {
-		t.Errorf("Expected ManifestCaptureRequestRef.UID %s, got %s", 
+		t.Errorf("Expected ManifestCaptureRequestRef.UID %s, got %s",
 			checkpoint.Spec.ManifestCaptureRequestRef.UID, unmarshaled.Spec.ManifestCaptureRequestRef.UID)
 	}
 
@@ -210,7 +210,7 @@ func TestManifestCheckpoint_ReadyCondition(t *testing.T) {
 func TestManifestCheckpoint_NoPhaseField(t *testing.T) {
 	checkpoint := &ManifestCheckpoint{
 		Status: ManifestCheckpointStatus{
-			TotalObjects:  10,
+			TotalObjects:   10,
 			TotalSizeBytes: 2048,
 			Conditions: []metav1.Condition{
 				{
@@ -281,7 +281,7 @@ func TestManifestCheckpoint_ChunksInfo(t *testing.T) {
 					Checksum:     "def456",
 				},
 			},
-			TotalObjects:  8,
+			TotalObjects:   8,
 			TotalSizeBytes: 768,
 		},
 	}
@@ -298,4 +298,3 @@ func TestManifestCheckpoint_ChunksInfo(t *testing.T) {
 		t.Errorf("Expected TotalSizeBytes 768, got %d", checkpoint.Status.TotalSizeBytes)
 	}
 }
-

@@ -31,7 +31,7 @@ var ErrRefreshNotConfigured = errors.New("snapshot graph registry: TryRefresh no
 // never succeeded). Callers that need heterogeneous graph resolution should map this to 503 / fail-closed.
 var ErrGraphRegistryNotReady = errors.New("snapshot graph registry not ready")
 
-// LiveReader is a registry view that can be rebuilt from bootstrap + eligible DSC + RESTMapper.
+// LiveReader is a registry view that can be rebuilt from bootstrap + eligible CSD + RESTMapper.
 // Production uses *Provider; tests may use Static with a frozen registry.
 type LiveReader interface {
 	Reader

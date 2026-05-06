@@ -81,7 +81,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		//
 		// PRECONDITION:
 		// - Snapshot created by user
-		// - Snapshot has HandledByDomainSpecificController=True (simulated)
+		// - Snapshot has HandledByCustomSnapshotController=True (simulated)
 		//
 		// ACTIONS:
 		// 1. GenericSnapshotBinderController.Reconcile creates SnapshotContent
@@ -141,13 +141,13 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: set HandledByDomainSpecificController=True
+			// Simulate domain controller: set HandledByCustomSnapshotController=True
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",
@@ -269,7 +269,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// INTERFACE: GenericSnapshotBinderController.checkConsistencyAndSetReady
 			//
 			// PRECONDITION:
-			// - Snapshot created with HandledByDomainSpecificController=True
+			// - Snapshot created with HandledByCustomSnapshotController=True
 			// - SnapshotContent created and has finalizer
 			//
 			// ACTIONS:
@@ -326,13 +326,13 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: set HandledByDomainSpecificController=True
+			// Simulate domain controller: set HandledByCustomSnapshotController=True
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",

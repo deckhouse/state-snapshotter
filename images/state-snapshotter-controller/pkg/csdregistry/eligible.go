@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package dscregistry derives unified snapshot GVK pairs from DomainSpecificSnapshotController
+// Package csdregistry derives unified snapshot GVK pairs from CustomSnapshotDefinition
 // for wiring GenericSnapshotBinderController / SnapshotContentController (R2 phase 2).
-package dscregistry
+package csdregistry
 
 import (
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -30,10 +30,10 @@ const (
 	conditionRBACReady = "RBACReady"
 )
 
-// DSCWatchEligible implements the ADR activation predicate (same inputs as runtime watch formula):
+// CSDWatchEligible implements the ADR activation predicate (same inputs as runtime watch formula):
 // Accepted=True, RBACReady=True, and both conditions have observedGeneration == metadata.generation.
 // Ready is not read as an input.
-func DSCWatchEligible(d *storagev1alpha1.DomainSpecificSnapshotController) bool {
+func CSDWatchEligible(d *storagev1alpha1.CustomSnapshotDefinition) bool {
 	if d == nil {
 		return false
 	}

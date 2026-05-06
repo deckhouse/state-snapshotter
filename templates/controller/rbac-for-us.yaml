@@ -12,15 +12,15 @@ metadata:
   name: d8:{{ .Chart.Name }}:controller
   {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
 rules:
-# DomainSpecificSnapshotController (cluster-scoped; registry reconciler)
+# CustomSnapshotDefinition (cluster-scoped; registry reconciler)
 - apiGroups: ["state-snapshotter.deckhouse.io"]
-  resources: ["domainspecificsnapshotcontrollers"]
+  resources: ["customsnapshotdefinitions"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["state-snapshotter.deckhouse.io"]
-  resources: ["domainspecificsnapshotcontrollers/status"]
+  resources: ["customsnapshotdefinitions/status"]
   verbs: ["get", "update", "patch"]
 
-# CustomResourceDefinition (read-only discovery for DSC mapping resolution)
+# CustomResourceDefinition (read-only discovery for CSD mapping resolution)
 - apiGroups: ["apiextensions.k8s.io"]
   resources: ["customresourcedefinitions"]
   verbs: ["get", "list", "watch"]

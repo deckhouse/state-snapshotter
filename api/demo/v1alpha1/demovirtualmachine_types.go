@@ -22,7 +22,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=demovm
-// DemoVirtualMachine is a minimal placeholder "resource" side for DSC mapping (PR5b); not reconciled beyond registration.
+// DemoVirtualMachine is a minimal placeholder "resource" side for CSD mapping (PR5b); not reconciled beyond registration.
 type DemoVirtualMachine struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

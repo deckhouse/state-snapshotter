@@ -177,7 +177,7 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			// Note: We don't actually create BackupClass in fake client to avoid CRD issues
 			// Instead, we'll mock the Get call
 
-			// PRECONDITION: Create Snapshot with HandledByDomainSpecificController=True
+			// PRECONDITION: Create Snapshot with HandledByCustomSnapshotController=True
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-snapshot")
@@ -188,12 +188,12 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 				"backupClassName": "test-backup-class",
 			}
 
-			// Set HandledByDomainSpecificController condition
+			// Set HandledByCustomSnapshotController condition
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",

@@ -1,4 +1,4 @@
-# DSC wiring для demo domain
+# CSD wiring для demo domain
 
 **Статус:** Historical design (частично реализовано). Нормативный контракт — в `spec/system-spec.md`.
 > ⚠️ This document contains historical and potentially outdated design decisions.
@@ -8,26 +8,26 @@
 
 ## Принцип
 
-**`DomainSpecificSnapshotController` (DSC)** — декларативная регистрация пар **snapshot / snapshot content** для доменных kinds, чтобы они участвовали в **unified registry** и **runtime watches** по существующим правилам (см. [`spec/system-spec.md`](../../spec/system-spec.md) §0, [`operations/dsc-rbac-and-mcr.md`](../../operations/dsc-rbac-and-mcr.md)).
+**`CustomSnapshotDefinition` (CSD)** — декларативная регистрация пар **snapshot / snapshot content** для доменных kinds, чтобы они участвовали в **unified registry** и **runtime watches** по существующим правилам (см. [`spec/system-spec.md`](../../spec/system-spec.md) §0, [`operations/csd-rbac-and-mcr.md`](../../operations/csd-rbac-and-mcr.md)).
 
-**Разделение понятий:** запуск dedicated controller process не равен активации kind в graph discovery. `DemoVirtualDiskSnapshotController` и `DemoVirtualMachineSnapshotController` стартуют всегда и могут обработать manual snapshot без DSC. `Snapshot` создаёт demo children только если соответствующая resource→snapshot mapping пришла из eligible DSC.
+**Разделение понятий:** запуск dedicated controller process не равен активации kind в graph discovery. `DemoVirtualDiskSnapshotController` и `DemoVirtualMachineSnapshotController` стартуют всегда и могут обработать manual snapshot без CSD. `Snapshot` создаёт demo children только если соответствующая resource→snapshot mapping пришла из eligible CSD.
 
-**DSC и generic — граница:** DSC **не** определяет состав дерева snapshot-run и **не** используется **`Snapshot`** reconciler’ом для обхода или «разрешённых детей». DSC нужен для **регистрации** GVK, **wiring** watches и единообразного runtime (события → reconcile) доменных контроллеров. Состав run задаётся только **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** в API (нормативно **[`spec/system-spec.md`](../../spec/system-spec.md) §3**, мотивы — [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md)); generic читает refs **динамически**, без обращения к DSC как к источнику структуры дерева.
+**CSD и generic — граница:** CSD **не** определяет состав дерева snapshot-run и **не** используется **`Snapshot`** reconciler’ом для обхода или «разрешённых детей». CSD нужен для **регистрации** GVK, **wiring** watches и единообразного runtime (события → reconcile) доменных контроллеров. Состав run задаётся только **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** в API (нормативно **[`spec/system-spec.md`](../../spec/system-spec.md) §3**, мотивы — [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md)); generic читает refs **динамически**, без обращения к CSD как к источнику структуры дерева.
 
 Generic **`Snapshot`** reconciler **не** получает `if demoKind`: он ведёт **root** namespace capture и опирается на **универсальную** модель дерева — **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, единый **`Ready`**, и **вычисляемый** exclude для generic capture (без persisted «domain summary»; см. [`04-coverage-dedup.md`](04-coverage-dedup.md), [`08`](08-universal-snapshot-tree-model.md)).
 
 **Parent link в demo API:** parent задаётся Kubernetes **ownerReference** child snapshot → parent snapshot. Это lifecycle/back-reference/requeue helper; состав дерева остаётся только в parent-owned `status.childrenSnapshotRefs`.
 
-## Объекты DSC (черновик)
+## Объекты CSD (черновик)
 
-Минимум **два** DSC (или один DSC с двумя парами kinds — если схема и KindConflict это позволяют). Таблица — **пример** demo v1, **не** фиксированный allowlist: новые kinds подключаются **дополнительными** DSC **без** изменений generic **`Snapshot`** reconciler ([`05`](05-tree-and-graph-invariants.md) — дерево без compile-time списка детей).
+Минимум **два** CSD (или один CSD с двумя парами kinds — если схема и KindConflict это позволяют). Таблица — **пример** demo v1, **не** фиксированный allowlist: новые kinds подключаются **дополнительными** CSD **без** изменений generic **`Snapshot`** reconciler ([`05`](05-tree-and-graph-invariants.md) — дерево без compile-time списка детей).
 
-| DSC | Snapshot kind | SnapshotContent kind | Назначение |
+| CSD | Snapshot kind | SnapshotContent kind | Назначение |
 |-----|---------------|----------------------|------------|
 | A | demo VM snapshot | common content | VM |
 | B | demo disk snapshot | common content | Нижний доменный disk-узел |
 
-**VolumeSnapshot** / **VolumeSnapshotContent** — обычно CSI API group; для участия в дереве под root **не** требуется DSC state-snapshotter (если драйвер стандартный). Для текущего PR5a/PR5b это **future work**: demo-путь сейчас опирается на `Demo*Snapshot` + `*Content` и stub `Ready`, без production CSI/data-path.
+**VolumeSnapshot** / **VolumeSnapshotContent** — обычно CSI API group; для участия в дереве под root **не** требуется CSD state-snapshotter (если драйвер стандартный). Для текущего PR5a/PR5b это **future work**: demo-путь сейчас опирается на `Demo*Snapshot` + `*Content` и stub `Ready`, без production CSI/data-path.
 
 ## Кто что создаёт
 
@@ -47,7 +47,7 @@ Generic **`Snapshot`** reconciler **не** получает `if demoKind`: он 
 ## Приоритет / порядок
 
 - Порядок «disk subtree **не** обгоняет VM snapshot» — **требование к доменной** логике (фазы / `status` / политика контроллеров), **не** механизм, который обеспечивает generic **`Snapshot`**. Generic **не** управляет очерёдностью доменных шагов — [`03-snapshot-flow.md`](03-snapshot-flow.md).
-- KindConflict / Accepted — как для любых DSC.
+- KindConflict / Accepted — как для любых CSD.
 
 ## RBAC
 
@@ -56,5 +56,5 @@ Generic **`Snapshot`** reconciler **не** получает `if demoKind`: он 
 ## Не делать
 
 - Не описывать и не реализовывать **вложенный** `Snapshot` под root для VM/disk вместо heterogeneous детей — это **политика трека** (**INV-T1**), а не утверждение, что `Snapshot` «особый» kind или «верхний доменный контроллер» в kube.
-- Не добавлять `if demoKind` в generic **`Snapshot`** reconciler; не встраивать доменные ветки в **unified** DSC/registry-слой там, где он должен оставаться тип-агностичным (см. [`spec/system-spec.md`](../../spec/system-spec.md) §0, ADR).
-- Не использовать **DSC** как источник истины для **состава дерева** snapshot-run (только **`children*Refs`** в API).
+- Не добавлять `if demoKind` в generic **`Snapshot`** reconciler; не встраивать доменные ветки в **unified** CSD/registry-слой там, где он должен оставаться тип-агностичным (см. [`spec/system-spec.md`](../../spec/system-spec.md) §0, ADR).
+- Не использовать **CSD** как источник истины для **состава дерева** snapshot-run (только **`children*Refs`** в API).

@@ -114,7 +114,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",
@@ -306,7 +306,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			Expect(err).NotTo(HaveOccurred())
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",

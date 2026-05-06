@@ -30,7 +30,7 @@
 До полного сценария ТЗ в одном релизе (SSOT в `snapshot-rework`):
 
 - **Child composition (manifests-only)** — целевая ось **N2b**, не «опциональный потом».
-- DSC priority traversal **в полном объёме**, data-layer — после закрытого N2 / в **N5** по плану.
+- CSD priority traversal **в полном объёме**, data-layer — после закрытого N2 / в **N5** по плану.
 - Экспорт/импорт архива и CLI как в полном ТЗ — не обещать в рамках N2.
 - **`ManifestCaptureRequest` как обязательный публичный контракт** для оператора — см. §10; публично: root + **SnapshotContent** + artifact metadata; MCR/MCP — **внутренний** execution path в **N2a**.
 
@@ -457,7 +457,7 @@ spec:
 
 ## 14. Bootstrap / registry / RBAC impact
 
-- Зарегистрировать пару **`Snapshot` / `SnapshotContent`** в `pkg/unifiedbootstrap` (и при необходимости DSC): resolve, watches, RBAC в шаблонах. **Убрать** использование **generic `SnapshotContent`** как носителя для namespace root (**без** миграции — целевая схема сразу SnapshotContent).
+- Зарегистрировать пару **`Snapshot` / `SnapshotContent`** в `pkg/unifiedbootstrap` (и при необходимости CSD): resolve, watches, RBAC в шаблонах. **Убрать** использование **generic `SnapshotContent`** как носителя для namespace root (**без** миграции — целевая схема сразу SnapshotContent).
 - Не смешивать в одном PR без необходимости с треками M1/M2 (manifest) и крупными изменениями R3 — см. [`implementation-plan.md`](implementation-plan.md).
 
 ---
@@ -506,7 +506,7 @@ SSOT: **§2.4.1** и **§2.4.2** (декомпозиция N2b по PR) в [`imp
 
 ### N5 — За пределами manifests-only дерева
 
-Data-layer (volume/VSC/VCR), полный export/import, restore с данными, DSC traversal в полном объёме — по [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md). **Дерево манифест-only** — в **N2b**, не в N5.
+Data-layer (volume/VSC/VCR), полный export/import, restore с данными, CSD traversal в полном объёме — по [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md). **Дерево манифест-only** — в **N2b**, не в N5.
 
 ---
 

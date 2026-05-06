@@ -22,7 +22,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=demovd
-// DemoVirtualDisk is a minimal placeholder "resource" side for DSC mapping (PR5a); not used by reconcile logic yet.
+// DemoVirtualDisk is a minimal placeholder "resource" side for CSD mapping (PR5a); not used by reconcile logic yet.
 type DemoVirtualDisk struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

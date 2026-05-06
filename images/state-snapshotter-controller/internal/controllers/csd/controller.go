@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package dsc
+package csd
 
 import (
 	"context"
@@ -37,34 +37,34 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// DSC condition types (ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md).
+// CSD condition types (ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md).
 const (
-	DSCConditionAccepted  = "Accepted"
-	DSCConditionRBACReady = "RBACReady"
-	DSCConditionReady     = "Ready"
+	CSDConditionAccepted  = "Accepted"
+	CSDConditionRBACReady = "RBACReady"
+	CSDConditionReady     = "Ready"
 )
 
 const (
-	DSCReasonKindConflict = "KindConflict"
-	DSCReasonInvalidSpec  = "InvalidSpec"
-	// DSCReadyReasonNotReady is the Ready condition reason when the aggregate is false (not a spec-level standardized reason).
-	DSCReadyReasonNotReady = "NotReady"
+	CSDReasonKindConflict = "KindConflict"
+	CSDReasonInvalidSpec  = "InvalidSpec"
+	// CSDReadyReasonNotReady is the Ready condition reason when the aggregate is false (not a spec-level standardized reason).
+	CSDReadyReasonNotReady = "NotReady"
 )
 
-// DomainSpecificSnapshotControllerReconciler resolves snapshotResourceMapping, detects cross-DSC
+// CustomSnapshotDefinitionReconciler resolves snapshotResourceMapping, detects cross-CSD
 // snapshot kind conflicts, writes Accepted and aggregated Ready. RBACReady is owned by Deckhouse hook.
 // Runtime watch activation is triggered after successful status reconciliation.
 //
-// Phase-1 trade-off: Reconcile ignores the triggering request and always List()s all DSCs, then fully
-// recomputes resolution and conflicts for every object. Any update to one DSC re-runs the whole cycle.
+// Phase-1 trade-off: Reconcile ignores the triggering request and always List()s all CSDs, then fully
+// recomputes resolution and conflicts for every object. Any update to one CSD re-runs the whole cycle.
 // This is intentional for correctness and simplicity; optimize later if needed.
-type DomainSpecificSnapshotControllerReconciler struct {
+type CustomSnapshotDefinitionReconciler struct {
 	Client client.Client
 	Scheme *runtime.Scheme
 	Logger logger.LoggerInterface
 	Config *config.Options
 
-	// UnifiedRuntimeSync runs after a successful full DSC reconcile. Production wiring always provides it;
+	// UnifiedRuntimeSync runs after a successful full CSD reconcile. Production wiring always provides it;
 	// nil remains valid for focused unit tests.
 	UnifiedRuntimeSync func(context.Context) error
 
@@ -73,12 +73,12 @@ type DomainSpecificSnapshotControllerReconciler struct {
 	GraphRegistryRefresh func(context.Context) error
 }
 
-func NewDomainSpecificSnapshotControllerReconciler(
+func NewCustomSnapshotDefinitionReconciler(
 	c client.Client,
 	scheme *runtime.Scheme,
 	log logger.LoggerInterface,
 	cfg *config.Options,
-) (*DomainSpecificSnapshotControllerReconciler, error) {
+) (*CustomSnapshotDefinitionReconciler, error) {
 	if c == nil {
 		return nil, fmt.Errorf("client must not be nil")
 	}
@@ -88,7 +88,7 @@ func NewDomainSpecificSnapshotControllerReconciler(
 	if log == nil {
 		return nil, fmt.Errorf("logger must not be nil")
 	}
-	return &DomainSpecificSnapshotControllerReconciler{
+	return &CustomSnapshotDefinitionReconciler{
 		Client: c,
 		Scheme: scheme,
 		Logger: log,
@@ -96,32 +96,32 @@ func NewDomainSpecificSnapshotControllerReconciler(
 	}, nil
 }
 
-func (r *DomainSpecificSnapshotControllerReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
+func (r *CustomSnapshotDefinitionReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
-	var list storagev1alpha1.DomainSpecificSnapshotControllerList
+	var list storagev1alpha1.CustomSnapshotDefinitionList
 	if err := r.Client.List(ctx, &list); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileAll(ctx, list.Items); err != nil {
-		r.Logger.Error(err, "DSC reconcileAll failed")
+		r.Logger.Error(err, "CSD reconcileAll failed")
 		return ctrl.Result{}, err
 	}
 	if r.GraphRegistryRefresh != nil {
 		if err := r.GraphRegistryRefresh(ctx); err != nil {
-			r.Logger.Warning("snapshot graph registry refresh after DSC reconcile failed", "error", err)
+			r.Logger.Warning("snapshot graph registry refresh after CSD reconcile failed", "error", err)
 		}
 	}
 	if r.UnifiedRuntimeSync != nil {
 		if err := r.UnifiedRuntimeSync(ctx); err != nil {
-			r.Logger.Warning("unified GVK runtime sync after DSC reconcile failed", "error", err)
+			r.Logger.Warning("unified GVK runtime sync after CSD reconcile failed", "error", err)
 		}
 	}
 	return ctrl.Result{}, nil
 }
 
-type dscEntryResolution struct {
+type csdEntryResolution struct {
 	perMapping []mappingResolution
-	// duplicateSnapshotKind is true if two mappings in the same DSC resolve to the same snapshot GroupKind.
+	// duplicateSnapshotKind is true if two mappings in the same CSD resolve to the same snapshot GroupKind.
 	duplicateSnapshotKind bool
 }
 
@@ -130,26 +130,26 @@ type mappingResolution struct {
 	resolveErr error
 }
 
-func (r *DomainSpecificSnapshotControllerReconciler) reconcileAll(ctx context.Context, items []storagev1alpha1.DomainSpecificSnapshotController) error {
-	resByName, conflicting := r.computeDSCGlobalStateFromItems(ctx, items)
+func (r *CustomSnapshotDefinitionReconciler) reconcileAll(ctx context.Context, items []storagev1alpha1.CustomSnapshotDefinition) error {
+	resByName, conflicting := r.computeCSDGlobalStateFromItems(ctx, items)
 	for i := range items {
 		d := &items[i]
 		if err := r.writeStatusIfNeeded(ctx, d, resByName, conflicting); err != nil {
-			return fmt.Errorf("update status for DSC %q: %w", d.Name, err)
+			return fmt.Errorf("update status for CSD %q: %w", d.Name, err)
 		}
 	}
 	return nil
 }
 
-// computeDSCGlobalStateFromItems resolves every DSC spec and derives KindConflict participants.
-func (r *DomainSpecificSnapshotControllerReconciler) computeDSCGlobalStateFromItems(
+// computeCSDGlobalStateFromItems resolves every CSD spec and derives KindConflict participants.
+func (r *CustomSnapshotDefinitionReconciler) computeCSDGlobalStateFromItems(
 	ctx context.Context,
-	items []storagev1alpha1.DomainSpecificSnapshotController,
-) (resByName map[string]dscEntryResolution, conflicting map[string]struct{}) {
-	resByName = make(map[string]dscEntryResolution, len(items))
+	items []storagev1alpha1.CustomSnapshotDefinition,
+) (resByName map[string]csdEntryResolution, conflicting map[string]struct{}) {
+	resByName = make(map[string]csdEntryResolution, len(items))
 	for i := range items {
 		d := &items[i]
-		resByName[d.Name] = r.resolveDSCSpec(ctx, d)
+		resByName[d.Name] = r.resolveCSDSpec(ctx, d)
 	}
 
 	snapshotOwners := make(map[string]map[string]struct{})
@@ -169,19 +169,19 @@ func (r *DomainSpecificSnapshotControllerReconciler) computeDSCGlobalStateFromIt
 		if hasErr {
 			continue
 		}
-		seenInDSC := make(map[string]struct{})
+		seenInCSD := make(map[string]struct{})
 		for _, m := range res.perMapping {
 			gkKey := m.snapshotGK.String()
-			if _, dup := seenInDSC[gkKey]; dup {
+			if _, dup := seenInCSD[gkKey]; dup {
 				hasErr = true
 				break
 			}
-			seenInDSC[gkKey] = struct{}{}
+			seenInCSD[gkKey] = struct{}{}
 		}
 		if hasErr {
 			continue
 		}
-		for gk := range seenInDSC {
+		for gk := range seenInCSD {
 			if snapshotOwners[gk] == nil {
 				snapshotOwners[gk] = make(map[string]struct{})
 			}
@@ -200,8 +200,8 @@ func (r *DomainSpecificSnapshotControllerReconciler) computeDSCGlobalStateFromIt
 	return resByName, conflicting
 }
 
-func (r *DomainSpecificSnapshotControllerReconciler) resolveDSCSpec(ctx context.Context, d *storagev1alpha1.DomainSpecificSnapshotController) dscEntryResolution {
-	var out dscEntryResolution
+func (r *CustomSnapshotDefinitionReconciler) resolveCSDSpec(ctx context.Context, d *storagev1alpha1.CustomSnapshotDefinition) csdEntryResolution {
+	var out csdEntryResolution
 	out.perMapping = make([]mappingResolution, 0, len(d.Spec.SnapshotResourceMapping))
 	seenGK := make(map[string]struct{})
 
@@ -237,7 +237,7 @@ func (r *DomainSpecificSnapshotControllerReconciler) resolveDSCSpec(ctx context.
 	return out
 }
 
-func (r *DomainSpecificSnapshotControllerReconciler) getCRD(ctx context.Context, crdName string) (*extv1.CustomResourceDefinition, error) {
+func (r *CustomSnapshotDefinitionReconciler) getCRD(ctx context.Context, crdName string) (*extv1.CustomResourceDefinition, error) {
 	crd := &extv1.CustomResourceDefinition{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: crdName}, crd); err != nil {
 		return nil, err
@@ -266,33 +266,33 @@ func storedVersion(crd *extv1.CustomResourceDefinition) string {
 	return ""
 }
 
-func (r *DomainSpecificSnapshotControllerReconciler) writeStatusIfNeeded(
+func (r *CustomSnapshotDefinitionReconciler) writeStatusIfNeeded(
 	ctx context.Context,
-	d *storagev1alpha1.DomainSpecificSnapshotController,
-	resByName map[string]dscEntryResolution,
+	d *storagev1alpha1.CustomSnapshotDefinition,
+	resByName map[string]csdEntryResolution,
 	conflicting map[string]struct{},
 ) error {
 	res := resByName[d.Name]
 	gen := d.GetGeneration()
 
 	acceptedStatus, acceptedReason, acceptedMsg := r.computeAccepted(d.Name, res, conflicting)
-	rbac := meta.FindStatusCondition(d.Status.Conditions, DSCConditionRBACReady)
-	ready := computeDSCReady(acceptedStatus, rbac, gen)
+	rbac := meta.FindStatusCondition(d.Status.Conditions, CSDConditionRBACReady)
+	ready := computeCSDReady(acceptedStatus, rbac, gen)
 
-	desired := buildDSCStatusConditions(gen, acceptedStatus, acceptedReason, acceptedMsg, ready, d.Status.Conditions)
+	desired := buildCSDStatusConditions(gen, acceptedStatus, acceptedReason, acceptedMsg, ready, d.Status.Conditions)
 
-	if dscConditionsSemanticallyEqual(d.Status.Conditions, desired) {
+	if csdConditionsSemanticallyEqual(d.Status.Conditions, desired) {
 		return nil
 	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var list storagev1alpha1.DomainSpecificSnapshotControllerList
+		var list storagev1alpha1.CustomSnapshotDefinitionList
 		if err := r.Client.List(ctx, &list); err != nil {
 			return err
 		}
-		freshResByName, freshConflicting := r.computeDSCGlobalStateFromItems(ctx, list.Items)
+		freshResByName, freshConflicting := r.computeCSDGlobalStateFromItems(ctx, list.Items)
 
-		current := &storagev1alpha1.DomainSpecificSnapshotController{}
+		current := &storagev1alpha1.CustomSnapshotDefinition{}
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: d.Name}, current); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
@@ -302,10 +302,10 @@ func (r *DomainSpecificSnapshotControllerReconciler) writeStatusIfNeeded(
 		gen = current.GetGeneration()
 		freshRes := freshResByName[current.Name]
 		acceptedStatus, acceptedReason, acceptedMsg := r.computeAccepted(current.Name, freshRes, freshConflicting)
-		rbac := meta.FindStatusCondition(current.Status.Conditions, DSCConditionRBACReady)
-		ready := computeDSCReady(acceptedStatus, rbac, gen)
-		desired := buildDSCStatusConditions(gen, acceptedStatus, acceptedReason, acceptedMsg, ready, current.Status.Conditions)
-		if dscConditionsSemanticallyEqual(current.Status.Conditions, desired) {
+		rbac := meta.FindStatusCondition(current.Status.Conditions, CSDConditionRBACReady)
+		ready := computeCSDReady(acceptedStatus, rbac, gen)
+		desired := buildCSDStatusConditions(gen, acceptedStatus, acceptedReason, acceptedMsg, ready, current.Status.Conditions)
+		if csdConditionsSemanticallyEqual(current.Status.Conditions, desired) {
 			return nil
 		}
 		current.Status.Conditions = desired
@@ -313,16 +313,16 @@ func (r *DomainSpecificSnapshotControllerReconciler) writeStatusIfNeeded(
 	})
 }
 
-func (r *DomainSpecificSnapshotControllerReconciler) computeAccepted(
-	dscName string,
-	res dscEntryResolution,
+func (r *CustomSnapshotDefinitionReconciler) computeAccepted(
+	csdName string,
+	res csdEntryResolution,
 	conflicting map[string]struct{},
 ) (metav1.ConditionStatus, string, string) {
-	if _, isConflict := conflicting[dscName]; isConflict {
-		return metav1.ConditionFalse, DSCReasonKindConflict, "snapshot kind claimed by more than one DomainSpecificSnapshotController"
+	if _, isConflict := conflicting[csdName]; isConflict {
+		return metav1.ConditionFalse, CSDReasonKindConflict, "snapshot kind claimed by more than one CustomSnapshotDefinition"
 	}
 	if res.duplicateSnapshotKind {
-		return metav1.ConditionFalse, DSCReasonInvalidSpec, "duplicate snapshot kind in snapshotResourceMapping within the same DSC"
+		return metav1.ConditionFalse, CSDReasonInvalidSpec, "duplicate snapshot kind in snapshotResourceMapping within the same CSD"
 	}
 	var errMsgs []string
 	for _, m := range res.perMapping {
@@ -331,13 +331,13 @@ func (r *DomainSpecificSnapshotControllerReconciler) computeAccepted(
 		}
 	}
 	if len(errMsgs) > 0 {
-		return metav1.ConditionFalse, DSCReasonInvalidSpec, strings.Join(errMsgs, "; ")
+		return metav1.ConditionFalse, CSDReasonInvalidSpec, strings.Join(errMsgs, "; ")
 	}
 	return metav1.ConditionTrue, "Resolved", "mapping resolved, content CRDs are cluster-scoped"
 }
 
-// computeDSCReady mirrors ADR: Ready=True iff Accepted=True, RBACReady=True, both observedGeneration == metadata.generation.
-func computeDSCReady(accepted metav1.ConditionStatus, rbac *metav1.Condition, gen int64) metav1.ConditionStatus {
+// computeCSDReady mirrors ADR: Ready=True iff Accepted=True, RBACReady=True, both observedGeneration == metadata.generation.
+func computeCSDReady(accepted metav1.ConditionStatus, rbac *metav1.Condition, gen int64) metav1.ConditionStatus {
 	if accepted != metav1.ConditionTrue {
 		return metav1.ConditionFalse
 	}
@@ -347,8 +347,8 @@ func computeDSCReady(accepted metav1.ConditionStatus, rbac *metav1.Condition, ge
 	return metav1.ConditionTrue
 }
 
-// buildDSCStatusConditions sets Accepted and Ready; copies RBACReady from existing if present.
-func buildDSCStatusConditions(
+// buildCSDStatusConditions sets Accepted and Ready; copies RBACReady from existing if present.
+func buildCSDStatusConditions(
 	gen int64,
 	acceptedStatus metav1.ConditionStatus,
 	acceptedReason string,
@@ -359,7 +359,7 @@ func buildDSCStatusConditions(
 	var conds []metav1.Condition
 
 	meta.SetStatusCondition(&conds, metav1.Condition{
-		Type:               DSCConditionAccepted,
+		Type:               CSDConditionAccepted,
 		Status:             acceptedStatus,
 		Reason:             acceptedReason,
 		Message:            acceptedMessage,
@@ -367,12 +367,12 @@ func buildDSCStatusConditions(
 		LastTransitionTime: metav1.Now(),
 	})
 
-	if rbac := meta.FindStatusCondition(existing, DSCConditionRBACReady); rbac != nil {
+	if rbac := meta.FindStatusCondition(existing, CSDConditionRBACReady); rbac != nil {
 		cp := *rbac
 		meta.SetStatusCondition(&conds, cp)
 	}
 
-	readyReason := DSCReadyReasonNotReady
+	readyReason := CSDReadyReasonNotReady
 	var readyMsg string
 	switch {
 	case readyStatus == metav1.ConditionTrue:
@@ -385,7 +385,7 @@ func buildDSCStatusConditions(
 	}
 
 	meta.SetStatusCondition(&conds, metav1.Condition{
-		Type:               DSCConditionReady,
+		Type:               CSDConditionReady,
 		Status:             readyStatus,
 		Reason:             readyReason,
 		Message:            readyMsg,
@@ -396,7 +396,7 @@ func buildDSCStatusConditions(
 	return conds
 }
 
-func dscConditionsSemanticallyEqual(a, b []metav1.Condition) bool {
+func csdConditionsSemanticallyEqual(a, b []metav1.Condition) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -409,22 +409,22 @@ func dscConditionsSemanticallyEqual(a, b []metav1.Condition) bool {
 		if !ok {
 			return false
 		}
-		if !dscConditionFieldsEqual(got, want) {
+		if !csdConditionFieldsEqual(got, want) {
 			return false
 		}
 	}
 	return true
 }
 
-func dscConditionFieldsEqual(x, y metav1.Condition) bool {
+func csdConditionFieldsEqual(x, y metav1.Condition) bool {
 	return x.Status == y.Status && x.Reason == y.Reason && x.Message == y.Message && x.ObservedGeneration == y.ObservedGeneration
 }
 
-func (r *DomainSpecificSnapshotControllerReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *CustomSnapshotDefinitionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Logger == nil {
 		return fmt.Errorf("Logger is required")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&storagev1alpha1.DomainSpecificSnapshotController{}).
+		For(&storagev1alpha1.CustomSnapshotDefinition{}).
 		Complete(r)
 }

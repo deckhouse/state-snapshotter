@@ -34,9 +34,9 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Integration: DSC reconciler KindConflict", func() {
-	const nameA = "integration-dsc-kc-a"
-	const nameB = "integration-dsc-kc-b"
+var _ = Describe("Integration: CSD reconciler KindConflict", func() {
+	const nameA = "integration-csd-kc-a"
+	const nameB = "integration-csd-kc-b"
 
 	sharedMapping := func() []storagev1alpha1.SnapshotResourceMappingEntry {
 		return []storagev1alpha1.SnapshotResourceMappingEntry{
@@ -49,29 +49,29 @@ var _ = Describe("Integration: DSC reconciler KindConflict", func() {
 
 	AfterEach(func() {
 		for _, n := range []string{nameA, nameB} {
-			d := &storagev1alpha1.DomainSpecificSnapshotController{}
+			d := &storagev1alpha1.CustomSnapshotDefinition{}
 			d.SetName(n)
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
 		}
 		for _, n := range []string{nameA, nameB} {
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, client.ObjectKey{Name: n}, &storagev1alpha1.DomainSpecificSnapshotController{})
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: n}, &storagev1alpha1.CustomSnapshotDefinition{})
 				return errors.IsNotFound(err)
 			}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
 		}
 	})
 
-	It("sets Accepted=False KindConflict on both DSCs when they claim the same snapshot kind", func() {
-		a := &storagev1alpha1.DomainSpecificSnapshotController{
+	It("sets Accepted=False KindConflict on both CSDs when they claim the same snapshot kind", func() {
+		a := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: nameA},
-			Spec: storagev1alpha1.DomainSpecificSnapshotControllerSpec{
+			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
 				OwnerModule:             "mod-a",
 				SnapshotResourceMapping: sharedMapping(),
 			},
 		}
-		b := &storagev1alpha1.DomainSpecificSnapshotController{
+		b := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: nameB},
-			Spec: storagev1alpha1.DomainSpecificSnapshotControllerSpec{
+			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
 				OwnerModule:             "mod-b",
 				SnapshotResourceMapping: sharedMapping(),
 			},
@@ -81,12 +81,12 @@ var _ = Describe("Integration: DSC reconciler KindConflict", func() {
 
 		for _, n := range []string{nameA, nameB} {
 			Eventually(func(g Gomega) {
-				cur := &storagev1alpha1.DomainSpecificSnapshotController{}
+				cur := &storagev1alpha1.CustomSnapshotDefinition{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: n}, cur)).To(Succeed())
-				acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.DSCConditionAccepted)
+				acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.CSDConditionAccepted)
 				g.Expect(acc).NotTo(BeNil())
 				g.Expect(acc.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(acc.Reason).To(Equal(controllers.DSCReasonKindConflict))
+				g.Expect(acc.Reason).To(Equal(controllers.CSDReasonKindConflict))
 			}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 		}
 	})

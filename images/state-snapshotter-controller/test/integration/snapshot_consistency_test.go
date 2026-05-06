@@ -93,7 +93,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",
@@ -244,7 +244,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			// Snapshot is InProgress but never Ready=True
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",
@@ -344,7 +344,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",
@@ -449,7 +449,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByDomainSpecificController,
+				snapshot.ConditionHandledByCustomSnapshotController,
 				metav1.ConditionTrue,
 				"Processed",
 				"Domain controller processed snapshot",

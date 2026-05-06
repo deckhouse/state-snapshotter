@@ -265,7 +265,7 @@ func groupKindKey(gvk schema.GroupVersionKind) string {
 	return fmt.Sprintf("%s/%s", gvk.Group, gvk.Kind)
 }
 
-// NewGVKRegistryFromParallelSnapshotContentPairs registers each snapshot↔content pair from merged bootstrap/DSC
+// NewGVKRegistryFromParallelSnapshotContentPairs registers each snapshot↔content pair from merged bootstrap/CSD
 // discovery (parallel slices). Uses RegisterSnapshotContentMapping so non-default Content kind names work.
 func NewGVKRegistryFromParallelSnapshotContentPairs(snapshotGVKs, contentGVKs []schema.GroupVersionKind) (*GVKRegistry, error) {
 	if len(snapshotGVKs) != len(contentGVKs) {

@@ -59,4 +59,3 @@ type ManifestCheckpointContentChunkSpec struct {
 	// Used for integrity validation and debugging
 	Checksum string `json:"checksum,omitempty"`
 }
-
