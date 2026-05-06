@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -109,37 +109,25 @@ func demoSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, c cl
 	return manifestCaptureRequestSafeToDelete(ctx, c, key, contentName)
 }
 
-func demoManifestCheckpointReady(
-	ctx context.Context,
-	c client.Client,
-	mcr *ssv1alpha1.ManifestCaptureRequest,
-) (mcpName string, ready bool, terminalFailed bool, message string, err error) {
-	if mcr.Status.CheckpointName == "" {
-		cond := meta.FindStatusCondition(mcr.Status.Conditions, ssv1alpha1.ManifestCaptureRequestConditionTypeReady)
-		if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == ssv1alpha1.ManifestCaptureRequestConditionReasonFailed {
-			return "", false, true, cond.Message, nil
-		}
-		return "", false, false, fmt.Sprintf("waiting for ManifestCaptureRequest %s/%s", mcr.Namespace, mcr.Name), nil
+func ensureDemoSnapshotContent(ctx context.Context, c client.Client, contentName string, ownerRef metav1.OwnerReference) error {
+	existing := &storagev1alpha1.SnapshotContent{}
+	err := c.Get(ctx, client.ObjectKey{Name: contentName}, existing)
+	if err == nil {
+		_, err := ensureLifecycleOwnerRef(ctx, c, existing, ownerRef)
+		return err
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
 	}
 
-	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := c.Get(ctx, client.ObjectKey{Name: mcr.Status.CheckpointName}, mcp); err != nil {
-		if apierrors.IsNotFound(err) {
-			return mcr.Status.CheckpointName, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %q", mcr.Status.CheckpointName), nil
-		}
-		return "", false, false, "", err
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            contentName,
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
+		},
+		Spec: storagev1alpha1.SnapshotContentSpec{},
 	}
-	cond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
-	if cond == nil {
-		return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %q Ready condition", mcp.Name), nil
-	}
-	if cond.Status == metav1.ConditionTrue {
-		return mcp.Name, true, false, cond.Message, nil
-	}
-	if cond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed {
-		return mcp.Name, false, true, cond.Message, nil
-	}
-	return mcp.Name, false, false, cond.Message, nil
+	return c.Create(ctx, content)
 }
 
 func commonSnapshotContentReadyForSnapshot(ctx context.Context, c client.Reader, contentName string) (bool, string, string, error) {

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -142,7 +142,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	if res.Requeue || res.RequeueAfter > 0 {
 		return res, nil
 	}
-	if err := r.ensureContent(ctx, s, contentName, *contentOwnerRef); err != nil {
+	if err := ensureDemoSnapshotContent(ctx, r.Client, contentName, *contentOwnerRef); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -250,32 +250,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVMSnapshotLifecycle(ctx
 	}
 	ref := rootObjectKeeperOwnerReference(ok)
 	return &ref, ctrl.Result{}, nil
-}
-
-func (r *DemoVirtualMachineSnapshotReconciler) ensureContent(ctx context.Context, _ *demov1alpha1.DemoVirtualMachineSnapshot, contentName string, ownerRef metav1.OwnerReference) error {
-	existing := &storagev1alpha1.SnapshotContent{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, existing)
-	if err == nil {
-		_, err := ensureLifecycleOwnerRef(ctx, r.Client, existing, ownerRef)
-		return err
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	// VM content is cluster-scoped and intentionally retained/managed separately.
-	// This controller publishes result refs; SnapshotContentController validates them.
-	// We intentionally do not use controllerutil.CreateOrUpdate here.
-	// This controller owns only a subset of fields and must avoid
-	// accidental overwrites of fields owned by other controllers.
-	content := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            contentName,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-		},
-		Spec: storagev1alpha1.SnapshotContentSpec{},
-	}
-	return r.Client.Create(ctx, content)
 }
 
 func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, source *demov1alpha1.DemoVirtualMachine) ([]storagev1alpha1.SnapshotChildRef, error) {

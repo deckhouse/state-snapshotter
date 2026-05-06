@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -126,7 +125,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	if res.Requeue || res.RequeueAfter > 0 {
 		return res, nil
 	}
-	if err := r.ensureContent(ctx, s, contentName, *contentOwnerRef); err != nil {
+	if err := ensureDemoSnapshotContent(ctx, r.Client, contentName, *contentOwnerRef); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := patchDemoVirtualDiskSnapshotBound(ctx, r.Client, req.NamespacedName, contentName); err != nil {
@@ -238,32 +237,6 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskSnapshotLifecycle(ctx 
 	}
 	ref := rootObjectKeeperOwnerReference(ok)
 	return &ref, ctrl.Result{}, nil
-}
-
-func (r *DemoVirtualDiskSnapshotReconciler) ensureContent(ctx context.Context, _ *demov1alpha1.DemoVirtualDiskSnapshot, contentName string, ownerRef metav1.OwnerReference) error {
-	existing := &storagev1alpha1.SnapshotContent{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, existing)
-	if err == nil {
-		_, err := ensureLifecycleOwnerRef(ctx, r.Client, existing, ownerRef)
-		return err
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	// Content is cluster-scoped and intentionally retained/managed separately.
-	// This controller publishes result refs; SnapshotContentController validates them.
-	// We intentionally do not use controllerutil.CreateOrUpdate here.
-	// This controller owns only a subset of fields and must avoid
-	// accidental overwrites of fields owned by other controllers.
-	content := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            contentName,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-		},
-		Spec: storagev1alpha1.SnapshotContentSpec{},
-	}
-	return r.Client.Create(ctx, content)
 }
 
 func patchDemoVirtualDiskSnapshotBound(
