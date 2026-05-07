@@ -41,6 +41,16 @@ NS="nss-smoke-$(date +%Y%m%d%H%M%S)"
 jq --version
 ```
 
+Smoke graph artifacts are written under `ARTIFACT_DIR`:
+
+```shell
+ARTIFACT_DIR="${ARTIFACT_DIR:-/tmp/state-snapshotter-smoke-artifacts-$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$ARTIFACT_DIR"
+echo "Artifacts: $ARTIFACT_DIR"
+```
+
+The graph helper requires `kubectl` and `jq`. If Graphviz `dot` is installed it also renders SVG; otherwise it keeps `.dot`, `.objects.yaml`, and `.summary.txt` and prints a warning without failing smoke.
+
 Subresource API опубликован как Kubernetes aggregated APIService. В smoke вызывайте его через kube-apiserver:
 
 ```shell
@@ -239,6 +249,43 @@ mark_csd_rbac_ready() {
     | kubectl replace --subresource=status -f -
 }
 
+snapshot_graph_artifact() {
+  local snapshot="$1"
+  local name="$2"
+  local title="${3:-$name}"
+  local description="${4:-$title}"
+  hack/snapshot-graph.sh \
+    --namespace "$NS" \
+    --snapshot "$snapshot" \
+    --output-dir "$ARTIFACT_DIR" \
+    --name "$name" \
+    --mode lifecycle \
+    --title "$title" \
+    --description "$description"
+  hack/snapshot-graph.sh \
+    --namespace "$NS" \
+    --snapshot "$snapshot" \
+    --output-dir "$ARTIFACT_DIR" \
+    --name "$name" \
+    --mode logical \
+    --title "$title" \
+    --description "$description"
+}
+
+snapshotcontent_graph_artifact() {
+  local content="$1"
+  local name="$2"
+  local title="${3:-$name}"
+  local description="${4:-$title}"
+  hack/snapshot-graph.sh \
+    --snapshotcontent "$content" \
+    --output-dir "$ARTIFACT_DIR" \
+    --name "$name" \
+    --mode lifecycle \
+    --title "$title" \
+    --description "$description"
+}
+
 assert_source_ref() {
   local kind="$1"
   local name="$2"
@@ -318,6 +365,33 @@ Fallback через `jq` обязателен для случаев, когда 
 ```shell
 kubectl -n "$NS" get snapshot root-full -o json \
   | jq -r '.status.childrenSnapshotRefs[]? | select(.kind=="DemoVirtualMachineSnapshot") | .name'
+```
+
+## 4.1 Smoke artifacts
+
+Each graph artifact call writes compact graph images plus sidecar details. For `Snapshot` roots the helper emits both lifecycle and logical views by default:
+
+- `<name>.lifecycle.dot` / `<name>.lifecycle.svg` — owner/lifecycle chain: `ObjectKeeper`, `Snapshot`, `SnapshotContent`, live MCR when present, MCP, archived manifest chunks;
+- `<name>.logical.dot` / `<name>.logical.svg` — status/logical refs: bound content, live MCR when present, child refs, MCP/chunk refs, data refs, source refs, and `ObjectKeeper.spec.followObjectRef` when present;
+- `<name>.<mode>.details.json` — full names, UIDs, ownerReferences, extracted refs, conditions, labels/annotations, warnings;
+- `<name>.<mode>.objects.yaml` — raw traversed objects separated by comments;
+- `<name>.<mode>.summary.txt` — counts and invariant checks;
+- `<name>.<mode>.stage.txt` — the exact test-stage caption rendered at the top of the DOT/SVG.
+
+Open the SVG from `$ARTIFACT_DIR` in a browser or image viewer. Main node labels stay compact (`SC/root-full`, `[Ready]`); full details live in `.details.json` and node tooltips in SVG. Node colors: snapshots are light blue, `SnapshotContent` is light green, `ObjectKeeper` is pink, MCR/MCP/chunks are light yellow/orange, source/domain objects are gray, and missing/problem objects have red dashed/red borders with badges such as `[MISSING]`, `[ORPHAN]`, `[BAD OWNER]`, or `[CONFLICT]`. Edges are styled by role: red bold solid `ownerRef`, blue dashed status refs, green solid child refs, orange artifact refs (`status.chunks`), gray dotted `spec.followObjectRef`, purple dashed `spec.sourceRef`, and orange `status.dataRef`. Both lifecycle and logical views use the same top-to-bottom layout. Graphs are grouped into namespaced and cluster-scoped clusters and include a compact legend.
+
+For live `--snapshot` graphs, the helper also includes point-in-time inventory: all currently existing namespaced resources in `$NS` (except noisy events), plus cluster-scoped `CustomSnapshotDefinition` resources because they define the active graph registry context for the test. Objects already deleted before rendering are not shown. This makes smoke artifacts reflect the namespace and CSD state at the exact draw moment, not historical resources from earlier reconcile steps. Use `--no-include-namespace-resources` only for focused/debug fixture rendering.
+
+For stricter local diagnosis, run the helper manually with `--strict`; invariant violations then return non-zero:
+
+```shell
+hack/snapshot-graph.sh \
+  --namespace "$NS" \
+  --snapshot root-full \
+  --output-dir "$ARTIFACT_DIR" \
+  --name "strict-root-full" \
+  --mode full \
+  --strict
 ```
 
 ## 5. Подготовка namespace и demo resources
@@ -433,6 +507,12 @@ wait_content_mcp "$ROOT_NO_CSD_CONTENT" 120
 wait_content_ready "$ROOT_NO_CSD_CONTENT" 180
 ROOT_NO_CSD_MCP=$(kubectl get snapshotcontent "$ROOT_NO_CSD_CONTENT" -o jsonpath='{.status.manifestCheckpointName}')
 kubectl get manifestcheckpoint "$ROOT_NO_CSD_MCP" -o yaml
+
+snapshot_graph_artifact \
+  root-no-csd \
+  "01-root-no-csd-ready" \
+  "01 root-no-csd ready" \
+  "CSD registration baseline: no DemoVirtualMachine/DemoVirtualDisk CSD is registered; the root Snapshot is Ready and source objects are included only as live namespace inventory/source refs."
 ```
 
 Ожидаемо:
@@ -523,6 +603,12 @@ spec: {}
 EOF
 
 wait_snapshot_ready snapshot root-disk-only 180
+
+snapshot_graph_artifact \
+  root-disk-only \
+  "02-disk-only-ready" \
+  "02 disk-only ready" \
+  "CSD eligibility: only the disk CSD is registered; disk snapshots are eligible, while VM remains a source/inventory object without custom snapshot expansion."
 ```
 
 Ожидаемо детерминированно:
@@ -726,6 +812,12 @@ for content in "$ROOT_FULL_CONTENT" "$VM_CONTENT" "$DISK_CONTENT"; do
   kubectl get snapshotcontent "$content" -o json \
     | jq -e 'all(.metadata.ownerReferences[]?; (.kind | endswith("Snapshot")) | not)'
 done
+
+snapshot_graph_artifact \
+  root-full \
+  "03-root-full-ready" \
+  "03 root-full ready" \
+  "CSD graph activation: VM and disk CSDs are registered; the root Snapshot is Ready with parent/child SnapshotContent, MCP, ObjectKeeper, and chunk artifacts."
 ```
 
 Ожидаемо:
@@ -852,6 +944,14 @@ Duplicate `409 Conflict` можно оставить optional/manual-hard, ес�
 kubectl -n "$NS" delete snapshot root-no-csd --ignore-not-found --wait=false
 kubectl -n "$NS" delete snapshot root-disk-only --ignore-not-found --wait=false
 kubectl -n "$NS" delete snapshot root-full --ignore-not-found --wait=false
+
+if [ -n "${ROOT_FULL_CONTENT:-}" ]; then
+  snapshotcontent_graph_artifact \
+    "$ROOT_FULL_CONTENT" \
+    "04-root-full-after-delete" \
+    "04 root-full after delete" \
+    "Retained read path after root Snapshot deletion: SnapshotContent, ObjectKeeper, MCP, and archived chunks remain available for diagnostics."
+fi
 
 kubectl delete customsnapshotdefinition smoke-demo-disk-only --ignore-not-found
 kubectl delete customsnapshotdefinition smoke-demo-vm-disk --ignore-not-found

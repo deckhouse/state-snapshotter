@@ -21,6 +21,7 @@
 #   PR4_SMOKE_REQUIRE_TTL          1 = after TTL wait, require content (and MCP if set) gone — fail if still present
 #   PR4_SMOKE_TTL_LOG_EVERY_SEC    progress log interval during strict TTL wait (default 30)
 #   PR4_SMOKE_EXTRA_SNAPSHOT       optional second Snapshot name under default for extra .../snapshots/<name>/manifests probe
+#   ARTIFACT_DIR                   graph artifacts directory (default: /tmp/state-snapshotter-smoke-artifacts-<timestamp>)
 #
 # Usage: ./hack/pr4-smoke.sh
 # Cleanup retained objects after a run: ./hack/pr4-smoke-cleanup.sh
@@ -35,6 +36,7 @@ POLL_SEC="${PR4_SMOKE_POLL_SEC:-5}"
 PROXY_PORT="${PR4_SMOKE_PROXY_PORT:-18443}"
 NS="default"
 SNAP_NAME="pr4-smoke"
+ARTIFACT_DIR="${ARTIFACT_DIR:-/tmp/state-snapshotter-smoke-artifacts-$(date +%Y%m%d-%H%M%S)}"
 
 PROXY_PID=""
 TMP=""
@@ -98,8 +100,10 @@ need_cmd() {
 
 need_cmd kubectl
 need_cmd jq
+mkdir -p "${ARTIFACT_DIR}"
 
 log "== PR4 smoke: namespace=${NS} snapshot=${SNAP_NAME}"
+log "Artifacts: ${ARTIFACT_DIR}"
 
 log "== 1. Discovery"
 DISC="/apis/${SUBAPI}/${SUBVER}"
@@ -156,6 +160,23 @@ fi
 BOUND=$(kubectl -n "${NS}" get "${NS_SNAP_RES}" "${SNAP_NAME}" -o json | jq -r '.status.boundSnapshotContentName')
 MCP=$(kubectl get snapshotcontent.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)
 log "OK Ready; content=${BOUND} MCP=${MCP}"
+
+bash "$(dirname "$0")/snapshot-graph.sh" \
+	--namespace "${NS}" \
+	--snapshot "${SNAP_NAME}" \
+	--output-dir "${ARTIFACT_DIR}" \
+	--name "pr4-ready" \
+	--mode lifecycle \
+	--title "PR4 ready" \
+	--description "PR4 ready before root deletion: root Snapshot is Ready, retained SnapshotContent and MCP exist, and ObjectKeeper follows the live Snapshot."
+bash "$(dirname "$0")/snapshot-graph.sh" \
+	--namespace "${NS}" \
+	--snapshot "${SNAP_NAME}" \
+	--output-dir "${ARTIFACT_DIR}" \
+	--name "pr4-ready" \
+	--mode logical \
+	--title "PR4 ready" \
+	--description "PR4 ready before root deletion: logical refs show bound content, manifest checkpoint/chunks, source refs, and live namespace inventory."
 
 SNAP_UID=$(kubectl -n "${NS}" get "${NS_SNAP_RES}" "${SNAP_NAME}" -o json | jq -r '.metadata.uid')
 MCR_RES="${PR4_SMOKE_MCR_RESOURCE:-manifestcapturerequests.state-snapshotter.deckhouse.io}"
@@ -226,6 +247,14 @@ if kubectl -n "${NS}" get "${MCR_RES}" "${MCR_NAME}" >/dev/null 2>&1; then
 	exit 1
 fi
 log "OK content + MCP present; no MCR"
+
+bash "$(dirname "$0")/snapshot-graph.sh" \
+	--snapshotcontent "${BOUND}" \
+	--output-dir "${ARTIFACT_DIR}" \
+	--name "pr4-after-delete-retained" \
+	--mode lifecycle \
+	--title "PR4 retained after delete" \
+	--description "PR4 retained after root Snapshot deletion: graph starts from SnapshotContent and verifies retained content, ObjectKeeper, MCP, and chunks remain inspectable."
 
 log "== 9. Aggregated GET after root delete (retained)"
 kubectl get --raw "${AGG_PATH}" >"${TMP}"
