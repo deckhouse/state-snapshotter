@@ -166,6 +166,43 @@
 
 Профиль должен быть **один** в коде (или генерироваться из одного источника); ad-hoc «снять всё» запрещён (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
 
+#### 4.5.1 Secret handling in ManifestCheckpoint
+
+`Secret` objects are sensitive and are not stored in `ManifestCheckpoint` by default.
+
+- Non-`Opaque` secrets are always skipped (`kubernetes.io/tls`, `kubernetes.io/dockerconfigjson`, `kubernetes.io/service-account-token`, and any other `type != Opaque`).
+- `Opaque` secrets without explicit annotations are skipped.
+- `Opaque` secrets annotated with `backup.deckhouse.io/include-secret: "true"` are stored with `.data` and `.stringData` removed; other fields are preserved as-is after normal object cleaning.
+- `Opaque` secrets annotated with `backup.deckhouse.io/include-secret-data: "true"` are stored with `.data` and `.stringData`. This annotation is a standalone opt-in, not an addition to `backup.deckhouse.io/include-secret`. It is dangerous because sensitive values are persisted in `ManifestCheckpoint`; use it only intentionally.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example
+  annotations:
+    backup.deckhouse.io/include-secret: "true"
+type: Opaque
+data:
+  password: ...
+```
+
+This Secret is stored without `.data` and `.stringData`.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example-with-data
+  annotations:
+    backup.deckhouse.io/include-secret-data: "true"
+type: Opaque
+data:
+  password: ...
+```
+
+This Secret is stored together with `.data` and `.stringData`.
+
 ---
 
 ### 4.6 N2a.x — сверка manifest-линии с §4.3 (выполнено по коду репозитория)

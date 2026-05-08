@@ -18,7 +18,6 @@ package manifestcapture
 
 import (
 	"context"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"testing"
 	"time"
 
@@ -28,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
@@ -37,6 +37,8 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	manifestcommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -47,6 +49,39 @@ import (
 func TestManifestCaptureRequestGinkgo(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "ManifestCaptureRequest Suite")
+}
+
+func secretForManifestCaptureTest(name string, annotations map[string]string, secretType string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]interface{}{
+			"name":        name,
+			"namespace":   "ns1",
+			"annotations": annotations,
+		},
+		"type": secretType,
+		"data": map[string]interface{}{
+			"password": "cGFzcw==",
+		},
+		"stringData": map[string]interface{}{
+			"token": "plain",
+		},
+	}}
+	u.SetAPIVersion("v1")
+	u.SetKind("Secret")
+	u.SetName(name)
+	u.SetNamespace("ns1")
+	u.SetAnnotations(annotations)
+	return u
+}
+
+func objectsByKindName(objects []unstructured.Unstructured) map[string]unstructured.Unstructured {
+	result := make(map[string]unstructured.Unstructured, len(objects))
+	for _, object := range objects {
+		result[object.GetKind()+"/"+object.GetName()] = object
+	}
+	return result
 }
 
 var _ = Describe("ManifestCaptureRequest TTL", func() {
@@ -111,6 +146,66 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(objects[0].GetKind()).To(Equal("ConfigMap"))
 			Expect(objects[0].GetName()).To(Equal("cm1"))
 			Expect(objects[0].GetNamespace()).To(Equal("ns1"))
+		})
+
+		It("should enforce Secret security contract before checkpoint chunking", func() {
+			ctx := context.Background()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: "ns1"},
+				Data:       map[string]string{"key": "value"},
+			}
+			Expect(baseClient.Create(ctx, cm)).To(Succeed())
+
+			secrets := []*unstructured.Unstructured{
+				secretForManifestCaptureTest("tls-secret", nil, "kubernetes.io/tls"),
+				secretForManifestCaptureTest("opaque-default", nil, "Opaque"),
+				secretForManifestCaptureTest("opaque-include", map[string]string{manifestcommon.AnnotationIncludeSecret: "true"}, "Opaque"),
+				secretForManifestCaptureTest("opaque-include-data", map[string]string{manifestcommon.AnnotationIncludeSecretData: "true"}, "Opaque"),
+			}
+			for _, secret := range secrets {
+				Expect(baseClient.Create(ctx, secret)).To(Succeed())
+			}
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-secrets", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "ConfigMap", Name: "cm1"},
+						{APIVersion: "v1", Kind: "Secret", Name: "tls-secret"},
+						{APIVersion: "v1", Kind: "Secret", Name: "opaque-default"},
+						{APIVersion: "v1", Kind: "Secret", Name: "opaque-include"},
+						{APIVersion: "v1", Kind: "Secret", Name: "opaque-include-data"},
+					},
+				},
+			}
+
+			objects, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objects).To(HaveLen(3))
+
+			captured := objectsByKindName(objects)
+			Expect(captured).To(HaveKey("ConfigMap/cm1"))
+			Expect(captured).NotTo(HaveKey("Secret/tls-secret"))
+			Expect(captured).NotTo(HaveKey("Secret/opaque-default"))
+
+			included := captured["Secret/opaque-include"]
+			Expect(included.GetAnnotations()).To(HaveKeyWithValue(manifestcommon.AnnotationIncludeSecret, "true"))
+			_, found, err := unstructured.NestedMap(included.Object, "data")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse(), "include-secret must remove Secret data")
+			_, found, err = unstructured.NestedMap(included.Object, "stringData")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse(), "include-secret must remove Secret stringData")
+
+			withData := captured["Secret/opaque-include-data"]
+			data, found, err := unstructured.NestedMap(withData.Object, "data")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(data).To(HaveKeyWithValue("password", "cGFzcw=="))
+			stringData, found, err := unstructured.NestedMap(withData.Object, "stringData")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(stringData).To(HaveKeyWithValue("token", "plain"))
 		})
 	})
 

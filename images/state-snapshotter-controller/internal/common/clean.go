@@ -153,3 +153,26 @@ func CleanObjectForSnapshot(u *unstructured.Unstructured, excludeAnnotations []s
 
 	return out
 }
+
+// SanitizeObjectForManifestCheckpoint removes sensitive Secret fields before checkpoint storage.
+// Non-Secret objects are returned unchanged as a copy.
+func SanitizeObjectForManifestCheckpoint(u *unstructured.Unstructured) *unstructured.Unstructured {
+	if u == nil {
+		return nil
+	}
+	out := u.DeepCopy()
+	if out.GetKind() != "Secret" {
+		return out
+	}
+	secretType, found, _ := unstructured.NestedString(out.Object, "type")
+	if !found || secretType != "Opaque" {
+		return nil
+	}
+	annotations := out.GetAnnotations()
+	if annotations[AnnotationIncludeSecretData] == "true" {
+		return out
+	}
+	unstructured.RemoveNestedField(out.Object, "data")
+	unstructured.RemoveNestedField(out.Object, "stringData")
+	return out
+}

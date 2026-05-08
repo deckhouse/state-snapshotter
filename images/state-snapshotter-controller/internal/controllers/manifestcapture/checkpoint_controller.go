@@ -25,7 +25,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"sort"
 	"strings"
 	"time"
@@ -47,6 +46,7 @@ import (
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -609,6 +609,13 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	addObject := func(obj *unstructured.Unstructured) {
 		var finalObj *unstructured.Unstructured
 
+		// Secret filtering is a security invariant for ManifestCheckpoint and is
+		// enforced even when general backup filtering is disabled.
+		if common.ShouldSkipSecretObject(obj) {
+			r.Logger.Info("Skipping secret object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
+			return
+		}
+
 		// Apply filtering only if enabled
 		if r.Config.EnableFiltering {
 			// Step 3: Apply filtering (TZ section 5, step 3) - BEFORE adding
@@ -629,6 +636,10 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		} else {
 			// If filtering disabled, use object as-is (no filtering, no cleaning)
 			finalObj = obj
+		}
+		finalObj = common.SanitizeObjectForManifestCheckpoint(finalObj)
+		if finalObj == nil {
+			return
 		}
 
 		// FIX: Restore apiVersion/kind because JSON round-trip in CleanObjectForSnapshot
@@ -797,10 +808,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		"objects", len(objects),
 		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes)
 
-	// Handle empty objects
-	if len(objects) == 0 {
-		r.Logger.Info("createChunks: No objects to chunk, creating empty chunk")
-		// Create empty chunk
+	createEmptyChunk := func() ([]storagev1alpha1.ChunkInfo, error) {
 		emptyJSON := []byte("[]")
 		// Get gzip bytes first for size calculation
 		gzipBytes, err := r.compressToBytes(emptyJSON)
@@ -862,23 +870,42 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		}, nil
 	}
 
+	// Handle empty objects
+	if len(objects) == 0 {
+		r.Logger.Info("createChunks: No objects to chunk, creating empty chunk")
+		return createEmptyChunk()
+	}
+
 	// Convert objects to JSON array format
 	// Normalize objects to ensure they are pure map[string]interface{} without yaml.MapSlice
 	// This prevents Key/Value serialization when reading chunks later
 	jsonObjects := make([]interface{}, 0, len(objects))
 	for _, obj := range objects {
+		if common.ShouldSkipSecretObject(&obj) {
+			r.Logger.Info("Skipping secret object before chunk storage", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
+			continue
+		}
+		sanitized := common.SanitizeObjectForManifestCheckpoint(&obj)
+		if sanitized == nil {
+			continue
+		}
+
 		// Normalize object to ensure clean JSON serialization
-		normalized := r.normalizeObjectForJSON(obj.Object)
+		normalized := r.normalizeObjectForJSON(sanitized.Object)
 
 		// FIX: Ensure apiVersion and kind are present in normalized object
 		// normalizeObjectForJSON works on obj.Object (map), which doesn't include TypeMeta
 		// We need to explicitly add apiVersion and kind to the normalized map
 		if normalizedMap, ok := normalized.(map[string]interface{}); ok {
-			normalizedMap["apiVersion"] = obj.GetAPIVersion()
-			normalizedMap["kind"] = obj.GetKind()
+			normalizedMap["apiVersion"] = sanitized.GetAPIVersion()
+			normalizedMap["kind"] = sanitized.GetKind()
 		}
 
 		jsonObjects = append(jsonObjects, normalized)
+	}
+	if len(jsonObjects) == 0 {
+		r.Logger.Info("createChunks: No objects left after checkpoint filtering, creating empty chunk")
+		return createEmptyChunk()
 	}
 
 	// Split objects into chunks based on COMPRESSED size

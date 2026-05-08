@@ -24,6 +24,13 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
+const (
+	// AnnotationIncludeSecret allows an Opaque Secret to be stored without data.
+	AnnotationIncludeSecret = "backup.deckhouse.io/include-secret"
+	// AnnotationIncludeSecretData allows an Opaque Secret to be stored with data.
+	AnnotationIncludeSecretData = "backup.deckhouse.io/include-secret-data"
+)
+
 // Constants for resource type filtering
 var (
 	// Ephemeral kinds that should be excluded (TZ section 4.1)
@@ -84,21 +91,9 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 		}
 	}
 
-	// 3) Service account Secrets (recreated automatically)
-	// TZ: exclude all service account Secrets, not just service-account-token
-	// Includes: kubernetes.io/service-account-token, kubernetes.io/dockercfg, kubernetes.io/dockerconfigjson
-	// Semantics: secrets are whitelisted via label, not by name
+	// 3) Secrets are sensitive by default.
 	if kind == "Secret" {
-		if t, found, _ := unstructured.NestedString(u.Object, "type"); found {
-			// Skip all non-Opaque secrets unless explicitly marked for backup
-			if t != "Opaque" {
-				// Allow explicitly marked secrets via label
-				if labels != nil && labels["backup.deckhouse.io/include-secret"] == "true" {
-					return false
-				}
-				return true
-			}
-		}
+		return ShouldSkipSecretObject(u)
 	}
 
 	// 4) Temporary PVCs
@@ -167,6 +162,25 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 	}
 
 	return false
+}
+
+// ShouldSkipSecretObject applies the ManifestCheckpoint Secret security contract.
+func ShouldSkipSecretObject(u *unstructured.Unstructured) bool {
+	if u == nil || u.GetKind() != "Secret" {
+		return false
+	}
+
+	secretType, found, _ := unstructured.NestedString(u.Object, "type")
+	if !found || secretType != "Opaque" {
+		return true
+	}
+
+	annotations := u.GetAnnotations()
+	if annotations[AnnotationIncludeSecret] == "true" || annotations[AnnotationIncludeSecretData] == "true" {
+		return false
+	}
+
+	return true
 }
 
 // ShouldSkipObjectWithLog is a helper function that combines ShouldSkipObject
