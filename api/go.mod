@@ -1,6 +1,6 @@
 module github.com/deckhouse/state-snapshotter/api
 
-go 1.25.9
+go 1.25.10
 require k8s.io/apimachinery v0.30.2
 
 require (
