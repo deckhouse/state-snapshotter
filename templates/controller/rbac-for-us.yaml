@@ -48,7 +48,7 @@ rules:
 # ManifestCheckpointContentChunk (cluster-scoped)
 - apiGroups: ["state-snapshotter.deckhouse.io"]
   resources: ["manifestcheckpointcontentchunks"]
-  verbs: ["create", "get", "list", "watch", "delete"]
+  verbs: ["create", "get", "delete"]
 
 # ObjectKeeper (cluster-scoped) - created by this controller for lifecycle management
 # ObjectKeeper is used in FollowObject mode to manage ManifestCheckpoint lifecycle
@@ -92,17 +92,6 @@ rules:
   - "roles"
   - "rolebindings"
   verbs: ["get", "list", "watch"]
-
-# API Server permissions (for /manifests subresource)
-# Only 'get' permission needed - no list/watch (no informer cache)
-# TODO: Remove access to manifestcheckpointcontentchunks - move archive assembly to controller
-# Currently API server assembles JSON from chunks directly (archive_service.go:257)
-# This requires 'get' permission. According to ADR, API server should NOT have access to chunks.
-# Future: Move archive assembly logic to ManifestCheckpointController, store assembled archive
-# in checkpoint.Status or as a separate resource, so API server only needs to read the final result.
-- apiGroups: ["state-snapshotter.deckhouse.io"]
-  resources: ["manifestcheckpointcontentchunks"]
-  verbs: ["get"]  # Only 'get' by name - no list/watch needed (no informer cache)
 
 # Unified Snapshots RBAC (for XxxxSnapshot roots and common SnapshotContent)
 # RBAC is scoped to API group, not to concrete Snapshot kinds

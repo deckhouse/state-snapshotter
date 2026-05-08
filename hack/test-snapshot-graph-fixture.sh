@@ -65,7 +65,7 @@ write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-bad <<EOF
 EOF
 
 write_obj manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io chunk-root-0 <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpointContentChunk","metadata":{"name":"chunk-root-0","uid":"chunk-root-0-uid"},"spec":{"checkpointName":"mcp-root","index":0,"objectsCount":3,"data":"H4sIAAAAAAAA/4pWyslPzy/KSVHSUcpJLC5R0lFKrShQ0lEqLkksSQQA"}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpointContentChunk","metadata":{"name":"chunk-root-0","uid":"chunk-root-0-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","name":"mcp-root","uid":"mcp-root-uid","controller":true}]},"spec":{"checkpointName":"mcp-root","index":0,"objectsCount":3,"data":"H4sIAAAAAAAA/4pWyslPzy/KSVHSUcpJLC5R0lFKrShQ0lEqLkksSQQA"}}
 EOF
 
 write_obj demovirtualdisks.demo.state-snapshotter.deckhouse.io live-disk <<EOF
@@ -165,6 +165,7 @@ grep -Fq 'MISSING' "${OUT_DIR}/fixture.full.dot"
 grep -Fq 'Chunk\nchunk-root-0' "${OUT_DIR}/fixture.full.dot"
 ! grep -Fq 'Chunk\nchunk-root-0\n[Unknown]' "${OUT_DIR}/fixture.full.dot"
 grep -Fq 'status.chunks' "${OUT_DIR}/fixture.full.dot"
+grep -Fq 'ownerRef' "${OUT_DIR}/fixture.full.dot"
 grep -Fq 'cluster_namespaced' "${OUT_DIR}/fixture.full.dot"
 grep -Fq 'cluster_cluster_scoped' "${OUT_DIR}/fixture.full.dot"
 jq -e '.nodes[] | select(.kind=="SnapshotContent" and .name=="sc-bad" and (.warnings[]?=="BAD OWNER"))' "${OUT_DIR}/fixture.full.details.json" >/dev/null
@@ -172,6 +173,7 @@ jq -e '.nodes[] | select(.kind=="DemoVirtualDisk" and .missing==true)' "${OUT_DI
 jq -e '.nodes[] | select(.kind=="ManifestCheckpointContentChunk" and .refs.checkpointName=="mcp-root" and .refs.objectsCount==3)' "${OUT_DIR}/fixture.full.details.json" >/dev/null
 grep -q 'Child SnapshotContent/sc-disk ownerRef -> parent SnapshotContent/sc-root' "${OUT_DIR}/fixture.full.summary.txt"
 grep -q 'Chunk/chunk-root-0 spec.checkpointName -> ManifestCheckpoint/mcp-root' "${OUT_DIR}/fixture.full.summary.txt"
+grep -q 'Chunk/chunk-root-0 ownerRef -> ManifestCheckpoint/mcp-root' "${OUT_DIR}/fixture.full.summary.txt"
 grep -q 'No SnapshotContent ownerRef to Snapshot: sc-bad' "${OUT_DIR}/fixture.full.summary.txt"
 grep -Fq 'MCR\nmcr-root' "${OUT_DIR}/fixture.full.dot"
 grep -Fq 'status.manifestCaptureRequestName' "${OUT_DIR}/fixture.full.dot"

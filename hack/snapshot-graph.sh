@@ -812,11 +812,13 @@ visit_chunk() {
 	if json=$(get_json "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$name"); then
 		add_existing_node "$json"
 		dump_object "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$name"
+		add_owner_edges "$json" "$key" ""
 		if printf '%s' "$json" | jq -e --arg checkpoint "$checkpoint_name" '.spec.checkpointName == $checkpoint' >/dev/null; then
 			add_check "OK" "Chunk/${name} spec.checkpointName -> ManifestCheckpoint/${checkpoint_name}"
 		else
 			add_check "VIOLATION" "Chunk/${name} spec.checkpointName -> ManifestCheckpoint/${checkpoint_name}"
 		fi
+		check_owner_ref "$json" "ManifestCheckpoint" "$checkpoint_name" "Chunk/${name} ownerRef -> ManifestCheckpoint/${checkpoint_name}"
 	else
 		add_missing_node "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$name"
 		dump_object "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$name"

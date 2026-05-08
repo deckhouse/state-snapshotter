@@ -103,7 +103,10 @@ kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" -o wide
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" -o jsonpath='{.metadata.ownerReferences}' | jq .
 ```
 
-**5e. Чанки (по префиксу имени MCP; опционально)**
+**5e. Чанки (по префиксу имени MCP; опционально, только operator/admin diagnostic)**
+
+Обычным пользователям прямой доступ к `ManifestCheckpointContentChunk` не выдаётся; штатная проверка
+payload должна идти через `/manifests`.
 
 ```bash
 kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io -o wide | grep -E "^NAME|${MCP}" || true

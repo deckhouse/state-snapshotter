@@ -22,13 +22,49 @@ rules:
   # Permission to read resources for validation (to check if they exist in the correct namespace)
   # Webhook needs to verify that target resources exist before validating user permissions
   # Only GET is needed - webhook calls Get() for specific resources, not List() or Watch()
-  # Using "*" to support all resource types that can be specified in MCR targets
-  # (ConfigMap, Secret, Deployment, Service, CustomResources, etc.)
-  # This covers all API groups (core "" and all custom API groups)
+  # Keep this allowlist explicit: wildcard resources would also grant direct access
+  # to ManifestCheckpointContentChunk payloads.
+  # Domain/demo resources are intentionally not listed here: external domain
+  # controllers/CSD flow must grant their own validation RBAC.
   - apiGroups:
-      - "*"
+      - ""
     resources:
-      - "*"
+      - pods
+      - services
+      - configmaps
+      - secrets
+      - serviceaccounts
+      - persistentvolumeclaims
+    verbs:
+      - get
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs:
+      - get
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - get
+  # Roles and RoleBindings are part of the core namespace manifest profile,
+  # so the webhook may validate them as explicit MCR targets.
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - roles
+      - rolebindings
     verbs:
       - get
   # Note: Discovery API (/api, /apis) is publicly accessible and doesn't require RBAC permissions
