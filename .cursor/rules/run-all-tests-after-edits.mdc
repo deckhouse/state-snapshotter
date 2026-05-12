@@ -1,0 +1,10 @@
+---
+description: After code changes run appropriate tests. Full policy → controller-redeploy-and-remote-e2e; which level → testing-levels-and-strategy.
+alwaysApply: true
+---
+
+# Run tests after edits
+
+After code changes, run the appropriate tests before the final response. **E2E and execution policy:** see **controller-redeploy-and-remote-e2e**. **Which level to run:** see **testing-levels-and-strategy**. If tests cannot be run, state why and what is missing.
+
+**`./go-lint.sh`:** do not use it on a dirty tracked tree as a substitute for committing — workflow and the direct `golangci-lint run` alternative are in **go-lint-script.mdc** (MUST).

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,14 +51,6 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 	// Skip validation for delete operations
 	if mcr.DeletionTimestamp != nil || arReview.Operation == model.OperationDelete {
 		return &kwhvalidating.ValidatorResult{Valid: true}, nil
-	}
-
-	// Validate that targets are not empty
-	if len(mcr.Spec.Targets) == 0 {
-		return &kwhvalidating.ValidatorResult{
-			Valid:   false,
-			Message: "At least one target must be specified",
-		}, nil
 	}
 
 	// Validate that namespace is set (MCR is namespaced)
@@ -120,7 +112,8 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 			}, nil
 		}
 
-		// Check if resource is namespaced (MCR only supports namespaced resources)
+		// Check if resource is namespaced. MCR is a namespaced capture request and
+		// must not capture cluster-scoped resources.
 		if !resourceInfo.Namespaced {
 			return &kwhvalidating.ValidatorResult{
 				Valid:   false,

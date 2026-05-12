@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,9 +23,12 @@ import (
 	"net/http"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -44,17 +47,25 @@ type Server struct {
 // caCert: optional CA certificate bytes for mTLS (if provided, mTLS is mandatory - no fallback)
 // allowedClientCNs: list of allowed client certificate CNs for mTLS (comma-separated)
 // Returns nil if caCert is specified but cannot be parsed
-func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string) *Server {
+func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string, restMappers ...meta.RESTMapper) *Server {
+	var restMapper meta.RESTMapper
+	if len(restMappers) > 0 {
+		restMapper = restMappers[0]
+	}
 	// Create archive service with directClient for all operations
 	// directClient is used for both ManifestCheckpoint and chunks to avoid informer requirements
 	archiveService := usecase.NewArchiveService(directClient, directClient, logger)
 
 	// Create archive handler with directClient for ManifestCheckpoint
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
+	restoreService := restore.NewService(directClient, archiveService)
+	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
+	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper)
 
 	// Setup routes
 	mux := http.NewServeMux()
 	archiveHandler.SetupRoutes(mux)
+	restoreHandler.SetupRoutes(mux)
 
 	// Add logging middleware
 	handler := loggingMiddleware(mux, logger)
@@ -118,8 +129,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 func mTLSMiddleware(next http.Handler, logger logger.LoggerInterface, allowedCNs []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip health check endpoints (for in-cluster probes)
-		if r.URL.Path == "/healthz" || r.URL.Path == "/livez" ||
-			r.URL.Path == "/readyz" || r.URL.Path == "/health" || r.URL.Path == "/ready" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/livez" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -215,7 +225,7 @@ func loggingMiddleware(next http.Handler, logger logger.LoggerInterface) http.Ha
 
 		// Skip logging for health check endpoints and API discovery endpoints
 		// /openapi/v2, /openapi/v3, /apis are normal discovery requests from kube-apiserver
-		if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/healthz" || r.URL.Path == "/livez" ||
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/livez" ||
 			r.URL.Path == "/openapi/v2" || r.URL.Path == "/openapi/v3" || r.URL.Path == "/apis" {
 			return
 		}

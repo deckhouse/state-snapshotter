@@ -46,6 +46,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ManifestCheckpointList{},
 		&ManifestCheckpointContentChunk{},
 		&ManifestCheckpointContentChunkList{},
+		&CustomSnapshotDefinition{},
+		&CustomSnapshotDefinitionList{},
 		// NOTE: IRetainer has been removed. ObjectKeeper is now used instead (managed by deckhouse-controller).
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

@@ -26,6 +26,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/consts"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/logger"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 const (
@@ -42,6 +43,19 @@ const (
 	DefaultTTL               = 10 * time.Minute // 10 minutes (TZ: defaultTTL)
 	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
+
+	// DefaultSnapshotRootOKTTL is spec.ttl on root ObjectKeeper (ret-snap-* and unified ret-* snapshot OK)
+	// when neither STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL nor STATE_SNAPSHOTTER_NS_ROOT_OK_TTL is set.
+	//
+	// DEBUG ONLY (explicit team choice for TTL/smoke iteration): currently 1m so strict cluster smoke
+	// (PR4_SMOKE_REQUIRE_TTL=1) finishes quickly. This MUST NOT ship as the long-term default: before merge
+	// to a production-oriented branch, restore a safe built-in default (e.g. 168*time.Hour) or rely solely
+	// on env in chart/values — otherwise retained root content may disappear far faster than operators expect.
+	DefaultSnapshotRootOKTTL = 1 * time.Minute
+	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try EnvSnapshotRootOKTTLAlt, then default.
+	EnvSnapshotRootOKTTL = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"
+	// EnvSnapshotRootOKTTLAlt: second env var name for the same duration; read when EnvSnapshotRootOKTTL is unset or non-positive.
+	EnvSnapshotRootOKTTLAlt = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
 )
 
 type Options struct {
@@ -60,6 +74,15 @@ type Options struct {
 	// If false, all objects are included as-is (no filtering, no cleaning)
 	// Default: false (filtering disabled by default)
 	EnableFiltering bool
+
+	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible CSD (R5).
+	// See EffectiveUnifiedBootstrapPairs().
+	UnifiedBootstrapMode        UnifiedBootstrapMode
+	UnifiedBootstrapCustomPairs []unifiedbootstrap.UnifiedGVKPair
+
+	// SnapshotRootOKTTL: duration for root snapshot ObjectKeeper FollowObjectWithTTL (Snapshot + unified XxxxSnapshot).
+	// Resolved at startup: env override if >0, else built-in DefaultSnapshotRootOKTTL.
+	SnapshotRootOKTTL time.Duration
 }
 
 func NewConfig() *Options {
@@ -111,7 +134,43 @@ func NewConfig() *Options {
 	// Filtering disabled by default - all objects included as-is
 	opts.EnableFiltering = false
 
+	mode, pairs, perr := ParseUnifiedBootstrapPairsEnv(os.Getenv(EnvUnifiedBootstrapPairs))
+	if perr != nil {
+		log.Printf("Invalid %s (%v); using default bootstrap list", EnvUnifiedBootstrapPairs, perr)
+		mode = UnifiedBootstrapDefault
+		pairs = nil
+	}
+	opts.UnifiedBootstrapMode = mode
+	opts.UnifiedBootstrapCustomPairs = pairs
+
+	opts.SnapshotRootOKTTL = resolveSnapshotRootOKTTL()
 	return &opts
+}
+
+func resolveSnapshotRootOKTTL() time.Duration {
+	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTL); ok {
+		return d
+	}
+	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTLAlt); ok {
+		return d
+	}
+	return DefaultSnapshotRootOKTTL
+}
+
+func positiveDurationFromEnv(key string) (time.Duration, bool) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Printf("Invalid %s (%q): %v", key, v, err)
+		return 0, false
+	}
+	if d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 // LoadFromConfigMap loads controller configuration from ConfigMap data and updates Options

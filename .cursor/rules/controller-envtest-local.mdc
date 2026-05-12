@@ -1,0 +1,30 @@
+---
+description: How to run controller envtest locally (KUBEBUILDER_ASSETS + optional setup-envtest PATH)
+globs: images/state-snapshotter-controller/**/*.go
+alwaysApply: true
+---
+
+# Controller envtest (local)
+
+Integration tests under `images/state-snapshotter-controller/test/integration/` use **envtest** (etcd + kube-apiserver). They do **not** run meaningfully without binaries.
+
+## Environment
+
+```bash
+# envtest for controller tests (etcd + kube-apiserver + kubectl)
+export KUBEBUILDER_ASSETS="$HOME/.envtest-bin/k8s/1.33.0-darwin-arm64"   # adjust version / arch / path
+# optional: run setup-envtest from anywhere
+export PATH="$HOME/go/bin:$PATH"
+```
+
+Adjust `KUBEBUILDER_ASSETS` to the directory that contains `etcd`, `kube-apiserver`, and `kubectl` (e.g. output of `setup-envtest use 1.33.0 --arch amd64`).
+
+## Command
+
+```bash
+cd images/state-snapshotter-controller && go test -tags integration ./test/integration/... -count=1
+```
+
+If assets are missing, **BeforeSuite fails** with a clear message (no silent skip).
+
+See also `docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`.

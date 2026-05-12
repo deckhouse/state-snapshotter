@@ -1,0 +1,84 @@
+# Snapshot flow: root Snapshot + heterogeneous snapshot tree
+
+**Статус:** Historical design (частично реализовано; updated after PR5a/PR5b).  
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+
+**Цель:** согласовать порядок reconcile, **ownerRef** (иерархия / GC / deletion) отдельно от **вычисляемого dedup/exclude**, и границу без special-case «если DemoVM» в generic reconcile.
+
+**Три оси (кратко):** дерево — **`children*Refs`**; готовность — **`Ready`** по refs + зависимостям; lifecycle — **ownerRef**/финализаторы ([`05` §3](05-tree-and-graph-invariants.md) таблица «Три оси», [`08` B](08-universal-snapshot-tree-model.md)).
+
+**Parent link:** доменный parent controller ставит **ownerReference** на создаваемый child snapshot. Это lifecycle/back-reference/requeue helper; логическое дерево для traversal задаётся parent-owned `status.childrenSnapshotRefs`.
+
+**Traversal (единый вход в логическое дерево):** обход для **`Ready`**, для **вычисляемого** dedup/exclude и для любого агрегированного чтения по **целевой** модели PR5 стартует с root **`Snapshot`** и продолжается **только** по **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**; **не** по **ownerRef**, **не** по CSD и **не** по «ожидаемой схеме» kinds ([`05`](05-tree-and-graph-invariants.md) §1–§2).
+
+## Целевое дерево (логическое)
+
+Под **одним** root **`Snapshot`** (снимок namespace) живут **не** другие NS snapshot, а **разные kinds** snapshot/content:
+
+**Дисклеймер к диаграмме ниже:** рисунок иллюстрирует **возможную** форму дерева в demo v1, а **не** фиксированную схему, обязательный порядок узлов и **не** allowlist kinds. Фактический граф — то, что контроллеры создали и отразили в **`children*Refs`**; см. [`05`](05-tree-and-graph-invariants.md) (нет compile-time списка детей в generic).
+
+```text
+Snapshot (root)
+├── SnapshotContent          ← root namespace manifest result (N2a/N2b root)
+├── DemoVirtualMachineSnapshot
+│   ├── SnapshotContent
+│   ├── DemoVirtualDiskSnapshot
+│   │   └── SnapshotContent
+│   └── …
+├── DemoVirtualDiskSnapshot            ← при необходимости standalone disk под root
+│   └── SnapshotContent
+└── VolumeSnapshot                     ← где leaf данных = CSI
+    └── VolumeSnapshotContent
+```
+
+**`VolumeSnapshot`** / **`VolumeSnapshotContent`** — **leaf** слоя данных (CSI); в дереве они появляются как узлы, которые **создаёт и ведёт доменный** контроллер (или согласованная цепочка под ним), **без** регистрации VS в CSD state-snapshotter там, где это не требуется ([`02`](02-csd-wiring.md)). **Generic** не ветвится по «demo vs CSI»: взаимодействие с таким узлом — **только** через ref в **`children*Refs`** и **тип-агностичный** разбор CSI **status** (маппинг к **`Ready`** / dedup), **без** продуктовой ветки «наш особый VS».
+
+Имена demo kinds — см. [`01-api.md`](01-api.md). **Смысл:** PR5 / real domain wiring — это **heterogeneous snapshot graph**, а не модель с **вложенным** `Snapshot` под root вместо доменного графа (**INV-T1**).
+
+## Участники
+
+| Участник | Роль |
+|----------|------|
+| **Generic Snapshot controller** | Только **root** namespace-level capture: bind **одного** root `SnapshotContent`, MCR→MCP для root; **`Ready`** root — каскад по **`childrenSnapshotRefs`** (heterogeneous дети после расширения элементов refs в spec) и собственные зависимости root. **Не** создаёт **вложенный** `Snapshot` под root (**INV-T1** — политика трека, не «особый» kind). **Не** содержит `if DemoVM`. |
+| **Demo VM / Disk snapshot controllers** | Создают и ведут **DemoVirtualMachineSnapshot**, **DemoVirtualDiskSnapshot**, их **Content**, **VolumeSnapshot**/VCR, MCR/MCP для manifest leaf. |
+| **Согласование с root** | **Пишут** в root **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** те **доменные** контроллеры (или **опциональный** demo orchestrator — [`02`](02-csd-wiring.md)), которые **создали** соответствующие дочерние snapshot-узлы: каждый отвечает за **свои** элементы refs (**INV-REF-M1** / **INV-REF-M2**, [`05`](05-tree-and-graph-invariants.md) §1; merge-safe патчи — детали ключа в spec/коде PR5). **Generic** root reconciler **не** заполняет доменные дети в refs «по схеме»; он **читает** refs для **`Ready`** / exclude. **`Ready`** root — каскад снизу вверх по refs ([`07`](07-ready-delete-matrix.md), [`08`](08-universal-snapshot-tree-model.md)). В spec элементы refs могут быть описаны минимально для PR1 — для PR5 **расширяется содержимое тех же полей**, без новых имён полей дерева. |
+
+## Порядок: current implementation
+
+1. Пользователь создаёт **root `Snapshot`** на namespace с demo workload.
+2. Generic controller: bind root SnapshotContent, root MCR→MCP, с **exclude**, **вычисляемым** из API и дерева (см. [`04-coverage-dedup.md`](04-coverage-dedup.md)).
+3. **Доменный** контроллер (или orchestrator из [`02`](02-csd-wiring.md)), **наблюдающий** root **`Snapshot`** / namespace по **политике** (label/selector, аннотация на NS и т.д. — фиксируется в spec), **инициирует** создание **`DemoVirtualMachineSnapshot`**; далее **те же** доменные reconciler’ы создают disk snapshots, **VolumeSnapshot**/VCR, MCR/MCP по **`spec`** — **не** generic **`Snapshot`** reconciler.
+4. PR5a/PR5b demo-path: child refs пишутся в `children*Refs`; `Ready` root/VM сходится через generic E6 по дочерним snapshot refs. Demo `Ready` для child snapshots пока stub.
+5. **Aggregated manifests — граница контрактов:** в **текущем** shipping-контуре действует **PR4**: aggregated read и traversal завязаны на **существующий** обход (SnapshotContent-дерево / контракт в [`spec/snapshot-aggregated-manifests-pr4.md`](../../spec/snapshot-aggregated-manifests-pr4.md)). **В этом документе** flow **heterogeneous** графа для aggregation **не** нормативен до отдельного шага: поддержка **нескольких MCP** с доменных content и обход **по тем же** **`children*Refs`** потребует **явного** расширения traversal и обновления spec — иначе риск **двух несовместимых** моделей обхода (legacy PR4 vs полный PR5-граф). Пока не смержен контракт расширения — для aggregation опираться **только** на механизм PR4.
+
+## Порядок: target flow (future work)
+
+1. Реальный leaf data-path для demo disks через CSI `VolumeSnapshot`/`VolumeSnapshotContent` + VCR.
+2. Тип-агностичная интерпретация CSI готовности в общей `Ready` модели без demo-specific веток в generic.
+3. Полный dedup по data-path и manifest-path с единым критерием materialized coverage.
+
+## Owner references (**не** дерево, **не** dedup, **не** `Ready`)
+
+- **ownerRef** нужен для **lifecycle**: владение, **GC cascade**, согласованное удаление (например child demo snapshot → parent VM snapshot; при политике — привязка к root NS UID через label или отдельный ref).
+- **ownerRef не определяет:** состав логического дерева (это **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**), dedup/exclude (**вычисление** по API в границах run — [`06`](06-coverage-dedup-keys.md)), ни прямую агрегацию **`Ready`** (она идёт по refs + conditions).
+- **ownerRef** может **расходиться** с логическим деревом refs (лишние/отсутствующие связи, ручные правки, гонки) и **не** должен использоваться для **восстановления** или **обхода** дерева — только **`children*Refs`** ([`05`](05-tree-and-graph-invariants.md)).
+- **ownerRef не отвечает** на вопросы «этот PVC уже покрыт?» или «этот VirtualDisk уже в VM subtree?» — для этого только **вычисление** по API + дереву refs (см. [`04-coverage-dedup.md`](04-coverage-dedup.md), [`06`](06-coverage-dedup-keys.md), [`08` часть B](08-universal-snapshot-tree-model.md)).
+
+## Удаление (cascade)
+
+Удаление **root `Snapshot`**:
+
+- инициирует каскад через **`ownerReference`** и **финализаторы** для объектов, входящих в **текущий snapshot-run** (**run** здесь: объекты, достижимые по **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** от root, плюс lifecycle-связи — **не** «всё с label» и **не** «всё по ownerRef» как определение run);
+- **состав** удаляемых объектов определяется **фактическими связями в API** (**refs** как логическое дерево + **ownerRef** / финализаторы как lifecycle), а не заранее заданной «схемой дерева»;
+- **`SnapshotContent`**, **MCP** и связанные артефакты **root** namespace capture удаляются по **тем же** правилам модуля, что и сегодня (**N2a/N2b**), **без** отдельной ветки «только для demo»;
+- модель **не** предполагает **вложенный** **`Snapshot`** под root (**INV-T1**), поэтому **нет** отдельной ветки «каскад nested NS» — дочерние узлы PR5 это **heterogeneous** kinds, снимаемые вместе с run по **ownerRef**/политике модуля.
+
+Сводка по kind и финализаторам — [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md) §6–§7; ограничения **ownerRef** — [`08` часть B](08-universal-snapshot-tree-model.md).
+
+## Открытые вопросы (для следующего раунда spec)
+
+1. Точная форма **edges** root NS → `DemoVirtualMachineSnapshot` / `DemoVirtualDiskSnapshot` / `VolumeSnapshot` в API.
+2. Как **aggregated** endpoint однозначно обходит heterogeneous граф без дублирования MCP (один узел — один MCP в merge).

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2025 Flant JSC
+# Copyright 2026 Flant JSC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,8 +35,19 @@ section_end() {
 }
 
 linter_version="v1.64.5"
-section_start "install_linter" "Installing golangci-lint@$linter_version"
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b . $linter_version
+linter_toolchain="${GOLANGCI_LINT_GOTOOLCHAIN:-go1.25.9}"
+linter_cache_root="${GOLANGCI_LINT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/state-snapshotter/golangci-lint}"
+linter_bin_dir="$linter_cache_root/$linter_toolchain/$linter_version"
+linter_bin="$linter_bin_dir/golangci-lint"
+
+section_start "install_linter" "Installing golangci-lint@$linter_version with $linter_toolchain"
+if [ ! -x "$linter_bin" ]; then
+    mkdir -p "$linter_bin_dir"
+    if ! GOBIN="$linter_bin_dir" GOTOOLCHAIN="$linter_toolchain" go install "github.com/golangci/golangci-lint/cmd/golangci-lint@$linter_version"; then
+        section_end "install_linter"
+        exit 1
+    fi
+fi
 section_end "install_linter"
 
 basedir=$(pwd)
@@ -51,7 +62,7 @@ run_linters() {
         # check all editions
         for edition in $GO_BUILD_TAGS ;do
             section_start "run_lint" "Running linter in $dir (edition: $edition) for $run_for"
-            ../../golangci-lint run ${extra_args} --fix --color=always --allow-parallel-runners --build-tags $edition
+            "$linter_bin" run ${extra_args} --fix --color=always --allow-parallel-runners --build-tags $edition
             local linter_status=$?
             section_end "run_lint"
             if [ $linter_status -ne 0 ]; then
@@ -72,8 +83,8 @@ run_linters() {
         echo "git apply - <<EOF
 $(git diff)
 EOF"
-        section_end "print_patch" 
-        git checkout -f
+        section_end "print_patch"
+        echo -e "\e[33mWorking tree is dirty (golangci-lint --fix and/or local edits). Review with git diff; commit or revert explicitly. This script no longer runs git checkout -f (that discarded uncommitted work).\e[0m"
         failed='true'
     else
         echo -e "\e[32mLinter doesn't have changes requested for $run_for\e[0m"
@@ -85,8 +96,6 @@ if [ -n "${CI_MERGE_REQUEST_DIFF_BASE_SHA}" ]; then
 fi
 
 run_linters "all files"
-
-rm golangci-lint
 
 if [ $failed == 'true' ]; then
     exit 1

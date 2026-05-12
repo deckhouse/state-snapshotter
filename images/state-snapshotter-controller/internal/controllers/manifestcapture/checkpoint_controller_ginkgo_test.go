@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package manifestcapture
 
 import (
 	"context"
@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
@@ -34,8 +35,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	manifestcommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -44,6 +49,39 @@ import (
 func TestManifestCaptureRequestGinkgo(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "ManifestCaptureRequest Suite")
+}
+
+func secretForManifestCaptureTest(name string, annotations map[string]string, secretType string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]interface{}{
+			"name":        name,
+			"namespace":   "ns1",
+			"annotations": annotations,
+		},
+		"type": secretType,
+		"data": map[string]interface{}{
+			"password": "cGFzcw==",
+		},
+		"stringData": map[string]interface{}{
+			"token": "plain",
+		},
+	}}
+	u.SetAPIVersion("v1")
+	u.SetKind("Secret")
+	u.SetName(name)
+	u.SetNamespace("ns1")
+	u.SetAnnotations(annotations)
+	return u
+}
+
+func objectsByKindName(objects []unstructured.Unstructured) map[string]unstructured.Unstructured {
+	result := make(map[string]unstructured.Unstructured, len(objects))
+	for _, object := range objects {
+		result[object.GetKind()+"/"+object.GetName()] = object
+	}
+	return result
 }
 
 var _ = Describe("ManifestCaptureRequest TTL", func() {
@@ -57,6 +95,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 
 	BeforeEach(func() {
 		scheme = runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(storagev1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(deckhousev1alpha1.AddToScheme(scheme)).To(Succeed())
 
@@ -84,6 +123,92 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 		Expect(err).ToNot(HaveOccurred(), "Failed to create controller")
 	})
 
+	Describe("collectTargetObjects", func() {
+		It("should resolve targets in the ManifestCaptureRequest namespace", func() {
+			ctx := context.Background()
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: "ns1"}}
+			Expect(baseClient.Create(ctx, cm)).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-configmap", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{{
+						APIVersion: "v1",
+						Kind:       "ConfigMap",
+						Name:       "cm1",
+					}},
+				},
+			}
+
+			objects, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objects).To(HaveLen(1))
+			Expect(objects[0].GetKind()).To(Equal("ConfigMap"))
+			Expect(objects[0].GetName()).To(Equal("cm1"))
+			Expect(objects[0].GetNamespace()).To(Equal("ns1"))
+		})
+
+		It("should enforce Secret security contract before checkpoint chunking", func() {
+			ctx := context.Background()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: "ns1"},
+				Data:       map[string]string{"key": "value"},
+			}
+			Expect(baseClient.Create(ctx, cm)).To(Succeed())
+
+			secrets := []*unstructured.Unstructured{
+				secretForManifestCaptureTest("tls-secret", nil, "kubernetes.io/tls"),
+				secretForManifestCaptureTest("opaque-default", nil, "Opaque"),
+				secretForManifestCaptureTest("opaque-include", map[string]string{manifestcommon.AnnotationIncludeSecret: "true"}, "Opaque"),
+				secretForManifestCaptureTest("opaque-include-data", map[string]string{manifestcommon.AnnotationIncludeSecretData: "true"}, "Opaque"),
+			}
+			for _, secret := range secrets {
+				Expect(baseClient.Create(ctx, secret)).To(Succeed())
+			}
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-secrets", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "ConfigMap", Name: "cm1"},
+						{APIVersion: "v1", Kind: "Secret", Name: "tls-secret"},
+						{APIVersion: "v1", Kind: "Secret", Name: "opaque-default"},
+						{APIVersion: "v1", Kind: "Secret", Name: "opaque-include"},
+						{APIVersion: "v1", Kind: "Secret", Name: "opaque-include-data"},
+					},
+				},
+			}
+
+			objects, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objects).To(HaveLen(3))
+
+			captured := objectsByKindName(objects)
+			Expect(captured).To(HaveKey("ConfigMap/cm1"))
+			Expect(captured).NotTo(HaveKey("Secret/tls-secret"))
+			Expect(captured).NotTo(HaveKey("Secret/opaque-default"))
+
+			included := captured["Secret/opaque-include"]
+			Expect(included.GetAnnotations()).To(HaveKeyWithValue(manifestcommon.AnnotationIncludeSecret, "true"))
+			_, found, err := unstructured.NestedMap(included.Object, "data")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse(), "include-secret must remove Secret data")
+			_, found, err = unstructured.NestedMap(included.Object, "stringData")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse(), "include-secret must remove Secret stringData")
+
+			withData := captured["Secret/opaque-include-data"]
+			data, found, err := unstructured.NestedMap(withData.Object, "data")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(data).To(HaveKeyWithValue("password", "cGFzcw=="))
+			stringData, found, err := unstructured.NestedMap(withData.Object, "stringData")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(stringData).To(HaveKeyWithValue("token", "plain"))
+		})
+	})
+
 	// ============================================================================
 	// TTL-related tests
 	// ============================================================================
@@ -102,7 +227,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctrl.setTTLAnnotation(mcr)
 
 			Expect(mcr.Annotations).ToNot(BeNil())
-			Expect(mcr.Annotations[AnnotationKeyTTL]).To(Equal("168h"))
+			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("168h"))
 		})
 
 		It("should not overwrite existing TTL annotation", func() {
@@ -111,14 +236,14 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 					Name:      "test-mcr",
 					Namespace: "default",
 					Annotations: map[string]string{
-						AnnotationKeyTTL: "24h",
+						controllercommon.AnnotationKeyTTL: "24h",
 					},
 				},
 			}
 
 			ctrl.setTTLAnnotation(mcr)
 
-			Expect(mcr.Annotations[AnnotationKeyTTL]).To(Equal("24h"))
+			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("24h"))
 		})
 
 		It("should use config TTL when available", func() {
@@ -132,7 +257,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 
 			ctrl.setTTLAnnotation(mcr)
 
-			Expect(mcr.Annotations[AnnotationKeyTTL]).To(Equal("72h"))
+			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("72h"))
 		})
 	})
 
@@ -408,13 +533,23 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctrl.APIReader = finalizeClient
 		})
 
-		It("should finalize MCR when checkpoint exists but MCR is not finalized", func() {
+		It("should keep MCR processing when checkpoint exists but is not handed off to SnapshotContent", func() {
 			checkpointName := "mcp-test-finalize"
 
 			// Create checkpoint first
 			checkpoint := &storagev1alpha1.ManifestCheckpoint{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: checkpointName,
+				},
+				Status: storagev1alpha1.ManifestCheckpointStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             storagev1alpha1.ManifestCheckpointConditionReasonCompleted,
+							LastTransitionTime: metav1.Now(),
+						},
+					},
 				},
 			}
 			Expect(finalizeClient.Create(ctx, checkpoint)).To(Succeed())
@@ -443,24 +578,82 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Verify MCR was finalized
+			// Verify MCR published the checkpoint but is not finalized until handoff.
 			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(finalizeClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
 
-			// Check Ready=True
+			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			Expect(readyCond).ToNot(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing))
+			Expect(updatedMCR.Status.CheckpointName).To(Equal(checkpointName))
+			Expect(updatedMCR.Status.CompletionTimestamp).To(BeNil())
+			Expect(updatedMCR.Annotations).To(BeNil())
+		})
+
+		It("should finalize MCR when checkpoint exists and is handed off to SnapshotContent", func() {
+			checkpointName := "mcp-test-handed-off"
+
+			checkpoint := &storagev1alpha1.ManifestCheckpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: checkpointName,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: snapstorage.SchemeGroupVersion.String(),
+							Kind:       "SnapshotContent",
+							Name:       "content-test",
+							UID:        types.UID("content-uid"),
+						},
+					},
+				},
+				Status: storagev1alpha1.ManifestCheckpointStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               storagev1alpha1.ManifestCheckpointConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             storagev1alpha1.ManifestCheckpointConditionReasonCompleted,
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			}
+			Expect(finalizeClient.Create(ctx, checkpoint)).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mcr-handed-off",
+					Namespace: "default",
+				},
+				Status: storagev1alpha1.ManifestCaptureRequestStatus{
+					CheckpointName: checkpointName,
+					Conditions:     []metav1.Condition{},
+				},
+			}
+			Expect(finalizeClient.Create(ctx, mcr)).To(Succeed())
+
+			req := controllerruntime.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      mcr.Name,
+					Namespace: mcr.Namespace,
+				},
+			}
+			result, err := ctrl.Reconcile(ctx, req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(finalizeClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
+
 			readyCond := meta.FindStatusCondition(updatedMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(readyCond).ToNot(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
-
-			// Check CompletionTimestamp set
 			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
-
-			// Check TTL annotation added
 			Expect(updatedMCR.Annotations).ToNot(BeNil())
-			Expect(updatedMCR.Annotations[AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
+			Expect(updatedMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
 		})
 	})
 })
@@ -481,7 +674,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 		client = fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
+			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			Build()
 	})
 
@@ -519,11 +712,11 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			Expect(client.Create(ctx, cm)).To(Succeed())
 
 			// Create ObjectKeeper manually (simulating controller behavior)
-			retainerName := "ret-mcr-default-test-mcr"
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: DeckhouseAPIVersion,
-					Kind:       KindObjectKeeper,
+					APIVersion: controllercommon.DeckhouseAPIVersion,
+					Kind:       controllercommon.KindObjectKeeper,
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name: retainerName,
@@ -564,7 +757,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 				},
 			}
 
-			retainerName := "ret-mcr-default-test-mcr"
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: retainerName,
@@ -589,8 +782,8 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 					Name: "mcp-test-123",
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: DeckhouseAPIVersion,
-							Kind:       KindObjectKeeper,
+							APIVersion: controllercommon.DeckhouseAPIVersion,
+							Kind:       controllercommon.KindObjectKeeper,
 							Name:       retainerName,
 							UID:        objectKeeper.UID,
 							Controller: func() *bool { b := true; return &b }(),
@@ -614,13 +807,13 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 			Expect(len(createdCheckpoint.OwnerReferences)).To(Equal(1))
 			ownerRef := createdCheckpoint.OwnerReferences[0]
-			Expect(ownerRef.Kind).To(Equal(KindObjectKeeper))
+			Expect(ownerRef.Kind).To(Equal(controllercommon.KindObjectKeeper))
 			Expect(ownerRef.Name).To(Equal(retainerName))
 			Expect(ownerRef.UID).To(Equal(objectKeeper.UID))
 			Expect(*ownerRef.Controller).To(BeTrue())
 		})
 
-		It("should validate ObjectKeeper belongs to correct MCR by UID", func() {
+		It("should keep stale same-name MCR ObjectKeeper untouched when request UID changes", func() {
 			mcr1 := &storagev1alpha1.ManifestCaptureRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-mcr",
@@ -637,10 +830,22 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 				},
 			}
 
-			retainerName := "ret-mcr-default-test-mcr"
-			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
+			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: retainerName,
+					Name:      "test-cm",
+					Namespace: "default",
+				},
+			}
+			Expect(client.Create(ctx, cm)).To(Succeed())
+			Expect(client.Create(ctx, mcr2)).To(Succeed())
+
+			oldRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr1.Namespace, mcr1.Name, mcr1.UID)
+			newRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr2.Namespace, mcr2.Name, mcr2.UID)
+			Expect(newRetainerName).ToNot(Equal(oldRetainerName))
+
+			oldObjectKeeper := &deckhousev1alpha1.ObjectKeeper{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: oldRetainerName,
 				},
 				Spec: deckhousev1alpha1.ObjectKeeperSpec{
 					Mode: "FollowObject",
@@ -653,14 +858,29 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 					},
 				},
 			}
-			Expect(client.Create(ctx, objectKeeper)).To(Succeed())
+			Expect(client.Create(ctx, oldObjectKeeper)).To(Succeed())
 
-			// Verify ObjectKeeper belongs to mcr1 (not mcr2)
-			createdOK := &deckhousev1alpha1.ObjectKeeper{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, createdOK)).To(Succeed())
+			testLogger, err := logger.NewLogger("info")
+			Expect(err).NotTo(HaveOccurred())
+			ctrl, err := NewManifestCheckpointController(client, client, scheme, testLogger, &config.Options{
+				DefaultTTL:    10 * time.Minute,
+				DefaultTTLStr: "10m",
+			})
+			Expect(err).NotTo(HaveOccurred())
 
-			Expect(createdOK.Spec.FollowObjectRef.UID).To(Equal(string(mcr1.UID)))
-			Expect(createdOK.Spec.FollowObjectRef.UID).ToNot(Equal(string(mcr2.UID)))
+			_, err = ctrl.Reconcile(ctx, controllerruntime.Request{NamespacedName: types.NamespacedName{Namespace: mcr2.Namespace, Name: mcr2.Name}})
+			Expect(err).NotTo(HaveOccurred())
+
+			oldFresh := &deckhousev1alpha1.ObjectKeeper{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: oldRetainerName}, oldFresh)).To(Succeed())
+			Expect(oldFresh.Spec.FollowObjectRef.UID).To(Equal(string(mcr1.UID)))
+
+			newFresh := &deckhousev1alpha1.ObjectKeeper{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: newRetainerName}, newFresh)).To(Succeed())
+			Expect(newFresh.Spec.FollowObjectRef).NotTo(BeNil())
+			Expect(newFresh.Spec.FollowObjectRef.UID).To(Equal(string(mcr2.UID)))
+			Expect(newFresh.Spec.FollowObjectRef.Name).To(Equal(mcr2.Name))
+			Expect(newFresh.Spec.FollowObjectRef.Namespace).To(Equal(mcr2.Namespace))
 		})
 	})
 })
@@ -712,27 +932,27 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 	Describe("Deterministic checkpoint name generation", func() {
 		It("should generate same checkpoint name for same MCR UID", func() {
 			mcrUID := types.UID("test-uid-12345")
-			name1 := ctrl.generateCheckpointNameFromUID(string(mcrUID))
-			name2 := ctrl.generateCheckpointNameFromUID(string(mcrUID))
+			name1 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
+			name2 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
 
 			Expect(name1).To(Equal(name2))
-			Expect(name1).To(HavePrefix(ChunkNamePrefix))
+			Expect(name1).To(HavePrefix(namespacemanifest.CheckpointNamePrefix))
 		})
 
 		It("should generate different checkpoint names for different MCR UIDs", func() {
 			mcrUID1 := types.UID("test-uid-12345")
 			mcrUID2 := types.UID("test-uid-67890")
-			name1 := ctrl.generateCheckpointNameFromUID(string(mcrUID1))
-			name2 := ctrl.generateCheckpointNameFromUID(string(mcrUID2))
+			name1 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID1)
+			name2 := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID2)
 
 			Expect(name1).ToNot(Equal(name2))
-			Expect(name1).To(HavePrefix(ChunkNamePrefix))
-			Expect(name2).To(HavePrefix(ChunkNamePrefix))
+			Expect(name1).To(HavePrefix(namespacemanifest.CheckpointNamePrefix))
+			Expect(name2).To(HavePrefix(namespacemanifest.CheckpointNamePrefix))
 		})
 
 		It("should generate RFC 1123 compliant checkpoint name", func() {
 			mcrUID := types.UID("test-uid-12345")
-			name := ctrl.generateCheckpointNameFromUID(string(mcrUID))
+			name := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
 
 			// RFC 1123: lowercase alphanumeric, must start and end with alphanumeric
 			Expect(name).To(MatchRegexp("^[a-z0-9][a-z0-9-]*[a-z0-9]$"))
@@ -800,7 +1020,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			finalMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, finalMCR)).To(Succeed())
 			Expect(finalMCR.Annotations).ToNot(BeNil())
-			Expect(finalMCR.Annotations[AnnotationKeyTTL]).To(Equal("10m"))
+			Expect(finalMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("10m"))
 			// Verify status is still intact
 			ready = meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
@@ -1429,34 +1649,6 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 
-		It("sets Failed without entering Processing for invalid spec", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "bad",
-					Namespace: "default",
-				},
-				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
-					Targets: []storagev1alpha1.ManifestTarget{}, // Empty targets
-				},
-			}
-			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
-
-			_, err := reconciler.Reconcile(ctx, controllerruntime.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      mcr.Name,
-					Namespace: mcr.Namespace,
-				},
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			updated := &storagev1alpha1.ManifestCaptureRequest{}
-			Expect(k8sClient.Get(ctx, ctrlclient.ObjectKeyFromObject(mcr), updated)).To(Succeed())
-
-			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
-			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
-		})
 	})
 
 	Describe("isTerminal semantics", func() {

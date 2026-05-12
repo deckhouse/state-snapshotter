@@ -12,6 +12,19 @@ metadata:
   name: d8:{{ .Chart.Name }}:controller
   {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
 rules:
+# CustomSnapshotDefinition (cluster-scoped; registry reconciler)
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["customsnapshotdefinitions"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["customsnapshotdefinitions/status"]
+  verbs: ["get", "update", "patch"]
+
+# CustomResourceDefinition (read-only discovery for CSD mapping resolution)
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch"]
+
 # ManifestCaptureRequest (namespaced)
 - apiGroups: ["state-snapshotter.deckhouse.io"]
   resources: ["manifestcapturerequests"]
@@ -48,25 +61,57 @@ rules:
 - apiGroups: [""]
   resources: ["namespaces"]
   verbs: ["get", "list", "watch"]
-# Allow controller-runtime to watch configmaps (needed for informer cache)
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
-# Core Kubernetes resources (temporary wide permissions)
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["get", "list"]
 
-# API Server permissions (for /manifests subresource)
-# Only 'get' permission needed - no list/watch (no informer cache)
-# TODO: Remove access to manifestcheckpointcontentchunks - move archive assembly to controller
-# Currently API server assembles JSON from chunks directly (archive_service.go:257)
-# This requires 'get' permission. According to ADR, API server should NOT have access to chunks.
-# Future: Move archive assembly logic to ManifestCheckpointController, store assembled archive
-# in checkpoint.Status or as a separate resource, so API server only needs to read the final result.
-- apiGroups: ["state-snapshotter.deckhouse.io"]
-  resources: ["manifestcheckpointcontentchunks"]
-  verbs: ["get"]  # Only 'get' by name - no list/watch needed (no informer cache)
+# Snapshot root capture allowlist (read-only)
+- apiGroups: [""]
+  resources:
+  - "pods"
+  - "services"
+  - "configmaps"
+  - "secrets"
+  - "serviceaccounts"
+  - "persistentvolumeclaims"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources:
+  - "deployments"
+  - "statefulsets"
+  - "daemonsets"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources:
+  - "jobs"
+  - "cronjobs"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources:
+  - "ingresses"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources:
+  - "roles"
+  - "rolebindings"
+  verbs: ["get", "list", "watch"]
+
+# Unified Snapshots RBAC (for XxxxSnapshot roots and common SnapshotContent)
+# RBAC is scoped to API group, not to concrete Snapshot kinds
+# Adding a new Snapshot kind requires adding its resource name here
+# See ADR section 7 (RBAC Strategy) for details
+# Note: Kubernetes RBAC does NOT support wildcards in resource names
+# We need to list all snapshot resource types explicitly
+
+# storage.deckhouse.io group (Snapshot, SnapshotContent)
+- apiGroups: ["storage.deckhouse.io"]
+  resources:
+  - "snapshots"                    # Snapshot kind
+  - "snapshotcontents"            # SnapshotContent kind
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Unified Snapshots status subresources for storage.deckhouse.io
+- apiGroups: ["storage.deckhouse.io"]
+  resources:
+  - "snapshots/status"
+  - "snapshotcontents/status"
+  verbs: ["get", "update", "patch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

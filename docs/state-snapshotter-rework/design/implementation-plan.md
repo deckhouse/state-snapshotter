@@ -1,0 +1,253 @@
+# План доработок (roadmap)
+
+Детальный план работ и таблицы статусов. Высокоуровневый прогресс — в [`operations/project-status.md`](../operations/project-status.md). Обзор линий продукта и ссылки на runbook — [`../README.md`](../README.md).
+
+**Продуктовое ТЗ (SSOT сценария):** [`snapshot-rework/`](../../../snapshot-rework/) — контрактные примеры и потоки **не правятся** из `docs/` в пользу «упрощённого MVP»; план ниже только задаёт поставку кода под ТЗ.
+
+**Техдизайн R2 2b / R3 (runtime registry, diff, additive watch):** [`r2-phase-2b-r3-runtime-registry.md`](r2-phase-2b-r3-runtime-registry.md).
+
+**Сверка с удалённым указателем `snapshot-rework/plan/dorabotki-i-testy.md`:** таблица § → файлы — в [`snapshot-rework/README.md`](../../../snapshot-rework/README.md).
+
+---
+
+## 2. План доработок
+
+### 2.1 Baseline: устойчивый процесс (обязательно первым)
+
+**Отсутствие CRD в кластере не должно валить процесс.** Пустой реестр unified-типов — **нормальный режим**, а не «деградация безымянная».
+
+| # | Задача | Зачем | Статус |
+|---|--------|--------|--------|
+| S1 | На старте: **discovery** — учитывать только реально существующие в API GVK (из bootstrap-конфига до CSD, позже из CSD) | Operational hygiene | ✅ сделано |
+| S2 | Логировать предупреждение / событие и **не** вешать watch на отсутствующие типы | Нет CrashLoop из-за частично выключенных модулей | ✅ сделано |
+
+**Как сделано (S1–S2):**
+
+- Пакет `images/state-snapshotter-controller/pkg/unifiedbootstrap/`: `DefaultUnifiedRuntimeBootstrapPairs()` / legacy alias `DefaultDesiredUnifiedSnapshotPairs()`, отдельный `DefaultGraphRegistryBuiltInPairs()`, `ResolveAvailableUnifiedGVKPairs(mapper, pairs, log)`.
+- `cmd/main.go`: unified/generic runtime в v0 always-on; `Snapshot*`, common `SnapshotContent`, demo snapshot kinds, CSD reconciler, graph registry, `GenericSnapshotBinderController`, `unifiedruntime.Syncer` и hot-add path регистрируются на едином startup path.
+- **Динамика после старта:** новые eligible типы из CSD подхватываются **без рестарта** через `pkg/unifiedruntime.Syncer.Sync` (R2 2b/R3). **Снятие** watch при выпадении типа из resolved — по-прежнему не гарантируется; см. gauges `state_snapshotter_unified_runtime_*` и лог при stale.
+
+Опционально (не сделано): **feature gate** в values для всего unified трека.
+
+### 2.2 Реестр типов (после S1–S2)
+
+| # | Задача | Зачем | Статус |
+|---|--------|--------|--------|
+| R1 | **`CustomSnapshotDefinition`:** типы `api/v1alpha1`, CRD `crds/state-snapshotter.deckhouse.io_customsnapshotdefinitions.yaml`, регистрация схемы | Единый контракт API | ✅ |
+| R2 | **CSD reconciler** в manager + пересчёт статусов; **phase 1** — см. блок ниже; **phase 2a** — merge на старте; **phase 2b** — `pkg/unifiedruntime.Sync` после reconcile CSD: additive `mgr.Add` для новых пар | Замена статического bootstrap как единственного источника пар GVK | ✅ phase 1 / 2a / 2b *(additive add; без clean unwatch)* |
+| R3 | **Runtime (без рестарта pod):** подписка по формуле `Accepted`+`RBACReady`+поколения; `Ready` не в предикате; **отписка не гарантируется** | Нет обязательности watch на stale тип; новые eligible — без рестарта | ✅ *(additive + layered state + proof-тест + gauges/log stale↔resolved; symmetric unwatch — ⬜)* |
+| R4 | Конфликт kind между CSD → `Accepted=False (KindConflict)`; процесс не падает | Fail-closed на уровне CSD | ✅ *(reconciler; см. `internal/controllers/csd/controller.go`)* |
+| R5 | Опциональный bootstrap-список GVK (env / Helm values); runtime always-on | Rollout | ✅ см. `pkg/config` (`STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`), `openapi/config-values.yaml`, `templates/controller/deployment.yaml` |
+
+**R2 phase 1 — сделано (status-only, без runtime activation):**
+
+- [x] `internal/controllers/csd/controller.go`: на каждый reconcile — полный `List` CSD, resolve CRD-имён через `CustomResourceDefinition`, инвариант **cluster-scoped content**, дубликат snapshot kind в одном CSD → `InvalidSpec`, cross-CSD → `KindConflict`.
+- [x] Статусы **`Accepted`**, производный **`Ready`** по ADR; **`RBACReady`** не пишет контроллер (копия из объекта).
+- [x] `RetryOnConflict`: внутри retry повторный `List` + пересчёт global state (актуальный spec).
+- [x] Подключение в `cmd/main.go`; RBAC: `templates/controller/rbac-for-us.yaml` (CSD + status + read CRD).
+- [x] `hack/generate_code.sh`: как в модуле `backup` — пин `controller-gen` v0.18.0, вызов из `$(go env GOPATH)/bin/controller-gen`.
+- [x] **Phase 2a (только на старте процесса):** `pkg/csdregistry` — eligible CSD → пары GVK; `unifiedbootstrap.MergeBootstrapAndCSDPairs`; в `cmd/main.go` после `manager.New` — прямой client + `ResolveAvailableUnifiedGVKPairs` на merged списке. Ошибка `List` CSD → fallback на bootstrap-only + warning в logrus.
+- [x] **Phase 2b (additive):** `pkg/unifiedruntime.Syncer` после успешного `reconcileAll` CSD: merge + `ResolveAvailableUnifiedGVKPairs` → `GenericSnapshotBinderController.AddWatchForPair` / `SnapshotContentController.AddWatchForContent` (`mgr.Add` после `Start` поддерживается controller-runtime). Идемпотентность по GVK; один сбой add не валит остальные пары.
+- [x] **R3 (часть 1 — state + proof):** слой **bootstrap / eligible / merged / resolved** в `pkg/unifiedruntime.LayeredGVKState` + `BuildLayeredGVKState`; **active** — `Syncer.activeSnapshotGVKKeys` (монотонно: ключ попадает, если оба `AddWatch*` успешны); `LastLayeredState()` / `ActiveSnapshotGVKKeys()` для отладки и тестов; unit — `pkg/unifiedruntime/layers_test.go`. Интеграция: `test/integration/unified_runtime_hot_add_test.go` — CSD становится watch-eligible (Accepted → RBACReady), затем проверяются `LastLayeredState` (resolved + eligible) и `ActiveSnapshotGVKKeys`; тест **Serial**, маппинг на **RegistrationTestSnapshot** (не `TestSnapshot`), чтобы не вешать глобальный watch на тип, с которым lifecycle-спеки делают прямой `Reconcile` (иначе два reconcile-потока и 409). В `BeforeSuite` интеграции — wiring как в production: unified controllers + `unifiedruntime.NewSyncer` + `AddCustomSnapshotDefinitionControllerToManager(..., syncer.Sync, graphRegistryRefresh)`.
+- [x] **R3 (observability):** после каждого `Sync` обновляются Prometheus gauges (`sigs.k8s.io/controller-runtime/pkg/metrics`): `state_snapshotter_unified_runtime_resolved_snapshot_gvk_count`, `active_monotonic_snapshot_gvk_count`, `stale_active_snapshot_gvk_count`; сводка на `V(2)`; при `stale_active_snapshot_gvk_count > 0` — **Info**-лог со списком ключей и явным hint про restart pod (additive watches не снимаются). Регистрация метрик — `sync.Once` в `NewSyncer`. См. [`r2-phase-2b-r3-runtime-registry.md`](r2-phase-2b-r3-runtime-registry.md).
+- [x] **R5:** `config.Options` + env (`STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`); `cmd/main.go` имеет один always-on generic/unified startup path; `NewSyncer` получает `EffectiveUnifiedBootstrapPairs()`; Helm/OpenAPI. Ошибка парсинга bootstrap → warning + дефолтный список. Graph registry built-ins отделены от runtime bootstrap: по умолчанию только `Snapshot`→`SnapshotContent`, demo пары — через eligible CSD.
+- [ ] **R3 / integration (опционально):** два CSD при поломке одного, полный T5/T9 и т.д.
+
+### 2.3 Manifest capture
+
+| # | Задача | Зачем | Статус |
+|---|--------|--------|--------|
+| M1 | Расширение **MCR spec** | UX | ⬜ **отложено** до стабилизации **Snapshot / SnapshotContent / ObjectKeeper** по поставке **N2a** (и при необходимости N3); не смешивать с закрытием **N2b** без явного gate |
+| M2 | Лимиты объёма, таймауты list | Защита apiserver/etcd | ⬜ **после M1** (тот же gate) |
+
+### 2.4 Snapshot + SnapshotContent + ObjectKeeper
+
+**Цель:** сразу целевая схема **без миграции** с промежуточного generic `SnapshotContent` для корня namespace — см. [`decisions/snapshot-content-decision.md`](decisions/snapshot-content-decision.md). Детали сценария — **только** [`snapshot-rework/`](../../../snapshot-rework/). Статус **`Snapshot`**: **только `conditions`**, без `status.phase` — [`decisions/snapshot-status-surface.md`](decisions/snapshot-status-surface.md).
+
+| # | Задача | Документ / примечание | Статус |
+|---|--------|------------------------|--------|
+| N0 | **Gate:** **Chosen option** в [`snapshot-scope.md`](decisions/snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `Snapshot` / `SnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`snapshot-controller.md`](snapshot-controller.md) §13–§16 | ✅ (scope resolved; group `storage.deckhouse.io/v1alpha1` на этапе N1) |
+| N1 | **API + lifecycle skeleton (завершённый подготовительный слой, код не откатывается):** типы `Snapshot`, `SnapshotContent`, codegen, OpenAPI; **убрать** generic `SnapshotContent` как носитель root; bind + delete; integration (lifecycle, deletion, mismatch, recovery). **В N1 намеренно нет:** ObjectKeeper, реального manifest capture, дочернего дерева. | decision + design §14–§16 | ✅ |
+| N2 | **Manifests-only snapshot path** (без data-layer), в два подэтапа — **§2.4.1:** **N2a** — первый рабочий снимок манифестов одного root (OK + MCR→ManifestCheckpoint + статус на SnapshotContent + download одного снимка); **N2b** — дерево манифест-only снимков (дети, refs на graph, агрегированный Ready, aggregated download). | [`snapshot-controller.md`](snapshot-controller.md) + §2.4.1 | ⬜ |
+| N3 | **Интеграция / hardening:** envtest — recovery после **рестарта** контроллера; доп. негативные кейсы; политика по §15. Базовые mismatch/recovery/status уже в N1 (`snapshot_n1_boundary_test.go`). | design §15 | ⬜ |
+| N4 | **После закрытого N2 (N2a+N2b):** углублённые лимиты большого namespace, политики таймаутов list/apiserver (пересечение с §8.6 design, M2). | design §8.6, §16 | ⬜ |
+| N5 | **За пределами manifests-only дерева:** data-layer (volume/VSC/VCR и т.д.), CSD priority traversal в полном объёме, экспорт/импорт/restore с данными — итерациями по [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md) без изменения ТЗ из `docs/`. Дочерняя **композиция манифест-only** — в **N2b**, не в N5. | бэклог | ⬜ |
+
+Трек **N*** и **M1–M2** не смешивать в одном PR без необходимости.
+
+#### 2.4.1 N2 — manifests-only путь (N2a / N2b), SSOT декомпозиции
+
+**Граница N1 ↔ N2 (код N1 не пересматривается как «неудачная работа»):** **N1** — **завершённый** слой **API + lifecycle skeleton**: CRD/типы, bind root↔`SnapshotContent`, delete (Retain/Delete), integration (lifecycle, mismatch, recovery). **В N1 намеренно нет:** **ObjectKeeper**, **реального** manifest capture, **дочернего дерева**. Дальнейшие этапы опираются на этот скелет без отката CRD/bind/delete.
+
+**Зафиксированные договорённости для N2:**
+
+- **ObjectKeeper** нужен уже в **первом рабочем** проходе (**N2a**), как **retention anchor** для корневого content/артефакта; OK **не** заменяет bind (**`status.boundSnapshotContentName`**).
+- Рабочий scope до data-layer — **manifests-only**; **VolumeCaptureRequest**, **VolumeSnapshotContent** и прочие data-ветки — **не реализуются** в N2. Request names живут на snapshot status (future `status.volumeCaptureRequestName`); `SnapshotContent.status.dataRef` зарезервирован только для cluster durable artifact ref (`apiVersion/kind/name`, first v0 target — `VolumeSnapshotContent`) and MUST NOT point to VCR/DataExport/request.
+- **Внутренний** путь исполнения manifest capture — **ManifestCaptureRequest → ManifestCheckpoint** (+ существующие **ManifestCheckpointContentChunk** в коде модуля); публичный lifecycle и статусы — **`Snapshot` / `SnapshotContent`** (+ при необходимости те же поля связи, что у unified content с MCP, по аналогии со `SnapshotContent`).
+- **Дерево snapshot-ов и child composition** — **целевая ось продукта**, закрывается в **N2b** (manifests-only), а не откладывается как «дальний optional».
+
+**Цель N2 целиком:** кратчайший путь к **первым рабочим** снимкам манифестов (**N2a**), затем к **рабочему дереву** manifests-only снимков (**N2b**). Полный vision из [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md) **не** тащить в один этап.
+
+**Вне N2 (явный out-of-scope для всего N2a+N2b):** volume/data snapshots; реальный поток **VCR/VSC**; **restore с данными**; полный **export/import** продукта; **storage class remap**; **VM data restore**; выдача поддерева **с data payloads** (агрегированный download в N2b — **только манифесты**).
+
+---
+
+**N2a — первый рабочий manifests-only snapshot (один root, без дерева)**
+
+**Definition of Done (N2a):**
+
+1. **Два ObjectKeeper не смешивать:** корневой OK (**`ret-snap-…`**: **`FollowObjectWithTTL`** на **`Snapshot`**, `spec.ttl` из env или дефолта в `pkg/config`) + **root `SnapshotContent.metadata.ownerReferences` → этот OK** (TTL-якорь; не наоборот; root Snapshot не owned by OK) — отдельно от **generic** execution OK **`ret-mcr-*`** (**`FollowObject`** на MCR, UID-aware name to avoid stale same-name request conflicts) в `ManifestCheckpointController`. Для **namespace N2a** финальный **MCP** крепится к **SnapshotContent** (`ownerReference`), **без** `ret-mcr-*` для MCP. Chunks → **ownerRef на MCP**. Детали — [`snapshot-controller.md`](snapshot-controller.md) §4.3 / §4.6.
+2. Реальный manifest capture через цепочку **MCR → ManifestCheckpoint** (chunks), управляемый из потока **Snapshot** (ensure временного MCR с **ownerRef** на root snapshot для GC in-flight, observe MCP; после persisted результата и handoff MCP ownerRef на `SnapshotContent` — **`MCR Ready=True`**, затем **удаление MCR**, §4.7 design; без публичной обязанности MCR для оператора — §10).
+3. Запись результата в **`SnapshotContent.status`** по **§4.4** design (как минимум **`manifestCheckpointName`**, conditions; опционально `capturedAt`, `resourceCount`).
+4. **`SnapshotContent Ready=True`** на root **только** после **persisted** manifest-результата (MCP Ready + консистентные chunks / статус MCP + ownerRef handoff на `SnapshotContent`), **не** из «промежуточного» события вроде одного лишь факта создания MCR без готового checkpoint. Snapshot-level `Ready` только зеркалит bound `SnapshotContent Ready`.
+5. Рабочий **read/download path** манифестов **одного** снимка (на базе существующей склейки chunks / archive path в модуле, без обязательности нового формата хранения).
+6. **Без** агрегации детей и **без** data-flow; поля data-related — только **placeholders**, если уже есть в CRD.
+
+**Design lock до кода N2a (подробности в design, не дублировать здесь):**
+
+- Публичный **status surface** N2a — [`snapshot-controller.md`](snapshot-controller.md) **§4.4** (root без MCR в status; SnapshotContent — `manifestCheckpointName` + conditions + опциональные счётчики/время).
+- **Allowlist / exclusions** — **§4.5**.
+- **Download** (один снимок, без предматериализации) — **§8.7**.
+- **N2b агрегация Ready** — **§11.1**.
+- **Контроллеры** (NS vs `ManifestCheckpointController`) — **§10**.
+- **OK vs ownerRef** — **§4.3**.
+
+**N2a.x:** выполнено — см. [`snapshot-controller.md`](snapshot-controller.md) **§4.6** (сверка с `ManifestCheckpointController`).
+
+**Порядок работ N2a (ориентир):** (0) прочитать design lock + §4.6–§4.7; (1) CRD **`manifestCheckpointName`** на SnapshotContent (§4.4.1); (2) allowlist §4.5 в коде; (3) NS reconciler: SnapshotContent, **root OK**, MCR по §4.7, observe MCP, статусы NS/SnapshotContent, Ready, **delete MCR** после success; (4) download §8.7.1; (5) integration.
+
+**Нормативно:** набор GVR — **§4.5** + один SSOT в коде; ad-hoc «снять всё подряд» **запрещён**.
+
+**Known N2a limits (не маскировать как «готово»):** фактическое срабатывание TTL retained SnapshotContent — политика Deckhouse ObjectKeeper controller; политика **удаления root при незавершённом capture** и явный cancel MCP — [`snapshot-controller.md`](snapshot-controller.md) §5.2; list targets без pagination — только N2a, hardening позже (§4.5 / §4.3.2 design).
+
+**Хранилище манифестов N2a:** **ManifestCheckpoint + gzip/json chunks**; выдача — склейка на читании (см. `ArchiveService`, §8.7). Отдельный заранее материализованный **`bundle.tar.gz`** **не обязателен** для N2a.
+
+---
+
+**N2b — дерево manifests-only snapshot-ов**
+
+**Definition of Done (N2b):**
+
+1. Создание **дочерних** snapshot **доменными контроллерами** (по ТЗ) с **ownerReference** на parent snapshot, плюс дочерние **`SnapshotContent`**.
+2. На parent snapshot: **`childrenSnapshotRefs`** — полный declarative planned graph; после discovery/create — `GraphReady=True`.
+3. На **`SnapshotContent`**: **`childrenSnapshotContentRefs`** — result graph, построенный `SnapshotContentController` из planned graph и bound child contents.
+4. **`Ready=True`** у parent snapshot — только mirror bound `SnapshotContent Ready`; parent content `Ready` агрегируется `SnapshotContentController` из собственного result + required child contents (child failed → parent content `Ready=False` / `ChildSnapshotFailed`).
+5. **Aggregated manifests download** для **subtree / root** (только манифесты, без data payloads; на чтении из MCP/chunks — §8.7 design).
+6. По-прежнему **без** data-flow (volume и т.д.).
+
+#### 2.4.2 N2b — поставка короткими PR (инвариант на PR)
+
+Цель: **не** смешивать форму графа в API, wiring parent/child, политику **Ready**, read-path aggregated download и доменный traversal в один коммит. Каждый PR замыкает **один** новый инвариант; после каждого — зелёные тесты и понятный критерий остановки.
+
+| PR | Фокус | Включить | Не включать (отложить) | Критерий остановки |
+|----|--------|----------|-------------------------|-------------------|
+| **PR1** | Только **форма графа** в API | JSON: `childrenSnapshotRefs` / `childrenSnapshotContentRefs`; в Go элементы — **`SnapshotChildRef`** / **`SnapshotContentChildRef`**. Обновление **design** и при необходимости **spec**; unit / envtest на **сериализацию** | Aggregated download; полный parent content **Ready**; несколько типов детей; domain traversal | «API графа стабилен, дерево в поведении ещё не оживлено» |
+| **PR2** | **Один** child в графе **end-to-end** (без доменного writer) | **Было:** временный in-repo scaffold (удалён). **Сейчас:** интеграция **`snapshot_graph_e5_e6_integration_test.go`** — merge refs, child как **registered snapshot kind fixture** (Snapshot kind) + **SnapshotContent/MCP**, parent content **Ready** после child; плюс **PR5a** как доменный writer одного kind. | Subtree download как продукт; несколько детей без ручного merge в тесте | «Дерево на **одном** ребёнке работает» |
+| **PR3** | **Политика агрегации Ready** parent content по persisted content graph | **Сейчас:** snapshot-level `Ready` зеркалит bound `SnapshotContent`; snapshot controllers публикуют `childrenSnapshotContentRefs` в bound content после `GraphReady` и child binding; `SnapshotContentController` валидирует persisted child contents и агрегирует parent content `Ready`. Старые helpers для snapshot-level aggregation не являются SSOT. | Aggregated download (PR4); несколько детей; optional/required в API | «Матрица success / pending / failed зафиксирована тестами на content-level aggregation» |
+| **PR4** | **Aggregated manifests download** (без data) | **SSOT:** [`spec/snapshot-aggregated-manifests-pr4.md`](../spec/snapshot-aggregated-manifests-pr4.md) — endpoint, read-path по **сохранённому** SnapshotContent-графу ([`spec/system-spec.md`](../spec/system-spec.md) **§3.0** ст. 2), fail-whole, merge, циклы/дубликаты. Integration: parent + 1 child, затем parent + 2 children | Data payloads; export/import; restore | «N2b manifests-only **для пользователя** замкнут на чтении subtree». **Real cluster:** `hack/pr4-smoke.sh` (без skip OK) — aggregated до удаления root snapshot; текущий post-delete retained read через `/snapshots/{name}/manifests` является temporary behavior / implementation detail. **TODO:** целевой retained read — `/snapshotcontents/{contentName}/manifests`, а live Snapshot route после удаления должен возвращать `404`. **Strict TTL** (`PR4_SMOKE_REQUIRE_TTL=1`) — на кластере с рабочим Deckhouse ObjectKeeper; TTL снимка задаётся контроллером (`FollowObjectWithTTL` + `spec.ttl`, env/дефолт); см. [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md). |
+| **PR5** | Первый **реальный** domain wiring | **Heterogeneous** дерево на базе **общей** snapshot-модели: **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** для **любых** дочерних kinds, единый content **`Ready`** (каскад), snapshot **`Ready`** как mirror content, **dedup вычисляемый** из API; **без** **вложенного** **`Snapshot`** под root (**INV-T1**), **без** отдельных `domainChild*` / persisted coverage / `SubtreeReady`. Детали — [`design/demo-domain-csd/08-universal-snapshot-tree-model.md`](demo-domain-csd/08-universal-snapshot-tree-model.md). **Имена полей дерева не множатся:** расширяется **семантика элементов** существующих **`children*Refs`** под heterogeneous children; PR4 read-path (§3.0 ст. 2) — в spec вместе с кодом. | До PR5 не начинать, пока **PR1–PR4** не зелёные — иначе неясно, баг в графе, агрегации или домене | «Один реальный доменный сценарий на базе стабильного N2b-скелета»; generic **E5/E6** без временного child-**Snapshot** scaffold в runtime |
+
+**Рекомендуемый порядок:** **PR1 → PR2 → PR3 → PR4**; **PR5** — после стабильности PR1–PR4.
+
+**Правило изменения CRD:** для `childrenSnapshotRefs` (и других API-полей) CRD меняются только через Go API types + `bash hack/generate_code.sh`; ручное редактирование YAML в `crds/` не допускается.
+
+**Целевая архитектура vs код.** В модели PR5 / demo-domain — только **heterogeneous** flow ([`demo-domain-csd/README.md`](demo-domain-csd/README.md)). Ранний временный in-repo scaffold для PR2–PR3 **удалён**; тот же контракт доказывают **`snapshot_graph_e5_e6_integration_test.go`**, **PR5a/PR5b** и unit-тесты **E6**.
+
+**Первый минимальный вход в N2b:** только **PR1** (поля графа + docs/spec + тесты сериализации; **без** изменения семантики **Ready** N2a-leaf и без orchestration).
+
+#### 2.4.3 Demo domain (virtualization-shaped) через CSD — **Proposed**
+
+Целевой референс в пакете demo-domain — **heterogeneous** дерево на **универсальной** модели **[`08-universal-snapshot-tree-model.md`](demo-domain-csd/08-universal-snapshot-tree-model.md)** — те же **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**, один content **`Ready`** с mirror на snapshot, dedup **только вычисление**; **не** отдельный namespace-only graph API, **не** `domainChild*`, **не** persisted `domainCoverage`, **не** `SubtreeReady`. Подробности demo v1: [`demo-domain-csd/README.md`](demo-domain-csd/README.md).
+
+- Пакет: **[`design/demo-domain-csd/README.md`](demo-domain-csd/README.md)** + [`testing/demo-domain-csd-test-plan.md`](../testing/demo-domain-csd-test-plan.md).
+- Фиксация: [`05`](demo-domain-csd/05-tree-and-graph-invariants.md), [`06`](demo-domain-csd/06-coverage-dedup-keys.md), [`07`](demo-domain-csd/07-ready-delete-matrix.md), **[`08`](demo-domain-csd/08-universal-snapshot-tree-model.md)**.
+- **Тесты (после кода):** [`testing/demo-domain-csd-test-plan.md`](../testing/demo-domain-csd-test-plan.md); уровни — [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md) (раздел Demo domain).
+- **Нормативный каркас PR5+** (логическое дерево по **`children*Refs`**, **INV-REF1** / **INV-REF-C1** / **INV-REF-M1** / **INV-REF-M2**, **INV-S0** / **INV-E1**, запрет CSD/ownerRef как SoT дерева/dedup) — **[`spec/system-spec.md`](../spec/system-spec.md) §3** (две стадии — **§3.0**). Расширение **формы элементов** `children*Refs` (GVK+…) и полная фиксация PR4 read-path по SnapshotContent в OpenAPI+коде — вместе с реализацией PR5; мотивы, таблицы **`Ready`**/delete — [`demo-domain-csd/`](demo-domain-csd/README.md).
+
+#### 2.4.4 Порядок имплементации **[`spec/system-spec.md`](../spec/system-spec.md) §3** (execution plan)
+
+Короткая **нарезка атомарных PR** под контракт **§3**: **что** делать — только в spec; **как** и матрицы — в design / test-plan. Таблица **§2.4.2** выше — поставка N2b по полю API (**PR1**), граф + **Ready** (**PR2–PR3**), aggregated (**PR4**), heterogeneous gate (**PR5**); подраздел ниже — **порядок работ внутри линии generic + граф + dedup + Ready** (может частично пересекаться уже закрытыми N2b PR — тогда этап помечается в PR как выполненный / no-op).
+
+**Граница §3-E* vs PR5 (demo-domain).** Срезы **§3-E1…E6** ниже — **подготовка generic-инфраструктуры** в модуле (refs, merge, read-path по **content refs** (§3.0 ст. 2), dedup, **`Ready`**) поверх нормативного **[`spec/system-spec.md`](../spec/system-spec.md) §3**; они **не** являются этапом «написать демо-доменный контроллер». Первый реальный **domain consumer** контракта — **PR5** ([`demo-domain-csd/README.md`](demo-domain-csd/README.md)): CSD, **Demo*Snapshot** / **Content**, запись **`children*Refs`** (§3.0 ст. 1), прохождение generic **Ready** / dedup / обход сохранённого графа. В demo API parent больше не задаётся в spec: parent controller создаёт child snapshot с **ownerReference** на parent и публикует полный `status.childrenSnapshotRefs`. Минимальный spike одного kind **возможен** уже после **E1/E2**; **практически комфортная** точка входа в PR5 — после **E3/E4**, когда не «плавает» слой read-path / **content refs**. Рекомендуемая нарезка внутри PR5: **PR5a** — один доменный kind (например **DemoVirtualDiskSnapshot**), короткий proof (один CSD, один child path, refs); **PR5b** — при необходимости второй kind и вложенность (например **DemoVirtualMachineSnapshot** → Disk) для проверки промежуточного узла.
+
+**Практичный переход (не ждать «идеального» E1–E6).** Не обязательно закрывать все срезы **E1–E6** до конца перед доменом; разумная очередность:
+1. **E3/E4 до рабочего минимума** — зафиксировать поведение вокруг **`childrenSnapshotContentRefs`**; дожать read-path / aggregation (§3.0 ст. 2) настолько, чтобы **domain consumer** не упирался в неясность, **как generic читает сохранённый граф**; **без** лишнего раздувания матрицы **`Ready`** в этих же PR (широкий **Ready** — **E6** / отдельные изменения).
+2. **PR5a** — один реальный demo kind (**DemoVirtualDiskSnapshot**), один **CSD**, один простой child-path; parent-owned запись **`children*Refs`** выполняет **`Snapshot`** через CSD discovery; проверить, что generic читает граф только через registry / **`unstructured`**.
+3. **PR5b** — **DemoVirtualMachineSnapshot** (и при необходимости цепочка VM → Disk), промежуточный узел и каскад **`Ready`**.
+
+**§3-E1 — базовый graph (write + read)**
+Запись **`childrenSnapshotRefs`** как parent-owned complete child set (**INV-REF-M1** / **INV-REF-M2**); generic читает только refs (**INV-REF1**, без list-достройки); в этом срезе **не** опираться на **`childrenSnapshotContentRefs`** для обхода; **без** dedup. **Тест:** один child, happy-path.
+
+**§3-E2 — multi-writer / merge correctness**
+Несколько writers на refs; **RetryOnConflict** / согласованная стратегия patch. **Тесты:** concurrent writers; **нельзя** удалить чужой ref (**INV-REF-M2**).
+
+**§3-E3 — content refs (частично)**
+Использование **`childrenSnapshotContentRefs`** там, где нужно по spec traversal; generic: **без** list-обхода (**INV-REF-C1**); при выбранном варианте — **явный fallback** только по цепочке **snapshot refs**. **Тест:** отсутствие / пустые content refs → **fail-closed** или задокументированный fallback.
+
+**§3-E4 — traversal / aggregation (если выносится отдельным PR)**
+Обход дерева **по refs**; подготовка к aggregated операциям (download / restore по политике N2b); **без** расширения матрицы **Ready** в том же PR (если иначе — разнести). Общий DFS по **`childrenSnapshotContentRefs`** (сортировка детей, циклы) — в коде **`usecase.WalkSnapshotContentSubtree`**; обход работает только по common **`SnapshotContent`** и не использует CSD content-CRD registry. Агрегатор PR4 и интеграции PR5a/PR5b используют **один** ref-only walk; листья common content **без** MCP на aggregated path fail-closed.
+
+**Aggregated Snapshot Read API:** generic endpoint **`/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/{resource}/{name}/manifests`** читает любой namespaced registered snapshot resource как restore point: snapshot → `status.boundSnapshotContentName` → graph registry content GVK → **`BuildAggregatedJSONFromContent`**. Legacy `snapshots/{name}/manifests` сохраняется. Duplicate object identity (`apiVersion|kind|namespace|name`) — fail, без merge/overwrite/silent dedup; HTTP surface — `409 Conflict`. Design/API SSOT: [`snapshot-read.md`](snapshot-read.md), [`../api/snapshot-read.md`](../api/snapshot-read.md).
+
+**§3-E5 — dedup / exclude**
+**INV-S0** / **INV-E1**: вычисление только по дереву текущего run; **fail-closed** при неполных данных. **В коде (root capture):** `usecase.BuildRootNamespaceManifestCaptureTargets` + `collectRunSubtreeManifestExcludeKeys` (обход **`childrenSnapshotContentRefs`** + common SnapshotContent через registry; **без** list subtree); для каждого **`status.childrenSnapshotRefs`** — **`usecase.ResolveChildSnapshotRefToBoundContentName`** (один **`Get`** по **`apiVersion`/`kind`** из ref) + опционально **`EnsureGVKRegistryFromLive`** / **`TryRefresh`** там, где нужен registry для content walk, не для разрешения ref; **`namespacemanifest.FilterManifestTargets`**; wiring в **`snapshot_capture.go`** + **`ArchiveService`** на **`SnapshotReconciler`** (`snapshotgraphregistry.LiveReader`). **Ограничения среза:** при пустых **`childrenSnapshotRefs`** exclude не применяется (как раньше — полный namespace list); при непустых **`childrenSnapshotRefs`** registry **обязателен** для E5 subtree (иначе fail-closed). **Живой registry:** `pkg/snapshotgraphregistry` — полная пересборка Current на каждом **`Refresh`** после reconcile CSD **и** не более **одного** **`TryRefresh`** на пользовательскую операцию generic read-path / E5 при пустом registry или **`ErrChildRefNotRegistered`** (без polling). **Finish line (срез):** при непустых **`status.childrenSnapshotRefs`** первый root **MCR** не создаётся, пока exclude по subtree нельзя посчитать полностью по **уже опубликованному** графу и registry (**`ReasonSubtreeManifestCapturePending`**, короткий requeue); **без** создания искусственного child **`Snapshot`** для этого. **CapturePlanDrift** при subtree-root: удалить **MCR** + requeue (**не** штатный путь к сходимости); для **N2a** без subtree refs — drift по-прежнему **terminal**. Если после exclude не осталось allowlisted целей, root **MCR** с пустыми **`spec.targets`**: **`ManifestCheckpointController`** для SnapshotContent-bound MCR (аннотация **`bound-snapshot-content`**) строит пустой checkpoint вместо ошибки «No targets specified». При **терминальном** сбое дочернего snapshot capture родительский reconcile не перетирает **`ChildSnapshotFailed`** состоянием **`SubtreeManifestCapturePending`**. Integration: **`snapshot_graph_e5_e6_integration_test.go`**, **`snapshot_graph_registry_dynamic_csd_test.go`**; unit — **`root_capture_run_exclude_test.go`**, **`root_capture_e5_registry_unit_test.go`**, **`pkg/snapshotgraphregistry/provider_test.go`**.
+
+**Own scope filtering:** domain controllers формируют own MCR только из ресурсов, принадлежащих текущему domain object, и явно разрешённых root/namespace-level ресурсов. Ресурсы с `ownerReferences` на другой domain object исключаются из own scope родителя и должны покрываться child snapshot subtree или namespace fallback. Детальный рабочий checklist — [`demo-domain-csd/09-materialized-child-content-mcp-and-aggregated-read-checklist.md`](demo-domain-csd/09-materialized-child-content-mcp-and-aggregated-read-checklist.md).
+
+**§3-E6 — Ready (generic child snapshot refs)**
+**Агрегация** parent content по **`status.childrenSnapshotRefs`**: каждый ref **MUST** содержать только **`apiVersion`**, **`kind`**, **`name`**; child namespace всегда берётся из namespace родителя (namespace-local модель, см. **[`spec/system-spec.md`](../spec/system-spec.md) §3.2**). Parent controller владеет полным списком своих children: **`Snapshot`** строит top-level refs через CSD/registry discovery, domain controllers строят refs из собственной модели; child controllers **не** self-register и не патчат parent graph. После discovery/create parent controller выставляет **`GraphReady=True`**. Snapshot controllers после `GraphReady=True` резолвят child snapshot → bound child content, публикуют parent **`SnapshotContent.status.childrenSnapshotContentRefs`** и ensures child content **ownerRef → parent content**; `SnapshotContentController` только валидирует persisted child content refs и агрегирует parent `SnapshotContent Ready`. Snapshot-level `Ready` **не** агрегирует детей и только зеркалит bound content. **Не используется:** persisted coverage set, custom snapshot name convention, registry lookup by kind-name. **Wiring:** dynamic watches child snapshot kinds → parent relays; child content ownerRef → parent content gives fast parent content requeue. **Тесты:** unit и integration по content-level aggregation / mirror-ready. Нормативный минимум — **[`spec/system-spec.md`](../spec/system-spec.md) §3.8**.
+
+**Фактический прогресс срезов §3-E в коде** (объём «сделано / не сделано» без повторения таблиц Must) — в [`operations/project-status.md`](../operations/project-status.md) (строка таблицы N2b generic §3 и блок под ней).
+
+---
+
+**Definition of Done (N2 целиком = N2a ∧ N2b)**
+
+Выполнены DoD **N2a** и **N2b**; out-of-scope выше **не** смешан с закрытием N2 без явного расширения этапа.
+
+---
+
+**Практический task-list (копипаст backlog)**
+
+**N2a:** CRD §4.4.1 + allowlist §4.5 + §4.7 → NS reconciler → download §8.7.1 → integration.
+
+**N2b:** по шагам **§2.4.2** (таблица PR в подразделе **2.4.2** выше в этом документе; PR1→PR4, затем PR5 при необходимости). Порядок имплементации контракта **[`spec/system-spec.md`](../spec/system-spec.md) §3** — **§2.4.4**.
+
+**В этой задаче (только план):** не переписывать CRD N1 без отдельного решения; не менять bind/delete skeleton без необходимости; не включать data snapshots и полный export/import/restore.
+
+### 2.5 Документация и операционка
+
+| # | Задача | Статус |
+|---|--------|--------|
+| D1 | README: зависимости, CSI vs storage.deckhouse.io, manifest vs unified | ✅ [`../README.md`](../README.md) |
+| D2 | RBAC из CSD + hook; CSD vs MCR | ✅ [`../operations/csd-rbac-and-mcr.md`](../operations/csd-rbac-and-mcr.md) |
+| D3 | Runbook: исчезновение CRD (degraded / fail-open); unified runtime: метрики stale/resolved/active, рестарт pod | ✅ [`../operations/runbook-degraded-and-unified-runtime.md`](../operations/runbook-degraded-and-unified-runtime.md) |
+
+---
+
+## 4. Порядок внедрения
+
+1. ~~S1–S2~~ ✅; тест **T1** ✅.
+2. ~~**R1**~~ ✅.
+3. ~~**R2 phase 1**~~ ✅ (CSD reconciler + статусы + тесты); ~~**R4**~~ ✅ в части reconciler (`KindConflict`).
+4. ~~**R2 phase 2a**~~ ✅; ~~**R2 phase 2b (additive watches)**~~ ✅ (`unifiedruntime` + `AddWatch*`). ~~**R3 (ядро)**~~ ✅ — layered state, proof hot-add, Prometheus + лог stale↔resolved. Опционально — доп. proof-сценарии из design note.
+5. ~~**D1–D3**~~ ✅ — обзор ([`README.md`](../README.md)), runbook ([`operations/runbook-degraded-and-unified-runtime.md`](../operations/runbook-degraded-and-unified-runtime.md)), CSD/RBAC/MCR ([`operations/csd-rbac-and-mcr.md`](../operations/csd-rbac-and-mcr.md)). При эволюции кода — синхронизировать эти три файла.
+
+**Рекомендуемый порядок дальше** (после закрытого ядра R2/R3 + D1–D3): не смешивать manifest с rollout-unified в одном PR.
+
+1. ~~**R5 bootstrap config**~~ ✅ — `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS`; Helm `unifiedBootstrapPairs`; unified/generic runtime always-on in v0.
+2. ~~**Точечные integration-тесты**~~ ✅ — `unified_runtime_rbac_eligibility_test.go`: без RBACReady нет записи в `EligibleFromCSD`; после снятия RBACReady resolved теряет пару, monotonic active сохраняет ключ.
+3. ~~**N0 → N1**~~ ✅; **N2** — по **§2.4.1**: **N2a** (первый manifests-only snapshot + OK + download), затем **N2b** (дерево + aggregated download); далее **N3** (restart/hardening), **N4** (лимиты после N2), **N5** (data-layer и полный ТЗ вне manifests-only дерева).
+4. **M1**, затем **M2** — только после стабилизации namespace-flow (**N2a** или явный gate в плане; расширение MCR spec не блокируется закрытием **N2b**, если так зафиксировано); manifest-трек не смешивать с N2 без необходимости.
+
+*(R5 и M1–M2 не смешивать в одном PR без необходимости.)*
+
+---
+
+## 5. Открытые решения
+
+- ~~Отдельный контроллер для CSD vs Runnable в manager~~ — для **R2 phase 1** выбран **reconciler в том же manager** (`SetupWithManager`); отдельный процесс при необходимости пересмотреть позже.
+- Размещение **ValidatingWebhook** (только reject spec) — **пока не в приоритете**; брать после rollout/gates и при явной продуктовой потребности.
+- Feature flag для unified целиком — в связке с **R5** (см. §4).
+
+**Зафиксировано в ADR:** исчезновение CRD — degraded / fail-open; bootstrap до CSD; v1alpha1 только CRD-имена; cluster-only content.

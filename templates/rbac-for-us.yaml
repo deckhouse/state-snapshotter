@@ -9,7 +9,6 @@ rules:
   - state-snapshotter.deckhouse.io
   resources:
   - manifestcapturerequests
-  - manifestcheckpointcontentchunks
   - manifestcheckpoints
   verbs:
   - get

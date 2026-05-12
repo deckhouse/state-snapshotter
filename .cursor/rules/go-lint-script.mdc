@@ -1,0 +1,44 @@
+---
+description: go-lint.sh — GO_BUILD_TAGS parity with CI; commit vs lint order; safe tree after --fix.
+alwaysApply: true
+---
+
+# go-lint.sh (repo root)
+
+## MUST (agent and developer)
+
+1. **Do not** run a full **`./go-lint.sh`** on an **uncommitted** batch of tracked changes unless you intend to **finish with a commit** (including **`git commit --amend`** after `--fix`). The script uses **`--fix`** and then fails if **`git status --porcelain`** is non-empty — a dirty tree before the run is indistinguishable from “linter produced edits”, so exit **1** is ambiguous and wastes a review cycle.
+2. **Preferred order:** commit the current batch (or a small WIP commit) → run **`./go-lint.sh`** → if `--fix` changed files, review **`git diff`** → **`git commit --amend`** (or a follow-up commit) → rerun **`./go-lint.sh`** until it exits **0** and the tree is clean.
+3. If you need linter feedback **while** editing and **do not** want to commit yet: run **`golangci-lint run`** directly from the relevant module (see below), **not** **`./go-lint.sh`**. For compile-only checks use **`go test`** / **`go build`**; do not substitute **`./go-lint.sh`** for that.
+4. If you **do not** plan to commit soon, **do not** run **`./go-lint.sh`** at all; use direct **`golangci-lint`** or skip lint until commit time.
+5. After **`./go-lint.sh`** exits non-zero or prints “Linter requests changes”, inspect **`git diff`**: **`--fix`** may have applied auto-fixes; **commit** or **amend** or revert manually — the script does **not** run **`git checkout -f`**.
+
+## CI parity: `GO_BUILD_TAGS`
+
+- **CI** (`.github/workflows/go_checks.yaml`) sets: `GO_BUILD_TAGS: "ce ee se seplus csepro"`.
+- `./go-lint.sh` runs `golangci-lint` **only** inside `for edition in $GO_BUILD_TAGS`.
+- If the variable is **unset** or empty, the loop **does not run** — linters for `images/*` effectively **do not run**, and the script may exit “success” without a real check.
+
+**Locally, same as CI:**
+
+```bash
+export GO_BUILD_TAGS="ce ee se seplus csepro"
+./go-lint.sh
+```
+
+## Linter without the wrapper (WIP, single edition)
+
+Controller example (binary path as in CI, or local `golangci-lint`):
+
+```bash
+cd images/state-snapshotter-controller
+golangci-lint run --build-tags ce ./...
+```
+
+Repeat with other tags if needed. This avoids changing the global `go-lint.sh` flow and does not unexpectedly mix all editions.
+
+## Previously: tree reset (`git checkout -f`)
+
+The script **no longer** invokes `git checkout -f`. Previously, with a “dirty” `git status` after `--fix`, that **irreversibly wiped** uncommitted changes in tracked files. Now, on a dirty tree the script only prints the diff, marks the run failed, and **leaves** edits in the working copy.
+
+**Bottom line:** if `gci` / `--fix` changed something — review the diff, commit or amend or revert; rerun `./go-lint.sh` until `git status` (for tracked files) is clean after the script.

@@ -1,0 +1,9 @@
+---
+description: When to update project-status; keep status high-level.
+alwaysApply: true
+---
+
+# Operations status update
+
+- After code or documentation changes, update `docs/state-snapshotter-rework/operations/project-status.md` if the change is **critical** to the plan/status. Do not update for minor or cosmetic changes.
+- **project-status.md** must stay high-level: stage status table, short implemented summary, in progress, planned, blockers / rollout dependencies. Do not copy into it: full state machine, long rollout steps, file-level TODOs, or spec/design/testing content. See **status-high-level-only** for strict boundaries.

@@ -1,0 +1,140 @@
+# `Ready` / Failed / Delete: матрица по kinds (v1)
+
+**Статус:** Historical design (частично реализовано).
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+
+**Базовая модель:** единый condition **`Ready`** — [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) §A.4.
+**Связь:** дерево — [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md); dedup — [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md).
+
+**Не использовать:** отдельный condition **`SubtreeReady`**, поля **`domainSubtreeSummary`**, **`domainCoverage`** в CR.
+
+---
+
+## 1. Единый `Ready`: каскад успеха (снизу вверх)
+
+1. **Лист** (например `DemoVirtualDiskSnapshot`): **`Ready=True`** только когда выполнены **все** его жёсткие зависимости (§2 таблица leaf).
+2. **Промежуточный** узел demo VM и **корень** при оценке **детей**: **`Ready=True`** только если **все обязательные** дети из snapshot refs и content refs (с учётом **INV-R2a**) **готовы**. **Как прочитать готовность одного дочернего узла** — **одинаково** для всех контроллеров:
+   1. Если у **snapshot**-ребёнка в API есть **свой** condition **`Ready`** → каскад опирается **только** на него (и на отсутствие противоречия с API).
+   2. Иначе → по **первичной классификации** §3: обычно источник — **owning `*SnapshotContent`**, пока не получена классифицированная **`reason`** снизу.
+   3. Если ни (1), ни (2) по контракту типа **не** применимы → **ошибка модели** (**spec**); родитель остаётся **`Ready=False`** до исправления.
+
+**Сводка: как родитель читает готовность дочернего узла** (то же, что п.2 выше; для реализации — **один** согласованный путь во всех контроллерах):
+
+| Ситуация | Действие |
+|----------|----------|
+| У **snapshot**-ребёнка в API есть свой **`Ready`** | Опираться **только** на него (+ противоречия с API). |
+| **`Ready`** на snapshot **нет** | Идти по **§3**; обычно источник — **owning `*SnapshotContent`**. |
+| Ни один из допустимых путей по типу **не** применим | **Ошибка модели** → родитель **`Ready=False`**. |
+| Состояние ребёнка **нельзя надёжно** определить | Считать ребёнка **не готовым** → родитель **`Ready=False`** (**INV-R4**). |
+
+3. **Корень** (`Snapshot`): **`Ready=True`** только если root namespace MCP (и пр.) по N2a **и** то же условие для **всех** обязательных прямых детей, перечисленных в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** root (и их content-ссылок по политике узла).
+
+**INV-R4 (fail-closed агрегации).** Если состояние **обязательного** ребёнка из refs **нельзя надёжно** определить (ошибка чтения API, временная недоступность, **битый** ref, отсутствует ожидаемый **condition**), родитель **обязан** трактовать ребёнка как **не готового**: свой **`Ready=False`** — **не** оставаться **`Ready=True`** из‑за «не смогли проверить». Конкретные **`reason`** (например **`ChildStateUnknown`**) — в **spec**; дух тот же, что **INV-E1** в [`06-coverage-dedup-keys.md`](06-coverage-dedup-keys.md).
+
+**INV-R2a (обязательность только по refs).** Для агрегации **`Ready`** родитель учитывает как **обязательных** только узлы, **уже включённые** в его **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** этого run. Объект в API, **ещё не** попавший в refs родителя, **не** должен удерживать родителя в **`Ready=False`** как «обязательный ребёнок отсутствует в дереве»; после записи в refs применяются пункты §1 и **INV-R2**. Согласованность refs ↔ API — [`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) §1.
+
+**INV-R2 (структурный инвариант: ребёнок из refs пропал из API).** Если объект перечислен в **`childrenSnapshotRefs`** или в **`childrenSnapshotContentRefs`** как **обязательный** ребёнок (по политике узла) и **отсутствует в API**, родитель **обязан** иметь **`Ready=False`**, **даже если** все остальные зависимости узла ещё «зелёные».
+
+Пока дети не готовы, родитель остаётся **`Ready=False`** с осмысленным **`reason`** (например ожидание детей), без отдельного «subtree» condition.
+
+---
+
+## 2. Leaf `DemoVirtualDiskSnapshot`: когда `Ready=True` (v1)
+
+| Зависимость | Условие |
+|-------------|---------|
+| **Volume** | `VolumeSnapshot` **ReadyToUse** (или принятая политика CSI). |
+| **Manifest** | `SnapshotContent`: MCP **Ready**, chunks консистентны (правила N2a). |
+| **Итог** | **Оба** выполнены. **INV-R1 (fail-closed):** частичная готовность → **`Ready=False`**, `VolumeSnapshotNotReady` / `ManifestCheckpointNotReady` / аналог. |
+
+---
+
+## 3. Каскад деградации (снизу вверх), единый `Ready`
+
+**Текущая реализация E6 (нормативно для runtime):**
+
+- Родительская агрегация `Ready` использует фиксированный приоритет причин:
+  1. `ChildSnapshotFailed`
+  2. `SubtreeManifestCapturePending`
+  3. `ChildSnapshotPending`
+  4. `Completed` (только если блокеров нет)
+- Для child selection используется strict ref (`apiVersion`/`kind`/`name`) и один `Get` в namespace родителя.
+- Отдельной политики «пробрасывать первичную reason неизменной вверх по всем уровням» текущий runtime-контракт не требует.
+
+При любой поломке нижнего уровня:
+
+1. Узел по правилу выше (или leaf snapshot с прямым **`Ready`**) переходит в **`Ready=False`** с **`reason` / `message`**, отражающими **первопричину**.
+2. Родитель при reconcile видит ребёнка **`Ready=False`** или **отсутствующего** ребёнка в API → выставляет **`Ready=False`** и **пробрасывает** причину снизу по правилу ниже.
+3. Каскад **до корня** (`Snapshot`).
+
+**Политика `reason` / `message` (текущая реализация):** для родителя выбирается reason по фиксированному E6-приоритету выше, а не по лексикографическому порядку refs. В `message` допускается контекст по дочерним узлам.
+
+**INV-R5 (несколько детей с разными `reason`).** При нескольких неготовых детях reason родителя определяется тем же E6-приоритетом (`ChildSnapshotFailed` > `SubtreeManifestCapturePending` > `ChildSnapshotPending`), без tie-break по ключу refs.
+
+**Обязательные примеры `reason` (черновик перечня):**
+
+| `reason` | Когда |
+|----------|--------|
+| `ManifestChunkMissing` | Удалена / недоступна chunk, битая склейка MCP. |
+| `ManifestCheckpointMissing` | MCP / checkpoint удалён или недоступен. |
+| `ChildSnapshotMissing` | Дочерний snapshot из **refs** исчез из API (GC, ручное удаление). |
+| `ChildSnapshotContentMissing` | Дочерний **SnapshotContent** исчез. |
+| `VolumeSnapshotNotReady` | VS не Ready / удалён / ошибка драйвера. |
+| `ChildStateUnknown` (имя в **spec**) | Не удалось надёжно прочитать состояние обязательного ребёнка (**INV-R4**). |
+
+**INV-R0 (целостность готовности, только наблюдаемое по API и refs).** Родитель **не** остаётся **`Ready=True`**, если выполняется **любое** из: **(a)** обязательный ребёнок из refs **отсутствует** в API (**INV-R2**); **(b)** у обязательного ребёнка **`Ready=False`**; **(c)** **противоречие** с API (объект формально «готов», но нарушает инвариант типа); **(d)** состояние ребёнка **неопределимо** надёжно (**INV-R4**). Формулировки вроде «subtree физически повреждён» **не** использовать как отдельный критерий — только **(a)–(d)**. **INV-R2** — именованный подслучай **(a)**.
+
+**INV-R3.** Корень **`Ready=True`** только при выполнении §1 и отсутствии противоречий с API; иначе **`Ready=False`** с причиной снизу.
+
+---
+
+## 4. Сценарии деградации (обязательно отразить в тестах)
+
+### 4.1. Успех, затем удалена chunk / сломан MCP
+
+1. Дерево было **`Ready=True`**.
+2. Администратор удаляет **chunk** манифеста (или ломает MCP).
+3. По **приоритету первичной классификации** §3 (п.1–2): при наличии condition на **MCP** / checkpoint — сигнал оттуда; иначе первым выставляет **`Ready=False`** на **`SnapshotContent`** (или иной owning **`*SnapshotContent`**) → **`reason`**: **`ManifestChunkMissing`** / **`ManifestCheckpointMissing`**, `message` с деталями.
+4. Каскад: **disk content** → **disk snapshot** → **VM snapshot** → **root `Snapshot`**: на каждом уровне **`Ready=False`**, причина **отражает первопричину** (не молчаливый False).
+
+### 4.2. Успех, затем удалён дочерний **Snapshot**
+
+1. После успеха удалён например **`DemoVirtualDiskSnapshot`** (ручное удаление / GC).
+2. Родитель (`DemoVirtualMachineSnapshot` или root) при reconcile: ребёнок отсутствует в API при том, что он **обязателен** по refs/политике → **`Ready=False`**, **`reason`**: **`ChildSnapshotMissing`**, `message` с именем/типом.
+
+### 4.3. Успех, затем удалён дочерний **SnapshotContent**
+
+1. Удалён **`SnapshotContent`** (или другой обязательный content).
+2. Snapshot-родитель при reconcile → **`Ready=False`**, **`reason`**: **`ChildSnapshotContentMissing`** (или согласованный код), каскад дальше вверх как в §3.
+
+---
+
+## 5. Таблица «сбой → кто первым `Ready=False`» (v1)
+
+| Ситуация | Первый уровень сигнала | Каскад |
+|----------|------------------------|--------|
+| VS timeout / error | disk snapshot | → VM → root |
+| MCP / chunk | **Сначала** MCP / checkpoint с conditions (§3 п.1); **иначе** owning **`*SnapshotContent`** (§3 п.2) | → disk snapshot → … |
+| Удалён child snapshot | родитель, ожидавший ребёнка | → вверх |
+| Удалён child content | соответствующий snapshot | → вверх |
+
+---
+
+## 6. Delete / ownerRef / финализаторы
+
+Удаление и **GC** следуют **базовой** модели: **`ownerReference`**, финализаторы (кто поставил — тот снимает), политики **Retain/Delete** для content — как в модуле и **[`08` часть B](08-universal-snapshot-tree-model.md)**; этот документ **не** переопределяет общие правила lifecycle. **Связь с `Ready` в этом документе:** удаление объекта, **входящего** в дерево текущего run по **`children*Refs`**, приводит к отсутствию ребёнка в API или к **`Ready=False`** у выживших узлов → родитель переходит в **`Ready=False`** по **INV-R2** / **INV-R0** (и каскад §3). Подробнее: **[`08` B.8](08-universal-snapshot-tree-model.md#b8-взаимодействие-с-деградацией)**.
+
+## 7. Сводная таблица по kind (`Ready` / delete)
+
+| Kind | `Ready` | Удаление | Финализаторы |
+|------|---------|----------|--------------|
+| Root NS | §1–§3 | user | модуль |
+| DemoVirtualMachineSnapshot | все обязательные дети **`Ready=True`** по §1 (через **`children*Refs`**) | owner root | demo |
+| DemoVirtualDiskSnapshot | §2 | owner VM или root | demo |
+| `*SnapshotContent` | **`Ready=True`**, когда связанные MCP/chunks и прочие артефакты **в согласованном состоянии** по правилам типа (N2a для namespace manifest path); иначе **`Ready=False`** с **`reason`** из §3 / §2. **Источник состояния для родительского `*Snapshot`**, если на snapshot **нет** собственного **`Ready`** (§1 п.2, §3). | с snapshot | см. код |
+| VolumeSnapshot | CSI | с disk / политика | demo + CSI |
+
+Детали строк финализаторов — в коде константами.

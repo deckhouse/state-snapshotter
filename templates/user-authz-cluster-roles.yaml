@@ -12,7 +12,6 @@ rules:
   resources:
   - manifestcapturerequests
   - manifestcheckpoints
-  - manifestcheckpointcontentchunks
   verbs:
   - get
   - list
@@ -31,7 +30,6 @@ rules:
   resources:
   - manifestcapturerequests
   - manifestcheckpoints
-  - manifestcheckpointcontentchunks
   verbs:
   - create
   - delete

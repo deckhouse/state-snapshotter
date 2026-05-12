@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,15 +16,42 @@ limitations under the License.
 
 package controllers
 
+import (
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/csd"
+)
+
+const (
+	KindSnapshot                   = common.KindSnapshot
+	KindDemoVirtualDiskSnapshot    = common.KindDemoVirtualDiskSnapshot
+	KindDemoVirtualMachineSnapshot = common.KindDemoVirtualMachineSnapshot
+	KindDemoVirtualDisk            = common.KindDemoVirtualDisk
+	KindDemoVirtualMachine         = common.KindDemoVirtualMachine
+)
+
 // API constants for ObjectKeeper
 const (
 	// DeckhouseAPIVersion is the API version for deckhouse.io resources (ObjectKeeper)
 	// Note: This is group/version, not just group, despite the name.
-	DeckhouseAPIVersion = "deckhouse.io/v1alpha1"
-	KindObjectKeeper    = "ObjectKeeper"
+	DeckhouseAPIVersion                 = common.DeckhouseAPIVersion
+	KindObjectKeeper                    = common.KindObjectKeeper
+	ObjectKeeperModeFollowObject        = common.ObjectKeeperModeFollowObject
+	ObjectKeeperModeFollowObjectWithTTL = common.ObjectKeeperModeFollowObjectWithTTL
 )
 
 // Annotation key constants
 const (
-	AnnotationKeyTTL = "state-snapshotter.deckhouse.io/ttl" // TTL annotation for automatic deletion
+	AnnotationKeyTTL = common.AnnotationKeyTTL // TTL annotation for automatic deletion
+)
+
+const (
+	CSDConditionAccepted  = csd.CSDConditionAccepted
+	CSDConditionRBACReady = csd.CSDConditionRBACReady
+	CSDConditionReady     = csd.CSDConditionReady
+)
+
+const (
+	CSDReasonKindConflict  = csd.CSDReasonKindConflict
+	CSDReasonInvalidSpec   = csd.CSDReasonInvalidSpec
+	CSDReadyReasonNotReady = csd.CSDReadyReasonNotReady
 )

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
@@ -33,6 +34,13 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
+
+func setDiscoveryResources(client *fake.Clientset, resources ...metav1.APIResource) {
+	client.Discovery().(*fakediscovery.FakeDiscovery).Resources = []*metav1.APIResourceList{{
+		GroupVersion: "v1",
+		APIResources: resources,
+	}}
+}
 
 // newFakeDynamicClient creates a fake dynamic client with test resources
 // Resources must be created with proper namespace and name already set
@@ -123,19 +131,13 @@ func TestMCRValidate_RejectClusterScopedResource(t *testing.T) {
 	ctx := context.Background()
 
 	// Setup mock Kubernetes client
-	// Note: fake client's Discovery API will return empty, so we rely on fallback heuristics
-	// For Node, fallback assumes namespaced=true, but we can test the actual behavior
-	// by checking if the validation passes discovery and then fails on cluster-scoped check
 	mockClient := fake.NewSimpleClientset()
+	setDiscoveryResources(mockClient, metav1.APIResource{Name: "nodes", Kind: "Node", Namespaced: false})
 	dynClient := newFakeDynamicClient(map[string]map[string]runtime.Object{})
 	SetKubernetesClient(mockClient)
 	SetDynamicClient(dynClient)
 
 	// Create MCR with cluster-scoped resource
-	// Note: Since fake Discovery API doesn't know about Node being cluster-scoped,
-	// the test will use fallback heuristics which assume namespaced=true
-	// To properly test this, we'd need to mock Discovery API, but for unit tests
-	// we can test the validation logic separately
 	mcr := &storagev1alpha1.ManifestCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "mcr-test-node",
@@ -173,11 +175,45 @@ func TestMCRValidate_RejectClusterScopedResource(t *testing.T) {
 		t.Fatalf("MCRValidate returned error: %v", err)
 	}
 
-	// Note: With fake Discovery API, Node will use fallback which assumes namespaced=true
-	// So this test will pass validation. To properly test cluster-scoped rejection,
-	// we'd need integration tests or a more sophisticated mock.
-	// For now, we test that validation doesn't crash and handles the case gracefully.
-	_ = result
+	if result.Valid {
+		t.Fatal("Expected cluster-scoped Node target to be rejected")
+	}
+	if !contains(result.Message, "cluster-scoped") {
+		t.Fatalf("Expected cluster-scoped rejection, got: %s", result.Message)
+	}
+}
+
+func TestMCRValidate_RejectsNamespaceTarget(t *testing.T) {
+	ctx := context.Background()
+
+	mockClient := fake.NewSimpleClientset()
+	setDiscoveryResources(mockClient, metav1.APIResource{Name: "namespaces", Kind: "Namespace", Namespaced: false})
+	SetKubernetesClient(mockClient)
+	SetDynamicClient(newFakeDynamicClient(map[string]map[string]runtime.Object{}))
+
+	mcr := &storagev1alpha1.ManifestCaptureRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mcr-namespace",
+			Namespace: "default",
+		},
+		Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+			Targets: []storagev1alpha1.ManifestTarget{{
+				APIVersion: "v1",
+				Kind:       "Namespace",
+				Name:       "default",
+			}},
+		},
+	}
+	result, err := MCRValidate(ctx, testCreateAdmissionReview(), mcr)
+	if err != nil {
+		t.Fatalf("MCRValidate returned error: %v", err)
+	}
+	if result.Valid {
+		t.Fatal("Expected Namespace target to be rejected")
+	}
+	if !contains(result.Message, "cluster-scoped") {
+		t.Fatalf("Expected cluster-scoped rejection, got: %s", result.Message)
+	}
 }
 
 func TestMCRValidate_RejectWithoutGETPermission(t *testing.T) {
@@ -326,7 +362,7 @@ func TestMCRValidate_RejectSecretInDifferentNamespace(t *testing.T) {
 	}
 }
 
-func TestMCRValidate_EmptyTargets(t *testing.T) {
+func TestMCRValidate_AllowsEmptyTargets(t *testing.T) {
 	ctx := context.Background()
 
 	mockClient := fake.NewSimpleClientset()
@@ -356,13 +392,8 @@ func TestMCRValidate_EmptyTargets(t *testing.T) {
 		t.Fatalf("MCRValidate returned error: %v", err)
 	}
 
-	if result.Valid {
-		t.Error("Expected MCR to be rejected (empty targets), but it was accepted")
-	}
-
-	expectedMsg := "At least one target must be specified"
-	if result.Message != expectedMsg {
-		t.Errorf("Expected error message %q, but got: %s", expectedMsg, result.Message)
+	if !result.Valid {
+		t.Errorf("Expected MCR with empty targets to be valid, got: %s", result.Message)
 	}
 }
 
@@ -525,6 +556,16 @@ func TestMCRValidate_MultipleTargets(t *testing.T) {
 
 	if !result.Valid {
 		t.Errorf("Expected MCR with multiple valid targets to be valid, but got: %s", result.Message)
+	}
+}
+
+func testCreateAdmissionReview() *model.AdmissionReview {
+	return &model.AdmissionReview{
+		Operation: model.OperationCreate,
+		UserInfo: authenticationv1.UserInfo{
+			Username: "test-user",
+			Groups:   []string{"system:authenticated"},
+		},
 	}
 }
 

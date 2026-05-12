@@ -3,9 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: (devel)
-  labels:
-    module: state-snapshotter
+    controller-gen.kubebuilder.io/version: v0.18.0
   name: manifestcapturerequests.state-snapshotter.deckhouse.io
 spec:
   group: state-snapshotter.deckhouse.io
@@ -83,10 +81,8 @@ spec:
               conditions:
                 description: |-
                   Conditions represent the latest available observations of the request state
-                  Expected condition types:
-                  - Ready: indicates whether the capture request is ready (True) or not (False)
-                  - Failed: indicates whether the capture request has failed (True) or not (False)
-                  - Processing: indicates whether the capture request is being processed (True) or not (False)
+                  Only Ready condition is used - it is set to True on success or False on final failure
+                  Ready condition is set only in final state (terminal success or terminal failure)
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

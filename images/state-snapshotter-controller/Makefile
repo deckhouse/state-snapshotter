@@ -1,4 +1,4 @@
-.PHONY: help test test-unit test-e2e build clean deps setup-envtest
+.PHONY: help test test-unit test-integration test-e2e build clean deps setup-envtest
 
 # Default target
 .DEFAULT_GOAL := help
@@ -40,12 +40,32 @@ setup-envtest: ## Setup envtest binaries (required for e2e tests)
 			echo "$(YELLOW)Note: Run 'make test-e2e' to download binaries automatically$(NC)"; \
 		fi
 
-test: test-unit ## Run all tests (unit + e2e)
+test: test-unit test-integration ## Run all tests (unit + integration + e2e)
 
 test-unit: ## Run unit tests only
 	@echo "$(BLUE)Running unit tests...$(NC)"
-	$(GO) test -v -timeout $(TEST_TIMEOUT) ./internal/... -coverprofile=coverage.out
+	$(GO) test -v -timeout $(TEST_TIMEOUT) ./pkg/... ./internal/... -coverprofile=coverage.out
 	@echo "$(GREEN)Unit tests completed!$(NC)"
+
+test-integration: ## Run integration tests (requires envtest)
+	@echo "$(BLUE)Running integration tests...$(NC)"
+	@echo "$(YELLOW)Setting up envtest (this may download binaries on first run)...$(NC)"
+	@GOPATH=$$($(GO) env GOPATH) && \
+		if [ ! -f $$GOPATH/bin/setup-envtest ]; then \
+			echo "$(YELLOW)Installing setup-envtest...$(NC)"; \
+			$(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest; \
+		fi && \
+		KUBEBUILDER_ASSETS=$$($$GOPATH/bin/setup-envtest use -p path) && \
+		export KUBEBUILDER_ASSETS && \
+		if [ -n "$$KUBEBUILDER_ASSETS" ]; then \
+			echo "$(BLUE)KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS$(NC)"; \
+			if [ -d "$$KUBEBUILDER_ASSETS" ]; then \
+				echo "$(YELLOW)Ensuring binaries are executable...$(NC)"; \
+				chmod +x $$KUBEBUILDER_ASSETS/etcd $$KUBEBUILDER_ASSETS/kube-apiserver $$KUBEBUILDER_ASSETS/kubectl 2>/dev/null || true; \
+			fi; \
+		fi && \
+		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v
+	@echo "$(GREEN)Integration tests completed!$(NC)"
 
 test-e2e: ## Run e2e tests (automatically sets up envtest)
 	@echo "$(BLUE)Running e2e tests...$(NC)"

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package manifestcapture
 
 import (
 	"bytes"
@@ -43,15 +43,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
-)
-
-const (
-	// ChunkNamePrefix is the prefix for chunk names
-	ChunkNamePrefix = "mcp-"
 )
 
 // setSingleCondition sets a condition, removing any existing condition of the same type first
@@ -142,19 +140,12 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Guard: Check if checkpoint already exists (idempotency check)
-	// If checkpoint exists but MCR is not terminal, finalize MCR status
+	// Guard: Check if checkpoint already exists (idempotency check).
+	// MCR Ready=True is delayed until the checkpoint is handed off to SnapshotContent.
 	if mcr.Status.CheckpointName != "" {
 		var checkpoint storagev1alpha1.ManifestCheckpoint
 		if err := r.Get(ctx, client.ObjectKey{Name: mcr.Status.CheckpointName}, &checkpoint); err == nil {
-			// Checkpoint exists - finalize MCR status (idempotent finalization)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", mcr.Status.CheckpointName)); err != nil {
-				if errors.IsNotFound(err) {
-					return ctrl.Result{}, nil
-				}
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
+			return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &checkpoint)
 		}
 		// Checkpoint doesn't exist - proceed with normal processing
 	}
@@ -205,17 +196,6 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 	}
 
-	// Validate targets
-	if len(mcr.Spec.Targets) == 0 {
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, "No targets specified"); err != nil {
-			if errors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
 	// Collect all target objects
 	// Note: NotFound errors from collectTargetObjects are always from target objects, not related objects.
 	// Related objects (ConfigMaps, Secrets from volumes) are collected in collectRelatedObjects,
@@ -256,108 +236,128 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		// Generate deterministic checkpoint name based on MCR UID
 		// This prevents creating multiple checkpoints if reconciliation happens multiple times
 		// before status is successfully updated
-		checkpointName = r.generateCheckpointNameFromUID(string(mcr.UID))
+		checkpointName = namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
 		r.Logger.Info("Starting checkpoint creation",
 			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name),
 			"checkpoint", checkpointName,
 			"targets", len(mcr.Spec.Targets))
 	}
 
-	// ADR: Create only ONE ObjectKeeper: ret-mcr-<namespace>-<mcrName>
-	// This ObjectKeeper:
-	// - Uses FollowObject mode to follow MCR (no TTL)
-	// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
-	// - When MCR is deleted, ObjectKeeper is automatically deleted (FollowObject)
-	// - When ObjectKeeper is deleted, GC deletes MCP (via ownerRef)
-	// - TTL and request cleanup are handled by MCR controller, not ObjectKeeper
-	retainerName := fmt.Sprintf("ret-mcr-%s-%s", mcr.Namespace, mcr.Name)
-	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
-	// Update Processing message to show progress
-	r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
+	controllerTrue := func() *bool { b := true; return &b }()
 
-	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
-	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
-	switch {
-	case errors.IsNotFound(err):
-		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: DeckhouseAPIVersion,
-				Kind:       KindObjectKeeper,
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: retainerName,
-			},
-			Spec: deckhousev1alpha1.ObjectKeeperSpec{
-				Mode: "FollowObject",
-				FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
-					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
-					Kind:       "ManifestCaptureRequest",
-					Namespace:  mcr.Namespace,
-					Name:       mcr.Name,
-					UID:        string(mcr.UID),
-				},
-			},
+	boundContentName := ""
+	if mcr.Annotations != nil {
+		boundContentName = mcr.Annotations[namespacemanifest.AnnotationBoundSnapshotContent]
+	}
+
+	var mcpOwnerRefs []metav1.OwnerReference
+
+	if boundContentName != "" {
+		r.Logger.Info("Snapshot-bound capture: MCP ownerRef -> SnapshotContent",
+			"snapshotContent", boundContentName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		r.updateProcessingMessage(ctx, mcr, "Resolving SnapshotContent for checkpoint ownerRef...")
+		boundContent := &snapstorage.SnapshotContent{}
+		if err := r.Get(ctx, client.ObjectKey{Name: boundContentName}, boundContent); err != nil {
+			if errors.IsNotFound(err) {
+				msg := fmt.Sprintf("SnapshotContent %q not found", boundContentName)
+				if ferr := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, msg); ferr != nil {
+					if errors.IsNotFound(ferr) {
+						return ctrl.Result{}, nil
+					}
+					return ctrl.Result{}, ferr
+				}
+				return ctrl.Result{}, fmt.Errorf("%s", msg)
+			}
+			return ctrl.Result{}, fmt.Errorf("get SnapshotContent %q: %w", boundContentName, err)
 		}
-		if err := r.Create(ctx, objectKeeper); err != nil {
-			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
-			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
-				if errors.IsNotFound(err) {
-					return ctrl.Result{}, nil
+		mcpOwnerRefs = []metav1.OwnerReference{{
+			APIVersion: snapstorage.SchemeGroupVersion.String(),
+			Kind:       "SnapshotContent",
+			Name:       boundContent.Name,
+			UID:        boundContent.UID,
+			Controller: controllerTrue,
+		}}
+	} else {
+		// Generic execution ObjectKeeper names are UID-aware so stale keepers from a deleted MCR
+		// cannot block a recreated request with the same namespace/name.
+		retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
+		r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
+
+		objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+		err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
+		switch {
+		case errors.IsNotFound(err):
+			objectKeeper = &deckhousev1alpha1.ObjectKeeper{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: controllercommon.DeckhouseAPIVersion,
+					Kind:       controllercommon.KindObjectKeeper,
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: retainerName,
+				},
+				Spec: deckhousev1alpha1.ObjectKeeperSpec{
+					Mode: "FollowObject",
+					FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+						APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+						Kind:       "ManifestCaptureRequest",
+						Namespace:  mcr.Namespace,
+						Name:       mcr.Name,
+						UID:        string(mcr.UID),
+					},
+				},
+			}
+			if err := r.Create(ctx, objectKeeper); err != nil {
+				r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
+				if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
+					if errors.IsNotFound(err) {
+						return ctrl.Result{}, nil
+					}
+					return ctrl.Result{}, err
 				}
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, err
+			r.Logger.Info("Created ObjectKeeper", "name", retainerName)
+			if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
+			r.Logger.Info("✅ Step 1 complete: Created ObjectKeeper",
+				"objectKeeper", retainerName,
+				"uid", objectKeeper.UID,
+				"checkpoint", checkpointName,
+				"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
+		case err != nil:
+			return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
+		default:
+			if objectKeeper.Spec.FollowObjectRef == nil {
+				return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
+			}
+			if objectKeeper.Spec.FollowObjectRef.UID != string(mcr.UID) {
+				return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another MCR (UID mismatch: expected %s, got %s)",
+					retainerName, string(mcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
+			}
+			r.Logger.Info("ObjectKeeper already exists, using existing", "objectKeeper", retainerName, "uid", objectKeeper.UID)
 		}
-		r.Logger.Info("Created ObjectKeeper", "name", retainerName)
-		// After create, ensure it's observable via apiserver (UID barrier pattern)
-		// Always read via APIReader (direct API, no cache) to ensure read-after-write consistency
-		// This guarantees that ObjectKeeper is visible in apiserver before proceeding
-		// This is not retry logic - it's handling cache lag after Create()
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-			// UID barrier: if object is not yet observable via APIReader, requeue briefly
-			// This ensures read-after-write consistency for ownerRef UID
-			// This is not retry logic - it's handling cache lag after Create()
-			return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-		}
-		r.Logger.Info("✅ Step 1 complete: Created ObjectKeeper",
-			"objectKeeper", retainerName,
-			"uid", objectKeeper.UID,
-			"checkpoint", checkpointName,
-			"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
-	case err != nil:
-		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	default:
-		// ObjectKeeper exists - validate it belongs to this MCR
-		// This protects against race conditions where MCR was deleted and recreated with same name
-		if objectKeeper.Spec.FollowObjectRef == nil {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
-		}
-		if objectKeeper.Spec.FollowObjectRef.UID != string(mcr.UID) {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another MCR (UID mismatch: expected %s, got %s)",
-				retainerName, string(mcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
-		}
-		r.Logger.Info("ObjectKeeper already exists, using existing", "objectKeeper", retainerName, "uid", objectKeeper.UID)
+		mcpOwnerRefs = []metav1.OwnerReference{{
+			APIVersion: controllercommon.DeckhouseAPIVersion,
+			Kind:       controllercommon.KindObjectKeeper,
+			Name:       retainerName,
+			UID:        objectKeeper.UID,
+			Controller: controllerTrue,
+		}}
 	}
 
-	// If checkpoint already exists → finalize MCR (idempotent finalization)
-	// This handles the case where checkpoint was created but MCR status update failed
+	// If checkpoint already exists → publish checkpointName and wait for SnapshotContent handoff.
+	// This handles the case where checkpoint was created but MCR status update failed.
 	var existingCheckpoint storagev1alpha1.ManifestCheckpoint
 	if err := r.Get(ctx, client.ObjectKey{Name: checkpointName}, &existingCheckpoint); err == nil {
-		r.Logger.Info("Checkpoint already exists, finalizing MCR",
+		r.Logger.Info("Checkpoint already exists, checking SnapshotContent handoff before MCR completion",
 			"checkpoint", checkpointName)
 		mcr.Status.CheckpointName = checkpointName
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s already exists", checkpointName)); err != nil {
-			if errors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &existingCheckpoint)
 	}
 
-	// Create ManifestCheckpoint with ownerRef to ret-mcr-* ObjectKeeper
-	// ADR: Checkpoint MUST have ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
-	// This is the single ObjectKeeper that holds both MCR and MCP
+	// Create ManifestCheckpoint: ownerRef -> SnapshotContent (snapshot capture) or ObjectKeeper (generic MCR capture).
 	checkpoint := &storagev1alpha1.ManifestCheckpoint{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
@@ -369,16 +369,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				"state-snapshotter.deckhouse.io/source-namespace": mcr.Namespace,
 				"state-snapshotter.deckhouse.io/source-request":   mcr.Name,
 			},
-			// ADR: Checkpoint has ownerRef ONLY on ret-mcr-<namespace>-<mcrName>
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: DeckhouseAPIVersion,
-					Kind:       KindObjectKeeper,
-					Name:       retainerName, // This is ret-mcr-<namespace>-<mcrName>
-					UID:        objectKeeper.UID,
-					Controller: func() *bool { b := true; return &b }(),
-				},
-			},
+			OwnerReferences: mcpOwnerRefs,
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{
 			SourceNamespace: mcr.Namespace,
@@ -395,8 +386,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		if !errors.IsAlreadyExists(err) {
 			r.Logger.Error(err, "Failed to create ManifestCheckpoint",
 				"checkpoint", checkpointName,
-				"owner", retainerName,
-				"ownerUID", objectKeeper.UID)
+				"ownerRefs", mcpOwnerRefs)
 			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
@@ -440,9 +430,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		r.Logger.Info("✅ Step 2 complete: Created ManifestCheckpoint",
 			"checkpoint", checkpointName,
 			"uid", checkpoint.UID,
-			"ownerRefs", ownerRefDetails,
-			"objectKeeperName", retainerName,
-			"objectKeeperUID", objectKeeper.UID)
+			"ownerRefs", ownerRefDetails)
 		// Set Processing condition on checkpoint immediately after creation
 		now := metav1.Now()
 		setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
@@ -533,26 +521,82 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		"chunks", len(chunks),
 		"totalObjects", totalObjects)
 
-	// Update MCR status
+	// Publish checkpointName now, but keep MCR Processing until SnapshotContent owns the artifact.
 	mcr.Status.CheckpointName = checkpointName
-	if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s created successfully", checkpointName)); err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
+	if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpointName, fmt.Sprintf("Checkpoint %s created; waiting for SnapshotContent ownerRef handoff", checkpointName)); err != nil {
 		return ctrl.Result{}, err
 	}
+	return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, checkpoint)
+}
 
-	// NOTE: ObjectKeeper uses FollowObject mode (no TTL)
-	// ObjectKeeper follows MCR lifecycle and is automatically deleted when MCR is deleted
-	// TTL and request cleanup are handled by MCR controller, not ObjectKeeper
-
-	r.Logger.Info("ManifestCaptureRequest processed successfully",
-		"name", mcr.Name,
-		"checkpoint", checkpointName,
-		"chunks", len(chunks),
-		"objects", totalObjects)
-
+func (r *ManifestCheckpointController) finalizeMCRIfCheckpointHandedOff(
+	ctx context.Context,
+	mcr *storagev1alpha1.ManifestCaptureRequest,
+	checkpoint *storagev1alpha1.ManifestCheckpoint,
+) (ctrl.Result, error) {
+	ready := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
+	if ready == nil {
+		if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpoint.Name, fmt.Sprintf("Checkpoint %s has no Ready condition yet", checkpoint.Name)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	if ready.Status == metav1.ConditionFalse && ready.Reason == storagev1alpha1.ManifestCheckpointConditionReasonFailed {
+		mcr.Status.CheckpointName = checkpoint.Name
+		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, ready.Message); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if ready.Status != metav1.ConditionTrue {
+		if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpoint.Name, ready.Message); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	if !manifestCheckpointOwnedBySnapshotContent(checkpoint) {
+		if err := r.markMCRCheckpointPendingHandoff(ctx, mcr, checkpoint.Name, fmt.Sprintf("Checkpoint %s is Ready; waiting for SnapshotContent ownerRef handoff", checkpoint.Name)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	mcr.Status.CheckpointName = checkpoint.Name
+	if err := r.finalizeMCR(ctx, mcr, metav1.ConditionTrue, storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted, fmt.Sprintf("Checkpoint %s handed off to SnapshotContent", checkpoint.Name)); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
+}
+
+func manifestCheckpointOwnedBySnapshotContent(checkpoint *storagev1alpha1.ManifestCheckpoint) bool {
+	for _, ref := range checkpoint.OwnerReferences {
+		if ref.APIVersion == snapstorage.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *ManifestCheckpointController) markMCRCheckpointPendingHandoff(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest, checkpointName, message string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.ManifestCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err != nil {
+			return err
+		}
+		current.Status.CheckpointName = checkpointName
+		readyCondition := meta.FindStatusCondition(current.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+		transitionTime := metav1.Now()
+		if readyCondition != nil && readyCondition.Reason == storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing {
+			transitionTime = readyCondition.LastTransitionTime
+		}
+		setSingleCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ManifestCaptureRequestConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.ManifestCaptureRequestConditionReasonProcessing,
+			Message:            message,
+			LastTransitionTime: transitionTime,
+		})
+		return r.Status().Update(ctx, current)
+	})
 }
 
 func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context, mcr *storagev1alpha1.ManifestCaptureRequest) ([]unstructured.Unstructured, error) {
@@ -564,6 +608,13 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	// But only if enableFiltering is true (default: false - include everything as-is)
 	addObject := func(obj *unstructured.Unstructured) {
 		var finalObj *unstructured.Unstructured
+
+		// Secret filtering is a security invariant for ManifestCheckpoint and is
+		// enforced even when general backup filtering is disabled.
+		if common.ShouldSkipSecretObject(obj) {
+			r.Logger.Info("Skipping secret object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
+			return
+		}
 
 		// Apply filtering only if enabled
 		if r.Config.EnableFiltering {
@@ -586,6 +637,10 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			// If filtering disabled, use object as-is (no filtering, no cleaning)
 			finalObj = obj
 		}
+		finalObj = common.SanitizeObjectForManifestCheckpoint(finalObj)
+		if finalObj == nil {
+			return
+		}
 
 		// FIX: Restore apiVersion/kind because JSON round-trip in CleanObjectForSnapshot
 		// or normalizeObjectForJSON may drop TypeMeta fields
@@ -605,16 +660,14 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		}
 	}
 
-	// Step 1: Collect target objects (TZ section 5, step 1)
-	// TZ: All targets must be namespaced objects in the same namespace as ManifestCaptureRequest
-	// Cluster-scoped resources are NOT supported in targets
+	// Step 1: Collect target objects (TZ section 5, step 1).
+	// MCR targets are namespaced in the same namespace as ManifestCaptureRequest.
 	for _, target := range mcr.Spec.Targets {
 		gv, err := schema.ParseGroupVersion(target.APIVersion)
 		if err != nil {
 			return nil, fmt.Errorf("invalid apiVersion %s: %w", target.APIVersion, err)
 		}
 
-		// Get the resource (all targets are namespaced, so use MCR namespace)
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(schema.GroupVersionKind{
 			Group:   gv.Group,
@@ -622,17 +675,15 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			Kind:    target.Kind,
 		})
 		obj.SetName(target.Name)
+		key := client.ObjectKey{Namespace: mcr.Namespace, Name: target.Name}
 		obj.SetNamespace(mcr.Namespace)
 
-		if err := r.Get(ctx, client.ObjectKey{
-			Namespace: mcr.Namespace,
-			Name:      target.Name,
-		}, obj); err != nil {
+		if err := r.Get(ctx, key, obj); err != nil {
 			// Preserve original error for IsNotFound check in caller
 			// errors.IsNotFound works with wrapped errors (fmt.Errorf with %w preserves error type via errors.Unwrap)
 			// NotFound → Ready=False immediately (terminal state)
 			// To retry, user must delete and recreate MCR
-			return nil, fmt.Errorf("failed to get %s %s/%s: %w", target.Kind, mcr.Namespace, target.Name, err)
+			return nil, fmt.Errorf("failed to get %s %s: %w", target.Kind, key.String(), err)
 		}
 
 		// Add target object (filtering happens inside addObject)
@@ -757,10 +808,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		"objects", len(objects),
 		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes)
 
-	// Handle empty objects
-	if len(objects) == 0 {
-		r.Logger.Info("createChunks: No objects to chunk, creating empty chunk")
-		// Create empty chunk
+	createEmptyChunk := func() ([]storagev1alpha1.ChunkInfo, error) {
 		emptyJSON := []byte("[]")
 		// Get gzip bytes first for size calculation
 		gzipBytes, err := r.compressToBytes(emptyJSON)
@@ -771,10 +819,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
 
 		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, ChunkNamePrefix) {
-			checkpointID = checkpointName[len(ChunkNamePrefix):]
+		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
+			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
 		}
-		chunkName := fmt.Sprintf("%s%s-0", ChunkNamePrefix, checkpointID)
+		chunkName := fmt.Sprintf("%s%s-0", namespacemanifest.CheckpointNamePrefix, checkpointID)
 
 		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{
 			TypeMeta: metav1.TypeMeta{
@@ -822,23 +870,42 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		}, nil
 	}
 
+	// Handle empty objects
+	if len(objects) == 0 {
+		r.Logger.Info("createChunks: No objects to chunk, creating empty chunk")
+		return createEmptyChunk()
+	}
+
 	// Convert objects to JSON array format
 	// Normalize objects to ensure they are pure map[string]interface{} without yaml.MapSlice
 	// This prevents Key/Value serialization when reading chunks later
 	jsonObjects := make([]interface{}, 0, len(objects))
 	for _, obj := range objects {
+		if common.ShouldSkipSecretObject(&obj) {
+			r.Logger.Info("Skipping secret object before chunk storage", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
+			continue
+		}
+		sanitized := common.SanitizeObjectForManifestCheckpoint(&obj)
+		if sanitized == nil {
+			continue
+		}
+
 		// Normalize object to ensure clean JSON serialization
-		normalized := r.normalizeObjectForJSON(obj.Object)
+		normalized := r.normalizeObjectForJSON(sanitized.Object)
 
 		// FIX: Ensure apiVersion and kind are present in normalized object
 		// normalizeObjectForJSON works on obj.Object (map), which doesn't include TypeMeta
 		// We need to explicitly add apiVersion and kind to the normalized map
 		if normalizedMap, ok := normalized.(map[string]interface{}); ok {
-			normalizedMap["apiVersion"] = obj.GetAPIVersion()
-			normalizedMap["kind"] = obj.GetKind()
+			normalizedMap["apiVersion"] = sanitized.GetAPIVersion()
+			normalizedMap["kind"] = sanitized.GetKind()
 		}
 
 		jsonObjects = append(jsonObjects, normalized)
+	}
+	if len(jsonObjects) == 0 {
+		r.Logger.Info("createChunks: No objects left after checkpoint filtering, creating empty chunk")
+		return createEmptyChunk()
 	}
 
 	// Split objects into chunks based on COMPRESSED size
@@ -911,10 +978,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	for i, chunk := range chunks {
 		// Extract ID from checkpoint name (remove prefix if present)
 		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, ChunkNamePrefix) {
-			checkpointID = checkpointName[len(ChunkNamePrefix):]
+		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
+			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
 		}
-		chunkName := fmt.Sprintf("%s%s-%d", ChunkNamePrefix, checkpointID, i)
+		chunkName := fmt.Sprintf("%s%s-%d", namespacemanifest.CheckpointNamePrefix, checkpointID, i)
 
 		// Marshal chunk objects to JSON array
 		chunkJSON, err := json.Marshal(chunk.objects)
@@ -1096,18 +1163,6 @@ func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData str
 	}
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
-}
-
-// generateCheckpointNameFromUID generates a deterministic checkpoint name from MCR UID
-// This prevents creating multiple checkpoints if reconciliation happens multiple times
-// before status is successfully updated (e.g., due to status update failures)
-func (r *ManifestCheckpointController) generateCheckpointNameFromUID(mcrUID string) string {
-	// Use SHA256 hash of MCR UID to get deterministic, RFC 1123 compliant name
-	// Take first 16 hex chars (8 bytes) for checkpoint ID
-	hash := sha256.Sum256([]byte(mcrUID))
-	id := hex.EncodeToString(hash[:8]) // 8 bytes = 16 hex chars
-
-	return fmt.Sprintf("%s%s", ChunkNamePrefix, id)
 }
 
 // loadConfigFromConfigMap loads controller configuration from optional ConfigMap
@@ -1308,7 +1363,7 @@ func (r *ManifestCheckpointController) finalizeMCR(
 func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.ManifestCaptureRequest) {
 	// Don't overwrite if annotation already exists
 	if mcr.Annotations != nil {
-		if _, exists := mcr.Annotations[AnnotationKeyTTL]; exists {
+		if _, exists := mcr.Annotations[controllercommon.AnnotationKeyTTL]; exists {
 			return
 		}
 	}
@@ -1320,7 +1375,7 @@ func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.Man
 	if r.Config != nil && r.Config.DefaultTTLStr != "" {
 		ttlStr = r.Config.DefaultTTLStr
 	}
-	mcr.Annotations[AnnotationKeyTTL] = ttlStr
+	mcr.Annotations[controllercommon.AnnotationKeyTTL] = ttlStr
 }
 
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {
@@ -1464,6 +1519,7 @@ func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Cont
 				"expirationTime", expirationTime,
 				"ttl", defaultTTL)
 
+			// MCP deletion is handled by ObjectKeeper (FollowObject + ownerRef).
 			if err := client.Delete(ctx, mcr); err != nil {
 				if errors.IsNotFound(err) {
 					// Already deleted, that's fine (double-delete is safe)

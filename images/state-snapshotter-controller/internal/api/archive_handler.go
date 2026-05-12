@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -239,42 +238,6 @@ type CheckpointInfoResponse struct {
 }
 
 // ============================================================================
-// Snapshot API Endpoints (for future domain snapshots)
-// ============================================================================
-
-// HandleGetSnapshotArchive handles GET /api/v1/namespaces/<ns>/snapshots/<name>/archive
-// This endpoint will be used when domain snapshots (VirtualMachineSnapshot, etc.) are implemented
-// For now, it returns 501 Not Implemented
-func (h *ArchiveHandler) HandleGetSnapshotArchive(w http.ResponseWriter, r *http.Request) {
-	// Extract namespace and snapshot name from URL path
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/namespaces/")
-	parts := strings.Split(path, "/")
-
-	if len(parts) < 4 || parts[1] != "snapshots" {
-		h.writeErrorResponse(w, http.StatusBadRequest, "Invalid URL path. Expected: /api/v1/namespaces/<ns>/snapshots/<name>/archive", "")
-		return
-	}
-
-	namespace := parts[0]
-	snapshotName := parts[2]
-
-	// TODO: When domain snapshots are implemented:
-	// 1. Get SnapshotContent by namespace and name
-	// 2. Extract checkpointName from SnapshotContent.status.checkpointName
-	// 3. Validate that SourceNamespace matches namespace
-	// 4. Redirect to checkpoint archive endpoint
-
-	h.writeErrorResponse(w, http.StatusNotImplemented, "Snapshot API will be available when SnapshotContent is implemented",
-		fmt.Sprintf("Use checkpoint API directly: /api/v1/checkpoints/<checkpoint-name>/archive. Namespace: %s, Snapshot: %s", namespace, snapshotName))
-}
-
-// HandleGetSnapshotInfo handles GET /api/v1/namespaces/<ns>/snapshots/<name>/info
-func (h *ArchiveHandler) HandleGetSnapshotInfo(w http.ResponseWriter, _ *http.Request) {
-	// TODO: Implement when domain snapshots are available
-	h.writeErrorResponse(w, http.StatusNotImplemented, "Snapshot info API not yet implemented", "")
-}
-
-// ============================================================================
 // Kubernetes APIService Endpoints
 // ============================================================================
 
@@ -348,18 +311,29 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 		GroupVersion: "subresources.state-snapshotter.deckhouse.io/v1alpha1",
 		APIResources: []metav1.APIResource{
 			// Primary resource: required by Kubernetes API aggregation layer
-			{
-				Name:         "manifestcheckpoints",
-				SingularName: "manifestcheckpoint",
-				Namespaced:   false, // ManifestCheckpoint is cluster-scoped
-				Kind:         "ManifestCheckpoint",
-				Verbs:        []string{"get", "list"},
-			},
 			// Subresource: the actual /manifests endpoint
 			{
 				Name:       "manifestcheckpoints/manifests",
 				Namespaced: false, // ManifestCheckpoint is cluster-scoped
 				Kind:       "ManifestCheckpoint",
+				Verbs:      []string{"get"},
+			},
+			{
+				Name:       "snapshots/manifests",
+				Namespaced: true,
+				Kind:       "Snapshot",
+				Verbs:      []string{"get"},
+			},
+			{
+				Name:       "snapshots/manifests-with-data-restoration",
+				Namespaced: true,
+				Kind:       "Snapshot",
+				Verbs:      []string{"get"},
+			},
+			{
+				Name:       "snapshots/manifests",
+				Namespaced: true,
+				Kind:       "Snapshot",
 				Verbs:      []string{"get"},
 			},
 		},
@@ -373,33 +347,6 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 	}
 }
 
-// HandleListManifestCheckpoints handles GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints
-// Returns empty list to satisfy Kubernetes API aggregation layer requirements
-// Note: This is a subresource API, actual list should be queried via main API group (state-snapshotter.deckhouse.io/v1alpha1)
-func (h *ArchiveHandler) HandleListManifestCheckpoints(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	// Build selfLink for kubectl compatibility
-	selfLink := r.URL.Path
-	if r.URL.RawQuery != "" {
-		selfLink += "?" + r.URL.RawQuery
-	}
-
-	// Return empty list structure in Kubernetes API format
-	listResponse := map[string]interface{}{
-		"kind":       "ManifestCheckpointList",
-		"apiVersion": "subresources.state-snapshotter.deckhouse.io/v1alpha1",
-		"items":      []interface{}{},
-		"metadata": map[string]interface{}{
-			"resourceVersion": "0",
-			"selfLink":        selfLink,
-		},
-	}
-
-	_ = json.NewEncoder(w).Encode(listResponse)
-}
-
 // HandleGetManifests handles GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests
 // This is the Kubernetes APIService endpoint for the /manifests subresource
 func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Request, checkpointName string) {
@@ -409,29 +356,6 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 	var checkpoint storagev1alpha1.ManifestCheckpoint
 	if err := h.client.Get(r.Context(), types.NamespacedName{Name: checkpointName}, &checkpoint); err != nil {
 		if errors.IsNotFound(err) {
-			// Log detailed information about checkpoint not found
-			// Check if ObjectKeeper exists to help diagnose GC issues
-			// Note: ObjectKeeper name pattern is ret-mcr-{namespace}-{mcrName}, not ret-{checkpointName}
-			// For legacy checkpoints, we check the old pattern
-			retainerName := fmt.Sprintf("ret-%s", checkpointName)
-			var objectKeeper metav1.PartialObjectMetadata
-			objectKeeper.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "deckhouse.io",
-				Version: "v1alpha1",
-				Kind:    "ObjectKeeper",
-			})
-			objectKeeperExists := false
-			objectKeeperUID := ""
-			if err := h.client.Get(r.Context(), types.NamespacedName{Name: retainerName}, &objectKeeper); err == nil {
-				objectKeeperExists = true
-				objectKeeperUID = string(objectKeeper.UID)
-			}
-			h.logger.Error(err, "Checkpoint not found",
-				"checkpoint", checkpointName,
-				"objectKeeperExists", objectKeeperExists,
-				"objectKeeperName", retainerName,
-				"objectKeeperUID", objectKeeperUID,
-				"note", "If ObjectKeeper exists but checkpoint doesn't, GC may have deleted checkpoint due to ownerRef mismatch")
 			status := metav1.Status{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Status",
@@ -621,19 +545,10 @@ type ListCheckpointsResponse struct {
 // Health Check Endpoints
 // ============================================================================
 
-// HandleHealth handles GET /health
+// HandleHealth handles GET /healthz (Kubernetes standard endpoint)
 func (h *ArchiveHandler) HandleHealth(w http.ResponseWriter, _ *http.Request) {
 	response := map[string]string{
 		"status": "ok",
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
-}
-
-// HandleReady handles GET /ready (legacy endpoint)
-func (h *ArchiveHandler) HandleReady(w http.ResponseWriter, _ *http.Request) {
-	response := map[string]string{
-		"status": "ready",
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
@@ -713,28 +628,6 @@ func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
 	// List checkpoints (exact match)
 	mux.HandleFunc("/api/v1/checkpoints", h.HandleListCheckpoints)
 
-	// Snapshot endpoints (for future use)
-	mux.HandleFunc("/api/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
-		// Extract path after /api/v1/namespaces/
-		path := strings.TrimPrefix(r.URL.Path, "/api/v1/namespaces/")
-		parts := strings.Split(path, "/")
-
-		// Expected: <namespace>/snapshots/<name>/<action>
-		if len(parts) >= 4 && parts[1] == "snapshots" {
-			action := parts[3]
-			switch action {
-			case "archive":
-				h.HandleGetSnapshotArchive(w, r)
-			case "info":
-				h.HandleGetSnapshotInfo(w, r)
-			default:
-				h.writeErrorResponse(w, http.StatusNotFound, "Not found", fmt.Sprintf("Unknown action: %s", action))
-			}
-		} else {
-			h.writeErrorResponse(w, http.StatusNotFound, "Not found", "")
-		}
-	})
-
 	// Kubernetes APIService endpoints
 	// Path: /apis/subresources.state-snapshotter.deckhouse.io
 	// Handle API group discovery endpoint
@@ -750,46 +643,27 @@ func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1", h.HandleAPIResourceListDiscovery)
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/", h.HandleAPIResourceListDiscovery)
 
-	// Path: /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints
-	// Supports:
-	//   - GET /apis/.../manifestcheckpoints (list - returns empty list)
-	//   - GET /apis/.../manifestcheckpoints/<name>/manifests (subresource)
-	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints", func(w http.ResponseWriter, r *http.Request) {
-		// Handle list endpoint - check path without trailing slash and ignore query parameters
-		// Kubernetes may call with query params like ?limit=500
-		path := strings.TrimSuffix(r.URL.Path, "/")
-		if path == "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints" {
-			if r.Method != http.MethodGet {
-				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported for list")
-				return
-			}
-			h.HandleListManifestCheckpoints(w, r)
-			return
-		}
-	})
-
-	// Path: /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests
+	// Path: /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/", func(w http.ResponseWriter, r *http.Request) {
 		// Extract path after /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/
 		path := strings.TrimPrefix(r.URL.Path, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/")
+		path = strings.TrimSuffix(path, "/")
 
 		if path == "" {
 			// Should not happen due to routing, but handle gracefully
-			h.HandleListManifestCheckpoints(w, r)
-			return
-		}
-
-		// Split path: <name>/<subresource>
-		parts := strings.SplitN(path, "/", 2)
-		if len(parts) != 2 {
-			// GET without subresource - return 404 with proper Kubernetes error
 			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required: use /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests")
 			return
 		}
 
+		// Split path: <name>[/<subresource>]
+		parts := strings.SplitN(path, "/", 2)
 		checkpointName := parts[0]
-		subresource := parts[1]
+		if len(parts) == 1 {
+			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required: use /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/<name>/manifests")
+			return
+		}
 
+		subresource := parts[1]
 		switch subresource {
 		case "manifests":
 			if r.Method != http.MethodGet {
@@ -804,11 +678,9 @@ func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
 
 	// Health check endpoints (Kubernetes standard)
 	mux.HandleFunc("/healthz", h.HandleHealth)
+	mux.HandleFunc("/readyz", h.HandleHealth)
 	mux.HandleFunc("/livez", h.HandleLive)
-	// Legacy endpoints (for backward compatibility)
-	mux.HandleFunc("/health", h.HandleHealth)
-	mux.HandleFunc("/ready", h.HandleReady)
 
 	// Log health check endpoint registration
-	h.logger.Info("Health check endpoints registered", "healthz", "/healthz", "livez", "/livez", "health", "/health", "ready", "/ready")
+	h.logger.Info("Health check endpoints registered", "healthz", "/healthz", "readyz", "/readyz", "livez", "/livez")
 }

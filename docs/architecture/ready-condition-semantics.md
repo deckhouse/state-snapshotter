@@ -82,7 +82,7 @@ conditions:
   - `Ready=True` с любым другим `reason` запрещено.
 - **`Failed`**: Операция завершилась с ошибкой. Ресурс в финальном неуспешном состоянии.
 - **`InvalidSpec`**: Спецификация ресурса некорректна. Операция не может быть начата.
-- **`InternalError`**: Внутренняя ошибка контроллера (legacy, для обратной совместимости).
+- **`InternalError`**: Внутренняя ошибка контроллера (устойчивое имя `reason` для сбоев внутри reconcile).
 
 ---
 
@@ -198,7 +198,7 @@ message: "<what is wrong>"
 - `Ready=True` (всегда с `reason=Completed`)
 - `Ready=False` с `reason=Failed`
 - `Ready=False` с `reason=InvalidSpec`
-- `Ready=False` с `reason=InternalError` (legacy)
+- `Ready=False` с `reason=InternalError`
 
 **НЕ терминальное состояние:**
 - `Ready=False` с `reason=Processing` (требует продолжения обработки)
@@ -354,7 +354,7 @@ const (
 	// ConditionReasonInvalidSpec indicates invalid resource specification
 	ConditionReasonInvalidSpec = "InvalidSpec"
 	
-	// ConditionReasonInternalError indicates internal error (legacy, for backward compatibility)
+	// ConditionReasonInternalError indicates internal controller fault during reconcile
 	ConditionReasonInternalError = "InternalError"
 )
 ```

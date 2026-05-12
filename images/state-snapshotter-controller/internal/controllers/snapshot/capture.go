@@ -1,0 +1,676 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package snapshot
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
+	"sort"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
+)
+
+const labelSnapshotUID = "state-snapshotter.deckhouse.io/snapshot-uid"
+
+// errManifestCapturePlanDrift is returned when an existing MCR for this Snapshot has a different
+// target set than the current namespace listing; MCR spec is not silently rewritten.
+var errManifestCapturePlanDrift = errors.New("manifest capture plan drift")
+
+// deleteSnapshotManifestCaptureRequest removes the namespace-flow MCR after capture is persisted.
+// NotFound is success; other errors are returned so the reconciler can retry.
+func (r *SnapshotReconciler) deleteSnapshotManifestCaptureRequest(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) error {
+	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := r.Client.Get(ctx, key, mcr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get ManifestCaptureRequest %s: %w", key.String(), err)
+	}
+	if err := r.Client.Delete(ctx, mcr); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete ManifestCaptureRequest %s: %w", key.String(), err)
+	}
+	return nil
+}
+
+// reconcileChildrenRefsE6ParentReadyOrPatch applies E6 aggregation for status.childrenSnapshotRefs (strict
+// apiVersion/kind/name refs; single Get per child). Returns (allChildrenAllowParentSuccess, result, err):
+// when false, result is from patchSnapshotReadyFromE6 and the caller must return it; when true, caller may mark root capture complete.
+func (r *SnapshotReconciler) reconcileChildrenRefsE6ParentReadyOrPatch(
+	ctx context.Context,
+	parent *storagev1alpha1.Snapshot,
+	subtreePending bool,
+	subtreeMsg string,
+	selfCaptureComplete bool,
+) (allChildrenAllowParentSuccess bool, res ctrl.Result, err error) {
+	if len(parent.Status.ChildrenSnapshotRefs) == 0 {
+		return true, ctrl.Result{}, nil
+	}
+	sum, err := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.e6ChildStatusReader(), parent.Status.ChildrenSnapshotRefs, parent.Namespace)
+	if err != nil {
+		return false, ctrl.Result{}, err
+	}
+	in := usecase.E6ParentReadyPickInput{
+		HasChildFailed:                sum.HasFailed,
+		ChildFailedMessage:            usecase.JoinNonEmpty(sum.FailedMessages, "; "),
+		SubtreeManifestCapturePending: subtreePending,
+		SubtreeMessage:                subtreeMsg,
+		HasChildPending:               sum.HasPending,
+		ChildPendingMessage:           usecase.JoinNonEmpty(sum.PendingParts, "; "),
+		SelfCaptureComplete:           selfCaptureComplete,
+	}
+	out := usecase.PickParentReadyReasonE6(in)
+	if out.Ready {
+		return true, ctrl.Result{}, nil
+	}
+	parentKey := types.NamespacedName{Namespace: parent.Namespace, Name: parent.Name}
+	res, err = r.patchSnapshotReadyFromE6(ctx, parentKey, out.Reason, out.Message)
+	return false, res, err
+}
+
+// reconcileCaptureN2a drives manifest capture via MCR->ManifestCheckpoint after root SnapshotContent is bound.
+func (r *SnapshotReconciler) reconcileCaptureN2a(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	content *storagev1alpha1.SnapshotContent,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if r.Dynamic == nil {
+		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic client is nil")
+	}
+	if r.APIReader == nil {
+		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: APIReader is nil")
+	}
+
+	_, res, err := r.ensureSnapshotRootObjectKeeper(ctx, nsSnap, content)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if res.RequeueAfter > 0 || res.Requeue {
+		return res, nil
+	}
+
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
+		return ctrl.Result{}, err
+	}
+	if done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content); done {
+		return res, err
+	}
+
+	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, nsSnap, content.Name)
+	if err != nil {
+		freshParent := &storagev1alpha1.Snapshot{}
+		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
+			return ctrl.Result{}, gerr
+		}
+		hasSubtree := len(freshParent.Status.ChildrenSnapshotRefs) > 0
+		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding;
+		// do not fail capture as ListFailed — requeue like ChildSnapshotPending.
+		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
+			errors.Is(err, usecase.ErrRunGraphChildNotBound) ||
+			errors.Is(err, usecase.ErrRunGraphChildSnapshotNotFound) ||
+			(hasSubtree && errors.Is(err, usecase.ErrRunGraphChildNotReachable)) ||
+			(hasSubtree && errors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady))
+		if transientChildGraph {
+			cur := meta.FindStatusCondition(freshParent.Status.Conditions, snapshotpkg.ConditionReady)
+			if cur != nil && cur.Reason == snapshotpkg.ReasonChildSnapshotFailed {
+				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+			}
+			var reason string
+			var msg string
+			if hasSubtree {
+				sum, serr := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.e6ChildStatusReader(), freshParent.Status.ChildrenSnapshotRefs, freshParent.Namespace)
+				if serr != nil {
+					return ctrl.Result{}, serr
+				}
+				out := usecase.PickParentReadyReasonE6(usecase.E6ParentReadyPickInput{
+					HasChildFailed:                sum.HasFailed,
+					ChildFailedMessage:            usecase.JoinNonEmpty(sum.FailedMessages, "; "),
+					SubtreeManifestCapturePending: true,
+					SubtreeMessage:                err.Error(),
+					HasChildPending:               sum.HasPending,
+					ChildPendingMessage:           usecase.JoinNonEmpty(sum.PendingParts, "; "),
+					SelfCaptureComplete:           false,
+				})
+				if out.Reason == snapshotpkg.ReasonChildSnapshotFailed {
+					parentKey := types.NamespacedName{Namespace: freshParent.Namespace, Name: freshParent.Name}
+					return r.patchSnapshotReadyFromE6(ctx, parentKey, out.Reason, out.Message)
+				}
+				reason = out.Reason
+				msg = out.Message
+			} else {
+				reason = snapshotpkg.ReasonChildSnapshotPending
+				msg = err.Error()
+			}
+			// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
+			if hasSubtree {
+				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
+					return ctrl.Result{}, delErr
+				}
+			}
+			meta.SetStatusCondition(&freshParent.Status.Conditions, metav1.Condition{
+				Type:               snapshotpkg.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            msg,
+				ObservedGeneration: freshParent.Generation,
+			})
+			if uerr := r.Client.Status().Update(ctx, freshParent); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+			_ = content
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
+		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
+			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())
+		}
+		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
+	}
+	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
+	if err != nil {
+		if errors.Is(err, errManifestCapturePlanDrift) {
+			freshParent := &storagev1alpha1.Snapshot{}
+			if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
+				return ctrl.Result{}, gerr
+			}
+			// Subtree-root: plan drift is not the primary convergence path; delete stale MCR and retry with fresh targets.
+			// Plain N2a (no childrenSnapshotRefs): terminal CapturePlanDrift for operator visibility.
+			if len(freshParent.Status.ChildrenSnapshotRefs) > 0 {
+				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
+					return ctrl.Result{}, delErr
+				}
+				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
+			return r.failCapture(ctx, freshParent, content, "CapturePlanDrift", err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	if res.RequeueAfter > 0 || res.Requeue {
+		return res, nil
+	}
+
+	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
+		return ctrl.Result{}, err
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if apierrors.IsNotFound(err) {
+			meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
+				Type:               snapshotpkg.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "ManifestCheckpointPending",
+				Message:            fmt.Sprintf("waiting for ManifestCheckpoint %q", mcpName),
+				ObservedGeneration: nsSnap.Generation,
+			})
+			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
+		reason := "ManifestCheckpointNotReady"
+		msg := "ManifestCheckpoint not ready"
+		if readyCond != nil {
+			reason = readyCond.Reason
+			msg = readyCond.Message
+		}
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
+			(readyCond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed) {
+			return r.failCapture(ctx, nsSnap, content, "ManifestCheckpointFailed", msg)
+		}
+		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
+			Type:               snapshotpkg.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            msg,
+			ObservedGeneration: nsSnap.Generation,
+		})
+		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+
+	if readyCond.Reason != ssv1alpha1.ManifestCheckpointConditionReasonCompleted {
+		// Ready=True with unexpected reason — still treat as success if True (defensive).
+		logger.Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
+	}
+
+	return r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+}
+
+// reconcileIfRootManifestCheckpointAlreadyReady handles idempotent steady state: MCP name on SnapshotContent, MCP Ready,
+// Snapshot Ready, and MCR already removed. Skips recreating MCR when capture is complete.
+func (r *SnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyReady(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	content *storagev1alpha1.SnapshotContent,
+) (done bool, res ctrl.Result, err error) {
+	mcpName := content.Status.ManifestCheckpointName
+	if mcpName == "" {
+		return false, ctrl.Result{}, nil
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, ctrl.Result{}, nil
+		}
+		return true, ctrl.Result{}, err
+	}
+	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
+		return false, ctrl.Result{}, nil
+	}
+
+	// Steady-state fast path only after the request is gone; while MCR exists we must run
+	// ensureManifestCaptureRequest (capture plan drift vs live namespace).
+	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
+	staleMCR := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := r.Client.Get(ctx, mcrKey, staleMCR); err == nil {
+		readyCond := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse && readyCond.Reason == "CapturePlanDrift" {
+			return true, ctrl.Result{}, nil
+		}
+		return false, ctrl.Result{}, nil
+	} else if !apierrors.IsNotFound(err) {
+		return true, ctrl.Result{}, err
+	}
+
+	res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+	return true, res, err
+}
+
+func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	_ string,
+) (ctrl.Result, error) {
+	fresh := &storagev1alpha1.Snapshot{}
+	nsKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	var gerr error
+	if r.APIReader != nil {
+		gerr = r.APIReader.Get(ctx, nsKey, fresh)
+	} else {
+		gerr = r.Client.Get(ctx, nsKey, fresh)
+	}
+	if gerr != nil {
+		return ctrl.Result{}, gerr
+	}
+	if fresh.Status.BoundSnapshotContentName == "" {
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionReady)
+	if contentReady == nil || contentReady.Status != metav1.ConditionTrue {
+		reason := snapshotpkg.ReasonManifestCapturePending
+		message := fmt.Sprintf("waiting for SnapshotContent %q Ready", content.Name)
+		if contentReady != nil {
+			reason = contentReady.Reason
+			message = contentReady.Message
+		}
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur := &storagev1alpha1.Snapshot{}
+			if err := r.Client.Get(ctx, nsKey, cur); err != nil {
+				return err
+			}
+			cur.Status.ObservedGeneration = cur.Generation
+			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+				Type:               snapshotpkg.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            message,
+				ObservedGeneration: cur.Generation,
+			})
+			return r.Client.Status().Update(ctx, cur)
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady)
+	if ready == nil || ready.Status != contentReady.Status || ready.Reason != contentReady.Reason || ready.Message != contentReady.Message {
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur := &storagev1alpha1.Snapshot{}
+			if err := r.Client.Get(ctx, nsKey, cur); err != nil {
+				return err
+			}
+			cur.Status.ObservedGeneration = cur.Generation
+			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+				Type:               snapshotpkg.ConditionReady,
+				Status:             contentReady.Status,
+				Reason:             contentReady.Reason,
+				Message:            contentReady.Message,
+				ObservedGeneration: cur.Generation,
+			})
+			return r.Client.Status().Update(ctx, cur)
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	post := &storagev1alpha1.Snapshot{}
+	if err := r.Client.Get(ctx, nsKey, post); err != nil {
+		return ctrl.Result{}, err
+	}
+	mcrReady, err := r.snapshotManifestCaptureRequestReadyForCleanup(ctx, post)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !mcrReady {
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	if err := r.deleteSnapshotManifestCaptureRequest(ctx, post); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.patchSnapshotManifestCaptureRequestName(ctx, post, ""); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *SnapshotReconciler) snapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) (bool, error) {
+	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
+	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.Client, key, nsSnap.Status.BoundSnapshotContentName)
+}
+
+func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
+	nsSnap.Status.ObservedGeneration = nsSnap.Generation
+	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
+		Type:               snapshotpkg.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            msg,
+		ObservedGeneration: nsSnap.Generation,
+	})
+	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
+		return ctrl.Result{}, err
+	}
+	_ = content
+	return ctrl.Result{}, nil
+}
+
+// ensureSnapshotRootObjectKeeper creates the cluster-scoped ret-snap-* ObjectKeeper.
+// Root SnapshotContent gets metadata.ownerReferences -> that ObjectKeeper (controller) so that when the
+// Deckhouse ObjectKeeper controller deletes the OK after follow+TTL, Kubernetes GC removes retained root content and
+// cascades to MCP / child content. The OK itself must not list SnapshotContent in ownerReferences (wrong direction for TTL).
+//
+// spec.mode is always FollowObjectWithTTL; spec.followObjectRef targets the root Snapshot; spec.ttl is
+// SnapshotRootOKTTL from controller config (env override or built-in default). Execution-chain ObjectKeepers (MCR) stay FollowObject without TTL.
+func (r *SnapshotReconciler) ensureSnapshotRootObjectKeeper(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
+	ok, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
+		ctx,
+		r.Client,
+		r.APIReader,
+		r.Config,
+		nsSnap,
+		storagev1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindSnapshot),
+	)
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	if res.Requeue || res.RequeueAfter > 0 {
+		return ok, res, nil
+	}
+	patchRes, err := r.ensureRootSnapshotContentOwnedByObjectKeeper(ctx, content, ok)
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	if patchRes.Requeue || patchRes.RequeueAfter > 0 {
+		return ok, patchRes, nil
+	}
+	return ok, ctrl.Result{}, nil
+}
+
+// ensureRootSnapshotContentOwnedByObjectKeeper patches root SnapshotContent to reference the root ObjectKeeper.
+func (r *SnapshotReconciler) ensureRootSnapshotContentOwnedByObjectKeeper(
+	ctx context.Context,
+	content *storagev1alpha1.SnapshotContent,
+	ok *deckhousev1alpha1.ObjectKeeper,
+) (ctrl.Result, error) {
+	changed, err := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, content, controllercommon.RootObjectKeeperOwnerReference(ok))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+// snapshotOwnerReferenceForMCR is set on ManifestCaptureRequest so Kubernetes GC removes the
+// request when the Snapshot is deleted (same namespace; in-flight capture cleanup).
+func snapshotOwnerReferenceForMCR(ns *storagev1alpha1.Snapshot) metav1.OwnerReference {
+	b := true
+	return metav1.OwnerReference{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "Snapshot",
+		Name:       ns.Name,
+		UID:        ns.UID,
+		Controller: &b,
+	}
+}
+
+func manifestCaptureRequestOwnerRefMatchesSnapshot(ref metav1.OwnerReference, ns *storagev1alpha1.Snapshot) bool {
+	return ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() &&
+		ref.Kind == "Snapshot" &&
+		ref.Name == ns.Name &&
+		ref.UID == ns.UID
+}
+
+func manifestCaptureRequestHasOwnerRefToSnapshot(refs []metav1.OwnerReference, ns *storagev1alpha1.Snapshot) bool {
+	for i := range refs {
+		if manifestCaptureRequestOwnerRefMatchesSnapshot(refs[i], ns) {
+			return true
+		}
+	}
+	return false
+}
+
+// manifestCaptureRequestConflictingSnapshotOwner is true if another Snapshot claims this MCR.
+func manifestCaptureRequestConflictingSnapshotOwner(refs []metav1.OwnerReference, ns *storagev1alpha1.Snapshot) bool {
+	for i := range refs {
+		ref := refs[i]
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "Snapshot" &&
+			(ref.Name != ns.Name || ref.UID != ns.UID) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *SnapshotReconciler) namespaceRootManifestCapturePersistedOnContent(ctx context.Context, content *storagev1alpha1.SnapshotContent) bool {
+	mcpName := content.Status.ManifestCheckpointName
+	if mcpName == "" {
+		return false
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		return false
+	}
+	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+	return readyCond != nil && readyCond.Status == metav1.ConditionTrue
+}
+
+func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, targets []namespacemanifest.ManifestTarget) (*ssv1alpha1.ManifestCaptureRequest, ctrl.Result, error) {
+	name := namespacemanifest.SnapshotMCRName(nsSnap.UID)
+	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: name}
+
+	specTargets := make([]ssv1alpha1.ManifestTarget, 0, len(targets))
+	for _, t := range targets {
+		specTargets = append(specTargets, ssv1alpha1.ManifestTarget{
+			APIVersion: t.APIVersion,
+			Kind:       t.Kind,
+			Name:       t.Name,
+		})
+	}
+
+	existing := &ssv1alpha1.ManifestCaptureRequest{}
+	err := r.Client.Get(ctx, key, existing)
+	switch {
+	case apierrors.IsNotFound(err):
+		freshContent := &storagev1alpha1.SnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, freshContent); err == nil {
+			if r.namespaceRootManifestCapturePersistedOnContent(ctx, freshContent) {
+				// Another reconcile finished capture and deleted the MCR; avoid recreating the request.
+				return nil, ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+			}
+		}
+		mcr := &ssv1alpha1.ManifestCaptureRequest{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: nsSnap.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					snapshotOwnerReferenceForMCR(nsSnap),
+				},
+				Labels: map[string]string{
+					labelSnapshotUID: string(nsSnap.UID),
+				},
+				Annotations: map[string]string{
+					namespacemanifest.AnnotationBoundSnapshotContent: content.Name,
+				},
+			},
+			Spec: ssv1alpha1.ManifestCaptureRequestSpec{Targets: specTargets},
+		}
+		if err := r.Client.Create(ctx, mcr); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
+			}
+			return nil, ctrl.Result{}, err
+		}
+		created := &ssv1alpha1.ManifestCaptureRequest{}
+		if err := r.Client.Get(ctx, key, created); err != nil {
+			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+		}
+		if err := r.patchSnapshotManifestCaptureRequestName(ctx, nsSnap, name); err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		return created, ctrl.Result{}, nil
+	case err != nil:
+		return nil, ctrl.Result{}, err
+	default:
+		if existing.Labels == nil || existing.Labels[labelSnapshotUID] != string(nsSnap.UID) {
+			return nil, ctrl.Result{}, fmt.Errorf("ManifestCaptureRequest %s exists but is not owned by this Snapshot (stale or manual)", key.String())
+		}
+		if manifestCaptureRequestConflictingSnapshotOwner(existing.OwnerReferences, nsSnap) {
+			return nil, ctrl.Result{}, fmt.Errorf("ManifestCaptureRequest %s has ownerReference to a different Snapshot", key.String())
+		}
+		if !manifestCaptureRequestHasOwnerRefToSnapshot(existing.OwnerReferences, nsSnap) {
+			base := existing.DeepCopy()
+			existing.OwnerReferences = append(existing.OwnerReferences, snapshotOwnerReferenceForMCR(nsSnap))
+			if err := r.Client.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
+				return nil, ctrl.Result{}, err
+			}
+			return nil, ctrl.Result{Requeue: true}, nil
+		}
+		if existing.Annotations == nil || existing.Annotations[namespacemanifest.AnnotationBoundSnapshotContent] != content.Name {
+			base := existing.DeepCopy()
+			if existing.Annotations == nil {
+				existing.Annotations = map[string]string{}
+			}
+			existing.Annotations[namespacemanifest.AnnotationBoundSnapshotContent] = content.Name
+			if err := r.Client.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
+				return nil, ctrl.Result{}, err
+			}
+			return nil, ctrl.Result{Requeue: true}, nil
+		}
+		if !manifestTargetsEqual(existing.Spec.Targets, specTargets) {
+			return nil, ctrl.Result{}, fmt.Errorf("%w: ManifestCaptureRequest %s spec.targets differ from current resolved capture targets; delete the MCR to retry with a fresh plan", errManifestCapturePlanDrift, key.String())
+		}
+		if err := r.patchSnapshotManifestCaptureRequestName(ctx, nsSnap, name); err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		return existing, ctrl.Result{}, nil
+	}
+}
+
+func (r *SnapshotReconciler) patchSnapshotManifestCaptureRequestName(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, name string) error {
+	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &storagev1alpha1.Snapshot{}
+		if err := r.Client.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		if fresh.Status.ManifestCaptureRequestName == name {
+			return nil
+		}
+		base := fresh.DeepCopy()
+		fresh.Status.ManifestCaptureRequestName = name
+		return r.Client.Status().Patch(ctx, fresh, client.MergeFrom(base))
+	})
+}
+
+// manifestTargetsEqual compares capture plans in canonical order (APIVersion, Kind, Name).
+// New MCR targets are always sorted; existing spec may be unsorted, so both sides are sorted before compare.
+func manifestTargetsEqual(a, b []ssv1alpha1.ManifestTarget) bool {
+	aa := append([]ssv1alpha1.ManifestTarget(nil), a...)
+	bb := append([]ssv1alpha1.ManifestTarget(nil), b...)
+	sortManifestSpecTargets(aa)
+	sortManifestSpecTargets(bb)
+	if len(aa) != len(bb) {
+		return false
+	}
+	for i := range aa {
+		if aa[i].APIVersion != bb[i].APIVersion || aa[i].Kind != bb[i].Kind || aa[i].Name != bb[i].Name {
+			return false
+		}
+	}
+	return true
+}
+
+func sortManifestSpecTargets(ts []ssv1alpha1.ManifestTarget) {
+	sort.Slice(ts, func(i, j int) bool {
+		a, b := ts[i], ts[j]
+		if a.APIVersion != b.APIVersion {
+			return a.APIVersion < b.APIVersion
+		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return a.Name < b.Name
+	})
+}
