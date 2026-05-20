@@ -3,6 +3,7 @@ package restore
 import (
 	"testing"
 
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -35,8 +36,17 @@ func TestTransform_ConvertsPVCToVRR(t *testing.T) {
 		Content: &unstructured.Unstructured{
 			Object: map[string]interface{}{"metadata": map[string]interface{}{"uid": "uid-12345678"}},
 		},
-		DataRefKind: "VolumeSnapshotContent",
-		DataRefName: "vsc-1",
+		DataBindings: []snapshot.DataBindingRef{{
+			Target: snapshot.ObjectRef{
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Name:       "data-pvc",
+			},
+			Artifact: snapshot.ObjectRef{
+				Kind: "VolumeSnapshotContent",
+				Name: "vsc-1",
+			},
+		}},
 	}
 
 	opts := Options{
@@ -88,7 +98,7 @@ func TestTransform_ConvertsPVCToVRR(t *testing.T) {
 	}
 }
 
-func TestTransform_PVCRequiresDataRef(t *testing.T) {
+func TestTransform_PVCRequiresDataRefsBinding(t *testing.T) {
 	pvc := unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "v1",
 		"kind":       "PersistentVolumeClaim",
@@ -111,6 +121,6 @@ func TestTransform_PVCRequiresDataRef(t *testing.T) {
 
 	_, err := NewTransformer().Transform([]unstructured.Unstructured{pvc}, opts, node)
 	if err == nil {
-		t.Fatal("expected error when dataRef is missing for PVC")
+		t.Fatal("expected error when dataRefs binding is missing for PVC")
 	}
 }

@@ -95,7 +95,7 @@ type testSnapshotContentLike struct {
 	metav1.ObjectMeta
 	specSnapshotRef                   *ObjectRef
 	statusManifestCheckpointName      string
-	statusDataRef                     *ObjectRef
+	statusDataRefs                    []DataBindingRef
 	statusChildrenSnapshotContentRefs []ObjectRef
 	statusConditions                  []metav1.Condition
 	statusDataConsistency             string
@@ -120,8 +120,8 @@ func (t *testSnapshotContentLike) GetStatusManifestCheckpointName() string {
 	return t.statusManifestCheckpointName
 }
 
-func (t *testSnapshotContentLike) GetStatusDataRef() *ObjectRef {
-	return t.statusDataRef
+func (t *testSnapshotContentLike) GetStatusDataRefs() []DataBindingRef {
+	return t.statusDataRefs
 }
 
 func (t *testSnapshotContentLike) GetStatusChildrenSnapshotContentRefs() []ObjectRef {
@@ -330,7 +330,7 @@ func TestSnapshotLike_GettersArePure(t *testing.T) {
 // 2. Call all getter methods multiple times:
 //   - GetSpecSnapshotRef()
 //   - GetStatusManifestCheckpointName()
-//   - GetStatusDataRef()
+//   - GetStatusDataRefs()
 //   - GetStatusChildrenSnapshotContentRefs()
 //   - GetStatusConditions()
 //   - GetStatusDataConsistency()
@@ -362,11 +362,14 @@ func TestSnapshotContentLike_GettersArePure(t *testing.T) {
 		Kind: "VirtualMachineSnapshot",
 		Name: "parent-snapshot",
 	}
-	initialDataRef := &ObjectRef{
-		APIVersion: "snapshot.storage.k8s.io/v1",
-		Kind:       "VolumeSnapshotContent",
-		Name:       "vsc-1",
-	}
+	initialDataRefs := []DataBindingRef{{
+		TargetUID: "pvc-uid-1",
+		Artifact: ObjectRef{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshotContent",
+			Name:       "vsc-1",
+		},
+	}}
 
 	obj := &testSnapshotContentLike{
 		ObjectMeta: metav1.ObjectMeta{
@@ -374,7 +377,7 @@ func TestSnapshotContentLike_GettersArePure(t *testing.T) {
 		},
 		specSnapshotRef:                   initialSnapshotRef,
 		statusManifestCheckpointName:      "test-mcp",
-		statusDataRef:                     initialDataRef,
+		statusDataRefs:                    initialDataRefs,
 		statusChildrenSnapshotContentRefs: initialChildrenRefs,
 		statusConditions:                  initialConditions,
 		statusDataConsistency:             "ApplicationConsistent",
@@ -391,7 +394,7 @@ func TestSnapshotContentLike_GettersArePure(t *testing.T) {
 	// First round of calls
 	ref1 := obj.GetSpecSnapshotRef()
 	mcpName1 := obj.GetStatusManifestCheckpointName()
-	dataRef1 := obj.GetStatusDataRef()
+	dataRefs1 := obj.GetStatusDataRefs()
 	childrenRefs1 := obj.GetStatusChildrenSnapshotContentRefs()
 	conditions1 := obj.GetStatusConditions()
 	dataConsistency1 := obj.GetStatusDataConsistency()
@@ -400,7 +403,7 @@ func TestSnapshotContentLike_GettersArePure(t *testing.T) {
 	// Second round of calls (to test idempotency)
 	ref2 := obj.GetSpecSnapshotRef()
 	mcpName2 := obj.GetStatusManifestCheckpointName()
-	dataRef2 := obj.GetStatusDataRef()
+	dataRefs2 := obj.GetStatusDataRefs()
 	childrenRefs2 := obj.GetStatusChildrenSnapshotContentRefs()
 	conditions2 := obj.GetStatusConditions()
 	dataConsistency2 := obj.GetStatusDataConsistency()
@@ -432,8 +435,8 @@ func TestSnapshotContentLike_GettersArePure(t *testing.T) {
 	if mcpName1 != mcpName2 {
 		t.Error("GetStatusManifestCheckpointName() returned different values on multiple calls (not idempotent)")
 	}
-	if !reflect.DeepEqual(dataRef1, dataRef2) {
-		t.Error("GetStatusDataRef() returned different values on multiple calls (not idempotent)")
+	if !reflect.DeepEqual(dataRefs1, dataRefs2) {
+		t.Error("GetStatusDataRefs() returned different values on multiple calls (not idempotent)")
 	}
 	if !reflect.DeepEqual(childrenRefs1, childrenRefs2) || !reflect.DeepEqual(childrenRefs2, childrenRefs3) {
 		t.Error("GetStatusChildrenSnapshotContentRefs() returned different values on multiple calls (not idempotent)")
@@ -535,7 +538,7 @@ func TestSnapshotContentLike_GettersHandleNilAndEmpty(t *testing.T) {
 		},
 		specSnapshotRef:                   nil,
 		statusManifestCheckpointName:      "",
-		statusDataRef:                     nil,
+		statusDataRefs:                    nil,
 		statusChildrenSnapshotContentRefs: nil,
 		statusConditions:                  nil,
 		statusDataConsistency:             "",
@@ -549,9 +552,9 @@ func TestSnapshotContentLike_GettersHandleNilAndEmpty(t *testing.T) {
 			t.Errorf("Expected nil ref, got %v", ref)
 		}
 
-		dataRef := obj.GetStatusDataRef()
-		if dataRef != nil {
-			t.Errorf("Expected nil data ref, got %v", dataRef)
+		dataRefs := obj.GetStatusDataRefs()
+		if len(dataRefs) != 0 {
+			t.Errorf("Expected empty data refs, got %v", dataRefs)
 		}
 
 		childrenRefs := obj.GetStatusChildrenSnapshotContentRefs()

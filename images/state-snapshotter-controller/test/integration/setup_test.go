@@ -73,6 +73,47 @@ func ptrInt64(v int64) *int64 {
 	return &v
 }
 
+func ptrString(v string) *string {
+	return &v
+}
+
+func snapshotContentDataRefsSchema() apiextensionsv1.JSONSchemaProps {
+	return apiextensionsv1.JSONSchemaProps{
+		Type: "array",
+		Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+			Schema: &apiextensionsv1.JSONSchemaProps{
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"targetUID": {Type: "string", MinLength: ptrInt64(1)},
+					"target": {
+						Type: "object",
+						Properties: map[string]apiextensionsv1.JSONSchemaProps{
+							"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
+							"kind":       {Type: "string", MinLength: ptrInt64(1)},
+							"name":       {Type: "string", MinLength: ptrInt64(1)},
+							"namespace":  {Type: "string"},
+							"uid":        {Type: "string"},
+						},
+						Required: []string{"apiVersion", "kind", "name"},
+					},
+					"artifact": {
+						Type: "object",
+						Properties: map[string]apiextensionsv1.JSONSchemaProps{
+							"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
+							"kind":       {Type: "string", MinLength: ptrInt64(1)},
+							"name":       {Type: "string", MinLength: ptrInt64(1)},
+						},
+						Required: []string{"apiVersion", "kind", "name"},
+					},
+				},
+				Required: []string{"targetUID", "target", "artifact"},
+			},
+		},
+		XListType:    ptrString("map"),
+		XListMapKeys: []string{"targetUID"},
+	}
+}
+
 // integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
 // from graph built-ins and eligible CSD rows. Demo domain pairs are intentionally CSD-gated here.
 func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
@@ -314,15 +355,7 @@ var _ = BeforeSuite(func() {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"manifestCheckpointName": {Type: "string"},
-										"dataRef": {
-											Type: "object",
-											Properties: map[string]apiextensionsv1.JSONSchemaProps{
-												"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
-												"kind":       {Type: "string", MinLength: ptrInt64(1)},
-												"name":       {Type: "string", MinLength: ptrInt64(1)},
-											},
-											Required: []string{"apiVersion", "kind", "name"},
-										},
+										"dataRefs":               snapshotContentDataRefsSchema(),
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -455,15 +488,7 @@ var _ = BeforeSuite(func() {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"manifestCheckpointName": {Type: "string"},
-										"dataRef": {
-											Type: "object",
-											Properties: map[string]apiextensionsv1.JSONSchemaProps{
-												"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
-												"kind":       {Type: "string", MinLength: ptrInt64(1)},
-												"name":       {Type: "string", MinLength: ptrInt64(1)},
-											},
-											Required: []string{"apiVersion", "kind", "name"},
-										},
+										"dataRefs":               snapshotContentDataRefsSchema(),
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{

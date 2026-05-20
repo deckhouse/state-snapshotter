@@ -128,25 +128,68 @@ spec:
                   - type
                   type: object
                 type: array
-              dataRef:
-                description: |-
-                  DataRef optionally references a durable data artifact produced by the data path.
-                  It MUST NOT reference an execution request such as VolumeCaptureRequest/DataExport.
-                properties:
-                  apiVersion:
-                    minLength: 1
-                    type: string
-                  kind:
-                    minLength: 1
-                    type: string
-                  name:
-                    minLength: 1
-                    type: string
-                required:
-                - apiVersion
-                - kind
-                - name
-                type: object
+              dataRefs:
+                description: DataRefs lists PVC target to data artifact bindings for
+                  this logical snapshot node.
+                items:
+                  description: SnapshotDataBinding associates a PVC target with its
+                    captured data artifact on one SnapshotContent.
+                  properties:
+                    artifact:
+                      description: Artifact references the cluster-scoped durable
+                        data artifact (for example VolumeSnapshotContent).
+                      properties:
+                        apiVersion:
+                          minLength: 1
+                          type: string
+                        kind:
+                          minLength: 1
+                          type: string
+                        name:
+                          minLength: 1
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      - name
+                      type: object
+                    target:
+                      description: Target identifies the PVC (and related metadata)
+                        captured in MCP for this binding.
+                      properties:
+                        apiVersion:
+                          type: string
+                        kind:
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        uid:
+                          description: |-
+                            UID is a type that holds unique ID values, including UUIDs.  Because we
+                            don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                            intent and helps make sure that UIDs and names do not get conflated.
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      - name
+                      type: object
+                    targetUID:
+                      description: TargetUID is the map key for status.dataRefs (PersistentVolumeClaim
+                        UID).
+                      minLength: 1
+                      type: string
+                  required:
+                  - artifact
+                  - target
+                  - targetUID
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - targetUID
+                x-kubernetes-list-type: map
               manifestCheckpointName:
                 description: ManifestCheckpointName is the cluster-scoped ManifestCheckpoint
                   name once manifest capture has persisted.

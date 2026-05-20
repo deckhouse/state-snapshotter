@@ -114,7 +114,7 @@ func (m *mockSnapshotContentLike) GetStatusManifestCheckpointName() string {
 	return ""
 }
 
-func (m *mockSnapshotContentLike) GetStatusDataRef() *ObjectRef {
+func (m *mockSnapshotContentLike) GetStatusDataRefs() []DataBindingRef {
 	return nil
 }
 

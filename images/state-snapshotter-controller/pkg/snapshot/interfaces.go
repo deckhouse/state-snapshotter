@@ -27,6 +27,14 @@ type ObjectRef struct {
 	Kind       string
 	Name       string
 	Namespace  string // Only for namespaced resources
+	UID        string // Optional; set for PVC targets in dataRefs
+}
+
+// DataBindingRef is one PVC target to durable data artifact binding on SnapshotContent.
+type DataBindingRef struct {
+	TargetUID string
+	Target    ObjectRef
+	Artifact  ObjectRef
 }
 
 // SnapshotLike is a typed interface for any XxxxSnapshot resource.
@@ -136,11 +144,10 @@ type SnapshotContentLike interface {
 	// Contract: Pure function, idempotent, no side effects.
 	GetStatusManifestCheckpointName() string
 
-	// GetStatusDataRef returns the durable data artifact reference (for example VSC).
-	// It must not point at execution requests such as VCR/DataExport.
-	// Returns nil if not applicable.
+	// GetStatusDataRefs returns durable PVC to data artifact bindings (for example PVC -> VSC).
+	// Artifacts must not point at execution requests such as VCR/DataExport.
 	// Contract: Pure function, idempotent, no side effects.
-	GetStatusDataRef() *ObjectRef
+	GetStatusDataRefs() []DataBindingRef
 
 	// GetStatusChildrenSnapshotContentRefs returns the list of child SnapshotContent references.
 	// This is the authoritative source for child SnapshotContent objects.

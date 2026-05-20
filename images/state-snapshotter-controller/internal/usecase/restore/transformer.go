@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -37,10 +38,17 @@ func (t *Transformer) Transform(objects []unstructured.Unstructured, opts Option
 			output = append(output, obj)
 			continue
 		}
-		if node.DataRefKind == "" || node.DataRefName == "" {
-			return TransformResult{}, fmt.Errorf("dataRef is required for PVC %s", obj.GetName())
+		binding, ok := findDataBindingForPVC(obj, node.DataBindings)
+		if !ok {
+			return TransformResult{}, fmt.Errorf(
+				"dataRefs binding is required for PVC %s/%s (uid=%s)",
+				obj.GetNamespace(), obj.GetName(), obj.GetUID(),
+			)
 		}
-		vrr, err := buildVRR(obj, node, targetNamespace)
+		if binding.Artifact.Kind == "" || binding.Artifact.Name == "" {
+			return TransformResult{}, fmt.Errorf("dataRefs artifact is required for PVC %s", obj.GetName())
+		}
+		vrr, err := buildVRR(obj, binding.Artifact, node, targetNamespace)
 		if err != nil {
 			return TransformResult{}, err
 		}
@@ -49,7 +57,23 @@ func (t *Transformer) Transform(objects []unstructured.Unstructured, opts Option
 	return TransformResult{Objects: output}, nil
 }
 
-func buildVRR(pvc unstructured.Unstructured, node *SnapshotContentNode, targetNamespace string) (*unstructured.Unstructured, error) {
+func findDataBindingForPVC(pvc unstructured.Unstructured, bindings []snapshot.DataBindingRef) (snapshot.DataBindingRef, bool) {
+	pvcUID := string(pvc.GetUID())
+	for _, b := range bindings {
+		if pvcUID != "" && (b.TargetUID == pvcUID || b.Target.UID == pvcUID) {
+			return b, true
+		}
+		if b.Target.APIVersion == pvc.GetAPIVersion() &&
+			b.Target.Kind == pvc.GetKind() &&
+			b.Target.Namespace == pvc.GetNamespace() &&
+			b.Target.Name == pvc.GetName() {
+			return b, true
+		}
+	}
+	return snapshot.DataBindingRef{}, false
+}
+
+func buildVRR(pvc unstructured.Unstructured, artifact snapshot.ObjectRef, node *SnapshotContentNode, targetNamespace string) (*unstructured.Unstructured, error) {
 	pvcName := pvc.GetName()
 	if pvcName == "" {
 		return nil, fmt.Errorf("PVC name is empty")
@@ -70,8 +94,8 @@ func buildVRR(pvc unstructured.Unstructured, node *SnapshotContentNode, targetNa
 
 	spec := map[string]interface{}{
 		"source": map[string]interface{}{
-			"kind": node.DataRefKind,
-			"name": node.DataRefName,
+			"kind": artifact.Kind,
+			"name": artifact.Name,
 		},
 		"pvcTemplate": map[string]interface{}{
 			"metadata": metadata,

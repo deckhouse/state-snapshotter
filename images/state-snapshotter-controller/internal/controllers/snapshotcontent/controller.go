@@ -262,9 +262,12 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 				logger.Error(err, "Failed to remove ManifestCheckpoint finalizer", "mcp", mcpName)
 			}
 		}
-		if dataRef := contentLike.GetStatusDataRef(); dataRef != nil && dataRef.Kind == "VolumeSnapshotContent" {
-			if err := r.removeArtifactFinalizer(ctx, "VolumeSnapshotContent", dataRef.Name, "snapshot.storage.k8s.io/v1"); err != nil {
-				logger.Error(err, "Failed to remove VolumeSnapshotContent finalizer", "vsc", dataRef.Name)
+		for _, binding := range contentLike.GetStatusDataRefs() {
+			if binding.Artifact.Kind != "VolumeSnapshotContent" || binding.Artifact.Name == "" {
+				continue
+			}
+			if err := r.removeArtifactFinalizer(ctx, "VolumeSnapshotContent", binding.Artifact.Name, "snapshot.storage.k8s.io/v1"); err != nil {
+				logger.Error(err, "Failed to remove VolumeSnapshotContent finalizer", "vsc", binding.Artifact.Name)
 			}
 		}
 
@@ -569,10 +572,10 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 }
 
 func (r *SnapshotContentController) resolveDataReadiness(_ context.Context, _ *unstructured.Unstructured) (bool, string, string, error) {
-	// v0: no data path yet; state-only snapshots do not require dataRef.
-	// Future data path must publish SnapshotContent.status.dataRef only after the
-	// final artifact exists, is Ready, and has ownerRef -> SnapshotContent.
-	// dataRef is apiVersion/kind/name for a durable artifact, never a request ref.
+	// PR-2: validate each dataRefs[].artifact exists and is Ready; empty dataRefs[] satisfies the data leg
+	// for manifest-only nodes. Until then this is a no-op for common SnapshotContent Ready aggregation.
+	// Non-common GVKs still use checkConsistencyAndSetReady for legacy artifact existence/finalizer checks
+	// over dataRefs[] (not artifact Ready aggregation).
 	return true, "", "", nil
 }
 
@@ -707,28 +710,30 @@ func (r *SnapshotContentController) checkConsistencyAndSetReady(
 		}
 	}
 
-	// Check durable data artifact if present. dataRef must point to the final artifact
-	// (for example VolumeSnapshotContent), not to an execution request.
-	dataRef := contentLike.GetStatusDataRef()
-	if dataRef != nil && dataRef.Kind == "VolumeSnapshotContent" {
-		exists, err := r.checkArtifactExists(ctx, "VolumeSnapshotContent", dataRef.Name, "snapshot.storage.k8s.io/v1")
+	// Legacy consistency (non-common GVK): existence + finalizer for VSC entries in dataRefs[].
+	// Common SnapshotContent uses resolveDataReadiness (PR-2) instead of this path.
+	for _, binding := range contentLike.GetStatusDataRefs() {
+		if binding.Artifact.Kind != "VolumeSnapshotContent" || binding.Artifact.Name == "" {
+			continue
+		}
+		vscName := binding.Artifact.Name
+		exists, err := r.checkArtifactExists(ctx, "VolumeSnapshotContent", vscName, "snapshot.storage.k8s.io/v1")
 		if err != nil {
 			return fmt.Errorf("failed to check VolumeSnapshotContent: %w", err)
 		}
 		if !exists {
 			if wasReady {
-				// Artifact was lost - set Ready=False
 				snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
-					snapshot.ReasonArtifactMissing, fmt.Sprintf("VolumeSnapshotContent %s not found", dataRef.Name))
+					snapshot.ReasonArtifactMissing, fmt.Sprintf("VolumeSnapshotContent %s not found", vscName))
 				snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
 				if err := r.Status().Update(ctx, obj); err != nil {
 					return fmt.Errorf("failed to update Ready=False: %w", err)
 				}
-				logger.Info("VolumeSnapshotContent missing, set Ready=False", "vsc", dataRef.Name)
+				logger.Info("VolumeSnapshotContent missing, set Ready=False", "vsc", vscName)
 			}
-			return nil // Artifact missing, but object was never Ready
+			return nil
 		}
-		if err := r.ensureArtifactFinalizer(ctx, "VolumeSnapshotContent", dataRef.Name, "snapshot.storage.k8s.io/v1"); err != nil {
+		if err := r.ensureArtifactFinalizer(ctx, "VolumeSnapshotContent", vscName, "snapshot.storage.k8s.io/v1"); err != nil {
 			return fmt.Errorf("failed to ensure VolumeSnapshotContent finalizer: %w", err)
 		}
 	}

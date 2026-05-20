@@ -513,25 +513,53 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusManifestCheckpointName() s
 	return ""
 }
 
-func (w *unstructuredSnapshotContentWrapper) GetStatusDataRef() *ObjectRef {
+func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRef {
 	status, ok := w.obj.Object["status"].(map[string]interface{})
 	if !ok {
 		return nil
 	}
-	dataRefRaw, ok := status["dataRef"].(map[string]interface{})
+	dataRefsRaw, ok := status["dataRefs"].([]interface{})
 	if !ok {
 		return nil
 	}
 
-	ref := &ObjectRef{}
-	if apiVersion, ok := dataRefRaw["apiVersion"].(string); ok {
+	var refs []DataBindingRef
+	for _, item := range dataRefsRaw {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		binding := DataBindingRef{}
+		if uid, ok := entry["targetUID"].(string); ok {
+			binding.TargetUID = uid
+		}
+		if targetRaw, ok := entry["target"].(map[string]interface{}); ok {
+			binding.Target = objectRefFromMap(targetRaw)
+		}
+		if artifactRaw, ok := entry["artifact"].(map[string]interface{}); ok {
+			binding.Artifact = objectRefFromMap(artifactRaw)
+		}
+		refs = append(refs, binding)
+	}
+	return refs
+}
+
+func objectRefFromMap(m map[string]interface{}) ObjectRef {
+	ref := ObjectRef{}
+	if apiVersion, ok := m["apiVersion"].(string); ok {
 		ref.APIVersion = apiVersion
 	}
-	if kind, ok := dataRefRaw["kind"].(string); ok {
+	if kind, ok := m["kind"].(string); ok {
 		ref.Kind = kind
 	}
-	if name, ok := dataRefRaw["name"].(string); ok {
+	if name, ok := m["name"].(string); ok {
 		ref.Name = name
+	}
+	if namespace, ok := m["namespace"].(string); ok {
+		ref.Namespace = namespace
+	}
+	if uid, ok := m["uid"].(string); ok {
+		ref.UID = uid
 	}
 	return ref
 }

@@ -84,10 +84,7 @@ func (r *Resolver) buildTree(ctx context.Context, contentGVK schema.GroupVersion
 		Content:                root,
 		ManifestCheckpointName: contentLike.GetStatusManifestCheckpointName(),
 	}
-	if dataRef := contentLike.GetStatusDataRef(); dataRef != nil {
-		node.DataRefKind = dataRef.Kind
-		node.DataRefName = dataRef.Name
-	}
+	node.DataBindings = contentLike.GetStatusDataRefs()
 
 	children := contentLike.GetStatusChildrenSnapshotContentRefs()
 	sort.Slice(children, func(i, j int) bool {

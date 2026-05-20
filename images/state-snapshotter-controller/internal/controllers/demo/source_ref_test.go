@@ -208,8 +208,8 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if contentReady == nil || contentReady.Status != metav1.ConditionTrue || contentReady.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected content Ready=True Completed, got %#v", contentReady)
 	}
-	if content.Status.DataRef != nil {
-		t.Fatalf("state-only snapshot content must not require or set dataRef, got %#v", content.Status.DataRef)
+	if len(content.Status.DataRefs) != 0 {
+		t.Fatalf("state-only snapshot content must not require or set dataRefs, got %#v", content.Status.DataRefs)
 	}
 }
 
@@ -484,8 +484,8 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}
 	assertDemoOwnerRef(t, diskContent.OwnerReferences, storagev1alpha1.SchemeGroupVersion.String(), "SnapshotContent", vmContentName, true)
 	assertNoSnapshotContentOwnerRefToSnapshot(t, diskContent)
-	if vmContent.Status.DataRef != nil {
-		t.Fatalf("state-only VM content must not require or set dataRef, got %#v", vmContent.Status.DataRef)
+	if len(vmContent.Status.DataRefs) != 0 {
+		t.Fatalf("state-only VM content must not require or set dataRefs, got %#v", vmContent.Status.DataRefs)
 	}
 }
 

@@ -66,18 +66,32 @@ type SnapshotSubjectRef struct {
 	UID        types.UID `json:"uid,omitempty"`
 }
 
-// SnapshotDataRef points to a durable data artifact produced by the data path.
+// SnapshotDataArtifactRef points to a durable data artifact produced by the data path.
 // It MUST reference a final artifact such as VolumeSnapshotContent or equivalent.
 // It MUST NOT reference execution requests such as VolumeCaptureRequest.
-// v0 intended target: VolumeSnapshotContent or equivalent final artifact.
 // +k8s:deepcopy-gen=true
-type SnapshotDataRef struct {
+type SnapshotDataArtifactRef struct {
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+}
+
+// SnapshotDataBinding associates a PVC target with its captured data artifact on one SnapshotContent.
+// +k8s:deepcopy-gen=true
+type SnapshotDataBinding struct {
+	// TargetUID is the map key for status.dataRefs (PersistentVolumeClaim UID).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	TargetUID string `json:"targetUID"`
+
+	// Target identifies the PVC (and related metadata) captured in MCP for this binding.
+	Target SnapshotSubjectRef `json:"target"`
+
+	// Artifact references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
+	Artifact SnapshotDataArtifactRef `json:"artifact"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -90,10 +104,11 @@ type SnapshotContentStatus struct {
 	// +optional
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
-	// DataRef optionally references a durable data artifact produced by the data path.
-	// It MUST NOT reference an execution request such as VolumeCaptureRequest/DataExport.
+	// DataRefs lists PVC target to data artifact bindings for this logical snapshot node.
+	// +listType=map
+	// +listMapKey=targetUID
 	// +optional
-	DataRef *SnapshotDataRef `json:"dataRef,omitempty"`
+	DataRefs []SnapshotDataBinding `json:"dataRefs,omitempty"`
 
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

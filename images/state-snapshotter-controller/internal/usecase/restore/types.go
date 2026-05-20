@@ -1,16 +1,17 @@
 package restore
 
-import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+import (
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
 
 type SnapshotContentNode struct {
 	Content *unstructured.Unstructured
 	// ManifestCheckpointName is required for /manifests.
 	ManifestCheckpointName string
-	// DataRefKind is optional. When present, it is used as VRR source kind.
-	DataRefKind string
-	// DataRefName is optional. When present, it is used as VRR source name.
-	DataRefName string
-	Children    []*SnapshotContentNode
+	// DataBindings maps PVC targets to durable data artifacts on this content node.
+	DataBindings []snapshot.DataBindingRef
+	Children     []*SnapshotContentNode
 }
 
 type Options struct {

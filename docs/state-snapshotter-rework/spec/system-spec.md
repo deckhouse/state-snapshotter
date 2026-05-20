@@ -24,7 +24,7 @@
 - **R2 phase 2a ✅:** на старте процесса merge eligible CSD ∪ bootstrap → resolve mapper → начальные GVK для unified контроллеров (`cmd/main.go`, `pkg/csdregistry`, `pkg/unifiedbootstrap`).
 - **R2 phase 2b ✅:** после успешного reconcile CSD — `pkg/unifiedruntime.Syncer.Sync`: пересчёт слоёв (`LayeredGVKState`) и additive `AddWatch*` для новых resolved пар; **clean unwatch не гарантируется** (ADR).
 - **Always-on runtime startup (v0):** `Snapshot`, common `SnapshotContent`, `DemoVirtualDiskSnapshot`, `DemoVirtualMachineSnapshot`, CSD reconciler, graph registry, `GenericSnapshotBinderController`, `unifiedruntime.Syncer`, and dynamic hot-add watches are initialized on the single runtime path. CSD управляет не фактом запуска этих controllers, а тем, входит ли domain kind в **graph registry** и `Snapshot` discovery.
-- **Common content model (v0):** `storage.deckhouse.io/SnapshotContent` is the only active cluster-scoped content carrier and has no live reverse reference to the source snapshot. It exposes immutable `spec` (`backupRepositoryName`, `deletionPolicy`), publisher-owned `status.manifestCheckpointName`, `status.childrenSnapshotContentRefs`, optional cluster artifact **`status.dataRef`** (`apiVersion`/`kind`/`name`), and validator-owned `status.conditions`. CSD mapping is `resourceCRDName -> snapshotCRDName`; the content side is fixed to common `SnapshotContent`. Snapshot-domain controllers own planning/execution and publish result refs into bound content status. `SnapshotContentController` validates persisted content refs and owns only content readiness conditions; it does **not** read live Snapshot objects, does **not** read MCR/VCR requests, and does **not** create execution requests. Snapshot-level `Ready` mirrors bound content `Ready`. `SnapshotContent.status.dataRef` MUST NOT point to `VolumeCaptureRequest`, `DataExport`, or any other execution request; v0 first expected data artifact kind is cluster-scoped `VolumeSnapshotContent` or an equivalent final artifact.
+- **Common content model (v0 → target):** `storage.deckhouse.io/SnapshotContent` is the only active cluster-scoped content carrier and has no live reverse reference to the source snapshot. It represents a **logical snapshot node** (not one volume). It exposes immutable `spec` (`backupRepositoryName`, `deletionPolicy`), publisher-owned `status.manifestCheckpointName` (MCP with many manifest targets via MCR), `status.childrenSnapshotContentRefs`, and durable data bindings: **`status.dataRefs[]`** only (per-PVC target identity + cluster-scoped artifact ref). Validator-owned `status.conditions`. CSD mapping is `resourceCRDName -> snapshotCRDName`; the content side is fixed to common `SnapshotContent`. Snapshot-domain controllers own planning/execution and publish result refs into bound content status. `SnapshotContentController` validates persisted content refs and owns only content readiness conditions; it does **not** read live Snapshot objects, does **not** read MCR/VCR requests, and does **not** create execution requests. Snapshot-level `Ready` mirrors bound content `Ready`. Published data artifact refs MUST NOT point to `VolumeCaptureRequest`, `DataExport`, or other execution requests; first expected artifact kind is cluster-scoped `VolumeSnapshotContent` or equivalent. **`dataRefs[]` is present in CRD since PR-1**; validation, publish, and readiness paths are delivered by **PR-2+** / **PR-4** (see **§3.9**).
 - **Custom snapshot controller barrier (v0):** CSD-registered custom snapshot controllers MUST set `status.conditions[type=HandledByCustomSnapshotController]=True` on their `XxxxSnapshot` after they have accepted/planned the snapshot and published required request/graph status fields. `GenericSnapshotBinderController` MUST wait for this condition before binding/creating `SnapshotContent`. The old `HandledByDomainSpecificController` condition name is superseded and MUST NOT be used by active controllers or tests.
 - **Request → artifact → content lifecycle:** snapshot controllers create MCR/VCR-style execution requests, set ownerRef → owning snapshot, store temporary request names in snapshot status, and publish durable result refs to the bound `SnapshotContent`. Request controllers create MCP/data artifacts and protect them through ObjectKeeper until handoff. `SnapshotContentController` validates the final artifacts and ensures artifact ownerRef → `SnapshotContent`. Snapshot controllers may clear request names and delete requests only after the explicit artifact chain is complete: content status references the artifact, the artifact exists, is `Ready=True`, and is owned by that `SnapshotContent`.
 - **Snapshot lifecycle ownerRef model:** every non-root `XxxxSnapshot` and every `SnapshotContent` has exactly one lifecycle owner. Root `SnapshotContent` has `ownerRef -> root ObjectKeeper`. A root snapshot-run is anchored by one root `ObjectKeeper` in `FollowObjectWithTTL` mode: the root Snapshot is the ObjectKeeper follow target via `spec.followObjectRef`, but is not owned by that cluster-scoped ObjectKeeper because Snapshot is namespaced. Child Snapshot ownerRef points to parent Snapshot; child `SnapshotContent` ownerRef points to parent `SnapshotContent`; artifacts referenced from `SnapshotContent.status` are owned by that `SnapshotContent`. `SnapshotContent` MUST NOT be owned by a short-lived Snapshot.
@@ -33,6 +33,7 @@
 - **Manifest / MCR / ManifestCheckpoint** — отдельный трек от unified registry snapshot-типов; не смешивать с CSD.
 - **ManifestCheckpointContentChunk RBAC (US-18.1):** chunk CRs contain persisted manifest payload data and MUST NOT be exposed to ordinary users through direct Kubernetes API access. Module RBAC MUST grant `manifestcheckpointcontentchunks` only to the internal controller/API service account, with verbs `create`, `get`, `delete` and without `list` / `watch`. User-facing access to manifest payloads goes through the controlled `/manifests` API path, which reads chunks using the internal controller/API direct client under the controller/API pod service account identity; no user impersonation is used for chunk reads.
 - **ManifestCheckpoint Secret protection (US-18.2):** Kubernetes `Secret` objects are sensitive and MUST NOT be stored by default. Any `Secret` with `type != Opaque` MUST be skipped. `Opaque` secrets are skipped unless explicitly annotated. `backup.deckhouse.io/include-secret: "true"` stores the object with `.data` / `.stringData` removed; other fields are preserved as-is after normal object cleaning. `backup.deckhouse.io/include-secret-data: "true"` is a standalone opt-in that includes the `Opaque` Secret with `.data` / `.stringData`; this is dangerous because sensitive values are persisted in `ManifestCheckpoint` and MUST be used only intentionally.
+- **Logical SnapshotContent + dual-capture (N5+, accepted target):** **`SnapshotContent`** = logical node (MCP + **`dataRefs[]`** + real children); **one MCR + one VCR** per logical node (bulk `spec.targets[]` each); multi-PVC = multiple entries in MCR targets / VCR targets / **`dataRefs[]`**, not synthetic PVC child nodes — **§3.9**, [`design/volume-node-dual-capture.md`](../design/volume-node-dual-capture.md).
 - **Snapshot manifests-only path (N2):** этапы **N2a** / **N2b** — [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.1**; **декомпозиция поставки N2b по PR** — **§2.4.2** (тот же файл). Публичные поля статуса N2a, allowlist, **временный MCR** (**ownerRef** на root `Snapshot` для GC in-flight; удаляется контроллером после `MCR Ready=True`, где `Ready=True` означает MCP ready + ownerRef handoff на `SnapshotContent`), **каноническая ссылка на MCP** — `SnapshotContent.status.manifestCheckpointName`, delete root / in-flight capture, download API/ошибки, агрегация N2b, OK vs ownerRef — [`design/snapshot-controller.md`](../design/snapshot-controller.md) **§4.3–§4.7**, **§5.2**, **§8.7**, **§10–§11**. Data-layer и полный export/restore — за пределами N2. При стабильном контракте в API — дополнять этот spec, не дублируя design.
 - **N2b — форма графа в статусе (PR1+):** опциональные поля **`status.childrenSnapshotRefs`** на **`Snapshot`** и domain snapshots (элементы JSON: обязательные **`apiVersion`**, **`kind`**, **`name`**) и **`status.childrenSnapshotContentRefs`** на **`SnapshotContent`** (элемент: **`name`**). В Go — **`SnapshotChildRef`** / **`SnapshotContentChildRef`**. Generic **не** резолвит дочерний snapshot «по имени» через перебор registry: **`apiVersion`/`kind`** задают объект однозначно. Parent/back-reference задаётся Kubernetes **`ownerReference`** child snapshot → parent snapshot; это lifecycle/requeue helper, **не** источник состава дерева. Семантика заполнения и orchestration — **§2.4.2** плана и design **§11**. **Инварианты дерева snapshot-run, merge и dedup** — **§3**; дизайн-пакет — [`design/demo-domain-csd/README.md`](../design/demo-domain-csd/README.md), [`design/demo-domain-csd/08-universal-snapshot-tree-model.md`](../design/demo-domain-csd/08-universal-snapshot-tree-model.md).
 - **N2b PR2–PR3 (история поставки):** ранние итерации плана использовали временный in-repo scaffold для «один ребёнок + матрица parent **Ready**»; этот путь **удалён** из runtime и integration-контракта. Нормативная модель parent **Ready** и приоритетов reason — **§3.8** и **[`design/snapshot-controller.md`](../design/snapshot-controller.md) §11.1**; поставка и тесты — **`snapshot_graph_e5_e6_integration_test.go`**, **PR5a/PR5b**, unit **`namespace_snapshot_parent_ready_e6_test.go`** (см. **§2.4.2**/**§2.4.4** плана).
@@ -48,6 +49,7 @@
 - Тесты и команды: [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md)
 - Прогресс стадий: [`operations/project-status.md`](../operations/project-status.md)
 - Aggregated read API: [`snapshot-aggregated-read.md`](snapshot-aggregated-read.md)
+- Logical SnapshotContent + `dataRefs[]`: [`design/volume-node-dual-capture.md`](../design/volume-node-dual-capture.md); N5 PR roadmap — [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.5**
 
 ## §3. Граф snapshot-run: refs, generic, merge, dedup (нормативно для PR5+)
 
@@ -59,7 +61,7 @@
 
 **1) Capture-time domain expansion (построение дерева снимка).** При создании пользователем **`XxxxSnapshot`** **доменный** контроллер соответствующего типа определяет **snapshot scope** для этого ресурса и то, **как** каждый охваченный объект представлен в дереве run, в частности:
 - обычные Kubernetes-ресурсы → **manifest capture** данного узла (MCP / MCR и пр. — по нормативам N2a/N2b и согласованным design);
-- ресурсы **volume / data** → отдельные snapshot/data-операции (вне manifests-only подграфа или по отдельным под-документам);
+- ресурсы **volume / data** → привязка **PVC manifest + VSC** в **одном ownership scope** на соответствующем `SnapshotContent` (**`dataRefs[]`** + MCP targets); root **`Snapshot`** — **aggregator** (residual MCP/`dataRefs[]`, дети = реальная domain decomposition) — **§3.9**, design [`volume-node-dual-capture.md`](../design/volume-node-dual-capture.md);
 - объекты, для которых предусмотрен **другой** доменный snapshot (другой **`YyyySnapshot`** / контроллер) → оформляются как **явные дочерние** **`YyyySnapshot`** (и связанный **`SnapshotContent`**), с публикацией рёбер в **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`** по политике родительского узла.
 
 **Логическое дерево** snapshot-run материализуется **сверху вниз** на этом этапе. **Generic**-код **не** выводит состав дерева из инвентаря API и **не** подменяет решение домена; он **использует только уже записанные** в **`status`** refs (**§3.1**, **INV-REF1**).
@@ -146,6 +148,7 @@ Artifacts referenced by SnapshotContent.status:
 ### §3.7. Ссылки на тесты и дизайн
 
 - Порядок атомарных PR под имплементацию **§3** (без повторения MUST): [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.4**.
+- N5 `dataRefs[]` (logical SnapshotContent): design [`design/volume-node-dual-capture.md`](../design/volume-node-dual-capture.md); PR roadmap **§2.4.5** [`implementation-plan.md`](../design/implementation-plan.md).
 - Концептуальный SSOT дерева / осей: [`design/demo-domain-csd/08-universal-snapshot-tree-model.md`](../design/demo-domain-csd/08-universal-snapshot-tree-model.md).
 - Инварианты графа и generic vs domain: [`design/demo-domain-csd/05-tree-and-graph-invariants.md`](../design/demo-domain-csd/05-tree-and-graph-invariants.md).
 - План сценариев: [`testing/demo-domain-csd-test-plan.md`](../testing/demo-domain-csd-test-plan.md).
@@ -154,8 +157,87 @@ Artifacts referenced by SnapshotContent.status:
 
 Когда **`status.childrenSnapshotRefs`** **не пуст**, `Snapshot` и другие snapshot controllers **MUST NOT** вычислять финальный `Ready` по дочерним snapshot-объектам. Единственный критерий истины: **`Snapshot.status.conditions[Ready]` зеркалит bound `SnapshotContent.status.conditions[Ready]`**. Если content теряет `Ready=True`, snapshot также становится `Ready=False` при следующем reconcile/watch event. Так как `SnapshotContent` не хранит reverse ref на snapshot, controllers **MUST** обеспечивать mirror через собственные watch/requeue механизмы (например polling `RequeueAfter` пока bound content pending).
 
-`childrenSnapshotRefs` остаются snapshot-level planned graph. Parent snapshot controller после `GraphReady=True` резолвит детей в bound child `SnapshotContent`, публикует durable **`SnapshotContent.status.childrenSnapshotContentRefs`**, и только после этого публикует result refs вроде **`status.manifestCheckpointName`**. **`SnapshotContentController`** не читает live snapshot, не читает MCR/VCR и не строит граф; он валидирует уже опубликованные **`manifestCheckpointName`**, **`dataRef`** и **`childrenSnapshotContentRefs`**, затем агрегирует parent content `Ready`. **SnapshotGraphRegistry** на этом пути не является источником истины. Пробуждение parent snapshot при изменении дочернего объекта — через динамические watches на зарегистрированные snapshot-GVK (см. **§0**) и map **child → parents** по совпадению ref **в пределах namespace дочернего объекта** (**§3.2**).
+`childrenSnapshotRefs` остаются snapshot-level planned graph. Parent snapshot controller после `GraphReady=True` резолвит детей в bound child `SnapshotContent`, публикует durable **`SnapshotContent.status.childrenSnapshotContentRefs`**, и только после этого публикует result refs вроде **`status.manifestCheckpointName`**. **`SnapshotContentController`** не читает live snapshot, не читает MCR/VCR и не строит граф; он валидирует уже опубликованные **`manifestCheckpointName`**, **`dataRefs[]`**, **`childrenSnapshotContentRefs`**, затем агрегирует parent content `Ready`. **SnapshotGraphRegistry** на этом пути не является источником истины. Пробуждение parent snapshot при изменении дочернего объекта — через динамические watches на зарегистрированные snapshot-GVK (см. **§0**) и map **child → parents** по совпадению ref **в пределах namespace дочернего объекта** (**§3.2**).
 
 - **MUST:** при **NotFound** дочернего snapshot или bound content — parent `SnapshotContent Ready=False` как ожидание (ordering / ещё не создан). При ошибке Get (не NotFound) — fail операции агрегации на этом reconcile. Состояния «ambiguous ref» **нет** в контракте.
 - **MUST:** классифицировать каждого child content как **успех** (`Ready=True`), **ожидание**, или **терминальный провал** (`Ready=False` с причиной из согласованного набора terminal capture / fail-closed). Расширенные мотивы — [`design/demo-domain-csd/07-ready-delete-matrix.md`](../design/demo-domain-csd/07-ready-delete-matrix.md).
 - **MUST:** при одновременном наличии нескольких причин на parent content выбирать **одну** итоговую причину **`Ready=False`** в строгом приоритете. Snapshot-level `Ready` не имеет собственной матрицы: он копирует condition с bound `SnapshotContent`.
+
+### §3.9. Logical SnapshotContent: manifest + `dataRefs[]` (N5+)
+
+Нормативное резюме **целевой** модели (symmetric bulk **MCR** / **VCR**). Детали, фильтры, PR roadmap PR-0…PR-9 + **PR-F** — [`design/volume-node-dual-capture.md`](../design/volume-node-dual-capture.md), [`implementation-plan.md`](../design/implementation-plan.md) **§2.4.5**. **`SnapshotContent.dataRefs[]`** в CRD (**PR-1**); bulk **VCR** и publish path — после **PR-F** / **PR-4**.
+
+#### §3.9.1. What a SnapshotContent represents
+
+- **MUST:** **`SnapshotContent`** represents a **logical snapshot node** (domain object, namespace root, or decomposed child such as disk), **not** a single volume artifact and **not** “one PVC per content” by construction.
+- **MUST:** each logical node exposes:
+  - **`status.manifestCheckpointName`** → **MCP** built from **MCR `spec.targets[]`** (zero or many manifest objects);
+  - **`status.dataRefs[]`** → zero or more bindings **{ PVC target identity, cluster-scoped data artifact }** — **единственный** контракт data artifacts;
+  - **`status.childrenSnapshotContentRefs[]`** → zero or more **real** child logical nodes (domain decomposition only).
+- **MUST NOT:** use singular **`status.dataRef`** (removed from CRD in PR-1); **no** fallback, **no** dual-write. **`status.dataRefs[]`** is the only data artifact field.
+
+#### §3.9.2. Co-ownership: PVC manifest and data binding
+
+- **MUST:** for every PVC whose data is captured in a scope, the **sanitized PVC manifest** and the matching **`dataRefs[]` entry** (same **`pvcUID`**) **MUST** reside on the **same** `SnapshotContent`.
+- **MUST NOT:** duplicate the same PVC manifest or data binding across ownership scopes in one run.
+- **MUST:** final PVC **ownership** for a run **MUST** be resolved by **snapshot-run tree coverage**, **domain claims**, **policy exclusions**, and **`pvcUID` dedup** (**INV-S0**, **INV-P1**). **MUST NOT** define ownership **solely** by listing all PVCs in a namespace.
+
+#### §3.9.3. Namespace root vs non-root domain
+
+- **MUST:** root namespace **`Snapshot`** / bound root **`SnapshotContent`** **MAY** act as **aggregator-only**: MCP **MAY** hold **residual** namespace manifests only (allowlist minus E5, possibly **empty archive**); **`dataRefs[]` MAY** hold **residual** PVC bindings owned by root scope; **`children*Refs`** represent **real** domain decomposition.
+- **MAY:** for **residual root-owned PVCs only**, use a **namespace-wide PVC list** as **candidate discovery**: `PVC candidates − subtree-covered pvcUIDs − policy exclusions = residual root-owned PVC`. Listing is a **technical** step; **ownership** of each candidate **MUST** still follow tree coverage and dedup before publish to root **`dataRefs[]`**.
+- **MUST:** root **MUST NOT** create VCR / **`dataRefs[]`** entries for PVCs already covered by a child/domain subtree in this run.
+- **MUST:** non-root / domain **`SnapshotContent` MUST NOT** be **data-only**: MCP **MUST** include at least the **`spec.sourceRef`** manifest for that snapshot; if the node owns PVCs, MCP **MUST** also include sanitized PVC manifests for those PVCs; **`dataRefs[]`** holds the matching VSC bindings.
+- **MUST:** if **`spec.sourceRef`** is **NotFound** or deleted between planning and manifest capture for a non-root domain node, reconcile **MUST** fail-closed (terminal failure or explicit pending reason). **MUST NOT** reach capture-complete / data-only success without the sourceRef manifest in MCP.
+
+#### §3.9.4. Children vs multi-PVC
+
+- **MUST:** **multi-PVC** on one logical object **MUST** be represented as **multiple `dataRefs[]` entries** (and corresponding MCR targets) on **one** `SnapshotContent`, **not** as extra child snapshot nodes created **only** because another PVC appeared.
+- **MUST:** **`children*Refs`** are used **only** for **real** domain decomposition (separate snapshot kinds / lifecycle), not as a PVC-counting mechanism.
+- **MUST NOT:** model “one volume → one SnapshotContent → one `dataRef`” as the target architecture.
+
+#### §3.9.5. Symmetric bulk requests (MCR / VCR)
+
+- **MUST:** **`ManifestCaptureRequest`** is a bulk manifest capture request: **`spec.targets[]`** lists manifest objects; **`status.checkpointName`** references the durable **MCP** artifact.
+- **MUST:** **`VolumeCaptureRequest`** is a bulk volume capture request (target contract): **`spec.targets[]`** lists PVC/volume targets; **`status.dataRefs[]`** lists durable data artifacts (e.g. **VSC**) per target. **`VCR Ready=True`** only when **all** `spec.targets[]` are complete.
+- **MUST:** at most **one active MCR** and **one active VCR** per logical **`SnapshotContent`** in a capture plan.
+- **MUST NOT:** use **N separate VCR objects per PVC** on one logical content as the target architecture.
+
+**storage-foundation prerequisite:** if the live **VCR** API is still single-PVC, a **foundation PR** **MUST** precede N5 data capture: bulk **`spec.targets[]`**, **`status.dataRefs[]`**, aggregate **Ready** — see [`implementation-plan.md`](../design/implementation-plan.md) **§2.4.5** **PR-F**.
+
+#### §3.9.6. Capture execution and publish
+
+- **MUST:** per logical node, the snapshot controller runs **one capture plan** that ensures **one MCR** (`spec.targets[]` = manifest scope) and **in parallel one VCR** (`spec.targets[]` = PVC/data scope). Execution requests **MUST** use **ownerRef → owning Snapshot**; durable artifacts **MUST** use **ownerRef → owning SnapshotContent** after handoff.
+- **MUST:** publish on **`SnapshotContent`**: **`status.manifestCheckpointName`** ← **`MCR.status.checkpointName`**; **`status.dataRefs[]`** ← **`VCR.status.dataRefs[]`** (after handoff). Published refs **MUST NOT** reference **VolumeCaptureRequest**, **ManifestCaptureRequest**, or other execution requests.
+- **MUST:** snapshot temporary status uses **`manifestCaptureRequestName`** and **`volumeCaptureRequestName`** (singular each), not a list of VCRs per PVC.
+
+#### §3.9.7. Ready
+
+- **MUST:** **`SnapshotContent` Ready=True** only when:
+
+```text
+MCP Ready
+∧ (∀ required dataRefs[].artifact are Ready)
+∧ (∀ required child SnapshotContent are Ready)
+```
+
+- **MUST:** **`MCP Ready`** means **`status.manifestCheckpointName`** references an existing MCP with **`Ready=True`** (including **empty archive**, 0 objects). Applies to **aggregator-only** root: MCP may be **empty by content**, but **`manifestCheckpointName` MUST be present** and point to that **Ready** MCP. **`SnapshotContentController` MUST** validate **`manifestCheckpointName`** the same as for any other node. **MUST NOT** introduce a special “root without MCP” readiness branch in v1.
+- **MUST:** manifest-only nodes treat an **empty** `dataRefs[]` as satisfying the data leg; nodes that own PVCs **MUST** remain not Ready until **all** required bindings are Ready.
+- **MUST:** validator order remains manifest → data (all refs) → children.
+
+#### §3.9.8. Restore and dedup (data path)
+
+- **MUST:** restore-with-data **MUST** match each PVC manifest in a content’s MCP to **`dataRefs[]`** on the **same** content: primary key **`target.uid` (`pvcUID`)**, fallback **`(apiVersion, kind, namespace, name)`** from manifest metadata; missing binding → **fail-closed**.
+- **MUST:** at most **one** data capture per **`pvcUID`** per snapshot-run (**INV-P1**); manifest E5 exclude remains separate (**INV-S0** / **INV-E1** — [`design/demo-domain-csd/06-coverage-dedup-keys.md`](../design/demo-domain-csd/06-coverage-dedup-keys.md) §4).
+
+#### §3.9.9. Boundaries
+
+- **MUST NOT:** treat **Pod** (or other workload) using a PVC as the **owner** of volume capture; Pod usage may affect **`status.dataConsistency`** (or equivalent) on the owning snapshot node only.
+- **MUST NOT:** implement VCR/VSC CSI driver wiring, Ceph/Rook sidecar compatibility, or shadow **`VolumeSnapshot`** workarounds in **state-snapshotter**; that remains **storage-foundation**.
+
+**PVC list vs ownership (residual root):**
+
+- **MAY:** use a **namespace-wide PVC list** **only** as **candidate discovery** for **residual root scope** (see **§3.9.3**): candidates minus subtree-covered **`pvcUID`s**, minus policy exclusions.
+- **MUST NOT:** define PVC **ownership** **solely** by listing all PVCs in a namespace.
+- **MUST:** resolve **final ownership** by **snapshot-run tree coverage**, **domain claims**, **policy exclusions**, and **`pvcUID` dedup** before publishing **`dataRefs[]`** or MCR PVC targets.
+- **MUST:** root **MUST NOT** capture (manifest or data) a PVC already covered by a **child/domain subtree** in this run.
