@@ -203,7 +203,7 @@
 
 #### 2.4.5 N5 data-layer — `dataRefs[]` roadmap (PR-0 … PR-9)
 
-**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** (restore tree + `dataRefs[]`) in progress. **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F** (bulk VCR, storage-foundation) blocks real data path.
+**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** ✅; **PR-4** blocked on **PR-F** (bulk VCR in storage-foundation). **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F task:** `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`.
 
 **Target architecture (fixed — do not re-litigate per PR):**
 
@@ -260,7 +260,7 @@ status:
 | **PR-0** | Docs stabilization | Model B correction; §3.9; residual PVC list semantics; this roadmap | Code, CRD |
 | **PR-1** | API contract + mechanical consumers | Add **`status.dataRefs[]`**; remove **`dataRef`** (no bridge); Go types; CRD + codegen; wrappers **`DataRefs` only**; **mechanical** SCC loops over `dataRefs[]` (VSC finalizer/existence); restore resolver/transformer **read** `dataRefs[]` (PVC match only) | **PR-2** `resolveDataReadiness`; **PR-3** restore tree publish; VCR publish |
 | **PR-2** | SCC data readiness | **`resolveDataReadiness`**: validate **`dataRefs[]` only**; aggregate Ready reason; **no** VCR creation | VCR, restore tree publish |
-| **PR-3** | Restore tree (publish) | End-to-end restore graph with `dataRefs[]`; fail-closed when MCP PVC lacks binding and data restore required | VCR ensure |
+| **PR-3** | Restore tree (publish) ✅ | End-to-end restore graph with `dataRefs[]`; fail-closed when MCP PVC lacks binding and data restore required | VCR ensure |
 | **PR-F** | **storage-foundation prerequisite** | Bulk **VCR**: `spec.targets[]`, `status.dataRefs[]`; **Ready** when all targets done; controller creates VSC per target | state-snapshotter publish |
 | **PR-4** | VCR plumbing (state-snapshotter) | **One VCR** per logical content with N PVC **`spec.targets[]`**; publish **`SnapshotContent.dataRefs[]`** from **`VCR.status.dataRefs[]`**; cleanup/handoff after **all** bindings; deterministic VCR name per content | Requires **PR-F** |
 | **PR-5** | Scoped PVC manifest capture | Explicit PVC in MCR `targets[]` for owning scope; matching PVC entries in **same** VCR `targets[]`; root/domain MCP includes PVC manifests only for owned PVCs | Dedup resolver |
@@ -303,20 +303,22 @@ Use as PR description / review gate. Check only items for that PR.
 - [x] No VCR/MCR creation in SCC
 - [x] Unit: 0 refs; missing VSC; not readyToUse; 2 refs one pending; 2 refs both ready; unknown kind; invalid ref
 
-**PR-3 — Restore tree publish** (in progress)
+**PR-3 — Restore tree publish** ✅
 
 - [x] `SnapshotContentNode` carries per-node `DataBindings` from `status.dataRefs[]` (cloned in resolver)
 - [x] Transformer: PVC → binding by uid first; identity fallback only when PVC uid empty
 - [x] Fail-closed when binding missing (PVC ns/name/uid in error)
 - [x] Unit tests: 2 PVC / 2 VRR; UID vs name; tree isolation parent/child bindings
-- [ ] Mark PR-3 done after review (no VCR publish in this PR)
+- [x] No VCR/MCR creation or `SnapshotContent.dataRefs[]` publish in this PR
 
-**PR-F — storage-foundation bulk VCR (prerequisite)**
+**PR-F — storage-foundation bulk VCR (prerequisite)** — task SSOT: `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`
 
 - [ ] VCR `spec.targets[]` for 0..N PVC targets
 - [ ] VCR `status.dataRefs[]` populated as artifacts become Ready
 - [ ] VCR `Ready=True` only when all targets complete
-- [ ] Document contract for state-snapshotter publish path
+- [ ] One VCR per logical `SnapshotContent` (no per-PVC fanout)
+- [ ] `dataRefs[].artifact` = durable refs only (e.g. `VolumeSnapshotContent`), not requests
+- [ ] Document contract for state-snapshotter **PR-4** publish path
 
 **PR-4 — VCR plumbing (state-snapshotter)**
 
