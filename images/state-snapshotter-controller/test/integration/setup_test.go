@@ -22,7 +22,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -178,9 +177,11 @@ var _ = BeforeSuite(func() {
 	}
 
 	crdPaths := []string{crdsPath}
-	foundationCRDs := filepath.Clean(filepath.Join(crdsPath, "..", "storage-foundation", "crds"))
-	if st, err := os.Stat(foundationCRDs); err == nil && st.IsDir() {
+	if foundationCRDs, foundationSource, ok := integrationResolveFoundationCRDDir(crdsPath); ok {
 		crdPaths = append(crdPaths, foundationCRDs)
+		GinkgoWriter.Printf("integration: storage-foundation CRDs from %s (%s)\n", foundationCRDs, foundationSource)
+	} else {
+		GinkgoWriter.Println("integration: storage-foundation/crds not found; PR-7 pending-VCR uses minimal VolumeCaptureRequest CRD after envtest start")
 	}
 
 	testEnv = &envtest.Environment{
@@ -768,6 +769,8 @@ var _ = BeforeSuite(func() {
 	Eventually(func() bool {
 		return mgr.GetCache().WaitForCacheSync(ctx)
 	}).Should(BeTrue())
+
+	integrationEnsureVolumeCaptureRequestCRD(testCtx, cfg)
 
 	// Wait for RESTMapper to discover test GVKs (avoid discovery race)
 	waitForMapping := func(gvk schema.GroupVersionKind) error {

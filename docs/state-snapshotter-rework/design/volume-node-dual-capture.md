@@ -280,7 +280,7 @@ Missing binding for a PVC present in MCP → **fail-closed** for restore-with-da
 | PR-4 | state-snapshotter: one VCR per content, publish from VCR → content |
 | PR-5 | Scoped PVC manifests ✅ |
 | PR-6 | Ownership/dedup ✅ |
-| PR-7 | Envtest 2-PVC vertical slice |
+| PR-7 | Envtest 2-PVC subtree vertical slice ✅ (`n5_pr7_two_pvc_integration_test.go`) |
 | PR-8 | E2E local-thin |
 | PR-9 | Runbook/status |
 
