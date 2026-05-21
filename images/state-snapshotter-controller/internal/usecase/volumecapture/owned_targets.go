@@ -21,15 +21,15 @@ import (
 	"fmt"
 	"sort"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// ListOwnedPVCTargetsForLogicalContent returns residual PVC targets owned by this logical SnapshotContent node:
-// namespace PVC candidates minus subtree-covered UIDs (PR-6). Empty slice means manifest-only (no volume leg).
+// ListOwnedPVCTargetsForLogicalContent returns PVC volume targets owned by this logical SnapshotContent node.
+// Root residual scope: namespace PVC candidates minus subtree-covered UIDs.
+// Domain/non-root scope: only this node's dataRefs[] and pending VCR targets (not full namespace list).
 func ListOwnedPVCTargetsForLogicalContent(
 	ctx context.Context,
 	c client.Reader,
@@ -43,15 +43,15 @@ func ListOwnedPVCTargetsForLogicalContent(
 	if content == nil {
 		return nil, nil
 	}
-	covered, err := CollectSubtreeCoveredPVCUIDs(ctx, c, namespace, content)
+	var out []vcpkg.Target
+	if IsResidualRootPVCCaptureScope(snap, content) {
+		out, err = listResidualRootOwnedPVCTargets(ctx, c, namespace, snap, content)
+	} else {
+		out, err = listDomainNodeOwnedPVCTargets(ctx, c, namespace, content)
+	}
 	if err != nil {
 		return nil, err
 	}
-	candidates, err := ListNamespacePVCTargets(ctx, c, namespace)
-	if err != nil {
-		return nil, err
-	}
-	out := residualPVCTargets(candidates, covered)
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].UID < out[j].UID
 	})
@@ -59,16 +59,14 @@ func ListOwnedPVCTargetsForLogicalContent(
 }
 
 // ListOwnedPVCTargetsForSnapshotContent is the domain/demo entry point when only namespace + content are known.
+// Domain nodes never use namespace-wide residual discovery.
 func ListOwnedPVCTargetsForSnapshotContent(
 	ctx context.Context,
 	c client.Reader,
 	namespace string,
 	content *storagev1alpha1.SnapshotContent,
 ) ([]vcpkg.Target, error) {
-	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
-	}
-	return ListOwnedPVCTargetsForLogicalContent(ctx, c, snap, content)
+	return listDomainNodeOwnedPVCTargets(ctx, c, namespace, content)
 }
 
 func snapshotNamespaceForOwnedTargets(snap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent) (string, error) {

@@ -29,7 +29,7 @@ import (
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// AnnotationStubVolumeCapturePVCs is a legacy/test-only bootstrap for owned PVC names until PR-7 envtest.
+// AnnotationStubVolumeCapturePVCs is test/bootstrap only; production owned PVC planning must not use it.
 // Production planning uses subtree coverage + namespace PVC candidates (PR-6).
 const AnnotationStubVolumeCapturePVCs = "state-snapshotter.deckhouse.io/volume-capture-stub-pvcs"
 

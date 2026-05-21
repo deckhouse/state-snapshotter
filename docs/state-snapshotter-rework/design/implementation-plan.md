@@ -322,27 +322,28 @@ Use as PR description / review gate. Check only items for that PR.
 
 **PR-4 — VCR plumbing (state-snapshotter)** ✅
 
-- [x] Ensure **one VCR** per logical content; `spec.targets[]` = all owned PVCs (stub: `state-snapshotter.deckhouse.io/volume-capture-stub-pvcs`)
+- [x] Ensure **one VCR** per logical content; `spec.targets[]` = owned PVCs from PR-6 resolver (not stub annotation)
 - [x] Deterministic VCR name `snap-vcr-{contentUID}` (not per-pvcUID suffix)
 - [x] `Snapshot.status.volumeCaptureRequestName` only for in-flight VCR; publish **`SnapshotContent.status.dataRefs[]`** from **`VCR.status.dataRefs[]`**; VSC ownerRef → content
 - [x] Safe delete VCR after **all** bindings handoff (symmetry with MCR)
 - [x] Unit: one VCR / two targets; publish two `dataRefs`; pending retained; failed fail-closed; no extra content; no singular `dataRef`
 - [x] MCR/VCR legs independent (ensure VCR does not requeue-block manifest); handoff before publish; defensive `dataRefs` validation; failure retains VCR + `volumeCaptureRequestName` for debug
 
-**PR-5 — Scoped PVC manifests**
+**PR-5 — Scoped PVC manifests** ✅ (production path)
 
 - [x] `CaptureFilterContext{ExplicitTarget: true}` for MCR targets
-- [x] Domain MCR: sourceRef + owned PVCs in same MCP (demo: stub annotation on domain snapshot)
+- [x] Domain MCR: sourceRef + owned PVCs on same node (`OwnedPVCManifestTargetsForSnapshotContent`; not namespace-wide list)
 - [x] Root residual PVCs in root MCR targets when owned (append after allowlist − E5)
 - [x] No PVC manifest duplicate in parent when child owns PVC (E5 exclude + `AppendOwnedPVCManifestTargets` skips excluded keys)
 
-**PR-6 — Ownership/dedup**
+**PR-6 — Ownership/dedup** ✅ (production path)
 
 - [x] `CollectSubtreeCoveredPVCUIDs` from descendant `SnapshotContent` (`dataRefs[]` + pending VCR `spec.targets[]`)
-- [x] Residual owned PVCs: namespace PVC candidates − subtree covered (MCR + VCR planning)
+- [x] Root residual: namespace PVC candidates − subtree covered (`IsResidualRootPVCCaptureScope`)
+- [x] Domain/non-root: this node's `dataRefs[]` + pending VCR only (`listDomainNodeOwnedPVCTargets`)
 - [x] Duplicate `pvcUID` in subtree → fail-closed (`DuplicateCoveredPVCUID`)
-- [x] Stub annotation `volume-capture-stub-pvcs` test-only (`ListOwnedPVCTargetsFromStubAnnotation`)
-- [x] Unit: subtree collector, residual targets, root duplicate fail-closed
+- [x] Stub annotation test-only; not referenced from production controllers
+- [x] Unit: subtree collector, residual/domain ownership, stale dataRef uid, root duplicate fail-closed
 
 **PR-7 — Vertical slice envtest** ✅
 
