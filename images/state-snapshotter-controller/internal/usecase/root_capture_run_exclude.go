@@ -30,6 +30,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
@@ -76,15 +77,19 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if err != nil {
 		return nil, err
 	}
+	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, nil)
+	if err != nil {
+		return nil, err
+	}
 	if len(rootNS.Status.ChildrenSnapshotRefs) == 0 {
-		return base, nil
+		return namespacemanifest.AppendOwnedPVCManifestTargets(base, ownedPVC, nil, targetNamespace), nil
 	}
 	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
 	if err != nil {
 		return nil, err
 	}
 	filtered := namespacemanifest.FilterManifestTargets(base, excl, targetNamespace)
-	return filtered, nil
+	return namespacemanifest.AppendOwnedPVCManifestTargets(filtered, ownedPVC, excl, targetNamespace), nil
 }
 
 func collectRunSubtreeManifestExcludeKeys(

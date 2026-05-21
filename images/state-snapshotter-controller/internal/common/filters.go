@@ -65,9 +65,17 @@ var (
 // If excludeKinds is provided (from ConfigMap), it will be checked in addition to built-in rules.
 // If nil or empty, only built-in rules are applied.
 func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool {
+	return ShouldSkipObjectWithContext(u, excludeKinds, CaptureFilterContext{})
+}
+
+// ShouldSkipObjectWithContext applies the same rules as ShouldSkipObject with optional scoped-target overrides.
+func ShouldSkipObjectWithContext(u *unstructured.Unstructured, excludeKinds []string, filter CaptureFilterContext) bool {
 	kind := u.GetKind()
 	name := u.GetName()
 	labels := u.GetLabels()
+	scopedPVC := filter.ExplicitTarget &&
+		kind == "PersistentVolumeClaim" &&
+		u.GetAPIVersion() == "v1"
 
 	// 1) Explicit opt-out
 	if labels != nil && labels["backup.deckhouse.io/exclude-from-backup"] == "true" {
@@ -103,9 +111,11 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 		}
 	}
 
-	// 5) Owner references — skip managed objects
-	if ownerRefs := u.GetOwnerReferences(); len(ownerRefs) > 0 {
-		return true
+	// 5) Owner references — skip managed objects (except explicit MCR PVC targets).
+	if !scopedPVC {
+		if ownerRefs := u.GetOwnerReferences(); len(ownerRefs) > 0 {
+			return true
+		}
 	}
 
 	// 6) Ephemeral kinds (built-in)
@@ -147,7 +157,7 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 	}
 
 	// 9) Storage & virtualization objects (CSI and VD layers)
-	if storageKinds[kind] {
+	if !scopedPVC && storageKinds[kind] {
 		return true
 	}
 

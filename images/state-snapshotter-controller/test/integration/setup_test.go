@@ -22,6 +22,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -176,8 +177,14 @@ var _ = BeforeSuite(func() {
 		GinkgoWriter.Printf("Warning: CRDs path not verified, using: %s\n", crdsPath)
 	}
 
+	crdPaths := []string{crdsPath}
+	foundationCRDs := filepath.Clean(filepath.Join(crdsPath, "..", "storage-foundation", "crds"))
+	if st, err := os.Stat(foundationCRDs); err == nil && st.IsDir() {
+		crdPaths = append(crdPaths, foundationCRDs)
+	}
+
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{crdsPath},
+		CRDDirectoryPaths:     crdPaths,
 		ErrorIfCRDPathMissing: false,
 	}
 

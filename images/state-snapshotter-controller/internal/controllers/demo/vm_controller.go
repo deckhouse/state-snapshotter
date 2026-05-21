@@ -163,6 +163,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		controllercommon.KindDemoVirtualMachine,
 		source.Name,
 		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualMachineSnapshot, s.Name, s.UID),
+		s.Annotations,
 	)
 	if err != nil {
 		return ctrl.Result{}, err

@@ -145,7 +145,7 @@ MCR and VCR are **not** sequential phases (“manifests first, then data”). Ei
 
 ## 6. Target API: `dataRefs[]` (present since PR-1; publish/readiness later)
 
-**Единственный data artifact contract.** Поле **`status.dataRefs[]`** в CRD с **PR-1**; publish из VCR и readiness aggregation — **PR-2+** / **PR-4** (после **PR-F**). Singular `status.dataRef` удалён, **без** legacy bridge. **Delivery:** [`implementation-plan.md`](implementation-plan.md) **§2.4.5**.
+**Единственный data artifact contract.** Поле **`status.dataRefs[]`** в CRD с **PR-1**; SCC readiness — **PR-2**; publish из VCR — **PR-4** ✅ (после **PR-F** ✅). Stub owned PVCs: annotation `state-snapshotter.deckhouse.io/volume-capture-stub-pvcs` until **PR-6** ownership resolver; **PR-5** ✅ adds those PVCs to MCR targets and scoped MCP capture. **PR-4 runtime:** MCR и VCR — независимые bulk-leg (`ensureVolumeCaptureLeg` не блокирует MCR); publish только после validate → VSC ownerRef handoff → `dataRefs[]`; при `VolumeCaptureFailed` VCR и `volumeCaptureRequestName` остаются для отладки. Singular `status.dataRef` удалён, **без** legacy bridge. **Delivery:** [`implementation-plan.md`](implementation-plan.md) **§2.4.5**.
 
 ### 6.1 Status shape (sketch)
 
@@ -278,7 +278,7 @@ Missing binding for a PVC present in MCP → **fail-closed** for restore-with-da
 | PR-3 | Restore tree publish / end-to-end restore graph with `dataRefs[]` ✅ |
 | PR-F | storage-foundation: bulk VCR (`targets[]`, `status.dataRefs[]`) — see `docs/pr-f-bulk-volumecapturerequest.md` |
 | PR-4 | state-snapshotter: one VCR per content, publish from VCR → content |
-| PR-5 | Scoped PVC manifests |
+| PR-5 | Scoped PVC manifests ✅ |
 | PR-6 | Ownership/dedup |
 | PR-7 | Envtest 2-PVC vertical slice |
 | PR-8 | E2E local-thin |

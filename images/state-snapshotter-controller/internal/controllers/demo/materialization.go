@@ -21,8 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,6 +32,10 @@ import (
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
+	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -54,16 +56,20 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	targetKind string,
 	targetName string,
 	ownerRef metav1.OwnerReference,
+	annotations map[string]string,
 ) (*ssv1alpha1.ManifestCaptureRequest, error) {
 	mcrName := demoSnapshotManifestCaptureRequestName(kind, namespace, name)
 	key := types.NamespacedName{Namespace: namespace, Name: mcrName}
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
-	desiredTargets := []ssv1alpha1.ManifestTarget{{
+	desiredTargets, err := demoManifestCaptureTargets(ctx, c, namespace, annotations, []ssv1alpha1.ManifestTarget{{
 		APIVersion: targetAPIVersion,
 		Kind:       targetKind,
 		Name:       targetName,
-	}}
-	err := c.Get(ctx, key, existing)
+	}})
+	if err != nil {
+		return nil, err
+	}
+	err = c.Get(ctx, key, existing)
 	if err == nil {
 		if !controllercommon.ManifestTargetsEqual(existing.Spec.Targets, desiredTargets) {
 			base := existing.DeepCopy()
@@ -89,7 +95,7 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	}
 	if err := c.Create(ctx, mcr); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, targetAPIVersion, targetKind, targetName, ownerRef)
+			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, targetAPIVersion, targetKind, targetName, ownerRef, annotations)
 		}
 		return nil, err
 	}
@@ -109,6 +115,37 @@ func cleanupDemoSnapshotManifestCaptureRequest(ctx context.Context, c client.Cli
 
 func demoSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, c client.Reader, key types.NamespacedName, contentName string) (bool, error) {
 	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, c, key, contentName)
+}
+
+func demoManifestCaptureTargets(
+	ctx context.Context,
+	c client.Reader,
+	namespace string,
+	annotations map[string]string,
+	base []ssv1alpha1.ManifestTarget,
+) ([]ssv1alpha1.ManifestTarget, error) {
+	nmBase := make([]namespacemanifest.ManifestTarget, 0, len(base))
+	for _, t := range base {
+		nmBase = append(nmBase, namespacemanifest.ManifestTarget{
+			APIVersion: t.APIVersion,
+			Kind:       t.Kind,
+			Name:       t.Name,
+		})
+	}
+	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsFromAnnotations(ctx, c, namespace, annotations)
+	if err != nil {
+		return nil, err
+	}
+	merged := namespacemanifest.AppendOwnedPVCManifestTargets(nmBase, ownedPVC, nil, namespace)
+	out := make([]ssv1alpha1.ManifestTarget, 0, len(merged))
+	for _, t := range merged {
+		out = append(out, ssv1alpha1.ManifestTarget{
+			APIVersion: t.APIVersion,
+			Kind:       t.Kind,
+			Name:       t.Name,
+		})
+	}
+	return out, nil
 }
 
 func ensureDemoSnapshotContent(ctx context.Context, c client.Client, contentName string, ownerRef metav1.OwnerReference) error {

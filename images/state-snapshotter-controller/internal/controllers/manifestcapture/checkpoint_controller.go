@@ -606,7 +606,7 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	// Helper to add object if not already collected
 	// CRITICAL: Filtering and cleaning must happen BEFORE adding (TZ requirement)
 	// But only if enableFiltering is true (default: false - include everything as-is)
-	addObject := func(obj *unstructured.Unstructured) {
+	addObject := func(obj *unstructured.Unstructured, filterCtx common.CaptureFilterContext) {
 		var finalObj *unstructured.Unstructured
 
 		// Secret filtering is a security invariant for ManifestCheckpoint and is
@@ -620,7 +620,7 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		if r.Config.EnableFiltering {
 			// Step 3: Apply filtering (TZ section 5, step 3) - BEFORE adding
 			// Pass excludeKinds from ConfigMap to support runtime configuration
-			if common.ShouldSkipObject(obj, r.Config.ExcludeKinds) {
+			if common.ShouldSkipObjectWithContext(obj, r.Config.ExcludeKinds, filterCtx) {
 				r.Logger.Info("Skipping object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
 				return
 			}
@@ -686,14 +686,16 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			return nil, fmt.Errorf("failed to get %s %s: %w", target.Kind, key.String(), err)
 		}
 
-		// Add target object (filtering happens inside addObject)
-		addObject(obj)
+		// Add target object (filtering happens inside addObject; explicit MCR targets use scoped PVC rules).
+		addObject(obj, common.CaptureFilterContext{ExplicitTarget: true})
 
 		// Step 2: Recursively collect related objects (TZ section 5, step 2)
 		// collectRelatedObjects now uses addObject directly, so filtering is applied
 		// Collect related objects (ConfigMaps, Secrets, etc.)
 		// Errors are ignored - continue even if related objects collection fails
-		r.collectRelatedObjects(ctx, obj, mcr.Namespace, addObject)
+		r.collectRelatedObjects(ctx, obj, mcr.Namespace, func(related *unstructured.Unstructured) {
+			addObject(related, common.CaptureFilterContext{})
+		})
 	}
 
 	// Step 4: Sort objects (TZ section 5, step 4)

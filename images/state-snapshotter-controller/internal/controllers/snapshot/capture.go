@@ -128,6 +128,13 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.ensureVolumeCaptureLeg(ctx, nsSnap, content); err != nil {
+		return ctrl.Result{}, err
+	}
+	if _, err := r.reconcileVolumeCapturePublish(ctx, nsSnap, content, false); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content); done {
 		return res, err
 	}
@@ -194,7 +201,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 				return ctrl.Result{}, uerr
 			}
 			_ = content
-			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
 			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())
@@ -214,14 +221,14 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
 					return ctrl.Result{}, delErr
 				}
-				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+				return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil)
 			}
 			return r.failCapture(ctx, freshParent, content, "CapturePlanDrift", err.Error())
 		}
 		return ctrl.Result{}, err
 	}
 	if res.RequeueAfter > 0 || res.Requeue {
-		return res, nil
+		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
 	}
 
 	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
@@ -241,7 +248,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
 		return ctrl.Result{}, err
 	}
@@ -268,7 +275,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}
 
 	if readyCond.Reason != ssv1alpha1.ManifestCheckpointConditionReasonCompleted {
@@ -276,7 +283,8 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		logger.Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
 	}
 
-	return r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+	res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+	return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
 }
 
 // reconcileIfRootManifestCheckpointAlreadyReady handles idempotent steady state: MCP name on SnapshotContent, MCP Ready,
@@ -317,6 +325,7 @@ func (r *SnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyReady(
 	}
 
 	res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+	res, err = r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
 	return true, res, err
 }
 
@@ -419,15 +428,22 @@ func (r *SnapshotReconciler) snapshotManifestCaptureRequestReadyForCleanup(ctx c
 }
 
 func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
-	nsSnap.Status.ObservedGeneration = nsSnap.Generation
-	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-		Type:               snapshotpkg.ConditionReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            msg,
-		ObservedGeneration: nsSnap.Generation,
-	})
-	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
+	nsKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &storagev1alpha1.Snapshot{}
+		if err := r.Client.Get(ctx, nsKey, fresh); err != nil {
+			return err
+		}
+		fresh.Status.ObservedGeneration = fresh.Generation
+		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
+			Type:               snapshotpkg.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            msg,
+			ObservedGeneration: fresh.Generation,
+		})
+		return r.Client.Status().Update(ctx, fresh)
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 	_ = content

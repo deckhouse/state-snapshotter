@@ -148,6 +148,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		controllercommon.KindDemoVirtualDisk,
 		source.Name,
 		demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualDiskSnapshot, s.Name, s.UID),
+		s.Annotations,
 	)
 	if err != nil {
 		return ctrl.Result{}, err

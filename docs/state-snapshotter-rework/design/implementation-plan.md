@@ -203,7 +203,7 @@
 
 #### 2.4.5 N5 data-layer — `dataRefs[]` roadmap (PR-0 … PR-9)
 
-**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** ✅; **PR-4** blocked on **PR-F** (bulk VCR in storage-foundation). **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F task:** `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`.
+**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** ✅; **PR-F** ✅ (bulk VCR in storage-foundation); **PR-4** ✅ (VCR publish); **PR-5** ✅ (scoped PVC manifests; stub owned-PVC list until **PR-6**). **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F task:** `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`.
 
 **Target architecture (fixed — do not re-litigate per PR):**
 
@@ -263,7 +263,7 @@ status:
 | **PR-3** | Restore tree (publish) ✅ | End-to-end restore graph with `dataRefs[]`; fail-closed when MCP PVC lacks binding and data restore required | VCR ensure |
 | **PR-F** | **storage-foundation prerequisite** | Bulk **VCR**: `spec.targets[]`, `status.dataRefs[]`; **Ready** when all targets done; controller creates VSC per target | state-snapshotter publish |
 | **PR-4** | VCR plumbing (state-snapshotter) | **One VCR** per logical content with N PVC **`spec.targets[]`**; publish **`SnapshotContent.dataRefs[]`** from **`VCR.status.dataRefs[]`**; cleanup/handoff after **all** bindings; deterministic VCR name per content | Requires **PR-F** |
-| **PR-5** | Scoped PVC manifest capture | Explicit PVC in MCR `targets[]` for owning scope; matching PVC entries in **same** VCR `targets[]`; root/domain MCP includes PVC manifests only for owned PVCs | Dedup resolver |
+| **PR-5** | Scoped PVC manifest capture ✅ | Explicit PVC in MCR `targets[]` for owning scope; matching PVC entries in **same** VCR `targets[]`; root/domain MCP includes PVC manifests only for owned PVCs | Dedup resolver |
 | **PR-6** | Ownership/dedup resolver | Subtree `pvcUID` coverage; residual root: list PVC candidates allowed; final owner = tree + domain claims + exclusions + dedup; conflicts fail-closed | e2e cluster |
 | **PR-7** | First vertical slice (envtest) | **2 PVC**: one MCR (2 manifest targets), **one VCR** (2 volume targets), one MCP + **`dataRefs[]` len 2**; content Ready waits for both | Cluster e2e |
 | **PR-8** | E2E local-thin | Real foundation bulk VCR→VSC; validate MCP + `dataRefs[]` + Ready | Rook/Ceph |
@@ -311,29 +311,30 @@ Use as PR description / review gate. Check only items for that PR.
 - [x] Unit tests: 2 PVC / 2 VRR; UID vs name; tree isolation parent/child bindings
 - [x] No VCR/MCR creation or `SnapshotContent.dataRefs[]` publish in this PR
 
-**PR-F — storage-foundation bulk VCR (prerequisite)** — task SSOT: `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`
+**PR-F — storage-foundation bulk VCR (prerequisite)** ✅ — task SSOT: `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`
 
-- [ ] VCR `spec.targets[]` for 0..N PVC targets
-- [ ] VCR `status.dataRefs[]` populated as artifacts become Ready
-- [ ] VCR `Ready=True` only when all targets complete
-- [ ] One VCR per logical `SnapshotContent` (no per-PVC fanout)
-- [ ] `dataRefs[].artifact` = durable refs only (e.g. `VolumeSnapshotContent`), not requests
-- [ ] Document contract for state-snapshotter **PR-4** publish path
+- [x] VCR `spec.targets[]` for 0..N PVC targets
+- [x] VCR `status.dataRefs[]` populated as artifacts become Ready
+- [x] VCR `Ready=True` only when all targets complete
+- [x] One VCR per logical `SnapshotContent` (no per-PVC fanout)
+- [x] `dataRefs[].artifact` = durable refs only (e.g. `VolumeSnapshotContent`), not requests
+- [x] Document contract for state-snapshotter **PR-4** publish path
 
-**PR-4 — VCR plumbing (state-snapshotter)**
+**PR-4 — VCR plumbing (state-snapshotter)** ✅
 
-- [ ] Ensure **one VCR** per logical content; `spec.targets[]` = all owned PVCs
-- [ ] Deterministic VCR name from snapshot/content UID (not per-pvcUID suffix)
-- [ ] Publish **`SnapshotContent.status.dataRefs[]`** from **`VCR.status.dataRefs[]`** after handoff; artifact ownerRef → content
-- [ ] Safe delete VCR after **all** bindings handoff (symmetry with MCR)
-- [ ] Integration: stub or fake bulk VCR; blocked on **PR-F** for real controller
+- [x] Ensure **one VCR** per logical content; `spec.targets[]` = all owned PVCs (stub: `state-snapshotter.deckhouse.io/volume-capture-stub-pvcs`)
+- [x] Deterministic VCR name `snap-vcr-{contentUID}` (not per-pvcUID suffix)
+- [x] `Snapshot.status.volumeCaptureRequestName` only for in-flight VCR; publish **`SnapshotContent.status.dataRefs[]`** from **`VCR.status.dataRefs[]`**; VSC ownerRef → content
+- [x] Safe delete VCR after **all** bindings handoff (symmetry with MCR)
+- [x] Unit: one VCR / two targets; publish two `dataRefs`; pending retained; failed fail-closed; no extra content; no singular `dataRef`
+- [x] MCR/VCR legs independent (ensure VCR does not requeue-block manifest); handoff before publish; defensive `dataRefs` validation; failure retains VCR + `volumeCaptureRequestName` for debug
 
 **PR-5 — Scoped PVC manifests**
 
-- [ ] `CaptureFilterContext{ExplicitTarget: true}` for MCR targets
-- [ ] Domain MCR: sourceRef + owned PVCs in same MCP
-- [ ] Root residual PVCs in root MCR targets when owned
-- [ ] No PVC manifest duplicate in parent when child owns PVC (E5 + data dedup)
+- [x] `CaptureFilterContext{ExplicitTarget: true}` for MCR targets
+- [x] Domain MCR: sourceRef + owned PVCs in same MCP (demo: stub annotation on domain snapshot)
+- [x] Root residual PVCs in root MCR targets when owned (append after allowlist − E5)
+- [x] No PVC manifest duplicate in parent when child owns PVC (E5 exclude + `AppendOwnedPVCManifestTargets` skips excluded keys)
 
 **PR-6 — Ownership/dedup**
 

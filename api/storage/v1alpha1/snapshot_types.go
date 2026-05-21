@@ -60,6 +60,10 @@ type SnapshotStatus struct {
 	// Snapshot controllers use it as execution state and clear it after the result is published to SnapshotContent.
 	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
 
+	// VolumeCaptureRequestName is the temporary bulk VCR owned by this snapshot while the volume leg runs.
+	// Cleared after VCR.status.dataRefs[] is published to bound SnapshotContent and artifacts are handed off.
+	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
+
 	// ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
 	// in the N2b run tree. Generic reconcile resolves each child with one Get by ref GVK (no demo-kind
 	// branching and no registry scan for child selection); it is not limited to Snapshot.
