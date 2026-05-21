@@ -32,7 +32,6 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	volumecapturectrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
-	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -44,13 +43,7 @@ func TestEnsureVolumeCaptureLeg_pendingDoesNotRequeue(t *testing.T) {
 	ns := "default"
 	pvc := newPVC(ns, "pvc-a", "uid-a")
 	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snap",
-			Namespace: ns,
-			Annotations: map[string]string{
-				volumecaptureuc.AnnotationStubVolumeCapturePVCs: "pvc-a",
-			},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 
@@ -77,11 +70,7 @@ func TestReconcileVolumeCapturePublish_wrongTargetIdentityNoPublish(t *testing.T
 	ns := "default"
 	pvc := newPVC(ns, "pvc-a", "uid-a")
 	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snap",
-			Namespace: ns,
-			Annotations: map[string]string{volumecaptureuc.AnnotationStubVolumeCapturePVCs: "pvc-a"},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vcr := readyVCR(ns, vcpkg.SnapshotContentVCRName(content.UID), []vcpkg.Target{
@@ -119,14 +108,8 @@ func TestReconcileVolumeCapturePublish_incompleteDataRefsNoPublish(t *testing.T)
 	pvcA := newPVC(ns, "pvc-a", "uid-a")
 	pvcB := newPVC(ns, "pvc-b", "uid-b")
 	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snap",
-			Namespace: ns,
-			Annotations: map[string]string{
-				volumecaptureuc.AnnotationStubVolumeCapturePVCs: "pvc-a,pvc-b",
-			},
-		},
-		Status: storagev1alpha1.SnapshotStatus{VolumeCaptureRequestName: vcpkg.SnapshotContentVCRName("content-uid")},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
+		Status:     storagev1alpha1.SnapshotStatus{VolumeCaptureRequestName: vcpkg.SnapshotContentVCRName("content-uid")},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vcr := readyVCR(ns, vcpkg.SnapshotContentVCRName(content.UID), []vcpkg.Target{
@@ -164,11 +147,7 @@ func TestReconcileVolumeCapturePublish_handoffBeforePublish(t *testing.T) {
 	ns := "default"
 	pvc := newPVC(ns, "pvc-a", "uid-a")
 	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "snap",
-			Namespace:   ns,
-			Annotations: map[string]string{volumecaptureuc.AnnotationStubVolumeCapturePVCs: "pvc-a"},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vsc := volumeSnapshotContent("vsc-a", true)
@@ -254,11 +233,7 @@ func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	pvcA := newPVC(ns, "pvc-a", "uid-a")
 	pvcB := newPVC(ns, "pvc-b", "uid-b")
 	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "snap",
-			Namespace:   ns,
-			Annotations: map[string]string{volumecaptureuc.AnnotationStubVolumeCapturePVCs: "pvc-a,pvc-b"},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vscA := volumeSnapshotContent("vsc-a", true)
@@ -314,11 +289,7 @@ func TestReconcileVolumeCapture_VCRFailedRetainsRequest(t *testing.T) {
 	ns := "default"
 	pvc := newPVC(ns, "pvc-a", "uid-a")
 	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "snap",
-			Namespace:   ns,
-			Annotations: map[string]string{volumecaptureuc.AnnotationStubVolumeCapturePVCs: "pvc-a"},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vcrName := vcpkg.SnapshotContentVCRName(content.UID)

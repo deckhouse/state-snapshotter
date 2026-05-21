@@ -56,12 +56,12 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	targetKind string,
 	targetName string,
 	ownerRef metav1.OwnerReference,
-	annotations map[string]string,
+	contentName string,
 ) (*ssv1alpha1.ManifestCaptureRequest, error) {
 	mcrName := demoSnapshotManifestCaptureRequestName(kind, namespace, name)
 	key := types.NamespacedName{Namespace: namespace, Name: mcrName}
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
-	desiredTargets, err := demoManifestCaptureTargets(ctx, c, namespace, annotations, []ssv1alpha1.ManifestTarget{{
+	desiredTargets, err := demoManifestCaptureTargets(ctx, c, namespace, contentName, []ssv1alpha1.ManifestTarget{{
 		APIVersion: targetAPIVersion,
 		Kind:       targetKind,
 		Name:       targetName,
@@ -95,7 +95,7 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	}
 	if err := c.Create(ctx, mcr); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, targetAPIVersion, targetKind, targetName, ownerRef, annotations)
+			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, targetAPIVersion, targetKind, targetName, ownerRef, contentName)
 		}
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func demoManifestCaptureTargets(
 	ctx context.Context,
 	c client.Reader,
 	namespace string,
-	annotations map[string]string,
+	contentName string,
 	base []ssv1alpha1.ManifestTarget,
 ) ([]ssv1alpha1.ManifestTarget, error) {
 	nmBase := make([]namespacemanifest.ManifestTarget, 0, len(base))
@@ -132,7 +132,11 @@ func demoManifestCaptureTargets(
 			Name:       t.Name,
 		})
 	}
-	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsFromAnnotations(ctx, c, namespace, annotations)
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		return nil, fmt.Errorf("get SnapshotContent %q: %w", contentName, err)
+	}
+	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshotContent(ctx, c, namespace, content)
 	if err != nil {
 		return nil, err
 	}

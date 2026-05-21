@@ -20,67 +20,60 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// AnnotationStubVolumeCapturePVCs lists PVC names (same namespace as Snapshot) for PR-4 vertical slice until PR-5 ownership resolver exists.
-const AnnotationStubVolumeCapturePVCs = "state-snapshotter.deckhouse.io/volume-capture-stub-pvcs"
-
-// ListOwnedPVCTargetsForLogicalContent returns PVC targets owned by this logical SnapshotContent node.
-// Empty slice means no volume leg for this capture (manifest-only).
+// ListOwnedPVCTargetsForLogicalContent returns residual PVC targets owned by this logical SnapshotContent node:
+// namespace PVC candidates minus subtree-covered UIDs (PR-6). Empty slice means manifest-only (no volume leg).
 func ListOwnedPVCTargetsForLogicalContent(
 	ctx context.Context,
 	c client.Reader,
 	snap *storagev1alpha1.Snapshot,
-	_ *storagev1alpha1.SnapshotContent,
+	content *storagev1alpha1.SnapshotContent,
 ) ([]vcpkg.Target, error) {
-	if snap == nil {
+	namespace, err := snapshotNamespaceForOwnedTargets(snap, content)
+	if err != nil {
+		return nil, err
+	}
+	if content == nil {
 		return nil, nil
 	}
-	raw := strings.TrimSpace(snap.Annotations[AnnotationStubVolumeCapturePVCs])
-	if raw == "" {
-		return nil, nil
+	covered, err := CollectSubtreeCoveredPVCUIDs(ctx, c, namespace, content)
+	if err != nil {
+		return nil, err
 	}
-	names := splitCSV(raw)
-	out := make([]vcpkg.Target, 0, len(names))
-	for _, name := range names {
-		pvc := &corev1.PersistentVolumeClaim{}
-		key := types.NamespacedName{Namespace: snap.Namespace, Name: name}
-		if err := c.Get(ctx, key, pvc); err != nil {
-			return nil, fmt.Errorf("get PVC %s: %w", key, err)
-		}
-		if pvc.UID == "" {
-			return nil, fmt.Errorf("PVC %s has empty uid", key)
-		}
-		out = append(out, vcpkg.Target{
-			UID:        string(pvc.UID),
-			APIVersion: corev1.SchemeGroupVersion.String(),
-			Kind:       "PersistentVolumeClaim",
-			Name:       pvc.Name,
-			Namespace:  pvc.Namespace,
-		})
+	candidates, err := ListNamespacePVCTargets(ctx, c, namespace)
+	if err != nil {
+		return nil, err
 	}
+	out := residualPVCTargets(candidates, covered)
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].UID < out[j].UID
 	})
 	return out, nil
 }
 
-func splitCSV(s string) []string {
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
+// ListOwnedPVCTargetsForSnapshotContent is the domain/demo entry point when only namespace + content are known.
+func ListOwnedPVCTargetsForSnapshotContent(
+	ctx context.Context,
+	c client.Reader,
+	namespace string,
+	content *storagev1alpha1.SnapshotContent,
+) ([]vcpkg.Target, error) {
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace},
 	}
-	return out
+	return ListOwnedPVCTargetsForLogicalContent(ctx, c, snap, content)
+}
+
+func snapshotNamespaceForOwnedTargets(snap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent) (string, error) {
+	if snap != nil && snap.Namespace != "" {
+		return snap.Namespace, nil
+	}
+	return "", fmt.Errorf("namespace is required to resolve owned PVC targets")
 }

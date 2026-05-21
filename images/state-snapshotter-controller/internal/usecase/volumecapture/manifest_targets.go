@@ -19,15 +19,13 @@ package volumecapture
 import (
 	"context"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
-// OwnedPVCManifestTargetsForSnapshot returns explicit PVC manifest targets for a logical capture node.
-// Uses the same owned-PVC source as the bulk VCR leg (stub annotation until PR-6 resolver).
+// OwnedPVCManifestTargetsForSnapshot returns explicit PVC manifest targets for a logical capture node (PR-6 resolver).
 func OwnedPVCManifestTargetsForSnapshot(
 	ctx context.Context,
 	c client.Reader,
@@ -41,23 +39,14 @@ func OwnedPVCManifestTargetsForSnapshot(
 	return namespacemanifest.ManifestTargetsFromVolumeTargets(vol), nil
 }
 
-// OwnedPVCManifestTargetsFromAnnotations resolves stub-owned PVCs for domain snapshots (demo, etc.).
-func OwnedPVCManifestTargetsFromAnnotations(
+// OwnedPVCManifestTargetsForSnapshotContent is the domain/demo entry point when only namespace + content are known.
+func OwnedPVCManifestTargetsForSnapshotContent(
 	ctx context.Context,
 	c client.Reader,
 	namespace string,
-	annotations map[string]string,
+	content *storagev1alpha1.SnapshotContent,
 ) ([]namespacemanifest.ManifestTarget, error) {
-	if annotations == nil || annotations[AnnotationStubVolumeCapturePVCs] == "" {
-		return nil, nil
-	}
-	snap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   namespace,
-			Annotations: annotations,
-		},
-	}
-	vol, err := ListOwnedPVCTargetsForLogicalContent(ctx, c, snap, nil)
+	vol, err := ListOwnedPVCTargetsForSnapshotContent(ctx, c, namespace, content)
 	if err != nil {
 		return nil, err
 	}

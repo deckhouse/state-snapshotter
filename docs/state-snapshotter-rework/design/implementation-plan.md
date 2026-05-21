@@ -203,7 +203,7 @@
 
 #### 2.4.5 N5 data-layer — `dataRefs[]` roadmap (PR-0 … PR-9)
 
-**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** ✅; **PR-F** ✅ (bulk VCR in storage-foundation); **PR-4** ✅ (VCR publish); **PR-5** ✅ (scoped PVC manifests; stub owned-PVC list until **PR-6**). **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F task:** `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`.
+**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** ✅; **PR-F** ✅ (bulk VCR in storage-foundation); **PR-4** ✅ (VCR publish); **PR-5** ✅ (scoped PVC manifests); **PR-6** ✅ (subtree PVC ownership resolver). **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F task:** `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`.
 
 **Target architecture (fixed — do not re-litigate per PR):**
 
@@ -264,7 +264,7 @@ status:
 | **PR-F** | **storage-foundation prerequisite** | Bulk **VCR**: `spec.targets[]`, `status.dataRefs[]`; **Ready** when all targets done; controller creates VSC per target | state-snapshotter publish |
 | **PR-4** | VCR plumbing (state-snapshotter) | **One VCR** per logical content with N PVC **`spec.targets[]`**; publish **`SnapshotContent.dataRefs[]`** from **`VCR.status.dataRefs[]`**; cleanup/handoff after **all** bindings; deterministic VCR name per content | Requires **PR-F** |
 | **PR-5** | Scoped PVC manifest capture ✅ | Explicit PVC in MCR `targets[]` for owning scope; matching PVC entries in **same** VCR `targets[]`; root/domain MCP includes PVC manifests only for owned PVCs | Dedup resolver |
-| **PR-6** | Ownership/dedup resolver | Subtree `pvcUID` coverage; residual root: list PVC candidates allowed; final owner = tree + domain claims + exclusions + dedup; conflicts fail-closed | e2e cluster |
+| **PR-6** | Ownership/dedup resolver ✅ | Subtree `pvcUID` coverage; residual root: list PVC candidates allowed; final owner = tree + domain claims + exclusions + dedup; conflicts fail-closed | e2e cluster |
 | **PR-7** | First vertical slice (envtest) | **2 PVC**: one MCR (2 manifest targets), **one VCR** (2 volume targets), one MCP + **`dataRefs[]` len 2**; content Ready waits for both | Cluster e2e |
 | **PR-8** | E2E local-thin | Real foundation bulk VCR→VSC; validate MCP + `dataRefs[]` + Ready | Rook/Ceph |
 | **PR-9** | Docs/runbook/status | Troubleshooting, operations sync | — |
@@ -338,10 +338,11 @@ Use as PR description / review gate. Check only items for that PR.
 
 **PR-6 — Ownership/dedup**
 
-- [ ] `CollectSubtreeCoveredPVCUIDs` (or equivalent) from tree + pending VCR
-- [ ] Residual root: list candidates → subtract covered → bind root `dataRefs[]`
-- [ ] Duplicate `pvcUID` claim in one run → fail-closed
-- [ ] Unit: root+child overlap, two residual PVCs on root
+- [x] `CollectSubtreeCoveredPVCUIDs` from descendant `SnapshotContent` (`dataRefs[]` + pending VCR `spec.targets[]`)
+- [x] Residual owned PVCs: namespace PVC candidates − subtree covered (MCR + VCR planning)
+- [x] Duplicate `pvcUID` in subtree → fail-closed (`DuplicateCoveredPVCUID`)
+- [x] Stub annotation `volume-capture-stub-pvcs` test-only (`ListOwnedPVCTargetsFromStubAnnotation`)
+- [x] Unit: subtree collector, residual targets, root duplicate fail-closed
 
 **PR-7 — Vertical slice envtest**
 

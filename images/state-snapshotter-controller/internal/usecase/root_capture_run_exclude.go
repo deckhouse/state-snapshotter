@@ -77,7 +77,11 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if err != nil {
 		return nil, err
 	}
-	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, nil)
+	rootContent := &storagev1alpha1.SnapshotContent{}
+	if err := c.Get(ctx, client.ObjectKey{Name: rootContentName}, rootContent); err != nil {
+		return nil, fmt.Errorf("get root SnapshotContent %q: %w", rootContentName, err)
+	}
+	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, rootContent)
 	if err != nil {
 		return nil, err
 	}

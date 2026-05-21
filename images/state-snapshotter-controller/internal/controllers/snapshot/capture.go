@@ -39,6 +39,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
@@ -149,6 +150,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding;
 		// do not fail capture as ListFailed — requeue like ChildSnapshotPending.
 		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
+			errors.Is(err, volumecaptureuc.ErrSubtreeDataRefsPending) ||
 			errors.Is(err, usecase.ErrRunGraphChildNotBound) ||
 			errors.Is(err, usecase.ErrRunGraphChildSnapshotNotFound) ||
 			(hasSubtree && errors.Is(err, usecase.ErrRunGraphChildNotReachable)) ||
@@ -205,6 +207,9 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
 			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())
+		}
+		if errors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
+			return r.failCapture(ctx, freshParent, content, "DuplicateCoveredPVCUID", err.Error())
 		}
 		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}

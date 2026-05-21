@@ -22,6 +22,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -614,6 +615,9 @@ func reconcileCommonSnapshotContentStatusForTest(t *testing.T, cl client.Client,
 func newDemoSourceRefFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storage scheme: %v", err)
 	}
