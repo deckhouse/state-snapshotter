@@ -203,7 +203,7 @@
 
 #### 2.4.5 N5 data-layer — `dataRefs[]` roadmap (PR-0 … PR-9)
 
-**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** (`SnapshotContent.dataRefs[]`) in code. **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F** (bulk VCR, storage-foundation) blocks real data path.
+**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅ (SCC `resolveDataReadiness`); next **PR-3** restore tree publish. **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F** (bulk VCR, storage-foundation) blocks real data path.
 
 **Target architecture (fixed — do not re-litigate per PR):**
 
@@ -285,23 +285,23 @@ Use as PR description / review gate. Check only items for that PR.
 - [x] API sketch + PR-0…9 + **PR-F** roadmap (this section)
 - [x] Symmetric bulk MCR/VCR (one request each per logical content; not N VCR per PVC)
 
-**PR-1 — API contract + mechanical consumers**
+**PR-1 — API contract + mechanical consumers** ✅
 
-- [ ] Add `SnapshotContentStatus.DataRefs[]` (`target` + `artifact`; or flat `targetUID` + `listMapKey`)
-- [ ] kubebuilder/OpenAPI: `listType=map`, map key per §6.2 design
-- [ ] Remove **`DataRef`** from types **or** mark **deprecated** in CRD; **do not** use in controllers/wrappers
-- [ ] Wrappers/interfaces: **`DataRefs` only** — no read/write singular `DataRef`
-- [ ] **No** fallback `dataRef` → `dataRefs[]`; **no** dual-write
-- [ ] CRD regenerated (`hack/generate_code.sh`); `targetUID` **MinLength=1**; unit round-trip; integration: duplicate `targetUID` rejected by apiserver
-- [ ] Docs aligned (no “legacy bridge” wording)
+- [x] Add `SnapshotContentStatus.DataRefs[]` (`target` + `artifact`; `targetUID` + `listMapKey`)
+- [x] kubebuilder/OpenAPI: `listType=map`, map key per §6.2 design
+- [x] Remove **`DataRef`** from types; **do not** use in controllers/wrappers
+- [x] Wrappers/interfaces: **`DataRefs` only** — no read/write singular `DataRef`
+- [x] **No** fallback `dataRef` → `dataRefs[]`; **no** dual-write
+- [x] CRD regenerated (`hack/generate_code.sh`); `targetUID` **MinLength=1**; unit round-trip; integration: duplicate `targetUID` rejected by apiserver
+- [x] Docs aligned (no “legacy bridge” wording)
 
 **PR-2 — SCC data readiness**
 
-- [ ] `resolveDataReadiness`: **`dataRefs[]` only** (empty list = data leg N/A for manifest-only)
-- [ ] Ready=False until all required artifacts Ready; reason mentions pending data ref count
-- [ ] Still validates `manifestCheckpointName` (including empty MCP)
-- [ ] No VCR/MCR creation in SCC
-- [ ] Unit/envtest: 0 refs; 2 refs one pending; 2 refs both ready
+- [x] `resolveDataReadiness`: **`dataRefs[]` only** (empty list = data leg N/A for manifest-only)
+- [x] Ready=False until all required artifacts Ready; reason mentions pending data ref count
+- [x] Still validates `manifestCheckpointName` (including empty MCP) — unchanged path before data leg
+- [x] No VCR/MCR creation in SCC
+- [x] Unit: 0 refs; missing VSC; not readyToUse; 2 refs one pending; 2 refs both ready; unknown kind; invalid ref
 
 **PR-3 — Restore**
 

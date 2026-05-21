@@ -571,14 +571,6 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 	return mcp.Name, false, false, cond.Message, nil
 }
 
-func (r *SnapshotContentController) resolveDataReadiness(_ context.Context, _ *unstructured.Unstructured) (bool, string, string, error) {
-	// PR-2: validate each dataRefs[].artifact exists and is Ready; empty dataRefs[] satisfies the data leg
-	// for manifest-only nodes. Until then this is a no-op for common SnapshotContent Ready aggregation.
-	// Non-common GVKs still use checkConsistencyAndSetReady for legacy artifact existence/finalizer checks
-	// over dataRefs[] (not artifact Ready aggregation).
-	return true, "", "", nil
-}
-
 // cascadeRemoveFinalizersFromChildren removes finalizers from child SnapshotContent objects
 // This unlocks GC for children, but does NOT initiate Delete(child-content)
 // GC will handle deletion through ownerRef

@@ -50,10 +50,13 @@ const (
 
 // Reasons for Ready=False
 const (
-	ReasonContentMissing       = "ContentMissing"
-	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
-	ReasonArtifactMissing      = "ArtifactMissing"
-	ReasonDeleting             = "Deleting"
+	ReasonContentMissing           = "ContentMissing"
+	ReasonChildSnapshotMissing     = "ChildSnapshotMissing"
+	ReasonArtifactMissing          = "ArtifactMissing"
+	ReasonArtifactNotReady         = "ArtifactNotReady"
+	ReasonDataArtifactInvalid      = "DataArtifactInvalid"
+	ReasonDataArtifactNotSupported = "DataArtifactNotSupported"
+	ReasonDeleting                 = "Deleting"
 
 	// ReasonChildSnapshotPending is set on a parent Snapshot (E6) while a required child snapshot
 	// in status.childrenSnapshotRefs is not yet bound, has no Ready condition, Ready=False with a non-terminal reason,

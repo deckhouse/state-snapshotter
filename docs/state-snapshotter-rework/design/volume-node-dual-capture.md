@@ -273,9 +273,9 @@ Missing binding for a PVC present in MCP → **fail-closed** for restore-with-da
 | PR | Summary |
 |----|---------|
 | PR-0 | Docs stabilization ✅ |
-| PR-1 | API `dataRefs[]` only; remove/deprecate `dataRef` |
-| PR-2 | SCC validates all refs |
-| PR-3 | Restore matcher |
+| PR-1 | API contract + mechanical consumers (`dataRefs[]`; remove `dataRef`) ✅ |
+| PR-2 | SCC `resolveDataReadiness` over `dataRefs[]` ✅ |
+| PR-3 | Restore tree publish / end-to-end restore graph with `dataRefs[]` |
 | PR-F | storage-foundation: bulk VCR (`targets[]`, `status.dataRefs[]`) |
 | PR-4 | state-snapshotter: one VCR per content, publish from VCR → content |
 | PR-5 | Scoped PVC manifests |
