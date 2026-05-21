@@ -65,6 +65,7 @@ func (s *Service) collectManifests(ctx context.Context, node *SnapshotContentNod
 	if err != nil {
 		return nil, err
 	}
+	// Transform uses this node's DataBindings only; child MCP PVCs are collected in child recursion.
 	result, err := s.transform.Transform(raw, opts, node)
 	if err != nil {
 		return nil, err

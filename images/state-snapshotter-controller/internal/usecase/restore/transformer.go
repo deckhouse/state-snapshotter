@@ -46,7 +46,10 @@ func (t *Transformer) Transform(objects []unstructured.Unstructured, opts Option
 			)
 		}
 		if binding.Artifact.Kind == "" || binding.Artifact.Name == "" {
-			return TransformResult{}, fmt.Errorf("dataRefs artifact is required for PVC %s", obj.GetName())
+			return TransformResult{}, fmt.Errorf(
+				"dataRefs artifact is required for PVC %s/%s (uid=%s)",
+				obj.GetNamespace(), obj.GetName(), obj.GetUID(),
+			)
 		}
 		vrr, err := buildVRR(obj, binding.Artifact, node, targetNamespace)
 		if err != nil {
@@ -55,22 +58,6 @@ func (t *Transformer) Transform(objects []unstructured.Unstructured, opts Option
 		output = append(output, *vrr)
 	}
 	return TransformResult{Objects: output}, nil
-}
-
-func findDataBindingForPVC(pvc unstructured.Unstructured, bindings []snapshot.DataBindingRef) (snapshot.DataBindingRef, bool) {
-	pvcUID := string(pvc.GetUID())
-	for _, b := range bindings {
-		if pvcUID != "" && (b.TargetUID == pvcUID || b.Target.UID == pvcUID) {
-			return b, true
-		}
-		if b.Target.APIVersion == pvc.GetAPIVersion() &&
-			b.Target.Kind == pvc.GetKind() &&
-			b.Target.Namespace == pvc.GetNamespace() &&
-			b.Target.Name == pvc.GetName() {
-			return b, true
-		}
-	}
-	return snapshot.DataBindingRef{}, false
 }
 
 func buildVRR(pvc unstructured.Unstructured, artifact snapshot.ObjectRef, node *SnapshotContentNode, targetNamespace string) (*unstructured.Unstructured, error) {

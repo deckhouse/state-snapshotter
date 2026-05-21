@@ -123,4 +123,7 @@ func TestTransform_PVCRequiresDataRefsBinding(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when dataRefs binding is missing for PVC")
 	}
+	if err.Error() == "" {
+		t.Fatal("expected non-empty error message")
+	}
 }

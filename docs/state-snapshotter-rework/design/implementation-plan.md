@@ -203,7 +203,7 @@
 
 #### 2.4.5 N5 data-layer — `dataRefs[]` roadmap (PR-0 … PR-9)
 
-**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅ (SCC `resolveDataReadiness`); next **PR-3** restore tree publish. **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F** (bulk VCR, storage-foundation) blocks real data path.
+**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** (restore tree + `dataRefs[]`) in progress. **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F** (bulk VCR, storage-foundation) blocks real data path.
 
 **Target architecture (fixed — do not re-litigate per PR):**
 
@@ -303,12 +303,13 @@ Use as PR description / review gate. Check only items for that PR.
 - [x] No VCR/MCR creation in SCC
 - [x] Unit: 0 refs; missing VSC; not readyToUse; 2 refs one pending; 2 refs both ready; unknown kind; invalid ref
 
-**PR-3 — Restore**
+**PR-3 — Restore tree publish** (in progress)
 
-- [ ] `SnapshotContentNode` (or equivalent) holds `DataRefs[]`
-- [ ] Transformer: PVC in MCP → binding by uid, then identity
-- [ ] Fail-closed when data restore required and binding missing
-- [ ] Unit tests: 2 PVC, 2 refs, mismatch cases
+- [x] `SnapshotContentNode` carries per-node `DataBindings` from `status.dataRefs[]` (cloned in resolver)
+- [x] Transformer: PVC → binding by uid first; identity fallback only when PVC uid empty
+- [x] Fail-closed when binding missing (PVC ns/name/uid in error)
+- [x] Unit tests: 2 PVC / 2 VRR; UID vs name; tree isolation parent/child bindings
+- [ ] Mark PR-3 done after review (no VCR publish in this PR)
 
 **PR-F — storage-foundation bulk VCR (prerequisite)**
 

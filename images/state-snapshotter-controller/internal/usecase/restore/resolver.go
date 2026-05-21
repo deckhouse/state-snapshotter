@@ -83,8 +83,8 @@ func (r *Resolver) buildTree(ctx context.Context, contentGVK schema.GroupVersion
 	node := &SnapshotContentNode{
 		Content:                root,
 		ManifestCheckpointName: contentLike.GetStatusManifestCheckpointName(),
+		DataBindings:           cloneDataBindings(contentLike.GetStatusDataRefs()),
 	}
-	node.DataBindings = contentLike.GetStatusDataRefs()
 
 	children := contentLike.GetStatusChildrenSnapshotContentRefs()
 	sort.Slice(children, func(i, j int) bool {

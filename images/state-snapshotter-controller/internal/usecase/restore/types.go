@@ -9,7 +9,7 @@ type SnapshotContentNode struct {
 	Content *unstructured.Unstructured
 	// ManifestCheckpointName is required for /manifests.
 	ManifestCheckpointName string
-	// DataBindings maps PVC targets to durable data artifacts on this content node.
+	// DataBindings are this node's status.dataRefs[] only (not inherited from parent/child).
 	DataBindings []snapshot.DataBindingRef
 	Children     []*SnapshotContentNode
 }
