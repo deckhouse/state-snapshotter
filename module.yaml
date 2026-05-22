@@ -1,5 +1,5 @@
 name: state-snapshotter
-stage: "Preview"
+stage: "Experimental"
 descriptions:
   en: "State snapshotter module"
   ru: "Модуль State snapshotter"
