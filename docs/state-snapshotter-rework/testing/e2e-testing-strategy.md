@@ -55,6 +55,16 @@
 
 **Итоговая формулировка для PR / чата:** PR4 как **read-path** и **retained-path** на реальном кластере — рабочие; полное доказательство **TTL-удаления** retained артефактов — отдельный прогон на окружении с известным конфигом ObjectKeeper.
 
+### PR8 (N5): cluster data-layer (`hack/pr8-smoke.sh`)
+
+**Команда:** `bash hack/pr8-smoke.sh` из корня репозитория (нужны `kubectl`, `jq`, RBAC на `Snapshot`/`VolumeCaptureRequest` в `PR8_SMOKE_NAMESPACE`, по умолчанию `nss-smoke-<timestamp>`).
+
+**Проверяет:** два PVC на **local-thin** (`WaitForFirstConsumer` — скрипт поднимает bind-pod); child capture **pvc-a** через реальный bulk **VCR→VSC**; merge subtree; root residual **pvc-b** только; один VCR на content; `VCR.spec.targets[]` / `status.dataRefs[]`; `SnapshotContent.status.dataRefs[]`; VSC `ownerReference` → `SnapshotContent`; `Ready=True` после MCP + dataRefs + children; без stub-annotation.
+
+**Порядок сценария:** child + только `pvc-a` → root + merge → `pvc-b` (чтобы child не перехватил residual до root).
+
+**Зависимости:** задеплоены `d8-state-snapshotter` и `d8-storage-foundation` controllers; `VolumeSnapshotClass` для local CSI (annotation на `local-thin`).
+
 ## Уже есть (поддерживать)
 
 | Уровень | Назначение |
@@ -62,7 +72,7 @@
 | Unit | Условия, GVK registry, `unifiedbootstrap`, `unifiedruntime` (`layers_test`, `metrics_test`, snapshot registry tests) |
 | Integration | envtest, CRD из `crds/`; **CSD:** см. ниже |
 | E2E (envtest) | Сборка manager |
-| Smoke | Реальный кластер: ручной pre-e2e checklist [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md), `hack/pr4-smoke.sh` для Snapshot retained |
+| Smoke | Реальный кластер: pre-e2e [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md), `hack/pr4-smoke.sh` (retained manifests), `hack/pr8-smoke.sh` (N5 bulk VCR/local-thin) |
 
 **Integration (CSD + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются CSD reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible CSD на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddCustomSnapshotDefinitionControllerToManager(..., syncer.Sync, graphRegistryRefresh)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
 

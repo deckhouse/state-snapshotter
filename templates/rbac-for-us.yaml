@@ -19,6 +19,29 @@ rules:
   - deletecollection
   - patch
   - update
+# storage.deckhouse.io unified Snapshot API (PR-4/PR-8 cluster smoke; mirrors controller RBAC)
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshots
+  - snapshotcontents
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshots/status
+  - snapshotcontents/status
+  verbs:
+  - get
+  - update
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

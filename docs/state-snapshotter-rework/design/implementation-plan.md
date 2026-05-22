@@ -266,7 +266,7 @@ status:
 | **PR-5** | Scoped PVC manifest capture ✅ | Explicit PVC in MCR `targets[]` for owning scope; matching PVC entries in **same** VCR `targets[]`; root/domain MCP includes PVC manifests only for owned PVCs | Dedup resolver |
 | **PR-6** | Ownership/dedup resolver ✅ | Subtree `pvcUID` coverage; residual root: list PVC candidates allowed; final owner = tree + domain claims + exclusions + dedup; conflicts fail-closed | e2e cluster |
 | **PR-7** | First vertical slice (envtest) ✅ | **2 PVC** subtree: child `dataRefs[]` / pending VCR cover `pvc-a`; root MCR residual `pvc-b` only; duplicate `pvcUID` fail-closed; manifest-only leaf does not block | Cluster e2e (PR-8) |
-| **PR-8** | E2E local-thin | Real foundation bulk VCR→VSC; validate MCP + `dataRefs[]` + Ready | Rook/Ceph |
+| **PR-8** | E2E local-thin | `hack/pr8-smoke.sh` — real foundation bulk VCR→VSC; validate MCP + `dataRefs[]` + Ready | Rook/Ceph |
 | **PR-9** | Docs/runbook/status | Troubleshooting, operations sync | — |
 
 **Optional later (not in PR-0…9):** Pod-mounted PVC → `dataConsistency` only.
@@ -353,12 +353,12 @@ Use as PR description / review gate. Check only items for that PR.
 - [x] Manifest-only child (Ready MCP, no PVC objects / no dataRefs / no VCR) does not block root residual PVC planning
 - [x] Asserts: target UID, GVK/kind, namespace; no stub annotation on Snapshot
 - [x] Envtest VCR API: `storage-foundation/crds` via sibling path or `STORAGE_FOUNDATION_CRDS`; else minimal test-only `VolumeCaptureRequest` CRD; pending-VCR `It` skips if API still unavailable
-- [ ] PR-8 cluster: one MCR + one VCR bulk, MCP + `dataRefs[]` len 2, content Ready with real VSC
+- [x] PR-8 cluster: `hack/pr8-smoke.sh` — one bulk VCR per content, real VSC, MCP + `dataRefs[]` + Ready (local-thin)
 
 **PR-8 — E2E local-thin**
 
-- [ ] Cluster smoke with storage-foundation VCR→VSC
-- [ ] Assert MCP + `dataRefs[]` + content Ready end-to-end
+- [x] Cluster smoke script `hack/pr8-smoke.sh` (local-thin, bind pods for WaitForFirstConsumer, two-PVC subtree ordering)
+- [x] Run on cluster with module admin kubeconfig; assert MCP + `dataRefs[]` + content Ready end-to-end
 
 **PR-9 — Ops docs**
 
