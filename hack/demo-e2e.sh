@@ -207,6 +207,20 @@ wait_volume_capture_published() {
 	wait_until "volume capture published (${1}, uid ${2})" volume_capture_published "$1" "$2" "$3"
 }
 
+# VCR is ephemeral (deleted after handoff). Inspect spec.targets only while VCR is still visible.
+verify_vcr_targets_if_present() {
+	local vcr="$1" uid="$2" label="$3"
+	vcr_exists "${vcr}" || return 0
+	wait_until "${label} VCR spec.targets contains pvc uid" vcr_has_target_uid "${vcr}" "${uid}"
+	local n
+	n="$(vcr_json "${vcr}" | jq '.spec.targets | length')"
+	[[ "${n}" == "1" ]] || {
+		log "ERROR: ${label} VCR must have exactly one target, got ${n}"
+		exit 1
+	}
+	log "OK ${label} VCR has 1 target before publish completes"
+}
+
 dump_ready_blockers() {
 	log "DIAG Snapshot $1:"
 	kubectl -n "${NS}" get "${SNAP_RES}" "$1" -o json 2>/dev/null | jq -c '.status.conditions // []' >&2 || true
@@ -392,7 +406,12 @@ aggregated_path() { printf '/apis/%s/%s/namespaces/%s/snapshots/%s/manifests' "$
 verify_aggregated_present() {
 	local snap="$1" out="$2"
 	# TODO(retained-read-api): temporary snapshot-name route; see script header.
-	kubectl get --raw "$(aggregated_path "${snap}")" >"${out}" 2>"${out}.err"
+	if ! kubectl get --raw "$(aggregated_path "${snap}")" >"${out}" 2>"${out}.err"; then
+		log "ERROR: aggregated GET failed for ${snap} (see ${out}.err)"
+		log "Hint: admin kubeconfig needs get snapshots/manifests (subresources.state-snapshotter.deckhouse.io); see templates/rbac-for-us.yaml"
+		cat "${out}.err" >&2 2>/dev/null || true
+		exit 1
+	fi
 	jq -e 'type == "array" and length >= 1' "${out}" >/dev/null
 	jq -e --arg n "${CM_NAME}" '[.[] | select(.kind == "ConfigMap" and .metadata.name == $n)] | length >= 1' "${out}" >/dev/null
 	log "OK aggregated manifests contain ${CM_NAME}"
@@ -468,9 +487,27 @@ fi
 kubectl get crd manifestcheckpoints.state-snapshotter.deckhouse.io manifestcapturerequests.state-snapshotter.deckhouse.io >/dev/null
 DECK_SNAP_CAN="$(kubectl auth can-i create "${SNAP_RES}" -n "${NS}" 2>&1 || true)"
 [[ "${DECK_SNAP_CAN}" == "yes" ]] || { log "ERROR: need create ${SNAP_RES} in ${NS}"; exit 1; }
+# can-i is unreliable for APIService subresources; probe --raw (404 = RBAC ok, Forbidden = missing rule).
+AGG_RBAC_PROBE="$(stage_dir "00-preflight")/aggregated-rbac-probe.err"
+set +e
+kubectl get --raw "/apis/${SUBAPI}/${SUBVER}/namespaces/default/snapshots/__demo_e2e_rbac_probe__/manifests" >/dev/null 2>"${AGG_RBAC_PROBE}"
+AGG_RBAC_RC=$?
+set -e
+if grep -q Forbidden "${AGG_RBAC_PROBE}" 2>/dev/null; then
+	log "ERROR: kubernetes-admin cannot GET snapshots/manifests (${SUBAPI})"
+	log "Redeploy state-snapshotter module (templates/rbac-for-us.yaml) or have cluster-admin patch ClusterRole d8:state-snapshotter:admin-kubeconfig"
+	cat "${AGG_RBAC_PROBE}" >&2
+	exit 1
+fi
+[[ "${AGG_RBAC_RC}" -eq 0 || "${AGG_RBAC_RC}" -eq 1 ]] || {
+	log "ERROR: aggregated RBAC probe failed (rc=${AGG_RBAC_RC})"
+	cat "${AGG_RBAC_PROBE}" >&2
+	exit 1
+}
 {
 	echo "storage_class=${STORAGE_CLASS}"
 	echo "snap_create_can=${DECK_SNAP_CAN}"
+	echo "agg_rbac_probe_rc=${AGG_RBAC_RC}"
 	echo "has_objectkeeper=${HAS_OBJECTKEEPER}"
 	kubectl get storageclass "${STORAGE_CLASS}" -o json | jq '{name: .metadata.name, annotations: .metadata.annotations}' || true
 	kubectl get volumesnapshotclass -o name 2>/dev/null || true
@@ -518,10 +555,15 @@ finish_stage "02-child-created" "PASS" "child Snapshot applied and bound" "Snaps
 begin_stage "03-child-ready"
 CHILD_VCR="$(vcr_name_for_content "${CHILD_CONTENT}")"
 assert_at_most_one_vcr
-wait_until "child VCR exists" vcr_exists "${CHILD_VCR}"
-wait_until "child VCR targets pvc-a" vcr_has_target_uid "${CHILD_VCR}" "${PVC_A_UID}"
-wait_volume_capture_published "${CHILD_CONTENT}" "${PVC_A_UID}" "${CHILD_VCR}"
-vcr_exists "${CHILD_VCR}" && wait_until "child VCR deleted" vcr_absent "${CHILD_VCR}" || log "OK child VCR already deleted"
+if content_has_dataref_uid "${CHILD_CONTENT}" "${PVC_A_UID}"; then
+	log "OK child volume already published in dataRefs[] (VCR handoff done)"
+else
+	if vcr_exists "${CHILD_VCR}"; then
+		verify_vcr_targets_if_present "${CHILD_VCR}" "${PVC_A_UID}" "child"
+	fi
+	wait_volume_capture_published "${CHILD_CONTENT}" "${PVC_A_UID}" "${CHILD_VCR}"
+fi
+vcr_exists "${CHILD_VCR}" && wait_until "child VCR deleted after publish" vcr_absent "${CHILD_VCR}" || true
 CHILD_VSC="$(kubectl get "${CONTENT_RES}" "${CHILD_CONTENT}" -o json | jq -r --arg u "${PVC_A_UID}" \
 	'(.status.dataRefs // [])[] | select(.targetUID == $u) | .artifact.name' | head -1)"
 [[ -n "${CHILD_VSC}" ]] || { log "ERROR: child dataRefs missing VSC"; exit 1; }
@@ -578,7 +620,15 @@ finish_stage "05-root-created" "PASS" "root Snapshot, subtree merge" "Root conte
 begin_stage "06-root-ready"
 ROOT_VCR="$(vcr_name_for_content "${ROOT_CONTENT}")"
 assert_at_most_one_vcr
-wait_volume_capture_published "${ROOT_CONTENT}" "${PVC_B_UID}" "${ROOT_VCR}"
+if content_has_dataref_uid "${ROOT_CONTENT}" "${PVC_B_UID}"; then
+	log "OK root residual already in dataRefs[]"
+else
+	if vcr_exists "${ROOT_VCR}"; then
+		verify_vcr_targets_if_present "${ROOT_VCR}" "${PVC_B_UID}" "root"
+	fi
+	wait_volume_capture_published "${ROOT_CONTENT}" "${PVC_B_UID}" "${ROOT_VCR}"
+fi
+vcr_exists "${ROOT_VCR}" && wait_until "root VCR deleted after publish" vcr_absent "${ROOT_VCR}" || true
 content_has_dataref_uid "${CHILD_CONTENT}" "${PVC_B_UID}" && { log "ERROR: child has pvc-b dataRef"; exit 1; }
 content_has_dataref_uid "${ROOT_CONTENT}" "${PVC_A_UID}" && { log "ERROR: root duplicates pvc-a"; exit 1; }
 content_has_dataref_uid "${ROOT_CONTENT}" "${PVC_B_UID}" || { log "ERROR: root missing pvc-b dataRef"; exit 1; }

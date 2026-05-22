@@ -42,6 +42,13 @@ rules:
   - get
   - update
   - patch
+# Aggregated manifests read API (demo-e2e / PR-4 cluster validation)
+- apiGroups:
+  - subresources.state-snapshotter.deckhouse.io
+  resources:
+  - snapshots/manifests
+  verbs:
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
