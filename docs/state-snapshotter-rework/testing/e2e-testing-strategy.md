@@ -21,7 +21,7 @@
 | Где | Что является контрактом |
 |-----|-------------------------|
 | **Integration** | Структура и поведение **этого модуля**: `ownerReferences` (**root SnapshotContent→ObjectKeeper** для retained TTL-якоря, **MCR→Snapshot** на время capture, MCP→SnapshotContent, child SnapshotContent→parent SnapshotContent), снятие `snapshot.deckhouse.io/parent-protect` у дочернего SnapshotContent при удалении parent content (без `Client.Delete` детей), ручное удаление SnapshotContent после удаления root snapshot не блокируется финализаторами. **Не** требовать TTL Deckhouse ObjectKeeper или полного GC MCP/chunks как обязательный проход envtest. |
-| **Real cluster** | `hack/pr4-smoke.sh`: retained read, aggregated manifests, **обязательный** контракт root ObjectKeeper (если не `PR4_SMOKE_SKIP_OK_CONTRACT=1`); фаза TTL — наблюдательная по умолчанию, **строгая** только с `PR4_SMOKE_REQUIRE_TTL=1` при реально настроенном TTL. |
+| **Real cluster** | **`hack/demo-e2e.sh`** (main): manifest + volume + retained + aggregated + forced ObjectKeeper TTL/GC (`08-forced-ttl-gc`); staged artifacts under `artifacts/<run-id>/`. |
 
 Продуктовую модель удаления не менять ради ограничений envtest (см. также `.cursor/rules/controller-envtest-local.mdc`).
 
@@ -38,32 +38,23 @@
 
 **Минимум:** `go test -tags integration ./test/integration/...`; **опционально** — cluster smoke. Закрытие трека без зелёных тестов по плану — **недопустимо** ([`implementation-plan.md`](../design/implementation-plan.md) §2.4.3).
 
-### PR4: проверка на реальном кластере (`hack/pr4-smoke.sh`)
+### Unified demo/e2e (main cluster path): `hack/demo-e2e.sh`
 
-**Команда:** из корня репозитория `bash hack/pr4-smoke.sh` (без `PR4_SMOKE_SKIP_OK_CONTRACT`, если в кластере есть `objectkeepers.deckhouse.io`). Лог прогона сохраняйте как артефакт ревью/PR.
+**Команда:** `bash hack/demo-e2e.sh` из корня репозитория.
 
-**Подтверждено базовым прогоном** (read-path + retained + контракт модуля на живом API server):
+**Один сценарий** для **state-snapshotter + storage-foundation**: manifest capture (ConfigMap + MCP), retained lifecycle + aggregated read, bulk **VCR→VSC→`dataRefs[]`**, two-PVC subtree (child **pvc-a**, root residual **pvc-b**).
 
-- subresource **aggregated manifests** отвечает и отдаёт ожидаемый JSON-массив;
-- **retained read** после удаления `Snapshot` сейчас проверяется через временное поведение `/snapshots/{name}/manifests` (deleted Snapshot name через root ObjectKeeper). **TODO:** долгосрочный retained read API должен быть `/snapshotcontents/{contentName}/manifests`; после удаления Snapshot live-route `/snapshots/{name}/manifests` должен возвращать `404 Snapshot not found`;
-- **root ObjectKeeper** (шаг 5b скрипта): `spec.followObjectRef` → `Snapshot` (UID root snapshot); у **root `SnapshotContent`** есть **controller `ownerReference` → этот ObjectKeeper** (OK без `ownerReferences` на SnapshotContent);
-- discovery субресурса, опциональный gzip, negative 404 — по сценарию скрипта.
+**Артефакты:** `artifacts/<run-id>/{00-preflight … 09-cleanup}/` — YAML/JSON dumps, events, `summary.txt`, graph (`hack/snapshot-graph.sh`).
 
-**Не является частью базового прогона** (отдельно: интеграция с Deckhouse ObjectKeeper + GC, не unit/integration модуля):
+**Storage:** **local-thin** only. **TODO:** Rook/Ceph not supported in this script yet.
 
-- **strict TTL cascade:** `PR4_SMOKE_REQUIRE_TTL=1` — скрипт ждёт до `PR4_SMOKE_WAIT_SEC` исчезновения retained `SnapshotContent`, затем отсутствия `ManifestCheckpoint`, затем **неуспешный** aggregated GET. Корневой OK создаётся контроллером всегда в **`FollowObjectWithTTL`**; `spec.ttl` — из `STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL` / алиас `STATE_SNAPSHOTTER_NS_ROOT_OK_TTL` или встроенный дефолт (`DefaultSnapshotRootOKTTL` в `pkg/config`; может быть временно уменьшен для отладки, например 1m). Для strict-прогона задайте `PR4_SMOKE_WAIT_SEC` с запасом относительно `spec.ttl`. Без strict-режима шаг 10 остаётся наблюдательным (`sleep` + INFO).
+**Retained read:** временный путь `GET …/namespaces/{ns}/snapshots/{rootName}/manifests` после удаления root Snapshot (см. TODO в скрипте). Целевой API — `/snapshotcontents/{contentName}/manifests`.
 
-**Итоговая формулировка для PR / чата:** PR4 как **read-path** и **retained-path** на реальном кластере — рабочие; полное доказательство **TTL-удаления** retained артефактов — отдельный прогон на окружении с известным конфигом ObjectKeeper.
+**Опции:** `DEMO_E2E_SKIP_CLEANUP=1`, `DEMO_E2E_SKIP_OK_CONTRACT=1`, `DEMO_E2E_SKIP_FORCED_TTL=1`, `DEMO_E2E_ARTIFACT_DIR` (или `DEMO_E2E_ARTIFACTS_ROOT`), `DEMO_E2E_WAIT_SEC`, `DEMO_E2E_GC_WAIT_SEC`.
 
-### PR8 (N5): cluster data-layer (`hack/pr8-smoke.sh`)
+**Зависимости:** `d8-state-snapshotter`, `d8-storage-foundation`, Deckhouse ObjectKeeper controller, RBAC create на `snapshots.storage.deckhouse.io` в smoke-namespace.
 
-**Команда:** `bash hack/pr8-smoke.sh` из корня репозитория (нужны `kubectl`, `jq`, RBAC на `Snapshot`/`VolumeCaptureRequest` в `PR8_SMOKE_NAMESPACE`, по умолчанию `nss-smoke-<timestamp>`).
-
-**Проверяет:** два PVC на **local-thin** (`WaitForFirstConsumer` — скрипт поднимает bind-pod); child capture **pvc-a** через реальный bulk **VCR→VSC**; merge subtree; root residual **pvc-b** только; один VCR на content; `VCR.spec.targets[]` / `status.dataRefs[]`; `SnapshotContent.status.dataRefs[]`; VSC `ownerReference` → `SnapshotContent`; `Ready=True` после MCP + dataRefs + children; без stub-annotation.
-
-**Порядок сценария:** child + только `pvc-a` → root + merge → `pvc-b` (чтобы child не перехватил residual до root).
-
-**Зависимости:** задеплоены `d8-state-snapshotter` и `d8-storage-foundation` controllers; `VolumeSnapshotClass` для local CSI (annotation на `local-thin`).
+**Forced TTL (replaces PR4_SMOKE_REQUIRE_TTL):** после retained-проверки патч `ObjectKeeper.spec.ttl=0s` и ожидание GC до `DEMO_E2E_GC_WAIT_SEC` (без ожидания реального `spec.ttl` снимка).
 
 ## Уже есть (поддерживать)
 
@@ -72,7 +63,7 @@
 | Unit | Условия, GVK registry, `unifiedbootstrap`, `unifiedruntime` (`layers_test`, `metrics_test`, snapshot registry tests) |
 | Integration | envtest, CRD из `crds/`; **CSD:** см. ниже |
 | E2E (envtest) | Сборка manager |
-| Smoke | Реальный кластер: pre-e2e [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md), `hack/pr4-smoke.sh` (retained manifests), `hack/pr8-smoke.sh` (N5 bulk VCR/local-thin) |
+| Smoke | Реальный кластер: pre-e2e [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md), **`hack/demo-e2e.sh`** (canonical unified e2e) |
 
 **Integration (CSD + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются CSD reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible CSD на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddCustomSnapshotDefinitionControllerToManager(..., syncer.Sync, graphRegistryRefresh)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
 

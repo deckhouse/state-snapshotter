@@ -162,7 +162,7 @@ kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" 2>&1 || echo "Snaps
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" 2>&1 || echo "MCP удалён"
 ```
 
-Aggregated после полного схода цепочки перестаёт отвечать — как в `PR4_SMOKE_REQUIRE_TTL=1` в `hack/pr4-smoke.sh`.
+Aggregated после полного схода цепочки перестаёт отвечать — как в stage `08-forced-ttl-gc` в [`hack/demo-e2e.sh`](../../../hack/demo-e2e.sh).
 
 ---
 
@@ -178,7 +178,7 @@ kubectl -n default delete configmap demo-ns-snapshot-cm --ignore-not-found
 
 ## Приложение A — автоматический прогон
 
-Из корня репозитория: **`bash hack/pr4-smoke.sh`** (`default`, снимок **`pr4-smoke`**). Уборка без ожидания TTL: **`bash hack/pr4-smoke-cleanup.sh`**.
+Из корня репозитория: **`bash hack/demo-e2e.sh`** (ephemeral namespace `demo-e2e-*`, снимки **`demo-child`** / **`demo-root`**). Артефакты: `artifacts/<run-id>/`. Отладка: `DEMO_E2E_SKIP_CLEANUP=1`.
 
 ---
 
