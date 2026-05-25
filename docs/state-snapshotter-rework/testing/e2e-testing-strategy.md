@@ -50,9 +50,11 @@
 
 **Retained read:** временный путь `GET …/namespaces/{ns}/snapshots/{rootName}/manifests` после удаления root Snapshot (см. TODO в скрипте). Целевой API — `/snapshotcontents/{contentName}/manifests`.
 
-**Опции:** `DEMO_E2E_SKIP_CLEANUP=1`, `DEMO_E2E_SKIP_OK_CONTRACT=1`, `DEMO_E2E_SKIP_FORCED_TTL=1`, `DEMO_E2E_REQUIRE_FORCED_TTL=1`, `DEMO_E2E_ARTIFACT_DIR` (или `DEMO_E2E_ARTIFACTS_ROOT`), `DEMO_E2E_WAIT_SEC`, `DEMO_E2E_GC_WAIT_SEC`.
+**Опции:** `DEMO_E2E_SKIP_CLEANUP=1`, `DEMO_E2E_SKIP_OK_CONTRACT=1`, `DEMO_E2E_SKIP_FORCED_TTL=1` (debug skip stage 08), `DEMO_E2E_REQUIRE_FORCED_TTL=1` (fail if stage 08 cannot patch ObjectKeeper), `DEMO_E2E_ENABLE_KICK=1` (debug-only Snapshot annotate kick; **default off**), `DEMO_E2E_STALL_SEC`, `DEMO_E2E_ARTIFACT_DIR` (или `DEMO_E2E_ARTIFACTS_ROOT`), `DEMO_E2E_WAIT_SEC`, `DEMO_E2E_GC_WAIT_SEC`.
 
-**RBAC (три роли, см. `templates/controller/rbac-for-us.yaml` vs `templates/rbac-for-us.yaml`):** (1) controller SA — create/patch ObjectKeeper, MCR/MCP, VCR, SnapshotContent status; **без** `delete` ObjectKeeper; (2) admin-kubeconfig — Snapshots + aggregated read + read-only MCR/MCP/OK; (3) forced TTL — **не** в admin-kubeconfig: `demo-e2e` ставит временный `demo-e2e-objectkeeper-patcher-<run-id>` или требует cluster-admin. Перед smoke: `bash hack/rbac-can-i-audit.sh`.
+**Legacy:** отдельные PR-4/PR-8 cluster scripts удалены; единственный канонический путь — `hack/demo-e2e.sh`.
+
+**RBAC (три роли, см. `templates/controller/rbac-for-us.yaml` vs `templates/rbac-for-us.yaml`):** (1) controller SA — create/patch ObjectKeeper, MCR/MCP, VCR, SnapshotContent status; **без** `delete` ObjectKeeper; (2) admin-kubeconfig — Snapshots + aggregated read + read-only MCR/MCP/OK; (3) forced TTL — **не** в admin-kubeconfig: stage `08-forced-ttl-gc` **SKIP** по умолчанию, если caller не может `patch objectkeepers.deckhouse.io`; скрипт может поставить временный `demo-e2e-objectkeeper-patcher-<run-id>` или нужен cluster-admin. `DEMO_E2E_REQUIRE_FORCED_TTL=1` — fail вместо skip. Перед smoke: `bash hack/rbac-can-i-audit.sh`.
 
 **Зависимости:** `d8-state-snapshotter`, `d8-storage-foundation`, Deckhouse ObjectKeeper controller, RBAC create на `snapshots.storage.deckhouse.io` в smoke-namespace.
 

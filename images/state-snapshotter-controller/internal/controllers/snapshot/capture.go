@@ -24,6 +24,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"sort"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -211,6 +212,9 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		if errors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
 			return r.failCapture(ctx, freshParent, content, "DuplicateCoveredPVCUID", err.Error())
 		}
+		if isTransientCaptureTargetError(err) {
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 2 * time.Second}, nil)
+		}
 		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
@@ -321,6 +325,15 @@ func (r *SnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyReady(
 	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
 	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
 		return false, ctrl.Result{}, nil
+	}
+
+	// Publisher-complete: bound content Ready means capture is done; mirror snapshot Ready even if MCR
+	// still exists (avoids re-entering BuildRootNamespaceManifestCaptureTargets after transient ListFailed).
+	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionReady)
+	if contentReady != nil && contentReady.Status == metav1.ConditionTrue {
+		res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+		res, err = r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
+		return true, res, err
 	}
 
 	// Steady-state fast path only after the request is gone; while MCR exists we must run
@@ -438,6 +451,14 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 func (r *SnapshotReconciler) snapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) (bool, error) {
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
 	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.snapshotContentReader(), key, nsSnap.Status.BoundSnapshotContentName)
+}
+
+func isTransientCaptureTargetError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Informer to sync") || strings.Contains(msg, "failed waiting for")
 }
 
 func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {

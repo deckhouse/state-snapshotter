@@ -24,13 +24,17 @@
 #   DEMO_E2E_WAIT_LOG_EVERY_SEC  progress log interval during waits (default: 30)
 #   DEMO_E2E_GC_WAIT_SEC         max wait after forced ObjectKeeper TTL (default: 120)
 #   DEMO_E2E_SKIP_CLEANUP        1 = keep namespace
-#   DEMO_E2E_SKIP_FORCED_TTL     1 = skip stage 08-forced-ttl-gc
+#   DEMO_E2E_SKIP_FORCED_TTL     1 = skip stage 08-forced-ttl-gc (debug only)
 #   DEMO_E2E_SKIP_OK_CONTRACT   1 = skip ObjectKeeper contract checks (no objectkeepers.deckhouse.io)
-#   DEMO_E2E_REQUIRE_FORCED_TTL 1 = fail if stage 08 cannot patch ObjectKeeper (else skip with WARN)
+#   DEMO_E2E_REQUIRE_FORCED_TTL 1 = fail if stage 08 cannot patch ObjectKeeper (else skip with clear reason)
+#   DEMO_E2E_ENABLE_KICK         1 = annotate Snapshots to force reconcile (debug only; default off)
+#
+# Canonical cluster e2e (replaces legacy separate PR-4/PR-8 scripts; those paths are removed).
 #
 # ObjectKeeper forced TTL (stage 08) is patched by this script, not the controller. If the caller
-# cannot patch objectkeepers, the script may install temporary ClusterRole/Bindings
-# demo-e2e-objectkeeper-patcher-<run-id> (removed on exit). Alternatively run with cluster-admin.
+# cannot patch objectkeepers.deckhouse.io, stage 08 is SKIP by default. The script may install
+# temporary ClusterRole/Bindings demo-e2e-objectkeeper-patcher-<run-id> (removed on exit), or use
+# cluster-admin. Production admin RBAC does not grant ObjectKeeper patch.
 #   DEMO_E2E_ARTIFACT_DIR        artifact root (alias: DEMO_E2E_ARTIFACTS_ROOT)
 #   DEMO_E2E_BIND_IMAGE          bind pod image for WaitForFirstConsumer PVCs
 #   DEMO_E2E_CONTROLLER_SA       impersonate for graph wiring (default: state-snapshotter controller SA)
@@ -88,7 +92,9 @@ HAS_OBJECTKEEPER=0
 DEMO_E2E_OK_RBAC_ROLE="demo-e2e-objectkeeper-patcher-${RUN_ID}"
 DEMO_E2E_OK_RBAC_BINDING="${DEMO_E2E_OK_RBAC_ROLE}"
 DEMO_E2E_OK_RBAC_INSTALLED=0
+DEMO_E2E_FORCED_TTL_SKIP_REASON=""
 CONTROLLER_SA="${DEMO_E2E_CONTROLLER_SA:-system:serviceaccount:d8-state-snapshotter:controller}"
+DEMO_E2E_KICK_ANN="state-snapshotter.deckhouse.io/demo-e2e-kick"
 
 log() { printf '%s\n' "$*" >&2; }
 
@@ -204,7 +210,7 @@ ensure_demo_e2e_objectkeeper_access() {
 		log "ERROR: forced TTL requires objectkeepers.patch (cluster-admin or successful demo-e2e temp RBAC)"
 		exit 1
 	fi
-	log "WARN: cannot patch objectkeepers; stage 08-forced-ttl-gc skipped (cluster-admin, temp RBAC, or DEMO_E2E_REQUIRE_FORCED_TTL=1)"
+	DEMO_E2E_FORCED_TTL_SKIP_REASON="current user cannot patch objectkeepers.deckhouse.io"
 	DEMO_E2E_SKIP_FORCED_TTL=1
 	if ! auth_can_yes get "${OK_RES}"; then
 		log "WARN: cannot get objectkeepers; ObjectKeeper contract checks will be skipped"
@@ -282,9 +288,27 @@ wait_until_gc() {
 	return 1
 }
 
-kick_snapshot() {
+maybe_kick_snapshot() {
+	[[ "${DEMO_E2E_ENABLE_KICK:-0}" == "1" ]] || return 0
 	kubectl -n "${NS}" annotate "${SNAP_RES}" "$1" \
-		"state-snapshotter.deckhouse.io/demo-e2e-kick=$(date +%s)" --overwrite >/dev/null
+		"${DEMO_E2E_KICK_ANN}=$(date +%s)" --overwrite >/dev/null
+	log "DEBUG: kick_snapshot ${1} (DEMO_E2E_ENABLE_KICK=1)"
+}
+
+assert_no_demo_e2e_kick() {
+	[[ "${DEMO_E2E_ENABLE_KICK:-0}" == "1" ]] && return 0
+	local snap="$1" kick
+	kick="$(kubectl -n "${NS}" get "${SNAP_RES}" "${snap}" \
+		-o "jsonpath={.metadata.annotations['${DEMO_E2E_KICK_ANN}']}" 2>/dev/null || true)"
+	if [[ -n "${kick}" ]]; then
+		log "ERROR: ${snap} has ${DEMO_E2E_KICK_ANN}=${kick} (use DEMO_E2E_ENABLE_KICK=1 only for debug)"
+		exit 1
+	fi
+}
+
+log_forced_ttl_skip() {
+	local reason="$1"
+	log "08-forced-ttl-gc skipped: ${reason}. Run with cluster-admin or DEMO_E2E_REQUIRE_FORCED_TTL=1 to require this check."
 }
 
 snapshot_bound() {
@@ -571,8 +595,8 @@ merge_child_graph_into_root() {
 		'{metadata: {ownerReferences: [{apiVersion: $av, kind: "SnapshotContent", name: $rcn, uid: $rcu, controller: true}]}}')" >/dev/null
 	kubectl patch "${CONTENT_RES}" "${root_content}" --subresource=status --type=merge --patch="$(jq -n \
 		--arg ccn "${CHILD_CONTENT}" '{status: {childrenSnapshotContentRefs: [{name: $ccn}]}}')" >/dev/null
-	kick_snapshot "${ROOT_SNAP}"
-	kick_snapshot "${CHILD_SNAP}"
+	maybe_kick_snapshot "${ROOT_SNAP}"
+	maybe_kick_snapshot "${CHILD_SNAP}"
 }
 
 dump_list_to_dir() {
@@ -814,6 +838,7 @@ fi
 	echo "has_objectkeeper=${HAS_OBJECTKEEPER}"
 	echo "ok_rbac_installed=${DEMO_E2E_OK_RBAC_INSTALLED}"
 	echo "skip_forced_ttl=${DEMO_E2E_SKIP_FORCED_TTL:-0}"
+	echo "enable_kick=${DEMO_E2E_ENABLE_KICK:-0}"
 	echo "skip_ok_contract=${DEMO_E2E_SKIP_OK_CONTRACT:-0}"
 	kubectl get storageclass "${STORAGE_CLASS}" -o json | jq '{name: .metadata.name, annotations: .metadata.annotations}' || true
 	kubectl get volumesnapshotclass -o name 2>/dev/null || true
@@ -919,9 +944,9 @@ ROOT_VCR="$(vcr_name_for_content "${ROOT_CONTENT}")"
 if vcr_exists "${ROOT_VCR}" && vcr_json "${ROOT_VCR}" | jq -r '.spec.targets[]?.uid // empty' | grep -qx "${PVC_A_UID}"; then
 	log "WARN: deleting premature root VCR ${ROOT_VCR} (child-covered pvc-a before residual pvc-b)"
 	kubectl -n "${NS}" delete "${VCR_RES}" "${ROOT_VCR}" --wait=true
-	kick_snapshot "${ROOT_SNAP}"
+	maybe_kick_snapshot "${ROOT_SNAP}"
 fi
-kick_snapshot "${ROOT_SNAP}"
+maybe_kick_snapshot "${ROOT_SNAP}"
 finish_stage "05-root-created" "PASS" "root Snapshot, subtree merge" "Root content + child refs wired" "root-created" "lifecycle" "${ROOT_SNAP}"
 
 # --- 06-root-ready ---
@@ -948,6 +973,8 @@ kubectl get "${MCP_RES}" "${ROOT_MCP}" >/dev/null
 wait_until "root has child content ref" root_has_child_content_ref
 wait_content_ready "${ROOT_CONTENT}" "${ROOT_SNAP}"
 wait_snapshot_ready "${ROOT_SNAP}" "${ROOT_CONTENT}"
+assert_no_demo_e2e_kick "${ROOT_SNAP}"
+assert_no_demo_e2e_kick "${CHILD_SNAP}"
 assert_root_objectkeeper_contract
 verify_aggregated_expect_conflict "${ROOT_SNAP}" "$(stage_dir "06-root-ready")/aggregated-root-conflict.err"
 finish_stage "06-root-ready" "PASS" "residual pvc-b, MCP, root aggregated 409, OK" "Root Ready + subtree duplicate contract" "root-ready" "logical" "${ROOT_SNAP}"
@@ -965,7 +992,15 @@ finish_stage "07-root-deleted-retained" "PASS" "root Snapshot deleted" "Content+
 # --- 08-forced-ttl-gc ---
 begin_stage "08-forced-ttl-gc"
 if [[ "${DEMO_E2E_SKIP_FORCED_TTL:-0}" == "1" || "${HAS_OBJECTKEEPER}" != "1" ]]; then
-	log "SKIP forced TTL phase (SKIP_FORCED_TTL or no ObjectKeeper CRD)"
+	if [[ "${HAS_OBJECTKEEPER}" != "1" ]]; then
+		log_forced_ttl_skip "objectkeepers.deckhouse.io CRD not installed"
+	elif [[ -n "${DEMO_E2E_FORCED_TTL_SKIP_REASON}" ]]; then
+		log_forced_ttl_skip "${DEMO_E2E_FORCED_TTL_SKIP_REASON}"
+	elif [[ "${DEMO_E2E_SKIP_FORCED_TTL:-0}" == "1" ]]; then
+		log_forced_ttl_skip "DEMO_E2E_SKIP_FORCED_TTL=1 (debug)"
+	else
+		log_forced_ttl_skip "forced TTL phase not run"
+	fi
 	write_stage_summary "08-forced-ttl-gc" "SKIP" "forced TTL skipped" "N/A"
 	save_artifacts "08-forced-ttl-gc"
 else

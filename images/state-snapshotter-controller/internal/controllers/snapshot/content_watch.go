@@ -21,8 +21,11 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -66,8 +69,46 @@ func MapSnapshotContentToBoundSnapshots(ctx context.Context, c client.Client, ob
 	return out
 }
 
+func logSnapshotContentEnqueues(ctx context.Context, content *storagev1alpha1.SnapshotContent, eventType string, reqs []reconcile.Request) {
+	if len(reqs) == 0 {
+		return
+	}
+	logger := log.FromContext(ctx).V(1)
+	for _, req := range reqs {
+		logger.Info("snapshotcontent update enqueues bound snapshot",
+			"snapshotContent", content.Name,
+			"snapshot", req.Namespace+"/"+req.Name,
+			"eventType", eventType,
+		)
+	}
+}
+
+func enqueueBoundSnapshotsFromContent(ctx context.Context, c client.Client, obj client.Object, eventType string, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	if obj == nil {
+		return
+	}
+	reqs := MapSnapshotContentToBoundSnapshots(ctx, c, obj)
+	if content, ok := obj.(*storagev1alpha1.SnapshotContent); ok {
+		logSnapshotContentEnqueues(ctx, content, eventType, reqs)
+	}
+	for _, req := range reqs {
+		q.Add(req)
+	}
+}
+
 func snapshotContentToSnapshotEnqueueHandler(c client.Client) handler.EventHandler {
-	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		return MapSnapshotContentToBoundSnapshots(ctx, c, obj)
-	})
+	return handler.Funcs{
+		CreateFunc: func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueueBoundSnapshotsFromContent(ctx, c, e.Object, "create", q)
+		},
+		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueueBoundSnapshotsFromContent(ctx, c, e.ObjectNew, "update", q)
+		},
+		DeleteFunc: func(ctx context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueueBoundSnapshotsFromContent(ctx, c, e.Object, "delete", q)
+		},
+		GenericFunc: func(ctx context.Context, e event.GenericEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			enqueueBoundSnapshotsFromContent(ctx, c, e.Object, "generic", q)
+		},
+	}
 }
