@@ -17,8 +17,11 @@
 # Env:
 #   DEMO_E2E_NAMESPACE           default: demo-e2e-<timestamp>
 #   DEMO_E2E_STORAGE_CLASS       default: local-thin
-#   DEMO_E2E_WAIT_SEC            default: 900
+#   DEMO_E2E_WAIT_SEC            default: 900 (hard cap; stall abort is earlier — see DEMO_E2E_STALL_SEC)
+#   DEMO_E2E_STALL_SEC           fail if SnapshotContent Ready but Snapshot not (default: 120)
+#   DEMO_E2E_MANIFEST_WAIT_SEC   fail if MCP name still empty on content (default: 300)
 #   DEMO_E2E_POLL_SEC            default: 5
+#   DEMO_E2E_WAIT_LOG_EVERY_SEC  progress log interval during waits (default: 30)
 #   DEMO_E2E_GC_WAIT_SEC         max wait after forced ObjectKeeper TTL (default: 120)
 #   DEMO_E2E_SKIP_CLEANUP        1 = keep namespace
 #   DEMO_E2E_SKIP_FORCED_TTL     1 = skip stage 08-forced-ttl-gc
@@ -30,6 +33,7 @@
 # demo-e2e-objectkeeper-patcher-<run-id> (removed on exit). Alternatively run with cluster-admin.
 #   DEMO_E2E_ARTIFACT_DIR        artifact root (alias: DEMO_E2E_ARTIFACTS_ROOT)
 #   DEMO_E2E_BIND_IMAGE          bind pod image for WaitForFirstConsumer PVCs
+#   DEMO_E2E_CONTROLLER_SA       impersonate for graph wiring (default: state-snapshotter controller SA)
 
 set -euo pipefail
 
@@ -38,8 +42,11 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)"
 
 STORAGE_CLASS="${DEMO_E2E_STORAGE_CLASS:-local-thin}"
 WAIT_SEC="${DEMO_E2E_WAIT_SEC:-900}"
+STALL_SEC="${DEMO_E2E_STALL_SEC:-120}"
+MANIFEST_WAIT_SEC="${DEMO_E2E_MANIFEST_WAIT_SEC:-300}"
 GC_WAIT_SEC="${DEMO_E2E_GC_WAIT_SEC:-120}"
 POLL_SEC="${DEMO_E2E_POLL_SEC:-5}"
+declare -A SNAPSHOT_STALL_SINCE MANIFEST_STALL_SINCE
 NS="${DEMO_E2E_NAMESPACE:-demo-e2e-${RUN_ID}}"
 ARTIFACTS_ROOT="${DEMO_E2E_ARTIFACT_DIR:-${DEMO_E2E_ARTIFACTS_ROOT:-artifacts}}"
 RUN_ARTIFACT_DIR="${ARTIFACTS_ROOT}/${RUN_ID}"
@@ -77,8 +84,12 @@ HAS_OBJECTKEEPER=0
 DEMO_E2E_OK_RBAC_ROLE="demo-e2e-objectkeeper-patcher-${RUN_ID}"
 DEMO_E2E_OK_RBAC_BINDING="${DEMO_E2E_OK_RBAC_ROLE}"
 DEMO_E2E_OK_RBAC_INSTALLED=0
+CONTROLLER_SA="${DEMO_E2E_CONTROLLER_SA:-system:serviceaccount:d8-state-snapshotter:controller}"
 
 log() { printf '%s\n' "$*" >&2; }
+
+# Parent/child graph refs (childrenSnapshotRefs, ownerRefs) are controller-owned in production.
+kubectl_as_controller() { kubectl --as="${CONTROLLER_SA}" "$@"; }
 
 need_cmd() {
 	command -v "$1" >/dev/null 2>&1 || {
@@ -330,19 +341,135 @@ verify_vcr_targets_if_present() {
 }
 
 dump_ready_blockers() {
+	local mcr vcr snap_cond content_cond
 	log "DIAG Snapshot $1:"
-	kubectl -n "${NS}" get "${SNAP_RES}" "$1" -o json 2>/dev/null | jq -c '.status.conditions // []' >&2 || true
+	kubectl -n "${NS}" get "${SNAP_RES}" "$1" -o json 2>/dev/null | jq -c \
+		'{conditions: (.status.conditions // []), childrenSnapshotRefs: .status.childrenSnapshotRefs, mcr: .status.manifestCaptureRequestName, vcr: .status.volumeCaptureRequestName}' \
+		>&2 || true
+	snap_cond="$(snapshot_ready_condition "$1")"
+	mcr="$(kubectl -n "${NS}" get "${SNAP_RES}" "$1" -o jsonpath='{.status.manifestCaptureRequestName}' 2>/dev/null || true)"
+	if [[ -n "${mcr}" ]]; then
+		log "DIAG MCR ${mcr}:"
+		kubectl -n "${NS}" get "${MCR_RES}" "${mcr}" -o json 2>/dev/null | jq -c \
+			'{conditions: (.status.conditions // []), checkpointName: .status.checkpointName}' >&2 \
+			|| log "DIAG MCR ${mcr}: not found"
+	fi
+	vcr="$(kubectl -n "${NS}" get "${SNAP_RES}" "$1" -o jsonpath='{.status.volumeCaptureRequestName}' 2>/dev/null || true)"
+	if [[ -n "${vcr}" ]]; then
+		if kubectl -n "${NS}" get "${VCR_RES}" "${vcr}" >/dev/null 2>&1; then
+			log "DIAG VCR ${vcr}: exists"
+			kubectl -n "${NS}" get "${VCR_RES}" "${vcr}" -o json 2>/dev/null | jq -c '.status.conditions // []' >&2 || true
+		else
+			log "DIAG VCR ${vcr}: missing (deleted or not created yet)"
+		fi
+	fi
 	log "DIAG SnapshotContent $2:"
 	kubectl get "${CONTENT_RES}" "$2" -o json 2>/dev/null | jq -c \
 		'{conditions: (.status.conditions // []), dataRefs: .status.dataRefs, children: .status.childrenSnapshotContentRefs, mcp: .status.manifestCheckpointName}' \
 		>&2 || true
+	content_cond="$(kubectl get "${CONTENT_RES}" "$2" -o json 2>/dev/null | jq -c '([.status.conditions[]? | select(.type == "Ready")][0]) // empty' || true)"
+	if content_ready_is_true "$2" && ! snapshot_ready "$1"; then
+		log "DIAG mismatch: SnapshotContent Ready=True but Snapshot not Ready (stale mirror / missing enqueue)"
+		log "DIAG Snapshot Ready: ${snap_cond:-<none>}"
+		log "DIAG SnapshotContent Ready: ${content_cond:-<none>}"
+	fi
+}
+
+dump_controller_logs_hint() {
+	log "HINT: controller logs — kubectl logs -n d8-state-snapshotter deploy/controller --tail=300"
+	kubectl logs -n d8-state-snapshotter -l app=controller --tail=60 2>/dev/null | tail -30 >&2 || true
+}
+
+snapshot_ready_condition() {
+	kubectl -n "${NS}" get "${SNAP_RES}" "$1" -o json 2>/dev/null \
+		| jq -c '([.status.conditions[]? | select(.type == "Ready")][0]) // empty'
+}
+
+content_ready_is_true() {
+	content_ready "$1"
+}
+
+snapshot_terminal_ready_failure() {
+	local cond reason
+	cond="$(snapshot_ready_condition "$1")"
+	[[ -n "${cond}" && "${cond}" != "null" ]] || return 1
+	reason="$(jq -r '.reason // ""' <<<"${cond}")"
+	case "${reason}" in
+	ChildSnapshotFailed|CapturePlanDrift|ManifestCheckpointFailed|VolumeCaptureFailed|ListFailed|VolumeCaptureTargetsFailed)
+		log "ERROR: Snapshot $1 terminal Ready=False reason=${reason} msg=$(jq -r '.message // ""' <<<"${cond}")"
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# Abort when progress is obviously stuck (do not burn full DEMO_E2E_WAIT_SEC).
+snapshot_ready_stall_abort() {
+	local snap="$1" content="$2" cond reason content_mcp
+	cond="$(snapshot_ready_condition "${snap}")"
+	[[ -n "${cond}" && "${cond}" != "null" ]] || return 1
+	reason="$(jq -r '.reason // ""' <<<"${cond}")"
+
+	if content_ready_is_true "${content}" && ! snapshot_ready "${snap}"; then
+		[[ -n "${SNAPSHOT_STALL_SINCE[${snap}]:-}" ]] || SNAPSHOT_STALL_SINCE["${snap}"]="${SECONDS}"
+		if (( SECONDS - SNAPSHOT_STALL_SINCE["${snap}"] >= STALL_SEC )); then
+			log "ERROR: SnapshotContent ${content} Ready=True but Snapshot ${snap} not Ready for ${STALL_SEC}s (likely stale status / controller not reconciling)"
+			dump_ready_blockers "${snap}" "${content}"
+			dump_controller_logs_hint
+			return 0
+		fi
+	else
+		unset 'SNAPSHOT_STALL_SINCE['"${snap}"']'
+	fi
+
+	content_mcp="$(kubectl get "${CONTENT_RES}" "${content}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
+	if [[ "${reason}" == "ManifestCapturePending" && -z "${content_mcp}" ]]; then
+		[[ -n "${MANIFEST_STALL_SINCE[${snap}]:-}" ]] || MANIFEST_STALL_SINCE["${snap}"]="${SECONDS}"
+		if (( SECONDS - MANIFEST_STALL_SINCE["${snap}"] >= MANIFEST_WAIT_SEC )); then
+			log "ERROR: Snapshot ${snap} ManifestCapturePending and SnapshotContent ${content} still has no manifestCheckpointName (${MANIFEST_WAIT_SEC}s)"
+			dump_ready_blockers "${snap}" "${content}"
+			dump_controller_logs_hint
+			return 0
+		fi
+	else
+		unset 'MANIFEST_STALL_SINCE['"${snap}"']'
+	fi
+	return 1
 }
 
 wait_snapshot_ready() {
-	if ! wait_until "Snapshot $1 Ready" snapshot_ready "$1"; then
-		[[ -n "${2:-}" ]] && dump_ready_blockers "$1" "$2"
-		return 1
-	fi
+	local snap="$1" content="$2"
+	local deadline=$((SECONDS + WAIT_SEC)) phase_start=${SECONDS} last_log=${SECONDS}
+	local log_every="${DEMO_E2E_WAIT_LOG_EVERY_SEC:-30}"
+	SNAPSHOT_STALL_SINCE=()
+	MANIFEST_STALL_SINCE=()
+	while (( SECONDS < deadline )); do
+		if snapshot_ready "${snap}"; then
+			log "OK Snapshot ${snap} Ready"
+			return 0
+		fi
+		if snapshot_terminal_ready_failure "${snap}"; then
+			dump_ready_blockers "${snap}" "${content}"
+			dump_controller_logs_hint
+			save_artifacts "${CURRENT_STAGE}" 2>/dev/null || true
+			return 1
+		fi
+		if snapshot_ready_stall_abort "${snap}" "${content}"; then
+			save_artifacts "${CURRENT_STAGE}" 2>/dev/null || true
+			return 1
+		fi
+		if (( SECONDS - last_log >= log_every )); then
+			log "WAIT: Snapshot ${snap} Ready ($((SECONDS - phase_start))s / ${WAIT_SEC}s; stall=${STALL_SEC}s)"
+			dump_ready_blockers "${snap}" "${content}"
+			last_log=${SECONDS}
+		fi
+		sleep "${POLL_SEC}"
+	done
+	log "ERROR: timeout waiting for Snapshot ${snap} Ready (${WAIT_SEC}s) [stage=${CURRENT_STAGE}]"
+	dump_ready_blockers "${snap}" "${content}"
+	dump_controller_logs_hint
+	save_artifacts "${CURRENT_STAGE}" 2>/dev/null || true
+	return 1
 }
 
 wait_content_ready() {
@@ -412,16 +539,15 @@ root_has_child_content_ref() {
 }
 
 merge_child_graph_into_root() {
-	local root_content root_uid child_uid root_cuid
+	local root_content root_uid root_cuid
 	root_content="$(kubectl -n "${NS}" get "${SNAP_RES}" "${ROOT_SNAP}" -o jsonpath='{.status.boundSnapshotContentName}')"
 	root_uid="$(kubectl -n "${NS}" get "${SNAP_RES}" "${ROOT_SNAP}" -o jsonpath='{.metadata.uid}')"
-	child_uid="$(kubectl -n "${NS}" get "${SNAP_RES}" "${CHILD_SNAP}" -o jsonpath='{.metadata.uid}')"
 	root_cuid="$(content_uid "${root_content}")"
 
 	kubectl -n "${NS}" patch "${SNAP_RES}" "${CHILD_SNAP}" --type=merge --patch="$(jq -n \
 		--arg av "${STORAGE_API}" --arg rn "${ROOT_SNAP}" --arg ru "${root_uid}" \
 		'{metadata: {ownerReferences: [{apiVersion: $av, kind: "Snapshot", name: $rn, uid: $ru, controller: true}]}}')" >/dev/null
-	kubectl -n "${NS}" patch "${SNAP_RES}" "${ROOT_SNAP}" --subresource=status --type=merge --patch="$(jq -n \
+	kubectl_as_controller -n "${NS}" patch "${SNAP_RES}" "${ROOT_SNAP}" --subresource=status --type=merge --patch="$(jq -n \
 		--arg av "${STORAGE_API}" --arg cn "${CHILD_SNAP}" \
 		'{status: {childrenSnapshotRefs: [{apiVersion: $av, kind: "Snapshot", name: $cn}]}}')" >/dev/null
 	kubectl patch "${CONTENT_RES}" "${CHILD_CONTENT}" --type=merge --patch="$(jq -n \

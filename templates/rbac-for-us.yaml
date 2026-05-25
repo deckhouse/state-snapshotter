@@ -1,6 +1,6 @@
 ---
 # Admin-kubeconfig ClusterRole: manual kubectl / demo-e2e (NOT controller SA).
-# - Create/read/delete Snapshots; patch SnapshotContent for demo graph wiring only.
+# - Create/read/delete Snapshots; patch Snapshot/SnapshotContent status for demo graph wiring (merge_child_graph_into_root).
 # - Read aggregated manifests subresources.
 # - Read-only MCR/MCP/ObjectKeeper for diagnostics.
 # - Do NOT grant objectkeepers patch/update (forced TTL uses demo-e2e temp RBAC or cluster-admin).
@@ -37,6 +37,8 @@ rules:
   - snapshots/status
   verbs:
   - get
+  - patch
+  - update
 - apiGroups:
   - storage.deckhouse.io
   resources:

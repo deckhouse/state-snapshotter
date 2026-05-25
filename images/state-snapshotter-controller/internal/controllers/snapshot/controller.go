@@ -33,8 +33,10 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -102,8 +104,18 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		Mgr:                   mgr,
 	}
 	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
+	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
+	// Status-only SnapshotContent updates must enqueue the bound Snapshot (Ready propagation).
+	passAll := predicate.NewPredicateFuncs(func(client.Object) bool { return true })
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&storagev1alpha1.Snapshot{})
+		For(&storagev1alpha1.Snapshot{}).
+		Watches(
+			&storagev1alpha1.SnapshotContent{},
+			snapshotContentToSnapshotEnqueueHandler(mgr.GetClient()),
+			builder.WithPredicates(passAll),
+		)
 	return b.Complete(r)
 }
 

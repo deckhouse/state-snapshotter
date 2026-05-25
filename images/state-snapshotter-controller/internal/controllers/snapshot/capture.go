@@ -299,6 +299,14 @@ func (r *SnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyReady(
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 ) (done bool, res ctrl.Result, err error) {
+	freshContent, err := r.getSnapshotContentFresh(ctx, content.Name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, ctrl.Result{}, nil
+		}
+		return true, ctrl.Result{}, err
+	}
+	content = freshContent
 	mcpName := content.Status.ManifestCheckpointName
 	if mcpName == "" {
 		return false, ctrl.Result{}, nil
@@ -353,8 +361,8 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 	if fresh.Status.BoundSnapshotContentName == "" {
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, content); err != nil {
+	content, err := r.getSnapshotContentFresh(ctx, fresh.Status.BoundSnapshotContentName)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 		}
@@ -429,7 +437,7 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 
 func (r *SnapshotReconciler) snapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) (bool, error) {
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
-	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.Client, key, nsSnap.Status.BoundSnapshotContentName)
+	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.snapshotContentReader(), key, nsSnap.Status.BoundSnapshotContentName)
 }
 
 func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
@@ -550,7 +558,7 @@ func (r *SnapshotReconciler) namespaceRootManifestCapturePersistedOnContent(ctx 
 		return false
 	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+	if err := r.snapshotContentReader().Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		return false
 	}
 	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
@@ -574,8 +582,8 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 	err := r.Client.Get(ctx, key, existing)
 	switch {
 	case apierrors.IsNotFound(err):
-		freshContent := &storagev1alpha1.SnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, freshContent); err == nil {
+		freshContent, err := r.getSnapshotContentFresh(ctx, content.Name)
+		if err == nil {
 			if r.namespaceRootManifestCapturePersistedOnContent(ctx, freshContent) {
 				// Another reconcile finished capture and deleted the MCR; avoid recreating the request.
 				return nil, ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
