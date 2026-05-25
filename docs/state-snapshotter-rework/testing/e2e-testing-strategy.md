@@ -50,11 +50,13 @@
 
 **Retained read:** временный путь `GET …/namespaces/{ns}/snapshots/{rootName}/manifests` после удаления root Snapshot (см. TODO в скрипте). Целевой API — `/snapshotcontents/{contentName}/manifests`.
 
-**Опции:** `DEMO_E2E_SKIP_CLEANUP=1`, `DEMO_E2E_SKIP_OK_CONTRACT=1`, `DEMO_E2E_SKIP_FORCED_TTL=1`, `DEMO_E2E_ARTIFACT_DIR` (или `DEMO_E2E_ARTIFACTS_ROOT`), `DEMO_E2E_WAIT_SEC`, `DEMO_E2E_GC_WAIT_SEC`.
+**Опции:** `DEMO_E2E_SKIP_CLEANUP=1`, `DEMO_E2E_SKIP_OK_CONTRACT=1`, `DEMO_E2E_SKIP_FORCED_TTL=1`, `DEMO_E2E_REQUIRE_FORCED_TTL=1`, `DEMO_E2E_ARTIFACT_DIR` (или `DEMO_E2E_ARTIFACTS_ROOT`), `DEMO_E2E_WAIT_SEC`, `DEMO_E2E_GC_WAIT_SEC`.
+
+**RBAC (три роли, см. `templates/controller/rbac-for-us.yaml` vs `templates/rbac-for-us.yaml`):** (1) controller SA — create/patch ObjectKeeper, MCR/MCP, VCR, SnapshotContent status; **без** `delete` ObjectKeeper; (2) admin-kubeconfig — Snapshots + aggregated read + read-only MCR/MCP/OK; (3) forced TTL — **не** в admin-kubeconfig: `demo-e2e` ставит временный `demo-e2e-objectkeeper-patcher-<run-id>` или требует cluster-admin. Перед smoke: `bash hack/rbac-can-i-audit.sh`.
 
 **Зависимости:** `d8-state-snapshotter`, `d8-storage-foundation`, Deckhouse ObjectKeeper controller, RBAC create на `snapshots.storage.deckhouse.io` в smoke-namespace.
 
-**Forced TTL (replaces PR4_SMOKE_REQUIRE_TTL):** после retained-проверки патч `ObjectKeeper.spec.ttl=0s` и ожидание GC до `DEMO_E2E_GC_WAIT_SEC` (без ожидания реального `spec.ttl` снимка).
+**Forced TTL (replaces PR4_SMOKE_REQUIRE_TTL):** тестовый патч `ObjectKeeper.spec.ttl=0s` из скрипта (не production controller); ожидание GC до `DEMO_E2E_GC_WAIT_SEC`.
 
 ## Уже есть (поддерживать)
 

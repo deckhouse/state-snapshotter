@@ -52,6 +52,46 @@ func TestManifestCheckpointContentChunkRBACIsInternalOnly(t *testing.T) {
 	}
 }
 
+func TestAdminKubeconfigRBACIsManualReadPath(t *testing.T) {
+	repoRoot := filepath.Clean("../../../../..")
+	adminTemplate := filepath.Join(repoRoot, "templates", "rbac-for-us.yaml")
+	content := readTemplate(t, adminTemplate)
+
+	okBlock := extractYAMLRuleBlock(content, "objectkeepers")
+	if okBlock == "" {
+		t.Fatal("admin-kubeconfig must mention objectkeepers for diagnostics")
+	}
+	for _, forbidden := range []string{"- patch", "- update", "- delete", "- create"} {
+		if strings.Contains(okBlock, forbidden) {
+			t.Fatalf("admin-kubeconfig objectkeepers rule must not include %s (forced TTL uses demo-e2e temp RBAC)", forbidden)
+		}
+	}
+	mcrBlock := extractYAMLRuleBlock(content, "manifestcapturerequests")
+	if strings.Contains(mcrBlock, "- create") || strings.Contains(mcrBlock, "- patch") || strings.Contains(mcrBlock, "- delete") {
+		t.Fatal("admin-kubeconfig MCR/MCP must be read-only (get/list/watch)")
+	}
+	if !strings.Contains(content, "snapshots/manifests") || !strings.Contains(content, "manifestcheckpoints/manifests") {
+		t.Fatal("admin-kubeconfig must grant aggregated manifests subresource get")
+	}
+}
+
+func extractYAMLRuleBlock(content, resource string) string {
+	idx := strings.Index(content, resource)
+	if idx < 0 {
+		return ""
+	}
+	// Walk back to apiGroups and forward until next apiGroups or end of rules.
+	start := strings.LastIndex(content[:idx], "apiGroups:")
+	if start < 0 {
+		start = idx
+	}
+	end := strings.Index(content[idx:], "\n- apiGroups:")
+	if end < 0 {
+		return content[start:]
+	}
+	return content[start : idx+end]
+}
+
 func TestCoreRBACDoesNotGrantDemoDomainResources(t *testing.T) {
 	repoRoot := filepath.Clean("../../../../..")
 	templatesDir := filepath.Join(repoRoot, "templates")

@@ -1,4 +1,9 @@
 ---
+# Admin-kubeconfig ClusterRole: manual kubectl / demo-e2e (NOT controller SA).
+# - Create/read/delete Snapshots; patch SnapshotContent for demo graph wiring only.
+# - Read aggregated manifests subresources.
+# - Read-only MCR/MCP/ObjectKeeper for diagnostics.
+# - Do NOT grant objectkeepers patch/update (forced TTL uses demo-e2e temp RBAC or cluster-admin).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -14,17 +19,10 @@ rules:
   - get
   - list
   - watch
-  - create
-  - delete
-  - deletecollection
-  - patch
-  - update
-# storage.deckhouse.io unified Snapshot API (PR-4/PR-8 cluster smoke; mirrors controller RBAC)
 - apiGroups:
   - storage.deckhouse.io
   resources:
   - snapshots
-  - snapshotcontents
   verbs:
   - get
   - list
@@ -37,18 +35,41 @@ rules:
   - storage.deckhouse.io
   resources:
   - snapshots/status
+  verbs:
+  - get
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshotcontents
+  verbs:
+  - get
+  - list
+  - watch
+  - patch
+  - update
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
   - snapshotcontents/status
   verbs:
   - get
-  - update
   - patch
-# Aggregated manifests read API (demo-e2e / PR-4 cluster validation)
+  - update
 - apiGroups:
   - subresources.state-snapshotter.deckhouse.io
   resources:
   - snapshots/manifests
+  - manifestcheckpoints/manifests
   verbs:
   - get
+- apiGroups:
+  - deckhouse.io
+  resources:
+  - objectkeepers
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

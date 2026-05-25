@@ -23,6 +23,11 @@
 #   DEMO_E2E_SKIP_CLEANUP        1 = keep namespace
 #   DEMO_E2E_SKIP_FORCED_TTL     1 = skip stage 08-forced-ttl-gc
 #   DEMO_E2E_SKIP_OK_CONTRACT   1 = skip ObjectKeeper contract checks (no objectkeepers.deckhouse.io)
+#   DEMO_E2E_REQUIRE_FORCED_TTL 1 = fail if stage 08 cannot patch ObjectKeeper (else skip with WARN)
+#
+# ObjectKeeper forced TTL (stage 08) is patched by this script, not the controller. If the caller
+# cannot patch objectkeepers, the script may install temporary ClusterRole/Bindings
+# demo-e2e-objectkeeper-patcher-<run-id> (removed on exit). Alternatively run with cluster-admin.
 #   DEMO_E2E_ARTIFACT_DIR        artifact root (alias: DEMO_E2E_ARTIFACTS_ROOT)
 #   DEMO_E2E_BIND_IMAGE          bind pod image for WaitForFirstConsumer PVCs
 
@@ -69,6 +74,9 @@ PVC_B_UID=""
 ROOT_SNAP_UID=""
 OK_NAME="ret-snap-${NS}-${ROOT_SNAP}"
 HAS_OBJECTKEEPER=0
+DEMO_E2E_OK_RBAC_ROLE="demo-e2e-objectkeeper-patcher-${RUN_ID}"
+DEMO_E2E_OK_RBAC_BINDING="${DEMO_E2E_OK_RBAC_ROLE}"
+DEMO_E2E_OK_RBAC_INSTALLED=0
 
 log() { printf '%s\n' "$*" >&2; }
 
@@ -87,7 +95,107 @@ cleanup_ns() {
 	kubectl delete namespace "${NS}" --ignore-not-found=true --wait=false 2>/dev/null || true
 }
 
-trap cleanup_ns EXIT
+cleanup_demo_e2e_objectkeeper_rbac() {
+	[[ "${DEMO_E2E_OK_RBAC_INSTALLED}" == "1" ]] || return 0
+	kubectl delete clusterrolebinding "${DEMO_E2E_OK_RBAC_BINDING}" --ignore-not-found=true 2>/dev/null || true
+	kubectl delete clusterrole "${DEMO_E2E_OK_RBAC_ROLE}" --ignore-not-found=true 2>/dev/null || true
+	log "Removed temporary ObjectKeeper test RBAC (${DEMO_E2E_OK_RBAC_ROLE})"
+}
+
+cleanup_on_exit() {
+	cleanup_demo_e2e_objectkeeper_rbac
+	cleanup_ns
+}
+
+trap cleanup_on_exit EXIT
+
+auth_can_yes() {
+	[[ "$(kubectl auth can-i "$1" "${2}" 2>/dev/null || echo no)" == "yes" ]]
+}
+
+install_demo_e2e_objectkeeper_rbac() {
+	local whoami_json subjects err
+	err="$(mktemp)"
+	if ! whoami_json="$(kubectl auth whoami -o json 2>/dev/null)"; then
+		log "WARN: kubectl auth whoami failed; cannot install temporary ObjectKeeper RBAC"
+		rm -f "${err}"
+		return 1
+	fi
+	subjects="$(jq -n \
+		--arg user "$(jq -r '.status.userInfo.username // empty' <<<"${whoami_json}")" \
+		--argjson groups "$(jq -c '.status.userInfo.groups // []' <<<"${whoami_json}")" \
+		'($user | select(length > 0) | [{apiGroup: "rbac.authorization.k8s.io", kind: "User", name: .}])
+		 + ($groups | map({apiGroup: "rbac.authorization.k8s.io", kind: "Group", name: .}))')"
+	if [[ -z "${subjects}" || "${subjects}" == "[]" ]]; then
+		log "WARN: no subjects from kubectl auth whoami"
+		rm -f "${err}"
+		return 1
+	fi
+	if ! kubectl apply -f - 2>"${err}" <<EOF; then
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ${DEMO_E2E_OK_RBAC_ROLE}
+  labels:
+    demo-e2e.state-snapshotter.deckhouse.io/run-id: "${RUN_ID}"
+rules:
+- apiGroups: [deckhouse.io]
+  resources: [objectkeepers]
+  verbs: [get, patch, update]
+- apiGroups: [deckhouse.io]
+  resources: [objectkeepers/status]
+  verbs: [get, patch, update]
+EOF
+		log "WARN: failed to apply temporary ObjectKeeper ClusterRole (need create clusterroles or cluster-admin)"
+		cat "${err}" >&2 2>/dev/null || true
+		rm -f "${err}"
+		return 1
+	fi
+	if ! kubectl apply -f - 2>"${err}" <<EOF; then
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${DEMO_E2E_OK_RBAC_BINDING}
+  labels:
+    demo-e2e.state-snapshotter.deckhouse.io/run-id: "${RUN_ID}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${DEMO_E2E_OK_RBAC_ROLE}
+subjects: ${subjects}
+EOF
+		kubectl delete clusterrole "${DEMO_E2E_OK_RBAC_ROLE}" --ignore-not-found=true 2>/dev/null || true
+		log "WARN: failed to apply temporary ObjectKeeper ClusterRoleBinding"
+		cat "${err}" >&2 2>/dev/null || true
+		rm -f "${err}"
+		return 1
+	fi
+	rm -f "${err}"
+	return 0
+}
+
+ensure_demo_e2e_objectkeeper_access() {
+	[[ "${HAS_OBJECTKEEPER}" == "1" ]] || return 0
+	if auth_can_yes patch "${OK_RES}"; then
+		log "OK ObjectKeeper patch: caller already authorized"
+		return 0
+	fi
+	if install_demo_e2e_objectkeeper_rbac && auth_can_yes patch "${OK_RES}"; then
+		DEMO_E2E_OK_RBAC_INSTALLED=1
+		log "OK installed temporary demo-e2e ObjectKeeper RBAC (${DEMO_E2E_OK_RBAC_ROLE})"
+		return 0
+	fi
+	if [[ "${DEMO_E2E_REQUIRE_FORCED_TTL:-0}" == "1" ]]; then
+		log "ERROR: forced TTL requires objectkeepers.patch (cluster-admin or successful demo-e2e temp RBAC)"
+		exit 1
+	fi
+	log "WARN: cannot patch objectkeepers; stage 08-forced-ttl-gc skipped (cluster-admin, temp RBAC, or DEMO_E2E_REQUIRE_FORCED_TTL=1)"
+	DEMO_E2E_SKIP_FORCED_TTL=1
+	if ! auth_can_yes get "${OK_RES}"; then
+		log "WARN: cannot get objectkeepers; ObjectKeeper contract checks will be skipped"
+		DEMO_E2E_SKIP_OK_CONTRACT=1
+	fi
+}
 
 need_cmd kubectl
 need_cmd jq
@@ -404,17 +512,65 @@ finish_stage() {
 aggregated_path() { printf '/apis/%s/%s/namespaces/%s/snapshots/%s/manifests' "${SUBAPI}" "${SUBVER}" "${NS}" "$1"; }
 
 verify_aggregated_present() {
-	local snap="$1" out="$2"
+	local snap="$1" out="$2" require_cm="${3:-1}"
 	# TODO(retained-read-api): temporary snapshot-name route; see script header.
 	if ! kubectl get --raw "$(aggregated_path "${snap}")" >"${out}" 2>"${out}.err"; then
 		log "ERROR: aggregated GET failed for ${snap} (see ${out}.err)"
-		log "Hint: admin kubeconfig needs get snapshots/manifests (subresources.state-snapshotter.deckhouse.io); see templates/rbac-for-us.yaml"
+		if grep -q Forbidden "${out}.err" 2>/dev/null; then
+			log "Hint: grant get snapshots/manifests (subresources.state-snapshotter.deckhouse.io); see templates/rbac-for-us.yaml"
+		elif grep -q 'duplicate object detected' "${out}.err" 2>/dev/null; then
+			log "Hint: merged child+root subtree returns 409 by contract; use child snapshot or MCP route for single-archive read"
+		fi
 		cat "${out}.err" >&2 2>/dev/null || true
 		exit 1
 	fi
 	jq -e 'type == "array" and length >= 1' "${out}" >/dev/null
+	if [[ "${require_cm}" == "1" ]]; then
+		jq -e --arg n "${CM_NAME}" '[.[] | select(.kind == "ConfigMap" and .metadata.name == $n)] | length >= 1' "${out}" >/dev/null
+		log "OK aggregated manifests contain ${CM_NAME}"
+	else
+		log "OK aggregated manifests non-empty for ${snap}"
+	fi
+}
+
+verify_aggregated_expect_conflict() {
+	local snap="$1" out="$2"
+	set +e
+	kubectl get --raw "$(aggregated_path "${snap}")" >"${out}" 2>"${out}.err"
+	local rc=$?
+	set -e
+	grep -q 'duplicate object detected' "${out}.err" 2>/dev/null || {
+		log "ERROR: expected 409 duplicate-object Conflict for ${snap} (rc=${rc})"
+		cat "${out}.err" >&2 2>/dev/null || true
+		exit 1
+	}
+	log "OK aggregated read on ${snap} returns 409 (duplicate in child+root MCP tree; normative)"
+}
+
+mcp_manifests_path() { printf '/apis/%s/%s/manifestcheckpoints/%s/manifests' "${SUBAPI}" "${SUBVER}" "$1"; }
+
+mcp_manifests_rbac_ok() {
+	local probe_err="$1"
+	set +e
+	kubectl get --raw "$(mcp_manifests_path "__demo_e2e_mcp_rbac_probe__")" >/dev/null 2>"${probe_err}"
+	local rc=$?
+	set -e
+	! grep -q Forbidden "${probe_err}" 2>/dev/null && [[ "${rc}" -ne 0 ]]
+}
+
+verify_mcp_manifests_present() {
+	local mcp="$1" out="$2"
+	if ! kubectl get --raw "$(mcp_manifests_path "${mcp}")" >"${out}" 2>"${out}.err"; then
+		if grep -q Forbidden "${out}.err" 2>/dev/null; then
+			log "WARN: skip MCP manifests read (need get manifestcheckpoints/manifests on admin-kubeconfig; module RBAC sync)"
+			return 0
+		fi
+		log "ERROR: MCP manifests GET failed for ${mcp}"
+		cat "${out}.err" >&2 2>/dev/null || true
+		exit 1
+	fi
 	jq -e --arg n "${CM_NAME}" '[.[] | select(.kind == "ConfigMap" and .metadata.name == $n)] | length >= 1' "${out}" >/dev/null
-	log "OK aggregated manifests contain ${CM_NAME}"
+	log "OK root MCP ${mcp} archive contains ${CM_NAME}"
 }
 
 verify_aggregated_absent() {
@@ -481,6 +637,7 @@ kubectl get crd volumecapturerequests.storage.deckhouse.io >/dev/null
 kubectl get crd volumesnapshots.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io >/dev/null
 if kubectl get crd objectkeepers.deckhouse.io >/dev/null 2>&1; then
 	HAS_OBJECTKEEPER=1
+	ensure_demo_e2e_objectkeeper_access
 else
 	log "WARN: objectkeepers.deckhouse.io CRD missing; ObjectKeeper checks and forced TTL skipped"
 fi
@@ -499,6 +656,10 @@ if grep -q Forbidden "${AGG_RBAC_PROBE}" 2>/dev/null; then
 	cat "${AGG_RBAC_PROBE}" >&2
 	exit 1
 fi
+MCP_RBAC_PROBE="$(stage_dir "00-preflight")/mcp-rbac-probe.err"
+if ! mcp_manifests_rbac_ok "${MCP_RBAC_PROBE}"; then
+	log "WARN: cannot GET manifestcheckpoints/manifests (${SUBAPI}); stage 07 MCP archive check will be skipped until module RBAC sync"
+fi
 [[ "${AGG_RBAC_RC}" -eq 0 || "${AGG_RBAC_RC}" -eq 1 ]] || {
 	log "ERROR: aggregated RBAC probe failed (rc=${AGG_RBAC_RC})"
 	cat "${AGG_RBAC_PROBE}" >&2
@@ -509,6 +670,9 @@ fi
 	echo "snap_create_can=${DECK_SNAP_CAN}"
 	echo "agg_rbac_probe_rc=${AGG_RBAC_RC}"
 	echo "has_objectkeeper=${HAS_OBJECTKEEPER}"
+	echo "ok_rbac_installed=${DEMO_E2E_OK_RBAC_INSTALLED}"
+	echo "skip_forced_ttl=${DEMO_E2E_SKIP_FORCED_TTL:-0}"
+	echo "skip_ok_contract=${DEMO_E2E_SKIP_OK_CONTRACT:-0}"
 	kubectl get storageclass "${STORAGE_CLASS}" -o json | jq '{name: .metadata.name, annotations: .metadata.annotations}' || true
 	kubectl get volumesnapshotclass -o name 2>/dev/null || true
 	kubectl api-resources 2>/dev/null | grep -E 'snapshot|volumecapture|manifest|objectkeeper' || true
@@ -518,7 +682,7 @@ finish_stage "00-preflight" "PASS" "API/RBAC/SC checks" "Cluster ready for demo-
 # --- 01-source-created ---
 begin_stage "01-source-created"
 kubectl create namespace "${NS}" >/dev/null
-kubectl -n "${NS}" create configmap "${CM_NAME}" --from-literal=demo=e2e >/dev/null
+# ConfigMap after child Ready (stage 04) so child/root MCP trees do not both archive demo-cm (409 on aggregated read).
 kubectl -n "${NS}" apply -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -533,8 +697,8 @@ spec:
 EOF
 ensure_pvc_bound "${PVC_A}"
 PVC_A_UID="$(pvc_uid "${PVC_A}")"
-log "OK ${CM_NAME}, ${PVC_A} uid=${PVC_A_UID}"
-finish_stage "01-source-created" "PASS" "ns, ConfigMap, PVC A, bind pod" "Sources for manifest + volume capture" "source" "logical"
+log "OK ${PVC_A} uid=${PVC_A_UID}"
+finish_stage "01-source-created" "PASS" "ns, PVC A, bind pod" "Volume source for child capture" "source" "logical"
 
 # --- 02-child-created ---
 begin_stage "02-child-created"
@@ -572,7 +736,8 @@ CHILD_MCP="$(kubectl get "${CONTENT_RES}" "${CHILD_CONTENT}" -o jsonpath='{.stat
 [[ -n "${CHILD_MCP}" ]] && kubectl get "${MCP_RES}" "${CHILD_MCP}" >/dev/null
 wait_content_ready "${CHILD_CONTENT}" "${CHILD_SNAP}"
 wait_snapshot_ready "${CHILD_SNAP}" "${CHILD_CONTENT}"
-finish_stage "03-child-ready" "PASS" "VCR publish, VSC ownerRef, MCP, Ready" "Child volume+manifest ready" "child-ready" "logical" "${CHILD_SNAP}"
+verify_aggregated_present "${CHILD_SNAP}" "$(stage_dir "03-child-ready")/aggregated-child.json" 0
+finish_stage "03-child-ready" "PASS" "VCR publish, VSC ownerRef, MCP, Ready, child aggregated" "Child volume+manifest ready" "child-ready" "logical" "${CHILD_SNAP}"
 
 # --- 04-root-source-delta ---
 begin_stage "04-root-source-delta"
@@ -590,8 +755,9 @@ spec:
 EOF
 ensure_pvc_bound "${PVC_B}"
 PVC_B_UID="$(pvc_uid "${PVC_B}")"
-log "OK pvc-b uid=${PVC_B_UID}"
-finish_stage "04-root-source-delta" "PASS" "PVC B + bind pod" "Residual volume source ready" "root-delta" "logical"
+kubectl -n "${NS}" create configmap "${CM_NAME}" --from-literal=demo=e2e >/dev/null
+log "OK ${CM_NAME}, pvc-b uid=${PVC_B_UID}"
+finish_stage "04-root-source-delta" "PASS" "PVC B, ConfigMap, bind pod" "Residual volume + manifest source for root" "root-delta" "logical"
 
 # --- 05-root-created ---
 begin_stage "05-root-created"
@@ -641,8 +807,8 @@ wait_until "root has child content ref" root_has_child_content_ref
 wait_content_ready "${ROOT_CONTENT}" "${ROOT_SNAP}"
 wait_snapshot_ready "${ROOT_SNAP}" "${ROOT_CONTENT}"
 assert_root_objectkeeper_contract
-verify_aggregated_present "${ROOT_SNAP}" "$(stage_dir "06-root-ready")/aggregated-before-delete.json"
-finish_stage "06-root-ready" "PASS" "residual pvc-b, MCP, aggregated, OK" "Root Ready + read-path" "root-ready" "logical" "${ROOT_SNAP}"
+verify_aggregated_expect_conflict "${ROOT_SNAP}" "$(stage_dir "06-root-ready")/aggregated-root-conflict.err"
+finish_stage "06-root-ready" "PASS" "residual pvc-b, MCP, root aggregated 409, OK" "Root Ready + subtree duplicate contract" "root-ready" "logical" "${ROOT_SNAP}"
 
 # --- 07-root-deleted-retained ---
 begin_stage "07-root-deleted-retained"
@@ -650,8 +816,9 @@ kubectl -n "${NS}" delete "${SNAP_RES}" "${ROOT_SNAP}" --wait=true
 kubectl -n "${NS}" get "${SNAP_RES}" "${ROOT_SNAP}" >/dev/null 2>&1 && { log "ERROR: root Snapshot still exists"; exit 1; }
 kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" >/dev/null
 kubectl get "${MCP_RES}" "${ROOT_MCP}" >/dev/null
-verify_aggregated_present "${ROOT_SNAP}" "$(stage_dir "07-root-deleted-retained")/aggregated-after-delete.json"
-finish_stage "07-root-deleted-retained" "PASS" "root Snapshot deleted" "Content+MCP retained; temporary aggregated read" "retained" "lifecycle" "" "${ROOT_CONTENT}"
+verify_mcp_manifests_present "${ROOT_MCP}" "$(stage_dir "07-root-deleted-retained")/root-mcp-manifests.json"
+verify_aggregated_expect_conflict "${ROOT_SNAP}" "$(stage_dir "07-root-deleted-retained")/aggregated-retained-conflict.err"
+finish_stage "07-root-deleted-retained" "PASS" "root Snapshot deleted" "Content+MCP retained; MCP read + retained snapshot route" "retained" "lifecycle" "" "${ROOT_CONTENT}"
 
 # --- 08-forced-ttl-gc ---
 begin_stage "08-forced-ttl-gc"

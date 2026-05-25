@@ -50,9 +50,9 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["create", "get", "delete"]
 
-# ObjectKeeper (cluster-scoped) - created by this controller for lifecycle management
-# ObjectKeeper is used in FollowObject mode to manage ManifestCheckpoint lifecycle
-# Watch permission is needed because controller-runtime creates informer for all types in scheme
+# ObjectKeeper (cluster-scoped): controller creates/patches spec (drift/TTL/followRef); never deletes.
+# Deletion is Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained content/MCP.
+# No objectkeepers/status: state-snapshotter does not write ObjectKeeper status.
 - apiGroups: ["deckhouse.io"]
   resources: ["objectkeepers"]
   verbs: ["get", "list", "watch", "create", "update", "patch"]
