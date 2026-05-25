@@ -46,7 +46,11 @@ STALL_SEC="${DEMO_E2E_STALL_SEC:-120}"
 MANIFEST_WAIT_SEC="${DEMO_E2E_MANIFEST_WAIT_SEC:-300}"
 GC_WAIT_SEC="${DEMO_E2E_GC_WAIT_SEC:-120}"
 POLL_SEC="${DEMO_E2E_POLL_SEC:-5}"
-declare -A SNAPSHOT_STALL_SINCE MANIFEST_STALL_SINCE
+# Per-wait stall tracking (bash 3.2 compatible; one snap/content pair per wait_snapshot_ready call).
+STALL_TRACK_SNAP=""
+STALL_TRACK_CONTENT=""
+SNAPSHOT_STALL_SINCE=0
+MANIFEST_STALL_SINCE=0
 NS="${DEMO_E2E_NAMESPACE:-demo-e2e-${RUN_ID}}"
 ARTIFACTS_ROOT="${DEMO_E2E_ARTIFACT_DIR:-${DEMO_E2E_ARTIFACTS_ROOT:-artifacts}}"
 RUN_ARTIFACT_DIR="${ARTIFACTS_ROOT}/${RUN_ID}"
@@ -411,28 +415,38 @@ snapshot_ready_stall_abort() {
 	reason="$(jq -r '.reason // ""' <<<"${cond}")"
 
 	if content_ready_is_true "${content}" && ! snapshot_ready "${snap}"; then
-		[[ -n "${SNAPSHOT_STALL_SINCE[${snap}]:-}" ]] || SNAPSHOT_STALL_SINCE["${snap}"]="${SECONDS}"
-		if (( SECONDS - SNAPSHOT_STALL_SINCE["${snap}"] >= STALL_SEC )); then
+		if [[ "${STALL_TRACK_SNAP}" != "${snap}" || "${STALL_TRACK_CONTENT}" != "${content}" || "${SNAPSHOT_STALL_SINCE}" -eq 0 ]]; then
+			STALL_TRACK_SNAP="${snap}"
+			STALL_TRACK_CONTENT="${content}"
+			SNAPSHOT_STALL_SINCE=${SECONDS}
+		fi
+		if (( SECONDS - SNAPSHOT_STALL_SINCE >= STALL_SEC )); then
 			log "ERROR: SnapshotContent ${content} Ready=True but Snapshot ${snap} not Ready for ${STALL_SEC}s (likely stale status / controller not reconciling)"
 			dump_ready_blockers "${snap}" "${content}"
 			dump_controller_logs_hint
 			return 0
 		fi
 	else
-		unset 'SNAPSHOT_STALL_SINCE['"${snap}"']'
+		STALL_TRACK_SNAP=""
+		STALL_TRACK_CONTENT=""
+		SNAPSHOT_STALL_SINCE=0
 	fi
 
 	content_mcp="$(kubectl get "${CONTENT_RES}" "${content}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
 	if [[ "${reason}" == "ManifestCapturePending" && -z "${content_mcp}" ]]; then
-		[[ -n "${MANIFEST_STALL_SINCE[${snap}]:-}" ]] || MANIFEST_STALL_SINCE["${snap}"]="${SECONDS}"
-		if (( SECONDS - MANIFEST_STALL_SINCE["${snap}"] >= MANIFEST_WAIT_SEC )); then
+		if [[ "${STALL_TRACK_SNAP}" != "${snap}" || "${STALL_TRACK_CONTENT}" != "${content}" || "${MANIFEST_STALL_SINCE}" -eq 0 ]]; then
+			STALL_TRACK_SNAP="${snap}"
+			STALL_TRACK_CONTENT="${content}"
+			MANIFEST_STALL_SINCE=${SECONDS}
+		fi
+		if (( SECONDS - MANIFEST_STALL_SINCE >= MANIFEST_WAIT_SEC )); then
 			log "ERROR: Snapshot ${snap} ManifestCapturePending and SnapshotContent ${content} still has no manifestCheckpointName (${MANIFEST_WAIT_SEC}s)"
 			dump_ready_blockers "${snap}" "${content}"
 			dump_controller_logs_hint
 			return 0
 		fi
 	else
-		unset 'MANIFEST_STALL_SINCE['"${snap}"']'
+		MANIFEST_STALL_SINCE=0
 	fi
 	return 1
 }
@@ -441,8 +455,10 @@ wait_snapshot_ready() {
 	local snap="$1" content="$2"
 	local deadline=$((SECONDS + WAIT_SEC)) phase_start=${SECONDS} last_log=${SECONDS}
 	local log_every="${DEMO_E2E_WAIT_LOG_EVERY_SEC:-30}"
-	SNAPSHOT_STALL_SINCE=()
-	MANIFEST_STALL_SINCE=()
+	STALL_TRACK_SNAP=""
+	STALL_TRACK_CONTENT=""
+	SNAPSHOT_STALL_SINCE=0
+	MANIFEST_STALL_SINCE=0
 	while (( SECONDS < deadline )); do
 		if snapshot_ready "${snap}"; then
 			log "OK Snapshot ${snap} Ready"
