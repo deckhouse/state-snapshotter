@@ -19,6 +19,13 @@ rules:
   - get
   - list
   - watch
+# Chunk payloads: get-by-name only (no list/watch) for snapshot-graph / demo diagnostics.
+- apiGroups:
+  - state-snapshotter.deckhouse.io
+  resources:
+  - manifestcheckpointcontentchunks
+  verbs:
+  - get
 - apiGroups:
   - storage.deckhouse.io
   resources:

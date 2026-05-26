@@ -21,7 +21,7 @@ write_obj() {
 ready_condition='"conditions":[{"type":"Ready","status":"True","reason":"Completed","message":"ok"}]'
 
 write_obj snapshots.storage.deckhouse.io root <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"root","uid":"snap-root","ownerReferences":[]},"status":{"boundSnapshotContentName":"sc-root","manifestCaptureRequestName":"mcr-root","childrenSnapshotRefs":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap"}],${ready_condition}}}
+{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"root","uid":"snap-root","ownerReferences":[]},"status":{"boundSnapshotContentName":"sc-root","manifestCaptureRequestName":"mcr-root","volumeCaptureRequestName":"vcr-root","childrenSnapshotRefs":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap"}],${ready_condition}}}
 EOF
 
 write_obj demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io disk-snap <<EOF
@@ -29,7 +29,7 @@ write_obj demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io disk-snap
 EOF
 
 write_obj snapshotcontents.storage.deckhouse.io sc-root <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-root","uid":"sc-root-uid","ownerReferences":[{"apiVersion":"deckhouse.io/v1alpha1","kind":"ObjectKeeper","name":"ok-root","uid":"ok-root-uid","controller":true}]},"status":{"manifestCheckpointName":"mcp-root","childrenSnapshotContentRefs":[{"name":"sc-disk"},{"name":"sc-bad"},{"name":"sc-missing"}],${ready_condition}}}
+{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-root","uid":"sc-root-uid","ownerReferences":[{"apiVersion":"deckhouse.io/v1alpha1","kind":"ObjectKeeper","name":"ok-root","uid":"ok-root-uid","controller":true}]},"status":{"manifestCheckpointName":"mcp-root","childrenSnapshotContentRefs":[{"name":"sc-disk"},{"name":"sc-bad"},{"name":"sc-missing"}],"dataRefs":[{"targetUID":"pvc-root-uid","target":{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"},"artifact":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","name":"vsc-root"}}],${ready_condition}}}
 EOF
 
 write_obj snapshotcontents.storage.deckhouse.io sc-disk <<EOF
@@ -65,7 +65,19 @@ write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-bad <<EOF
 EOF
 
 write_obj manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io chunk-root-0 <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpointContentChunk","metadata":{"name":"chunk-root-0","uid":"chunk-root-0-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","name":"mcp-root","uid":"mcp-root-uid","controller":true}]},"spec":{"checkpointName":"mcp-root","index":0,"objectsCount":3,"data":"H4sIAAAAAAAA/4pWyslPzy/KSVHSUcpJLC5R0lFKrShQ0lEqLkksSQQA"}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpointContentChunk","metadata":{"name":"chunk-root-0","uid":"chunk-root-0-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","name":"mcp-root","uid":"mcp-root-uid","controller":true}]},"spec":{"checkpointName":"mcp-root","index":0,"objectsCount":3,"data":"H4sIAAAAAAAA/4pWyslPzy/KSVHSUcpJLC5R0lFKrShQ0lEqLkksSQQA"},"status":{${ready_condition}}}
+EOF
+
+write_obj persistentvolumeclaims pvc-root <<EOF
+{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"namespace":"ns1","name":"pvc-root","uid":"pvc-root-uid"},"spec":{"volumeName":"pv-root"}}
+EOF
+
+write_obj volumesnapshotcontents.snapshot.storage.k8s.io vsc-root <<EOF
+{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","metadata":{"name":"vsc-root","uid":"vsc-root-uid"},"status":{"readyToUse":true}}
+EOF
+
+write_obj volumecapturerequests.storage.deckhouse.io vcr-root <<EOF
+{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"VolumeCaptureRequest","metadata":{"namespace":"ns1","name":"vcr-root","uid":"vcr-root-uid"},"spec":{"mode":"Snapshot","targets":[{"uid":"pvc-root-uid","apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"}]},"status":{"dataRefs":[{"targetUID":"pvc-root-uid","target":{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"},"artifact":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","name":"vsc-root"}}],${ready_condition}}}
 EOF
 
 write_obj demovirtualdisks.demo.state-snapshotter.deckhouse.io live-disk <<EOF
@@ -102,6 +114,20 @@ demovirtualdisksnapshots     demo.state-snapshotter.deckhouse.io/v1alpha1 true  
 demovirtualdisks             demo.state-snapshotter.deckhouse.io/v1alpha1 true       DemoVirtualDisk
 demovirtualmachines          demo.state-snapshotter.deckhouse.io/v1alpha1 true       DemoVirtualMachine
 RES
+	exit 0
+fi
+
+if [[ "${1:-}" == "auth" && "${2:-}" == "can-i" ]]; then
+	resource="${4:-}"
+	case "${3:-}" in
+	get)
+		case "$resource" in
+		*manifestcheckpointcontentchunks*) echo yes ;;
+		*) echo yes ;;
+		esac
+		;;
+	*) echo no ;;
+	esac
 	exit 0
 fi
 
@@ -177,6 +203,13 @@ grep -q 'Chunk/chunk-root-0 ownerRef -> ManifestCheckpoint/mcp-root' "${OUT_DIR}
 grep -q 'No SnapshotContent ownerRef to Snapshot: sc-bad' "${OUT_DIR}/fixture.full.summary.txt"
 grep -Fq 'MCR\nmcr-root' "${OUT_DIR}/fixture.full.dot"
 grep -Fq 'status.manifestCaptureRequestName' "${OUT_DIR}/fixture.full.dot"
+grep -Fq 'status.dataRefs[].artifact' "${OUT_DIR}/fixture.full.dot"
+grep -Fq 'status.dataRefs[].target' "${OUT_DIR}/fixture.full.dot"
+grep -Fq 'status.volumeCaptureRequestName' "${OUT_DIR}/fixture.full.dot"
+grep -Fq 'VolumeSnapshotContent' "${OUT_DIR}/fixture.full.dot"
+grep -Fq 'VSC\nvsc-root' "${OUT_DIR}/fixture.full.dot"
+grep -Fq 'VCR\nvcr-root' "${OUT_DIR}/fixture.full.dot"
+! grep -Fq 'Chunk\nchunk-root-0\nMISSING' "${OUT_DIR}/fixture.full.dot"
 
 PATH="${BIN_DIR}:$PATH" SNAPSHOT_GRAPH_FIXTURE_DIR="$FIXTURE_DIR" \
 	bash "${ROOT_DIR}/hack/snapshot-graph.sh" \

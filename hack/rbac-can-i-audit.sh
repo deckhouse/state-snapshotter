@@ -42,6 +42,7 @@ can_i "" patch snapshotcontents.storage.deckhouse.io/status
 can_i "" patch snapshotcontents.storage.deckhouse.io
 can_i "" get snapshots/manifests.subresources.state-snapshotter.deckhouse.io -n "${NS}"
 can_i "" get manifestcheckpoints/manifests.subresources.state-snapshotter.deckhouse.io
+can_i "" get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io
 can_i "" get objectkeepers.deckhouse.io
 can_i "" patch objectkeepers.deckhouse.io
 can_i "" create clusterroles.rbac.authorization.k8s.io

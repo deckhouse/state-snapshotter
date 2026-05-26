@@ -27,9 +27,9 @@
 #   DEMO_E2E_SKIP_FORCED_TTL     1 = skip stage 08-forced-ttl-gc (debug only)
 #   DEMO_E2E_SKIP_OK_CONTRACT   1 = skip ObjectKeeper contract checks (no objectkeepers.deckhouse.io)
 #   DEMO_E2E_REQUIRE_FORCED_TTL 1 = fail if stage 08 cannot patch ObjectKeeper (else skip with clear reason)
-#   DEMO_E2E_ENABLE_KICK         1 = annotate Snapshots to force reconcile (debug only; default off)
 #
-# Canonical cluster e2e (replaces legacy separate PR-4/PR-8 scripts; those paths are removed).
+# Canonical cluster e2e (replaces legacy separate PR-4/PR-8 smoke scripts; use hack/demo-e2e.sh only).
+# Stages: 00-preflight .. 09-cleanup under artifacts/<run-id>/.
 #
 # ObjectKeeper forced TTL (stage 08) is patched by this script, not the controller. If the caller
 # cannot patch objectkeepers.deckhouse.io, stage 08 is SKIP by default. The script may install
@@ -94,7 +94,6 @@ DEMO_E2E_OK_RBAC_BINDING="${DEMO_E2E_OK_RBAC_ROLE}"
 DEMO_E2E_OK_RBAC_INSTALLED=0
 DEMO_E2E_FORCED_TTL_SKIP_REASON=""
 CONTROLLER_SA="${DEMO_E2E_CONTROLLER_SA:-system:serviceaccount:d8-state-snapshotter:controller}"
-DEMO_E2E_KICK_ANN="state-snapshotter.deckhouse.io/demo-e2e-kick"
 
 log() { printf '%s\n' "$*" >&2; }
 
@@ -288,27 +287,41 @@ wait_until_gc() {
 	return 1
 }
 
-maybe_kick_snapshot() {
-	[[ "${DEMO_E2E_ENABLE_KICK:-0}" == "1" ]] || return 0
-	kubectl -n "${NS}" annotate "${SNAP_RES}" "$1" \
-		"${DEMO_E2E_KICK_ANN}=$(date +%s)" --overwrite >/dev/null
-	log "DEBUG: kick_snapshot ${1} (DEMO_E2E_ENABLE_KICK=1)"
-}
-
-assert_no_demo_e2e_kick() {
-	[[ "${DEMO_E2E_ENABLE_KICK:-0}" == "1" ]] && return 0
-	local snap="$1" kick
-	kick="$(kubectl -n "${NS}" get "${SNAP_RES}" "${snap}" \
-		-o "jsonpath={.metadata.annotations['${DEMO_E2E_KICK_ANN}']}" 2>/dev/null || true)"
-	if [[ -n "${kick}" ]]; then
-		log "ERROR: ${snap} has ${DEMO_E2E_KICK_ANN}=${kick} (use DEMO_E2E_ENABLE_KICK=1 only for debug)"
-		exit 1
-	fi
-}
-
 log_forced_ttl_skip() {
 	local reason="$1"
 	log "08-forced-ttl-gc skipped: ${reason}. Run with cluster-admin or DEMO_E2E_REQUIRE_FORCED_TTL=1 to require this check."
+}
+
+# Prints identity, ObjectKeeper patch permission, and planned stage-08 behavior (preflight only).
+log_preflight_e2e_plan() {
+	local user can_patch stage08
+	user="$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || echo unknown)"
+	can_patch="$(kubectl auth can-i patch "${OK_RES}" 2>/dev/null || echo no)"
+	log "Preflight user: ${user}"
+	log "Preflight can-i patch ${OK_RES}: ${can_patch}"
+	if [[ "${DEMO_E2E_SKIP_FORCED_TTL:-0}" == "1" ]]; then
+		if [[ -n "${DEMO_E2E_FORCED_TTL_SKIP_REASON}" ]]; then
+			stage08="SKIP (${DEMO_E2E_FORCED_TTL_SKIP_REASON})"
+		elif [[ "${HAS_OBJECTKEEPER}" != "1" ]]; then
+			stage08="SKIP (no ObjectKeeper CRD)"
+		else
+			stage08="SKIP (DEMO_E2E_SKIP_FORCED_TTL=1 debug)"
+		fi
+	elif [[ "${DEMO_E2E_REQUIRE_FORCED_TTL:-0}" == "1" ]]; then
+		stage08="REQUIRED (fail if cannot patch)"
+	elif [[ "${HAS_OBJECTKEEPER}" != "1" ]]; then
+		stage08="SKIP (no ObjectKeeper CRD)"
+	elif auth_can_yes patch "${OK_RES}"; then
+		stage08="RUN (caller can patch objectkeepers)"
+	elif [[ "${DEMO_E2E_OK_RBAC_INSTALLED}" == "1" ]]; then
+		stage08="RUN (temporary demo-e2e ObjectKeeper RBAC)"
+	else
+		stage08="SKIP (cannot patch; temp RBAC install failed — escalation policy)"
+	fi
+	log "Preflight stage 08-forced-ttl-gc plan: ${stage08}"
+	PREFLIGHT_USER="${user}"
+	PREFLIGHT_OK_PATCH_CAN="${can_patch}"
+	PREFLIGHT_STAGE08_PLAN="${stage08}"
 }
 
 snapshot_bound() {
@@ -595,8 +608,6 @@ merge_child_graph_into_root() {
 		'{metadata: {ownerReferences: [{apiVersion: $av, kind: "SnapshotContent", name: $rcn, uid: $rcu, controller: true}]}}')" >/dev/null
 	kubectl patch "${CONTENT_RES}" "${root_content}" --subresource=status --type=merge --patch="$(jq -n \
 		--arg ccn "${CHILD_CONTENT}" '{status: {childrenSnapshotContentRefs: [{name: $ccn}]}}')" >/dev/null
-	maybe_kick_snapshot "${ROOT_SNAP}"
-	maybe_kick_snapshot "${CHILD_SNAP}"
 }
 
 dump_list_to_dir() {
@@ -659,11 +670,17 @@ save_graph() {
 	if [[ -n "${graph_content}" ]]; then
 		bash "${SCRIPT_DIR}/snapshot-graph.sh" --snapshotcontent "${graph_content}" \
 			--output-dir "${graph_dir}" --name "${graph_name}" --mode "${mode}" \
-			--title "${title}" --description "${desc}" 2>"${dir}/graph.err" || log "WARN: graph ${stage}"
+			--title "${title}" --description "${desc}" 2>"${dir}/graph.err" || {
+			log "ERROR: snapshot graph failed for stage ${stage} (see ${dir}/graph.err)"
+			exit 1
+		}
 	elif [[ -n "${graph_snap}" ]]; then
 		bash "${SCRIPT_DIR}/snapshot-graph.sh" --namespace "${NS}" --snapshot "${graph_snap}" \
 			--output-dir "${graph_dir}" --name "${graph_name}" --mode "${mode}" \
-			--title "${title}" --description "${desc}" 2>"${dir}/graph.err" || log "WARN: graph ${stage}"
+			--title "${title}" --description "${desc}" 2>"${dir}/graph.err" || {
+			log "ERROR: snapshot graph failed for stage ${stage} (see ${dir}/graph.err)"
+			exit 1
+		}
 	fi
 }
 
@@ -807,6 +824,7 @@ if kubectl get crd objectkeepers.deckhouse.io >/dev/null 2>&1; then
 else
 	log "WARN: objectkeepers.deckhouse.io CRD missing; ObjectKeeper checks and forced TTL skipped"
 fi
+log_preflight_e2e_plan
 kubectl get crd manifestcheckpoints.state-snapshotter.deckhouse.io manifestcapturerequests.state-snapshotter.deckhouse.io >/dev/null
 DECK_SNAP_CAN="$(kubectl auth can-i create "${SNAP_RES}" -n "${NS}" 2>&1 || true)"
 [[ "${DECK_SNAP_CAN}" == "yes" ]] || { log "ERROR: need create ${SNAP_RES} in ${NS}"; exit 1; }
@@ -838,7 +856,10 @@ fi
 	echo "has_objectkeeper=${HAS_OBJECTKEEPER}"
 	echo "ok_rbac_installed=${DEMO_E2E_OK_RBAC_INSTALLED}"
 	echo "skip_forced_ttl=${DEMO_E2E_SKIP_FORCED_TTL:-0}"
-	echo "enable_kick=${DEMO_E2E_ENABLE_KICK:-0}"
+	echo "require_forced_ttl=${DEMO_E2E_REQUIRE_FORCED_TTL:-0}"
+	echo "e2e_user=${PREFLIGHT_USER:-unknown}"
+	echo "ok_patch_can=${PREFLIGHT_OK_PATCH_CAN:-unknown}"
+	echo "stage08_plan=${PREFLIGHT_STAGE08_PLAN:-unknown}"
 	echo "skip_ok_contract=${DEMO_E2E_SKIP_OK_CONTRACT:-0}"
 	kubectl get storageclass "${STORAGE_CLASS}" -o json | jq '{name: .metadata.name, annotations: .metadata.annotations}' || true
 	kubectl get volumesnapshotclass -o name 2>/dev/null || true
@@ -944,9 +965,7 @@ ROOT_VCR="$(vcr_name_for_content "${ROOT_CONTENT}")"
 if vcr_exists "${ROOT_VCR}" && vcr_json "${ROOT_VCR}" | jq -r '.spec.targets[]?.uid // empty' | grep -qx "${PVC_A_UID}"; then
 	log "WARN: deleting premature root VCR ${ROOT_VCR} (child-covered pvc-a before residual pvc-b)"
 	kubectl -n "${NS}" delete "${VCR_RES}" "${ROOT_VCR}" --wait=true
-	maybe_kick_snapshot "${ROOT_SNAP}"
 fi
-maybe_kick_snapshot "${ROOT_SNAP}"
 finish_stage "05-root-created" "PASS" "root Snapshot, subtree merge" "Root content + child refs wired" "root-created" "lifecycle" "${ROOT_SNAP}"
 
 # --- 06-root-ready ---
@@ -973,8 +992,6 @@ kubectl get "${MCP_RES}" "${ROOT_MCP}" >/dev/null
 wait_until "root has child content ref" root_has_child_content_ref
 wait_content_ready "${ROOT_CONTENT}" "${ROOT_SNAP}"
 wait_snapshot_ready "${ROOT_SNAP}" "${ROOT_CONTENT}"
-assert_no_demo_e2e_kick "${ROOT_SNAP}"
-assert_no_demo_e2e_kick "${CHILD_SNAP}"
 assert_root_objectkeeper_contract
 verify_aggregated_expect_conflict "${ROOT_SNAP}" "$(stage_dir "06-root-ready")/aggregated-root-conflict.err"
 finish_stage "06-root-ready" "PASS" "residual pvc-b, MCP, root aggregated 409, OK" "Root Ready + subtree duplicate contract" "root-ready" "logical" "${ROOT_SNAP}"

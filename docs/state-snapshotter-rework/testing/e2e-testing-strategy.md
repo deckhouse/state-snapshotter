@@ -44,13 +44,13 @@
 
 **Один сценарий** для **state-snapshotter + storage-foundation**: manifest capture (ConfigMap + MCP), retained lifecycle + aggregated read, bulk **VCR→VSC→`dataRefs[]`**, two-PVC subtree (child **pvc-a**, root residual **pvc-b**).
 
-**Артефакты:** `artifacts/<run-id>/{00-preflight … 09-cleanup}/` — YAML/JSON dumps, events, `summary.txt`, graph (`hack/snapshot-graph.sh`).
+**Артефакты:** `artifacts/<run-id>/{00-preflight … 09-cleanup}/` — YAML/JSON dumps, events, `summary.txt`, graph (`hack/snapshot-graph.sh`). Граф: volume-рёбра (`status.dataRefs[]`, `status.volumeCaptureRequestName` → VCR), **fail** если `MCP.status.chunks[]` не читаются (`get manifestcheckpointcontentchunks` в `templates/rbac-for-us.yaml` admin-kubeconfig); fixture: `hack/test-snapshot-graph-fixture.sh`, `hack/test-snapshot-graph-chunk-verify.sh`.
 
 **Storage:** **local-thin** only. **TODO:** Rook/Ceph not supported in this script yet.
 
 **Retained read:** временный путь `GET …/namespaces/{ns}/snapshots/{rootName}/manifests` после удаления root Snapshot (см. TODO в скрипте). Целевой API — `/snapshotcontents/{contentName}/manifests`.
 
-**Опции:** `DEMO_E2E_SKIP_CLEANUP=1`, `DEMO_E2E_SKIP_OK_CONTRACT=1`, `DEMO_E2E_SKIP_FORCED_TTL=1` (debug skip stage 08), `DEMO_E2E_REQUIRE_FORCED_TTL=1` (fail if stage 08 cannot patch ObjectKeeper), `DEMO_E2E_ENABLE_KICK=1` (debug-only Snapshot annotate kick; **default off**), `DEMO_E2E_STALL_SEC`, `DEMO_E2E_ARTIFACT_DIR` (или `DEMO_E2E_ARTIFACTS_ROOT`), `DEMO_E2E_WAIT_SEC`, `DEMO_E2E_GC_WAIT_SEC`.
+**Опции:** `DEMO_E2E_SKIP_CLEANUP=1`, `DEMO_E2E_SKIP_OK_CONTRACT=1`, `DEMO_E2E_SKIP_FORCED_TTL=1` (debug skip stage 08), `DEMO_E2E_REQUIRE_FORCED_TTL=1` (fail if stage 08 cannot patch ObjectKeeper), `DEMO_E2E_STALL_SEC`, `DEMO_E2E_ARTIFACT_DIR` (или `DEMO_E2E_ARTIFACTS_ROOT`), `DEMO_E2E_WAIT_SEC`, `DEMO_E2E_GC_WAIT_SEC`. Preflight logs user, `can-i patch objectkeepers`, and planned stage-08 RUN/SKIP.
 
 **Legacy:** отдельные PR-4/PR-8 cluster scripts удалены; единственный канонический путь — `hack/demo-e2e.sh`.
 

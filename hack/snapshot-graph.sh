@@ -42,6 +42,14 @@ Options:
   --no-include-namespace-resources
                          Disable namespace inventory nodes.
   --strict               Return non-zero on invariant violations.
+
+Environment:
+  SNAPSHOT_GRAPH_HIDE_ORPHAN_VCR=true|false
+                         Hide inventory-only VolumeCaptureRequest nodes (default: false).
+  SNAPSHOT_GRAPH_REQUIRE_CHUNK_GET=true|false
+                         Fail when kubectl cannot get manifestcheckpointcontentchunks (default: true).
+  SNAPSHOT_GRAPH_SKIP_VOLUME_SMOKE=true|false
+                         Skip post-render grep checks for volume graph labels (default: false).
 EOF
 }
 
@@ -169,6 +177,13 @@ ROOT_CONTENT_KEY=""
 ROOT_CONTENT_NAME=""
 ROOT_OK_NAME=""
 VIOLATIONS=0
+CHUNK_VIOLATIONS=0
+VOLUME_DATAREF_EDGES=0
+EXPECT_VCR_EDGE_IN_GRAPH=0
+HIDE_ORPHAN_VCR="${SNAPSHOT_GRAPH_HIDE_ORPHAN_VCR:-false}"
+REQUIRE_CHUNK_GET="${SNAPSHOT_GRAPH_REQUIRE_CHUNK_GET:-1}"
+SKIP_VOLUME_SMOKE="${SNAPSHOT_GRAPH_SKIP_VOLUME_SMOKE:-false}"
+CHUNK_RESOURCE="manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io"
 
 json_quote() {
 	jq -Rn --arg s "$1" '$s'
@@ -214,6 +229,14 @@ kind_to_resource() {
 		;;
 	state-snapshotter.deckhouse.io/*\|ManifestCheckpointContentChunk)
 		printf '%s\n' "manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io"
+		return
+		;;
+	storage.deckhouse.io/*\|VolumeCaptureRequest)
+		printf '%s\n' "volumecapturerequests.storage.deckhouse.io"
+		return
+		;;
+	snapshot.storage.k8s.io/*\|VolumeSnapshotContent)
+		printf '%s\n' "volumesnapshotcontents.snapshot.storage.k8s.io"
 		return
 		;;
 	deckhouse.io/*\|ObjectKeeper)
@@ -367,6 +390,10 @@ node_fill() {
 		printf '%s\n' "#fff4c2"
 	elif [[ "$kind" == "ManifestCheckpointContentChunk" ]]; then
 		printf '%s\n' "#ffe8b3"
+	elif [[ "$kind" == "VolumeCaptureRequest" ]]; then
+		printf '%s\n' "#ffe8cc"
+	elif [[ "$kind" == "VolumeSnapshotContent" ]]; then
+		printf '%s\n' "#ffe0c2"
 	else
 		printf '%s\n' "#eeeeee"
 	fi
@@ -381,6 +408,8 @@ kind_short() {
 	ManifestCaptureRequest) printf '%s\n' "MCR" ;;
 	ManifestCheckpoint) printf '%s\n' "MCP" ;;
 	ManifestCheckpointContentChunk) printf '%s\n' "Chunk" ;;
+	VolumeCaptureRequest) printf '%s\n' "VCR" ;;
+	VolumeSnapshotContent) printf '%s\n' "VSC" ;;
 	DemoVirtualMachineSnapshot) printf '%s\n' "VMSnap" ;;
 	DemoVirtualDiskSnapshot) printf '%s\n' "DiskSnap" ;;
 	*) printf '%s\n' "$1" ;;
@@ -433,7 +462,7 @@ ready_badge() {
 
 kind_has_status_badge() {
 	case "$1" in
-	Snapshot|*Snapshot|SnapshotContent|CustomSnapshotDefinition|ManifestCaptureRequest|ManifestCheckpoint)
+	Snapshot|*Snapshot|SnapshotContent|CustomSnapshotDefinition|ManifestCaptureRequest|ManifestCheckpoint|VolumeCaptureRequest|VolumeSnapshotContent)
 		return 0
 		;;
 	*)
@@ -494,6 +523,72 @@ add_edge() {
 	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$from" "$to" "$label" "$color" "$style" "$penwidth" >>"$EDGES"
 }
 
+auth_can_get() {
+	local resource="$1"
+	kubectl auth can-i get "$resource" 2>/dev/null | grep -qx yes
+}
+
+ensure_chunk_get_permission() {
+	[[ "$REQUIRE_CHUNK_GET" == "1" ]] || return 0
+	if auth_can_get "$CHUNK_RESOURCE"; then
+		add_check "OK" "kubectl can get ${CHUNK_RESOURCE}"
+		return 0
+	fi
+	CHUNK_VIOLATIONS=$((CHUNK_VIOLATIONS + 1))
+	add_check "VIOLATION" "kubectl cannot get ${CHUNK_RESOURCE} (grant get on admin-kubeconfig; see templates/rbac-for-us.yaml)"
+	fail "chunk read forbidden: kubectl auth can-i get ${CHUNK_RESOURCE} is no"
+}
+
+edge_count_for_key() {
+	local key="$1"
+	awk -F '\t' -v k="$key" '$2 == k || $3 == k { c++ } END { print c + 0 }' "$EDGES"
+}
+
+record_volume_dataref_edge() {
+	VOLUME_DATAREF_EDGES=$((VOLUME_DATAREF_EDGES + 1))
+}
+
+visit_status_data_bindings() {
+	local from_key="$1" json="$2" artifact_label="$3" target_label="$4" depth="$5"
+	local binding t_api t_kind t_ns t_name t_key a_api a_kind a_name a_key
+	while IFS= read -r binding; do
+		[[ -n "$binding" ]] || continue
+		t_api=$(printf '%s' "$binding" | jq -r '.target.apiVersion // ""')
+		t_kind=$(printf '%s' "$binding" | jq -r '.target.kind // ""')
+		t_ns=$(printf '%s' "$binding" | jq -r '.target.namespace // ""')
+		t_name=$(printf '%s' "$binding" | jq -r '.target.name // ""')
+		a_api=$(printf '%s' "$binding" | jq -r '.artifact.apiVersion // ""')
+		a_kind=$(printf '%s' "$binding" | jq -r '.artifact.kind // ""')
+		a_name=$(printf '%s' "$binding" | jq -r '.artifact.name // ""')
+		if [[ -n "$a_kind" && -n "$a_name" ]]; then
+			[[ -z "$a_api" ]] && a_api="unknown"
+			a_key=$(key_for "$a_api" "$a_kind" "" "$a_name")
+			add_edge "$from_key" "$a_key" "$artifact_label" "orange" "solid" "1"
+			record_volume_dataref_edge
+			visit_source_ref "$a_api" "$a_kind" "" "$a_name" "$depth"
+		fi
+		if [[ -n "$t_kind" && -n "$t_name" ]]; then
+			[[ -z "$t_api" ]] && t_api="unknown"
+			t_key=$(key_for "$t_api" "$t_kind" "$t_ns" "$t_name")
+			add_edge "$from_key" "$t_key" "$target_label" "orange" "dashed" "1"
+			visit_source_ref "$t_api" "$t_kind" "$t_ns" "$t_name" "$depth"
+		fi
+	done < <(printf '%s' "$json" | jq -c '.status.dataRefs[]? // empty' 2>/dev/null)
+}
+
+visit_legacy_data_ref() {
+	local from_key="$1" json="$2" depth="$3"
+	local data_api data_kind data_name data_key
+	data_api=$(printf '%s' "$json" | jq -r '.status.dataRef.apiVersion // ""')
+	data_kind=$(printf '%s' "$json" | jq -r '.status.dataRef.kind // ""')
+	data_name=$(printf '%s' "$json" | jq -r '.status.dataRef.name // ""')
+	[[ -n "$data_kind" && -n "$data_name" ]] || return 0
+	data_key=$(key_for "$data_api" "$data_kind" "" "$data_name")
+	add_edge "$from_key" "$data_key" "status.dataRef legacy" "orange" "solid" "1"
+	record_volume_dataref_edge
+	visit_source_ref "$data_api" "$data_kind" "" "$data_name" "$depth"
+}
+
 record_detail_json() {
 	local json="$1" key="$2" warnings="${3:-}"
 	printf '%s' "$json" | jq -c --arg key "$key" --arg warnings "$warnings" '
@@ -520,7 +615,9 @@ record_detail_json() {
 				objectsCount: (.spec.objectsCount // null),
 				followObjectRef: (.spec.followObjectRef // null),
 				sourceRef: (.spec.sourceRef // null),
-				dataRef: (.status.dataRef // null)
+				dataRef: (.status.dataRef // null),
+				dataRefs: (.status.dataRefs // []),
+				volumeCaptureRequestName: (.status.volumeCaptureRequestName // null)
 			},
 			warnings: (if $warnings == "" then [] else ($warnings | split("|")) end)
 		}
@@ -784,14 +881,13 @@ visit_mcp() {
 		if [[ -n "$parent_content" ]]; then
 			check_owner_ref "$json" "SnapshotContent" "$parent_content" "ManifestCheckpoint/${name} ownerRef -> SnapshotContent/${parent_content}"
 		fi
-		printf '%s' "$json" | jq -r '.status.chunks[]? | .name // empty' \
-			| while IFS= read -r chunk_name; do
-				[[ -n "$chunk_name" ]] || continue
-				local chunk_key
-				chunk_key=$(key_for "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$chunk_name")
-				add_edge "$key" "$chunk_key" "status.chunks" "orange" "solid" "1"
-				visit_chunk "$chunk_name" $((depth + 1)) "$name"
-			done
+		while IFS= read -r chunk_name; do
+			[[ -n "$chunk_name" ]] || continue
+			local chunk_key
+			chunk_key=$(key_for "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$chunk_name")
+			add_edge "$key" "$chunk_key" "status.chunks" "orange" "solid" "1"
+			visit_chunk "$chunk_name" $((depth + 1)) "$name"
+		done < <(printf '%s' "$json" | jq -r '.status.chunks[]? | .name // empty')
 	else
 		add_missing_node "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpoint" "" "$name"
 		dump_object "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpoint" "" "$name"
@@ -820,8 +916,34 @@ visit_chunk() {
 		fi
 		check_owner_ref "$json" "ManifestCheckpoint" "$checkpoint_name" "Chunk/${name} ownerRef -> ManifestCheckpoint/${checkpoint_name}"
 	else
-		add_missing_node "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$name"
+		CHUNK_VIOLATIONS=$((CHUNK_VIOLATIONS + 1))
+		add_check "VIOLATION" "ManifestCheckpointContentChunk/${name} missing but listed in ManifestCheckpoint/${checkpoint_name}.status.chunks"
 		dump_object "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCheckpointContentChunk" "" "$name"
+	fi
+}
+
+visit_vcr() {
+	local ns="$1" name="$2" depth="$3" json key api kind
+	api="storage.deckhouse.io/v1alpha1"
+	kind="VolumeCaptureRequest"
+	key=$(key_for "$api" "$kind" "$ns" "$name")
+	if visited "$key"; then
+		return
+	fi
+	if (( depth > MAX_DEPTH )); then
+		add_placeholder_node "$api" "$kind" "$ns" "$name"
+		return
+	fi
+	mark_visited "$key"
+	if json=$(get_json "$api" "$kind" "$ns" "$name"); then
+		add_existing_node "$json"
+		dump_object "$api" "$kind" "$ns" "$name"
+		add_owner_edges "$json" "$key" "$ns"
+		visit_status_data_bindings "$key" "$json" "status.dataRefs[].artifact" "status.dataRefs[].target" $((depth + 1))
+	else
+		add_missing_node "$api" "$kind" "$ns" "$name"
+		dump_object "$api" "$kind" "$ns" "$name"
+		add_check "WARN" "VolumeCaptureRequest missing: ${ns}/${name}"
 	fi
 }
 
@@ -939,14 +1061,8 @@ visit_content() {
 			visit_content "$child" $((depth + 1)) "$name"
 		done
 
-	data_api=$(printf '%s' "$json" | jq -r '.status.dataRef.apiVersion // ""')
-	data_kind=$(printf '%s' "$json" | jq -r '.status.dataRef.kind // ""')
-	data_name=$(printf '%s' "$json" | jq -r '.status.dataRef.name // ""')
-	if [[ -n "$data_kind" && -n "$data_name" ]]; then
-		data_key=$(key_for "$data_api" "$data_kind" "" "$data_name")
-		add_edge "$key" "$data_key" "status.dataRef" "orange" "solid" "1"
-		visit_source_ref "$data_api" "$data_kind" "" "$data_name" $((depth + 1))
-	fi
+	visit_status_data_bindings "$key" "$json" "status.dataRefs[].artifact" "status.dataRefs[].target" $((depth + 1))
+	visit_legacy_data_ref "$key" "$json" $((depth + 1))
 }
 
 visit_snapshot() {
@@ -1004,6 +1120,16 @@ visit_snapshot() {
 		mcr_key=$(key_for "state-snapshotter.deckhouse.io/v1alpha1" "ManifestCaptureRequest" "$ns" "$mcr")
 		add_edge "$key" "$mcr_key" "status.manifestCaptureRequestName" "blue" "solid" "1"
 		visit_mcr "$ns" "$mcr" $((depth + 1))
+	fi
+
+	local vcr
+	vcr=$(printf '%s' "$json" | jq -r '.status.volumeCaptureRequestName // ""')
+	if [[ -n "$vcr" ]]; then
+		local vcr_key
+		vcr_key=$(key_for "storage.deckhouse.io/v1alpha1" "VolumeCaptureRequest" "$ns" "$vcr")
+		EXPECT_VCR_EDGE_IN_GRAPH=1
+		add_edge "$key" "$vcr_key" "status.volumeCaptureRequestName" "orange" "solid" "1"
+		visit_vcr "$ns" "$vcr" $((depth + 1))
 	fi
 
 	printf '%s' "$json" | jq -r '.status.childrenSnapshotRefs[]? | [.apiVersion, .kind, .name] | @tsv' \
@@ -1088,6 +1214,52 @@ include_cluster_context_inventory() {
 	done
 }
 
+finalize_orphan_inventory_vcrs() {
+	local key api kind ns name status ready label fill color style diag edge_count tmp
+	while IFS="$DELIM" read -r key api kind ns name status ready label fill color style diag; do
+		[[ "$kind" == "VolumeCaptureRequest" ]] || continue
+		[[ "$status" == "existing" ]] || continue
+		edge_count=$(edge_count_for_key "$key")
+		(( edge_count > 0 )) && continue
+		if [[ "$HIDE_ORPHAN_VCR" == "true" ]]; then
+			tmp="${TMP_DIR}/nodes.filtered"
+			awk -F "$DELIM" -v k="$key" '$1 != k' "$NODES" >"$tmp"
+			mv "$tmp" "$NODES"
+			continue
+		fi
+		diag="${diag} [inventory/orphan]"
+		fill="#f0f0f0"
+		color="gray45"
+		style="dashed"
+		replace_node_row "$key" "$(node_row "$key" "$api" "$kind" "$ns" "$name" "$status" "$ready" "$label" "$fill" "$color" "$style" "${diag# }")"
+	done <"$NODES"
+}
+
+verify_volume_graph_smoke() {
+	[[ "$SKIP_VOLUME_SMOKE" == "true" ]] || return 0
+	[[ -f "$DOT_FILE" ]] || return 0
+	if (( VOLUME_DATAREF_EDGES > 0 )); then
+		grep -Fq 'status.dataRefs[].artifact' "$DOT_FILE" || fail "volume smoke: missing status.dataRefs[].artifact in ${DOT_FILE}"
+		grep -Fq 'VolumeSnapshotContent' "$DOT_FILE" || fail "volume smoke: missing VolumeSnapshotContent in ${DOT_FILE}"
+	fi
+	if (( EXPECT_VCR_EDGE_IN_GRAPH > 0 )); then
+		grep -Fq 'status.volumeCaptureRequestName' "$DOT_FILE" || fail "volume smoke: missing status.volumeCaptureRequestName in ${DOT_FILE}"
+	fi
+}
+
+finalize_chunk_verification() {
+	local missing_chunks
+	missing_chunks=$(awk -F "$DELIM" '$3 == "ManifestCheckpointContentChunk" && $6 == "missing" { c++ } END { print c + 0 }' "$NODES")
+	if (( missing_chunks > 0 )); then
+		CHUNK_VIOLATIONS=$((CHUNK_VIOLATIONS + missing_chunks))
+	fi
+	if (( CHUNK_VIOLATIONS > 0 )); then
+		fail "chunk verification failed (${CHUNK_VIOLATIONS} issue(s)); see ${SUMMARY_FILE}"
+	fi
+}
+
+ensure_chunk_get_permission
+
 if [[ -n "$SNAPSHOT" ]]; then
 	ROOT_KEY=$(key_for "storage.deckhouse.io/v1alpha1" "Snapshot" "$NS" "$SNAPSHOT")
 	visit_snapshot "storage.deckhouse.io/v1alpha1" "Snapshot" "$NS" "$SNAPSHOT" 0 ""
@@ -1099,6 +1271,7 @@ elif [[ -n "$SNAPSHOTCONTENT" ]]; then
 fi
 include_namespace_inventory
 include_cluster_context_inventory
+finalize_orphan_inventory_vcrs
 
 if [[ -n "$ROOT_OK_NAME" ]]; then
 	if ok_json=$(get_json "deckhouse.io/v1alpha1" "ObjectKeeper" "" "$ROOT_OK_NAME"); then
@@ -1128,10 +1301,21 @@ edge_group() {
 	ownerRef) printf '%s\n' "owner" ;;
 	status.childrenSnapshotRefs|status.childrenSnapshotContentRefs) printf '%s\n' "child" ;;
 	status.chunks) printf '%s\n' "artifact" ;;
+	status.dataRefs[].artifact|status.dataRef\ legacy) printf '%s\n' "volumeArtifact" ;;
+	status.dataRefs[].target) printf '%s\n' "volumeTarget" ;;
+	status.volumeCaptureRequestName) printf '%s\n' "volumeStatus" ;;
 	spec.followObjectRef) printf '%s\n' "follow" ;;
 	spec.sourceRef) printf '%s\n' "source" ;;
 	status.*) printf '%s\n' "status" ;;
 	*) printf '%s\n' "status" ;;
+	esac
+}
+
+volume_edge_label() {
+	case "$1" in
+	status.dataRefs[].artifact|status.dataRef\ legacy|status.volumeCaptureRequestName) return 0 ;;
+	status.dataRefs[].target) return 0 ;;
+	*) return 1 ;;
 	esac
 }
 
@@ -1140,23 +1324,31 @@ render_edge_in_mode() {
 	group=$(edge_group "$label")
 	case "$MODE" in
 	lifecycle)
-		[[ "$group" == "owner" || "$group" == "follow" || "$group" == "artifact" || "$label" == "status.boundSnapshotContentName" || "$label" == "status.manifestCaptureRequestName" || "$label" == "status.manifestCheckpointName" || "$label" == "status.dataRef" ]]
+		[[ "$group" == "owner" || "$group" == "follow" || "$group" == "artifact" || "$group" == "volumeArtifact" || "$group" == "volumeTarget" || "$group" == "volumeStatus" || "$label" == "status.boundSnapshotContentName" || "$label" == "status.manifestCaptureRequestName" || "$label" == "status.manifestCheckpointName" ]]
 		;;
 	logical)
-		[[ "$group" == "child" || "$group" == "status" || "$group" == "source" || "$group" == "artifact" || "$group" == "follow" ]]
+		[[ "$group" == "child" || "$group" == "status" || "$group" == "source" || "$group" == "artifact" || "$group" == "follow" || "$group" == "volumeArtifact" || "$group" == "volumeTarget" || "$group" == "volumeStatus" ]]
 		;;
 	full)
 		return 0
 		;;
 	smoke)
-		[[ "$group" == "owner" || "$group" == "follow" || "$group" == "child" || "$group" == "artifact" || "$label" == "status.boundSnapshotContentName" || "$label" == "status.manifestCheckpointName" || "$label" == "status.dataRef" || "$group" == "source" ]]
+		[[ "$group" == "owner" || "$group" == "follow" || "$group" == "child" || "$group" == "artifact" || "$group" == "volumeArtifact" || "$group" == "volumeTarget" || "$group" == "volumeStatus" || "$label" == "status.boundSnapshotContentName" || "$label" == "status.manifestCheckpointName" || "$group" == "source" ]]
 		;;
 	esac
 }
 
 edge_attrs() {
-	local label="$1" group
+	local label="$1" group color style penwidth
 	group=$(edge_group "$label")
+	if volume_edge_label "$label"; then
+		case "$group" in
+		volumeTarget) printf '%s\t%s\t%s\t%s\n' "orange" "dashed" "2" "false" ;;
+		volumeStatus) printf '%s\t%s\t%s\t%s\n' "orange" "solid" "2" "false" ;;
+		*) printf '%s\t%s\t%s\t%s\n' "orange" "solid" "2" "false" ;;
+		esac
+		return
+	fi
 	case "$group" in
 	owner) printf '%s\t%s\t%s\t%s\n' "red" "solid" "3" "true" ;;
 	child) printf '%s\t%s\t%s\t%s\n' "green4" "solid" "2" "true" ;;
@@ -1231,8 +1423,9 @@ generate_dot() {
       <TR><TD ALIGN="LEFT"><FONT COLOR="red">━━</FONT> ownerRef</TD></TR>
       <TR><TD ALIGN="LEFT"><FONT COLOR="blue">- -</FONT> statusRef</TD></TR>
       <TR><TD ALIGN="LEFT"><FONT COLOR="green4">━━</FONT> childRef</TD></TR>
-      <TR><TD ALIGN="LEFT"><FONT COLOR="orange">━━</FONT> artifactRef</TD></TR>
-      <TR><TD ALIGN="LEFT"><FONT COLOR="gray45">···</FONT> followRef</TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="orange">━━</FONT> manifest chunk / volume artifact</TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="orange">- -</FONT> volume target ref</TD></TR>
+      <TR><TD ALIGN="LEFT"><FONT COLOR="gray45">···</FONT> followRef / inventory-only</TD></TR>
     </TABLE>
   >];
 }
@@ -1326,7 +1519,9 @@ generate_details
 VIOLATIONS=$(awk -F '\t' '$1 == "VIOLATION" { c++ } END { print c + 0 }' "$CHECKS")
 
 if command -v dot >/dev/null 2>&1; then
-	dot -Tsvg "$DOT_FILE" -o "$SVG_FILE"
+	if ! dot -Tsvg "$DOT_FILE" -o "$SVG_FILE" 2>/dev/null; then
+		warn "graphviz dot failed to render SVG (DOT saved): ${DOT_FILE}"
+	fi
 else
 	warn "graphviz dot not found; saved DOT only: ${DOT_FILE}"
 fi
@@ -1337,6 +1532,9 @@ log "wrote ${OBJECTS_FILE}"
 log "wrote ${SUMMARY_FILE}"
 log "wrote ${DETAILS_FILE}"
 log "wrote ${STAGE_FILE}"
+
+verify_volume_graph_smoke
+finalize_chunk_verification
 
 if [[ "$STRICT" == "1" && "$VIOLATIONS" -gt 0 ]]; then
 	fail "strict mode: ${VIOLATIONS} invariant violations; see ${SUMMARY_FILE}"

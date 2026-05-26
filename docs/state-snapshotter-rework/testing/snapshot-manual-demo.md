@@ -105,11 +105,12 @@ kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" -o jsonp
 
 **5e. Чанки (по префиксу имени MCP; опционально, только operator/admin diagnostic)**
 
-Обычным пользователям прямой доступ к `ManifestCheckpointContentChunk` не выдаётся; штатная проверка
-payload должна идти через `/manifests`.
+Обычным пользователям прямой **list/watch** на `ManifestCheckpointContentChunk` не выдаётся; штатная проверка
+payload — через `/manifests`. Для **`hack/snapshot-graph.sh`** / demo-e2e роли `d8:state-snapshotter:admin-kubeconfig` добавлен **`get`** по имени чанка (без list).
 
 ```bash
-kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io -o wide | grep -E "^NAME|${MCP}" || true
+kubectl auth can-i get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io
+kubectl get manifestcheckpointcontentchunk.state-snapshotter.deckhouse.io "${MCP}-0" -o yaml
 ```
 
 **5f. MCR после успеха быть не должен**
