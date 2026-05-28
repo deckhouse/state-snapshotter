@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build smoke artifacts for a state-snapshotter Snapshot graph.
+# Build smoke artifacts for a state-snapshotter Snapshot graph (demo-e2e stages).
 
 set -euo pipefail
 
