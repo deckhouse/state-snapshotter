@@ -128,6 +128,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, err
 	}
+	logRootDiagEnter(ctx, nsSnap)
 
 	if r.childWatchMgr != nil && r.SnapshotGraphRegistry != nil {
 		if err := r.childWatchMgr.EnsureWatches(ctx, r.SnapshotGraphRegistry); err != nil {

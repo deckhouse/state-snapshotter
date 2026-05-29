@@ -29,6 +29,29 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
+func logRootDiagEnter(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) {
+	if nsSnap == nil {
+		return
+	}
+	snap := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	logRootDiag(ctx, snap, "reconcileEnter",
+		"snapshotUID", string(nsSnap.UID),
+		"generation", nsSnap.Generation,
+		"childrenSnapshotRefs", len(nsSnap.Status.ChildrenSnapshotRefs),
+		"boundContent", nsSnap.Status.BoundSnapshotContentName,
+		"manifestCaptureRequestName", nsSnap.Status.ManifestCaptureRequestName,
+	)
+}
+
+func logRootDiagMCR(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, action string, extra ...interface{}) {
+	if nsSnap == nil {
+		return
+	}
+	snap := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	kv := append([]interface{}{"mcrAction", action, "mcrName", "snap-" + string(nsSnap.UID)}, extra...)
+	logRootDiag(ctx, snap, "mcrLifecycle", kv...)
+}
+
 func logRootDiag(ctx context.Context, snap types.NamespacedName, phase string, keysAndValues ...interface{}) {
 	args := append([]interface{}{"rootDiag", true, "snapshot", snap.String(), "phase", phase}, keysAndValues...)
 	log.FromContext(ctx).Info("root-diag", args...)

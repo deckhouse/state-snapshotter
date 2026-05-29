@@ -8,6 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
@@ -78,14 +79,22 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 		if err != nil {
 			if errors.Is(err, usecase.ErrRunGraphChildNotBound) ||
 				errors.Is(err, usecase.ErrRunGraphChildSnapshotNotFound) {
+				log.FromContext(ctx).Info("graph-publish-diag: child snapshot ref not ready for content publish",
+					"parentContent", parentContentName, "parentNamespace", parentNamespace,
+					"childAPIVersion", childRef.APIVersion, "childKind", childRef.Kind, "childName", childRef.Name,
+					"reason", err.Error())
 				return false, nil
 			}
 			return false, err
 		}
 		if childContentName == "" {
+			log.FromContext(ctx).Info("graph-publish-diag: empty bound content for child snapshot ref",
+				"parentContent", parentContentName, "childKind", childRef.Kind, "childName", childRef.Name)
 			return false, nil
 		}
 		if err := ensureChildSnapshotContentOwnedByParentContent(ctx, c, childContentName, parentContent); err != nil {
+			log.FromContext(ctx).Info("graph-publish-diag: ensure child content ownerRef failed",
+				"parentContent", parentContentName, "childContent", childContentName, "error", err.Error())
 			return false, err
 		}
 		out = append(out, storagev1alpha1.SnapshotContentChildRef{Name: childContentName})

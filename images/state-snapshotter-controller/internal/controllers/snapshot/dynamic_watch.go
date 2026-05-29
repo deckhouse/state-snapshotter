@@ -34,6 +34,9 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 )
 
 // snapshotDynamicWatchManager registers one controller-runtime controller per child snapshot GVK
@@ -95,8 +98,18 @@ func (m *snapshotDynamicWatchManager) ensureWatchLocked(ctx context.Context, gvk
 		return fmt.Errorf("register child snapshot watch for %s: %w", gvk.String(), err)
 	}
 	m.watched[key] = struct{}{}
+	if isUnifiedNamespaceSnapshotGVK(gvk) {
+		log.FromContext(ctx).Info("child-relay-diag: registered relay for unified namespace Snapshot GVK (root carrier also treated as child watch kind)",
+			"gvk", gvk.String(), "controllerName", name)
+	}
 	_ = ctx
 	return nil
+}
+
+func isUnifiedNamespaceSnapshotGVK(gvk schema.GroupVersionKind) bool {
+	return gvk.Group == storagev1alpha1.APIGroup &&
+		gvk.Version == storagev1alpha1.APIVersion &&
+		gvk.Kind == controllercommon.KindSnapshot
 }
 
 func controllerRuntimeNameForChildWatch(gvk schema.GroupVersionKind) string {
@@ -142,6 +155,12 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 	logger.Info("nss child relay: child fetched from reader",
 		"apiVersion", u.GetAPIVersion(), "kind", u.GetKind(), "rv", u.GetResourceVersion())
 
+	if isUnifiedNamespaceSnapshotGVK(r.gvk) {
+		bound, hasBound, _ := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
+		log.FromContext(ctx).Info("child-relay-diag: unified Snapshot seen as child relay target (not primary snapshot controller queue)",
+			"childNamespace", req.Namespace, "childName", req.Name, "boundSnapshotContentName", bound, "hasBound", hasBound)
+	}
+
 	reqs := findParentsReferencingChildSnapshot(ctx, childReader, u)
 	if len(reqs) == 0 {
 		bound, hasBound, _ := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
@@ -163,6 +182,8 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 	var best ctrl.Result
 	var firstErr error
 	for _, pr := range reqs {
+		log.FromContext(ctx).Info("child-relay-diag: inline main.Reconcile from relay (not primary workqueue)",
+			"relayGVK", r.gvk.String(), "parent", pr.String())
 		res, err := r.main.Reconcile(ctx, pr)
 		if err != nil && firstErr == nil {
 			firstErr = err

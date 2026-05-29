@@ -59,6 +59,7 @@ func (r *SnapshotReconciler) deleteSnapshotManifestCaptureRequest(ctx context.Co
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := r.Client.Get(ctx, key, mcr); err != nil {
 		if apierrors.IsNotFound(err) {
+			logRootDiagMCR(ctx, nsSnap, "deleteSkippedNotFound")
 			return nil
 		}
 		return fmt.Errorf("get ManifestCaptureRequest %s: %w", key.String(), err)
@@ -66,6 +67,7 @@ func (r *SnapshotReconciler) deleteSnapshotManifestCaptureRequest(ctx context.Co
 	if err := r.Client.Delete(ctx, mcr); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ManifestCaptureRequest %s: %w", key.String(), err)
 	}
+	logRootDiagMCR(ctx, nsSnap, "deleted", "mcrUID", string(mcr.UID))
 	return nil
 }
 
@@ -159,6 +161,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			return ctrl.Result{}, gerr
 		}
 		hasSubtree := len(freshParent.Status.ChildrenSnapshotRefs) > 0
+		logRootDiag(ctx, snapKey, "buildRootTargetsError", "hasSubtree", hasSubtree, "error", err.Error())
 		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding;
 		// do not fail capture as ListFailed — requeue like ChildSnapshotPending.
 		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
@@ -200,6 +203,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			}
 			// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
 			if hasSubtree {
+				logRootDiag(ctx, snapKey, "subtreePendingDeleteMCR", "hasSubtree", true)
 				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
 					return ctrl.Result{}, delErr
 				}
@@ -649,6 +653,7 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 			}
 			return nil, ctrl.Result{}, err
 		}
+		logRootDiagMCR(ctx, nsSnap, "created", "targetCount", len(specTargets))
 		created := &ssv1alpha1.ManifestCaptureRequest{}
 		if err := r.Client.Get(ctx, key, created); err != nil {
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
