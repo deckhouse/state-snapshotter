@@ -94,12 +94,13 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	}
 	logImpl, _ := liblogger.NewLogger("error")
 	r := &SnapshotReconciler{
-		Client:                mgr.GetClient(),
-		APIReader:             mgr.GetAPIReader(),
-		Dynamic:               dyn,
-		Scheme:                mgr.GetScheme(),
-		Config:                cfg,
-		Archive:               usecase.NewArchiveService(mgr.GetClient(), mgr.GetClient(), logImpl),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Dynamic:   dyn,
+		Scheme:    mgr.GetScheme(),
+		Config:    cfg,
+		// Chunks are internal-only (no list/watch informer); use APIReader like the /manifests API server.
+		Archive:               usecase.NewArchiveService(mgr.GetAPIReader(), mgr.GetAPIReader(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
 	}

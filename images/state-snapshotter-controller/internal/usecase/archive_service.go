@@ -46,8 +46,8 @@ import (
 
 // ArchiveService handles archive operations
 type ArchiveService struct {
-	client      client.Client // For ManifestCheckpoint (direct, no cache, no list/watch needed)
-	chunkClient client.Client // For chunks (direct, no cache, no list/watch needed)
+	client      client.Reader // ManifestCheckpoint reads (direct, no informer cache)
+	chunkClient client.Reader // chunk reads (direct, no list/watch informer)
 	logger      logger.LoggerInterface
 	cache       *ArchiveCache
 
@@ -70,11 +70,10 @@ type CacheItem struct {
 	TTL       time.Duration
 }
 
-// NewArchiveService creates a new ArchiveService
-// client: used for ManifestCheckpoint (direct, no cache, no list/watch needed)
-// chunkClient: used for chunks (direct, no cache, no list/watch needed)
-// Both use direct client to avoid informer requirements
-func NewArchiveService(client client.Client, chunkClient client.Client, logger logger.LoggerInterface) *ArchiveService {
+// NewArchiveService creates a new ArchiveService.
+// client and chunkClient should bypass the controller cache (APIReader or dedicated direct client):
+// ManifestCheckpointContentChunk is not watched by informers (internal-only RBAC).
+func NewArchiveService(client client.Reader, chunkClient client.Reader, logger logger.LoggerInterface) *ArchiveService {
 	return &ArchiveService{
 		client:      client,
 		chunkClient: chunkClient,
