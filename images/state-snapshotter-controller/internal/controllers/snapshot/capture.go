@@ -141,7 +141,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return res, err
 	}
 
-	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, nsSnap, content.Name)
+	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.snapshotReader(), nsSnap, content.Name)
 	if err != nil {
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
@@ -204,7 +204,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 				return ctrl.Result{}, uerr
 			}
 			_ = content
-			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: snapshotSubtreePendingRequeueAfter}, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
 			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())

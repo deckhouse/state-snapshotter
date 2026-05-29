@@ -18,6 +18,7 @@ package common
 
 const (
 	KindSnapshot                   = "Snapshot"
+	KindSnapshotContent            = "SnapshotContent"
 	KindDemoVirtualDiskSnapshot    = "DemoVirtualDiskSnapshot"
 	KindDemoVirtualMachineSnapshot = "DemoVirtualMachineSnapshot"
 	KindDemoVirtualDisk            = "DemoVirtualDisk"
