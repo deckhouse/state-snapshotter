@@ -6,19 +6,21 @@
 
 **Правила:**
 
+- **Live demo = трек C** (`snapshot-demo-volume`). Не смешивать с D в одном namespace.
 - Трек **A** (manifest) и **C** (volume) — **разные** namespace.
 - Трек A: **без PVC** в namespace.
 - Трек C: Snapshot **только после** Bound PVC + consumer Pod.
-- **Трек D (полный demo)** — отдельный namespace; CSD + `DemoVirtualMachine`/`DemoVirtualDisk` + PVC; один root Snapshot **после** `RBACReady` на CSD.
+- **Трек D** — optional/full demo; **сначала D0 без PVC** на чистом ns, потом (опционально) D1 с volume.
 - Retain — только на **успешном** snapshot.
 
-**Какой сценарий «основной»:**
+**Какой сценарий когда:**
 
-| Трек | Что показывает |
-|------|----------------|
-| **C** | Manifest leg (MCP/chunk) + volume leg (`dataRefs` → VSC) — **без** demo domain |
-| **D** | Всё из C + **CSD → child snapshots** (VM/disk) + aggregated subtree |
-| **B** | Child Snapshot + 2 PVC (автомат `hack/demo-e2e.sh`) |
+| Трек | Назначение |
+|------|------------|
+| **C** | **Основной live demo** — MCP/chunks + `dataRefs` → VSC |
+| **D0** | Диагностика CSD + demo children + MCR/MCP **без** volume leg |
+| **D1** | Полный D (+ PVC) — только после успешного D0 и redeploy controller RBAC |
+| **B** | Child + 2 PVC (`hack/demo-e2e.sh`) |
 
 ---
 
@@ -253,9 +255,15 @@ kubectl delete namespace "$DEMO_NS" --wait=true
 
 ---
 
-## Трек D — полный demo (CSD + Demo VM/Disk + volume + chunks)
+## Трек D — optional full demo (CSD + Demo VM/Disk)
 
-Отдельный namespace. **Не** переиспользуйте namespace трека C: demo children и CSD нужны **до** первого root Snapshot (или удалите старый Snapshot и создайте новый после включения CSD).
+Отдельный namespace (`snapshot-demo-full`). **Не** смешивать с треком C.
+
+**Порядок отладки:**
+
+1. **D0** — без PVC (изолирует child/MCR/CSD от volume leg).
+2. **Redeploy** модуля: `templates/webhooks/rbac-for-us.yaml` (demo inventory `get/list/watch`) + `templates/controller/rbac-for-us.yaml` (demo snapshots/MCR).
+3. Если D0 OK → **D1** с PVC (отдельный прогон); если D1 ломается — баг/гонка root volume + subtree pending.
 
 ### Переменные
 
@@ -263,38 +271,95 @@ kubectl delete namespace "$DEMO_NS" --wait=true
 export DEMO_NS=snapshot-demo-full
 export SNAP=demo-full
 export CSD_NAME=demo-live-vm-disk
-export STORAGE_CLASS=local-thin
-export PVC=demo-pvc
-export BIND_IMAGE=registry.k8s.io/pause:3.9
 export CTRL_NS=d8-state-snapshotter
 export CTRL_SA=controller
 ```
 
-### 0. RBAC (обязательно до трека D)
+### 0. RBAC preflight (admin + **controller SA** + webhook SA)
 
-`kubernetes-admin` должен иметь права на demo CRD и CSD. Проверка:
+Проверять **только** с `--as=system:serviceaccount:…` — `can-i` от своего kubeconfig не отражает права контроллера.
+
+**Admin** (ручной `kubectl apply` inventory/CSD):
 
 ```bash
 kubectl auth can-i create demovirtualmachines.demo.state-snapshotter.deckhouse.io -n "$DEMO_NS"
+kubectl auth can-i create demovirtualdisks.demo.state-snapshotter.deckhouse.io -n "$DEMO_NS"
 kubectl auth can-i create customsnapshotdefinitions.state-snapshotter.deckhouse.io
 ```
 
-Ожидание: все три `yes`. Если `no` — **redeploy модуля** с `templates/rbac-for-us.yaml` (в `d8:state-snapshotter:admin-kubeconfig` уже заложены demo CRD + CSD).
+**Controller SA** — матрица для Track D (`templates/controller/rbac-for-us.yaml`; на dev-кластере demo-права могут идти ещё из `state-snapshotter-smoke-demo-domain-rbac`):
 
-**Почему не починить kubectl'ом:** `kubernetes-admin` здесь не суперпользователь — нет `*/*`, нет `clusterroles` **escalate** и **bind**. Значит нельзя ни выдать себе новые API через `ClusterRole`, ни привязать отдельный role к SA. Расширение прав — только через Helm/module (или оператор с bind/escalate).
+```bash
+export WH_SA=webhooks
+AS_CTRL="--as=system:serviceaccount:${CTRL_NS}:${CTRL_SA}"
+AS_WH="--as=system:serviceaccount:${CTRL_NS}:${WH_SA}"
 
-**Controller SA** для demo reconcile: production — Deckhouse RBAC hook → CSD `RBACReady`; в smoke — §4, но apply `ClusterRoleBinding` тоже требует **bind** у того, кто запускает команды (часто тот же redeploy/оператор, не текущий kubeconfig).
+# Ключевые gate (достаточно для быстрого preflight)
+kubectl auth can-i create manifestcapturerequests.state-snapshotter.deckhouse.io $AS_CTRL -n "$DEMO_NS"
+kubectl auth can-i update demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io/status $AS_CTRL -n "$DEMO_NS"
+kubectl auth can-i update demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io/status $AS_CTRL -n "$DEMO_NS"
+kubectl auth can-i create manifestcheckpoints.state-snapshotter.deckhouse.io $AS_CTRL
+kubectl auth can-i create objectkeepers.deckhouse.io $AS_CTRL
 
-### 1. Namespace и preflight (как трек C)
+# Webhook (blocker MCR admission): get/list/watch на demo inventory
+kubectl auth can-i get demovirtualdisks.demo.state-snapshotter.deckhouse.io $AS_WH -n "$DEMO_NS"
+kubectl auth can-i get demovirtualmachines.demo.state-snapshotter.deckhouse.io $AS_WH -n "$DEMO_NS"
+kubectl auth can-i list demovirtualdisks.demo.state-snapshotter.deckhouse.io $AS_WH -n "$DEMO_NS"
+kubectl auth can-i watch demovirtualmachines.demo.state-snapshotter.deckhouse.io $AS_WH -n "$DEMO_NS"
+```
+
+Полная матрица (опционально):
+
+```bash
+can_ctrl() { kubectl auth can-i "$1" "$2" $AS_CTRL ${3:+-n "$3"} 2>/dev/null | awk -v v="$1" -v r="$2" '{print v, r, $1}'; }
+for v in get list watch; do
+  can_ctrl $v demovirtualmachines.demo.state-snapshotter.deckhouse.io "$DEMO_NS"
+  can_ctrl $v demovirtualdisks.demo.state-snapshotter.deckhouse.io "$DEMO_NS"
+done
+for v in get list watch create update patch delete; do
+  can_ctrl $v demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io "$DEMO_NS"
+  can_ctrl $v demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io "$DEMO_NS"
+done
+can_ctrl update demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io/finalizers "$DEMO_NS"
+can_ctrl update demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io/finalizers "$DEMO_NS"
+for v in get list watch; do can_ctrl $v customsnapshotdefinitions.state-snapshotter.deckhouse.io; done
+can_ctrl update customsnapshotdefinitions.state-snapshotter.deckhouse.io/status
+for v in get list watch create update patch delete; do
+  can_ctrl $v manifestcapturerequests.state-snapshotter.deckhouse.io "$DEMO_NS"
+  can_ctrl $v manifestcheckpoints.state-snapshotter.deckhouse.io
+done
+for v in get list watch create update patch; do can_ctrl $v objectkeepers.deckhouse.io; done
+for v in get list watch create update patch delete; do
+  can_ctrl $v snapshots.storage.deckhouse.io "$DEMO_NS"
+  can_ctrl $v snapshotcontents.storage.deckhouse.io
+done
+```
+
+| Ресурс | Ожидание для D | Примечание |
+|--------|----------------|------------|
+| demo inventory + snapshots + `/status` + `/finalizers` | все **yes** | child/MCR reconcile |
+| `manifestcapturerequests` (+ `/status`) | **yes** | create MCR |
+| `manifestcheckpoints`, chunks | **yes** | MCP |
+| `snapshots`, `snapshotcontents` (+ `/status`) | **yes** | unified + demo content |
+| `objectkeepers` create/patch | **yes**; delete **no** | по шаблону — OK |
+| `customsnapshotdefinitions/status` update | желательно **yes** | registry; для live D часто хватает ручного `RBACReady` |
+| **webhook** `get/list/watch` `demovirtualmachines`, `demovirtualdisks` | **yes** | иначе MCR **denied** (`not found in namespace`) |
+
+Проверить, что в chart задеплоен `d8:state-snapshotter:controller` с demo rules (не только smoke CR):
+
+```bash
+kubectl get clusterrole d8:state-snapshotter:controller -o yaml | grep -c demovirtual
+kubectl get clusterrolebinding -o json | jq -r --arg ns "$CTRL_NS" --arg sa "$CTRL_SA" \
+  '.items[] | select(.subjects[]? | .namespace==$ns and .name==$sa) | .metadata.name'
+```
+
+Расширить ClusterRole вручную **нельзя** без escalate у kubeconfig — только redeploy модуля.
+
+### 1. Чистый namespace
 
 ```bash
 kubectl delete namespace "$DEMO_NS" --ignore-not-found --wait=true --timeout=120s
 kubectl create namespace "$DEMO_NS"
-
-kubectl get storageclass "$STORAGE_CLASS"
-export VSC_NAME=$(kubectl get storageclass "$STORAGE_CLASS" \
-  -o jsonpath='{.metadata.annotations.storage\.deckhouse\.io/volumesnapshotclass}')
-kubectl get volumesnapshotclass "$VSC_NAME"
 kubectl get pods -n "$CTRL_NS" -l app=controller | grep Running
 ```
 
@@ -302,7 +367,7 @@ kubectl get pods -n "$CTRL_NS" -l app=controller | grep Running
 
 ```bash
 kubectl -n "$DEMO_NS" create configmap demo-snapshot-cm \
-  --from-literal=demo=full --dry-run=client -o yaml | kubectl apply -f -
+  --from-literal=demo=d0 --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n "$DEMO_NS" apply -f - <<'EOF'
 apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
@@ -336,93 +401,14 @@ EOF
 kubectl -n "$DEMO_NS" get demovirtualmachine,demovirtualdisk
 ```
 
-### 3. Volume workload (Bound до Snapshot)
+### 3. D0 gate: без PVC
 
 ```bash
-kubectl -n "$DEMO_NS" apply -f - <<EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ${PVC}
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: ${STORAGE_CLASS}
-  resources:
-    requests:
-      storage: 1Gi
-EOF
-
-kubectl -n "$DEMO_NS" apply -f - <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: bind-${PVC}
-spec:
-  restartPolicy: Never
-  containers:
-    - name: hold
-      image: ${BIND_IMAGE}
-      volumeMounts:
-        - name: data
-          mountPath: /data
-  volumes:
-    - name: data
-      persistentVolumeClaim:
-        claimName: ${PVC}
-EOF
-
-until [[ "$(kubectl -n "$DEMO_NS" get pvc "$PVC" -o jsonpath='{.status.phase}')" == "Bound" ]]; do sleep 2; done
-kubectl -n "$DEMO_NS" get pvc "$PVC" -o wide
+kubectl -n "$DEMO_NS" get pvc
+# ожидание: No resources found — иначе volume leg смешает диагностику
 ```
 
-### 4. Test-only RBAC для demo controllers + CSD
-
-Эмуляция внешнего Deckhouse RBAC hook (как в [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md) §7). На production кластере может уже быть выдано — тогда `can-i` ниже должно быть `yes` без apply.
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: state-snapshotter-live-demo-domain-rbac
-rules:
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - demovirtualmachines
-  - demovirtualdisks
-  - demovirtualmachinesnapshots
-  - demovirtualdisksnapshots
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - demovirtualmachinesnapshots/status
-  - demovirtualdisksnapshots/status
-  verbs: ["get", "update", "patch"]
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - demovirtualmachinesnapshots/finalizers
-  - demovirtualdisksnapshots/finalizers
-  verbs: ["update", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: state-snapshotter-live-demo-domain-rbac
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: state-snapshotter-live-demo-domain-rbac
-subjects:
-- kind: ServiceAccount
-  name: ${CTRL_SA}
-  namespace: ${CTRL_NS}
-EOF
-
-kubectl auth can-i create demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io \
-  --as="system:serviceaccount:${CTRL_NS}:${CTRL_SA}" -n "$DEMO_NS"
-```
-
-### 5. CustomSnapshotDefinition (VM + Disk)
+### 4. CustomSnapshotDefinition (VM + Disk)
 
 ```bash
 kubectl apply -f - <<EOF
@@ -460,7 +446,7 @@ kubectl get customsnapshotdefinition "${CSD_NAME}" -o json | jq \
   | kubectl replace --subresource=status -f -
 ```
 
-### 6. Root Snapshot (только после CSD eligible)
+### 5. Root Snapshot (после CSD eligible, D0 без PVC)
 
 ```bash
 kubectl -n "$DEMO_NS" apply -f - <<EOF
@@ -474,7 +460,25 @@ EOF
 kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -w
 ```
 
-### 7. Полный чеклист (manifest + volume + demo tree + chunks)
+### 6. D0 чеклист (один проход, без долгого wait)
+
+```bash
+kubectl -n "$DEMO_NS" get manifestcapturerequests.state-snapshotter.deckhouse.io
+kubectl -n "$DEMO_NS" get snap "$SNAP" -o jsonpath='Ready={.status.conditions[?(@.type=="Ready")].status} reason={.status.conditions[?(@.type=="Ready")].reason}{"\n"}'
+kubectl -n "$DEMO_NS" get demovirtualmachine,demovirtualdisk
+```
+
+Если `mcr` пусто или `Ready=False` + `SubtreeManifestCapturePending` — сразу логи (часто **webhook**, не volume):
+
+```bash
+kubectl logs -n "$CTRL_NS" -l app=controller --tail=120 \
+  | grep -iE "mcr-validation|denied the request|DemoVirtual|not found in namespace" \
+  | grep -v 'nss child relay' | tail -20
+```
+
+Типичная ошибка до redeploy webhook RBAC: `Target 0: resource …/DemoVirtualDisk not found in namespace` при существующем `disk-standalone` — webhook SA не может `get` demo inventory.
+
+### 7. D0/D1 чеклист (demo tree + chunks)
 
 ```bash
 export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" \
@@ -516,12 +520,10 @@ echo "VM_MCP=$VM_MCP"
 kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io "${VM_MCP}-0" \
   -o jsonpath='vmChunkObjects={.spec.objectsCount}{"\n"}' 2>/dev/null || echo "no VM chunk yet"
 
-# Volume leg на root
+# D0: volume leg на root должен быть пуст (нет PVC в ns)
 kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o json | jq '.status.dataRefs'
-export VSC=$(kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o jsonpath='{.status.dataRefs[0].artifact.name}')
-kubectl get volumesnapshotcontents.snapshot.storage.k8s.io "$VSC" -o jsonpath='readyToUse={.status.readyToUse}{"\n"}'
 
-# Aggregated root subtree (CM + demo + PVC в одном ответе)
+# Aggregated root subtree (CM + demo; без PVC на D0)
 kubectl get --raw \
   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/${DEMO_NS}/snapshots/${SNAP}/manifests" \
   | jq '[.[] | {kind, name: .metadata.name}] | {count: length, sample: .[0:12]}'
@@ -532,14 +534,36 @@ kubectl get --raw \
   | jq 'length'
 ```
 
-Ожидание:
+Ожидание **D0** (без PVC; короткая проверка после redeploy):
 
-- `childrenSnapshotRefs`: `DemoVirtualMachineSnapshot` на `vm-1`; `DemoVirtualDiskSnapshot` под VM на `disk-vm`; `disk-standalone` — direct child root (не под VM).
-- Root + child MCP: `status.chunks` не пустой, chunk `${MCP}-0` с `objectsCount > 0`.
-- Root `dataRefs[]` → VSC `readyToUse=true`.
-- Aggregated root `count` больше, чем у трека C (есть demo kinds).
+```bash
+kubectl get customsnapshotdefinition "$CSD_NAME" -o json | jq '[.status.conditions[]?|{type,status}]'
+kubectl -n "$DEMO_NS" get mcr
+CHILD_SC=$(kubectl -n "$DEMO_NS" get demovirtualdisksnapshot -o jsonpath='{.items[0].status.boundSnapshotContentName}')
+kubectl get snapshotcontents.storage.deckhouse.io "$CHILD_SC" -o jsonpath='mcp={.status.manifestCheckpointName} ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
+```
 
-### 8. Граф (полное дерево)
+- CSD Accepted + RBACReady + Ready; VM/Disk на месте.
+- **MCR** в ns (хотя бы на время capture).
+- Child **SnapshotContent** → `manifestCheckpointName` set; MCP **Ready**.
+- Root `Ready=True`; `dataRefs` пусто (нет PVC).
+
+**D1** (отдельный прогон с PVC): см. §8; ожидается `dataRefs[]` → VSC. Если D0 OK, а D1 снова `SubtreeManifestCapturePending` — отдельный баг volume + subtree.
+
+### 8. D1 — volume leg (только после успешного D0)
+
+Новый чистый namespace или удалите Snapshot и PVC, затем:
+
+```bash
+export STORAGE_CLASS=local-thin
+export PVC=demo-pvc
+export BIND_IMAGE=registry.k8s.io/pause:3.9
+
+# ... preflight SC/VSC как в треке C, затем PVC + bind pod ...
+# Snapshot создавать только после PVC Bound
+```
+
+### 9. Граф (D0 или D1)
 
 ```bash
 cd ~/GolandProjects/state-snapshotter
@@ -558,12 +582,11 @@ grep -E 'status\.chunks|DemoVirtual|status\.dataRefs|childrenSnapshot' \
   /tmp/snapshot-graph-full/demo-full.logical.dot | head -20
 ```
 
-### 9. Очистка (после прогона)
+### 10. Очистка (после прогона)
 
 ```bash
 kubectl delete customsnapshotdefinition "${CSD_NAME}" --ignore-not-found
 kubectl delete namespace "$DEMO_NS" --wait=true
-# ClusterRole demo RBAC оставить или удалить вручную, если создавали в §4
 ```
 
 ---
