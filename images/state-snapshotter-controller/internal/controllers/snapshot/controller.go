@@ -155,9 +155,11 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		storagev1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindSnapshot),
 	)
 	if err != nil {
+		logRootDiagReturn(ctx, req.NamespacedName, "objectKeeperError", ctrl.Result{}, err)
 		return ctrl.Result{}, err
 	}
 	if res.Requeue || res.RequeueAfter > 0 {
+		logRootDiagReturn(ctx, req.NamespacedName, "objectKeeperRequeue", res, nil)
 		return res, nil
 	}
 
@@ -263,15 +265,24 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 	if graphChanged {
+		logRootDiagReturn(ctx, req.NamespacedName, "childGraphChanged", ctrl.Result{Requeue: true}, nil)
 		return ctrl.Result{Requeue: true}, nil
+	}
+	for k, v := range snapshotDiagSummary(nsSnap, content) {
+		logRootDiag(ctx, req.NamespacedName, "beforeGraphPublish", k, v)
 	}
 	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.snapshotReader(), nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
 	if err != nil {
+		logRootDiagReturn(ctx, req.NamespacedName, "graphPublishError", ctrl.Result{}, err)
 		return ctrl.Result{}, err
 	}
+	logRootDiag(ctx, req.NamespacedName, "afterGraphPublish", "graphPublished", graphPublished)
 	if !graphPublished {
-		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		res := ctrl.Result{RequeueAfter: 500 * time.Millisecond}
+		logRootDiagReturn(ctx, req.NamespacedName, "graphPublishedFalse", res, nil)
+		return res, nil
 	}
+	logRootDiag(ctx, req.NamespacedName, "enterReconcileCaptureN2a", "content", content.Name)
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
 }
 

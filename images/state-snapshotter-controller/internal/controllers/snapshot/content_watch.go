@@ -87,12 +87,10 @@ func enqueueBoundSnapshotsFromContent(ctx context.Context, c client.Client, obj 
 	if obj == nil {
 		return
 	}
-	content, ok := obj.(*storagev1alpha1.SnapshotContent)
-	if !ok {
-		return
+	reqs := MapSnapshotContentToBoundSnapshots(ctx, c, obj)
+	if content, ok := obj.(*storagev1alpha1.SnapshotContent); ok {
+		logSnapshotContentEnqueues(ctx, content, eventType, reqs)
 	}
-	reqs := MapSnapshotContentUpdateToSnapshots(ctx, c, content)
-	logSnapshotContentEnqueues(ctx, content, eventType, reqs)
 	for _, req := range reqs {
 		q.Add(req)
 	}
@@ -104,12 +102,7 @@ func snapshotContentToSnapshotEnqueueHandler(c client.Client) handler.EventHandl
 			enqueueBoundSnapshotsFromContent(ctx, c, e.Object, "create", q)
 		},
 		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			oldSC, _ := e.ObjectOld.(*storagev1alpha1.SnapshotContent)
-			newSC, _ := e.ObjectNew.(*storagev1alpha1.SnapshotContent)
-			if !snapshotContentSubtreeWakeupStatusChanged(oldSC, newSC) {
-				return
-			}
-			enqueueBoundSnapshotsFromContent(ctx, c, newSC, "update", q)
+			enqueueBoundSnapshotsFromContent(ctx, c, e.ObjectNew, "update", q)
 		},
 		DeleteFunc: func(ctx context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 			enqueueBoundSnapshotsFromContent(ctx, c, e.Object, "delete", q)

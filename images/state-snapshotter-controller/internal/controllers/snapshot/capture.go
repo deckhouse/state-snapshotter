@@ -111,19 +111,27 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	content *storagev1alpha1.SnapshotContent,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	snapKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	logRootDiag(ctx, snapKey, "reconcileCaptureN2aStart", "content", content.Name)
 
 	if r.Dynamic == nil {
-		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic client is nil")
+		err := fmt.Errorf("snapshot reconciler: Dynamic client is nil")
+		logRootDiagReturn(ctx, snapKey, "dynamicClientNil", ctrl.Result{}, err)
+		return ctrl.Result{}, err
 	}
 	if r.APIReader == nil {
-		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: APIReader is nil")
+		err := fmt.Errorf("snapshot reconciler: APIReader is nil")
+		logRootDiagReturn(ctx, snapKey, "apiReaderNil", ctrl.Result{}, err)
+		return ctrl.Result{}, err
 	}
 
 	_, res, err := r.ensureSnapshotRootObjectKeeper(ctx, nsSnap, content)
 	if err != nil {
+		logRootDiagReturn(ctx, snapKey, "captureObjectKeeperError", ctrl.Result{}, err)
 		return ctrl.Result{}, err
 	}
 	if res.RequeueAfter > 0 || res.Requeue {
+		logRootDiagReturn(ctx, snapKey, "captureObjectKeeperRequeue", res, nil)
 		return res, nil
 	}
 
@@ -138,11 +146,14 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	}
 
 	if done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content); done {
+		logRootDiagReturn(ctx, snapKey, "manifestCheckpointAlreadyReady", res, err)
 		return res, err
 	}
 
-	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.snapshotReader(), nsSnap, content.Name)
+	logRootDiag(ctx, snapKey, "beforeBuildRootTargets", "content", content.Name)
+	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, nsSnap, content.Name)
 	if err != nil {
+		logRootDiag(ctx, snapKey, "afterBuildRootTargets", "error", err.Error())
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
 			return ctrl.Result{}, gerr
@@ -204,7 +215,9 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 				return ctrl.Result{}, uerr
 			}
 			_ = content
-			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: snapshotSubtreePendingRequeueAfter}, nil)
+			res := ctrl.Result{RequeueAfter: 500 * time.Millisecond}
+			logRootDiagReturn(ctx, snapKey, "subtreeManifestCapturePending", res, nil)
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
 			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())
@@ -217,8 +230,10 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		}
 		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}
+	logRootDiag(ctx, snapKey, "afterBuildRootTargets", "targetCount", len(targets))
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
+		logRootDiagReturn(ctx, snapKey, "ensureMCRError", ctrl.Result{}, err)
 		if errors.Is(err, errManifestCapturePlanDrift) {
 			freshParent := &storagev1alpha1.Snapshot{}
 			if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
@@ -237,10 +252,12 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, err
 	}
 	if res.RequeueAfter > 0 || res.Requeue {
+		logRootDiagReturn(ctx, snapKey, "ensureMCRRequeue", res, nil)
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
 	}
 
 	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+	logRootDiag(ctx, snapKey, "mcrEnsured", "mcr", mcr.Name, "plannedMCP", mcpName)
 	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
