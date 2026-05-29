@@ -79,6 +79,42 @@ rules:
   - get
   - list
   - watch
+# Demo domain inventory + generated child snapshots (live demo / pre-e2e manual kubectl).
+- apiGroups:
+  - demo.state-snapshotter.deckhouse.io
+  resources:
+  - demovirtualmachines
+  - demovirtualdisks
+  - demovirtualmachinesnapshots
+  - demovirtualdisksnapshots
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - state-snapshotter.deckhouse.io
+  resources:
+  - customsnapshotdefinitions
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - state-snapshotter.deckhouse.io
+  resources:
+  - customsnapshotdefinitions/status
+  verbs:
+  - get
+  - update
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
