@@ -265,7 +265,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if graphChanged {
 		return ctrl.Result{Requeue: true}, nil
 	}
-	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
+	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.snapshotReader(), nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

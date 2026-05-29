@@ -138,6 +138,27 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
+	reader := demoReconcilerReader(r.APIReader, r.Client)
+	if steady, err := demoReturnIfManifestCaptureSteadyState(
+		ctx,
+		r.Client,
+		reader,
+		s.Namespace,
+		controllercommon.KindDemoVirtualDiskSnapshot,
+		s.Name,
+		s.Status.Conditions,
+		contentName,
+	); err != nil {
+		return ctrl.Result{}, err
+	} else if steady {
+		if s.Status.ManifestCaptureRequestName != "" {
+			if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, ""); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
 	mcr, err := ensureDemoSnapshotManifestCaptureRequest(
 		ctx,
 		r.Client,
@@ -152,6 +173,9 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if mcr == nil {
+		return ctrl.Result{}, nil
 	}
 	if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {
 		return ctrl.Result{}, err

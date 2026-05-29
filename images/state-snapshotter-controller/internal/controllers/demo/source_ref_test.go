@@ -212,6 +212,26 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if len(content.Status.DataRefs) != 0 {
 		t.Fatalf("state-only snapshot content must not require or set dataRefs, got %#v", content.Status.DataRefs)
 	}
+
+	mcpBefore := content.Status.ManifestCheckpointName
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("fourth reconcile (steady state) failed: %v", err)
+	}
+	assertNoDemoMCRs(t, cl)
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
+		t.Fatalf("get content after steady reconcile: %v", err)
+	}
+	if content.Status.ManifestCheckpointName != mcpBefore {
+		t.Fatalf("steady reconcile must not change manifestCheckpointName: was %q, got %q", mcpBefore, content.Status.ManifestCheckpointName)
+	}
+	snap = getDemoDiskSnapshot(t, cl)
+	if snap.Status.ManifestCaptureRequestName != "" {
+		t.Fatalf("expected empty manifestCaptureRequestName after steady reconcile, got %q", snap.Status.ManifestCaptureRequestName)
+	}
+	ready = meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("expected snapshot to stay Ready=True after steady reconcile, got %#v", ready)
+	}
 }
 
 func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChildren(t *testing.T) {

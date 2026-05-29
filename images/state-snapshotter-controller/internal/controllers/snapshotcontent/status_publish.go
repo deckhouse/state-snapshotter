@@ -54,10 +54,14 @@ func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, co
 func PublishSnapshotContentChildrenFromSnapshotRefs(
 	ctx context.Context,
 	c client.Client,
+	readClient client.Reader,
 	parentNamespace string,
 	parentContentName string,
 	childSnapshotRefs []storagev1alpha1.SnapshotChildRef,
 ) (bool, error) {
+	if readClient == nil {
+		readClient = c
+	}
 	if parentContentName == "" {
 		return false, nil
 	}
@@ -65,12 +69,12 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 		return true, PublishSnapshotContentChildrenRefs(ctx, c, parentContentName, nil)
 	}
 	parentContent := &storagev1alpha1.SnapshotContent{}
-	if err := c.Get(ctx, client.ObjectKey{Name: parentContentName}, parentContent); err != nil {
+	if err := readClient.Get(ctx, client.ObjectKey{Name: parentContentName}, parentContent); err != nil {
 		return false, err
 	}
 	out := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(childSnapshotRefs))
 	for _, childRef := range childSnapshotRefs {
-		childContentName, err := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, c, childRef, parentNamespace)
+		childContentName, err := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, readClient, childRef, parentNamespace)
 		if err != nil {
 			if errors.Is(err, usecase.ErrRunGraphChildNotBound) ||
 				errors.Is(err, usecase.ErrRunGraphChildSnapshotNotFound) {

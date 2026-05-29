@@ -58,6 +58,23 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	ownerRef metav1.OwnerReference,
 	contentName string,
 ) (*ssv1alpha1.ManifestCaptureRequest, error) {
+	handoffComplete, err := demoSnapshotContentManifestHandoffComplete(ctx, c, contentName)
+	if err != nil {
+		return nil, err
+	}
+	if handoffComplete {
+		mcrName := demoSnapshotManifestCaptureRequestName(kind, namespace, name)
+		key := types.NamespacedName{Namespace: namespace, Name: mcrName}
+		existing := &ssv1alpha1.ManifestCaptureRequest{}
+		if err := c.Get(ctx, key, existing); err == nil {
+			return existing, nil
+		}
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
 	mcrName := demoSnapshotManifestCaptureRequestName(kind, namespace, name)
 	key := types.NamespacedName{Namespace: namespace, Name: mcrName}
 	existing := &ssv1alpha1.ManifestCaptureRequest{}

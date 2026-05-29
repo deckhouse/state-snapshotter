@@ -155,6 +155,27 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 
+	reader := demoReconcilerReader(r.APIReader, r.Client)
+	if steady, err := demoReturnIfManifestCaptureSteadyState(
+		ctx,
+		r.Client,
+		reader,
+		s.Namespace,
+		controllercommon.KindDemoVirtualMachineSnapshot,
+		s.Name,
+		s.Status.Conditions,
+		contentName,
+	); err != nil {
+		return ctrl.Result{}, err
+	} else if steady {
+		if s.Status.ManifestCaptureRequestName != "" {
+			if err := patchDemoVirtualMachineSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, ""); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
 	mcr, err := ensureDemoSnapshotManifestCaptureRequest(
 		ctx,
 		r.Client,
@@ -172,6 +193,9 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 		}
 		return ctrl.Result{}, err
+	}
+	if mcr == nil {
+		return ctrl.Result{}, nil
 	}
 	if err := patchDemoVirtualMachineSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {
 		return ctrl.Result{}, err
@@ -192,7 +216,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	if err := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "child graph planned"); err != nil {
 		return ctrl.Result{}, err
 	}
-	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, s.Namespace, contentName, childRefs)
+	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, reader, s.Namespace, contentName, childRefs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
