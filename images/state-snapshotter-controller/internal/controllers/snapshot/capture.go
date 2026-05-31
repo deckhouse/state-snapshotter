@@ -59,7 +59,6 @@ func (r *SnapshotReconciler) deleteSnapshotManifestCaptureRequest(ctx context.Co
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := r.Client.Get(ctx, key, mcr); err != nil {
 		if apierrors.IsNotFound(err) {
-			logRootDiagMCR(ctx, nsSnap, "deleteSkippedNotFound")
 			return nil
 		}
 		return fmt.Errorf("get ManifestCaptureRequest %s: %w", key.String(), err)
@@ -67,7 +66,6 @@ func (r *SnapshotReconciler) deleteSnapshotManifestCaptureRequest(ctx context.Co
 	if err := r.Client.Delete(ctx, mcr); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ManifestCaptureRequest %s: %w", key.String(), err)
 	}
-	logRootDiagMCR(ctx, nsSnap, "deleted", "mcrUID", string(mcr.UID))
 	return nil
 }
 
@@ -113,27 +111,19 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	content *storagev1alpha1.SnapshotContent,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	snapKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-	logRootDiag(ctx, snapKey, "reconcileCaptureN2aStart", "content", content.Name)
 
 	if r.Dynamic == nil {
-		err := fmt.Errorf("snapshot reconciler: Dynamic client is nil")
-		logRootDiagReturn(ctx, snapKey, "dynamicClientNil", ctrl.Result{}, err)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic client is nil")
 	}
 	if r.APIReader == nil {
-		err := fmt.Errorf("snapshot reconciler: APIReader is nil")
-		logRootDiagReturn(ctx, snapKey, "apiReaderNil", ctrl.Result{}, err)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: APIReader is nil")
 	}
 
 	_, res, err := r.ensureSnapshotRootObjectKeeper(ctx, nsSnap, content)
 	if err != nil {
-		logRootDiagReturn(ctx, snapKey, "captureObjectKeeperError", ctrl.Result{}, err)
 		return ctrl.Result{}, err
 	}
 	if res.RequeueAfter > 0 || res.Requeue {
-		logRootDiagReturn(ctx, snapKey, "captureObjectKeeperRequeue", res, nil)
 		return res, nil
 	}
 
@@ -148,20 +138,16 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	}
 
 	if done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content); done {
-		logRootDiagReturn(ctx, snapKey, "manifestCheckpointAlreadyReady", res, err)
 		return res, err
 	}
 
-	logRootDiag(ctx, snapKey, "beforeBuildRootTargets", "content", content.Name)
 	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, nsSnap, content.Name)
 	if err != nil {
-		logRootDiag(ctx, snapKey, "afterBuildRootTargets", "error", err.Error())
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
 			return ctrl.Result{}, gerr
 		}
 		hasSubtree := len(freshParent.Status.ChildrenSnapshotRefs) > 0
-		logRootDiag(ctx, snapKey, "buildRootTargetsError", "hasSubtree", hasSubtree, "error", err.Error())
 		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding;
 		// do not fail capture as ListFailed — requeue like ChildSnapshotPending.
 		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
@@ -203,7 +189,6 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			}
 			// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
 			if hasSubtree {
-				logRootDiag(ctx, snapKey, "subtreePendingDeleteMCR", "hasSubtree", true)
 				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
 					return ctrl.Result{}, delErr
 				}
@@ -219,9 +204,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 				return ctrl.Result{}, uerr
 			}
 			_ = content
-			res := ctrl.Result{RequeueAfter: 500 * time.Millisecond}
-			logRootDiagReturn(ctx, snapKey, "subtreeManifestCapturePending", res, nil)
-			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
 			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())
@@ -234,10 +217,8 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		}
 		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
 	}
-	logRootDiag(ctx, snapKey, "afterBuildRootTargets", "targetCount", len(targets))
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
-		logRootDiagReturn(ctx, snapKey, "ensureMCRError", ctrl.Result{}, err)
 		if errors.Is(err, errManifestCapturePlanDrift) {
 			freshParent := &storagev1alpha1.Snapshot{}
 			if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
@@ -256,12 +237,10 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, err
 	}
 	if res.RequeueAfter > 0 || res.Requeue {
-		logRootDiagReturn(ctx, snapKey, "ensureMCRRequeue", res, nil)
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
 	}
 
 	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
-	logRootDiag(ctx, snapKey, "mcrEnsured", "mcr", mcr.Name, "plannedMCP", mcpName)
 	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -653,7 +632,6 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 			}
 			return nil, ctrl.Result{}, err
 		}
-		logRootDiagMCR(ctx, nsSnap, "created", "targetCount", len(specTargets))
 		created := &ssv1alpha1.ManifestCaptureRequest{}
 		if err := r.Client.Get(ctx, key, created); err != nil {
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
