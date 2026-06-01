@@ -126,6 +126,11 @@ rules:
   resources: ["volumesnapshotcontents"]
   verbs: ["get", "list", "watch", "update", "patch"]
 
+# TODO(remove): эти demo-домен RBAC здесь быть НЕ должно. Статический RBAC контроллера
+# должен оставаться domain-agnostic; domain/custom-resource права (demo.* и любые
+# доменные CSD) обязан выдавать внешний Deckhouse RBAC controller/hook и сигнализировать
+# их готовность через CSD condition RBACReady=True. Сейчас права зашиты статически в обход
+# этой модели — это временно. Удалить после внедрения внешнего RBAC-hook'а.
 # Demo domain (dedicated Demo*Snapshot reconcilers; not generic binder). Required for MCR/MCP on child nodes.
 # Do not rely on ad-hoc smoke ClusterRoles (e.g. state-snapshotter-smoke-demo-domain-rbac) in production.
 - apiGroups: ["demo.state-snapshotter.deckhouse.io"]
