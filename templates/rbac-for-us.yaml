@@ -64,11 +64,18 @@ rules:
   - get
   - patch
   - update
+# Aggregated manifest read subresources. Includes per-domain-snapshot routes so a
+# subtree can be downloaded by a domain snapshot name (e.g. demovirtualmachinesnapshots/<vm>/manifests
+# returns the VM node + its whole subtree). These demo domain subresources belong here
+# (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
 - apiGroups:
   - subresources.state-snapshotter.deckhouse.io
   resources:
   - snapshots/manifests
+  - snapshots/manifests-with-data-restoration
   - manifestcheckpoints/manifests
+  - demovirtualmachinesnapshots/manifests
+  - demovirtualdisksnapshots/manifests
   verbs:
   - get
 - apiGroups:
