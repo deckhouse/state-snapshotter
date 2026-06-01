@@ -722,5 +722,6 @@ kubectl -n "$DEMO_NS" get pvc
 | [`snapshot-live-demo-runbook.md`](snapshot-live-demo-runbook.md) | Полный runbook, речь, pitfalls |
 | [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md) | Детальный CSD/graph smoke (эталон трека D) |
 | [`snapshot-manual-demo.md`](snapshot-manual-demo.md) | Минимум в `default` |
+| [`snapshot-tree-demo-runbook.md`](snapshot-tree-demo-runbook.md) | Дерево снапшотов: capture (tree + manifest + data) → restore → каскадный TTL-GC |
 | `hack/demo-e2e.sh` | Автоматический трек B |
 | `hack/snapshot-graph.sh` | Граф |
