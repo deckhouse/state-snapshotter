@@ -398,7 +398,7 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		return plan, err
 	}
 	if mcpFailed {
-		plan.readyReason = "ManifestCheckpointFailed"
+		plan.readyReason = reasonManifestCheckpointFailed
 		plan.readyMessage = mcpMessage
 		return plan, nil
 	}
@@ -433,11 +433,59 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 	return plan, nil
 }
 
+// reasonManifestCheckpointFailed is the SnapshotContent Ready=False reason published when the bound
+// ManifestCheckpoint is terminally failed. It is a local string (no pkg/snapshot constant yet); the
+// rename pass to the DomainReady/RequestsReady/ChildrenReady/Ready model owns promoting it.
+const reasonManifestCheckpointFailed = "ManifestCheckpointFailed"
+
+// terminalChildContentFailureReasons lists child SnapshotContent Ready=False reasons treated as a
+// terminal failure that must propagate up the ancestor chain as ChildSnapshotFailed (INV-FAIL1,
+// snapshot-rework/2026-06-03-snapshot-conditions-model.md §5). Any other Ready=False (e.g.
+// ArtifactNotReady, ManifestCapturePending, ChildSnapshotPending, or no Ready condition yet) is
+// non-terminal and propagates as ChildSnapshotPending so a transient child does not fail the tree.
+// "ChildrenFailed" is included for forward-compat with the later condition rename.
+var terminalChildContentFailureReasons = map[string]struct{}{
+	reasonManifestCheckpointFailed:          {},
+	snapshot.ReasonDataArtifactInvalid:      {},
+	snapshot.ReasonDataArtifactNotSupported: {},
+	snapshot.ReasonArtifactMissing:          {},
+	snapshot.ReasonChildSnapshotFailed:      {},
+	"ChildrenFailed":                        {},
+}
+
+func isTerminalChildContentFailure(reason string) bool {
+	_, ok := terminalChildContentFailureReasons[reason]
+	return ok
+}
+
+// childContentNotReadyMessage builds a parent-facing message for a not-Ready child that preserves the
+// child SnapshotContent name plus the child's original Ready reason/message. When the child is itself a
+// parent whose Ready message already names a failed leaf below, that message is carried verbatim so the
+// root message keeps the full path/ID to the failed leaf (INV-FAIL1).
+func childContentNotReadyMessage(name string, readyCond *metav1.Condition) string {
+	if readyCond == nil {
+		return fmt.Sprintf("child SnapshotContent %s is not Ready", name)
+	}
+	if readyCond.Message != "" {
+		return fmt.Sprintf("child SnapshotContent %s not ready: reason=%s message=%s", name, readyCond.Reason, readyCond.Message)
+	}
+	return fmt.Sprintf("child SnapshotContent %s not ready: reason=%s", name, readyCond.Reason)
+}
+
+// validateCommonContentChildren aggregates child SnapshotContent readiness for the parent Ready plan.
+//
+// Classification (INV-FAIL1): a child Ready=False with a terminal reason makes the parent
+// ChildSnapshotFailed immediately (terminal wins over pending regardless of ref order); any other
+// not-Ready child (NotFound, no Ready condition, or non-terminal Ready=False) is collected as pending
+// and surfaces as ChildSnapshotPending only when no terminal failure exists. In both branches the
+// message names the failed/pending child and carries its original Ready reason/message so a deeper
+// leaf failure is not lost as the failure climbs the ancestor chain.
 func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, string, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
 		return false, "", "", err
 	}
+	var pendingMsgs []string
 	for _, raw := range rawRefs {
 		refMap, ok := raw.(map[string]interface{})
 		if !ok {
@@ -451,7 +499,8 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
 		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
-				return false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s not found", name), nil
+				pendingMsgs = append(pendingMsgs, fmt.Sprintf("child SnapshotContent %s not found", name))
+				continue
 			}
 			return false, "", "", err
 		}
@@ -459,13 +508,18 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		if err != nil {
 			return false, "", "", err
 		}
-		if !snapshot.IsReady(childLike) {
-			readyCond := snapshot.GetCondition(childLike, snapshot.ConditionReady)
-			if readyCond != nil && readyCond.Status == metav1.ConditionFalse && readyCond.Reason == snapshot.ReasonChildSnapshotFailed {
-				return false, snapshot.ReasonChildSnapshotFailed, readyCond.Message, nil
-			}
-			return false, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("child SnapshotContent %s is not Ready", name), nil
+		if snapshot.IsReady(childLike) {
+			continue
 		}
+		readyCond := snapshot.GetCondition(childLike, snapshot.ConditionReady)
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse && isTerminalChildContentFailure(readyCond.Reason) {
+			return false, snapshot.ReasonChildSnapshotFailed,
+				fmt.Sprintf("child SnapshotContent %s failed: reason=%s message=%s", name, readyCond.Reason, readyCond.Message), nil
+		}
+		pendingMsgs = append(pendingMsgs, childContentNotReadyMessage(name, readyCond))
+	}
+	if len(pendingMsgs) > 0 {
+		return false, snapshot.ReasonChildSnapshotPending, strings.Join(pendingMsgs, "; "), nil
 	}
 	return true, "", "", nil
 }
