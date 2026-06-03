@@ -201,18 +201,18 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 	childRefs, err := r.ensureDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
-		if patchErr := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonCreateChildFailed, err.Error()); patchErr != nil {
+		if patchErr := patchDemoVirtualMachineSnapshotDomainReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonCreateChildFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, err
 	}
 	if err := patchDemoVirtualMachineSnapshotChildrenRefs(ctx, r.Client, req.NamespacedName, childRefs); err != nil {
-		if patchErr := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
+		if patchErr := patchDemoVirtualMachineSnapshotDomainReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, err
 	}
-	if err := patchDemoVirtualMachineSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "child graph planned"); err != nil {
+	if err := patchDemoVirtualMachineSnapshotDomainReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "child planning complete"); err != nil {
 		return ctrl.Result{}, err
 	}
 	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, reader, s.Namespace, contentName, childRefs)
@@ -397,7 +397,7 @@ func demoDiskOwnedByVM(disk *demov1alpha1.DemoVirtualDisk, vm *demov1alpha1.Demo
 	return disk.Spec.VirtualMachineName == vm.Name
 }
 
-func patchDemoVirtualMachineSnapshotGraphReady(
+func patchDemoVirtualMachineSnapshotDomainReady(
 	ctx context.Context,
 	c client.Client,
 	vmKey types.NamespacedName,
@@ -410,13 +410,13 @@ func patchDemoVirtualMachineSnapshotGraphReady(
 		if err := c.Get(ctx, vmKey, o); err != nil {
 			return err
 		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionGraphReady); rc != nil &&
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionDomainReady); rc != nil &&
 			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
 			return nil
 		}
 		base := o.DeepCopy()
 		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionGraphReady,
+			Type:               snapshot.ConditionDomainReady,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,

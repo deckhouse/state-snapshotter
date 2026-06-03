@@ -38,13 +38,14 @@ const (
 	// ConditionDataReady indicates data is ready (VCR Ready=True, if applicable)
 	ConditionDataReady = "DataReady"
 
-	// ConditionGraphReady indicates the snapshot controller finished child graph planning.
-	ConditionGraphReady = "GraphReady"
+	// ConditionDomainReady indicates that the domain controller finished planning.
+	// Readers must require observedGeneration == generation.
+	ConditionDomainReady = "DomainReady"
 
-	// ConditionHandledByCustomSnapshotController indicates domain controller has started processing
-	ConditionHandledByCustomSnapshotController = "HandledByCustomSnapshotController"
-
-	// ConditionHandledByCommonController indicates common controller has started processing
+	// ConditionHandledByCommonController is the generic binder's own progress marker: it is set after
+	// the binder creates SnapshotContent and is read to take the idempotent mirror path. It is not a
+	// domain/external barrier (the barrier is DomainReady). Removing it is a separate binder
+	// idempotency refactor, out of this change's scope.
 	ConditionHandledByCommonController = "HandledByCommonController"
 )
 
@@ -73,15 +74,15 @@ const (
 	ReasonChildSnapshotFailed = "ChildSnapshotFailed"
 )
 
-// Reasons for GraphReady=False.
+// Reasons for DomainReady=False.
 const (
 	ReasonChildGraphPending = "ChildGraphPending"
 	ReasonListFailed        = "ListFailed"
 	ReasonCreateChildFailed = "CreateChildFailed"
 	// ReasonPriorityLayerPending is set on a parent Snapshot while a higher-priority child snapshot
-	// layer has not yet published a current GraphReady=True. This is NOT a failure and has no deadline:
+	// layer has not yet published a current DomainReady=True. This is NOT a failure and has no deadline:
 	// a child snapshot (e.g. a large-storage capture) may legitimately stay pending for hours. The
-	// parent holds GraphReady=False/PriorityLayerPending (with the pending children listed in the
+	// parent holds DomainReady=False/PriorityLayerPending (with the pending children listed in the
 	// message) and never starts capture until the layer is ready. Waiting is woken primarily by child
 	// watches; a RequeueAfter polling fallback covers a missed watch event.
 	ReasonPriorityLayerPending = "PriorityLayerPending"
@@ -89,7 +90,7 @@ const (
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
 	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
 	// DSC RBACReady); the planner must not treat a Forbidden source list as "no objects" (that would
-	// silently drop coverage). Instead it degrades the graph (GraphReady=False) and requeues so coverage
+	// silently drop coverage). Instead it degrades the graph (DomainReady=False) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"
 	// ReasonSourceIdentityAnnotationMismatch is set when an existing child snapshot's generic source

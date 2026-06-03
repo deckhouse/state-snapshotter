@@ -91,13 +91,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
+			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionHandledByCommonController,
@@ -242,13 +236,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			Expect(err).NotTo(HaveOccurred())
 
 			// Snapshot is InProgress but never Ready=True
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
+			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionHandledByCommonController,
@@ -342,13 +330,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
+			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionHandledByCommonController,
@@ -447,13 +429,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
+			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionHandledByCommonController,

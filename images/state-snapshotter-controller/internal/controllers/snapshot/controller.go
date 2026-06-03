@@ -258,7 +258,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
 	if err != nil {
-		if patchErr := r.patchSnapshotGraphReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
+		if patchErr := r.patchSnapshotDomainReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, err
@@ -277,7 +277,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 // snapshotChildGraphPollInterval is the polling fallback cadence used while a priority layer is
-// pending GraphReady. It is NOT a deadline: child snapshots may stay pending for hours. Child watches
+// pending DomainReady. It is NOT a deadline: child snapshots may stay pending for hours. Child watches
 // are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does not
 // stall if a child-kind notification is dropped.
 const snapshotChildGraphPollInterval = 30 * time.Second

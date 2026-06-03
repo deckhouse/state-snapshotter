@@ -115,7 +115,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		}
 		return ctrl.Result{}, nil
 	}
-	if err := patchDemoVirtualDiskSnapshotGraphReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "leaf snapshot has no child graph"); err != nil {
+	if err := patchDemoVirtualDiskSnapshotDomainReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "leaf snapshot has no children"); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -211,7 +211,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	return ctrl.Result{}, nil
 }
 
-func patchDemoVirtualDiskSnapshotGraphReady(
+func patchDemoVirtualDiskSnapshotDomainReady(
 	ctx context.Context,
 	c client.Client,
 	diskKey types.NamespacedName,
@@ -224,13 +224,13 @@ func patchDemoVirtualDiskSnapshotGraphReady(
 		if err := c.Get(ctx, diskKey, o); err != nil {
 			return err
 		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionGraphReady); rc != nil &&
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionDomainReady); rc != nil &&
 			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
 			return nil
 		}
 		base := o.DeepCopy()
 		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionGraphReady,
+			Type:               snapshot.ConditionDomainReady,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,

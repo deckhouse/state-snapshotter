@@ -177,7 +177,7 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			// Note: We don't actually create BackupClass in fake client to avoid CRD issues
 			// Instead, we'll mock the Get call
 
-			// PRECONDITION: Create Snapshot with HandledByCustomSnapshotController=True
+			// PRECONDITION: Create Snapshot with DomainReady=True
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-snapshot")
@@ -187,18 +187,6 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			snapshotObj.Object["spec"] = map[string]interface{}{
 				"backupClassName": "test-backup-class",
 			}
-
-			// Set HandledByCustomSnapshotController condition
-			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
-			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
 
 			// Track created SnapshotContent to verify its spec
 			var createdContent *unstructured.Unstructured
@@ -225,6 +213,20 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			Expect(wrapperClient.Create(ctx, snapshotObj)).To(Succeed())
 			// Status update may fail with fake client, but that's ok - we're only interested in Create call
 			_ = wrapperClient.Status().Update(ctx, snapshotObj)
+
+			// Pass the generation-gated binder barrier at reconcile time: the mocked Get returns a copy
+			// of snapshotObj, so set DomainReady=True with observedGeneration == metadata.generation here
+			// (after Create, which may reset generation). The barrier must accept current-generation only.
+			snapshotObj.SetGeneration(2)
+			Expect(unstructured.SetNestedSlice(snapshotObj.Object, []interface{}{
+				map[string]interface{}{
+					"type":               snapshot.ConditionDomainReady,
+					"status":             string(metav1.ConditionTrue),
+					"reason":             snapshot.ReasonCompleted,
+					"message":            "domain planning complete",
+					"observedGeneration": int64(2),
+				},
+			}, "status", "conditions")).To(Succeed())
 
 			// ACTIONS: Trigger reconciliation
 			req := ctrl.Request{

@@ -25,7 +25,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -108,21 +107,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller
-			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
-
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
-
-			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
-			err = k8sClient.Status().Update(ctx, snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
+			// Simulate domain controller: publish DomainReady=True for the current generation.
+			setSnapshotDomainReadyCurrent(ctx, snapshotObj)
 
 			// Create controllers
 			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
@@ -170,7 +156,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 					return false
 				}
 
-				snapshotLike, err = snapshot.ExtractSnapshotLike(freshSnapshot)
+				snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 				if err != nil {
 					return false
 				}
@@ -301,19 +287,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller
-			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
-			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
-			err = k8sClient.Status().Update(ctx, snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
+			// Simulate domain controller: publish DomainReady=True for the current generation.
+			setSnapshotDomainReadyCurrent(ctx, snapshotObj)
 
 			// Create SnapshotContent manually with deterministic name (status.boundSnapshotContentName is missing)
 			contentName := snapshot.GenerateSnapshotContentName(snapshotObj.GetName(), string(snapshotObj.GetUID()))

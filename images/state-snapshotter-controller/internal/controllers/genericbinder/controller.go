@@ -119,6 +119,13 @@ func NewGenericSnapshotBinderController(
 	}, nil
 }
 
+// isDomainPlanningComplete reports whether the domain controller finished planning for the snapshot's
+// current generation: DomainReady=True with observedGeneration == metadata.generation.
+func isDomainPlanningComplete(snapshotLike snapshot.SnapshotLike) bool {
+	c := snapshot.GetCondition(snapshotLike, snapshot.ConditionDomainReady)
+	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == snapshotLike.GetGeneration()
+}
+
 // Reconcile processes a Snapshot resource
 //
 // Step 1 (Skeleton): Only create path - no deletion, no propagation
@@ -179,10 +186,10 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Step 1: Barrier - Wait for HandledByCustomSnapshotController
-	// Custom snapshot controller must process the snapshot first (create MCR/VCR, set conditions).
-	if !snapshot.HasCondition(snapshotLike, snapshot.ConditionHandledByCustomSnapshotController, metav1.ConditionTrue) {
-		logger.V(1).Info("Waiting for custom snapshot controller to handle snapshot")
+	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot
+	// refs, create MCR/VCR) for the current generation.
+	if !isDomainPlanningComplete(snapshotLike) {
+		logger.V(1).Info("Waiting for domain controller to finish planning (DomainReady)")
 		return ctrl.Result{}, nil
 	}
 
@@ -734,7 +741,7 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 ) error {
 	logger := log.FromContext(ctx)
 	contentName := snapshotLike.GetStatusContentName()
-	snapshot.SetCondition(snapshotLike, snapshot.ConditionGraphReady, metav1.ConditionTrue, snapshot.ReasonCompleted, "generic snapshot has no child graph")
+	snapshot.SetCondition(snapshotLike, snapshot.ConditionDomainReady, metav1.ConditionTrue, snapshot.ReasonCompleted, "generic snapshot has no children")
 	if contentName == "" {
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}

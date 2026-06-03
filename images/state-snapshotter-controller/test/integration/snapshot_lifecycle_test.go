@@ -81,7 +81,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		//
 		// PRECONDITION:
 		// - Snapshot created by user
-		// - Snapshot has HandledByCustomSnapshotController=True (simulated)
+		// - Snapshot has DomainReady=True (simulated)
 		//
 		// ACTIONS:
 		// 1. GenericSnapshotBinderController.Reconcile creates SnapshotContent
@@ -141,21 +141,8 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: set HandledByCustomSnapshotController=True
-			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
-
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
-
-			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
-			err = k8sClient.Status().Update(ctx, snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
+			// Simulate domain controller: publish DomainReady=True for the current generation.
+			setSnapshotDomainReadyCurrent(ctx, snapshotObj)
 
 			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			// Use Eventually to wait for the controller to process the snapshot
@@ -183,7 +170,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 					return false
 				}
 
-				snapshotLike, err = snapshot.ExtractSnapshotLike(snapshotObj)
+				snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 				if err != nil {
 					return false
 				}
@@ -265,11 +252,58 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// INVARIANT: No orphans - root ObjectKeeper follows Snapshot and owns retained root SnapshotContent.
 		})
 
+		It("should NOT create SnapshotContent while DomainReady is stale (observedGeneration < generation)", func() {
+			// The generic binder barrier is generation-gated: a DomainReady=True whose observedGeneration
+			// is behind metadata.generation must not let the binder proceed (no SnapshotContent created).
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			snapshotObj := &unstructured.Unstructured{}
+			snapshotObj.SetGroupVersionKind(snapshotGVK)
+			snapshotObj.SetName("test-lifecycle-stale-domainready")
+			snapshotObj.SetNamespace("default")
+			snapshotObj.Object["spec"] = map[string]interface{}{
+				"backupClassName": "test-backup-class",
+			}
+			Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
+			Expect(snapshotObj.GetGeneration()).To(BeNumerically(">", int64(0)))
+
+			// Publish DomainReady=True but for an older generation than the live spec.
+			setSnapshotDomainReady(ctx, snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration()-1)
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}}
+
+			// Reconcile must be a no-op at the barrier: no boundSnapshotContentName, no SnapshotContent.
+			Consistently(func() string {
+				_, reconcileErr := snapshotCtrl.Reconcile(ctx, req)
+				Expect(reconcileErr).NotTo(HaveOccurred())
+				fresh := &unstructured.Unstructured{}
+				fresh.SetGroupVersionKind(snapshotGVK)
+				if getErr := k8sClient.Get(ctx, req.NamespacedName, fresh); getErr != nil {
+					return "get-failed"
+				}
+				like, extractErr := snapshot.ExtractSnapshotLike(fresh)
+				if extractErr != nil {
+					return "extract-failed"
+				}
+				return like.GetStatusContentName()
+			}, "2s", "200ms").Should(BeEmpty(), "stale DomainReady must not pass the generic binder barrier")
+		})
+
 		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {
 			// INTERFACE: GenericSnapshotBinderController.checkConsistencyAndSetReady
 			//
 			// PRECONDITION:
-			// - Snapshot created with HandledByCustomSnapshotController=True
+			// - Snapshot created with DomainReady=True
 			// - SnapshotContent created and has finalizer
 			//
 			// ACTIONS:
@@ -326,20 +360,8 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: set HandledByCustomSnapshotController=True
-			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
-
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
-			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
-			err = k8sClient.Status().Update(ctx, snapshotObj)
-			Expect(err).NotTo(HaveOccurred())
+			// Simulate domain controller: publish DomainReady=True for the current generation.
+			setSnapshotDomainReadyCurrent(ctx, snapshotObj)
 
 			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			req := ctrl.Request{
@@ -462,7 +484,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			}, freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshotLike, err = snapshot.ExtractSnapshotLike(freshSnapshot)
+			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
 			readyCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)

@@ -193,9 +193,9 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected Ready=True Completed, got %#v", ready)
 	}
-	graphReady := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionGraphReady)
-	if graphReady == nil || graphReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected GraphReady=True for leaf disk snapshot, got %#v", graphReady)
+	domainReady := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionDomainReady)
+	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
+		t.Fatalf("expected DomainReady=True for leaf disk snapshot, got %#v", domainReady)
 	}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
 		t.Fatalf("get content after ready: %v", err)
@@ -421,9 +421,9 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}}) {
 		t.Fatalf("unexpected VM child refs: %#v", vmSnap.Status.ChildrenSnapshotRefs)
 	}
-	graphReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionGraphReady)
-	if graphReady == nil || graphReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected VM GraphReady=True after writing child refs, got %#v", graphReady)
+	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionDomainReady)
+	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
+		t.Fatalf("expected VM DomainReady=True after writing child refs, got %#v", domainReady)
 	}
 	ready := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonChildSnapshotPending {
@@ -568,9 +568,9 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 	}
 	assertDemoSnapshotOwnedBy(t, child, conflictingOwner.APIVersion, conflictingOwner.Kind, conflictingOwner.Name)
 	vmSnap := getDemoVMSnapshot(t, cl)
-	graphReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionGraphReady)
-	if graphReady == nil || graphReady.Status != metav1.ConditionFalse || graphReady.Reason != snapshot.ReasonCreateChildFailed {
-		t.Fatalf("expected GraphReady=False CreateChildFailed, got %#v", graphReady)
+	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionDomainReady)
+	if domainReady == nil || domainReady.Status != metav1.ConditionFalse || domainReady.Reason != snapshot.ReasonCreateChildFailed {
+		t.Fatalf("expected DomainReady=False CreateChildFailed, got %#v", domainReady)
 	}
 }
 

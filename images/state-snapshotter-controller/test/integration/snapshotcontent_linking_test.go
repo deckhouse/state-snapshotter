@@ -100,17 +100,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 		}).WithTimeout(120 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 		Expect(mcpName).NotTo(BeEmpty())
 
-		// Simulate domain controller status on Snapshot
-		snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
-		Expect(err).NotTo(HaveOccurred())
-		snapshot.SetCondition(
-			snapshotLike,
-			snapshot.ConditionHandledByCustomSnapshotController,
-			metav1.ConditionTrue,
-			"Processed",
-			"Domain controller processed snapshot",
-		)
-		snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())
+		// Simulate domain controller: publish DomainReady=True for the current generation.
+		setDomainReadyCondition(snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration())
 		status, _ := snapshotObj.Object["status"].(map[string]interface{})
 		if status == nil {
 			status = map[string]interface{}{}

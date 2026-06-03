@@ -148,8 +148,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 		// 1. Create TestSnapshot (root, no parent)
 		// 2. Wait for TestSnapshotContent creation (via GenericSnapshotBinderController)
 		// 3. Wait for finalizer addition (via SnapshotContentController)
-		// 4. Simulate domain controller: set HandledByCustomSnapshotController=True on SnapshotContent
-		// 5. Simulate readiness: set Ready=True on SnapshotContent
+		// 4. Simulate readiness: set Ready=True on SnapshotContent
 		// 6. Wait for Ready=True on Snapshot
 		//
 		// EXPECTED BEHAVIOR:
@@ -190,7 +189,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Step 1.5: Simulate domain controller: set HandledByCustomSnapshotController=True on Snapshot
+			// Step 1.5: Simulate domain controller: publish DomainReady=True (current generation) on Snapshot.
 			// GenericSnapshotBinderController waits for this condition before creating SnapshotContent
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
@@ -203,13 +202,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
+			injectDomainReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
 			conditions := snapshotLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshSnapshot, conditions)
 			err = k8sClient.Status().Update(ctx, freshSnapshot)
@@ -261,8 +254,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				return snapshot.HasFinalizer(freshContent, snapshot.FinalizerParentProtect)
 			}, "10s", "100ms").Should(BeTrue(), "Finalizer should be added to SnapshotContent")
 
-			// Step 4: Simulate domain controller: set HandledByCustomSnapshotController=True
-			// This simulates custom snapshot controller accepting the SnapshotContent
+			// Step 4: Simulate readiness on the SnapshotContent (custom controller completing its work).
 			freshContent := &unstructured.Unstructured{}
 			freshContent.SetGroupVersionKind(contentGVK)
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
@@ -273,13 +265,6 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			contentLike, err := snapshot.ExtractSnapshotContentLike(freshContent)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Accepted",
-				"Domain controller accepted",
-			)
 			contentConditions := contentLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshContent, contentConditions)
 			err = k8sClient.Status().Update(ctx, freshContent)
@@ -450,7 +435,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Set HandledByCustomSnapshotController=True
+			// Publish DomainReady=True (current generation)
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
@@ -462,13 +447,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
+			injectDomainReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
 			conditions := snapshotLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshSnapshot, conditions)
 			err = k8sClient.Status().Update(ctx, freshSnapshot)
@@ -529,13 +508,6 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			contentLike, err := snapshot.ExtractSnapshotContentLike(freshContent)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Accepted",
-				"Domain controller accepted",
-			)
 			snapshot.SetCondition(
 				contentLike,
 				snapshot.ConditionReady,
@@ -736,7 +708,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred(), "Should be able to create Snapshot (no RBAC errors)")
 
-			// Step 2: Set HandledByCustomSnapshotController=True
+			// Step 2: publish DomainReady=True (current generation)
 			// This verifies controller can update status subresource
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
@@ -749,13 +721,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Domain controller processed snapshot",
-			)
+			injectDomainReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
 			conditions := snapshotLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshSnapshot, conditions)
 			err = k8sClient.Status().Update(ctx, freshSnapshot)
@@ -828,13 +794,6 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			contentLike, err := snapshot.ExtractSnapshotContentLike(freshContent)
 			Expect(err).NotTo(HaveOccurred())
 
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionHandledByCustomSnapshotController,
-				metav1.ConditionTrue,
-				"Accepted",
-				"Domain controller accepted",
-			)
 			snapshot.SetCondition(
 				contentLike,
 				snapshot.ConditionReady,
