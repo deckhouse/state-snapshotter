@@ -149,6 +149,7 @@ func AddCustomSnapshotDefinitionControllerToManager(
 	if err != nil {
 		return err
 	}
+	rec.RESTMapper = mgr.GetRESTMapper()
 	rec.UnifiedRuntimeSync = unifiedRuntimeSync
 	rec.GraphRegistryRefresh = graphRegistryRefresh
 	return rec.SetupWithManager(mgr)

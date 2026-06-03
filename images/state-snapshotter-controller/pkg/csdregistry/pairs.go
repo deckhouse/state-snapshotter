@@ -19,8 +19,9 @@ package csdregistry
 import (
 	"context"
 	"fmt"
+	"sort"
 
-	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -30,10 +31,12 @@ import (
 
 // EligibleResourceSnapshotMapping is one CSD row resolved to concrete resource, snapshot, and content types.
 type EligibleResourceSnapshotMapping struct {
-	ResourceGVR     schema.GroupVersionResource
-	ResourceGVK     schema.GroupVersionKind
+	SourceGVR       schema.GroupVersionResource
+	SourceGVK       schema.GroupVersionKind
+	SnapshotGVR     schema.GroupVersionResource
 	SnapshotGVK     schema.GroupVersionKind
 	SnapshotContent schema.GroupVersionKind
+	Priority        int32
 }
 
 // EligibleUnifiedGVKPairs returns UnifiedGVKPair entries from every snapshotResourceMapping row
@@ -52,11 +55,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 			continue
 		}
 		for _, entry := range d.Spec.SnapshotResourceMapping {
-			snapCRD, err := getCRD(ctx, c, entry.SnapshotCRDName)
-			if err != nil {
-				continue
-			}
-			snapGVK, err := gvkFromCRD(snapCRD)
+			_, snapGVK, err := resolveEntryGVKs(ctx, c, entry)
 			if err != nil {
 				continue
 			}
@@ -76,7 +75,7 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 
 // EligibleResourceSnapshotMappings returns CSD resource→snapshot mappings used by Snapshot
 // parent-owned graph construction. Invalid or cluster-scoped resource rows are skipped fail-closed.
-func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]EligibleResourceSnapshotMapping, error) {
+func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader, mapper meta.RESTMapper) ([]EligibleResourceSnapshotMapping, error) {
 	var list ssv1alpha1.CustomSnapshotDefinitionList
 	if err := c.List(ctx, &list); err != nil {
 		return nil, err
@@ -89,64 +88,63 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader) ([]E
 			continue
 		}
 		for _, entry := range d.Spec.SnapshotResourceMapping {
-			resourceCRD, err := getCRD(ctx, c, entry.ResourceCRDName)
-			if err != nil || resourceCRD.Spec.Scope != extv1.NamespaceScoped {
-				continue
-			}
-			snapCRD, err := getCRD(ctx, c, entry.SnapshotCRDName)
+			sourceGVK, snapshotGVK, err := resolveEntryGVKs(ctx, c, entry)
 			if err != nil {
 				continue
 			}
-			resourceGVK, err := gvkFromCRD(resourceCRD)
+			sourceMapping, err := mapper.RESTMapping(sourceGVK.GroupKind(), sourceGVK.Version)
+			if err != nil || sourceMapping.Scope.Name() != meta.RESTScopeNameNamespace {
+				continue
+			}
+			snapshotMapping, err := mapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version)
 			if err != nil {
 				continue
 			}
-			snapshotGVK, err := gvkFromCRD(snapCRD)
-			if err != nil {
-				continue
-			}
-			key := resourceGVK.String() + "=>" + snapshotGVK.String()
+			key := sourceGVK.String() + "=>" + snapshotGVK.String()
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
 			out = append(out, EligibleResourceSnapshotMapping{
-				ResourceGVR: schema.GroupVersionResource{
-					Group:    resourceGVK.Group,
-					Version:  resourceGVK.Version,
-					Resource: resourceCRD.Spec.Names.Plural,
-				},
-				ResourceGVK:     resourceGVK,
+				SourceGVR:       sourceMapping.Resource,
+				SourceGVK:       sourceGVK,
+				SnapshotGVR:     snapshotMapping.Resource,
 				SnapshotGVK:     snapshotGVK,
 				SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
+				Priority:        entry.Priority,
 			})
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
+		}
+		return out[i].SourceGVK.String() < out[j].SourceGVK.String()
+	})
 	return out, nil
 }
 
-func getCRD(ctx context.Context, c client.Reader, name string) (*extv1.CustomResourceDefinition, error) {
-	crd := &extv1.CustomResourceDefinition{}
-	if err := c.Get(ctx, client.ObjectKey{Name: name}, crd); err != nil {
-		return nil, err
+func resolveEntryGVKs(ctx context.Context, c client.Reader, entry ssv1alpha1.SnapshotResourceMappingEntry) (schema.GroupVersionKind, schema.GroupVersionKind, error) {
+	_ = ctx
+	_ = c
+	sourceGVK, err := gvkFromRef(entry.Source)
+	if err != nil {
+		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("source GVK: %w", err)
 	}
-	return crd, nil
+	snapshotGVK, err := gvkFromRef(entry.Snapshot)
+	if err != nil {
+		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("snapshot GVK: %w", err)
+	}
+	return sourceGVK, snapshotGVK, nil
 }
 
-func gvkFromCRD(crd *extv1.CustomResourceDefinition) (schema.GroupVersionKind, error) {
-	ver := ""
-	for i := range crd.Spec.Versions {
-		if crd.Spec.Versions[i].Storage {
-			ver = crd.Spec.Versions[i].Name
-			break
-		}
+func gvkFromRef(ref ssv1alpha1.SnapshotGVKRef) (schema.GroupVersionKind, error) {
+	if ref.APIVersion == "" || ref.Kind == "" {
+		return schema.GroupVersionKind{}, fmt.Errorf("source/snapshot apiVersion and kind are required")
 	}
-	if ver == "" {
-		return schema.GroupVersionKind{}, fmt.Errorf("CRD %q has no storage version", crd.Name)
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return schema.GroupVersionKind{}, err
 	}
-	return schema.GroupVersionKind{
-		Group:   crd.Spec.Group,
-		Version: ver,
-		Kind:    crd.Spec.Names.Kind,
-	}, nil
+	return gv.WithKind(ref.Kind), nil
 }

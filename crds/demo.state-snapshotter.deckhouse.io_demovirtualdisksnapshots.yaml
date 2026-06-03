@@ -44,8 +44,10 @@ spec:
               DemoVirtualDiskSnapshot.
             properties:
               sourceRef:
-                description: SourceRef identifies the DemoVirtualDisk captured by
-                  this snapshot.
+                description: |-
+                  SourceRef identifies the DemoVirtualDisk captured by this snapshot for manually-created
+                  demo snapshots. Root-planned snapshots carry generic source identity in annotation
+                  state-snapshotter.deckhouse.io/source-ref instead.
                 properties:
                   apiVersion:
                     minLength: 1
@@ -61,8 +63,6 @@ spec:
                 - kind
                 - name
                 type: object
-            required:
-            - sourceRef
             type: object
           status:
             description: DemoVirtualDiskSnapshotStatus defines the observed state

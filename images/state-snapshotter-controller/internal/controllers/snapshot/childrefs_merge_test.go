@@ -17,9 +17,19 @@ limitations under the License.
 package snapshot
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func childRef(name string) storagev1alpha1.SnapshotChildRef {
@@ -51,6 +61,467 @@ func TestMergeSnapshotChildRefs(t *testing.T) {
 	if len(overwrite) != 1 || overwrite[0].Name != "x" {
 		t.Fatalf("same-key merge: %+v", overwrite)
 	}
+}
+
+func TestPriorityLayerGraphReady(t *testing.T) {
+	ctx := context.Background()
+	readyChild := demoSnapshotChild("ready", []metav1.Condition{{
+		Type:               snapshotpkg.ConditionGraphReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             snapshotpkg.ReasonCompleted,
+		ObservedGeneration: 1,
+	}})
+	pendingChild := demoSnapshotChild("pending", nil)
+	failedChild := demoSnapshotChild("failed", []metav1.Condition{{
+		Type:               snapshotpkg.ConditionGraphReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             snapshotpkg.ReasonGraphPlanningFailed,
+		Message:            "child graph failed",
+		ObservedGeneration: 1,
+	}})
+
+	t.Run("all graph ready", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
+		ready, terminal, pending, err := r.priorityLayerGraphReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready")})
+		if err != nil || !ready || terminal != "" || len(pending) != 0 {
+			t.Fatalf("want ready with no terminal/pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
+		}
+	})
+
+	t.Run("pending blocks lower priority without terminal message", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(pendingChild).Build()}
+		ready, terminal, pending, err := r.priorityLayerGraphReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
+		if err != nil || ready || terminal != "" || len(pending) != 1 {
+			t.Fatalf("want pending with no terminal message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
+		}
+		if !strings.Contains(pending[0], "no GraphReady condition yet") {
+			t.Fatalf("pending descriptor should explain missing GraphReady, got %q", pending[0])
+		}
+	})
+
+	t.Run("graph ready true without observedGeneration stays pending", func(t *testing.T) {
+		child := demoSnapshotChildRawConditions("noobserved", 1, []map[string]interface{}{{
+			"type":   snapshotpkg.ConditionGraphReady,
+			"status": string(metav1.ConditionTrue),
+			"reason": snapshotpkg.ReasonCompleted,
+		}})
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
+		ready, terminal, pending, err := r.priorityLayerGraphReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("noobserved")})
+		if err != nil || ready || terminal != "" || len(pending) != 1 {
+			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
+		}
+		if !strings.Contains(pending[0], "without observedGeneration") {
+			t.Fatalf("pending descriptor should flag missing observedGeneration, got %q", pending[0])
+		}
+	})
+
+	t.Run("graph ready true with stale observedGeneration stays pending", func(t *testing.T) {
+		child := demoSnapshotChildRawConditions("stale", 3, []map[string]interface{}{{
+			"type":               snapshotpkg.ConditionGraphReady,
+			"status":             string(metav1.ConditionTrue),
+			"reason":             snapshotpkg.ReasonCompleted,
+			"observedGeneration": int64(2),
+		}})
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
+		ready, terminal, pending, err := r.priorityLayerGraphReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("stale")})
+		if err != nil || ready || terminal != "" || len(pending) != 1 {
+			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
+		}
+		if !strings.Contains(pending[0], "stale") {
+			t.Fatalf("pending descriptor should flag stale observedGeneration, got %q", pending[0])
+		}
+	})
+
+	t.Run("terminal graph failure returns message", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(failedChild).Build()}
+		ready, terminal, pending, err := r.priorityLayerGraphReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("failed")})
+		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed graph planning") {
+			t.Fatalf("want terminal failure message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
+		}
+	})
+
+	t.Run("ready-based terminal failure requires current observedGeneration", func(t *testing.T) {
+		staleTerminal := demoSnapshotChildReadyTerminal("ready-stale", 3, 2, "ListFailed")
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(staleTerminal).Build()}
+		ready, terminal, pending, err := r.priorityLayerGraphReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-stale")})
+		if err != nil || ready || terminal != "" || len(pending) != 1 {
+			t.Fatalf("stale terminal Ready must be pending, not terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
+		}
+
+		currentTerminal := demoSnapshotChildReadyTerminal("ready-current", 3, 3, "ListFailed")
+		r = &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(currentTerminal).Build()}
+		ready, terminal, pending, err = r.priorityLayerGraphReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-current")})
+		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed") {
+			t.Fatalf("current terminal Ready must be terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
+		}
+	})
+}
+
+// demoSnapshotChildReadyTerminal builds a bound child snapshot with a terminal Ready=False condition
+// (one of usecase.ChildSnapshotTerminalReadyReasons), so a test can exercise the Ready-based terminal
+// path of snapshotChildTerminalFailure with explicit generation vs observedGeneration.
+func demoSnapshotChildReadyTerminal(name string, generation, observedGeneration int64, reason string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "demo.test/v1",
+			"kind":       "DemoSnapshot",
+			"metadata": map[string]interface{}{
+				"name":       name,
+				"namespace":  "ns1",
+				"generation": generation,
+			},
+			"status": map[string]interface{}{
+				"boundSnapshotContentName": "content-" + name,
+				"conditions": []interface{}{
+					map[string]interface{}{
+						"type":               snapshotpkg.ConditionReady,
+						"status":             string(metav1.ConditionFalse),
+						"reason":             reason,
+						"message":            "terminal failure",
+						"observedGeneration": observedGeneration,
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestSnapshotCoverageCheckerUsesSourceAnnotationUID(t *testing.T) {
+	ctx := context.Background()
+	source := demoSourceObject("vm-1", "uid-a")
+	identity := controllercommon.SnapshotSourceIdentity{
+		APIVersion: "demo.test/v1",
+		Kind:       "DemoSource",
+		Namespace:  "ns1",
+		Name:       "vm-1",
+		UID:        "uid-a",
+	}
+	child := demoSnapshotChildWithSource("covered", identity)
+	checker := newSnapshotCoverageChecker(
+		fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build(),
+		"ns1",
+		[]storagev1alpha1.SnapshotChildRef{childRef("covered")},
+	)
+	covered, err := checker.IsCovered(ctx, source)
+	if err != nil {
+		t.Fatalf("IsCovered returned error: %v", err)
+	}
+	if !covered {
+		t.Fatalf("expected source UID uid-a to be covered")
+	}
+
+	recreated := demoSourceObject("vm-1", "uid-b")
+	covered, err = checker.IsCovered(ctx, recreated)
+	if err != nil {
+		t.Fatalf("IsCovered for recreated source returned error: %v", err)
+	}
+	if covered {
+		t.Fatalf("source recreated with same name and different UID must not be covered")
+	}
+}
+
+func TestSnapshotCoverageCheckerFailsClosedWithoutSourceAnnotation(t *testing.T) {
+	ctx := context.Background()
+	child := demoSnapshotChild("missing-annotation", nil)
+	checker := newSnapshotCoverageChecker(
+		fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build(),
+		"ns1",
+		[]storagev1alpha1.SnapshotChildRef{childRef("missing-annotation")},
+	)
+	_, err := checker.IsCovered(ctx, demoSourceObject("vm-1", "uid-a"))
+	if err == nil || !strings.Contains(err.Error(), controllercommon.AnnotationKeySourceRef) {
+		t.Fatalf("expected missing source annotation error, got %v", err)
+	}
+}
+
+// TestCoverageRootsForNextWaveExcludesParentStatus locks the fix at its source: the next-wave
+// coverage seed is derived ONLY from the refs planned in the current pass, never the parent's stale
+// status. The signature alone forbids passing status; the test also asserts the seed is a copy so a
+// later append (ObservePlannedSnapshot growing roots) cannot alias and mutate the planned slice.
+func TestCoverageRootsForNextWaveExcludesParentStatus(t *testing.T) {
+	planned := []storagev1alpha1.SnapshotChildRef{childRef("nss-child-vm")}
+	got := coverageRootsForNextWave(planned)
+	if len(got) != 1 || got[0].Name != "nss-child-vm" {
+		t.Fatalf("seed must echo planned refs, got %+v", got)
+	}
+	got = append(got, childRef("nss-child-extra"))
+	got[0].Name = "mutated"
+	if len(planned) != 1 || planned[0].Name != "nss-child-vm" {
+		t.Fatalf("seed must be an independent copy; planned mutated: %+v", planned)
+	}
+}
+
+// TestParentStatusSeedWouldSelfCoverStandalone is the minimal regression: seeding the coverage
+// checker with the parent's own generated standalone-disk ref makes that disk self-cover (the bug),
+// while the fixed next-wave seed never includes status refs and therefore does not skip it.
+func TestParentStatusSeedWouldSelfCoverStandalone(t *testing.T) {
+	ctx := context.Background()
+	diskStandaloneIdentity := demoSourceIdentity("disk-standalone", "uid-disk-standalone")
+	diskStandaloneSource := demoSourceObject("disk-standalone", "uid-disk-standalone")
+	diskStandaloneChild := demoSnapshotChildWithSource("nss-child-disk-standalone", diskStandaloneIdentity)
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(diskStandaloneChild).Build()
+
+	buggy := newSnapshotCoverageChecker(cl, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("nss-child-disk-standalone")})
+	covered, err := buggy.IsCovered(ctx, diskStandaloneSource)
+	if err != nil {
+		t.Fatalf("IsCovered (status-seeded): %v", err)
+	}
+	if !covered {
+		t.Fatalf("precondition: status-seeded checker must self-cover the standalone disk (this is the bug)")
+	}
+
+	fixed := newSnapshotCoverageChecker(cl, "ns1", coverageRootsForNextWave(nil))
+	covered, err = fixed.IsCovered(ctx, diskStandaloneSource)
+	if err != nil {
+		t.Fatalf("IsCovered (fixed seed): %v", err)
+	}
+	if covered {
+		t.Fatalf("fixed next-wave seed must not self-cover the standalone disk")
+	}
+}
+
+// TestRecomputeChildGraphKeepsLowerPriorityStandalone reconstructs a two-wave recompute
+// (VM priority 100 -> Disk priority 10) using the production coverage checker and merge, and proves
+// the deterministic idempotency invariant: on a repeated reconcile where the root status already
+// carries both generated refs, the lower-priority standalone disk ref survives, the disk-vm covered
+// by the VM subtree is not re-added (no duplicate), and the VM ref is kept.
+func TestRecomputeChildGraphKeepsLowerPriorityStandalone(t *testing.T) {
+	ctx := context.Background()
+
+	vmIdentity := demoSourceIdentity("vm", "uid-vm")
+	diskVMIdentity := demoSourceIdentity("disk-vm", "uid-disk-vm")
+	diskStandaloneIdentity := demoSourceIdentity("disk-standalone", "uid-disk-standalone")
+
+	diskVMSource := demoSourceObject("disk-vm", "uid-disk-vm")
+	diskStandaloneSource := demoSourceObject("disk-standalone", "uid-disk-standalone")
+
+	diskVMChildRef := childRef("nss-child-disk-vm")
+	vmChild := demoSnapshotChildWithSourceAndChildren("nss-child-vm", vmIdentity, diskVMChildRef)
+	diskVMChild := demoSnapshotChildWithSource("nss-child-disk-vm", diskVMIdentity)
+	diskStandaloneChild := demoSnapshotChildWithSource("nss-child-disk-standalone", diskStandaloneIdentity)
+
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).
+		WithObjects(vmChild, diskVMChild, diskStandaloneChild).Build()
+
+	// Wave 1 (VM, priority 100): the highest-priority wave seeds from nil, so the VM source is always
+	// re-planned and kept in the current pass.
+	vmRef := childRef("nss-child-vm")
+	desiredRefs := []storagev1alpha1.SnapshotChildRef{vmRef}
+
+	// Wave 2 (Disk, priority 10): coverage seeded ONLY from this pass (the fix). disk-vm is covered by
+	// the VM subtree; disk-standalone is not covered despite a stale status ref existing.
+	coverage := newSnapshotCoverageChecker(cl, "ns1", coverageRootsForNextWave(desiredRefs))
+
+	diskVMCovered, err := coverage.IsCovered(ctx, diskVMSource)
+	if err != nil {
+		t.Fatalf("IsCovered(disk-vm): %v", err)
+	}
+	if !diskVMCovered {
+		t.Fatalf("disk-vm must be covered by the VM subtree (no duplicate direct child expected)")
+	}
+	diskStandaloneCovered, err := coverage.IsCovered(ctx, diskStandaloneSource)
+	if err != nil {
+		t.Fatalf("IsCovered(disk-standalone): %v", err)
+	}
+	if diskStandaloneCovered {
+		t.Fatalf("disk-standalone must NOT be covered: a stale parent status ref must not self-cover it")
+	}
+
+	// disk-vm skipped (covered); disk-standalone re-planned this pass.
+	desiredRefs = append(desiredRefs, childRef("nss-child-disk-standalone"))
+
+	// Merge against the parent's previous status, which already carried both generated refs.
+	currentStatus := []storagev1alpha1.SnapshotChildRef{vmRef, childRef("nss-child-disk-standalone")}
+	merged := mergeSnapshotManagedChildRefs(currentStatus, desiredRefs)
+
+	if countSnapshotChildRefName(merged, "nss-child-vm") != 1 {
+		t.Fatalf("merged must keep exactly one VM ref: %+v", merged)
+	}
+	if countSnapshotChildRefName(merged, "nss-child-disk-standalone") != 1 {
+		t.Fatalf("merged must keep exactly one standalone disk ref (regression): %+v", merged)
+	}
+	if countSnapshotChildRefName(merged, "nss-child-disk-vm") != 0 {
+		t.Fatalf("merged must NOT add a duplicate direct ref for the VM-covered disk: %+v", merged)
+	}
+}
+
+func TestChildGraphCaptureGate(t *testing.T) {
+	t.Run("status changed requeues immediately (not RequeueAfter)", func(t *testing.T) {
+		res, block := childGraphCaptureGate(true, true)
+		if !block || !res.Requeue || res.RequeueAfter != 0 {
+			t.Fatalf("changed graph must block with immediate Requeue:true; got block=%v res=%+v", block, res)
+		}
+	})
+
+	t.Run("changed takes precedence over pending", func(t *testing.T) {
+		res, block := childGraphCaptureGate(true, false)
+		if !block || !res.Requeue || res.RequeueAfter != 0 {
+			t.Fatalf("changed graph must requeue immediately even when pending; got block=%v res=%+v", block, res)
+		}
+	})
+
+	t.Run("pending unchanged uses RequeueAfter polling fallback", func(t *testing.T) {
+		res, block := childGraphCaptureGate(false, false)
+		if !block {
+			t.Fatalf("pending graph must block capture")
+		}
+		if res.Requeue {
+			t.Fatalf("pending graph must not set Requeue:true (hot-loop); got %+v", res)
+		}
+		if res.RequeueAfter != snapshotChildGraphPollInterval {
+			t.Fatalf("pending graph RequeueAfter = %v, want poll interval %v", res.RequeueAfter, snapshotChildGraphPollInterval)
+		}
+	})
+
+	t.Run("ready unchanged graph proceeds to capture", func(t *testing.T) {
+		res, block := childGraphCaptureGate(false, true)
+		if block || res.Requeue || res.RequeueAfter != 0 {
+			t.Fatalf("ready unchanged graph must proceed; got block=%v res=%+v", block, res)
+		}
+	})
+}
+
+func TestSummarizePendingChildrenCapsMessage(t *testing.T) {
+	small := []string{"a", "b", "c"}
+	if got := summarizePendingChildren(small); !strings.HasPrefix(got, "pending children: ") || strings.Contains(got, "first") {
+		t.Fatalf("small list must not be capped, got %q", got)
+	}
+
+	large := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		large = append(large, fmt.Sprintf("child-%d", i))
+	}
+	got := summarizePendingChildren(large)
+	if !strings.Contains(got, "first 20 of 50") {
+		t.Fatalf("large list must report cap and total, got %q", got)
+	}
+	if strings.Contains(got, "child-20") {
+		t.Fatalf("capped message must not include the 21st entry, got %q", got)
+	}
+	if !strings.Contains(got, "child-19") {
+		t.Fatalf("capped message must include the first 20 entries, got %q", got)
+	}
+}
+
+func demoSnapshotChild(name string, conditions []metav1.Condition) *unstructured.Unstructured {
+	child := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "demo.test/v1",
+			"kind":       "DemoSnapshot",
+			"metadata": map[string]interface{}{
+				"name":       name,
+				"namespace":  "ns1",
+				"generation": int64(1),
+			},
+		},
+	}
+	if len(conditions) > 0 {
+		status := map[string]interface{}{}
+		items := make([]interface{}, 0, len(conditions))
+		for _, condition := range conditions {
+			items = append(items, map[string]interface{}{
+				"type":               condition.Type,
+				"status":             string(condition.Status),
+				"reason":             condition.Reason,
+				"message":            condition.Message,
+				"observedGeneration": condition.ObservedGeneration,
+			})
+		}
+		status["conditions"] = items
+		child.Object["status"] = status
+	}
+	return child
+}
+
+// demoSnapshotChildRawConditions builds a child snapshot with explicit raw condition maps, so a test
+// can omit observedGeneration entirely (to exercise the strict GraphReady contract) or set a stale
+// value, which the typed helper cannot express.
+func demoSnapshotChildRawConditions(name string, generation int64, conditions []map[string]interface{}) *unstructured.Unstructured {
+	items := make([]interface{}, 0, len(conditions))
+	for _, c := range conditions {
+		items = append(items, c)
+	}
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "demo.test/v1",
+			"kind":       "DemoSnapshot",
+			"metadata": map[string]interface{}{
+				"name":       name,
+				"namespace":  "ns1",
+				"generation": generation,
+			},
+			"status": map[string]interface{}{
+				"conditions": items,
+			},
+		},
+	}
+}
+
+func demoSnapshotChildWithSource(name string, identity controllercommon.SnapshotSourceIdentity) *unstructured.Unstructured {
+	child := demoSnapshotChild(name, nil)
+	encoded, err := controllercommon.EncodeSnapshotSourceIdentity(identity)
+	if err != nil {
+		panic(err)
+	}
+	child.SetAnnotations(map[string]string{controllercommon.AnnotationKeySourceRef: encoded})
+	return child
+}
+
+// demoSnapshotChildWithSourceAndChildren builds a generated child snapshot carrying both its source
+// identity annotation and a status.childrenSnapshotRefs list, so coverage-recompute scenarios can
+// model a higher-priority subtree (e.g. VM snapshot owning the disk-vm snapshot).
+func demoSnapshotChildWithSourceAndChildren(name string, identity controllercommon.SnapshotSourceIdentity, childRefs ...storagev1alpha1.SnapshotChildRef) *unstructured.Unstructured {
+	child := demoSnapshotChildWithSource(name, identity)
+	if len(childRefs) == 0 {
+		return child
+	}
+	items := make([]interface{}, 0, len(childRefs))
+	for _, r := range childRefs {
+		items = append(items, map[string]interface{}{
+			"apiVersion": r.APIVersion,
+			"kind":       r.Kind,
+			"name":       r.Name,
+		})
+	}
+	if err := unstructured.SetNestedSlice(child.Object, items, "status", "childrenSnapshotRefs"); err != nil {
+		panic(err)
+	}
+	return child
+}
+
+func demoSourceIdentity(name, uid string) controllercommon.SnapshotSourceIdentity {
+	return controllercommon.SnapshotSourceIdentity{
+		APIVersion: "demo.test/v1",
+		Kind:       "DemoSource",
+		Namespace:  "ns1",
+		Name:       name,
+		UID:        uid,
+	}
+}
+
+func countSnapshotChildRefName(refs []storagev1alpha1.SnapshotChildRef, name string) int {
+	n := 0
+	for _, r := range refs {
+		if r.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
+func demoSourceObject(name, uid string) *unstructured.Unstructured {
+	source := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "demo.test/v1",
+			"kind":       "DemoSource",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": "ns1",
+				"uid":       uid,
+			},
+		},
+	}
+	return source
 }
 
 func TestRemoveSnapshotChildRefsByKeys(t *testing.T) {

@@ -86,11 +86,15 @@ metadata:
 spec:
   ownerModule: smoke-ssg
   snapshotResourceMapping:
-    - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
-      snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
+    - source:
+        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+        kind: DemoVirtualDisk
+      snapshot:
+        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+        kind: DemoVirtualDiskSnapshot
       priority: 0
 EOF
-# (CRD names must match metadata.name in crds/demo.state-snapshotter.deckhouse.io_*.yaml)
+# (GVK refs must match the installed demo resource and snapshot CRDs.)
 
 log "== waiting for Accepted on CSD =="
 ACC=""

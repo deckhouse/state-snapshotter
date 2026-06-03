@@ -75,10 +75,27 @@ const (
 
 // Reasons for GraphReady=False.
 const (
-	ReasonChildGraphPending   = "ChildGraphPending"
-	ReasonListFailed          = "ListFailed"
-	ReasonCreateChildFailed   = "CreateChildFailed"
-	ReasonGraphPlanningFailed = "GraphPlanningFailed"
+	ReasonChildGraphPending = "ChildGraphPending"
+	ReasonListFailed        = "ListFailed"
+	ReasonCreateChildFailed = "CreateChildFailed"
+	// ReasonPriorityLayerPending is set on a parent Snapshot while a higher-priority child snapshot
+	// layer has not yet published a current GraphReady=True. This is NOT a failure and has no deadline:
+	// a child snapshot (e.g. a large-storage capture) may legitimately stay pending for hours. The
+	// parent holds GraphReady=False/PriorityLayerPending (with the pending children listed in the
+	// message) and never starts capture until the layer is ready. Waiting is woken primarily by child
+	// watches; a RequeueAfter polling fallback covers a missed watch event.
+	ReasonPriorityLayerPending = "PriorityLayerPending"
+	ReasonGraphPlanningFailed  = "GraphPlanningFailed"
+	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
+	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
+	// DSC RBACReady); the planner must not treat a Forbidden source list as "no objects" (that would
+	// silently drop coverage). Instead it degrades the graph (GraphReady=False) and requeues so coverage
+	// resumes once RBAC is granted, without spamming hard reconcile errors.
+	ReasonSourceListForbidden = "SourceListForbidden"
+	// ReasonSourceIdentityAnnotationMismatch is set when an existing child snapshot's generic source
+	// identity annotation drifted from the value the planner manages. The planner fails closed (no
+	// silent rewrite) so external corruption/races surface instead of being masked.
+	ReasonSourceIdentityAnnotationMismatch = "SourceIdentityAnnotationMismatch"
 )
 
 // Reasons for Ready=True

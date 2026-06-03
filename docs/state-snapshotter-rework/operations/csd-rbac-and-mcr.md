@@ -6,11 +6,11 @@
 
 ## CustomSnapshotDefinition (CSD)
 
-**Назначение:** модуль (через свой hook/оператор) создаёт кластерный объект CSD и указывает **маппинг** имён CRD: какой source resource обслуживает какой `*Snapshot` тип. В v0 CSD mapping — это `resourceCRDName -> snapshotCRDName`; content side всегда общий cluster-scoped `storage.deckhouse.io/SnapshotContent`.
+**Назначение:** модуль (через свой hook/оператор) создаёт кластерный объект CSD и указывает **маппинг GVK**: какой source resource обслуживает какой `*Snapshot` тип. CSD mapping использует только `source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind` и `priority`; content side всегда общий cluster-scoped `storage.deckhouse.io/SnapshotContent`.
 
 **Что делает reconciler state-snapshotter**
 
-- Разрешает имена CRD в API (`CustomResourceDefinition`), проверяет инварианты (в т.ч. cluster-scoped content).
+- Разрешает GVK через RESTMapper и проверяет инварианты.
 - Выставляет **`Accepted`** (и причины `InvalidSpec`, `KindConflict` и т.д.).
 - Вычисляет производный **`Ready`** по правилам ADR (например, нет конфликта, RBAC готов с точки зрения статуса).
 - После успешного полного reconcile всех CSD вызывает **`unifiedruntime.Syncer.Sync`**: merge bootstrap ∪ eligible CSD → resolved → additive watches.
@@ -21,7 +21,7 @@
 
 Итог: **CSD — контракт регистрации типов и статуса приёмки**; **RBAC для снимков в API — ответственность модуля / внешнего RBAC controller**, сигнал о готовности приходит через `RBACReady`.
 
-**Content model:** `spec.snapshotResourceMapping[]` contains only `resourceCRDName`, `snapshotCRDName`, and optional `priority`. The state-snapshotter common layer owns `SnapshotContent` lifecycle, ObjectKeeper/Retain, MCP/data refs, and content-tree aggregation.
+**Content model:** `spec.snapshotResourceMapping[]` contains only `source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind`, and `priority`. The state-snapshotter common layer owns `SnapshotContent` lifecycle, ObjectKeeper/Retain, MCP/data refs, and content-tree aggregation.
 
 ---
 

@@ -58,15 +58,27 @@ type CustomSnapshotDefinitionSpec struct {
 }
 
 // +k8s:deepcopy-gen=true
-// SnapshotResourceMappingEntry maps resource CRDs to snapshot CRDs (plural.resource.group form).
+// SnapshotResourceMappingEntry maps source resource GVKs to snapshot GVKs.
 type SnapshotResourceMappingEntry struct {
+	// Source is the GVK of the domain resource being snapshotted.
 	// +kubebuilder:validation:Required
-	ResourceCRDName string `json:"resourceCRDName"`
+	Source SnapshotGVKRef `json:"source"`
+	// Snapshot is the GVK of the snapshot resource that materializes Source.
 	// +kubebuilder:validation:Required
-	SnapshotCRDName string `json:"snapshotCRDName"`
-	// Priority is used when ordering orchestration across mappings (lower runs first).
+	Snapshot SnapshotGVKRef `json:"snapshot"`
+	// Priority orders universal traversal across mappings. Higher values run first.
 	// +kubebuilder:validation:Minimum=0
 	Priority int32 `json:"priority,omitempty"`
+}
+
+// +k8s:deepcopy-gen=true
+type SnapshotGVKRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
 }
 
 // +k8s:deepcopy-gen=true

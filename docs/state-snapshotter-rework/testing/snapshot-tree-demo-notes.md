@@ -58,6 +58,17 @@ SnapshotContent.status.dataRefs[]  →  artifact = VolumeSnapshotContent
 - PVC из архива **не применяется** напрямую (ссылается на старый PV/namespace/status);
 - PVC после restore создаёт executor, не пользовательский манифест.
 
+English demo note:
+
+- Pods may be present in the archived manifests, but namespace restore excludes
+  them on purpose. The bind Pod is runtime consumer state, not durable
+  application intent; recreate consumers after the restored PVC is Bound if
+  needed.
+- The restored PVC can become Bound without a Pod even when the StorageClass is
+  `WaitForFirstConsumer`: VRR/executor creates the PV first and creates the PVC
+  with `spec.volumeName`, so Kubernetes performs static pre-binding instead of
+  dynamic provisioning.
+
 ## Что отдаёт агрегированный API (проверено по коду + замером 2026-06-01)
 
 `AggregatedNamespaceManifests` отдаёт объекты так, как они лежат в архиве

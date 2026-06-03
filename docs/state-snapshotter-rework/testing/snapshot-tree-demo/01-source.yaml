@@ -1,9 +1,8 @@
 # Source objects for the snapshot-tree demo.
 # Namespace + ConfigMap (manifest leg) + PVC & bind Pod (data leg) +
-# demo-domain inventory roots: one VM and one standalone Disk.
-#
-# The owned Disk (disk-vm, ownerRef -> vm-1) is applied separately in the
-# runbook because it needs vm-1 UID at apply time.
+# demo-domain inventory: one VM, one disk linked to the VM, and one standalone Disk.
+# The VM->Disk relationship is explicit in spec.virtualMachineName; ownerReferences
+# are lifecycle metadata only and are not used as snapshot-tree topology.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -53,6 +52,14 @@ metadata:
   name: vm-1
   namespace: snapshot-demo-tree
 spec: {}
+---
+apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+kind: DemoVirtualDisk
+metadata:
+  name: disk-vm
+  namespace: snapshot-demo-tree
+spec:
+  virtualMachineName: vm-1
 ---
 apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
 kind: DemoVirtualDisk

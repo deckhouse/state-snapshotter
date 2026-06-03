@@ -67,20 +67,6 @@ func demoVirtualDiskSnapshotContentName(namespace, name string) string {
 	return "demodiskc-" + hex.EncodeToString(sum[:10])
 }
 
-func validateDiskSourceRef(s *demov1alpha1.DemoVirtualDiskSnapshot) (string, error) {
-	ref := s.Spec.SourceRef
-	if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
-		return "", fmt.Errorf("spec.sourceRef.apiVersion must be %q", demov1alpha1.SchemeGroupVersion.String())
-	}
-	if ref.Kind != controllercommon.KindDemoVirtualDisk {
-		return "", fmt.Errorf("spec.sourceRef.kind must be %q", controllercommon.KindDemoVirtualDisk)
-	}
-	if ref.Name == "" {
-		return "", fmt.Errorf("spec.sourceRef.name is required")
-	}
-	return ref.Name, nil
-}
-
 func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("demoVirtualDiskSnapshot", req.NamespacedName)
 	ctx = log.IntoContext(ctx, logger)
@@ -99,19 +85,32 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
-	sourceName, err := validateDiskSourceRef(s)
-	if err != nil {
-		if patchErr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "InvalidSourceRef", err.Error()); patchErr != nil {
+	resolution := resolveDemoSnapshotSource(s.GetAnnotations(), s.Namespace, controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
+	if resolution.Reason != "" {
+		if patchErr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, resolution.Reason, resolution.Message); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, nil
 	}
+	if resolution.DeriveRef != nil {
+		if err := patchDemoVirtualDiskSnapshotSourceRef(ctx, r.Client, req.NamespacedName, *resolution.DeriveRef); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+	sourceName, sourceUID := resolution.Name, resolution.UID
 	source := &demov1alpha1.DemoVirtualDisk{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, "SourceNotFound", fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
+		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, demoReasonSourceNotFound, fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if sourceUID != "" && string(source.UID) != sourceUID {
+		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, demoReasonSourceUIDMismatch, fmt.Sprintf("%s %q UID mismatch", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -265,6 +264,32 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskSnapshotLifecycle(ctx 
 	}
 	ref := controllercommon.RootObjectKeeperOwnerReference(ok)
 	return &ref, ctrl.Result{}, nil
+}
+
+// patchDemoVirtualDiskSnapshotSourceRef one-shot fills spec.sourceRef derived from the
+// generic source identity annotation. spec.sourceRef is demo/manual API-compat only;
+// generic tree coverage uses AnnotationKeySourceRef, never this field.
+func patchDemoVirtualDiskSnapshotSourceRef(
+	ctx context.Context,
+	c client.Client,
+	diskKey types.NamespacedName,
+	ref demov1alpha1.SnapshotSourceRef,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		if err := c.Get(ctx, diskKey, o); err != nil {
+			return err
+		}
+		if o.Spec.SourceRef == ref {
+			return nil
+		}
+		if !demoSourceRefEmpty(o.Spec.SourceRef) {
+			return nil
+		}
+		base := o.DeepCopy()
+		o.Spec.SourceRef = ref
+		return c.Patch(ctx, o, client.MergeFrom(base))
+	})
 }
 
 func patchDemoVirtualDiskSnapshotBound(

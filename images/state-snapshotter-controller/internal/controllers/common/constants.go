@@ -36,5 +36,6 @@ const (
 
 // Annotation key constants.
 const (
-	AnnotationKeyTTL = "state-snapshotter.deckhouse.io/ttl"
+	AnnotationKeyTTL       = "state-snapshotter.deckhouse.io/ttl"
+	AnnotationKeySourceRef = "state-snapshotter.deckhouse.io/source-ref"
 )

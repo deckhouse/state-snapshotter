@@ -47,6 +47,11 @@ Smoke graph artifacts are written under `ARTIFACT_DIR`:
 ARTIFACT_DIR="${ARTIFACT_DIR:-/tmp/state-snapshotter-smoke-artifacts-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$ARTIFACT_DIR"
 echo "Artifacts: $ARTIFACT_DIR"
+
+# Graph chunk-verification reads cluster-scoped manifestcheckpointcontentchunks under the
+# controller SA (admin-kubeconfig has no direct chunk payload access — by design). Set once
+# so every snapshot-graph.sh invocation below inherits it (CLI --chunk-as still overrides).
+export SNAPSHOT_GRAPH_CHUNK_AS="${SNAPSHOT_GRAPH_CHUNK_AS:-system:serviceaccount:${CTRL_NS:-d8-state-snapshotter}:controller}"
 ```
 
 The graph helper requires `kubectl` and `jq`. If Graphviz `dot` is installed it also renders SVG; otherwise it keeps `.dot`, `.objects.yaml`, and `.summary.txt` and prints a warning without failing smoke.
@@ -572,8 +577,13 @@ metadata:
 spec:
   ownerModule: smoke
   snapshotResourceMapping:
-  - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
-    snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
+  - source:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualDisk
+    snapshot:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualDiskSnapshot
+    priority: 10
 EOF
 ```
 
@@ -674,10 +684,20 @@ metadata:
 spec:
   ownerModule: smoke
   snapshotResourceMapping:
-  - resourceCRDName: demovirtualmachines.demo.state-snapshotter.deckhouse.io
-    snapshotCRDName: demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io
-  - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
-    snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
+  - source:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualMachine
+    snapshot:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualMachineSnapshot
+    priority: 100
+  - source:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualDisk
+    snapshot:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualDiskSnapshot
+    priority: 10
 EOF
 ```
 

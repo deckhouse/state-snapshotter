@@ -256,15 +256,15 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	graphChanged, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
+	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
 	if err != nil {
 		if patchErr := r.patchSnapshotGraphReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, err
 	}
-	if graphChanged {
-		return ctrl.Result{Requeue: true}, nil
+	if res, block := childGraphCaptureGate(graphChanged, graphReady); block {
+		return res, nil
 	}
 	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.snapshotReader(), nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
 	if err != nil {
@@ -274,6 +274,29 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
+}
+
+// snapshotChildGraphPollInterval is the polling fallback cadence used while a priority layer is
+// pending GraphReady. It is NOT a deadline: child snapshots may stay pending for hours. Child watches
+// are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does not
+// stall if a child-kind notification is dropped.
+const snapshotChildGraphPollInterval = 30 * time.Second
+
+// childGraphCaptureGate decides how reconcile proceeds after child-graph planning and reports whether
+// capture must be blocked (block=true means return the result, do not capture):
+//   - graphChanged: planner just wrote status; requeue immediately so the fresh status is re-read.
+//     This is cheap (also woken by the self-watch) and avoids a 30s delay on an ordinary status update.
+//   - !graphReady: a priority layer is still pending; requeue via RequeueAfter polling fallback. This
+//     is intentionally unbounded — a child snapshot may stay pending for hours — and never a deadline.
+//   - otherwise: do not block; proceed to capture.
+func childGraphCaptureGate(graphChanged, graphReady bool) (ctrl.Result, bool) {
+	if graphChanged {
+		return ctrl.Result{Requeue: true}, true
+	}
+	if !graphReady {
+		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, true
+	}
+	return ctrl.Result{}, false
 }
 
 func (r *SnapshotReconciler) finishReconcileWithExistingContent(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, expectedName string) (ctrl.Result, error) {

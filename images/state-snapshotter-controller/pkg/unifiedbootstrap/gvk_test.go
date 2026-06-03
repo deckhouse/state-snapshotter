@@ -42,8 +42,9 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 	pairs := []UnifiedGVKPair{
 		{Snapshot: snap, SnapshotContent: content},
 		{
-			Snapshot:        schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"},
+			// Snapshot side intentionally not registered in the mapper, so this pair must be dropped.
+			Snapshot:        schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
+			SnapshotContent: content,
 		},
 	}
 
@@ -85,28 +86,35 @@ func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T)
 	}
 }
 
-func TestFilterGenericSnapshotGVKPairs_skipsDemoVirtualDiskAndVMSnapshots(t *testing.T) {
+func TestFilterGenericSnapshotGVKPairs_skipsDedicatedKinds(t *testing.T) {
+	// Snapshot (root) and the demo kinds have dedicated reconcilers, so the
+	// generic binder must not watch them. Only a non-dedicated kind survives.
+	genericSnap := schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"}
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"},
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		genericSnap,
 	}
 	commonContent := CommonSnapshotContentGVK()
 	contentGVKs := []schema.GroupVersionKind{
 		commonContent,
 		commonContent,
 		commonContent,
+		commonContent,
 	}
 	sOut, cOut := FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
-	if len(sOut) != 1 || sOut[0].Kind != "Snapshot" || len(cOut) != 1 || cOut[0].Kind != "SnapshotContent" {
+	if len(sOut) != 1 || sOut[0] != genericSnap || len(cOut) != 1 || cOut[0].Kind != "SnapshotContent" {
 		t.Fatalf("got snaps=%v contents=%v", sOut, cOut)
 	}
 }
 
 func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing.T) {
+	// Root Snapshot is dedicated (SnapshotReconciler), so its content side must be
+	// dropped; only the non-dedicated kind's content survives.
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
 	}
 	contentGVKs := []schema.GroupVersionKind{
 		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},

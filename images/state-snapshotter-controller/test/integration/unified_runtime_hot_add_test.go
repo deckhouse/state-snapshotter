@@ -89,8 +89,14 @@ var _ = Describe("Integration: unified runtime hot-add (CSD → Sync)", Serial, 
 				OwnerModule: "integration-hot-add",
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "registrationtestsnapshots.test.deckhouse.io",
-						SnapshotCRDName: "registrationtestsnapshots.test.deckhouse.io",
+						Source: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "RegistrationTestSnapshot",
+						},
+						Snapshot: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "RegistrationTestSnapshot",
+						},
 					},
 				},
 			},

@@ -20,8 +20,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	stderrors "errors"
 	"fmt"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"sort"
 	"strings"
 
@@ -35,6 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -43,61 +45,140 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
-) (bool, error) {
-	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader())
+) (bool, bool, error) {
+	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if len(mappings) == 0 {
 		changed, err := r.patchSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, nil)
-		return changed, err
+		return changed, err == nil, err
 	}
 
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
-	for _, mapping := range mappings {
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(mapping.ResourceGVK)
-		list.SetKind(mapping.ResourceGVK.Kind + "List")
-		resources, err := r.Dynamic.Resource(mapping.ResourceGVR).Namespace(nsSnap.Namespace).List(ctx, metav1.ListOptions{})
+	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
+	for layerStart := 0; layerStart < len(mappings); {
+		priority := mappings[layerStart].Priority
+		layerEnd := layerStart + 1
+		for layerEnd < len(mappings) && mappings[layerEnd].Priority == priority {
+			layerEnd++
+		}
+		var layerRefs []storagev1alpha1.SnapshotChildRef
+		for _, mapping := range mappings[layerStart:layerEnd] {
+			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
+			if err != nil {
+				var mismatch *sourceIdentityAnnotationMismatchError
+				if stderrors.As(err, &mismatch) {
+					sortSnapshotChildRefs(desiredRefs)
+					changed, perr := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonSourceIdentityAnnotationMismatch, mismatch.Error())
+					return changed, false, perr
+				}
+				var forbidden *sourceListForbiddenError
+				if stderrors.As(err, &forbidden) {
+					sortSnapshotChildRefs(desiredRefs)
+					changed, perr := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonSourceListForbidden, forbidden.Error())
+					return changed, false, perr
+				}
+				return false, false, err
+			}
+			layerRefs = append(layerRefs, refs...)
+		}
+		desiredRefs = append(desiredRefs, layerRefs...)
+		ready, terminalMessage, pending, err := r.priorityLayerGraphReady(ctx, nsSnap.Namespace, layerRefs)
 		if err != nil {
-			if errors.IsNotFound(err) || errors.IsForbidden(err) {
-				continue
-			}
-			return false, err
+			return false, false, err
 		}
-		list.Items = resources.Items
-		for i := range list.Items {
-			resource := &list.Items[i]
-			if len(resource.GetOwnerReferences()) > 0 {
-				// Parent-owned graph starts only from top-level domain resources.
-				// Owned resources are covered by their owner domain subtree when that owner is registered,
-				// and skipped fail-closed when the owner domain is not registered.
-				continue
-			}
-			childName := snapshotChildSnapshotName(nsSnap.Name, mapping.ResourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName())
-			if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, mapping.ResourceGVK, resource.GetName()); err != nil {
-				return false, err
-			}
-			desiredRefs = append(desiredRefs, storagev1alpha1.SnapshotChildRef{
-				APIVersion: mapping.SnapshotGVK.GroupVersion().String(),
-				Kind:       mapping.SnapshotGVK.Kind,
-				Name:       childName,
-			})
+		if terminalMessage != "" {
+			sortSnapshotChildRefs(desiredRefs)
+			changed, err := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, terminalMessage)
+			return changed, false, err
 		}
+		if !ready {
+			// Unbounded by design: a child snapshot (e.g. large-storage capture) may stay pending for
+			// hours. Hold GraphReady=False/PriorityLayerPending listing the pending children for
+			// diagnosability; never fail by duration. Capture stays gated until the layer is ready.
+			sortSnapshotChildRefs(desiredRefs)
+			message := fmt.Sprintf("waiting for priority %d child snapshots to publish current GraphReady=True; %s", priority, summarizePendingChildren(pending))
+			changed, err := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonPriorityLayerPending, message)
+			return changed, false, err
+		}
+		coverage = newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
+		layerStart = layerEnd
 	}
 	sortSnapshotChildRefs(desiredRefs)
 
 	statusChanged, err := r.patchSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	_ = content
-	return statusChanged, nil
+	return statusChanged, true, nil
 }
 
-func snapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName string) string {
-	sum := sha256.Sum256([]byte(parentName + "|" + resourceGVK + "|" + snapshotGVK + "|" + resourceName))
+func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	mapping csdregistry.EligibleResourceSnapshotMapping,
+	coverage snapshotCoverageChecker,
+) ([]storagev1alpha1.SnapshotChildRef, error) {
+	var refs []storagev1alpha1.SnapshotChildRef
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(mapping.SourceGVK)
+	list.SetKind(mapping.SourceGVK.Kind + "List")
+	resources, err := r.Dynamic.Resource(mapping.SourceGVR).Namespace(nsSnap.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		// NotFound: the mapped source kind is not (yet) served by the API; legitimately empty for now.
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		// Forbidden is RBAC-driven (granted externally via DSC RBACReady). Treating it as "no objects"
+		// would silently drop coverage, so degrade the graph instead of returning empty (fail-closed).
+		if errors.IsForbidden(err) {
+			return nil, &sourceListForbiddenError{msg: fmt.Sprintf("list source %s: %v", mapping.SourceGVK.String(), err)}
+		}
+		return nil, err
+	}
+	list.Items = resources.Items
+	sort.Slice(list.Items, func(i, j int) bool {
+		a, b := list.Items[i], list.Items[j]
+		if a.GetNamespace() != b.GetNamespace() {
+			return a.GetNamespace() < b.GetNamespace()
+		}
+		if a.GetName() != b.GetName() {
+			return a.GetName() < b.GetName()
+		}
+		return string(a.GetUID()) < string(b.GetUID())
+	})
+	for i := range list.Items {
+		resource := &list.Items[i]
+		covered, err := coverage.IsCovered(ctx, resource)
+		if err != nil {
+			return nil, err
+		}
+		if covered {
+			continue
+		}
+		childName := snapshotChildSnapshotName(nsSnap.Name, mapping.SourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName(), string(resource.GetUID()))
+		if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource); err != nil {
+			return nil, err
+		}
+		ref := storagev1alpha1.SnapshotChildRef{
+			APIVersion: mapping.SnapshotGVK.GroupVersion().String(),
+			Kind:       mapping.SnapshotGVK.Kind,
+			Name:       childName,
+		}
+		refs = append(refs, ref)
+		if err := coverage.ObservePlannedSnapshot(ctx, resource, ref, nil); err != nil {
+			return nil, err
+		}
+	}
+	sortSnapshotChildRefs(refs)
+	return refs, nil
+}
+
+func snapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName, resourceUID string) string {
+	sum := sha256.Sum256([]byte(parentName + "|" + resourceGVK + "|" + snapshotGVK + "|" + resourceName + "|" + resourceUID))
 	return "nss-child-" + hex.EncodeToString(sum[:10])
 }
 
@@ -106,9 +187,16 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 	nsSnap *storagev1alpha1.Snapshot,
 	name string,
 	gvk schema.GroupVersionKind,
-	resourceGVK schema.GroupVersionKind,
-	resourceName string,
+	source *unstructured.Unstructured,
 ) error {
+	sourceIdentity, err := controllercommon.SnapshotSourceIdentityFromObject(source)
+	if err != nil {
+		return fmt.Errorf("source identity for %s/%s: %w", source.GroupVersionKind().String(), source.GetName(), err)
+	}
+	sourceAnnotation, err := controllercommon.EncodeSnapshotSourceIdentity(sourceIdentity)
+	if err != nil {
+		return err
+	}
 	key := client.ObjectKey{Namespace: nsSnap.Namespace, Name: name}
 	child := &unstructured.Unstructured{}
 	child.SetGroupVersionKind(gvk)
@@ -123,12 +211,8 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 				"metadata": map[string]interface{}{
 					"name":      name,
 					"namespace": nsSnap.Namespace,
-				},
-				"spec": map[string]interface{}{
-					"sourceRef": map[string]interface{}{
-						"apiVersion": resourceGVK.GroupVersion().String(),
-						"kind":       resourceGVK.Kind,
-						"name":       resourceName,
+					"annotations": map[string]interface{}{
+						controllercommon.AnnotationKeySourceRef: sourceAnnotation,
 					},
 				},
 			},
@@ -145,13 +229,8 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 	if !controllercommon.OwnerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
 		changed = true
 	}
-	if child.Object["spec"] == nil {
-		child.Object["spec"] = map[string]interface{}{}
-		changed = true
-	}
-	spec, _ := child.Object["spec"].(map[string]interface{})
-	if ensureSourceRefSpec(spec, resourceGVK, resourceName) {
-		changed = true
+	if err := ensureSourceIdentityAnnotation(child, sourceIdentity, sourceAnnotation); err != nil {
+		return fmt.Errorf("existing child snapshot %s/%s: %w", gvk.String(), name, err)
 	}
 	if changed {
 		return r.Client.Patch(ctx, child, client.MergeFrom(base))
@@ -159,24 +238,316 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 	return nil
 }
 
-func ensureSourceRefSpec(spec map[string]interface{}, resourceGVK schema.GroupVersionKind, resourceName string) bool {
-	want := map[string]interface{}{
-		"apiVersion": resourceGVK.GroupVersion().String(),
-		"kind":       resourceGVK.Kind,
-		"name":       resourceName,
+// sourceIdentityAnnotationMismatchError signals that an existing child snapshot's source identity
+// annotation drifted from the planner-managed value. It is fail-closed (no self-heal): the planner
+// surfaces a terminal GraphReady=False/SourceIdentityAnnotationMismatch condition instead of an
+// endlessly requeued error or a silent rewrite that could mask external corruption/races.
+type sourceIdentityAnnotationMismatchError struct {
+	msg string
+}
+
+func (e *sourceIdentityAnnotationMismatchError) Error() string { return e.msg }
+
+// sourceListForbiddenError signals that listing a mapped source kind was rejected with Forbidden.
+// RBAC for domain/custom sources is granted externally (DSC RBACReady), so the planner degrades the
+// graph (GraphReady=False/SourceListForbidden) and requeues instead of treating Forbidden as an empty
+// result (which would silently drop coverage) or as a hard reconcile error (noisy log spam while
+// waiting for RBAC to be granted).
+type sourceListForbiddenError struct {
+	msg string
+}
+
+func (e *sourceListForbiddenError) Error() string { return e.msg }
+
+func ensureSourceIdentityAnnotation(snapshot *unstructured.Unstructured, want controllercommon.SnapshotSourceIdentity, wantAnnotation string) error {
+	got, err := controllercommon.DecodeSnapshotSourceIdentityAnnotation(snapshot)
+	if err != nil {
+		return &sourceIdentityAnnotationMismatchError{msg: fmt.Sprintf("%s: %v", controllercommon.AnnotationKeySourceRef, err)}
 	}
-	got, _ := spec["sourceRef"].(map[string]interface{})
-	if got != nil && got["apiVersion"] == want["apiVersion"] && got["kind"] == want["kind"] && got["name"] == want["name"] {
-		return false
+	if got == want {
+		return nil
 	}
-	spec["sourceRef"] = want
-	return true
+	return &sourceIdentityAnnotationMismatchError{msg: fmt.Sprintf("%s must remain %s", controllercommon.AnnotationKeySourceRef, wantAnnotation)}
+}
+
+type snapshotCoverageChecker interface {
+	IsCovered(ctx context.Context, obj *unstructured.Unstructured) (bool, error)
+	ObservePlannedSnapshot(ctx context.Context, source *unstructured.Unstructured, snapshotRef storagev1alpha1.SnapshotChildRef, contentRef *storagev1alpha1.SnapshotContentChildRef) error
+}
+
+type refBasedSnapshotCoverageChecker struct {
+	reader    client.Reader
+	namespace string
+	seen      map[string]struct{}
+	covered   map[string]struct{}
+	roots     []storagev1alpha1.SnapshotChildRef
+}
+
+func newSnapshotCoverageChecker(reader client.Reader, namespace string, roots []storagev1alpha1.SnapshotChildRef) snapshotCoverageChecker {
+	return &refBasedSnapshotCoverageChecker{
+		reader:    reader,
+		namespace: namespace,
+		seen:      make(map[string]struct{}),
+		covered:   make(map[string]struct{}),
+		roots:     append([]storagev1alpha1.SnapshotChildRef(nil), roots...),
+	}
+}
+
+func (c *refBasedSnapshotCoverageChecker) IsCovered(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
+	if err := c.refresh(ctx); err != nil {
+		return false, err
+	}
+	identity, err := controllercommon.SnapshotSourceIdentityFromObject(obj)
+	if err != nil {
+		return false, err
+	}
+	_, ok := c.covered[coverageObjectKey(identity)]
+	return ok, nil
+}
+
+func (c *refBasedSnapshotCoverageChecker) ObservePlannedSnapshot(_ context.Context, source *unstructured.Unstructured, snapshotRef storagev1alpha1.SnapshotChildRef, _ *storagev1alpha1.SnapshotContentChildRef) error {
+	identity, err := controllercommon.SnapshotSourceIdentityFromObject(source)
+	if err != nil {
+		return err
+	}
+	c.covered[coverageObjectKey(identity)] = struct{}{}
+	c.roots = append(c.roots, snapshotRef)
+	return nil
+}
+
+func (c *refBasedSnapshotCoverageChecker) refresh(ctx context.Context) error {
+	for _, ref := range c.roots {
+		if err := c.visitSnapshotRef(ctx, ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *refBasedSnapshotCoverageChecker) visitSnapshotRef(ctx context.Context, ref storagev1alpha1.SnapshotChildRef) error {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return err
+	}
+	gvk := gv.WithKind(ref.Kind)
+	refKey := gvk.String() + "|" + c.namespace + "|" + ref.Name
+	if _, ok := c.seen[refKey]; ok {
+		return nil
+	}
+	c.seen[refKey] = struct{}{}
+	child := &unstructured.Unstructured{}
+	child.SetGroupVersionKind(gvk)
+	if err := c.reader.Get(ctx, client.ObjectKey{Namespace: c.namespace, Name: ref.Name}, child); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if source, err := controllercommon.DecodeSnapshotSourceIdentityAnnotation(child); err != nil {
+		return err
+	} else {
+		c.covered[coverageObjectKey(source)] = struct{}{}
+	}
+	children, _, err := unstructured.NestedSlice(child.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return err
+	}
+	for _, raw := range children {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		childRef := storagev1alpha1.SnapshotChildRef{
+			APIVersion: fmt.Sprint(m["apiVersion"]),
+			Kind:       fmt.Sprint(m["kind"]),
+			Name:       fmt.Sprint(m["name"]),
+		}
+		if childRef.APIVersion == "" || childRef.Kind == "" || childRef.Name == "" {
+			continue
+		}
+		if err := c.visitSnapshotRef(ctx, childRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func coverageObjectKey(identity controllercommon.SnapshotSourceIdentity) string {
+	return identity.APIVersion + "|" + identity.Kind + "|" + identity.Namespace + "|" + identity.Name + "|" + identity.UID
+}
+
+// priorityLayerGraphReady reports whether every child snapshot in a priority layer has published a
+// current GraphReady=True (observedGeneration == metadata.generation; Ready=True does NOT substitute
+// GraphReady=True). Returns:
+//   - ready: all children are GraphReady=True for their current generation;
+//   - terminalMessage: non-empty only when a child surfaced a terminal failure condition (the only
+//     thing that turns the layer into GraphReady=False/GraphPlanningFailed); duration never does;
+//   - pending: human-readable descriptors of the children not yet ready (for the PriorityLayerPending
+//     message). Waiting on these is unbounded by design.
+func (r *SnapshotReconciler) priorityLayerGraphReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, terminalMessage string, pending []string, err error) {
+	for _, ref := range refs {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err != nil {
+			return false, "", nil, err
+		}
+		gvk := gv.WithKind(ref.Kind)
+		child := &unstructured.Unstructured{}
+		child.SetGroupVersionKind(gvk)
+		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, child); err != nil {
+			if errors.IsNotFound(err) {
+				pending = append(pending, fmt.Sprintf("%s/%s/%s (not created yet)", gvk.String(), namespace, ref.Name))
+				continue
+			}
+			return false, "", nil, err
+		}
+		if failed, message := snapshotChildTerminalFailure(child, gvk, namespace, ref.Name); failed {
+			return false, message, nil, nil
+		}
+		conditions, _, err := unstructured.NestedSlice(child.Object, "status", "conditions")
+		if err != nil {
+			return false, "", nil, err
+		}
+		if !conditionSliceHasCurrentTrue(conditions, snapshotpkg.ConditionGraphReady, child.GetGeneration()) {
+			pending = append(pending, describePendingChildGraphReady(conditions, gvk, namespace, ref.Name, child.GetGeneration()))
+		}
+	}
+	if len(pending) > 0 {
+		return false, "", pending, nil
+	}
+	return true, "", nil, nil
+}
+
+// maxPendingChildrenInMessage caps how many pending child descriptors are embedded in the
+// PriorityLayerPending condition message. A namespace may map a large number of source objects; without
+// a cap the condition message (and its status patch) could grow unboundedly and the apiserver may
+// reject an oversized status update. The full count is always reported.
+const maxPendingChildrenInMessage = 20
+
+// summarizePendingChildren renders the pending-children part of the PriorityLayerPending message,
+// truncating to maxPendingChildrenInMessage while still reporting the total count.
+func summarizePendingChildren(pending []string) string {
+	if len(pending) <= maxPendingChildrenInMessage {
+		return "pending children: " + strings.Join(pending, ", ")
+	}
+	return fmt.Sprintf("pending children (first %d of %d): %s", maxPendingChildrenInMessage, len(pending), strings.Join(pending[:maxPendingChildrenInMessage], ", "))
+}
+
+// describePendingChildGraphReady renders a compact, diagnosable descriptor for a child whose
+// GraphReady is not yet current: it reports the observed GraphReady status/reason, distinguishes a
+// missing condition from a stale observedGeneration, so the parent's PriorityLayerPending message
+// makes an hours-long wait explainable rather than silent.
+func describePendingChildGraphReady(conditions []interface{}, gvk schema.GroupVersionKind, namespace, name string, generation int64) string {
+	for _, raw := range conditions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] != snapshotpkg.ConditionGraphReady {
+			continue
+		}
+		status, _ := m["status"].(string)
+		reason, _ := m["reason"].(string)
+		observed, hasObserved := conditionObservedGeneration(m)
+		switch {
+		case status == string(metav1.ConditionTrue) && !hasObserved:
+			return fmt.Sprintf("%s/%s/%s (GraphReady=True without observedGeneration; want %d)", gvk.String(), namespace, name, generation)
+		case status == string(metav1.ConditionTrue) && observed != generation:
+			return fmt.Sprintf("%s/%s/%s (GraphReady=True observedGeneration=%d, stale; want %d)", gvk.String(), namespace, name, observed, generation)
+		default:
+			return fmt.Sprintf("%s/%s/%s (GraphReady=%s/%s)", gvk.String(), namespace, name, status, reason)
+		}
+	}
+	return fmt.Sprintf("%s/%s/%s (no GraphReady condition yet)", gvk.String(), namespace, name)
+}
+
+// conditionObservedGeneration extracts a condition's observedGeneration (int64/float64) and whether
+// the field was present. A missing observedGeneration is treated as "not current" by the strict
+// GraphReady contract.
+func conditionObservedGeneration(m map[string]interface{}) (int64, bool) {
+	switch observed := m["observedGeneration"].(type) {
+	case int64:
+		return observed, true
+	case float64:
+		return int64(observed), true
+	default:
+		return 0, false
+	}
+}
+
+func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.GroupVersionKind, namespace, name string) (bool, string) {
+	conditions, _, err := unstructured.NestedSlice(child.Object, "status", "conditions")
+	if err == nil && conditionSliceHasCurrentFalseReason(conditions, snapshotpkg.ConditionGraphReady, snapshotpkg.ReasonGraphPlanningFailed, child.GetGeneration()) {
+		return true, fmt.Sprintf("child snapshot %s/%s/%s failed graph planning", gvk.String(), namespace, name)
+	}
+	class, message := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, name)
+	if class == usecase.SnapshotChildReadyClassFailed && readyConditionIsCurrentTerminal(child) {
+		return true, message
+	}
+	return false, ""
+}
+
+// readyConditionIsCurrentTerminal reports whether the child's Ready condition is authoritative for its
+// current generation (observedGeneration == metadata.generation). The Ready-based terminal classifier
+// (usecase.ClassifyGenericChildSnapshotReady) does not check observedGeneration, so without this guard
+// a stale Ready=False/<terminal reason> from an older spec generation could trip a false terminal
+// failure in the wave gate. Mirrors the strict GraphReady contract: a terminal state counts only when
+// the child has confirmed it for the current generation.
+func readyConditionIsCurrentTerminal(child *unstructured.Unstructured) bool {
+	rc := usecase.CurrentReadyCondition(child)
+	return rc != nil && rc.ObservedGeneration == child.GetGeneration()
+}
+
+func conditionSliceHasCurrentTrue(conditions []interface{}, typ string, generation int64) bool {
+	for _, raw := range conditions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] != typ || m["status"] != string(metav1.ConditionTrue) {
+			continue
+		}
+		// Strict contract: GraphReady=True counts only with observedGeneration == metadata.generation.
+		// A missing or stale observedGeneration means the child has not confirmed the current spec, so
+		// the layer stays pending (never silently treated as ready).
+		observed, ok := conditionObservedGeneration(m)
+		return ok && observed == generation
+	}
+	return false
+}
+
+func conditionSliceHasCurrentFalseReason(conditions []interface{}, typ, reason string, generation int64) bool {
+	for _, raw := range conditions {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] != typ || m["status"] != string(metav1.ConditionFalse) || m["reason"] != reason {
+			continue
+		}
+		// Strict contract: a terminal GraphReady=False is only current with observedGeneration ==
+		// metadata.generation. A stale/missing observedGeneration is treated as not-yet-current
+		// (pending), so a child must re-confirm failure for the current spec generation.
+		observed, ok := conditionObservedGeneration(m)
+		return ok && observed == generation
+	}
+	return false
 }
 
 func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
 	ctx context.Context,
 	parent types.NamespacedName,
 	desired []storagev1alpha1.SnapshotChildRef,
+) (bool, error) {
+	return r.patchSnapshotChildrenRefsCondition(ctx, parent, desired, metav1.ConditionTrue, snapshotpkg.ReasonCompleted, "child graph planned")
+}
+
+func (r *SnapshotReconciler) patchSnapshotChildrenRefsCondition(
+	ctx context.Context,
+	parent types.NamespacedName,
+	desired []storagev1alpha1.SnapshotChildRef,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
 ) (bool, error) {
 	changed := false
 	var effective []storagev1alpha1.SnapshotChildRef
@@ -188,8 +559,9 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
 		effective = mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
 		graphReady := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionGraphReady)
 		graphReadyCurrent := graphReady != nil &&
-			graphReady.Status == metav1.ConditionTrue &&
-			graphReady.Reason == snapshotpkg.ReasonCompleted &&
+			graphReady.Status == status &&
+			graphReady.Reason == reason &&
+			graphReady.Message == message &&
 			graphReady.ObservedGeneration == cur.Generation
 		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && graphReadyCurrent {
 			return nil
@@ -198,9 +570,9 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
 		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionGraphReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             snapshotpkg.ReasonCompleted,
-			Message:            "child graph planned",
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
 			ObservedGeneration: cur.Generation,
 		})
 		changed = true
@@ -257,6 +629,21 @@ func mergeSnapshotManagedChildRefs(current, desired []storagev1alpha1.SnapshotCh
 
 func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 	return strings.HasPrefix(ref.Name, "nss-child-")
+}
+
+// coverageRootsForNextWave returns the snapshot refs used to seed the coverage checker for the next
+// (lower) priority wave during child-graph recompute. It intentionally returns ONLY the refs
+// planned/confirmed in the current recompute pass and NEVER the parent's own
+// status.childrenSnapshotRefs.
+//
+// Seeding from parent status is the self-coverage idempotency bug: a generated lower-priority child
+// carried in status would be visited by the coverage checker, which decodes its own source-ref
+// annotation and marks that source covered. The same source is then skipped this pass, omitted from
+// desiredRefs, and finally stripped by mergeSnapshotManagedChildRefs — so the standalone child ref
+// silently disappears from the root on every subsequent reconcile. Planning must be a full recompute:
+// coverage between waves flows only from higher-priority subtrees planned in this pass.
+func coverageRootsForNextWave(plannedThisPass []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
+	return append([]storagev1alpha1.SnapshotChildRef{}, plannedThisPass...)
 }
 
 func sortSnapshotChildRefs(refs []storagev1alpha1.SnapshotChildRef) {

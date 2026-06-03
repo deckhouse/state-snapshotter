@@ -62,8 +62,14 @@ var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Se
 				OwnerModule: "integration-nss-e6-status",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+						Source: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDisk",
+						},
+						Snapshot: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDiskSnapshot",
+						},
 					},
 				},
 			},

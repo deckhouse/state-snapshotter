@@ -80,8 +80,14 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 	registrationMapping := func() []storagev1alpha1.SnapshotResourceMappingEntry {
 		return []storagev1alpha1.SnapshotResourceMappingEntry{
 			{
-				ResourceCRDName: "registrationtestsnapshots.test.deckhouse.io",
-				SnapshotCRDName: "registrationtestsnapshots.test.deckhouse.io",
+				Source: storagev1alpha1.SnapshotGVKRef{
+					APIVersion: "test.deckhouse.io/v1alpha1",
+					Kind:       "RegistrationTestSnapshot",
+				},
+				Snapshot: storagev1alpha1.SnapshotGVKRef{
+					APIVersion: "test.deckhouse.io/v1alpha1",
+					Kind:       "RegistrationTestSnapshot",
+				},
 			},
 		}
 	}

@@ -51,12 +51,24 @@ var _ = Describe("Integration: CSD reconciler InvalidSpec", func() {
 				OwnerModule: "integration-test",
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "testsnapshots.test.deckhouse.io",
-						SnapshotCRDName: "testsnapshots.test.deckhouse.io",
+						Source: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "TestSnapshot",
+						},
+						Snapshot: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "TestSnapshot",
+						},
 					},
 					{
-						ResourceCRDName: "testsnapshots.test.deckhouse.io",
-						SnapshotCRDName: "testsnapshots.test.deckhouse.io",
+						Source: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "TestSnapshot",
+						},
+						Snapshot: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "TestSnapshot",
+						},
 					},
 				},
 			},

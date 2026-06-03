@@ -315,12 +315,10 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "disk-owned",
 				Namespace: "ns1",
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       controllercommon.KindDemoVirtualMachine,
-					Name:       "vm-a",
-					UID:        vmUID,
-				}},
+				UID:       "disk-owned-uid",
+			},
+			Spec: demov1alpha1.DemoVirtualDiskSpec{
+				VirtualMachineName: "vm-a",
 			},
 		},
 		&demov1alpha1.DemoVirtualDisk{
@@ -527,12 +525,10 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "disk-owned",
 				Namespace: "ns1",
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       controllercommon.KindDemoVirtualMachine,
-					Name:       "vm-a",
-					UID:        vmUID,
-				}},
+				UID:       "disk-owned-uid",
+			},
+			Spec: demov1alpha1.DemoVirtualDiskSpec{
+				VirtualMachineName: "vm-a",
 			},
 		},
 		&demov1alpha1.DemoVirtualDiskSnapshot{

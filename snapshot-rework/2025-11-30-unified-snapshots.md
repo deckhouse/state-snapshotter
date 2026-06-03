@@ -1,6 +1,7 @@
 ## Универсальный паттерн XxxxSnapshot / XxxxSnapshotContent
 
 > **Модуль `state-snapshotter`:** для кода и тестов см. [`docs/state-snapshotter-rework/spec/system-spec.md`](../docs/state-snapshotter-rework/spec/system-spec.md) и [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md).
+> **Transition note:** this historical draft contains old CSD examples with `resourceCRDName` / `snapshotCRDName`. The current implementable CSD contract is GVK-only (`source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind`, `priority`) and is defined in `docs/state-snapshotter-rework/spec/system-spec.md`.
 
 ### 1. Контекст и проблема
 Мы наращиваем stateful‑функционал платформы, а для stateful всегда очень важна возможность бэкапа и восстановления. Этот ADR определяет стандарт реализации снимков (snapshot’ов) в платформе: создание снимков, удаление снимков,  восстановление из снимка, скачивание снимка (экспорт) и загрузка снимка (импорт).

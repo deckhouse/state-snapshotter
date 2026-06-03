@@ -99,8 +99,14 @@ var _ = Describe("Integration: CustomSnapshotDefinition API smoke", Serial, func
 				// RegistrationTest* CRDs: avoids hanging a global TestSnapshot watch (lifecycle tests use direct Reconcile on TestSnapshot).
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "registrationtestsnapshots.test.deckhouse.io",
-						SnapshotCRDName: "registrationtestsnapshots.test.deckhouse.io",
+						Source: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "RegistrationTestSnapshot",
+						},
+						Snapshot: storagev1alpha1.SnapshotGVKRef{
+							APIVersion: "test.deckhouse.io/v1alpha1",
+							Kind:       "RegistrationTestSnapshot",
+						},
 					},
 				},
 			},

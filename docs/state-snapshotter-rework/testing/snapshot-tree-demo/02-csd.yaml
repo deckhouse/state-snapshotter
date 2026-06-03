@@ -12,7 +12,17 @@ metadata:
 spec:
   ownerModule: live-demo
   snapshotResourceMapping:
-    - resourceCRDName: demovirtualmachines.demo.state-snapshotter.deckhouse.io
-      snapshotCRDName: demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io
-    - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
-      snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
+    - source:
+        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+        kind: DemoVirtualMachine
+      snapshot:
+        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+        kind: DemoVirtualMachineSnapshot
+      priority: 100
+    - source:
+        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+        kind: DemoVirtualDisk
+      snapshot:
+        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+        kind: DemoVirtualDiskSnapshot
+      priority: 10

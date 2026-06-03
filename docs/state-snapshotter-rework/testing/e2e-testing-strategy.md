@@ -45,7 +45,7 @@
 
 **Один сценарий** для **state-snapshotter + storage-foundation**: manifest capture (ConfigMap + MCP), retained lifecycle + aggregated read, bulk **VCR→VSC→`dataRefs[]`**, two-PVC subtree (child **pvc-a**, root residual **pvc-b**).
 
-**Артефакты:** `artifacts/<run-id>/{00-preflight … 09-cleanup}/` — YAML/JSON dumps, events, `summary.txt`, graph (`hack/snapshot-graph.sh`). Граф: volume-рёбра (`status.dataRefs[]`, `status.volumeCaptureRequestName` → VCR), **fail** если `MCP.status.chunks[]` не читаются (`get manifestcheckpointcontentchunks` в `templates/rbac-for-us.yaml` admin-kubeconfig); fixture: `hack/test-snapshot-graph-fixture.sh`, `hack/test-snapshot-graph-chunk-verify.sh`.
+**Артефакты:** `artifacts/<run-id>/{00-preflight … 09-cleanup}/` — YAML/JSON dumps, events, `summary.txt`, graph (`hack/snapshot-graph.sh`). Граф: volume-рёбра (`status.dataRefs[]`, `status.volumeCaptureRequestName` → VCR), **fail** если `MCP.status.chunks[]` не читаются (chunks читаются под controller SA через `hack/snapshot-graph.sh --chunk-as system:serviceaccount:d8-state-snapshotter:controller`; admin-kubeconfig прямого доступа к chunk payload не имеет — by design, см. `templates/rbac-for-us.yaml`); fixture: `hack/test-snapshot-graph-fixture.sh`, `hack/test-snapshot-graph-chunk-verify.sh`.
 
 **Storage:** **local-thin** only. **TODO:** Rook/Ceph not supported in this script yet.
 

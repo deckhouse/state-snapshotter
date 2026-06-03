@@ -319,8 +319,14 @@ func createEligibleDemoDiskCSD(ctx context.Context, name string) {
 			OwnerModule: "integration-csd-gated-demo",
 			SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 				{
-					ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-					SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+					Source: ssv1alpha1.SnapshotGVKRef{
+						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+						Kind:       "DemoVirtualDisk",
+					},
+					Snapshot: ssv1alpha1.SnapshotGVKRef{
+						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+						Kind:       "DemoVirtualDiskSnapshot",
+					},
 				},
 			},
 		},
@@ -355,12 +361,26 @@ func createEligibleDemoVMAndDiskCSD(ctx context.Context, name string) {
 			OwnerModule: "integration-csd-gated-demo",
 			SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 				{
-					ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-					SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+					Source: ssv1alpha1.SnapshotGVKRef{
+						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+						Kind:       "DemoVirtualDisk",
+					},
+					Snapshot: ssv1alpha1.SnapshotGVKRef{
+						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+						Kind:       "DemoVirtualDiskSnapshot",
+					},
+					Priority: 10,
 				},
 				{
-					ResourceCRDName: "demovirtualmachines.demo.state-snapshotter.deckhouse.io",
-					SnapshotCRDName: "demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io",
+					Source: ssv1alpha1.SnapshotGVKRef{
+						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+						Kind:       "DemoVirtualMachine",
+					},
+					Snapshot: ssv1alpha1.SnapshotGVKRef{
+						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+						Kind:       "DemoVirtualMachineSnapshot",
+					},
+					Priority: 100,
 				},
 			},
 		},

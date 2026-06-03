@@ -1,6 +1,7 @@
 ## DomainSpecificSnapshotController: регистрация snapshot-типов и Deckhouse-managed RBAC
 
 > **Модуль `state-snapshotter`:** нормативные выдержки и статусы реализации — [`docs/state-snapshotter-rework/spec/system-spec.md`](../docs/state-snapshotter-rework/spec/system-spec.md), [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md).
+> **Transition note:** examples below that mention `resourceCRDName` / `snapshotCRDName` are historical draft material. The current implementable CSD contract is GVK-only (`source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind`, `priority`) and is defined in `docs/state-snapshotter-rework/spec/system-spec.md`.
 
 **Статус:** draft  
 **Дата:** 2026-01-23  

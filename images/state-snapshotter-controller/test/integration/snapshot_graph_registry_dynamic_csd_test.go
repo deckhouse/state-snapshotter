@@ -31,6 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -66,8 +67,14 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 				OwnerModule: "integration-dynamic-graph",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+						Source: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDisk",
+						},
+						Snapshot: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDiskSnapshot",
+						},
 					},
 				},
 			},
@@ -131,8 +138,14 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 				OwnerModule: "integration-global-graph-delete",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+						Source: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDisk",
+						},
+						Snapshot: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDiskSnapshot",
+						},
 					},
 				},
 			},

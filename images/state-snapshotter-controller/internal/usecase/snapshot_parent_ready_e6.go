@@ -95,6 +95,14 @@ func readyConditionFromSnapshotUnstructured(u *unstructured.Unstructured) *metav
 	return nil
 }
 
+// CurrentReadyCondition returns the Ready status condition from a snapshot's unstructured status, or
+// nil if absent. It uses the same JSON-based read as classification so listType=map / typed JSON
+// shapes round-trip. Callers that need a strict (current-generation) terminal decision compare the
+// returned condition's ObservedGeneration to the object's metadata.generation themselves.
+func CurrentReadyCondition(u *unstructured.Unstructured) *metav1.Condition {
+	return readyConditionFromSnapshotUnstructured(u)
+}
+
 // ClassifyGenericChildSnapshotReady classifies one resolved child snapshot (unstructured + GVK) for parent E6 aggregation.
 func ClassifyGenericChildSnapshotReady(u *unstructured.Unstructured, gvk schema.GroupVersionKind, childNS, childName string) (SnapshotChildReadyClass, string) {
 	childKey := fmt.Sprintf("%s/%s/%s", gvk.String(), childNS, childName)

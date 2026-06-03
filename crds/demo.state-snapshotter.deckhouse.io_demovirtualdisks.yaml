@@ -40,6 +40,13 @@ spec:
           metadata:
             type: object
           spec:
+            properties:
+              virtualMachineName:
+                description: |-
+                  VirtualMachineName links this disk to a DemoVirtualMachine for snapshot-tree
+                  planning. Kubernetes ownerReferences are lifecycle metadata only and are
+                  not used as topology source-of-truth.
+                type: string
             type: object
           status:
             type: object

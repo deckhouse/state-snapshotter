@@ -223,12 +223,15 @@ bash hack/snapshot-graph.sh \
   --output-dir /tmp/snapshot-graph \
   --name live \
   --mode logical \
-  --title "Volume demo"
+  --title "Volume demo" \
+  --chunk-as system:serviceaccount:d8-state-snapshotter:controller
 
 open /tmp/snapshot-graph/live.logical.svg
 
 grep -E 'status\.dataRefs|VolumeSnapshotContent|status\.chunks' /tmp/snapshot-graph/live.logical.dot
 ```
+
+`--chunk-as` нужен потому, что `manifestcheckpointcontentchunks` (cluster-scoped, сырой payload) намеренно не выдаётся пользователям/admin-kubeconfig напрямую — chunk-проверка графа идёт через impersonation под controller SA, у которого уже есть `get` на chunks. RBAC контроллера и пользовательские роли при этом не меняются (требуется лишь право impersonate у текущего kubeconfig — у cluster-admin оно есть). Альтернатива без impersonation — отключить строгую проверку: `SNAPSHOT_GRAPH_REQUIRE_CHUNK_GET=false`.
 
 **Если уже создали Snapshot (трек C) и нужно только показать chunks** — выполните блок **6b** с вашими `BOUND`/`MCP`/`SNAP`, затем шаг **7**.
 
@@ -419,10 +422,20 @@ metadata:
 spec:
   ownerModule: live-demo
   snapshotResourceMapping:
-  - resourceCRDName: demovirtualmachines.demo.state-snapshotter.deckhouse.io
-    snapshotCRDName: demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io
-  - resourceCRDName: demovirtualdisks.demo.state-snapshotter.deckhouse.io
-    snapshotCRDName: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
+  - source:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualMachine
+    snapshot:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualMachineSnapshot
+    priority: 100
+  - source:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualDisk
+    snapshot:
+      apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+      kind: DemoVirtualDiskSnapshot
+    priority: 10
 EOF
 
 until kubectl get customsnapshotdefinition "${CSD_NAME}" -o json \
@@ -574,7 +587,8 @@ bash hack/snapshot-graph.sh \
   --output-dir /tmp/snapshot-graph-full \
   --name demo-full \
   --mode logical \
-  --title "Full demo: CSD + VM/Disk + volume"
+  --title "Full demo: CSD + VM/Disk + volume" \
+  --chunk-as system:serviceaccount:d8-state-snapshotter:controller
 
 open /tmp/snapshot-graph-full/demo-full.logical.svg
 

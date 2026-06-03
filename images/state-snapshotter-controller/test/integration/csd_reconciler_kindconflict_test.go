@@ -41,8 +41,14 @@ var _ = Describe("Integration: CSD reconciler KindConflict", func() {
 	sharedMapping := func() []storagev1alpha1.SnapshotResourceMappingEntry {
 		return []storagev1alpha1.SnapshotResourceMappingEntry{
 			{
-				ResourceCRDName: "testsnapshots.test.deckhouse.io",
-				SnapshotCRDName: "testsnapshots.test.deckhouse.io",
+				Source: storagev1alpha1.SnapshotGVKRef{
+					APIVersion: "test.deckhouse.io/v1alpha1",
+					Kind:       "TestSnapshot",
+				},
+				Snapshot: storagev1alpha1.SnapshotGVKRef{
+					APIVersion: "test.deckhouse.io/v1alpha1",
+					Kind:       "TestSnapshot",
+				},
 			},
 		}
 	}

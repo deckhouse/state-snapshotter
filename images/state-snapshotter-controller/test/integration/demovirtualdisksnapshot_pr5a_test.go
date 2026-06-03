@@ -60,8 +60,14 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 				OwnerModule: "integration-pr5a",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+						Source: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDisk",
+						},
+						Snapshot: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDiskSnapshot",
+						},
 					},
 				},
 			},

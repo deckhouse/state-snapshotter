@@ -114,12 +114,26 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 				OwnerModule: "integration-pr5b",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
-						ResourceCRDName: "demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-						SnapshotCRDName: "demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
+						Source: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDisk",
+						},
+						Snapshot: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualDiskSnapshot",
+						},
+						Priority: 10,
 					},
 					{
-						ResourceCRDName: "demovirtualmachines.demo.state-snapshotter.deckhouse.io",
-						SnapshotCRDName: "demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io",
+						Source: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualMachine",
+						},
+						Snapshot: ssv1alpha1.SnapshotGVKRef{
+							APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+							Kind:       "DemoVirtualMachineSnapshot",
+						},
+						Priority: 100,
 					},
 				},
 			},

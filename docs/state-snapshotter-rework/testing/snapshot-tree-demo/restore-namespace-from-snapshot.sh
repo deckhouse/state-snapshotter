@@ -11,6 +11,15 @@
 #         ->  external-provisioner executor  ->  CSI CreateVolume (snapshotHandle)
 #         ->  PV  ->  PVC (spec.volumeName)  ->  storage-foundation sets VRR Ready=True
 #
+#     Because the executor creates the PV first and creates the PVC with
+#     spec.volumeName, the restored PVC is statically pre-bound. It can become
+#     Bound without any consumer Pod, even for WaitForFirstConsumer StorageClasses.
+#
+#   - Pods may be present in the archived manifests, but this demo helper excludes
+#     them from restore on purpose. The bind Pod is runtime consumer state, not
+#     durable application intent; recreate consumers after the restored PVC is
+#     Bound if the demo/application needs them.
+#
 # Entry point is a user-facing Snapshot (not a cluster-scoped SnapshotContent):
 # the aggregated manifests endpoint and the data-ref tree are both reachable from it.
 #

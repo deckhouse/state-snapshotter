@@ -74,22 +74,46 @@ spec:
                 description: SnapshotResourceMapping declares source resource CRD
                   -> snapshot CRD mappings.
                 items:
-                  description: SnapshotResourceMappingEntry maps resource CRDs to
-                    snapshot CRDs (plural.resource.group form).
+                  description: SnapshotResourceMappingEntry maps source resource GVKs
+                    to snapshot GVKs.
                   properties:
                     priority:
-                      description: Priority is used when ordering orchestration across
-                        mappings (lower runs first).
+                      description: Priority orders universal traversal across mappings.
+                        Higher values run first.
                       format: int32
                       minimum: 0
                       type: integer
-                    resourceCRDName:
-                      type: string
-                    snapshotCRDName:
-                      type: string
+                    snapshot:
+                      description: Snapshot is the GVK of the snapshot resource that
+                        materializes Source.
+                      properties:
+                        apiVersion:
+                          minLength: 1
+                          type: string
+                        kind:
+                          minLength: 1
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      type: object
+                    source:
+                      description: Source is the GVK of the domain resource being
+                        snapshotted.
+                      properties:
+                        apiVersion:
+                          minLength: 1
+                          type: string
+                        kind:
+                          minLength: 1
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      type: object
                   required:
-                  - resourceCRDName
-                  - snapshotCRDName
+                  - snapshot
+                  - source
                   type: object
                 minItems: 1
                 type: array

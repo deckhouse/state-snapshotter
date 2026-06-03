@@ -131,6 +131,11 @@ rules:
 # доменные CSD) обязан выдавать внешний Deckhouse RBAC controller/hook и сигнализировать
 # их готовность через CSD condition RBACReady=True. Сейчас права зашиты статически в обход
 # этой модели — это временно. Удалить после внедрения внешнего RBAC-hook'а.
+# KNOWN DEBT (pre-existing, intentionally NOT fixed in the GVK-priority slice): this static demo
+# RBAC is required to keep live-demo working until the external RBACReady hook exists. The guardrail
+# test TestCoreRBACDoesNotGrantDemoDomainResources fails by design until a separate PR moves these
+# rights to the external/demo-e2e RBAC path and gates them on CSD RBACReady=True. Do not silently
+# delete here (would break live-demo) and do not relax the guardrail test.
 # Demo domain (dedicated Demo*Snapshot reconcilers; not generic binder). Required for MCR/MCP on child nodes.
 # Do not rely on ad-hoc smoke ClusterRoles (e.g. state-snapshotter-smoke-demo-domain-rbac) in production.
 - apiGroups: ["demo.state-snapshotter.deckhouse.io"]

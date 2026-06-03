@@ -15,6 +15,8 @@ MAX_DEPTH=10
 ALLOW_MISSING_ROOT=0
 STRICT=0
 INCLUDE_NAMESPACE_RESOURCES=1
+CHUNK_AS=""
+CHUNK_AS_GROUPS=()
 
 log() { printf '%s\n' "$*" >&2; }
 fail() { log "ERROR: $*"; exit 1; }
@@ -42,6 +44,13 @@ Options:
   --no-include-namespace-resources
                          Disable namespace inventory nodes.
   --strict               Return non-zero on invariant violations.
+  --chunk-as USER        Impersonate USER (kubectl --as) only for cluster-scoped
+                         manifestcheckpointcontentchunks reads. Use the controller
+                         ServiceAccount, which already has get on chunks, so the
+                         admin-kubeconfig does not need direct chunk RBAC, e.g.
+                         system:serviceaccount:d8-state-snapshotter:controller.
+                         The rest of the traversal still runs as the current kubeconfig.
+  --chunk-as-group GROUP Add a kubectl --as-group for chunk reads (repeatable).
 
 Environment:
   SNAPSHOT_GRAPH_HIDE_ORPHAN_VCR=true|false
@@ -50,6 +59,10 @@ Environment:
                          Fail when kubectl cannot get manifestcheckpointcontentchunks (default: true).
   SNAPSHOT_GRAPH_SKIP_VOLUME_SMOKE=true|false
                          Skip post-render grep checks for volume graph labels (default: false).
+  SNAPSHOT_GRAPH_CHUNK_AS=USER
+                         Default for --chunk-as (CLI flag takes precedence).
+  SNAPSHOT_GRAPH_CHUNK_AS_GROUP=GROUP[,GROUP...]
+                         Default groups for chunk impersonation (comma-separated).
 EOF
 }
 
@@ -106,6 +119,14 @@ while [[ $# -gt 0 ]]; do
 	--strict)
 		STRICT=1
 		shift
+		;;
+	--chunk-as)
+		CHUNK_AS="${2:-}"
+		shift 2
+		;;
+	--chunk-as-group)
+		CHUNK_AS_GROUPS+=("${2:-}")
+		shift 2
 		;;
 	-h|--help)
 		usage
@@ -184,6 +205,15 @@ HIDE_ORPHAN_VCR="${SNAPSHOT_GRAPH_HIDE_ORPHAN_VCR:-false}"
 REQUIRE_CHUNK_GET="${SNAPSHOT_GRAPH_REQUIRE_CHUNK_GET:-1}"
 SKIP_VOLUME_SMOKE="${SNAPSHOT_GRAPH_SKIP_VOLUME_SMOKE:-false}"
 CHUNK_RESOURCE="manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io"
+
+# Chunk-only impersonation: CLI flags win over env. Lets the graph tool read
+# cluster-scoped chunks under the controller ServiceAccount (which has get on
+# chunks) instead of granting chunk RBAC to the admin-kubeconfig. The rest of the
+# traversal keeps using the current kubeconfig identity.
+CHUNK_AS="${CHUNK_AS:-${SNAPSHOT_GRAPH_CHUNK_AS:-}}"
+if [[ ${#CHUNK_AS_GROUPS[@]} -eq 0 && -n "${SNAPSHOT_GRAPH_CHUNK_AS_GROUP:-}" ]]; then
+	IFS=',' read -r -a CHUNK_AS_GROUPS <<<"${SNAPSHOT_GRAPH_CHUNK_AS_GROUP}"
+fi
 
 json_quote() {
 	jq -Rn --arg s "$1" '$s'
@@ -268,13 +298,47 @@ kind_to_resource() {
 	printf '%s\n' "$name"
 }
 
+# Emit kubectl impersonation flags (one per line) for chunk reads only.
+# Other resources never impersonate so the broad admin-kubeconfig traversal
+# (namespace inventory, sources) is unaffected.
+chunk_impersonation_args() {
+	[[ -n "$CHUNK_AS" ]] || return 0
+	printf '%s\n' "--as=${CHUNK_AS}"
+	local group
+	for group in ${CHUNK_AS_GROUPS[@]+"${CHUNK_AS_GROUPS[@]}"}; do
+		[[ -n "$group" ]] || continue
+		printf '%s\n' "--as-group=${group}"
+	done
+}
+
+impersonation_args_for_resource() {
+	case "$1" in
+	manifestcheckpointcontentchunks|manifestcheckpointcontentchunks.*)
+		chunk_impersonation_args
+		;;
+	esac
+}
+
+# Populates the global IMP_ARGS array with impersonation flags for the resource
+# (empty unless chunk impersonation is configured). Avoids bash 4.3 namerefs so
+# the script keeps working on the macOS default bash 3.2.
+IMP_ARGS=()
+load_impersonation_args() {
+	local resource="$1" arg
+	IMP_ARGS=()
+	while IFS= read -r arg; do
+		[[ -n "$arg" ]] && IMP_ARGS+=("$arg")
+	done < <(impersonation_args_for_resource "$resource")
+}
+
 get_json() {
 	local api="$1" kind="$2" ns="$3" name="$4" resource
 	resource=$(kind_to_resource "$api" "$kind")
+	load_impersonation_args "$resource"
 	if [[ -n "$ns" ]]; then
-		kubectl -n "$ns" get "$resource" "$name" -o json 2>/dev/null
+		kubectl -n "$ns" get "$resource" "$name" ${IMP_ARGS[@]+"${IMP_ARGS[@]}"} -o json 2>/dev/null
 	else
-		kubectl get "$resource" "$name" -o json 2>/dev/null
+		kubectl get "$resource" "$name" ${IMP_ARGS[@]+"${IMP_ARGS[@]}"} -o json 2>/dev/null
 	fi
 }
 
@@ -292,10 +356,11 @@ get_json_flexible() {
 get_yaml() {
 	local api="$1" kind="$2" ns="$3" name="$4" resource
 	resource=$(kind_to_resource "$api" "$kind")
+	load_impersonation_args "$resource"
 	if [[ -n "$ns" ]]; then
-		kubectl -n "$ns" get "$resource" "$name" -o yaml 2>/dev/null
+		kubectl -n "$ns" get "$resource" "$name" ${IMP_ARGS[@]+"${IMP_ARGS[@]}"} -o yaml 2>/dev/null
 	else
-		kubectl get "$resource" "$name" -o yaml 2>/dev/null
+		kubectl get "$resource" "$name" ${IMP_ARGS[@]+"${IMP_ARGS[@]}"} -o yaml 2>/dev/null
 	fi
 }
 
@@ -525,17 +590,22 @@ add_edge() {
 
 auth_can_get() {
 	local resource="$1"
-	kubectl auth can-i get "$resource" 2>/dev/null | grep -qx yes
+	load_impersonation_args "$resource"
+	kubectl auth can-i get "$resource" ${IMP_ARGS[@]+"${IMP_ARGS[@]}"} 2>/dev/null | grep -qx yes
 }
 
 ensure_chunk_get_permission() {
 	[[ "$REQUIRE_CHUNK_GET" == "1" ]] || return 0
 	if auth_can_get "$CHUNK_RESOURCE"; then
-		add_check "OK" "kubectl can get ${CHUNK_RESOURCE}"
+		if [[ -n "$CHUNK_AS" ]]; then
+			add_check "OK" "kubectl can get ${CHUNK_RESOURCE} (as ${CHUNK_AS})"
+		else
+			add_check "OK" "kubectl can get ${CHUNK_RESOURCE}"
+		fi
 		return 0
 	fi
 	CHUNK_VIOLATIONS=$((CHUNK_VIOLATIONS + 1))
-	add_check "VIOLATION" "kubectl cannot get ${CHUNK_RESOURCE} (grant get on admin-kubeconfig; see templates/rbac-for-us.yaml)"
+	add_check "VIOLATION" "kubectl cannot get ${CHUNK_RESOURCE} (use --chunk-as system:serviceaccount:d8-state-snapshotter:controller to read chunks under the controller SA, or set SNAPSHOT_GRAPH_REQUIRE_CHUNK_GET=false)"
 	fail "chunk read forbidden: kubectl auth can-i get ${CHUNK_RESOURCE} is no"
 }
 

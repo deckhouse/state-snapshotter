@@ -40,7 +40,8 @@ kubectl auth can-i get demovirtualmachines.demo.state-snapshotter.deckhouse.io \
   --as=system:serviceaccount:${MOD_NS}:webhooks -n "$DEMO_NS"      # webhook читает demo inventory
 kubectl auth can-i create manifestcapturerequests.state-snapshotter.deckhouse.io \
   --as=system:serviceaccount:${MOD_NS}:controller -n "$DEMO_NS"    # controller создаёт MCR
-kubectl auth can-i get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io  # chunks для графа
+kubectl auth can-i get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io \
+  --as=system:serviceaccount:${MOD_NS}:controller                 # chunks для графа: под controller SA (admin прямого доступа не имеет)
 ```
 
 Если webhook `get` demo inventory = `no` → redeploy модуля (иначе дерево не
@@ -53,23 +54,9 @@ kubectl auth can-i get manifestcheckpointcontentchunks.state-snapshotter.deckhou
 ## 2. Подготовить source namespace
 
 ```bash
-# ns + CM + PVC + bind Pod + VM + standalone disk
+# ns + CM + PVC + bind Pod + VM + VM-linked disk + standalone disk
+# VM->Disk link is spec.virtualMachineName, not ownerReferences.
 kubectl apply -f "$MANIFEST_DIR/01-source.yaml"
-
-# owned disk (нужен UID VM → inline)
-VM_UID=$(kubectl -n "$DEMO_NS" get demovirtualmachine vm-1 -o jsonpath='{.metadata.uid}')
-kubectl -n "$DEMO_NS" apply -f - <<EOF
-apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
-kind: DemoVirtualDisk
-metadata:
-  name: disk-vm
-  ownerReferences:
-    - apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
-      kind: DemoVirtualMachine
-      name: vm-1
-      uid: ${VM_UID}
-spec: {}
-EOF
 
 # gate: PVC Bound до Snapshot (local-thin = WaitForFirstConsumer; bind Pod уже в source)
 kubectl -n "$DEMO_NS" get pvc demo-pvc -w     # Ctrl+C на Bound
@@ -177,7 +164,8 @@ kubectl get volumesnapshotcontents.snapshot.storage.k8s.io "$VSC_NAME" -o json |
 # граф: ~2 мин на реальном кластере — лучше сгенерировать ЗАРАНЕЕ, не «вживую»
 cd /path/to/state-snapshotter
 bash hack/snapshot-graph.sh --namespace "$DEMO_NS" --snapshot "$SNAP" \
-  --output-dir /tmp/snapshot-tree --name tree --mode logical --title "Snapshot tree"
+  --output-dir /tmp/snapshot-tree --name tree --mode logical --title "Snapshot tree" \
+  --chunk-as system:serviceaccount:d8-state-snapshotter:controller
 open /tmp/snapshot-tree/tree.logical.svg
 grep -c 'MISSING' /tmp/snapshot-tree/tree.logical.dot   # ожидание: 0
 
@@ -237,6 +225,11 @@ bash restore-namespace-from-snapshot.sh \
 исключает, `ownerReferences`/runtime-поля чистит) → VRR на каждый snapshot'нутый
 PVC → ждёт `Bound`+`Ready` → печатает `RESULT: SUCCESS`. PV-обход делает сам
 (отключается `--no-pv-fix`). Контракт/детали — в notes.
+
+> Note: Pods may be present in the archive, but the helper does not restore them.
+> The restored PVC is statically pre-bound by VRR (`spec.volumeName`), so it can
+> become `Bound` without a consumer Pod even with a `WaitForFirstConsumer`
+> StorageClass.
 
 ```bash
 export RESTORE_NS=snapshot-demo-restored

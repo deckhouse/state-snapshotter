@@ -47,9 +47,22 @@ const (
 const (
 	CSDReasonKindConflict = "KindConflict"
 	CSDReasonInvalidSpec  = "InvalidSpec"
+	// CSDReasonSnapshotContractUnsatisfied is set when a registered snapshot kind's CRD does not
+	// expose the framework status protocol fields the generic orchestration reads by fixed name.
+	CSDReasonSnapshotContractUnsatisfied = "SnapshotContractUnsatisfied"
 	// CSDReadyReasonNotReady is the Ready condition reason when the aggregate is false (not a spec-level standardized reason).
 	CSDReadyReasonNotReady = "NotReady"
 )
+
+// requiredSnapshotStatusFields are the framework status protocol fields every snapshot kind
+// registered in a CSD must expose. Generic orchestration reads these by fixed canonical name;
+// the domain spec stays opaque. status.childrenSnapshotRefs is part of the protocol for non-leaf
+// snapshot kinds but is intentionally not enforced here: leaf snapshot kinds legitimately omit it
+// and CSD cannot know leaf-ness at registration time.
+var requiredSnapshotStatusFields = []string{
+	"boundSnapshotContentName",
+	"conditions",
+}
 
 // CustomSnapshotDefinitionReconciler resolves snapshotResourceMapping, detects cross-CSD
 // snapshot kind conflicts, writes Accepted and aggregated Ready. RBACReady is owned by Deckhouse hook.
@@ -59,10 +72,11 @@ const (
 // recomputes resolution and conflicts for every object. Any update to one CSD re-runs the whole cycle.
 // This is intentional for correctness and simplicity; optimize later if needed.
 type CustomSnapshotDefinitionReconciler struct {
-	Client client.Client
-	Scheme *runtime.Scheme
-	Logger logger.LoggerInterface
-	Config *config.Options
+	Client     client.Client
+	Scheme     *runtime.Scheme
+	RESTMapper meta.RESTMapper
+	Logger     logger.LoggerInterface
+	Config     *config.Options
 
 	// UnifiedRuntimeSync runs after a successful full CSD reconcile. Production wiring always provides it;
 	// nil remains valid for focused unit tests.
@@ -126,8 +140,9 @@ type csdEntryResolution struct {
 }
 
 type mappingResolution struct {
-	snapshotGK schema.GroupKind
-	resolveErr error
+	snapshotGK  schema.GroupKind
+	resolveErr  error
+	contractErr error
 }
 
 func (r *CustomSnapshotDefinitionReconciler) reconcileAll(ctx context.Context, items []storagev1alpha1.CustomSnapshotDefinition) error {
@@ -161,7 +176,7 @@ func (r *CustomSnapshotDefinitionReconciler) computeCSDGlobalStateFromItems(
 		}
 		hasErr := false
 		for _, m := range res.perMapping {
-			if m.resolveErr != nil {
+			if m.resolveErr != nil || m.contractErr != nil {
 				hasErr = true
 				break
 			}
@@ -207,25 +222,15 @@ func (r *CustomSnapshotDefinitionReconciler) resolveCSDSpec(ctx context.Context,
 
 	for _, entry := range d.Spec.SnapshotResourceMapping {
 		mr := mappingResolution{}
-		snapCRD, err := r.getCRD(ctx, entry.SnapshotCRDName)
+		resourceGVK, snapGVK, err := r.resolveMappingGVKs(ctx, entry)
 		if err != nil {
-			mr.resolveErr = fmt.Errorf("snapshot CRD %q: %w", entry.SnapshotCRDName, err)
+			mr.resolveErr = err
 			out.perMapping = append(out.perMapping, mr)
 			continue
 		}
-		_, err = r.getCRD(ctx, entry.ResourceCRDName)
-		if err != nil {
-			mr.resolveErr = fmt.Errorf("resource CRD %q: %w", entry.ResourceCRDName, err)
-			out.perMapping = append(out.perMapping, mr)
-			continue
-		}
-		snapGVK, err := gvkFromCRD(snapCRD)
-		if err != nil {
-			mr.resolveErr = fmt.Errorf("snapshot GVK: %w", err)
-			out.perMapping = append(out.perMapping, mr)
-			continue
-		}
+		_ = resourceGVK
 		mr.snapshotGK = snapGVK.GroupKind()
+		mr.contractErr = r.validateSnapshotStatusContract(ctx, snapGVK)
 
 		if _, dup := seenGK[mr.snapshotGK.String()]; dup {
 			out.duplicateSnapshotKind = true
@@ -237,33 +242,144 @@ func (r *CustomSnapshotDefinitionReconciler) resolveCSDSpec(ctx context.Context,
 	return out
 }
 
-func (r *CustomSnapshotDefinitionReconciler) getCRD(ctx context.Context, crdName string) (*extv1.CustomResourceDefinition, error) {
-	crd := &extv1.CustomResourceDefinition{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: crdName}, crd); err != nil {
-		return nil, err
+func (r *CustomSnapshotDefinitionReconciler) resolveMappingGVKs(ctx context.Context, entry storagev1alpha1.SnapshotResourceMappingEntry) (schema.GroupVersionKind, schema.GroupVersionKind, error) {
+	_ = ctx
+	resourceGVK, err := gvkFromRef(entry.Source)
+	if err != nil {
+		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("source GVK: %w", err)
 	}
-	return crd, nil
-}
-
-func gvkFromCRD(crd *extv1.CustomResourceDefinition) (schema.GroupVersionKind, error) {
-	ver := storedVersion(crd)
-	if ver == "" {
-		return schema.GroupVersionKind{}, fmt.Errorf("CRD %q has no storage version", crd.Name)
+	snapGVK, err := gvkFromRef(entry.Snapshot)
+	if err != nil {
+		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("snapshot GVK: %w", err)
 	}
-	return schema.GroupVersionKind{
-		Group:   crd.Spec.Group,
-		Version: ver,
-		Kind:    crd.Spec.Names.Kind,
-	}, nil
-}
-
-func storedVersion(crd *extv1.CustomResourceDefinition) string {
-	for i := range crd.Spec.Versions {
-		if crd.Spec.Versions[i].Storage {
-			return crd.Spec.Versions[i].Name
+	if r.RESTMapper != nil {
+		if _, err := r.RESTMapper.RESTMapping(resourceGVK.GroupKind(), resourceGVK.Version); err != nil {
+			return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("source RESTMapping %s: %w", resourceGVK.String(), err)
+		}
+		if _, err := r.RESTMapper.RESTMapping(snapGVK.GroupKind(), snapGVK.Version); err != nil {
+			return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("snapshot RESTMapping %s: %w", snapGVK.String(), err)
 		}
 	}
-	return ""
+	return resourceGVK, snapGVK, nil
+}
+
+// validateSnapshotStatusContract performs a shallow check that the snapshot kind's CRD exposes the
+// canonical framework status protocol fields the generic orchestration reads by fixed name. It only
+// blocks (returns a non-nil error) when it can positively determine, from a structural schema, that
+// the fields are absent. It is intentionally lenient (returns nil) when introspection is not possible:
+// no RESTMapper (focused unit tests), kind not CRD-backed (built-in/aggregated; out of scope this
+// slice), or status is schemaless / preserve-unknown.
+func (r *CustomSnapshotDefinitionReconciler) validateSnapshotStatusContract(ctx context.Context, snapGVK schema.GroupVersionKind) error {
+	if r.Client == nil || r.RESTMapper == nil {
+		return nil
+	}
+	rm, err := r.RESTMapper.RESTMapping(snapGVK.GroupKind(), snapGVK.Version)
+	if err != nil {
+		// Resolution failure is already reported as InvalidSpec by resolveMappingGVKs.
+		return nil
+	}
+	crdName := rm.Resource.Resource + "." + rm.Resource.Group
+	crd := &extv1.CustomResourceDefinition{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: crdName}, crd); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return evaluateSnapshotStatusContract(crd, snapGVK)
+}
+
+// evaluateSnapshotStatusContract is the pure contract decision: given a fetched CRD and the snapshot
+// GVK, it returns a non-nil error only when it can positively determine the framework status contract
+// is violated. It stays lenient when the schema is not structurally introspectable.
+func evaluateSnapshotStatusContract(crd *extv1.CustomResourceDefinition, snapGVK schema.GroupVersionKind) error {
+	statusSchema, inspectable, statusDeclared := crdStatusSchemaForVersion(crd, snapGVK.Version)
+	if !inspectable {
+		// Schemaless / preserve-unknown / version not described structurally: cannot reason about
+		// field presence, stay lenient.
+		return nil
+	}
+	if !statusDeclared {
+		// Structural schema that declares no status block at all positively violates the contract.
+		return contractUnsatisfiedError(snapGVK, allRequiredStatusPaths())
+	}
+	if missing := missingSnapshotStatusContractFields(statusSchema); len(missing) > 0 {
+		return contractUnsatisfiedError(snapGVK, missing)
+	}
+	return nil
+}
+
+func allRequiredStatusPaths() []string {
+	paths := make([]string, 0, len(requiredSnapshotStatusFields))
+	for _, field := range requiredSnapshotStatusFields {
+		paths = append(paths, "status."+field)
+	}
+	return paths
+}
+
+func contractUnsatisfiedError(snapGVK schema.GroupVersionKind, missing []string) error {
+	return fmt.Errorf("snapshot kind %s does not expose framework status contract fields: %s", snapGVK.String(), strings.Join(missing, ", "))
+}
+
+// missingSnapshotStatusContractFields returns the canonical status fields absent from an already
+// declared structural status subschema. It is lenient (returns nil) when the status subschema itself
+// is opaque: nil/empty properties or preserve-unknown. The "status block entirely absent" case is
+// handled earlier by validateSnapshotStatusContract via crdStatusSchemaForVersion's statusDeclared
+// flag, so it is not this function's responsibility. This keeps the check shallow (presence of
+// canonical paths, not full semantic schema).
+func missingSnapshotStatusContractFields(statusSchema *extv1.JSONSchemaProps) []string {
+	if statusSchema == nil || len(statusSchema.Properties) == 0 {
+		return nil
+	}
+	if statusSchema.XPreserveUnknownFields != nil && *statusSchema.XPreserveUnknownFields {
+		return nil
+	}
+	var missing []string
+	for _, field := range requiredSnapshotStatusFields {
+		if _, ok := statusSchema.Properties[field]; !ok {
+			missing = append(missing, "status."+field)
+		}
+	}
+	return missing
+}
+
+// crdStatusSchemaForVersion inspects the openAPIV3Schema for the given served version.
+//   - inspectable reports whether the version is described by a structural object schema we can reason
+//     about (so the absence of a field is meaningful). It is false for missing versions, absent schema,
+//     or a root that preserves unknown fields / declares no properties (schemaless).
+//   - statusDeclared reports whether a "status" property is present in that structural schema.
+//   - statusSchema is the "status" subschema when statusDeclared is true.
+func crdStatusSchemaForVersion(crd *extv1.CustomResourceDefinition, version string) (statusSchema *extv1.JSONSchemaProps, inspectable bool, statusDeclared bool) {
+	for i := range crd.Spec.Versions {
+		v := &crd.Spec.Versions[i]
+		if v.Name != version {
+			continue
+		}
+		if v.Schema == nil || v.Schema.OpenAPIV3Schema == nil {
+			return nil, false, false
+		}
+		root := v.Schema.OpenAPIV3Schema
+		if (root.XPreserveUnknownFields != nil && *root.XPreserveUnknownFields) || len(root.Properties) == 0 {
+			return nil, false, false
+		}
+		status, ok := root.Properties["status"]
+		if !ok {
+			return nil, true, false
+		}
+		return &status, true, true
+	}
+	return nil, false, false
+}
+
+func gvkFromRef(ref storagev1alpha1.SnapshotGVKRef) (schema.GroupVersionKind, error) {
+	if ref.APIVersion == "" || ref.Kind == "" {
+		return schema.GroupVersionKind{}, fmt.Errorf("source/snapshot apiVersion and kind are required")
+	}
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return schema.GroupVersionKind{}, err
+	}
+	return gv.WithKind(ref.Kind), nil
 }
 
 func (r *CustomSnapshotDefinitionReconciler) writeStatusIfNeeded(
@@ -332,6 +448,15 @@ func (r *CustomSnapshotDefinitionReconciler) computeAccepted(
 	}
 	if len(errMsgs) > 0 {
 		return metav1.ConditionFalse, CSDReasonInvalidSpec, strings.Join(errMsgs, "; ")
+	}
+	var contractMsgs []string
+	for _, m := range res.perMapping {
+		if m.contractErr != nil {
+			contractMsgs = append(contractMsgs, m.contractErr.Error())
+		}
+	}
+	if len(contractMsgs) > 0 {
+		return metav1.ConditionFalse, CSDReasonSnapshotContractUnsatisfied, strings.Join(contractMsgs, "; ")
 	}
 	return metav1.ConditionTrue, "Resolved", "mapping resolved, content CRDs are cluster-scoped"
 }
