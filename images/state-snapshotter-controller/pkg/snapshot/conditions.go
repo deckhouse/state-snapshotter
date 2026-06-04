@@ -26,8 +26,18 @@ const (
 	// ConditionInProgress indicates the object is in progress (creation only)
 	ConditionInProgress = "InProgress"
 
-	// ConditionReady indicates the object is ready for use
+	// ConditionReady indicates the object is ready for use.
+	// On SnapshotContent it is the single aggregate: Ready = RequestsReady && ChildrenReady.
+	// On Snapshot it mirrors the bound SnapshotContent.Ready, except for terminal child-Snapshot capture failures.
 	ConditionReady = "Ready"
+
+	// ConditionRequestsReady reports that this node's own requests completed and durable refs are
+	// published on SnapshotContent (manifestCheckpointName, dataRefs[]). It does not consider children.
+	ConditionRequestsReady = "RequestsReady"
+
+	// ConditionChildrenReady reports that all child SnapshotContents are Ready=True
+	// (a leaf with no children is ChildrenReady=True vacuously).
+	ConditionChildrenReady = "ChildrenReady"
 
 	// ConditionBound indicates the snapshot is bound to SnapshotContent.
 	ConditionBound = "Bound"

@@ -69,41 +69,6 @@ func (r *SnapshotReconciler) deleteSnapshotManifestCaptureRequest(ctx context.Co
 	return nil
 }
 
-// reconcileChildrenRefsE6ParentReadyOrPatch applies E6 aggregation for status.childrenSnapshotRefs (strict
-// apiVersion/kind/name refs; single Get per child). Returns (allChildrenAllowParentSuccess, result, err):
-// when false, result is from patchSnapshotReadyFromE6 and the caller must return it; when true, caller may mark root capture complete.
-func (r *SnapshotReconciler) reconcileChildrenRefsE6ParentReadyOrPatch(
-	ctx context.Context,
-	parent *storagev1alpha1.Snapshot,
-	subtreePending bool,
-	subtreeMsg string,
-	selfCaptureComplete bool,
-) (allChildrenAllowParentSuccess bool, res ctrl.Result, err error) {
-	if len(parent.Status.ChildrenSnapshotRefs) == 0 {
-		return true, ctrl.Result{}, nil
-	}
-	sum, err := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.e6ChildStatusReader(), parent.Status.ChildrenSnapshotRefs, parent.Namespace)
-	if err != nil {
-		return false, ctrl.Result{}, err
-	}
-	in := usecase.E6ParentReadyPickInput{
-		HasChildFailed:                sum.HasFailed,
-		ChildFailedMessage:            usecase.JoinNonEmpty(sum.FailedMessages, "; "),
-		SubtreeManifestCapturePending: subtreePending,
-		SubtreeMessage:                subtreeMsg,
-		HasChildPending:               sum.HasPending,
-		ChildPendingMessage:           usecase.JoinNonEmpty(sum.PendingParts, "; "),
-		SelfCaptureComplete:           selfCaptureComplete,
-	}
-	out := usecase.PickParentReadyReasonE6(in)
-	if out.Ready {
-		return true, ctrl.Result{}, nil
-	}
-	parentKey := types.NamespacedName{Namespace: parent.Namespace, Name: parent.Name}
-	res, err = r.patchSnapshotReadyFromE6(ctx, parentKey, out.Reason, out.Message)
-	return false, res, err
-}
-
 // reconcileCaptureN2a drives manifest capture via MCR->ManifestCheckpoint after root SnapshotContent is bound.
 func (r *SnapshotReconciler) reconcileCaptureN2a(
 	ctx context.Context,
@@ -161,49 +126,29 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			if cur != nil && cur.Reason == snapshotpkg.ReasonChildSnapshotFailed {
 				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 			}
-			var reason string
-			var msg string
+			// Single-aggregator contract (snapshot-rework/2026-06-03-snapshot-conditions-model.md):
+			// Snapshot.Ready is a mirror of the bound SnapshotContent.Ready. The ONE allowed exception is
+			// the child-Snapshot capture-failure bridge below: a child Snapshot can terminally fail capture
+			// planning before any child SnapshotContent reflects it, so the content tree cannot represent
+			// that failure. Pending states are NOT an exception — they are mirrored from Content.Ready.
 			if hasSubtree {
 				sum, serr := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.e6ChildStatusReader(), freshParent.Status.ChildrenSnapshotRefs, freshParent.Namespace)
 				if serr != nil {
 					return ctrl.Result{}, serr
 				}
-				out := usecase.PickParentReadyReasonE6(usecase.E6ParentReadyPickInput{
-					HasChildFailed:                sum.HasFailed,
-					ChildFailedMessage:            usecase.JoinNonEmpty(sum.FailedMessages, "; "),
-					SubtreeManifestCapturePending: true,
-					SubtreeMessage:                err.Error(),
-					HasChildPending:               sum.HasPending,
-					ChildPendingMessage:           usecase.JoinNonEmpty(sum.PendingParts, "; "),
-					SelfCaptureComplete:           false,
-				})
-				if out.Reason == snapshotpkg.ReasonChildSnapshotFailed {
+				if sum.HasFailed {
 					parentKey := types.NamespacedName{Namespace: freshParent.Namespace, Name: freshParent.Name}
-					return r.patchSnapshotReadyFromE6(ctx, parentKey, out.Reason, out.Message)
+					return r.patchSnapshotChildSnapshotFailedBridge(ctx, parentKey, usecase.JoinNonEmpty(sum.FailedMessages, "; "))
 				}
-				reason = out.Reason
-				msg = out.Message
-			} else {
-				reason = snapshotpkg.ReasonChildSnapshotPending
-				msg = err.Error()
-			}
-			// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
-			if hasSubtree {
+				// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
 				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
 					return ctrl.Result{}, delErr
 				}
 			}
-			meta.SetStatusCondition(&freshParent.Status.Conditions, metav1.Condition{
-				Type:               snapshotpkg.ConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             reason,
-				Message:            msg,
-				ObservedGeneration: freshParent.Generation,
-			})
-			if uerr := r.Client.Status().Update(ctx, freshParent); uerr != nil {
-				return ctrl.Result{}, uerr
+			// Pending window: mirror bound SnapshotContent.Ready instead of computing a local reason.
+			if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, freshParent, content, err); mErr != nil {
+				return ctrl.Result{}, mErr
 			}
-			_ = content
 			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {

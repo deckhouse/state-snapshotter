@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,11 +31,14 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// patchSnapshotReadyFromE6 applies PickParentReadyReasonE6 outcome (Ready=False branch) on the parent Snapshot.
-func (r *SnapshotReconciler) patchSnapshotReadyFromE6(
+// patchSnapshotChildSnapshotFailedBridge writes the ONE non-mirror Snapshot.Ready value permitted by the
+// single-aggregator contract (snapshot-rework/2026-06-03-snapshot-conditions-model.md): Ready=False/
+// ChildSnapshotFailed when a child Snapshot terminally failed capture planning before any child
+// SnapshotContent could reflect it (the content tree cannot represent a child-Snapshot capture failure).
+// Every other Snapshot.Ready transition is a mirror of the bound SnapshotContent.Ready.
+func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 	ctx context.Context,
 	parentKey types.NamespacedName,
-	reason string,
 	msg string,
 ) (ctrl.Result, error) {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -46,7 +50,7 @@ func (r *SnapshotReconciler) patchSnapshotReadyFromE6(
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             reason,
+			Reason:             snapshotpkg.ReasonChildSnapshotFailed,
 			Message:            msg,
 			ObservedGeneration: nsSnap.Generation,
 		})
@@ -56,4 +60,53 @@ func (r *SnapshotReconciler) patchSnapshotReadyFromE6(
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+}
+
+// mirrorSnapshotReadyFromBoundContent sets the parent Snapshot.Ready to a verbatim mirror of the bound
+// SnapshotContent.Ready (status/reason/message), gen-gated on the Snapshot. This enforces the
+// single-aggregator contract during the pre-capture pending window (the parent cannot build its own
+// capture plan yet because the subtree exclude set is not ready). If the content has no Ready condition
+// yet, it falls back to Ready=False/ManifestCapturePending carrying transientErr for diagnostics.
+func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
+	ctx context.Context,
+	parent *storagev1alpha1.Snapshot,
+	content *storagev1alpha1.SnapshotContent,
+	transientErr error,
+) error {
+	status := metav1.ConditionFalse
+	reason := snapshotpkg.ReasonManifestCapturePending
+	message := ""
+	if transientErr != nil {
+		message = transientErr.Error()
+	}
+	if fresh, err := r.getSnapshotContentFresh(ctx, content.Name); err == nil {
+		if cond := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady); cond != nil {
+			status = cond.Status
+			reason = cond.Reason
+			message = cond.Message
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	parentKey := types.NamespacedName{Namespace: parent.Namespace, Name: parent.Name}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.Snapshot{}
+		if err := r.Client.Get(ctx, parentKey, cur); err != nil {
+			return err
+		}
+		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionReady)
+		if existing != nil && existing.Status == status && existing.Reason == reason &&
+			existing.Message == message && existing.ObservedGeneration == cur.Generation {
+			return nil
+		}
+		cur.Status.ObservedGeneration = cur.Generation
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               snapshotpkg.ConditionReady,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: cur.Generation,
+		})
+		return r.Client.Status().Update(ctx, cur)
+	})
 }

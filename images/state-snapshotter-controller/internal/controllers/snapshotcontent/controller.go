@@ -317,7 +317,20 @@ func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
 	return gvk == unifiedbootstrap.CommonSnapshotContentGVK()
 }
 
+// commonContentStatusPlan is the SnapshotContent aggregation outcome. It carries the two sub-legs
+// (RequestsReady = own MCP + data; ChildrenReady = child SnapshotContents) and the derived Ready.
+// Ready is the single aggregate on SnapshotContent: Ready = RequestsReady && ChildrenReady (INV-COND2).
 type commonContentStatusPlan struct {
+	requestsReady   metav1.ConditionStatus
+	requestsReason  string
+	requestsMessage string
+	requestsFailed  bool // terminal (vs pending) when requestsReady != True
+
+	childrenReady   metav1.ConditionStatus
+	childrenReason  string
+	childrenMessage string
+	childrenFailed  bool // terminal (vs pending) when childrenReady != True
+
 	readyStatus  metav1.ConditionStatus
 	readyReason  string
 	readyMessage string
@@ -338,32 +351,25 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		statusMap = map[string]interface{}{}
 	}
 
-	changed := false
-	desired := metav1.Condition{
-		Type:               snapshot.ConditionReady,
-		Status:             plan.readyStatus,
-		Reason:             plan.readyReason,
-		Message:            plan.readyMessage,
-		ObservedGeneration: obj.GetGeneration(),
+	gen := obj.GetGeneration()
+	desired := []metav1.Condition{
+		{Type: snapshot.ConditionRequestsReady, Status: plan.requestsReady, Reason: plan.requestsReason, Message: plan.requestsMessage, ObservedGeneration: gen},
+		{Type: snapshot.ConditionChildrenReady, Status: plan.childrenReady, Reason: plan.childrenReason, Message: plan.childrenMessage, ObservedGeneration: gen},
+		{Type: snapshot.ConditionReady, Status: plan.readyStatus, Reason: plan.readyReason, Message: plan.readyMessage, ObservedGeneration: gen},
 	}
-	if cur := snapshot.GetCondition(contentLike, snapshot.ConditionReady); cur == nil ||
-		cur.Status != desired.Status || cur.Reason != desired.Reason || cur.Message != desired.Message || cur.ObservedGeneration != desired.ObservedGeneration {
-		snapshot.SetCondition(contentLike, snapshot.ConditionReady, desired.Status, desired.Reason, desired.Message)
-		conditions := contentLike.GetStatusConditions()
-		for i := range conditions {
-			if conditions[i].Type == snapshot.ConditionReady {
-				conditions[i].ObservedGeneration = desired.ObservedGeneration
-			}
+
+	changed := false
+	for _, d := range desired {
+		if upsertContentCondition(contentLike, d) {
+			changed = true
 		}
-		obj.Object["status"] = statusMap
-		snapshot.SyncConditionsToUnstructured(obj, conditions)
-		changed = true
 	}
 
 	if !changed {
 		return plan.readyStatus == metav1.ConditionTrue, nil
 	}
 	obj.Object["status"] = statusMap
+	snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
 	if err := r.Status().Update(ctx, obj); err != nil {
 		if errors.IsConflict(err) {
 			return false, nil
@@ -373,64 +379,150 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	return plan.readyStatus == metav1.ConditionTrue, nil
 }
 
+// upsertContentCondition sets desired (type/status/reason/message + observedGeneration) on contentLike
+// and reports whether anything changed. SetCondition owns LastTransitionTime idempotency but does not
+// set observedGeneration, so gen-gating (INV-COND3) is applied here.
+func upsertContentCondition(contentLike snapshot.SnapshotContentLike, desired metav1.Condition) bool {
+	cur := snapshot.GetCondition(contentLike, desired.Type)
+	if cur != nil && cur.Status == desired.Status && cur.Reason == desired.Reason &&
+		cur.Message == desired.Message && cur.ObservedGeneration == desired.ObservedGeneration {
+		return false
+	}
+	snapshot.SetCondition(contentLike, desired.Type, desired.Status, desired.Reason, desired.Message)
+	conds := contentLike.GetStatusConditions()
+	for i := range conds {
+		if conds[i].Type == desired.Type {
+			conds[i].ObservedGeneration = desired.ObservedGeneration
+		}
+	}
+	contentLike.SetStatusConditions(conds)
+	return true
+}
+
 func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
 	return r.reconcileCommonSnapshotContentStatus(ctx, obj)
 }
 
+// buildCommonSnapshotContentStatusPlan computes RequestsReady, ChildrenReady and the derived Ready.
+// Ready priority (single reason when several legs are not satisfied):
+//
+//	RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending > Completed
+//
+// Terminal failures win over pending (actionable first) and the node's own leg wins over children at
+// equal severity. DomainReady is NOT part of this formula; it is only a gate/barrier upstream.
 func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
 	plan := commonContentStatusPlan{
-		readyStatus:  metav1.ConditionFalse,
-		readyReason:  snapshot.ReasonManifestCapturePending,
-		readyMessage: "waiting for manifest capture",
+		requestsReady:   metav1.ConditionFalse,
+		requestsReason:  snapshot.ReasonManifestCapturePending,
+		requestsMessage: "waiting for manifest capture",
+		childrenReady:   metav1.ConditionTrue,
+		childrenReason:  snapshot.ReasonCompleted,
+		childrenMessage: "no child content or all child content ready",
 	}
 
-	mcpName, _, err := unstructured.NestedString(obj.Object, "status", "manifestCheckpointName")
-	if err != nil {
+	if err := r.fillRequestsLeg(ctx, obj, &plan); err != nil {
 		return plan, err
-	}
-	if mcpName == "" {
-		plan.readyMessage = "waiting for SnapshotContent.status.manifestCheckpointName"
-		return plan, nil
 	}
 
-	mcpReady, mcpFailed, mcpMessage, err := r.validateCommonContentManifestCheckpoint(ctx, obj, mcpName)
-	if err != nil {
-		return plan, err
-	}
-	if mcpFailed {
-		plan.readyReason = reasonManifestCheckpointFailed
-		plan.readyMessage = mcpMessage
-		return plan, nil
-	}
-	if !mcpReady {
-		plan.readyReason = snapshot.ReasonManifestCapturePending
-		plan.readyMessage = mcpMessage
-		return plan, nil
-	}
-
-	dataReady, dataReason, dataMessage, err := r.resolveDataReadiness(ctx, obj)
-	if err != nil {
-		return plan, err
-	}
-	if !dataReady {
-		plan.readyReason = dataReason
-		plan.readyMessage = dataMessage
-		return plan, nil
-	}
 	childrenReady, childReason, childMessage, err := r.validateCommonContentChildren(ctx, obj)
 	if err != nil {
 		return plan, err
 	}
 	if !childrenReady {
-		plan.readyReason = childReason
-		plan.readyMessage = childMessage
-		return plan, nil
+		plan.childrenReady = metav1.ConditionFalse
+		plan.childrenReason = childReason
+		plan.childrenMessage = childMessage
+		plan.childrenFailed = childReason == snapshot.ReasonChildSnapshotFailed
 	}
 
-	plan.readyStatus = metav1.ConditionTrue
-	plan.readyReason = snapshot.ReasonCompleted
-	plan.readyMessage = "manifest, data, and child content are ready"
+	switch {
+	case plan.requestsReady != metav1.ConditionTrue && plan.requestsFailed:
+		plan.readyStatus = metav1.ConditionFalse
+		plan.readyReason = plan.requestsReason
+		plan.readyMessage = plan.requestsMessage
+	case plan.childrenReady != metav1.ConditionTrue && plan.childrenFailed:
+		plan.readyStatus = metav1.ConditionFalse
+		plan.readyReason = plan.childrenReason
+		plan.readyMessage = plan.childrenMessage
+	case plan.requestsReady != metav1.ConditionTrue:
+		plan.readyStatus = metav1.ConditionFalse
+		plan.readyReason = plan.requestsReason
+		plan.readyMessage = plan.requestsMessage
+	case plan.childrenReady != metav1.ConditionTrue:
+		plan.readyStatus = metav1.ConditionFalse
+		plan.readyReason = plan.childrenReason
+		plan.readyMessage = plan.childrenMessage
+	default:
+		plan.readyStatus = metav1.ConditionTrue
+		plan.readyReason = snapshot.ReasonCompleted
+		plan.readyMessage = "manifest, data, and child content are ready"
+	}
 	return plan, nil
+}
+
+// terminalRequestsFailureReasons lists requests-leg Ready=False reasons treated as terminal (vs pending).
+// ArtifactNotReady (VSC not yet readyToUse) and ManifestCapturePending are pending; the rest are terminal.
+var terminalRequestsFailureReasons = map[string]struct{}{
+	reasonManifestCheckpointFailed:          {},
+	snapshot.ReasonDataArtifactInvalid:      {},
+	snapshot.ReasonDataArtifactNotSupported: {},
+	snapshot.ReasonArtifactMissing:          {},
+}
+
+func isTerminalRequestsFailure(reason string) bool {
+	_, ok := terminalRequestsFailureReasons[reason]
+	return ok
+}
+
+// fillRequestsLeg evaluates this node's own requests (ManifestCheckpoint + data artifacts) into the
+// RequestsReady leg of plan. Children are not considered here. Data is only evaluated once the MCP is
+// Ready (preserves the prior sequencing where data refs are published alongside capture completion).
+func (r *SnapshotContentController) fillRequestsLeg(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
+	mcpName, _, err := unstructured.NestedString(obj.Object, "status", "manifestCheckpointName")
+	if err != nil {
+		return err
+	}
+	if mcpName == "" {
+		plan.requestsReady = metav1.ConditionFalse
+		plan.requestsReason = snapshot.ReasonManifestCapturePending
+		plan.requestsMessage = "waiting for SnapshotContent.status.manifestCheckpointName"
+		return nil
+	}
+
+	mcpReady, mcpFailed, mcpMessage, err := r.validateCommonContentManifestCheckpoint(ctx, obj, mcpName)
+	if err != nil {
+		return err
+	}
+	if mcpFailed {
+		plan.requestsReady = metav1.ConditionFalse
+		plan.requestsFailed = true
+		plan.requestsReason = reasonManifestCheckpointFailed
+		plan.requestsMessage = mcpMessage
+		return nil
+	}
+	if !mcpReady {
+		plan.requestsReady = metav1.ConditionFalse
+		plan.requestsReason = snapshot.ReasonManifestCapturePending
+		plan.requestsMessage = mcpMessage
+		return nil
+	}
+
+	dataReady, dataReason, dataMessage, err := r.resolveDataReadiness(ctx, obj)
+	if err != nil {
+		return err
+	}
+	if !dataReady {
+		plan.requestsReady = metav1.ConditionFalse
+		plan.requestsReason = dataReason
+		plan.requestsMessage = dataMessage
+		plan.requestsFailed = isTerminalRequestsFailure(dataReason)
+		return nil
+	}
+
+	plan.requestsReady = metav1.ConditionTrue
+	plan.requestsReason = snapshot.ReasonCompleted
+	plan.requestsMessage = "manifest and data are ready"
+	return nil
 }
 
 // reasonManifestCheckpointFailed is the SnapshotContent Ready=False reason published when the bound
