@@ -174,9 +174,6 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 		Eventually(func(g Gomega) {
 			ch := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, childKey, ch)).To(Succeed())
-			b := meta.FindStatusCondition(ch.Status.Conditions, snapshot.ConditionBound)
-			g.Expect(b).NotTo(BeNil())
-			g.Expect(b.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(ch.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			childSnapshotContent = ch.Status.BoundSnapshotContentName
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
@@ -201,9 +198,7 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 		Eventually(func(g Gomega) {
 			p := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
-			b := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionBound)
-			g.Expect(b).NotTo(BeNil())
-			g.Expect(b.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(p.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		Expect(mergeChildGraphIntoRoot(ctx, k8sClient, nsName, parentName, childName, childSnapshotContent)).To(Succeed())
@@ -267,8 +262,8 @@ var _ = Describe("Integration: E5 subtree root MCR gate (registered child snapsh
 	})
 })
 
-var _ = Describe("Integration: E6 parent Ready when child snapshot fails capture", func() {
-	It("sets parent Ready=False ChildSnapshotFailed when child hits terminal capture failure", func() {
+var _ = Describe("Integration: terminal child-Snapshot failure bridge sets parent Ready=False", func() {
+	It("sets parent Ready=False ChildrenFailed when child hits terminal capture failure", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -360,7 +355,7 @@ var _ = Describe("Integration: E6 parent Ready when child snapshot fails capture
 			pr := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(pr).NotTo(BeNil())
 			g.Expect(pr.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(pr.Reason).To(Equal(snapshot.ReasonChildSnapshotFailed))
+			g.Expect(pr.Reason).To(Equal(snapshot.ReasonChildrenFailed))
 			g.Expect(pr.Message).To(ContainSubstring(childKey.String()))
 			g.Expect(pr.Message).To(ContainSubstring("CapturePlanDrift"))
 		}, 180*time.Second, 300*time.Millisecond).Should(Succeed())

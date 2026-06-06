@@ -426,7 +426,7 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		t.Fatalf("expected VM DomainReady=True after writing child refs, got %#v", domainReady)
 	}
 	ready := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonChildSnapshotPending {
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonChildrenPending {
 		t.Fatalf("expected Ready=False mirrored content pending before child content ready, got %#v", ready)
 	}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {

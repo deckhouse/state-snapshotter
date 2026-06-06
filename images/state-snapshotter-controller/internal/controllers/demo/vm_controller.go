@@ -220,7 +220,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	if !graphPublished {
-		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonChildSnapshotPending, "waiting for child content objects to bind"); err != nil {
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonChildrenPending, "waiting for child content objects to bind"); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
@@ -265,7 +265,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVMSnapshotLifecycle(ctx
 			return nil, ctrl.Result{}, err
 		}
 		if pending {
-			if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, client.ObjectKeyFromObject(s), metav1.ConditionFalse, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("waiting for parent %s/%s bound SnapshotContent", parentRef.Kind, parentRef.Name)); err != nil {
+			if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, client.ObjectKeyFromObject(s), metav1.ConditionFalse, snapshot.ReasonChildrenPending, fmt.Sprintf("waiting for parent %s/%s bound SnapshotContent", parentRef.Kind, parentRef.Name)); err != nil {
 				return nil, ctrl.Result{}, err
 			}
 			return nil, ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil

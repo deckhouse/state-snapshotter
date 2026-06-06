@@ -14,8 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// E6: generic Snapshot parent readiness aggregation from status.childrenSnapshotRefs.
+// Child Snapshot terminal-failure classification from status.childrenSnapshotRefs.
 // Each ref carries explicit apiVersion/kind/name; the child object is loaded with a single Get (no registry scan).
+//
+// This is NOT a Ready aggregator. Final readiness is owned by SnapshotContent
+// (Ready = RequestsReady && ChildrenReady) and Snapshot.Ready mirrors the bound SnapshotContent.Ready.
+// The helpers here serve two narrow purposes:
+//   - the priority-wave barrier (parent_graph.go), which must detect terminal child failures;
+//   - the single Snapshot.Ready bridge exception for child-Snapshot capture failures that no
+//     SnapshotContent can yet represent (SummarizeChildSnapshotTerminalFailures).
 
 package usecase
 
@@ -37,7 +44,7 @@ import (
 )
 
 // ChildSnapshotTerminalReadyReasons lists child snapshot Ready=False reasons treated as terminal capture
-// failure for parent aggregation (E6). Extend only with N2a-equivalent terminal paths shared across snapshot kinds.
+// failure. Extend only with N2a-equivalent terminal paths shared across snapshot kinds.
 var ChildSnapshotTerminalReadyReasons = map[string]struct{}{
 	"ListFailed":               {},
 	"NoCaptureTargets":         {},
@@ -47,7 +54,7 @@ var ChildSnapshotTerminalReadyReasons = map[string]struct{}{
 	"NamespaceNotFound":        {},
 }
 
-// SnapshotChildReadyClass is the E6 classification of one resolved child snapshot object.
+// SnapshotChildReadyClass is the classification of one resolved child snapshot object.
 type SnapshotChildReadyClass int
 
 const (
@@ -103,7 +110,7 @@ func CurrentReadyCondition(u *unstructured.Unstructured) *metav1.Condition {
 	return readyConditionFromSnapshotUnstructured(u)
 }
 
-// ClassifyGenericChildSnapshotReady classifies one resolved child snapshot (unstructured + GVK) for parent E6 aggregation.
+// ClassifyGenericChildSnapshotReady classifies one resolved child snapshot (unstructured + GVK).
 func ClassifyGenericChildSnapshotReady(u *unstructured.Unstructured, gvk schema.GroupVersionKind, childNS, childName string) (SnapshotChildReadyClass, string) {
 	childKey := fmt.Sprintf("%s/%s/%s", gvk.String(), childNS, childName)
 	bound, foundBound, err := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
@@ -139,7 +146,7 @@ func ClassifyGenericChildSnapshotReady(u *unstructured.Unstructured, gvk schema.
 	}
 }
 
-// ClassifySnapshotChildReady maps a typed Snapshot to the same E6 class as generic resolution
+// ClassifySnapshotChildReady maps a typed Snapshot to the same class as generic resolution
 // (typed storage Snapshot path; same status shape as other snapshot kinds).
 func ClassifySnapshotChildReady(ch *storagev1alpha1.Snapshot) (SnapshotChildReadyClass, string) {
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(ch)
@@ -151,122 +158,42 @@ func ClassifySnapshotChildReady(ch *storagev1alpha1.Snapshot) (SnapshotChildRead
 	return ClassifyGenericChildSnapshotReady(u, gvk, ch.Namespace, ch.Name)
 }
 
-// SnapshotChildrenRefsSummary aggregates E6 state across status.childrenSnapshotRefs.
-type SnapshotChildrenRefsSummary struct {
-	HasFailed      bool
-	FailedMessages []string
-	HasPending     bool
-	PendingParts   []string
-	AllCompleted   bool
+// ChildSnapshotTerminalFailures is the narrow input for the Snapshot.Ready child-capture-failure
+// bridge: terminal child-Snapshot capture failures discovered from status.childrenSnapshotRefs.
+// It carries no pending/Completed aggregation — those states are reflected through the
+// SnapshotContent.Ready mirror, not here.
+type ChildSnapshotTerminalFailures struct {
+	HasFailed bool
+	Messages  []string
 }
 
-// SummarizeChildrenSnapshotRefsForParentReadyE6 aggregates parent child readiness from strict refs (apiVersion/kind/name).
-func SummarizeChildrenSnapshotRefsForParentReadyE6(ctx context.Context, c client.Reader, refs []storagev1alpha1.SnapshotChildRef, parentSnapshotNamespace string) (*SnapshotChildrenRefsSummary, error) {
-	if len(refs) == 0 {
-		return &SnapshotChildrenRefsSummary{AllCompleted: true}, nil
-	}
-	var sum SnapshotChildrenRefsSummary
+// SummarizeChildSnapshotTerminalFailures scans status.childrenSnapshotRefs (strict
+// apiVersion/kind/name refs) and reports only terminal child-Snapshot capture failures: a child
+// Ready=False with a terminal reason, or an invalid ref. Pending children (including not-found-yet)
+// and Completed children are ignored — they are reflected through the SnapshotContent.Ready mirror.
+func SummarizeChildSnapshotTerminalFailures(ctx context.Context, c client.Reader, refs []storagev1alpha1.SnapshotChildRef, parentSnapshotNamespace string) (ChildSnapshotTerminalFailures, error) {
+	var out ChildSnapshotTerminalFailures
 	for _, ref := range refs {
 		if _, err := RefGVK(ref); err != nil {
-			sum.HasFailed = true
-			sum.FailedMessages = append(sum.FailedMessages, err.Error())
+			out.HasFailed = true
+			out.Messages = append(out.Messages, err.Error())
 			continue
 		}
 		u, gvk, resErr := GetChildSnapshot(ctx, c, ref, parentSnapshotNamespace)
 		if resErr != nil {
 			if errors.Is(resErr, ErrRunGraphChildSnapshotNotFound) {
-				sum.HasPending = true
-				sum.PendingParts = append(sum.PendingParts,
-					fmt.Sprintf("child snapshot %s/%s/%s not found yet", ref.APIVersion, ref.Kind, parentSnapshotNamespace+"/"+ref.Name))
-				continue
+				continue // not found yet is pending, not a terminal failure
 			}
-			return nil, resErr
+			return out, resErr
 		}
-		cls, msg := ClassifyGenericChildSnapshotReady(u, gvk, parentSnapshotNamespace, ref.Name)
-		switch cls {
-		case SnapshotChildReadyClassFailed:
-			sum.HasFailed = true
+		if cls, msg := ClassifyGenericChildSnapshotReady(u, gvk, parentSnapshotNamespace, ref.Name); cls == SnapshotChildReadyClassFailed {
+			out.HasFailed = true
 			if msg != "" {
-				sum.FailedMessages = append(sum.FailedMessages, msg)
+				out.Messages = append(out.Messages, msg)
 			}
-		case SnapshotChildReadyClassPending:
-			sum.HasPending = true
-			if msg != "" {
-				sum.PendingParts = append(sum.PendingParts, msg)
-			}
-		case SnapshotChildReadyClassCompleted:
-			// ok
 		}
 	}
-	if sum.HasFailed {
-		sum.AllCompleted = false
-		return &sum, nil
-	}
-	if sum.HasPending {
-		sum.AllCompleted = false
-		return &sum, nil
-	}
-	sum.AllCompleted = true
-	return &sum, nil
-}
-
-// E6ParentReadyPickInput is the generic parent Ready decision for Snapshot (priority matrix).
-type E6ParentReadyPickInput struct {
-	HasChildFailed                bool
-	ChildFailedMessage            string
-	SubtreeManifestCapturePending bool
-	SubtreeMessage                string
-	HasChildPending               bool
-	ChildPendingMessage           string
-	SelfCaptureComplete           bool
-}
-
-// E6ParentReadyPickOutput is the parent Ready condition after applying E6 priority.
-type E6ParentReadyPickOutput struct {
-	Ready   bool
-	Reason  string
-	Message string
-}
-
-// PickParentReadyReasonE6 applies strict priority:
-// ChildSnapshotFailed > SubtreeManifestCapturePending > ChildSnapshotPending > Completed
-// (Completed only if SelfCaptureComplete and no higher-priority issue).
-func PickParentReadyReasonE6(in E6ParentReadyPickInput) E6ParentReadyPickOutput {
-	if in.HasChildFailed {
-		msg := in.ChildFailedMessage
-		if msg == "" {
-			msg = "one or more child snapshots failed"
-		}
-		return E6ParentReadyPickOutput{
-			Ready: false, Reason: snapshot.ReasonChildSnapshotFailed, Message: msg,
-		}
-	}
-	if in.SubtreeManifestCapturePending {
-		msg := in.SubtreeMessage
-		if msg == "" {
-			msg = "subtree manifest capture pending"
-		}
-		return E6ParentReadyPickOutput{
-			Ready: false, Reason: snapshot.ReasonSubtreeManifestCapturePending, Message: msg,
-		}
-	}
-	if in.HasChildPending {
-		msg := in.ChildPendingMessage
-		if msg == "" {
-			msg = "waiting for child snapshots"
-		}
-		return E6ParentReadyPickOutput{
-			Ready: false, Reason: snapshot.ReasonChildSnapshotPending, Message: msg,
-		}
-	}
-	if in.SelfCaptureComplete {
-		return E6ParentReadyPickOutput{
-			Ready: true, Reason: snapshot.ReasonCompleted, Message: "all required child snapshots are ready",
-		}
-	}
-	return E6ParentReadyPickOutput{
-		Ready: false, Reason: snapshot.ReasonChildSnapshotPending, Message: "waiting for root manifest capture to complete",
-	}
+	return out, nil
 }
 
 // JoinNonEmpty joins non-empty strings with sep (helper for parent-facing messages).

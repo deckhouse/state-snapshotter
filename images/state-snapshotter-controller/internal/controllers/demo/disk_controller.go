@@ -247,7 +247,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskSnapshotLifecycle(ctx 
 			return nil, ctrl.Result{}, err
 		}
 		if pending {
-			if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, client.ObjectKeyFromObject(s), metav1.ConditionFalse, snapshot.ReasonChildSnapshotPending, fmt.Sprintf("waiting for parent %s/%s bound SnapshotContent", parentRef.Kind, parentRef.Name)); err != nil {
+			if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, client.ObjectKeyFromObject(s), metav1.ConditionFalse, snapshot.ReasonChildrenPending, fmt.Sprintf("waiting for parent %s/%s bound SnapshotContent", parentRef.Kind, parentRef.Name)); err != nil {
 				return nil, ctrl.Result{}, err
 			}
 			return nil, ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil

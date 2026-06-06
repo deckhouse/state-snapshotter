@@ -45,8 +45,8 @@ func TestCheckConsistencyAndSetReadyMirrorsContentReadyVerbatim(t *testing.T) {
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    snapshot.ConditionReady,
 		Status:  metav1.ConditionFalse,
-		Reason:  snapshot.ReasonChildSnapshotFailed,
-		Message: "child SnapshotContent child-a failed: reason=ChildSnapshotFailed message=child SnapshotContent leaf-broken failed: reason=ManifestCheckpointFailed message=ManifestCheckpoint mcp-leaf not found",
+		Reason:  snapshot.ReasonChildrenFailed,
+		Message: "child SnapshotContent child-a failed: reason=ChildrenFailed message=child SnapshotContent leaf-broken failed: reason=ManifestCheckpointFailed message=ManifestCheckpoint mcp-leaf not found",
 	})
 
 	snapGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")

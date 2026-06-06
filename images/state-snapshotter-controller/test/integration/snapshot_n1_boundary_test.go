@@ -94,9 +94,6 @@ var _ = Describe("Integration: Snapshot N1 boundary (recovery)", func() {
 			again := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, again)).To(Succeed())
 			g.Expect(again.Status.BoundSnapshotContentName).To(Equal(contentName))
-			bound := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionBound)
-			g.Expect(bound).NotTo(BeNil())
-			g.Expect(bound.Status).To(Equal(metav1.ConditionTrue))
 			domainReady := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionDomainReady)
 			g.Expect(domainReady).NotTo(BeNil())
 			g.Expect(domainReady.Status).To(Equal(metav1.ConditionTrue))

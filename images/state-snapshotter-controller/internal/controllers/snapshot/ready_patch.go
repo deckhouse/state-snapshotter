@@ -33,7 +33,7 @@ import (
 
 // patchSnapshotChildSnapshotFailedBridge writes the ONE non-mirror Snapshot.Ready value permitted by the
 // single-aggregator contract (snapshot-rework/2026-06-03-snapshot-conditions-model.md): Ready=False/
-// ChildSnapshotFailed when a child Snapshot terminally failed capture planning before any child
+// ChildrenFailed when a child Snapshot terminally failed capture planning before any child
 // SnapshotContent could reflect it (the content tree cannot represent a child-Snapshot capture failure).
 // Every other Snapshot.Ready transition is a mirror of the bound SnapshotContent.Ready.
 func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
@@ -50,7 +50,7 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             snapshotpkg.ReasonChildSnapshotFailed,
+			Reason:             snapshotpkg.ReasonChildrenFailed,
 			Message:            msg,
 			ObservedGeneration: nsSnap.Generation,
 		})

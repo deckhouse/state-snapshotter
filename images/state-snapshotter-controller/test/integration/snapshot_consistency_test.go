@@ -94,24 +94,10 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByCommonController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Common controller processed snapshot",
-			)
-			snapshot.SetCondition(
-				snapshotLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
 				snapshot.ReasonReady,
 				"Snapshot is ready",
-			)
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionInProgress,
-				metav1.ConditionTrue,
-				"Processing",
-				"Snapshot is in progress",
 			)
 
 			// Set contentName to non-existent Content
@@ -219,7 +205,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 
 		It("should NOT set Ready=False when Content is missing (never was Ready=True)", func() {
 			// PRECONDITION: Create Snapshot with contentName but Content doesn't exist
-			// Snapshot was NEVER Ready=True (only InProgress)
+			// Snapshot was NEVER Ready=True (still binding / RequestsReady pending)
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-missing-content-never-ready")
@@ -235,22 +221,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Snapshot is InProgress but never Ready=True
+			// Snapshot is bound (boundSnapshotContentName set) but never Ready=True
 			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCommonController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Common controller processed snapshot",
-			)
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionInProgress,
-				metav1.ConditionTrue,
-				"Processing",
-				"Snapshot is in progress",
-			)
 			// NO Ready=True condition
 
 			// Set contentName to non-existent Content
@@ -303,11 +275,6 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal(snapshot.ReasonContentMissing))
-
-			// InProgress should remain
-			inProgressCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionInProgress)
-			Expect(inProgressCond).NotTo(BeNil())
-			Expect(inProgressCond.Status).To(Equal(metav1.ConditionTrue), "InProgress should remain True")
 		})
 	})
 
@@ -331,13 +298,6 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			Expect(err).NotTo(HaveOccurred())
 
 			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
-			snapshot.SetCondition(
-				snapshotLike,
-				snapshot.ConditionHandledByCommonController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Common controller processed snapshot",
-			)
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionReady,
@@ -432,13 +392,6 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			injectDomainReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
-				snapshot.ConditionHandledByCommonController,
-				metav1.ConditionTrue,
-				"Processed",
-				"Common controller processed snapshot",
-			)
-			snapshot.SetCondition(
-				snapshotLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
 				snapshot.ReasonReady,
@@ -455,8 +408,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			err = k8sClient.Create(ctx, contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Set Content Ready=True and InProgress=False (terminal state)
-			// IsReady() requires both Ready=True AND InProgress=False
+			// Set Content Ready=True (terminal state)
 			contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -468,20 +420,11 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 				"Content is ready",
 			)
 
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionInProgress,
-				metav1.ConditionFalse,
-				"Completed",
-				"Content processing completed",
-			)
-
 			snapshot.SyncConditionsToUnstructured(contentObj, contentLike.GetStatusConditions())
 			err = k8sClient.Status().Update(ctx, contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify Content is Ready=True and InProgress=False before proceeding
-			// IsReady() requires Ready=True, and terminal state requires InProgress=False
+			// Verify Content is Ready=True before proceeding
 			Eventually(func() bool {
 				freshContent := &unstructured.Unstructured{}
 				freshContent.SetGroupVersionKind(contentGVK)
@@ -497,15 +440,9 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 					return false
 				}
 
-				// Check both Ready=True and InProgress=False for terminal state
 				readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
-				inProgressCond := snapshot.GetCondition(contentLike, snapshot.ConditionInProgress)
-
-				readyOk := readyCond != nil && readyCond.Status == metav1.ConditionTrue
-				inProgressOk := inProgressCond == nil || inProgressCond.Status == metav1.ConditionFalse
-
-				return readyOk && inProgressOk && snapshot.IsReady(contentLike)
-			}, "10s", "100ms").Should(BeTrue(), "Content should be Ready=True and InProgress=False (terminal state)")
+				return readyCond != nil && readyCond.Status == metav1.ConditionTrue && snapshot.IsReady(contentLike)
+			}, "10s", "100ms").Should(BeTrue(), "Content should be Ready=True (terminal state)")
 
 			// Set contentName to existing Content
 			snapshot.SyncConditionsToUnstructured(snapshotObj, snapshotLike.GetStatusConditions())

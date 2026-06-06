@@ -436,7 +436,7 @@ snapshot_terminal_ready_failure() {
 	[[ -n "${cond}" && "${cond}" != "null" ]] || return 1
 	reason="$(jq -r '.reason // ""' <<<"${cond}")"
 	case "${reason}" in
-	ChildSnapshotFailed|CapturePlanDrift|ManifestCheckpointFailed|VolumeCaptureFailed|ListFailed|VolumeCaptureTargetsFailed)
+	ChildrenFailed|CapturePlanDrift|ManifestCheckpointFailed|VolumeCaptureFailed|ListFailed|VolumeCaptureTargetsFailed)
 		log "ERROR: Snapshot $1 terminal Ready=False reason=${reason} msg=$(jq -r '.message // ""' <<<"${cond}")"
 		return 0
 		;;

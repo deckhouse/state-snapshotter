@@ -373,37 +373,38 @@ EOF
         exit 1
     fi
     
-    # Test 2: Simulate custom snapshot controller (set HandledByCustomSnapshotController condition)
-    # IMPORTANT: SnapshotController waits for this condition before creating SnapshotContent
+    # Test 2: Simulate the domain controller finishing planning (set DomainReady condition).
+    # IMPORTANT: the generic binder waits for DomainReady=True with observedGeneration == generation
+    # before creating SnapshotContent (gen-gated barrier).
     log_info ""
     log_info "═══════════════════════════════════════════════════════════════"
-    log_info "Test 2: Simulate custom snapshot controller"
+    log_info "Test 2: Simulate domain controller (DomainReady)"
     log_info "═══════════════════════════════════════════════════════════════"
     
     local snapshot_resource="${SNAPSHOT_KIND,,}s.${SNAPSHOT_API_GROUP}"
     
     if [[ "${SKIP_DOMAIN_SIMULATION:-false}" == "true" ]]; then
-        log_warn "Skipping custom snapshot controller simulation (CRD does not support conditions)"
+        log_warn "Skipping domain controller simulation (CRD does not support conditions)"
         log_warn "SnapshotContent will NOT be created - this is expected"
     else
-        log_info "Setting HandledByCustomSnapshotController=True condition..."
+        log_info "Setting DomainReady=True condition (observedGeneration == generation)..."
         
         # CRITICAL: Must use --subresource=status to patch status subresource
         # Without --subresource=status, Kubernetes will reject status.conditions
         # because status is declared as a subresource in the CRD
         local transition_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        local generation=$(kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.generation}' 2>/dev/null || echo "1")
         
         if command -v jq &>/dev/null; then
-            # Build patch payload with conditions array
-            # CRITICAL: When using --patch="...", payload must be wrapped in {"status": {...}}
-            # kubectl does NOT automatically wrap payload for --subresource=status when using --patch="..."
-            local patch_payload=$(jq -n --arg time "$transition_time" '{
+            # The barrier is gen-gated: observedGeneration must equal metadata.generation.
+            local patch_payload=$(jq -n --arg time "$transition_time" --argjson gen "${generation:-1}" '{
                 "status": {
                     "conditions": [{
-                        "type": "HandledByCustomSnapshotController",
+                        "type": "DomainReady",
                         "status": "True",
-                        "reason": "Processed",
-                        "message": "Custom snapshot controller processed snapshot",
+                        "reason": "Completed",
+                        "message": "Domain controller finished planning",
+                        "observedGeneration": $gen,
                         "lastTransitionTime": $time
                     }]
                 }
@@ -423,9 +424,9 @@ EOF
             # Verify condition was set
             sleep 1  # Small delay for API to update
             local condition_status=$(kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" \
-                -o jsonpath='{.status.conditions[?(@.type=="HandledByCustomSnapshotController")].status}' 2>/dev/null || echo "")
+                -o jsonpath='{.status.conditions[?(@.type=="DomainReady")].status}' 2>/dev/null || echo "")
             if [[ "$condition_status" == "True" ]]; then
-                log_success "Custom snapshot controller condition set and verified"
+                log_success "DomainReady condition set and verified"
             else
                 log_error "Condition was not set correctly (status: $condition_status)"
                 log_info "Snapshot status:"
@@ -542,6 +543,7 @@ EOF
     local content_resource="${CONTENT_KIND,,}s.${SNAPSHOT_API_GROUP}"
     # Use kubectl patch with merge patch directly to status subresource
     local transition_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local content_generation=$(kubectl get "$content_resource" $CONTENT_NAME -o jsonpath='{.metadata.generation}' 2>/dev/null || echo "1")
     
     # Get existing conditions to merge properly
     # jsonpath returns empty string if field doesn't exist, so we need to handle that
@@ -555,25 +557,19 @@ EOF
     fi
     
     if command -v jq &>/dev/null; then
-        # Build new conditions
-        local ready_condition=$(jq -n --arg time "$transition_time" '{
+        # Build new conditions. Ready is gen-gated (INV-COND3): observedGeneration == metadata.generation.
+        local ready_condition=$(jq -n --arg time "$transition_time" --argjson gen "${content_generation:-1}" '{
             "type": "Ready",
             "status": "True",
-            "reason": "AllArtifactsReady",
-            "message": "All artifacts are ready",
-            "lastTransitionTime": $time
-        }')
-        local inprogress_condition=$(jq -n --arg time "$transition_time" '{
-            "type": "InProgress",
-            "status": "False",
             "reason": "Completed",
-            "message": "Snapshot completed",
+            "message": "All artifacts are ready",
+            "observedGeneration": $gen,
             "lastTransitionTime": $time
         }')
         
-        # Merge with existing conditions (remove old Ready and InProgress if exist)
-        local updated_conditions=$(echo "$existing_conditions" | jq --argjson ready "$ready_condition" --argjson inprogress "$inprogress_condition" '
-            (. // []) | map(select(.type != "Ready" and .type != "InProgress")) + [$ready, $inprogress]
+        # Merge with existing conditions (replace any existing Ready)
+        local updated_conditions=$(echo "$existing_conditions" | jq --argjson ready "$ready_condition" '
+            (. // []) | map(select(.type != "Ready")) + [$ready]
         ')
         
         # Use merge patch to update status.conditions

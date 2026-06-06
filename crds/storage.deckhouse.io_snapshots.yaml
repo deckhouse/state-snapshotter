@@ -149,16 +149,16 @@ spec:
                   ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
                   Snapshot controllers use it as execution state and clear it after the result is published to SnapshotContent.
                 type: string
-              volumeCaptureRequestName:
-                description: |-
-                  VolumeCaptureRequestName is the temporary bulk VCR owned by this snapshot while the volume leg runs.
-                  Cleared after VCR.status.dataRefs[] is published to bound SnapshotContent and artifacts are handed off.
-                type: string
               observedGeneration:
                 description: ObservedGeneration is the metadata.generation the controller
                   last reconciled into this status.
                 format: int64
                 type: integer
+              volumeCaptureRequestName:
+                description: |-
+                  VolumeCaptureRequestName is the temporary bulk VCR owned by this snapshot while the volume leg runs.
+                  Cleared after VCR.status.dataRefs[] is published to bound SnapshotContent and artifacts are handed off.
+                type: string
             type: object
         type: object
     served: true

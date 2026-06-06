@@ -431,20 +431,13 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Set Ready=True and InProgress=False (terminal state)
+			// Set Ready=True (terminal state)
 			snapshot.SetCondition(
 				contentLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
 				snapshot.ReasonReady,
 				"Content is ready",
-			)
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionInProgress,
-				metav1.ConditionFalse,
-				"Completed",
-				"Content processing completed",
 			)
 			snapshot.SyncConditionsToUnstructured(contentObj, contentLike.GetStatusConditions())
 			err = k8sClient.Status().Update(ctx, contentObj)

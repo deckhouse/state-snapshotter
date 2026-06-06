@@ -349,7 +349,7 @@ func assertChildReadyUnchanged(t *testing.T, cl client.Client, name string) {
 	}
 }
 
-// A: terminal leaf failure propagates up the ancestor chain (depth >= 2) as ChildSnapshotFailed,
+// A: terminal leaf failure propagates up the ancestor chain (depth >= 2) as ChildrenFailed,
 // the root message keeps the failed leaf name + original reason, and an unaffected sibling stays Ready=True.
 func TestValidateCommonContentChildrenPropagatesTerminalLeafFailureAcrossDepth(t *testing.T) {
 	ctx := context.Background()
@@ -363,21 +363,21 @@ func TestValidateCommonContentChildrenPropagatesTerminalLeafFailureAcrossDepth(t
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(leaf, childOK).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	// Depth 1: child-a aggregates the broken leaf and must surface a terminal ChildSnapshotFailed
+	// Depth 1: child-a aggregates the broken leaf and must surface a terminal ChildrenFailed
 	// that names the leaf and preserves its original reason.
 	childA := parentContentWithChildRefs("child-a", "leaf-broken")
 	ready, reason, msg, err := r.validateCommonContentChildren(ctx, childA)
 	if err != nil {
 		t.Fatalf("validate child-a children: %v", err)
 	}
-	if ready || reason != snapshot.ReasonChildSnapshotFailed {
-		t.Fatalf("child-a expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildSnapshotFailed, ready, reason)
+	if ready || reason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("child-a expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenFailed, ready, reason)
 	}
 	if !strings.Contains(msg, "leaf-broken") || !strings.Contains(msg, reasonManifestCheckpointFailed) {
 		t.Fatalf("child-a message must name failed leaf + reason, got %q", msg)
 	}
 
-	// Persist child-a's computed Ready=False/ChildSnapshotFailed (cumulative message) and aggregate at root.
+	// Persist child-a's computed Ready=False/ChildrenFailed (cumulative message) and aggregate at root.
 	if err := cl.Create(ctx, contentWithReadyCond("child-a", metav1.ConditionFalse, reason, msg)); err != nil {
 		t.Fatalf("create child-a content: %v", err)
 	}
@@ -386,8 +386,8 @@ func TestValidateCommonContentChildrenPropagatesTerminalLeafFailureAcrossDepth(t
 	if err != nil {
 		t.Fatalf("validate root children: %v", err)
 	}
-	if ready || reason != snapshot.ReasonChildSnapshotFailed {
-		t.Fatalf("root expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildSnapshotFailed, ready, reason)
+	if ready || reason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("root expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenFailed, ready, reason)
 	}
 	for _, want := range []string{"child-a", "leaf-broken", reasonManifestCheckpointFailed} {
 		if !strings.Contains(msg, want) {
@@ -398,7 +398,7 @@ func TestValidateCommonContentChildrenPropagatesTerminalLeafFailureAcrossDepth(t
 	assertChildReadyUnchanged(t, cl, "child-ok")
 }
 
-// B: a missing data artifact on the leaf (ArtifactMissing) is terminal and propagates as ChildSnapshotFailed.
+// B: a missing data artifact on the leaf (ArtifactMissing) is terminal and propagates as ChildrenFailed.
 func TestValidateCommonContentChildrenTreatsMissingDataArtifactAsTerminal(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -415,8 +415,8 @@ func TestValidateCommonContentChildrenTreatsMissingDataArtifactAsTerminal(t *tes
 	if err != nil {
 		t.Fatalf("validate children: %v", err)
 	}
-	if ready || reason != snapshot.ReasonChildSnapshotFailed {
-		t.Fatalf("expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildSnapshotFailed, ready, reason)
+	if ready || reason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenFailed, ready, reason)
 	}
 	for _, want := range []string{"leaf-missing-vsc", snapshot.ReasonArtifactMissing, "vsc-leaf"} {
 		if !strings.Contains(msg, want) {
@@ -426,7 +426,7 @@ func TestValidateCommonContentChildrenTreatsMissingDataArtifactAsTerminal(t *tes
 }
 
 // C: a broken manifest leaf (ManifestCheckpointFailed) is terminal and wins over a sibling that is only
-// pending (ArtifactNotReady), regardless of ref order; a non-terminal child alone yields ChildSnapshotPending;
+// pending (ArtifactNotReady), regardless of ref order; a non-terminal child alone yields ChildrenPending;
 // the Ready sibling is never mutated.
 func TestValidateCommonContentChildrenClassifiesTerminalVsPending(t *testing.T) {
 	ctx := context.Background()
@@ -447,8 +447,8 @@ func TestValidateCommonContentChildrenClassifiesTerminalVsPending(t *testing.T) 
 	if err != nil {
 		t.Fatalf("validate children: %v", err)
 	}
-	if ready || reason != snapshot.ReasonChildSnapshotFailed {
-		t.Fatalf("expected terminal ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildSnapshotFailed, ready, reason)
+	if ready || reason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("expected terminal ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenFailed, ready, reason)
 	}
 	if !strings.Contains(msg, "leaf-manifest-broken") || !strings.Contains(msg, reasonManifestCheckpointFailed) {
 		t.Fatalf("message %q must name the terminal child + reason", msg)
@@ -461,8 +461,8 @@ func TestValidateCommonContentChildrenClassifiesTerminalVsPending(t *testing.T) 
 	if err != nil {
 		t.Fatalf("validate pending children: %v", err)
 	}
-	if ready || reason != snapshot.ReasonChildSnapshotPending {
-		t.Fatalf("expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildSnapshotPending, ready, reason)
+	if ready || reason != snapshot.ReasonChildrenPending {
+		t.Fatalf("expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenPending, ready, reason)
 	}
 	if !strings.Contains(msg, snapshot.ReasonArtifactNotReady) {
 		t.Fatalf("pending message %q must carry child reason", msg)

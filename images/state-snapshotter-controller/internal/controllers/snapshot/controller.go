@@ -63,11 +63,11 @@ type SnapshotReconciler struct {
 	childWatchMgr         *snapshotDynamicWatchManager
 }
 
-// e6ChildStatusReader returns the client used for E6 child snapshot reads.
+// childSnapshotStatusReader returns the client used for child snapshot status reads.
 // The split-client cache is invalidated by watch-driven updates in the same manager process; using the
 // API reader here can return unstructured objects whose status shape is harder to parse consistently
 // for demo CRDs in envtest.
-func (r *SnapshotReconciler) e6ChildStatusReader() client.Reader {
+func (r *SnapshotReconciler) childSnapshotStatusReader() client.Reader {
 	return r.Client
 }
 
@@ -186,7 +186,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
 		nsSnap.Status.BoundSnapshotContentName = ""
-		meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionBound)
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -198,7 +197,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if errors.IsNotFound(err) {
 		if nsSnap.Status.BoundSnapshotContentName != "" {
 			nsSnap.Status.BoundSnapshotContentName = ""
-			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionBound)
 			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
 			nsSnap.Status.ObservedGeneration = nsSnap.Generation
 			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
@@ -221,13 +219,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		nsSnap.Status.BoundSnapshotContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
-		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionBound,
-			Status:             metav1.ConditionTrue,
-			Reason:             "ContentCreated",
-			Message:            "SnapshotContent exists",
-			ObservedGeneration: nsSnap.Generation,
-		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -240,13 +231,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		nsSnap.Status.BoundSnapshotContentName = expectedName
 		nsSnap.Status.ObservedGeneration = nsSnap.Generation
-		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionBound,
-			Status:             metav1.ConditionTrue,
-			Reason:             "ContentBound",
-			Message:            "SnapshotContent exists and references this Snapshot",
-			ObservedGeneration: nsSnap.Generation,
-		})
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -306,13 +290,6 @@ func (r *SnapshotReconciler) finishReconcileWithExistingContent(ctx context.Cont
 	}
 	nsSnap.Status.BoundSnapshotContentName = expectedName
 	nsSnap.Status.ObservedGeneration = nsSnap.Generation
-	meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-		Type:               snapshotpkg.ConditionBound,
-		Status:             metav1.ConditionTrue,
-		Reason:             "ContentExists",
-		Message:            "SnapshotContent already exists",
-		ObservedGeneration: nsSnap.Generation,
-	})
 	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}

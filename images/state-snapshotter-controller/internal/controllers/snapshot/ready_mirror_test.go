@@ -34,7 +34,7 @@ func TestMirrorSnapshotReadyFromBoundContentCopiesContentReady(t *testing.T) {
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    snapshotpkg.ConditionReady,
 		Status:  metav1.ConditionFalse,
-		Reason:  snapshotpkg.ReasonChildSnapshotPending,
+		Reason:  snapshotpkg.ReasonChildrenPending,
 		Message: "child SnapshotContent leaf-x not ready: reason=ManifestCapturePending",
 	})
 
@@ -99,7 +99,7 @@ func TestMirrorSnapshotReadyFromBoundContentFallbackNoContentReady(t *testing.T)
 	}
 }
 
-// The bridge is the single non-mirror writer: Ready=False/ChildSnapshotFailed.
+// The bridge is the single non-mirror writer: Ready=False/ChildrenFailed.
 func TestPatchSnapshotChildSnapshotFailedBridge(t *testing.T) {
 	ctx := context.Background()
 
@@ -116,8 +116,8 @@ func TestPatchSnapshotChildSnapshotFailedBridge(t *testing.T) {
 		t.Fatalf("get parent: %v", err)
 	}
 	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady)
-	if got == nil || got.Status != metav1.ConditionFalse || got.Reason != snapshotpkg.ReasonChildSnapshotFailed {
-		t.Fatalf("bridge Ready = %#v, want False/%s", got, snapshotpkg.ReasonChildSnapshotFailed)
+	if got == nil || got.Status != metav1.ConditionFalse || got.Reason != snapshotpkg.ReasonChildrenFailed {
+		t.Fatalf("bridge Ready = %#v, want False/%s", got, snapshotpkg.ReasonChildrenFailed)
 	}
 	if got.ObservedGeneration != 5 {
 		t.Fatalf("observedGeneration=%d, want 5", got.ObservedGeneration)

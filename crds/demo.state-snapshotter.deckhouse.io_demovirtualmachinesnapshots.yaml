@@ -104,7 +104,7 @@ spec:
                 x-kubernetes-list-type: map
               conditions:
                 description: Conditions report readiness (e.g. Ready=True for generic
-                  parent E6 aggregation).
+                  parent children-readiness aggregation).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

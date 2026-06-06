@@ -413,78 +413,6 @@ func TestIsReady_ReturnsTrueOnlyWhenReadyTrue(t *testing.T) {
 	})
 }
 
-// Test IsInProgress - Returns True Only When InProgress=True
-//
-// INTERFACE: pkg/snapshot.IsInProgress
-//
-// PRECONDITION:
-// - Object implements SnapshotLike or SnapshotContentLike
-//
-// TEST SCENARIOS:
-//
-// SCENARIO 1: InProgress=True
-// - ACTIONS: SetCondition(obj, "InProgress", True, "Processing", "In progress")
-// - EXPECTED: IsInProgress(obj) == true
-//
-// SCENARIO 2: InProgress=False
-// - ACTIONS: SetCondition(obj, "InProgress", False, "Completed", "Done")
-// - EXPECTED: IsInProgress(obj) == false
-//
-// SCENARIO 3: InProgress condition missing
-// - ACTIONS: No condition set
-// - EXPECTED: IsInProgress(obj) == false
-func TestIsInProgress_ReturnsTrueOnlyWhenInProgressTrue(t *testing.T) {
-	t.Run("SnapshotLike", func(t *testing.T) {
-		obj := &mockSnapshotLike{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-snapshot"},
-			conditions: []metav1.Condition{},
-		}
-
-		// SCENARIO 1: InProgress=True
-		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
-		if !IsInProgress(obj) {
-			t.Error("Expected IsInProgress() to return true when InProgress=True")
-		}
-
-		// SCENARIO 2: InProgress=False
-		SetCondition(obj, ConditionInProgress, metav1.ConditionFalse, "Completed", "Done")
-		if IsInProgress(obj) {
-			t.Error("Expected IsInProgress() to return false when InProgress=False")
-		}
-
-		// SCENARIO 3: InProgress condition missing
-		obj.conditions = []metav1.Condition{}
-		if IsInProgress(obj) {
-			t.Error("Expected IsInProgress() to return false when InProgress condition is missing")
-		}
-	})
-
-	t.Run("SnapshotContentLike", func(t *testing.T) {
-		obj := &mockSnapshotContentLike{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-content"},
-			conditions: []metav1.Condition{},
-		}
-
-		// SCENARIO 1: InProgress=True
-		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
-		if !IsInProgress(obj) {
-			t.Error("Expected IsInProgress() to return true when InProgress=True")
-		}
-
-		// SCENARIO 2: InProgress=False
-		SetCondition(obj, ConditionInProgress, metav1.ConditionFalse, "Completed", "Done")
-		if IsInProgress(obj) {
-			t.Error("Expected IsInProgress() to return false when InProgress=False")
-		}
-
-		// SCENARIO 3: InProgress condition missing
-		obj.conditions = []metav1.Condition{}
-		if IsInProgress(obj) {
-			t.Error("Expected IsInProgress() to return false when InProgress condition is missing")
-		}
-	})
-}
-
 // Test SetCondition - Edge Cases
 //
 // Tests edge cases for SetCondition function:
@@ -517,18 +445,18 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 
 		// Set multiple conditions
 		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
-		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
-		SetCondition(obj, ConditionHandledByCommonController, metav1.ConditionTrue, "Started", "Started")
+		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
 
 		// All conditions should exist
 		if GetCondition(obj, ConditionReady) == nil {
 			t.Error("Expected Ready condition to exist")
 		}
-		if GetCondition(obj, ConditionInProgress) == nil {
-			t.Error("Expected InProgress condition to exist")
+		if GetCondition(obj, ConditionRequestsReady) == nil {
+			t.Error("Expected RequestsReady condition to exist")
 		}
-		if GetCondition(obj, ConditionHandledByCommonController) == nil {
-			t.Error("Expected HandledByCommonController condition to exist")
+		if GetCondition(obj, ConditionChildrenReady) == nil {
+			t.Error("Expected ChildrenReady condition to exist")
 		}
 
 		// Should have exactly 3 conditions
@@ -690,7 +618,7 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 			conditions: []metav1.Condition{},
 		}
 		// Set a different condition
-		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		// Try to get Ready condition (doesn't exist)
 		cond := GetCondition(obj, ConditionReady)
 		if cond != nil {
@@ -705,8 +633,8 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 		}
 		// Set multiple conditions
 		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
-		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
-		SetCondition(obj, ConditionHandledByCommonController, metav1.ConditionTrue, "Started", "Started")
+		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
 
 		// Get Ready condition
 		readyCond := GetCondition(obj, ConditionReady)
@@ -720,13 +648,13 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 			t.Errorf("Expected Ready condition status=True, got %v", readyCond.Status)
 		}
 
-		// Get InProgress condition
-		inProgressCond := GetCondition(obj, ConditionInProgress)
-		if inProgressCond == nil {
-			t.Fatal("Expected InProgress condition to exist")
+		// Get RequestsReady condition
+		requestsReadyCond := GetCondition(obj, ConditionRequestsReady)
+		if requestsReadyCond == nil {
+			t.Fatal("Expected RequestsReady condition to exist")
 		}
-		if inProgressCond.Type != ConditionInProgress {
-			t.Errorf("Expected condition type=%s, got %s", ConditionInProgress, inProgressCond.Type)
+		if requestsReadyCond.Type != ConditionRequestsReady {
+			t.Errorf("Expected condition type=%s, got %s", ConditionRequestsReady, requestsReadyCond.Type)
 		}
 	})
 }
@@ -765,7 +693,7 @@ func TestHasCondition_EdgeCases(t *testing.T) {
 			conditions: []metav1.Condition{},
 		}
 		// Set a different condition
-		SetCondition(obj, ConditionInProgress, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		// Check for Ready condition (doesn't exist)
 		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
 		if has {

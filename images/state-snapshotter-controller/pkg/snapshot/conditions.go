@@ -21,11 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Condition types according to ADR
+// Condition types: the final 4-condition model (DomainReady, RequestsReady, ChildrenReady, Ready).
 const (
-	// ConditionInProgress indicates the object is in progress (creation only)
-	ConditionInProgress = "InProgress"
-
 	// ConditionReady indicates the object is ready for use.
 	// On SnapshotContent it is the single aggregate: Ready = RequestsReady && ChildrenReady.
 	// On Snapshot it mirrors the bound SnapshotContent.Ready, except for terminal child-Snapshot capture failures.
@@ -39,24 +36,10 @@ const (
 	// (a leaf with no children is ChildrenReady=True vacuously).
 	ConditionChildrenReady = "ChildrenReady"
 
-	// ConditionBound indicates the snapshot is bound to SnapshotContent.
-	ConditionBound = "Bound"
-
-	// ConditionManifestsReady indicates manifests are ready (MCR Ready=True)
-	ConditionManifestsReady = "ManifestsReady"
-
-	// ConditionDataReady indicates data is ready (VCR Ready=True, if applicable)
-	ConditionDataReady = "DataReady"
-
 	// ConditionDomainReady indicates that the domain controller finished planning.
-	// Readers must require observedGeneration == generation.
+	// It is a gate/barrier (not part of the Ready formula); readers must require
+	// observedGeneration == generation.
 	ConditionDomainReady = "DomainReady"
-
-	// ConditionHandledByCommonController is the generic binder's own progress marker: it is set after
-	// the binder creates SnapshotContent and is read to take the idempotent mirror path. It is not a
-	// domain/external barrier (the barrier is DomainReady). Removing it is a separate binder
-	// idempotency refactor, out of this change's scope.
-	ConditionHandledByCommonController = "HandledByCommonController"
 )
 
 // Reasons for Ready=False
@@ -69,19 +52,19 @@ const (
 	ReasonDataArtifactNotSupported = "DataArtifactNotSupported"
 	ReasonDeleting                 = "Deleting"
 
-	// ReasonChildSnapshotPending is set on a parent Snapshot (E6) while a required child snapshot
-	// in status.childrenSnapshotRefs is not yet bound, has no Ready condition, Ready=False with a non-terminal reason,
-	// or root capture is not complete yet (no higher-priority reason applies).
-	ReasonChildSnapshotPending = "ChildSnapshotPending"
+	// ReasonChildrenPending is set while a required child SnapshotContent/Snapshot is not yet bound,
+	// has no Ready condition, is Ready=False with a non-terminal reason, or root capture is not complete
+	// yet (no higher-priority reason applies).
+	ReasonChildrenPending = "ChildrenPending"
 	// ReasonSubtreeManifestCapturePending is set on root Snapshot (and root SnapshotContent)
 	// while status.childrenSnapshotRefs is non-empty but the subtree exclude set cannot be computed yet
-	// (E5: no root ManifestCaptureRequest until exclude is complete — distinct from ChildSnapshotPending / ListFailed).
+	// (no root ManifestCaptureRequest until exclude is complete — distinct from ChildrenPending / ListFailed).
 	ReasonSubtreeManifestCapturePending = "SubtreeManifestCapturePending"
 	// ReasonManifestCapturePending is set while a snapshot controller waits for its own MCR/MCP materialization.
 	ReasonManifestCapturePending = "ManifestCapturePending"
-	// ReasonChildSnapshotFailed is set on a parent Snapshot (E6) when any required child snapshot has a terminal
-	// Ready=False (see usecase.ChildSnapshotTerminalReadyReasons).
-	ReasonChildSnapshotFailed = "ChildSnapshotFailed"
+	// ReasonChildrenFailed is set when any required child has a terminal Ready=False
+	// (see usecase.ChildSnapshotTerminalReadyReasons).
+	ReasonChildrenFailed = "ChildrenFailed"
 )
 
 // Reasons for DomainReady=False.
@@ -217,14 +200,6 @@ func GetCondition(obj interface{}, conditionType string) *metav1.Condition {
 // See: unified-snapshots-test-plan.md (TEST CASE: IsReady - Returns True Only When Ready=True)
 func IsReady(obj interface{}) bool {
 	return HasCondition(obj, ConditionReady, metav1.ConditionTrue)
-}
-
-// IsInProgress returns true if the object has InProgress=True condition.
-//
-// Contract: Pure function, idempotent, no side effects.
-// Works with any object implementing SnapshotLike or SnapshotContentLike.
-func IsInProgress(obj interface{}) bool {
-	return HasCondition(obj, ConditionInProgress, metav1.ConditionTrue)
 }
 
 // IsTerminal returns true if the object is in a terminal state (Ready=True or Ready=False)

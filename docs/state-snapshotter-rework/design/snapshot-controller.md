@@ -444,19 +444,19 @@ spec:
 
 - **`Ready=True` у parent snapshot** только зеркалит **parent `SnapshotContent Ready=True`**.
 - **`Ready=True` у parent content** только если: **собственный** persisted manifest-результат (N2a: **ManifestCheckpoint** на parent `SnapshotContent`, как сегодня в коде) **и** все **required** дочерние contents (резолв через **`childrenSnapshotRefs`** → child snapshot → `status.boundSnapshotContentName`) также **`Ready=True`**.
-- **Child content в процессе** (нет bound content, нет `Ready`, `Ready=False` с не-терминальной причиной N2a): parent content **`Ready=False`**, reason **`ChildSnapshotPending`** (`pkg/snapshot.ReasonChildSnapshotPending`); message поясняет этап (ожидание bind child content / ожидание child content `Ready=True`; при не-терминальном **`Ready=False`** у child content в message передаются **reason и при наличии message** child для observability).
-- **Child content в терминальном сбое** N2a (`Ready=False` с причиной из allowlist терминальных root-capture ошибок): parent content **`Ready=False`**, reason **`ChildSnapshotFailed`** (`pkg/snapshot.ReasonChildSnapshotFailed`); message содержит имя child и reason/message child.
+- **Child content в процессе** (нет bound content, нет `Ready`, `Ready=False` с не-терминальной причиной N2a): parent content **`Ready=False`**, reason **`ChildrenPending`** (`pkg/snapshot.ReasonChildrenPending`); message поясняет этап (ожидание bind child content / ожидание child content `Ready=True`; при не-терминальном **`Ready=False`** у child content в message передаются **reason и при наличии message** child для observability).
+- **Child content в терминальном сбое** N2a (`Ready=False` с причиной из allowlist терминальных root-capture ошибок): parent content **`Ready=False`**, reason **`ChildrenFailed`** (`pkg/snapshot.ReasonChildrenFailed`); message содержит имя child и reason/message child.
 - Успешный parent content после агрегации: **`Ready=True`**, reason **`Completed`** (`pkg/snapshot.ReasonCompleted`), как у N2a leaf после MCP.
 - Список **required** children vs optional — зафиксировать в spec/API при полном N2b.
 
-**Имплементация (generic):** parent snapshot controller строит durable content graph из **`status.childrenSnapshotRefs`**: child resolve — один `Get` по **`apiVersion/kind/name`** ref, затем `status.boundSnapshotContentName`; результат публикуется в **`SnapshotContent.status.childrenSnapshotContentRefs`**. `SnapshotContentController` валидирует уже опубликованный content graph; без domain kind-веток. Snapshot controllers не агрегируют child Ready и только зеркалят bound content Ready. Форма ref в API/CRD — только **`apiVersion/kind/name`** (без `namespace`), namespace child неявно равен namespace parent `Snapshot`. Parent/back-reference child-снимка задаётся **ownerReference** на parent snapshot; это lifecycle/requeue helper, не persisted graph. Snapshot controller ждёт `GraphReady=True` перед публикацией `childrenSnapshotContentRefs` и ensures child content ownerRef → parent content для lifecycle/requeue. `GVKRegistry` на E6 пути не обязателен и используется в основном read/exclude-путях E5. Дочерний **`Snapshot`** в графе — лишь один из допустимых snapshot kinds, не отдельный «scaffold»-путь. Исторический временный in-repo scaffold (PR2–PR3 в старых версиях плана) **удалён**; контракт и тесты — **[`spec/system-spec.md`](../spec/system-spec.md) §3.8**, **`snapshot_graph_e5_e6_integration_test.go`**, **PR5b**.
+**Имплементация (generic):** parent snapshot controller строит durable content graph из **`status.childrenSnapshotRefs`**: child resolve — один `Get` по **`apiVersion/kind/name`** ref, затем `status.boundSnapshotContentName`; результат публикуется в **`SnapshotContent.status.childrenSnapshotContentRefs`**. `SnapshotContentController` валидирует уже опубликованный content graph; без domain kind-веток. Snapshot controllers не агрегируют child Ready и только зеркалят bound content Ready. Форма ref в API/CRD — только **`apiVersion/kind/name`** (без `namespace`), namespace child неявно равен namespace parent `Snapshot`. Parent/back-reference child-снимка задаётся **ownerReference** на parent snapshot; это lifecycle/requeue helper, не persisted graph. Snapshot controller ждёт `DomainReady=True` перед публикацией `childrenSnapshotContentRefs` и ensures child content ownerRef → parent content для lifecycle/requeue. `GVKRegistry` на пути children-readiness не обязателен и используется в основном read/exclude-путях E5. Дочерний **`Snapshot`** в графе — лишь один из допустимых snapshot kinds, не отдельный «scaffold»-путь. Исторический временный in-repo scaffold (PR2–PR3 в старых версиях плана) **удалён**; контракт и тесты — **[`spec/system-spec.md`](../spec/system-spec.md) §3.8**, **`snapshot_graph_integration_test.go`**, **PR5b**.
 
 | Child state (resolved child content by snapshot ref) | Parent content `Ready` | Parent content `Ready` reason |
 |-------------------------------------------|----------------|------------------------|
-| Нет привязанного `SnapshotContent` / child reconcile в процессе | `False` | `ChildSnapshotPending` |
-| `Ready` отсутствует или `Unknown` | `False` | `ChildSnapshotPending` |
-| `Ready=False` с не-терминальной причиной (например `ManifestCheckpointPending`) | `False` | `ChildSnapshotPending` |
-| `Ready=False` с терминальной причиной N2a (whitelist в коде) | `False` | `ChildSnapshotFailed` |
+| Нет привязанного `SnapshotContent` / child reconcile в процессе | `False` | `ChildrenPending` |
+| `Ready` отсутствует или `Unknown` | `False` | `ChildrenPending` |
+| `Ready=False` с не-терминальной причиной (например `ManifestCheckpointPending`) | `False` | `ChildrenPending` |
+| `Ready=False` с терминальной причиной N2a (whitelist в коде) | `False` | `ChildrenFailed` |
 | Child content `Ready=True` и у parent content уже persisted MCP | `True` | `Completed` |
 
 **Ready=True не означает:**
@@ -484,7 +484,7 @@ spec:
 
 ### 13.2 Open (до финализации API / реализации)
 
-1. Точные **имена condition types** и их соответствие существующим unified CRD (в т.ч. **`ChildSnapshotFailed`** для N2b — §11.1).
+1. Точные **имена condition types** и их соответствие существующим unified CRD (в т.ч. **`ChildrenFailed`** для N2b — §11.1).
 2. **Deletion policy** на уровне class vs spec (что наследуется от SnapshotClass аналога).
 3. ~~Минимальный набор **GVR** для N2a~~ — зафиксирован в **§4.5**; остаётся перенос в CRD/code и при необходимости сужение/расширение через PR с обновлением §4.5.
 4. **Политика удаления root при незавершённом capture** — **§5.2 п.1:** in-flight MCR убирается **GC** по ownerRef на **`Snapshot`** после полного удаления root; явный `Delete(MCR)` из `reconcileDelete` **не** делается.

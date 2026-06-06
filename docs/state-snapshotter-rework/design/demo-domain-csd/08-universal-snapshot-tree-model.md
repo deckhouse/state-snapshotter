@@ -64,7 +64,7 @@
 
 **Fail-closed (агрегация `Ready`).** Если состояние **обязательного** ребёнка, заданного в **refs**, **нельзя надёжно** определить (ошибка чтения API, нет ожидаемых **conditions**, конфликт состояний), предок **обязан** **`Ready=False`** — **не** оставаться **`Ready=True`** из-за «не смогли проверить». Нормативно: **INV-R4** в [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md).
 
-**Несколько детей с `Ready=False` и разными `reason`:** на родителе выбирается один код по фиксированному E6-приоритету (`ChildSnapshotFailed` > `SubtreeManifestCapturePending` > `ChildSnapshotPending`) — см. **INV-R5** в [`07`](07-ready-delete-matrix.md) §3.
+**Несколько детей с `Ready=False` и разными `reason`:** на родителе выбирается один код по фиксированному приоритету children-readiness propagation (`ChildrenFailed` > `SubtreeManifestCapturePending` > `ChildrenPending`) — см. **INV-R5** в [`07`](07-ready-delete-matrix.md) §3.
 
 Примеры `reason`: `ManifestChunkMissing`, `ChildSnapshotMissing`, `ManifestCheckpointMissing`, `VolumeSnapshotNotReady`, …
 

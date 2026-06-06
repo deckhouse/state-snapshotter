@@ -270,7 +270,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err = k8sClient.Status().Update(ctx, freshContent)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Step 5: Simulate readiness: set Ready=True and InProgress=False on SnapshotContent
+			// Step 5: Simulate readiness: set Ready=True on SnapshotContent
 			// This simulates custom snapshot controller completing its work
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 				Name: contentName,
@@ -286,13 +286,6 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				metav1.ConditionTrue,
 				snapshot.ReasonReady,
 				"Content is ready",
-			)
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionInProgress,
-				metav1.ConditionFalse,
-				"Completed",
-				"Content processing completed",
 			)
 			contentConditions = contentLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshContent, contentConditions)
@@ -514,13 +507,6 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				metav1.ConditionTrue,
 				snapshot.ReasonReady,
 				"Content is ready",
-			)
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionInProgress,
-				metav1.ConditionFalse,
-				"Completed",
-				"Content processing completed",
 			)
 			contentConditions := contentLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshContent, contentConditions)
@@ -800,13 +786,6 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				metav1.ConditionTrue,
 				snapshot.ReasonReady,
 				"Content is ready",
-			)
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionInProgress,
-				metav1.ConditionFalse,
-				"Completed",
-				"Content processing completed",
 			)
 			contentConditions := contentLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshContent, contentConditions)

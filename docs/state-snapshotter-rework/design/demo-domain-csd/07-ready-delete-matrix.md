@@ -54,25 +54,24 @@
 
 ## 3. Каскад деградации (снизу вверх), единый `Ready`
 
-**Текущая реализация E6 (нормативно для runtime):**
+**Текущая runtime-модель** (нормативно — [`spec/system-spec.md`](../../spec/system-spec.md) §3.8 / §3.9.7):
 
-- Родительская агрегация `Ready` использует фиксированный приоритет причин:
-  1. `ChildSnapshotFailed`
-  2. `SubtreeManifestCapturePending`
-  3. `ChildSnapshotPending`
-  4. `Completed` (только если блокеров нет)
+- Готовность вычисляется **ровно на `SnapshotContent`** (единственный агрегатор, INV-COND2): `SnapshotContent.Ready = RequestsReady && ChildrenReady`.
+- `Snapshot.Ready` — **зеркало** bound `SnapshotContent.Ready` (status/reason/message копируются), без локального пересчёта дерева (INV-COND4).
+- Приоритет reason у `Ready` (один reason при нескольких упавших ногах): `RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending > Completed` — терминальные провалы первыми, свой узел перед детьми.
+- Failure листа поднимается **только** по ancestor-chain (INV-FAIL1): каждый предок получает `ChildrenReady=False` / `Ready=False` / reason `ChildrenFailed`, а `message` сохраняет имя failed-потомка и исходный reason/message (кумулятивно по глубине); sibling-ветки не затрагиваются.
+- Единственное не-mirror исключение для `Snapshot.Ready` — bridge терминального capture-failure дочернего **`Snapshot`**, который дерево контента ещё не может выразить (терминальные child-failure'ы вычисляет `usecase.SummarizeChildSnapshotTerminalFailures`, **без** pending-агрегации).
 - Для child selection используется strict ref (`apiVersion`/`kind`/`name`) и один `Get` в namespace родителя.
-- Отдельной политики «пробрасывать первичную reason неизменной вверх по всем уровням» текущий runtime-контракт не требует.
 
 При любой поломке нижнего уровня:
 
-1. Узел по правилу выше (или leaf snapshot с прямым **`Ready`**) переходит в **`Ready=False`** с **`reason` / `message`**, отражающими **первопричину**.
-2. Родитель при reconcile видит ребёнка **`Ready=False`** или **отсутствующего** ребёнка в API → выставляет **`Ready=False`** и **пробрасывает** причину снизу по правилу ниже.
-3. Каскад **до корня** (`Snapshot`).
+1. Узел (leaf `SnapshotContent` со своей request-ногой) переходит в **`Ready=False`** с **`reason` / `message`**, отражающими **первопричину**.
+2. Каждый предок-`SnapshotContent` при агрегации видит ребёнка `Ready=False` → выставляет `ChildrenReady=False` / `Ready=False` (reason `ChildrenFailed`) и сохраняет имя/первопричину в `message`.
+3. Каскад **до корня**: root `SnapshotContent`, затем root `Snapshot.Ready` как зеркало.
 
-**Политика `reason` / `message` (текущая реализация):** для родителя выбирается reason по фиксированному E6-приоритету выше, а не по лексикографическому порядку refs. В `message` допускается контекст по дочерним узлам.
+**Политика `reason` / `message`:** reason родительского `SnapshotContent` выбирается по приоритету §3.9.7 (`RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending`), а не по лексикографическому порядку refs. В `message` допускается контекст по дочерним узлам.
 
-**INV-R5 (несколько детей с разными `reason`).** При нескольких неготовых детях reason родителя определяется тем же E6-приоритетом (`ChildSnapshotFailed` > `SubtreeManifestCapturePending` > `ChildSnapshotPending`), без tie-break по ключу refs.
+**INV-R5 (несколько детей с разными `reason`).** При нескольких неготовых детях reason родителя определяется тем же приоритетом (`ChildrenFailed` приоритетнее `ChildrenPending`), без tie-break по ключу refs.
 
 **Обязательные примеры `reason` (черновик перечня):**
 

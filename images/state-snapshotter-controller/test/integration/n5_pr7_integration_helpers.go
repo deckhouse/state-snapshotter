@@ -26,7 +26,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,7 +37,6 @@ import (
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
@@ -181,9 +179,6 @@ func pr7WaitSnapshotBound(ctx context.Context, key types.NamespacedName) *storag
 	var snap storagev1alpha1.Snapshot
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, key, &snap)).To(Succeed())
-		b := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionBound)
-		g.Expect(b).NotTo(BeNil())
-		g.Expect(b.Status).To(Equal(metav1.ConditionTrue))
 		g.Expect(snap.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 		g.Expect(snap.UID).NotTo(BeEmpty())
 	}).Should(Succeed())

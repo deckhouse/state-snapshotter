@@ -193,30 +193,13 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Check if already handled by common controller
-	if snapshot.HasCondition(snapshotLike, snapshot.ConditionHandledByCommonController, metav1.ConditionTrue) {
-		// Snapshot is already handled - check consistency and Ready condition
-		if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
-			logger.Error(err, "Failed to check consistency")
-			// Non-fatal: continue reconciliation
-		}
-		// SnapshotContent no longer has a reverse watch back to Snapshot. Keep polling
-		// pending content so Snapshot Ready eventually mirrors content Ready.
-		if !snapshot.IsReady(snapshotLike) {
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Step 2: Set InProgress condition
-	snapshot.SetCondition(snapshotLike, snapshot.ConditionInProgress, metav1.ConditionTrue, "Processing", "Common controller is processing snapshot")
-	if err := r.updateSnapshotStatus(ctx, obj, snapshotLike); err != nil {
-		return ctrl.Result{}, err
-	}
-
+	// Idempotency is structural, not condition-based: the steps below (ensure ObjectKeeper/ownerRef,
+	// create SnapshotContent only when status.boundSnapshotContentName is empty, publish result links)
+	// are all idempotent and converge to the consistency/mirror step. No progress/handled marker
+	// condition is needed; status.boundSnapshotContentName is the durable "content created" signal.
 	contentName := snapshotLike.GetStatusContentName()
 
-	// Step 3: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef)
+	// Step 2: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef)
 	var contentOwnerRef *metav1.OwnerReference
 	if snapshot.IsRootSnapshot(obj) {
 		var result ctrl.Result
@@ -256,7 +239,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Step 4: Create SnapshotContent if it doesn't exist
+	// Step 3: Create SnapshotContent if it doesn't exist
 	if contentName == "" {
 		// Generate deterministic name
 		contentName = snapshotbinding.StableContentName(obj.GetName(), obj.GetUID())
@@ -350,7 +333,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Step 4.5: Populate SnapshotContent links from MCR/VCR (if present and Ready)
+	// Step 4: Populate SnapshotContent links from MCR/VCR (if present and Ready)
 	if contentName != "" {
 		requeue, err := r.ensureSnapshotContentLinks(ctx, snapshotLike, obj, contentName)
 		if err != nil {
@@ -362,13 +345,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Step 5: Set HandledByCommonController condition
-	snapshot.SetCondition(snapshotLike, snapshot.ConditionHandledByCommonController, metav1.ConditionTrue, "Handled", "Common controller has started processing")
-	if err := r.updateSnapshotStatus(ctx, obj, snapshotLike); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Step 6: Check consistency and set Ready condition
+	// Step 5: Check consistency and set Ready condition
 	// Only check if SnapshotContent already exists (has been processed by SnapshotContentController)
 	// This avoids checking consistency in a "half-assembled" state where SnapshotContent
 	// might not have finalizer or Ready condition yet. SnapshotContent has no reverse
@@ -469,15 +446,6 @@ func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
 	}
 
 	return nil
-}
-
-// updateSnapshotStatus updates the status of the Snapshot object
-func (r *GenericSnapshotBinderController) updateSnapshotStatus(ctx context.Context, obj *unstructured.Unstructured, snapshotLike snapshot.SnapshotLike) error {
-	// Sync conditions from wrapper to unstructured object
-	conditions := snapshotLike.GetStatusConditions()
-	snapshot.SyncConditionsToUnstructured(obj, conditions)
-
-	return r.Status().Update(ctx, obj)
 }
 
 // ensureObjectKeeper creates or gets ObjectKeeper for root snapshot
@@ -777,10 +745,6 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		status = readyCond.Status
 		reason = readyCond.Reason
 		message = readyCond.Message
-	}
-	if status == metav1.ConditionTrue && snapshot.IsInProgress(snapshotLike) {
-		snapshot.SetCondition(snapshotLike, snapshot.ConditionInProgress, metav1.ConditionFalse,
-			snapshot.ReasonCompleted, "SnapshotContent is ready")
 	}
 	logger.V(1).Info("Mirroring SnapshotContent Ready", "content", contentName, "status", status, "reason", reason)
 	return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message)

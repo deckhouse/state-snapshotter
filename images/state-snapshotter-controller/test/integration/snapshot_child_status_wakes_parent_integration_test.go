@@ -38,11 +38,11 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// E6 + dynamic child watch: root Snapshot reaches Ready=Completed with a referenced
-// DemoVirtualDiskSnapshot child (same graph class as PR5a). A follow-up status-only patch on the
-// child (Ready=True message tweak, no spec / generation bump) must not break parent convergence —
+// Children readiness propagation + dynamic child watch: root Snapshot reaches Ready=Completed with a
+// referenced DemoVirtualDiskSnapshot child (same graph class as PR5a). A follow-up status-only patch on
+// the child (Ready=True message tweak, no spec / generation bump) must not break parent convergence —
 // guards against predicates or relay paths that ignore status-only updates.
-var _ = Describe("Integration: NSS E6 parent woken by child snapshot status", Serial, func() {
+var _ = Describe("Integration: NSS parent woken by child snapshot status", Serial, func() {
 	const csdName = "integration-nss-e6-status-csd"
 
 	BeforeEach(func() {

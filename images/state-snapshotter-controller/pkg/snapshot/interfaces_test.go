@@ -183,7 +183,7 @@ func TestSnapshotLike_GettersArePure(t *testing.T) {
 	// Create object with initial state
 	initialConditions := []metav1.Condition{
 		{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Ready", Message: "Ready"},
-		{Type: "InProgress", Status: metav1.ConditionFalse, Reason: "Completed", Message: "Done"},
+		{Type: "RequestsReady", Status: metav1.ConditionFalse, Reason: "Completed", Message: "Done"},
 	}
 	initialChildrenRefs := []ObjectRef{
 		{Kind: "VirtualMachineSnapshot", Name: "child-1", Namespace: "default"},

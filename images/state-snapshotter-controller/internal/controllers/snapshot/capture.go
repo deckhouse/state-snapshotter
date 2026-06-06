@@ -114,7 +114,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		}
 		hasSubtree := len(freshParent.Status.ChildrenSnapshotRefs) > 0
 		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding;
-		// do not fail capture as ListFailed — requeue like ChildSnapshotPending.
+		// do not fail capture as ListFailed — requeue like ChildrenPending.
 		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
 			errors.Is(err, volumecaptureuc.ErrSubtreeDataRefsPending) ||
 			errors.Is(err, usecase.ErrRunGraphChildNotBound) ||
@@ -123,7 +123,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			(hasSubtree && errors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady))
 		if transientChildGraph {
 			cur := meta.FindStatusCondition(freshParent.Status.Conditions, snapshotpkg.ConditionReady)
-			if cur != nil && cur.Reason == snapshotpkg.ReasonChildSnapshotFailed {
+			if cur != nil && cur.Reason == snapshotpkg.ReasonChildrenFailed {
 				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 			}
 			// Single-aggregator contract (snapshot-rework/2026-06-03-snapshot-conditions-model.md):
@@ -132,13 +132,13 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			// planning before any child SnapshotContent reflects it, so the content tree cannot represent
 			// that failure. Pending states are NOT an exception — they are mirrored from Content.Ready.
 			if hasSubtree {
-				sum, serr := usecase.SummarizeChildrenSnapshotRefsForParentReadyE6(ctx, r.e6ChildStatusReader(), freshParent.Status.ChildrenSnapshotRefs, freshParent.Namespace)
+				sum, serr := usecase.SummarizeChildSnapshotTerminalFailures(ctx, r.childSnapshotStatusReader(), freshParent.Status.ChildrenSnapshotRefs, freshParent.Namespace)
 				if serr != nil {
 					return ctrl.Result{}, serr
 				}
 				if sum.HasFailed {
 					parentKey := types.NamespacedName{Namespace: freshParent.Namespace, Name: freshParent.Name}
-					return r.patchSnapshotChildSnapshotFailedBridge(ctx, parentKey, usecase.JoinNonEmpty(sum.FailedMessages, "; "))
+					return r.patchSnapshotChildSnapshotFailedBridge(ctx, parentKey, usecase.JoinNonEmpty(sum.Messages, "; "))
 				}
 				// E5 delayed first MCR: do not leave a root MCR while subtree exclude cannot be computed (stale plan vs exclude).
 				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {

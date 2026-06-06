@@ -293,20 +293,22 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Step 3: Content status aggregation and Ready condition.
-	if isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
-		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj)
-		if err != nil {
-			logger.Error(err, "Failed to reconcile common SnapshotContent status")
-			return ctrl.Result{}, err
-		}
-		if !ready {
-			return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
-		}
-	} else {
-		if err := r.checkConsistencyAndSetReady(ctx, contentLike, obj); err != nil {
-			logger.Error(err, "Failed to check consistency")
-			// Non-fatal: continue reconciliation
-		}
+	// The common storage.deckhouse.io/SnapshotContent is the ONLY content carrier in the unified
+	// runtime (every snapshot kind maps to CommonSnapshotContentGVK), and it owns the aggregate
+	// condition model: RequestsReady + ChildrenReady + derived Ready = RequestsReady && ChildrenReady
+	// (INV-COND2). No non-common SnapshotContent GVK is registered, so there is no other writer.
+	if !isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
+		logger.V(1).Info("non-common SnapshotContent GVK is not managed by the unified runtime; skipping",
+			"gvk", obj.GroupVersionKind().String())
+		return ctrl.Result{}, nil
+	}
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile common SnapshotContent status")
+		return ctrl.Result{}, err
+	}
+	if !ready {
+		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 
 	logger.Info("SnapshotContent reconciliation completed")
@@ -432,7 +434,7 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.childrenReady = metav1.ConditionFalse
 		plan.childrenReason = childReason
 		plan.childrenMessage = childMessage
-		plan.childrenFailed = childReason == snapshot.ReasonChildSnapshotFailed
+		plan.childrenFailed = childReason == snapshot.ReasonChildrenFailed
 	}
 
 	switch {
@@ -531,18 +533,16 @@ func (r *SnapshotContentController) fillRequestsLeg(ctx context.Context, obj *un
 const reasonManifestCheckpointFailed = "ManifestCheckpointFailed"
 
 // terminalChildContentFailureReasons lists child SnapshotContent Ready=False reasons treated as a
-// terminal failure that must propagate up the ancestor chain as ChildSnapshotFailed (INV-FAIL1,
+// terminal failure that must propagate up the ancestor chain as ChildrenFailed (INV-FAIL1,
 // snapshot-rework/2026-06-03-snapshot-conditions-model.md §5). Any other Ready=False (e.g.
-// ArtifactNotReady, ManifestCapturePending, ChildSnapshotPending, or no Ready condition yet) is
-// non-terminal and propagates as ChildSnapshotPending so a transient child does not fail the tree.
-// "ChildrenFailed" is included for forward-compat with the later condition rename.
+// ArtifactNotReady, ManifestCapturePending, ChildrenPending, or no Ready condition yet) is
+// non-terminal and propagates as ChildrenPending so a transient child does not fail the tree.
 var terminalChildContentFailureReasons = map[string]struct{}{
 	reasonManifestCheckpointFailed:          {},
 	snapshot.ReasonDataArtifactInvalid:      {},
 	snapshot.ReasonDataArtifactNotSupported: {},
 	snapshot.ReasonArtifactMissing:          {},
-	snapshot.ReasonChildSnapshotFailed:      {},
-	"ChildrenFailed":                        {},
+	snapshot.ReasonChildrenFailed:           {},
 }
 
 func isTerminalChildContentFailure(reason string) bool {
@@ -567,9 +567,9 @@ func childContentNotReadyMessage(name string, readyCond *metav1.Condition) strin
 // validateCommonContentChildren aggregates child SnapshotContent readiness for the parent Ready plan.
 //
 // Classification (INV-FAIL1): a child Ready=False with a terminal reason makes the parent
-// ChildSnapshotFailed immediately (terminal wins over pending regardless of ref order); any other
+// ChildrenFailed immediately (terminal wins over pending regardless of ref order); any other
 // not-Ready child (NotFound, no Ready condition, or non-terminal Ready=False) is collected as pending
-// and surfaces as ChildSnapshotPending only when no terminal failure exists. In both branches the
+// and surfaces as ChildrenPending only when no terminal failure exists. In both branches the
 // message names the failed/pending child and carries its original Ready reason/message so a deeper
 // leaf failure is not lost as the failure climbs the ancestor chain.
 func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, string, string, error) {
@@ -605,13 +605,13 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		}
 		readyCond := snapshot.GetCondition(childLike, snapshot.ConditionReady)
 		if readyCond != nil && readyCond.Status == metav1.ConditionFalse && isTerminalChildContentFailure(readyCond.Reason) {
-			return false, snapshot.ReasonChildSnapshotFailed,
+			return false, snapshot.ReasonChildrenFailed,
 				fmt.Sprintf("child SnapshotContent %s failed: reason=%s message=%s", name, readyCond.Reason, readyCond.Message), nil
 		}
 		pendingMsgs = append(pendingMsgs, childContentNotReadyMessage(name, readyCond))
 	}
 	if len(pendingMsgs) > 0 {
-		return false, snapshot.ReasonChildSnapshotPending, strings.Join(pendingMsgs, "; "), nil
+		return false, snapshot.ReasonChildrenPending, strings.Join(pendingMsgs, "; "), nil
 	}
 	return true, "", "", nil
 }
@@ -803,201 +803,6 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 
 	if len(childErrors) > 0 {
 		logger.Info("Some children failed, but cascade continues", "failedCount", len(childErrors), "totalCount", len(childrenRefs))
-	}
-
-	return nil
-}
-
-// checkConsistencyAndSetReady checks if artifacts exist and sets Ready condition
-// According to ADR: Ready=False выставляется только для ранее успешных объектов
-func (r *SnapshotContentController) checkConsistencyAndSetReady(
-	ctx context.Context,
-	contentLike snapshot.SnapshotContentLike,
-	obj *unstructured.Unstructured,
-) error {
-	logger := log.FromContext(ctx)
-	wasReady := snapshot.IsReady(contentLike)
-
-	// Check ManifestCheckpoint if present
-	mcpName := contentLike.GetStatusManifestCheckpointName()
-	if mcpName == "" {
-		// Ready must not become True without MCP link
-		logger.V(1).Info("ManifestCheckpointName is empty; not Ready yet", "snapshotContent", obj.GetName())
-		return nil
-	}
-	if mcpName != "" {
-		exists, err := r.checkArtifactExists(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1")
-		if err != nil {
-			return fmt.Errorf("failed to check ManifestCheckpoint: %w", err)
-		}
-		if !exists {
-			if wasReady {
-				// Artifact was lost - set Ready=False
-				snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
-					snapshot.ReasonArtifactMissing, fmt.Sprintf("ManifestCheckpoint %s not found", mcpName))
-				snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
-				if err := r.Status().Update(ctx, obj); err != nil {
-					return fmt.Errorf("failed to update Ready=False: %w", err)
-				}
-				logger.Info("ManifestCheckpoint missing, set Ready=False", "mcp", mcpName)
-			}
-			return nil // Artifact missing, but object was never Ready
-		}
-		if err := r.ensureArtifactFinalizer(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1"); err != nil {
-			return fmt.Errorf("failed to ensure ManifestCheckpoint finalizer: %w", err)
-		}
-	}
-
-	// Legacy consistency (non-common GVK): existence + finalizer for VSC entries in dataRefs[].
-	// Common SnapshotContent uses resolveDataReadiness (PR-2) instead of this path.
-	for _, binding := range contentLike.GetStatusDataRefs() {
-		if binding.Artifact.Kind != "VolumeSnapshotContent" || binding.Artifact.Name == "" {
-			continue
-		}
-		vscName := binding.Artifact.Name
-		exists, err := r.checkArtifactExists(ctx, "VolumeSnapshotContent", vscName, "snapshot.storage.k8s.io/v1")
-		if err != nil {
-			return fmt.Errorf("failed to check VolumeSnapshotContent: %w", err)
-		}
-		if !exists {
-			if wasReady {
-				snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
-					snapshot.ReasonArtifactMissing, fmt.Sprintf("VolumeSnapshotContent %s not found", vscName))
-				snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
-				if err := r.Status().Update(ctx, obj); err != nil {
-					return fmt.Errorf("failed to update Ready=False: %w", err)
-				}
-				logger.Info("VolumeSnapshotContent missing, set Ready=False", "vsc", vscName)
-			}
-			return nil
-		}
-		if err := r.ensureArtifactFinalizer(ctx, "VolumeSnapshotContent", vscName, "snapshot.storage.k8s.io/v1"); err != nil {
-			return fmt.Errorf("failed to ensure VolumeSnapshotContent finalizer: %w", err)
-		}
-	}
-
-	// Check children SnapshotContents if present
-	childrenRefs := contentLike.GetStatusChildrenSnapshotContentRefs()
-	if len(childrenRefs) > 0 {
-		for _, childRef := range childrenRefs {
-			childObj := &unstructured.Unstructured{}
-			childObj.SetGroupVersionKind(obj.GroupVersionKind())
-			if err := r.APIReader.Get(ctx, client.ObjectKey{Name: childRef.Name}, childObj); err != nil {
-				if errors.IsNotFound(err) {
-					if wasReady {
-						snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
-							snapshot.ReasonArtifactMissing, fmt.Sprintf("Child SnapshotContent %s not found", childRef.Name))
-						snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
-						if err := r.Status().Update(ctx, obj); err != nil {
-							return fmt.Errorf("failed to update Ready=False: %w", err)
-						}
-					}
-					return nil
-				}
-				return fmt.Errorf("failed to get child SnapshotContent %s: %w", childRef.Name, err)
-			}
-			childLike, err := snapshot.ExtractSnapshotContentLike(childObj)
-			if err != nil {
-				return fmt.Errorf("failed to extract child SnapshotContentLike: %w", err)
-			}
-			if !snapshot.IsReady(childLike) {
-				if wasReady {
-					snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionFalse,
-						snapshot.ReasonArtifactMissing, fmt.Sprintf("Child SnapshotContent %s is not Ready", childRef.Name))
-					snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
-					if err := r.Status().Update(ctx, obj); err != nil {
-						return fmt.Errorf("failed to update Ready=False: %w", err)
-					}
-				}
-				return nil
-			}
-		}
-	}
-
-	// All artifacts exist - set Ready=True if not already set
-	if !wasReady {
-		// Check if InProgress should be cleared
-		if snapshot.IsInProgress(contentLike) {
-			snapshot.SetCondition(contentLike, snapshot.ConditionInProgress, metav1.ConditionFalse,
-				snapshot.ReasonCompleted, "All artifacts exist")
-		}
-		snapshot.SetCondition(contentLike, snapshot.ConditionReady, metav1.ConditionTrue,
-			snapshot.ReasonCompleted, "All artifacts exist and valid")
-		snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
-		if err := r.Status().Update(ctx, obj); err != nil {
-			return fmt.Errorf("failed to update Ready=True: %w", err)
-		}
-		logger.Info("All artifacts exist, set Ready=True")
-	}
-
-	return nil
-}
-
-// checkArtifactExists checks if an artifact exists
-// Uses APIReader for read-after-write consistency
-func (r *SnapshotContentController) checkArtifactExists(ctx context.Context, kind, name, apiVersion string) (bool, error) {
-	// Parse GVK from apiVersion
-	var gvk schema.GroupVersionKind
-	if idx := strings.Index(apiVersion, "/"); idx != -1 {
-		gvk = schema.GroupVersionKind{
-			Group:   apiVersion[:idx],
-			Version: apiVersion[idx+1:],
-			Kind:    kind,
-		}
-	} else {
-		gvk = schema.GroupVersionKind{
-			Group:   "",
-			Version: apiVersion,
-			Kind:    kind,
-		}
-	}
-
-	artifactObj := &unstructured.Unstructured{}
-	artifactObj.SetGroupVersionKind(gvk)
-	key := client.ObjectKey{Name: name}
-
-	err := r.APIReader.Get(ctx, key, artifactObj)
-	if errors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("failed to get %s %s: %w", kind, name, err)
-	}
-
-	return true, nil
-}
-
-// ensureArtifactFinalizer adds artifact-protect finalizer to MCP/VSC if missing.
-func (r *SnapshotContentController) ensureArtifactFinalizer(ctx context.Context, kind, name, apiVersion string) error {
-	var gvk schema.GroupVersionKind
-	if idx := strings.Index(apiVersion, "/"); idx != -1 {
-		gvk = schema.GroupVersionKind{
-			Group:   apiVersion[:idx],
-			Version: apiVersion[idx+1:],
-			Kind:    kind,
-		}
-	} else {
-		gvk = schema.GroupVersionKind{
-			Group:   "",
-			Version: apiVersion,
-			Kind:    kind,
-		}
-	}
-
-	artifactObj := &unstructured.Unstructured{}
-	artifactObj.SetGroupVersionKind(gvk)
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-
-	if snapshot.AddFinalizer(artifactObj, snapshot.FinalizerArtifactProtect) {
-		if err := r.Update(ctx, artifactObj); err != nil {
-			return err
-		}
-		log.FromContext(ctx).Info("Added artifact finalizer", "kind", kind, "name", name, "finalizer", snapshot.FinalizerArtifactProtect)
 	}
 
 	return nil

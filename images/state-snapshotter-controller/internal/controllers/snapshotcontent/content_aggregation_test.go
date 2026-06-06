@@ -110,7 +110,7 @@ func TestContentPlanRequestsPending(t *testing.T) {
 	}
 }
 
-// RequestsReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildSnapshotPending.
+// RequestsReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildrenPending.
 func TestContentPlanChildrenPending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -129,12 +129,12 @@ func TestContentPlanChildrenPending(t *testing.T) {
 	if plan.childrenReady != metav1.ConditionFalse || plan.childrenFailed {
 		t.Fatalf("childrenReady=%s failed=%v, want False/non-terminal", plan.childrenReady, plan.childrenFailed)
 	}
-	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonChildSnapshotPending {
-		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonChildSnapshotPending)
+	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonChildrenPending {
+		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonChildrenPending)
 	}
 }
 
-// RequestsReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildSnapshotFailed.
+// RequestsReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildrenFailed.
 func TestContentPlanChildrenFailed(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -150,8 +150,8 @@ func TestContentPlanChildrenFailed(t *testing.T) {
 	if plan.childrenReady != metav1.ConditionFalse || !plan.childrenFailed {
 		t.Fatalf("childrenReady=%s failed=%v, want False/terminal", plan.childrenReady, plan.childrenFailed)
 	}
-	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonChildSnapshotFailed {
-		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonChildSnapshotFailed)
+	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonChildrenFailed)
 	}
 	if !strings.Contains(plan.readyMessage, "child-broken") {
 		t.Fatalf("ready message %q must name the failed child", plan.readyMessage)
@@ -198,8 +198,8 @@ func TestContentPlanReadyPriorityChildrenFailedOverRequestsPending(t *testing.T)
 	if plan.requestsReady != metav1.ConditionFalse || plan.requestsFailed {
 		t.Fatalf("requestsReady=%s failed=%v, want False/non-terminal", plan.requestsReady, plan.requestsFailed)
 	}
-	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonChildSnapshotFailed {
-		t.Fatalf("ready=%s/%s, want False/%s (children-failed wins over requests-pending)", plan.readyStatus, plan.readyReason, snapshot.ReasonChildSnapshotFailed)
+	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("ready=%s/%s, want False/%s (children-failed wins over requests-pending)", plan.readyStatus, plan.readyReason, snapshot.ReasonChildrenFailed)
 	}
 }
 

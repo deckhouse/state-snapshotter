@@ -207,9 +207,6 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
-			b := meta.FindStatusCondition(r.Status.Conditions, snapshot.ConditionBound)
-			g.Expect(b).NotTo(BeNil())
-			g.Expect(b.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(r.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			rootContentName = r.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
@@ -305,8 +302,8 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		Expect(visited).To(ContainElement(vmContentName))
 		Expect(visited).To(ContainElement(diskContentName))
 
-		// E6: after Snapshot publishes childrenSnapshotRefs, root becomes Ready=True only when
-		// all referenced child snapshot objects are ready.
+		// Children readiness: after Snapshot publishes childrenSnapshotRefs, root becomes Ready=True
+		// only when all referenced child snapshot objects are ready.
 		Eventually(func(g Gomega) {
 			r := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(testCtx, types.NamespacedName{Namespace: nsName, Name: "root"}, r)).To(Succeed())
