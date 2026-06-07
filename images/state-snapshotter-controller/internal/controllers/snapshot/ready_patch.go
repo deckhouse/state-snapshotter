@@ -74,8 +74,8 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 	transientErr error,
 ) error {
 	status := metav1.ConditionFalse
-	reason := snapshotpkg.ReasonManifestCapturePending
-	message := ""
+	reason := snapshotpkg.ReasonContentBindingPending
+	message := "waiting for SnapshotContent Ready condition to be published"
 	if transientErr != nil {
 		message = transientErr.Error()
 	}

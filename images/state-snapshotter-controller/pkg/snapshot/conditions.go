@@ -44,13 +44,32 @@ const (
 
 // Reasons for Ready=False
 const (
-	ReasonContentMissing           = "ContentMissing"
-	ReasonChildSnapshotMissing     = "ChildSnapshotMissing"
-	ReasonArtifactMissing          = "ArtifactMissing"
-	ReasonArtifactNotReady         = "ArtifactNotReady"
+	ReasonContentMissing       = "ContentMissing"
+	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
+	ReasonArtifactMissing      = "ArtifactMissing"
+	// ReasonArtifactNotReady is an internal/compat reason for "artifact exists but not ready yet".
+	// The data leg surfaces this state on RequestsReady/Ready as ReasonDataCapturePending (progress-aware);
+	// ReasonArtifactNotReady is retained for internal classification and backward compatibility.
+	ReasonArtifactNotReady = "ArtifactNotReady"
+	// ReasonDataCapturePending is the surfaced pending reason for the data leg: published data artifacts
+	// (e.g. VolumeSnapshotContent) exist but are not yet ready. Non-terminal. Message carries a
+	// "<ready>/<total> ready" progress count and a capped pending list.
+	ReasonDataCapturePending       = "DataCapturePending"
 	ReasonDataArtifactInvalid      = "DataArtifactInvalid"
 	ReasonDataArtifactNotSupported = "DataArtifactNotSupported"
-	ReasonDeleting                 = "Deleting"
+	// ReasonManifestCheckpointFailed is the terminal requests-leg reason when the bound ManifestCheckpoint
+	// is terminally failed. Used by SnapshotContent aggregation (own requests leg) and the terminal
+	// child-content classification.
+	ReasonManifestCheckpointFailed = "ManifestCheckpointFailed"
+	// ReasonArtifactFailed is the terminal reason for a previously-ready artifact that degraded
+	// (Phase 2, damaged-artifact revalidation). Declared here as part of the shared taxonomy; it is not
+	// wired into runtime until the Phase 2 wake-up/revalidation watches land.
+	ReasonArtifactFailed = "ArtifactFailed"
+	// ReasonContentBindingPending is the transitional pre-bind reason on a Snapshot: there is no bound
+	// SnapshotContent yet (or the bound content has no Ready condition yet). After bind, Snapshot.Ready
+	// is a verbatim mirror of SnapshotContent.Ready and this reason is not used.
+	ReasonContentBindingPending = "ContentBindingPending"
+	ReasonDeleting              = "Deleting"
 
 	// ReasonChildrenPending is set while a required child SnapshotContent/Snapshot is not yet bound,
 	// has no Ready condition, is Ready=False with a non-terminal reason, or root capture is not complete

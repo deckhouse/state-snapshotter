@@ -91,8 +91,8 @@ func TestMirrorSnapshotReadyFromBoundContentFallbackNoContentReady(t *testing.T)
 		t.Fatalf("get parent: %v", err)
 	}
 	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady)
-	if got == nil || got.Status != metav1.ConditionFalse || got.Reason != snapshotpkg.ReasonManifestCapturePending {
-		t.Fatalf("fallback Ready = %#v, want False/%s", got, snapshotpkg.ReasonManifestCapturePending)
+	if got == nil || got.Status != metav1.ConditionFalse || got.Reason != snapshotpkg.ReasonContentBindingPending {
+		t.Fatalf("fallback Ready = %#v, want False/%s", got, snapshotpkg.ReasonContentBindingPending)
 	}
 	if got.Message != "subtree manifest capture pending" {
 		t.Fatalf("fallback message = %q, want transient error text", got.Message)

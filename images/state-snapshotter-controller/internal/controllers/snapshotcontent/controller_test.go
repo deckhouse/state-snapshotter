@@ -358,7 +358,7 @@ func TestValidateCommonContentChildrenPropagatesTerminalLeafFailureAcrossDepth(t
 		t.Fatalf("add storage scheme: %v", err)
 	}
 
-	leaf := contentWithReadyCond("leaf-broken", metav1.ConditionFalse, reasonManifestCheckpointFailed, "ManifestCheckpoint mcp-leaf not found")
+	leaf := contentWithReadyCond("leaf-broken", metav1.ConditionFalse, snapshot.ReasonManifestCheckpointFailed, "ManifestCheckpoint mcp-leaf not found")
 	childOK := contentWithReadyCond("child-ok", metav1.ConditionTrue, snapshot.ReasonCompleted, "manifest, data, and child content are ready")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(leaf, childOK).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
@@ -373,7 +373,7 @@ func TestValidateCommonContentChildrenPropagatesTerminalLeafFailureAcrossDepth(t
 	if ready || reason != snapshot.ReasonChildrenFailed {
 		t.Fatalf("child-a expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenFailed, ready, reason)
 	}
-	if !strings.Contains(msg, "leaf-broken") || !strings.Contains(msg, reasonManifestCheckpointFailed) {
+	if !strings.Contains(msg, "leaf-broken") || !strings.Contains(msg, snapshot.ReasonManifestCheckpointFailed) {
 		t.Fatalf("child-a message must name failed leaf + reason, got %q", msg)
 	}
 
@@ -389,7 +389,7 @@ func TestValidateCommonContentChildrenPropagatesTerminalLeafFailureAcrossDepth(t
 	if ready || reason != snapshot.ReasonChildrenFailed {
 		t.Fatalf("root expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenFailed, ready, reason)
 	}
-	for _, want := range []string{"child-a", "leaf-broken", reasonManifestCheckpointFailed} {
+	for _, want := range []string{"child-a", "leaf-broken", snapshot.ReasonManifestCheckpointFailed} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("root message %q must contain %q (path/ID to failed leaf)", msg, want)
 		}
@@ -435,7 +435,7 @@ func TestValidateCommonContentChildrenClassifiesTerminalVsPending(t *testing.T) 
 		t.Fatalf("add storage scheme: %v", err)
 	}
 
-	leafBroken := contentWithReadyCond("leaf-manifest-broken", metav1.ConditionFalse, reasonManifestCheckpointFailed, "MCP mcp-x Ready=False")
+	leafBroken := contentWithReadyCond("leaf-manifest-broken", metav1.ConditionFalse, snapshot.ReasonManifestCheckpointFailed, "MCP mcp-x Ready=False")
 	pendingChild := contentWithReadyCond("child-pending", metav1.ConditionFalse, snapshot.ReasonArtifactNotReady, "VolumeSnapshotContent vsc-x is not readyToUse")
 	siblingOK := contentWithReadyCond("sibling-ok", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(leafBroken, pendingChild, siblingOK).Build()
@@ -450,7 +450,7 @@ func TestValidateCommonContentChildrenClassifiesTerminalVsPending(t *testing.T) 
 	if ready || reason != snapshot.ReasonChildrenFailed {
 		t.Fatalf("expected terminal ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenFailed, ready, reason)
 	}
-	if !strings.Contains(msg, "leaf-manifest-broken") || !strings.Contains(msg, reasonManifestCheckpointFailed) {
+	if !strings.Contains(msg, "leaf-manifest-broken") || !strings.Contains(msg, snapshot.ReasonManifestCheckpointFailed) {
 		t.Fatalf("message %q must name the terminal child + reason", msg)
 	}
 	assertChildReadyUnchanged(t, cl, "sibling-ok")
@@ -464,7 +464,7 @@ func TestValidateCommonContentChildrenClassifiesTerminalVsPending(t *testing.T) 
 	if ready || reason != snapshot.ReasonChildrenPending {
 		t.Fatalf("expected ready=false reason=%s, got ready=%v reason=%s", snapshot.ReasonChildrenPending, ready, reason)
 	}
-	if !strings.Contains(msg, snapshot.ReasonArtifactNotReady) {
-		t.Fatalf("pending message %q must carry child reason", msg)
+	if !strings.Contains(msg, "0/1 ready") || !strings.Contains(msg, "child-pending") {
+		t.Fatalf("pending message %q must carry progress count and pending child name", msg)
 	}
 }

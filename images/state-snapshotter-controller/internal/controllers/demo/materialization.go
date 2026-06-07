@@ -200,7 +200,7 @@ func commonSnapshotContentReadyForSnapshot(ctx context.Context, c client.Reader,
 	}
 	ready := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil {
-		return false, snapshot.ReasonManifestCapturePending, fmt.Sprintf("SnapshotContent %q is not Ready yet", contentName), nil
+		return false, snapshot.ReasonContentBindingPending, fmt.Sprintf("SnapshotContent %q has no Ready condition yet", contentName), nil
 	}
 	if ready.Status == metav1.ConditionTrue {
 		return true, ready.Reason, ready.Message, nil

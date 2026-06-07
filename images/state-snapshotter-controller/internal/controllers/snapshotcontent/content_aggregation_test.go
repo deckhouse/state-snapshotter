@@ -139,7 +139,7 @@ func TestContentPlanChildrenFailed(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	brokenChild := contentWithReadyCond("child-broken", metav1.ConditionFalse, reasonManifestCheckpointFailed, "mcp-child missing")
+	brokenChild := contentWithReadyCond("child-broken", metav1.ConditionFalse, snapshot.ReasonManifestCheckpointFailed, "mcp-child missing")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, brokenChild).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
@@ -163,7 +163,7 @@ func TestContentPlanReadyPriorityRequestsFailedWins(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-bad", metav1.ConditionFalse, ssv1alpha1.ManifestCheckpointConditionReasonFailed, "capture failed")
-	brokenChild := contentWithReadyCond("child-broken", metav1.ConditionFalse, reasonManifestCheckpointFailed, "mcp-child missing")
+	brokenChild := contentWithReadyCond("child-broken", metav1.ConditionFalse, snapshot.ReasonManifestCheckpointFailed, "mcp-child missing")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, brokenChild).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
@@ -177,8 +177,8 @@ func TestContentPlanReadyPriorityRequestsFailedWins(t *testing.T) {
 	if plan.childrenReady != metav1.ConditionFalse || !plan.childrenFailed {
 		t.Fatalf("childrenReady=%s failed=%v, want False/terminal", plan.childrenReady, plan.childrenFailed)
 	}
-	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != reasonManifestCheckpointFailed {
-		t.Fatalf("ready=%s/%s, want False/%s (requests-failed wins)", plan.readyStatus, plan.readyReason, reasonManifestCheckpointFailed)
+	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCheckpointFailed {
+		t.Fatalf("ready=%s/%s, want False/%s (requests-failed wins)", plan.readyStatus, plan.readyReason, snapshot.ReasonManifestCheckpointFailed)
 	}
 }
 
@@ -186,7 +186,7 @@ func TestContentPlanReadyPriorityRequestsFailedWins(t *testing.T) {
 func TestContentPlanReadyPriorityChildrenFailedOverRequestsPending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
-	brokenChild := contentWithReadyCond("child-broken", metav1.ConditionFalse, reasonManifestCheckpointFailed, "mcp-child missing")
+	brokenChild := contentWithReadyCond("child-broken", metav1.ConditionFalse, snapshot.ReasonManifestCheckpointFailed, "mcp-child missing")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(brokenChild).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 

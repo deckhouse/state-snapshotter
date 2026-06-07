@@ -192,15 +192,11 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if apierrors.IsNotFound(err) {
-			meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-				Type:               snapshotpkg.ConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             "ManifestCheckpointPending",
-				Message:            fmt.Sprintf("waiting for ManifestCheckpoint %q", mcpName),
-				ObservedGeneration: nsSnap.Generation,
-			})
-			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-				return ctrl.Result{}, err
+			// After bind, Snapshot.Ready is a mirror of bound SnapshotContent.Ready (INV-COND4): the content
+			// controller computes RequestsReady from the published manifestCheckpointName. Do NOT write a
+			// local pending reason here (no second source of truth).
+			if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); mErr != nil {
+				return ctrl.Result{}, mErr
 			}
 			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
@@ -209,25 +205,12 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 
 	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
 	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
-		reason := "ManifestCheckpointNotReady"
-		msg := "ManifestCheckpoint not ready"
-		if readyCond != nil {
-			reason = readyCond.Reason
-			msg = readyCond.Message
-		}
-		if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
-			(readyCond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed) {
-			return r.failCapture(ctx, nsSnap, content, "ManifestCheckpointFailed", msg)
-		}
-		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            msg,
-			ObservedGeneration: nsSnap.Generation,
-		})
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
+		// After bind the Snapshot never writes semantic Ready state (INV-COND4) — not even a terminal MCP
+		// failure. SnapshotContent aggregation owns RequestsReady/Ready (ManifestCheckpointFailed included)
+		// from the published manifestCheckpointName; the Snapshot only mirrors it. Eventual consistency: if
+		// content has not recomputed yet the mirror falls back to ContentBindingPending and we requeue.
+		if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); mErr != nil {
+			return ctrl.Result{}, mErr
 		}
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}

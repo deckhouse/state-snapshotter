@@ -102,8 +102,11 @@ func (r *SnapshotContentController) resolveDataReadiness(ctx context.Context, ob
 			fmt.Sprintf("data artifact(s) missing: %s", strings.Join(missing, ", ")), nil
 	}
 	if len(notReady) > 0 {
-		return false, snapshot.ReasonArtifactNotReady,
-			fmt.Sprintf("%d data artifact(s) pending: %s", len(notReady), strings.Join(notReady, ", ")), nil
+		// Surface the data leg pending state as DataCapturePending with a progress count. When this branch
+		// is reached the terminal buckets (invalid/unsupported/missing) are empty, so ready = total - notReady.
+		ready := len(refs) - len(notReady)
+		return false, snapshot.ReasonDataCapturePending,
+			"waiting for volume snapshot artifacts: " + formatReadyProgress(ready, len(refs), notReady), nil
 	}
 
 	return true, "", "", nil

@@ -121,6 +121,22 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 | T10 | RBAC drift / 403, изоляция по типу | — | ⬜ |
 | T11 | Два CSD, изоляция при поломке одного | опционально | ⬜ |
 
+## Status propagation and progress/degradation visibility
+
+Дизайн — [`design/status-propagation-and-visibility.md`](../design/status-propagation-and-visibility.md); контракт — [`spec/system-spec.md` §3.9.10](../spec/system-spec.md). Две фазы: **Phase 1** (progress-aware `Ready=False`) — реализована; **Phase 2** (damaged-artifact wake-up/revalidation) — следующий срез. Тяжёлый сквозной e2e-прогон выполняется **вместе с Phase 2** (gate ниже).
+
+| ID | Сценарий | Уровень | Статус |
+|----|----------|---------|--------|
+| P1-U1 | content без `manifestCheckpointName` → `RequestsReady=False`/`ManifestCapturePending`, `Ready=False` | unit | ✅ `controller_data_readiness_test.go` / `controller_test.go` |
+| P1-U2 | data pending count → `DataCapturePending`, message `"<ready>/<total> ready"` + capped pending list | unit | ✅ `controller_data_readiness_test.go`, `progress_visibility_test.go` |
+| P1-U3 | children pending count → `ChildrenPending`, message `"<ready>/<total> ready"` | unit | ✅ `controller_test.go` |
+| P1-U4 | terminal child failure → `ChildrenFailed` leaf-chain (`leaf=/reason=/message=`), 3 уровня root→vm→disk | unit | ✅ `progress_visibility_test.go`, `controller_test.go` |
+| P1-U5 | already `Ready=True` content, reconcile видит missing published artifact → `RequestsReady=False`/`ArtifactMissing`/`Ready=False`, kind/name в message (без watch) | unit | ✅ `progress_visibility_test.go` |
+| P1-U6 | Snapshot mirror: pre-bind fallback → `ContentBindingPending`; после bind — verbatim mirror content.Ready | unit | ✅ `ready_mirror_test.go` |
+| P1-I1 | bound Snapshot зеркалит content Ready после status-only обновления content | integration | ✅ `snapshot_content_ready_propagation_test.go` |
+| P1-E1 | e2e: во время создания root `Ready=False` с осмысленным reason/message; на ожидании детей message содержит count; финал `Ready=True/Completed` | e2e | ⬜ gate с Phase 2 |
+| P2-* | damaged-artifact revalidation: chunk/MCP/VSC удалён/деградировал после `Ready=True` → flip `Ready=False` вниз по дереву; sibling isolation; full live/e2e | watch + e2e | ⬜ Phase 2 |
+
 ## Нефункциональные
 
 - CI: `go_checks`.

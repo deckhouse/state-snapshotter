@@ -52,11 +52,11 @@ func TestResolveDataReadinessVSCNotReadyToUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveDataReadiness: %v", err)
 	}
-	if ready || reason != snapshot.ReasonArtifactNotReady {
-		t.Fatalf("expected ArtifactNotReady, got ready=%v reason=%q msg=%q", ready, reason, msg)
+	if ready || reason != snapshot.ReasonDataCapturePending {
+		t.Fatalf("expected DataCapturePending, got ready=%v reason=%q msg=%q", ready, reason, msg)
 	}
-	if msg == "" {
-		t.Fatal("expected non-empty message for pending VSC")
+	if !strings.Contains(msg, "0/1 ready") || !strings.Contains(msg, "vsc-pending") {
+		t.Fatalf("expected progress count and pending name in message, got %q", msg)
 	}
 }
 
@@ -85,11 +85,11 @@ func TestResolveDataReadinessTwoVSCOnePending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveDataReadiness: %v", err)
 	}
-	if ready || reason != snapshot.ReasonArtifactNotReady {
-		t.Fatalf("expected ArtifactNotReady, got ready=%v reason=%q msg=%q", ready, reason, msg)
+	if ready || reason != snapshot.ReasonDataCapturePending {
+		t.Fatalf("expected DataCapturePending, got ready=%v reason=%q msg=%q", ready, reason, msg)
 	}
-	if !strings.Contains(msg, "1 data artifact(s) pending") {
-		t.Fatalf("expected pending count in message, got %q", msg)
+	if !strings.Contains(msg, "1/2 ready") {
+		t.Fatalf("expected progress count in message, got %q", msg)
 	}
 	if !strings.Contains(msg, "vsc-pending") {
 		t.Fatalf("expected pending VSC name in message, got %q", msg)
