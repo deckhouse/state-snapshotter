@@ -161,23 +161,28 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 
 	reader := demoReconcilerReader(r.APIReader, r.Client)
-	if steady, err := demoReturnIfManifestCaptureSteadyState(
+	// Post-publish the demo snapshot is mirror-only: once manifest capture is published and the MCP
+	// is handed off to SnapshotContent, never re-run capture. Children were already planned/published
+	// before handoff; a failed published MCP (or degraded child content) is mirrored from the bound
+	// SnapshotContent (no re-capture/replan); recovery is woken by the bound-content watch.
+	if handled, err := demoMirrorOnlyIfHandoffComplete(
 		ctx,
 		r.Client,
 		reader,
 		s.Namespace,
 		controllercommon.KindDemoVirtualMachineSnapshot,
 		s.Name,
-		s.Status.Conditions,
 		contentName,
+		s.Status.ManifestCaptureRequestName,
+		func(status metav1.ConditionStatus, reason, message string) error {
+			return patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, status, reason, message)
+		},
+		func() error {
+			return patchDemoVirtualMachineSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, "")
+		},
 	); err != nil {
 		return ctrl.Result{}, err
-	} else if steady {
-		if s.Status.ManifestCaptureRequestName != "" {
-			if err := patchDemoVirtualMachineSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, ""); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
+	} else if handled {
 		return ctrl.Result{}, nil
 	}
 

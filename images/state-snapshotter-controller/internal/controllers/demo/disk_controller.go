@@ -143,23 +143,27 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	reader := demoReconcilerReader(r.APIReader, r.Client)
-	if steady, err := demoReturnIfManifestCaptureSteadyState(
+	// Post-publish the demo snapshot is mirror-only: once manifest capture is published and the MCP
+	// is handed off to SnapshotContent, never re-run capture. A failed published MCP is mirrored from
+	// the bound content (no re-capture); recovery is woken by the bound-content watch.
+	if handled, err := demoMirrorOnlyIfHandoffComplete(
 		ctx,
 		r.Client,
 		reader,
 		s.Namespace,
 		controllercommon.KindDemoVirtualDiskSnapshot,
 		s.Name,
-		s.Status.Conditions,
 		contentName,
+		s.Status.ManifestCaptureRequestName,
+		func(status metav1.ConditionStatus, reason, message string) error {
+			return patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, status, reason, message)
+		},
+		func() error {
+			return patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, "")
+		},
 	); err != nil {
 		return ctrl.Result{}, err
-	} else if steady {
-		if s.Status.ManifestCaptureRequestName != "" {
-			if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, ""); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
+	} else if handled {
 		return ctrl.Result{}, nil
 	}
 

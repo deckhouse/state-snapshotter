@@ -20,7 +20,6 @@ import (
 	"context"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,8 +29,19 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// demoSnapshotContentManifestHandoffComplete reports whether manifest capture finished on
-// SnapshotContent: non-empty manifestCheckpointName, Ready MCP, Ready content.
+// demoSnapshotContentManifestHandoffComplete reports whether manifest capture has been PUBLISHED and
+// HANDED OFF for this SnapshotContent: status.manifestCheckpointName is set and the referenced
+// ManifestCheckpoint exists and is owned (controller ownerRef) by the SnapshotContent.
+//
+// Intentionally NOT gated on current MCP Ready / content Ready (the previous behavior). Once the MCP
+// is published and its ownership is handed off to the SnapshotContent, manifest capture is DONE for
+// this content. A later MCP Ready=False/Failed (durable post-publish artifact degradation) must be
+// reflected by status (SnapshotContentController -> SnapshotContent.RequestsReady=False/
+// ManifestCheckpointFailed -> tree), NOT silently repaired by re-running capture. Gating handoff on
+// MCP readiness made a failed published MCP look like "capture incomplete", which caused the demo
+// reconciler to create a fresh MCR/MCP and mask the failure (re-capture). Ownership is the durable
+// signal: SnapshotContentController hands the MCP to the SnapshotContent only after it first became
+// Ready, so ownership==content means the artifact was published, regardless of its current Ready.
 // Root E5 exclude reads SnapshotContent/MCP only (not live MCR).
 func demoSnapshotContentManifestHandoffComplete(ctx context.Context, c client.Reader, contentName string) (bool, error) {
 	content := &storagev1alpha1.SnapshotContent{}
@@ -49,33 +59,63 @@ func demoSnapshotContentManifestHandoffComplete(ctx context.Context, c client.Re
 		}
 		return false, err
 	}
-	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
-	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
-		return false, nil
+	return manifestCheckpointHandedOffToContent(mcp, contentName), nil
+}
+
+// manifestCheckpointHandedOffToContent is true when the ManifestCheckpoint carries the CONTROLLER
+// ownerRef set by SnapshotContentController during handoff (kind SnapshotContent, matching name,
+// Controller=true). A non-controller/decorative SnapshotContent ownerRef does NOT count as a durable
+// handoff: only the controller ownerRef represents the transfer of artifact ownership to the content.
+func manifestCheckpointHandedOffToContent(mcp *ssv1alpha1.ManifestCheckpoint, contentName string) bool {
+	for _, ref := range mcp.OwnerReferences {
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() &&
+			ref.Kind == "SnapshotContent" && ref.Name == contentName &&
+			ref.Controller != nil && *ref.Controller {
+			return true
+		}
 	}
-	contentReady, _, _, err := commonSnapshotContentReadyForSnapshot(ctx, c, contentName)
+	return false
+}
+
+// demoMirrorOnlyIfHandoffComplete handles the post-publish state of a demo snapshot. Once manifest
+// capture is published and MCP ownership is handed off to the SnapshotContent, the demo snapshot is
+// mirror-only: it MUST NOT re-run manifest capture. It cleans any stray (completed) MCR, clears
+// status.manifestCaptureRequestName, and patches the demo snapshot Ready as a mirror of the bound
+// SnapshotContent.Ready. A later MCP Ready=False/Failed degrades the content and is mirrored here
+// without re-capture. Wake-up is event-driven via the bound-content watch (content_watch.go), so no
+// polling/requeue is used. Returns handled=true when the handoff is complete and the caller must stop.
+func demoMirrorOnlyIfHandoffComplete(
+	ctx context.Context,
+	c client.Client,
+	reader client.Reader,
+	namespace string,
+	snapshotKind string,
+	snapshotName string,
+	contentName string,
+	currentMCRName string,
+	patchReady func(status metav1.ConditionStatus, reason, message string) error,
+	clearMCRName func() error,
+) (bool, error) {
+	handoffComplete, err := demoSnapshotContentManifestHandoffComplete(ctx, reader, contentName)
+	if err != nil || !handoffComplete {
+		return false, err
+	}
+	if err := demoCleanupStrayManifestCaptureRequest(ctx, c, reader, namespace, snapshotKind, snapshotName, contentName); err != nil {
+		return false, err
+	}
+	if currentMCRName != "" {
+		if err := clearMCRName(); err != nil {
+			return false, err
+		}
+	}
+	contentReady, contentReason, contentMessage, err := commonSnapshotContentReadyForSnapshot(ctx, reader, contentName)
 	if err != nil {
 		return false, err
 	}
-	return contentReady, nil
-}
-
-func demoSnapshotReadyCondition(conditions []metav1.Condition) *metav1.Condition {
-	return meta.FindStatusCondition(conditions, snapshot.ConditionReady)
-}
-
-func demoSnapshotReadyTrue(conditions []metav1.Condition) bool {
-	rc := demoSnapshotReadyCondition(conditions)
-	return rc != nil && rc.Status == metav1.ConditionTrue
-}
-
-// demoChildManifestCaptureSteadyState is true when the snapshot is Ready and manifest
-// handoff is persisted on SnapshotContent. Further reconciles must not recreate MCR.
-func demoChildManifestCaptureSteadyState(ctx context.Context, reader client.Reader, conditions []metav1.Condition, contentName string) (bool, error) {
-	if !demoSnapshotReadyTrue(conditions) {
-		return false, nil
+	if contentReady {
+		return true, patchReady(metav1.ConditionTrue, snapshot.ReasonCompleted, contentMessage)
 	}
-	return demoSnapshotContentManifestHandoffComplete(ctx, reader, contentName)
+	return true, patchReady(metav1.ConditionFalse, contentReason, contentMessage)
 }
 
 // demoCleanupStrayManifestCaptureRequest removes a completed MCR left over after handoff
@@ -113,26 +153,4 @@ func demoReconcilerReader(apiReader, fallback client.Reader) client.Reader {
 		return apiReader
 	}
 	return fallback
-}
-
-// demoReturnIfManifestCaptureSteadyState stops reconcile when manifest handoff is done on
-// SnapshotContent so MCR is not recreated and root E5 sees a stable child subtree.
-func demoReturnIfManifestCaptureSteadyState(
-	ctx context.Context,
-	c client.Client,
-	reader client.Reader,
-	namespace string,
-	snapshotKind string,
-	snapshotName string,
-	conditions []metav1.Condition,
-	contentName string,
-) (bool, error) {
-	steady, err := demoChildManifestCaptureSteadyState(ctx, reader, conditions, contentName)
-	if err != nil || !steady {
-		return steady, err
-	}
-	if err := demoCleanupStrayManifestCaptureRequest(ctx, c, reader, namespace, snapshotKind, snapshotName, contentName); err != nil {
-		return false, err
-	}
-	return true, nil
 }
