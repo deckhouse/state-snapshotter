@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -862,11 +863,24 @@ func (r *GenericSnapshotBinderController) snapshotGVKsSnapshot() []schema.GroupV
 
 // registerSnapshotWatch calls builder.Complete. When the manager is already running, this relies on
 // controller-runtime allowing new runnables via Add — behavior is runtime-sensitive; upgrade c-r with care.
-func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager, gvk, _ schema.GroupVersionKind) error {
+func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager, gvk, contentGVK schema.GroupVersionKind) error {
+	// Guard: contentGVK must be a real GVK. An empty Kind would register the reverse content wake-up
+	// (.Watches) on a bogus unstructured GVK and silently never fire. All callers (SetupWithManager via
+	// getSnapshotContentGVK, AddWatchForPair via the resolved/paired content GVK) are expected to pass a
+	// non-empty content GVK; fail fast here so a regression in any callsite cannot create a dead watch.
+	if contentGVK.Kind == "" {
+		return fmt.Errorf("empty SnapshotContent GVK for Snapshot %s: refusing to register content wake-up watch", gvk.String())
+	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
+	contentObj := &unstructured.Unstructured{}
+	contentObj.SetGroupVersionKind(contentGVK)
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(obj).
+		// Reverse wake-up so Snapshot.Ready mirrors the bound SnapshotContent.Ready in both directions
+		// (including Ready=True -> False after the binder stopped polling). Enqueue-only; truth stays on
+		// SnapshotContent. See mapBoundContentToSnapshots.
+		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapBoundContentToSnapshots(gvk))).
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 	return builder.Complete(r)
 }
