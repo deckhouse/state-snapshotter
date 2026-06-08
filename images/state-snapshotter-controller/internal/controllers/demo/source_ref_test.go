@@ -425,9 +425,12 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
 		t.Fatalf("expected VM DomainReady=True after writing child refs, got %#v", domainReady)
 	}
+	// A1 (Slice 3): after bind the VM mirrors the bound SnapshotContent.Ready reason instead of writing a
+	// local ChildrenPending. No SnapshotContentController runs in this direct-reconcile unit test, so the
+	// content has no Ready condition yet and the mirror falls back to ContentBindingPending.
 	ready := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonChildrenPending {
-		t.Fatalf("expected Ready=False mirrored content pending before child content ready, got %#v", ready)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonContentBindingPending {
+		t.Fatalf("expected Ready=False mirrored from bound content (ContentBindingPending) before child content ready, got %#v", ready)
 	}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {
 		t.Fatalf("get VM content while child pending: %v", err)

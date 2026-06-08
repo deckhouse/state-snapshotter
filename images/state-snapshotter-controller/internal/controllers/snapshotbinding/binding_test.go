@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func TestStableContentName(t *testing.T) {
@@ -75,5 +77,21 @@ func TestPatchUnstructuredBoundContentNameIsIdempotent(t *testing.T) {
 	}
 	if got != "content-a" {
 		t.Fatalf("unexpected bound content name: %q", got)
+	}
+
+	// The common binder must never self-publish DomainReady: it is owned exclusively by the
+	// domain/namespace controller and the binder only waits for it.
+	conditions, _, err := unstructured.NestedSlice(fresh.Object, "status", "conditions")
+	if err != nil {
+		t.Fatalf("read conditions: %v", err)
+	}
+	for _, raw := range conditions {
+		cond, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if cond["type"] == snapshot.ConditionDomainReady {
+			t.Fatalf("PatchUnstructuredBoundContentName must not self-publish DomainReady, got condition: %#v", cond)
+		}
 	}
 }
