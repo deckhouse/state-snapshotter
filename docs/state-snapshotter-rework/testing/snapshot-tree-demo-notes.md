@@ -150,6 +150,7 @@ kubectl get --raw \
 | Файл | Назначение |
 |---|---|
 | [`snapshot-tree-demo/`](snapshot-tree-demo/) | Скачиваемые YAML + `restore-namespace-from-snapshot.sh` |
+| `hack/snapshot-tree-demo-e2e.sh` | Staged-диагностический прогон дерева (00-preflight..11-chunk-missing) с артефактами; runbook §9 |
 | [`snapshot-live-demo-runbook.md`](snapshot-live-demo-runbook.md) | Snapshot-only live demo, речь, pitfalls |
 | [`snapshot-live-demo-commands.md`](snapshot-live-demo-commands.md) | Команды треков A/C/D/B |
 | `hack/demo-e2e.sh` | Автоматический трек B; stage 08 = forced TTL GC |

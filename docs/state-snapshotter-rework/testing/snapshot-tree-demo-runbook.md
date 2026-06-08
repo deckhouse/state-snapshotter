@@ -15,6 +15,14 @@ restore, opt. каскадный GC по TTL. Детали/контракт/вн
 
 Части 5–7 **опциональны**; часть A (разделы 1–4) самодостаточна.
 
+> **Автоматический staged-диагностический прогон.** Разделы 1–4 ниже — ручной
+> happy-path. Для полной проверки архитектуры (priority planning → DomainReady
+> barrier → handoff → Phase 2a/Slice 3 propagation/recovery) с сохранением
+> артефактов по стадиям используйте `hack/snapshot-tree-demo-e2e.sh` — см.
+> [§9 «Staged diagnostic»](#9-staged-diagnostic-hacksnapshot-tree-demo-e2esh).
+> Это диагностический сценарий: ключевые инварианты — hard-fail, гоночные/
+> зависящие от окружения проверки — `SOFT` + артефакты, без падения прогона.
+
 ---
 
 ## 1. Переменные и preflight
@@ -305,3 +313,57 @@ kubectl logs -n d8-storage-foundation -l app=controller --tail=200   # restore l
 ```
 
 Подробности, контракт и внутренности — [`snapshot-tree-demo-notes.md`](snapshot-tree-demo-notes.md).
+
+---
+
+## 9. Staged diagnostic (`hack/snapshot-tree-demo-e2e.sh`)
+
+Расширенный сценарий вместо «одного happy-path»: набор стадий с артефактами после
+каждого важного состояния. Запускается на кластере с задеплоенным контроллером.
+
+```bash
+cd /path/to/state-snapshotter
+./hack/snapshot-tree-demo-e2e.sh
+# артефакты: artifacts/tree-demo-<run-id>/<stage>/
+```
+
+Стадии (каталоги артефактов):
+
+| Стадия | Что проверяет |
+|---|---|
+| `00-preflight` | CRD/SC/контроллер; внешний demo-domain RBAC (webhook get inventory, controller create MCR); отсутствие старых условий |
+| `01-priority-vm-first` | регистрация CSD (GVK/priority), `Accepted`/`RBACReady`, VM priority > Disk |
+| `02-tree-ready` | форма дерева (root→VM→disk-vm; standalone disk как root child; covered disk не дублируется; ConfigMap в MCP, не child); happy-path `RequestsReady/ChildrenReady/Ready=True`; baseline mirror root `Snapshot.Ready == content.Ready` |
+| `03-priority-inverted` | инверсия priority (Disk>VM) в чистом namespace: форма меняется **или** fail-closed с явной причиной; CSD восстанавливается в VM-first. **Авто-skip**, если на кластере есть чужие demo-снапшоты/CSD вне этого прогона (глобальный CSD-priority flip их бы задел) |
+| `04-domainready-barrier` | **hard**: каждый domain snapshot `DomainReady=True` и `observedGeneration == generation`; ни один `SnapshotContent` не несёт `DomainReady` (нет self-publication common-слоя). **soft**: timeline (content не биндится до current-gen `DomainReady`) |
+| `05-ownership-handoff` | MCP/VSC `ownerRef -> SnapshotContent` после handoff (steady-state); execution `ObjectKeeper ret-mcr-*`; `dataRefs` после handoff. **Limitation:** окно «born under execution OK» в live может быть пропущено — birth-семантика покрыта integration-тестами (записано в `notes.txt`) |
+| `06-mcp-failure` | leaf MCP `Ready=False` → leaf `RequestsReady=False/ManifestCheckpointFailed` → parent/root `ChildrenReady=False/ChildrenFailed` → root `Snapshot Ready=False` (verbatim mirror); sibling `Ready=True` |
+| `07-mcp-recovery` | возврат MCP `Ready=True` → дерево/root recover `Ready=True`; mirror совпадает |
+| `08-vsc-pending` | VSC `readyToUse=false` → `RequestsReady=False/DataCapturePending` (non-terminal) → root mirror |
+| `09-vsc-recovery` | VSC `readyToUse=true` → recovery |
+| `10-vsc-missing` | **destructive**: удаление VSC → `RequestsReady=False/ArtifactMissing`; sibling isolation; namespace чистится (восстановление невозможно) |
+| `11-chunk-missing` | **destructive**: удаление chunk + bump MCP → `ManifestCheckpointFailed` с именем chunk; документирует ограничение (chunk-watch не реализован в 2a). Артефакты-доказательства: `deleted-chunk.txt`, `mcp-before-delete/after-delete/after-bump.yaml`, флаг «MCP.status.chunks всё ещё ссылался на удалённый chunk» |
+
+> **Destructive stages.** `10-vsc-missing` и `11-chunk-missing` деструктивны: удаляют
+> `VolumeSnapshotContent`/chunk, и для VSC восстановление **не всегда возможно** (это нормально).
+> Не запускать на переиспользуемом demo-namespace без включённой очистки. Очистка включена по
+> умолчанию; `TREE_DEMO_SKIP_CLEANUP=1` её отключает — тогда эти стадии оставят повреждённое
+> состояние. На shared-кластере: `TREE_DEMO_SKIP_VSC=1` / `TREE_DEMO_SKIP_CHUNK=1`, чтобы прогон
+> остался недеструктивным.
+
+Hard-fail (ядро инвариантов): preflight, форма дерева, happy-path `Ready`,
+финальный `DomainReady` (=True, current-gen, не на `SnapshotContent`),
+MCP-failure propagation + sibling isolation, MCP recovery, равенство mirror.
+Остальное (инверсия, DomainReady timeline, handoff-интермедиаты, demo content→snapshot
+mirror, VSC/chunk) — `SOFT` с записью в `notes.txt`, прогон не падает. Итог: `SUMMARY.txt`
+(`soft_failures=N`). На каждой стадии: `resources/` (YAML/JSON), `conditions.txt`,
+`ownerrefs.txt`, `graph/` (DOT/SVG), `notes.txt`.
+
+Полезные env: `TREE_DEMO_STORAGE_CLASS`, `TREE_DEMO_MODULE_NS`,
+`TREE_DEMO_SKIP_INVERSION=1` (не трогать глобальный CSD; стадия и так авто-skip при
+наличии чужих demo-объектов/CSD), `TREE_DEMO_SKIP_VSC=1`, `TREE_DEMO_SKIP_CHUNK=1`,
+`TREE_DEMO_SKIP_CLEANUP=1` (оставить namespace/CSD).
+
+Самые стабильные стадии (02/06/07) — кандидаты на перенос в автоматический e2e
+(см. `e2e-testing-strategy.md` §P2a-E1). Контракт/детали — в
+[`snapshot-tree-demo-notes.md`](snapshot-tree-demo-notes.md).

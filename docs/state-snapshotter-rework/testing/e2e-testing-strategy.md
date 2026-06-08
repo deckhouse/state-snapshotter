@@ -155,6 +155,11 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 
 Выполняется на кластере с задеплоенным контроллером и tree-demo (root `Snapshot` → VM child → Disk leaf с MCP/VSC), не в envtest. Корректность на reconcile уже доказана unit+integration; live-gate проверяет сквозной mirror до root `Snapshot` и sibling isolation на реальном GC/RBAC.
 
+> Автоматический staged-прогон шагов ниже: `hack/snapshot-tree-demo-e2e.sh`
+> (стадии `00-preflight`..`11-chunk-missing`, артефакты `artifacts/tree-demo-<run-id>/`;
+> ядро инвариантов — hard-fail, гоночное — `SOFT`). Описание стадий —
+> [`snapshot-tree-demo-runbook.md` §9](snapshot-tree-demo-runbook.md#9-staged-diagnostic-hacksnapshot-tree-demo-e2esh). Шаги 1–6 ниже — ручной эквивалент.
+
 1. Baseline: `kubectl get snapshot -n <ns> <root> -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'` == `True`; root/VM/Disk `SnapshotContent` и sibling — `Ready=True`; в графе нет `MISSING`. Зафиксировать имена leaf MCP, VSC(ы) и `MCP.status.chunks[]`.
 2. MCP Failed: `kubectl patch manifestcheckpoint <mcp> --subresource=status --type=merge -p '{"status":{"conditions":[{"type":"Ready","status":"False","reason":"Failed","message":"e2e injected MCP failure","lastTransitionTime":"<now>"}]}}'` → ждать leaf `RequestsReady=False/ManifestCheckpointFailed`, вверх `ChildrenFailed`, root `Snapshot Ready=False` (mirror); затем patch назад `Ready=True` → full recovery.
 3. VSC `readyToUse=false` (если допускает admission): patch VSC status → leaf `DataCapturePending`, вверх `ChildrenPending`, root `Snapshot Ready=False`; назад `true` → recovery. Если status patch заблокирован — использовать сценарий 4.
