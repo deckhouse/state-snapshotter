@@ -61,6 +61,11 @@ func SnapshotSubjectRefMap(apiVersion, kind, name, namespace string, uid types.U
 	return out
 }
 
+// PatchUnstructuredBoundContentName records status.boundSnapshotContentName on a generic snapshot.
+// It MUST NOT publish DomainReady: DomainReady is a domain-planning barrier owned exclusively by the
+// domain/namespace controller (the generic binder only waits for it). Self-publishing it here would make
+// the common layer a second source of truth for planning completion (and, with observedGeneration=0,
+// previously deadlocked the binder's own barrier).
 func PatchUnstructuredBoundContentName(ctx context.Context, c client.Client, key client.ObjectKey, gvk schema.GroupVersionKind, contentName string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		obj := &unstructured.Unstructured{}
@@ -73,48 +78,11 @@ func PatchUnstructuredBoundContentName(ctx context.Context, c client.Client, key
 			return err
 		}
 		if current == contentName {
-			return setUnstructuredDomainReady(ctx, c, obj)
+			return nil
 		}
 		if err := unstructured.SetNestedField(obj.Object, contentName, "status", "boundSnapshotContentName"); err != nil {
 			return fmt.Errorf("set status.boundSnapshotContentName: %w", err)
 		}
-		setUnstructuredDomainReadyCondition(obj)
 		return c.Status().Update(ctx, obj)
 	})
-}
-
-func setUnstructuredDomainReady(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
-	if !setUnstructuredDomainReadyCondition(obj) {
-		return nil
-	}
-	return c.Status().Update(ctx, obj)
-}
-
-func setUnstructuredDomainReadyCondition(obj *unstructured.Unstructured) bool {
-	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	want := map[string]interface{}{
-		"type":               snapshot.ConditionDomainReady,
-		"status":             "True",
-		"reason":             snapshot.ReasonCompleted,
-		"message":            "generic snapshot has no children",
-		"observedGeneration": obj.GetGeneration(),
-	}
-	for i, raw := range conditions {
-		cond, ok := raw.(map[string]interface{})
-		if !ok || cond["type"] != snapshot.ConditionDomainReady {
-			continue
-		}
-		if cond["status"] == want["status"] &&
-			cond["reason"] == want["reason"] &&
-			cond["message"] == want["message"] &&
-			cond["observedGeneration"] == want["observedGeneration"] {
-			return false
-		}
-		conditions[i] = want
-		_ = unstructured.SetNestedSlice(obj.Object, conditions, "status", "conditions")
-		return true
-	}
-	conditions = append(conditions, want)
-	_ = unstructured.SetNestedSlice(obj.Object, conditions, "status", "conditions")
-	return true
 }

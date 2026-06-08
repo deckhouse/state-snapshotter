@@ -21,7 +21,6 @@ import (
 	"fmt"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
-	"strings"
 	"sync"
 	"time"
 
@@ -166,18 +165,17 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Step 0: Handle deletion - propagation Ready=False to parent
-	// If Snapshot is being deleted and was Ready=True, propagate Ready=False to parent
+	// Step 0: Handle deletion.
+	//
+	// Deleting a child Snapshot OBJECT is NOT a parent-degradation signal: in the durable-content model the
+	// child's SnapshotContent (and its artifacts) survives Snapshot deletion via ObjectKeeper TTL, so the
+	// parent's data is intact and the parent must stay Ready=True. Real degradation (durable artifact/content
+	// loss) propagates UP through SnapshotContent.ChildrenReady aggregation and is mirrored onto parent
+	// Snapshots by the content->Snapshot watch (INV-COND2/INV-COND4/INV-FAIL1) — proven by
+	// genericbinder_parent_degradation_content_driven_test. The previous recursive propagateReadyFalseToParent
+	// (direct Status().Update walk onto ancestor Snapshots) was a pre-conditions-model remnant and has been
+	// removed; the snapshot side never recomputes its own Ready/reason.
 	if !obj.GetDeletionTimestamp().IsZero() {
-		// Snapshot is being deleted
-		// Check if it was Ready=True and has a parent
-		if snapshot.IsReady(snapshotLike) {
-			// Propagate Ready=False to parent (if exists and not being deleted)
-			if err := r.propagateReadyFalseToParent(ctx, snapshotLike, obj); err != nil {
-				logger.Error(err, "Failed to propagate Ready=False to parent")
-				// Non-fatal: continue with deletion
-			}
-		}
 		// Remove finalizer from SnapshotContent on parent deletion (watch-driven, no reverse content ref).
 		if err := r.removeSnapshotContentFinalizer(ctx, snapshotLike, obj); err != nil {
 			logger.Error(err, "Failed to remove SnapshotContent finalizer on snapshot deletion")
@@ -583,145 +581,6 @@ func genericBinderObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSp
 	return true
 }
 
-// propagateReadyFalseToParent recursively writes Ready=False/ChildSnapshotMissing directly into the
-// ancestor Snapshot chain when a previously Ready=True child Snapshot is deleted.
-//
-// LEGACY EXCEPTION (architecturally suspicious — slated for removal/replacement).
-//
-// This is a remnant of the pre-conditions-model deletion algorithm
-// (snapshot-rework/unified-snapshot-deletion-algorithm.md, which still describes the removed
-// InProgress/Ready model). It is a direct recursive recompute-and-write into parent Snapshot.status that
-// bypasses SnapshotContent, which conflicts with the current single-aggregator contract
-// (snapshot-rework/2026-06-03-snapshot-conditions-model.md):
-//   - INV-COND2: Ready is aggregated in exactly one place — on SnapshotContent (RequestsReady &&
-//     ChildrenReady); everywhere else Ready is a mirror. Local recompute is forbidden.
-//   - INV-COND4: Snapshot.Ready := mirror(SnapshotContent.Ready); the snapshot side does not compute its
-//     own reason. ChildSnapshotMissing is exactly such a self-computed, non-mirror reason.
-//   - INV-FAIL1: structural/failure propagation up the tree is content-driven via ChildrenReady on
-//     SnapshotContent, not via direct writes onto live Snapshot objects.
-//
-// Target replacement: drive ancestor readiness from SnapshotContent.ChildrenReady aggregation
-// (durable content survives child-Snapshot deletion via ObjectKeeper TTL), and let Snapshot.Ready mirror
-// it, instead of this recursive Status().Update walk. This path is currently not covered by unit tests.
-//
-// TODO(conditions-model): remove this method and the deletion-time call site, or convert the deletion
-// signal into a content-driven ChildrenReady recomputation. Until then it is retained only as a
-// best-effort, non-fatal deletion-time hint (the caller already ignores its error).
-//
-// Guards (unchanged): propagate only if the deleted Snapshot was Ready=True, the parent exists, is not
-// being deleted, and was Ready=True.
-func (r *GenericSnapshotBinderController) propagateReadyFalseToParent(
-	ctx context.Context,
-	_ snapshot.SnapshotLike,
-	obj *unstructured.Unstructured,
-) error {
-	logger := log.FromContext(ctx)
-
-	// Find parent Snapshot through ownerRef
-	ownerRefs := obj.GetOwnerReferences()
-	var parentRef *metav1.OwnerReference
-	for i := range ownerRefs {
-		ref := &ownerRefs[i]
-		// Check if owner is another snapshot type (ends with "Snapshot")
-		if strings.HasSuffix(ref.Kind, "Snapshot") {
-			parentRef = ref
-			break
-		}
-	}
-
-	if parentRef == nil {
-		// No parent - nothing to propagate
-		return nil
-	}
-
-	// Get parent Snapshot - resolve GVK through registry
-	parentGVK, err := r.GVKRegistry.ResolveSnapshotGVK(parentRef.Kind)
-	if err != nil {
-		// Fallback: parse from APIVersion if registry doesn't know this GVK
-		// This handles edge cases like core APIs or dynamically discovered CRDs
-		if idx := strings.Index(parentRef.APIVersion, "/"); idx != -1 {
-			parentGVK = schema.GroupVersionKind{
-				Group:   parentRef.APIVersion[:idx],
-				Version: parentRef.APIVersion[idx+1:],
-				Kind:    parentRef.Kind,
-			}
-		} else {
-			parentGVK = schema.GroupVersionKind{
-				Group:   "",
-				Version: parentRef.APIVersion,
-				Kind:    parentRef.Kind,
-			}
-		}
-		logger.V(1).Info("GVK not found in registry, using fallback parsing", "kind", parentRef.Kind)
-	}
-
-	parentObj := &unstructured.Unstructured{}
-	parentObj.SetGroupVersionKind(parentGVK)
-	parentKey := client.ObjectKey{
-		Name:      parentRef.Name,
-		Namespace: obj.GetNamespace(), // Parent should be in the same namespace
-	}
-
-	// Use APIReader for read-after-write consistency
-	if err := r.APIReader.Get(ctx, parentKey, parentObj); err != nil {
-		if errors.IsNotFound(err) {
-			// Parent doesn't exist - nothing to propagate
-			return nil
-		}
-		return fmt.Errorf("failed to get parent Snapshot: %w", err)
-	}
-
-	// Guards: Don't propagate if:
-	// 1. Parent is being deleted (cascade deletion)
-	if !parentObj.GetDeletionTimestamp().IsZero() {
-		logger.V(1).Info("Parent Snapshot is being deleted, skipping propagation")
-		return nil
-	}
-
-	// 2. Parent was not Ready=True (don't propagate to already broken snapshots)
-	parentLike, err := snapshot.ExtractSnapshotLike(parentObj)
-	if err != nil {
-		return fmt.Errorf("failed to extract parent SnapshotLike: %w", err)
-	}
-
-	if !snapshot.IsReady(parentLike) {
-		logger.V(1).Info("Parent Snapshot is not Ready=True, skipping propagation")
-		return nil
-	}
-
-	// 3. Parent already has Ready=False (preserve existing Reason)
-	readyCond := snapshot.GetCondition(parentLike, snapshot.ConditionReady)
-	if readyCond != nil && readyCond.Status == metav1.ConditionFalse {
-		logger.V(1).Info("Parent Snapshot already has Ready=False, preserving existing Reason", "reason", readyCond.Reason)
-		return nil
-	}
-
-	// Propagate Ready=False to parent
-	// Preserve existing Reason if Ready=False already exists (root-cause preservation)
-	reason := snapshot.ReasonChildSnapshotMissing
-	if readyCond != nil && readyCond.Status == metav1.ConditionFalse {
-		reason = readyCond.Reason // Preserve existing reason
-	}
-
-	snapshot.SetCondition(parentLike, snapshot.ConditionReady, metav1.ConditionFalse, reason,
-		fmt.Sprintf("Child Snapshot %s/%s was deleted", obj.GetNamespace(), obj.GetName()))
-
-	// Sync conditions to unstructured
-	snapshot.SyncConditionsToUnstructured(parentObj, parentLike.GetStatusConditions())
-
-	if err := r.Status().Update(ctx, parentObj); err != nil {
-		return fmt.Errorf("failed to update parent Snapshot Ready=False: %w", err)
-	}
-
-	logger.Info("Propagated Ready=False to parent Snapshot",
-		"parent", fmt.Sprintf("%s/%s", parentObj.GetNamespace(), parentObj.GetName()),
-		"child", fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()),
-		"reason", reason)
-
-	// Recursively propagate to grandparent
-	return r.propagateReadyFalseToParent(ctx, parentLike, parentObj)
-}
-
 // checkConsistencyAndSetReady mirrors the bound SnapshotContent Ready condition.
 // GenericSnapshotBinderController does not aggregate children; SnapshotContent is
 // the single source of truth for final readiness.
@@ -734,12 +593,11 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	contentName := snapshotLike.GetStatusContentName()
 	// DomainReady is intentionally NOT written here. This function is a pure Ready mirror and is only
 	// reached after the Step-1 barrier (isDomainPlanningComplete) has already confirmed DomainReady=True
-	// for the current generation. DomainReady is owned upstream: childless generic snapshots get it at
-	// bind time via snapshotbinding.PatchUnstructuredBoundContentName (observedGeneration == generation);
-	// subtree snapshots get it from their domain controller. Re-asserting it here previously clobbered
-	// that owner: with observedGeneration=0 it deadlocked this very barrier (mirror never re-ran), and
-	// stamping the current generation would instead overwrite the domain controller's DomainReady on
-	// snapshots that actually have children.
+	// for the current generation. DomainReady is owned exclusively by the domain/namespace controller that
+	// plans the snapshot; the common layer (this binder and the shared binding helpers) only waits on the
+	// barrier and MUST NOT self-publish it (Slice 2). Re-asserting it here previously clobbered that owner:
+	// with observedGeneration=0 it deadlocked this very barrier (mirror never re-ran), and stamping the
+	// current generation would instead overwrite the domain controller's DomainReady.
 	if contentName == "" {
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}
@@ -788,11 +646,21 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 	reason string,
 	message string,
 ) error {
+	gen := obj.GetGeneration()
 	cur := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
-	if cur != nil && cur.Status == status && cur.Reason == reason && cur.Message == message {
+	if cur != nil && cur.Status == status && cur.Reason == reason && cur.Message == message && cur.ObservedGeneration == gen {
 		return nil
 	}
 	snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, status, reason, message)
+	// Stamp observedGeneration so the mirrored Ready matches demo/root mirror semantics (INV-DOMAIN-GEN /
+	// gen-gated readers): a verbatim mirror without observedGeneration would otherwise look stale/non-current.
+	conds := snapshotLike.GetStatusConditions()
+	for i := range conds {
+		if conds[i].Type == snapshot.ConditionReady {
+			conds[i].ObservedGeneration = gen
+		}
+	}
+	snapshotLike.SetStatusConditions(conds)
 	snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
 	if err := r.Status().Update(ctx, obj); err != nil {
 		return fmt.Errorf("failed to mirror SnapshotContent Ready: %w", err)

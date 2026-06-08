@@ -38,11 +38,24 @@ import (
 //
 // Mirror contract (INV-COND2 single aggregator / INV-COND4 mirror-not-recompute): Snapshot.Ready is
 // mirror-only (a verbatim copy of the bound SnapshotContent.Ready status/reason/message) EXCEPT for
-// failures that cannot be represented in the content tree yet. Those local Ready=False writes are:
-//   - pre-bind / pre-publish planning or capture failures (failCapture, and the
-//     mirrorSnapshotReadyFromBoundContent fallback to ContentBindingPending);
-//   - NamespaceNotFound (no namespace, so no content can be produced);
-//   - this child-Snapshot terminal capture-failure bridge.
+// failures that cannot be represented in the content tree yet. The complete, exhaustive set of local
+// (non-mirror) root Snapshot.Ready=False writers — there are NO hidden exceptions — is:
+//
+//   - PRE-BIND / PRE-PUBLISH PLANNING/CAPTURE FAILURES via failCapture(): these all happen before the root
+//     publishes its own truth refs (manifestCheckpointName / dataRefs), so SnapshotContent cannot yet carry
+//     them through RequestsReady:
+//   - "ListFailed"                — building capture targets failed (capture.go);
+//   - "CapturePlanDrift"          — plain N2a MCR plan drift, terminal (capture.go);
+//   - "VolumeCaptureTargetsFailed"/"VolumeCaptureFailed" — volume capture planning/exec (volume_capture.go);
+//   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (capture.go);
+//   - "SubtreeManifestFailed"     — PRE-PUBLISH BRIDGE: a descendant MCP is terminally Failed so the root
+//     exclude set / plan cannot be computed and the root MCR/MCP is not created yet. The descendant failure
+//     is also representable via content ChildrenReady once child refs are published (deferred conversion).
+//   - NamespaceNotFound (no namespace, so no content can be produced) — documented exception;
+//   - the child-Snapshot terminal capture-failure bridge below (patchSnapshotChildSnapshotFailedBridge);
+//   - the mirrorSnapshotReadyFromBoundContent fallback to ContentBindingPending (pre-publish pending window).
+//
+// Everything else is a verbatim mirror of the bound SnapshotContent.Ready.
 //
 // The bridge is NOT limited to the pre-bind window: a parent may already be bound when a child Snapshot
 // terminally fails capture planning before any child SnapshotContent exists to carry the failure, so this

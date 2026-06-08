@@ -60,9 +60,15 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on CSD.
+	if err := registerDemoVMBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualMachineSnapshot{}).
 		Watches(&demov1alpha1.DemoVirtualDiskSnapshot{}, handler.EnqueueRequestsFromMapFunc(mapDemoDiskSnapshotToParentVM)).
+		// SnapshotContent -> bound demo Snapshot wake-up so a content Ready change re-mirrors onto the
+		// demo Snapshot (INV-MIRROR); enqueue-only.
+		Watches(&storagev1alpha1.SnapshotContent{}, handler.EnqueueRequestsFromMapFunc(mapContentToBoundDemoVMSnapshots(mgr.GetClient()))).
 		Complete(&DemoVirtualMachineSnapshotReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
@@ -220,7 +226,14 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	if !graphPublished {
-		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, snapshot.ReasonChildrenPending, "waiting for child content objects to bind"); err != nil {
+		// Strict mirror after bind (INV-COND4): the VM does not recompute a local ChildrenPending reason
+		// from child-binding state. The bound SnapshotContent.ChildrenReady aggregation already reflects
+		// not-yet-published children, so mirror its Ready reason/message and requeue.
+		_, contentReason, contentMessage, err := commonSnapshotContentReadyForSnapshot(ctx, r.Client, contentName)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, contentReason, contentMessage); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil

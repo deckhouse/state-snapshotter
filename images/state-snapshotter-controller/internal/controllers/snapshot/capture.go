@@ -152,6 +152,16 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
+			// Classification (Slice 3): PRE-PUBLISH BRIDGE. This fires during root capture-target planning
+			// (BuildRootNamespaceManifestCaptureTargets) when a descendant ManifestCheckpoint is terminally
+			// Failed, so the root's exclude set cannot be computed and the root MCR/MCP is NOT created yet.
+			// At this point the root SnapshotContent has no published manifestCheckpointName, so it cannot
+			// express the root's own RequestsReady terminal failure — hence the local failCapture bridge.
+			// The underlying descendant terminal failure is ALSO representable via the content tree
+			// (descendant content RequestsReady=False -> ancestor ChildrenReady=False -> root content Ready
+			// =False -> root Snapshot mirror) once child content refs are published; converting this to pure
+			// content-driven propagation is a deferred follow-up (out of scope for Slice 3), not a hidden
+			// post-publish recompute.
 			return r.failCapture(ctx, freshParent, content, "SubtreeManifestFailed", err.Error())
 		}
 		if errors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {

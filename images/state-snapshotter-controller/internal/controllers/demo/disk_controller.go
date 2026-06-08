@@ -32,9 +32,11 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -53,8 +55,14 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on CSD.
+	if err := registerDemoDiskBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
+		// SnapshotContent -> bound demo Snapshot wake-up so a content Ready change re-mirrors onto the
+		// demo Snapshot (INV-MIRROR); enqueue-only.
+		Watches(&storagev1alpha1.SnapshotContent{}, handler.EnqueueRequestsFromMapFunc(mapContentToBoundDemoDiskSnapshots(mgr.GetClient()))).
 		Complete(&DemoVirtualDiskSnapshotReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
@@ -115,9 +123,6 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		}
 		return ctrl.Result{}, nil
 	}
-	if err := patchDemoVirtualDiskSnapshotDomainReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "leaf snapshot has no children"); err != nil {
-		return ctrl.Result{}, err
-	}
 
 	contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
 	contentOwnerRef, res, err := r.ensureDemoDiskSnapshotLifecycle(ctx, s)
@@ -177,6 +182,12 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 	if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {
+		return ctrl.Result{}, err
+	}
+	// DomainReady=True is published only now: for a leaf disk "domain planning complete" means its own
+	// manifest capture request is created/published (it has no child snapshots). Publishing it earlier
+	// (before the MCR) would let readers proceed before the request even existed.
+	if err := patchDemoVirtualDiskSnapshotDomainReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "manifest capture request planned"); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, manifestcapture.ManifestCheckpointNameFromRequest(mcr)); err != nil {
