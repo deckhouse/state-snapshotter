@@ -114,10 +114,10 @@ RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending > Completed
 
 ### 6.1. Progress / degradation visibility
 
-Дизайн: [`docs/state-snapshotter-rework/design/status-propagation-and-visibility.md`](../docs/state-snapshotter-rework/design/status-propagation-and-visibility.md). Одна модель, две фазы: **Phase 1** — progress-aware `Ready=False` (богатые reason/message, счётчики прогресса, leaf-chain в `ChildrenFailed`, mirror на `Snapshot`); **Phase 2** — wake-up/revalidation watches для деградации артефактов после `Ready=True`. Pending и degradation используют один и тот же pipeline и таксономию reason'ов.
+Дизайн: [`docs/state-snapshotter-rework/design/status-propagation-and-visibility.md`](../docs/state-snapshotter-rework/design/status-propagation-and-visibility.md). Одна модель, фазы: **Phase 1** — progress-aware `Ready=False` (богатые reason/message, счётчики прогресса, leaf-chain в `ChildrenFailed`, mirror на `Snapshot`); **Phase 2a** — MCP/VSC wake-up/revalidation watches для деградации артефактов после `Ready=True`. Pending и degradation используют один и тот же pipeline и таксономию reason'ов.
 
 - **Pending reasons:** `ManifestCapturePending`, `DataCapturePending` (наружу для not-ready data; `ArtifactNotReady` остаётся внутренним/compat), `ChildrenPending`, `ContentBindingPending` (только pre-bind на `Snapshot`).
-- **Failed reasons:** `ManifestCheckpointFailed`, `ArtifactMissing`, `DataArtifactInvalid`/`DataArtifactNotSupported`, `ArtifactFailed` (Phase 2), `ChildrenFailed`.
+- **Failed reasons:** `ManifestCheckpointFailed`, `ArtifactMissing`, `DataArtifactInvalid`/`DataArtifactNotSupported`, `ArtifactFailed` (deferred — не используется в Phase 2a), `ChildrenFailed`.
 - **Прогресс-сообщения:** `"<ready>/<total> ready"` + capped pending list (max 5, затем `" (+N more)"`).
 - **Leaf-chain (только в content-агрегации):** канонический parseable формат `ChildrenFailed`:
 
@@ -126,7 +126,9 @@ child SnapshotContent <direct-child> failed: leaf=<failed-leaf> reason=<original
 ```
 
 Родитель, видя терминального ребёнка с reason `ChildrenFailed`, переиспользует `leaf`/`reason`/`message` из его message и подставляет своего direct child; иначе ребёнок и есть failed leaf. `Snapshot` ничего не анализирует — только verbatim mirror (исключение — child-Snapshot bridge, §5.2).
-- **Revalidation без watch (Phase 1):** на каждом reconcile `SnapshotContentController` пересчитывает ноги; если опубликованный artifact ref перестал резолвиться (был `Ready=True`, стал missing/failed) → `RequestsReady=False`/`ArtifactMissing` → `Ready=False` с kind/name в message. Механизм пробуждения (artifact→content watches) — Phase 2.
+- **Revalidation без watch (Phase 1):** на каждом reconcile `SnapshotContentController` пересчитывает ноги; если опубликованный artifact ref перестал резолвиться (был `Ready=True`, стал missing/failed) → `RequestsReady=False`/`ArtifactMissing` → `Ready=False` с kind/name в message.
+- **Phase 2a — wake-up (truth=refs, ownerRef=routing, watch=enqueue-only):** события `ManifestCheckpoint`/`VolumeSnapshotContent` будят владельца **только** по `ownerRef → SnapshotContent`; handler не пишет conditions; broken/missing ownerRef логируется и дропается (correctness — на reconcile, `INV-RECONCILE-TRUTH`). **Без** reverse-index по `dataRefs[]` и **без** shortcut `chunk → SnapshotContent` (chunk, если когда-либо, — только `chunk → MCP → SnapshotContent`, `INV-OWNCHAIN`). **Без watermark:** классификация только по текущему состоянию артефакта (MCP NotFound → `ManifestCapturePending`; VSC NotFound → `ArtifactMissing`; VSC `readyToUse=false` → `DataCapturePending`; `ArtifactFailed` отложен). Content переустанавливает ownerRef VSC из `dataRefs[]` (self-heal, idempotent, best-effort, deleting VSC не патчится). Watches регистрируются c guard по RESTMapping.
+- **Chunk existence (get-only, без list/watch):** при MCP `Ready=True` — exact GET по `MCP.status.chunks[]`; первый `NotFound` → `ManifestCheckpointFailed` (terminal, message `ManifestCheckpoint <mcp> references missing chunk <chunk>`). Только **existence**, без чтения/декода `.spec.data` и без проверки checksum (content-валидация — на read/download/archive, не на каждом reconcile); GET — metadata-only (`PartialObjectMetadata`), payload не тянется. GET через uncached reader (cached Get создал бы chunk-informer = неявный list/watch — запрещено); транзиентная ошибка → requeue, не terminal. **Chunk deletion не будит reconcile** (нет chunk-watch): correctness — на следующем reconcile; read/download/archive ловит ошибку немедленно. Content/consistency (checksum в conditions) и `chunk → MCP → content` wake-up — вне scope (отдельный ADR/RBAC).
 
 ## 7. Тест-план
 

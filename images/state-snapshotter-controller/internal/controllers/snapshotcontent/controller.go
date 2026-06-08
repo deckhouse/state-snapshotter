@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -339,6 +340,12 @@ type commonContentStatusPlan struct {
 }
 
 func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
+	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
+	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
+	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
+	// only a liveness optimization).
+	r.selfHealDataArtifactOwnerRefs(ctx, obj)
+
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, obj)
 	if err != nil {
 		return false, err
@@ -636,12 +643,63 @@ func (r *SnapshotContentController) validateCommonContentManifestCheckpoint(ctx 
 	if err != nil {
 		return false, false, "", err
 	}
-	if ready {
-		if err := r.ensureManifestCheckpointOwnedByContent(ctx, resolvedMCPName, contentObj); err != nil {
-			return false, false, "", err
+	if !ready {
+		return ready, failed, msg, nil
+	}
+	if err := r.ensureManifestCheckpointOwnedByContent(ctx, resolvedMCPName, contentObj); err != nil {
+		return false, false, "", err
+	}
+	// Phase 2a chunk integrity by exact ref (no list/watch, get-only): every chunk named in
+	// MCP.status.chunks[] must still exist. A missing chunk is a terminal integrity loss of the
+	// published checkpoint -> ManifestCheckpointFailed (propagates as ChildrenFailed). Chunk deletion
+	// does NOT wake reconcile (no chunk watch by design); correctness is produced here on every
+	// reconcile, and the read/download/archive path fails immediately on use regardless.
+	missingChunk, chunkErr := r.firstMissingManifestCheckpointChunk(ctx, resolvedMCPName)
+	if chunkErr != nil {
+		return false, false, "", chunkErr
+	}
+	if missingChunk != "" {
+		return false, true, fmt.Sprintf("ManifestCheckpoint %s references missing chunk %s", resolvedMCPName, missingChunk), nil
+	}
+	return true, false, msg, nil
+}
+
+// firstMissingManifestCheckpointChunk validates chunk EXISTENCE by exact ref from MCP.status.chunks[].
+// It deliberately does NOT read/decode chunk content (.spec.data) or verify checksums — content/integrity
+// validation belongs to the explicit read/download/archive path, not to every reconcile. Each chunk is
+// fetched metadata-only (PartialObjectMetadata) so .spec.data is never transferred. It uses APIReader
+// (direct, uncached) on purpose: a cached Get would force the controller cache to start a
+// ManifestCheckpointContentChunk informer (implicit list/watch), which Phase 2a avoids (chunks keep
+// get-only RBAC). It stops at the first chunk that is NotFound and returns its name; transient
+// (non-NotFound) errors are returned so reconcile requeues instead of falsely failing the tree.
+func (r *SnapshotContentController) firstMissingManifestCheckpointChunk(ctx context.Context, mcpName string) (string, error) {
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if errors.IsNotFound(err) {
+			// MCP vanished between checks; resolveManifestCheckpointReady reclassifies on the next reconcile.
+			return "", nil
+		}
+		return "", err
+	}
+	chunkGVK := schema.GroupVersionKind{
+		Group:   ssv1alpha1.SchemeGroupVersion.Group,
+		Version: ssv1alpha1.SchemeGroupVersion.Version,
+		Kind:    "ManifestCheckpointContentChunk",
+	}
+	for _, ch := range mcp.Status.Chunks {
+		if ch.Name == "" {
+			continue
+		}
+		meta := &metav1.PartialObjectMetadata{}
+		meta.SetGroupVersionKind(chunkGVK)
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: ch.Name}, meta); err != nil {
+			if errors.IsNotFound(err) {
+				return ch.Name, nil
+			}
+			return "", err
 		}
 	}
-	return ready, failed, msg, nil
+	return "", nil
 }
 
 func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx context.Context, mcpName string, contentObj *unstructured.Unstructured) error {
@@ -668,6 +726,46 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 		mcp.OwnerReferences = refs
 		return r.Client.Patch(ctx, mcp, client.MergeFrom(base))
 	})
+}
+
+// selfHealDataArtifactOwnerRefs re-asserts the SnapshotContent ownerRef on every VolumeSnapshotContent
+// referenced by status.dataRefs[] (truth). This keeps ownerRef-only wake-up reliable without using
+// dataRefs as a wake-up routing index (INV-OWNCHAIN). It reuses the same handoff owner-ref shape as the
+// snapshot-side publisher (Controller=true, kind SnapshotContent) so the two writers converge and never
+// flip-flop. It is best-effort: missing VSC is left to data readiness (ArtifactMissing), a deleting VSC
+// is not patched, and any error is logged but does not fail reconcile or touch status.
+func (r *SnapshotContentController) selfHealDataArtifactOwnerRefs(ctx context.Context, obj *unstructured.Unstructured) {
+	logger := log.FromContext(ctx)
+	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
+	if err != nil {
+		return
+	}
+	content := &storagev1alpha1.SnapshotContent{}
+	content.Name = obj.GetName()
+	content.UID = obj.GetUID()
+	for _, binding := range contentLike.GetStatusDataRefs() {
+		art := binding.Artifact
+		if art.Kind != kindVolumeSnapshotContent || art.Name == "" {
+			continue
+		}
+		vsc := &unstructured.Unstructured{}
+		vsc.SetGroupVersionKind(artifactGVK(volumeSnapshotContentAPIVersion, kindVolumeSnapshotContent))
+		if getErr := r.Client.Get(ctx, client.ObjectKey{Name: art.Name}, vsc); getErr != nil {
+			if !errors.IsNotFound(getErr) {
+				logger.V(1).Info("self-heal: failed to get VolumeSnapshotContent; revalidation will backstop",
+					"vsc", art.Name, "err", getErr.Error())
+			}
+			continue
+		}
+		if !vsc.GetDeletionTimestamp().IsZero() {
+			// Deleting artifact: do not repair ownerRef; data readiness handles it.
+			continue
+		}
+		if healErr := ensureVolumeSnapshotContentOwnedByContent(ctx, r.Client, art.Name, content); healErr != nil {
+			logger.V(1).Info("self-heal: failed to ensure VolumeSnapshotContent ownerRef; wake-up may be degraded until next reconcile",
+				"vsc", art.Name, "err", healErr.Error())
+		}
+	}
 }
 
 func snapshotContentControllerOwnerRefsForHandoff(existing []metav1.OwnerReference, desired metav1.OwnerReference) ([]metav1.OwnerReference, bool, error) {
@@ -697,17 +795,25 @@ func snapshotContentControllerOwnerRefsForHandoff(existing []metav1.OwnerReferen
 	return out, !controllercommon.OwnerReferencesEqual(existing, out), nil
 }
 
+// resolveManifestCheckpointReady reads the published ManifestCheckpoint (truth = status.manifestCheckpointName)
+// and classifies it for the requests leg. Phase 2a uses only the current MCP state (no Ready-watermark):
+//   - NotFound / no Ready condition / Ready=False non-terminal -> pending (ManifestCapturePending). NotFound is
+//     a legitimate initial window because manifestCheckpointName is published before the MCP is created.
+//   - Ready=False with terminal Failed reason -> failed (ManifestCheckpointFailed), original MCP message kept.
+//   - Ready=True -> ready.
+//
+// Returns (resolvedName, ready, failed, message, error).
 func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.Context, mcpName string) (string, bool, bool, string, error) {
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
-			return mcpName, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s", mcpName), nil
+			return mcpName, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcpName), nil
 		}
 		return "", false, false, "", err
 	}
 	cond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
 	if cond == nil {
-		return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s Ready condition", mcp.Name), nil
+		return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcp.Name), nil
 	}
 	if cond.Status == metav1.ConditionTrue {
 		return mcp.Name, true, false, cond.Message, nil
@@ -715,7 +821,7 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 	if cond.Status == metav1.ConditionFalse && cond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed {
 		return mcp.Name, false, true, cond.Message, nil
 	}
-	return mcp.Name, false, false, cond.Message, nil
+	return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcp.Name), nil
 }
 
 // cascadeRemoveFinalizersFromChildren removes finalizers from child SnapshotContent objects
@@ -978,12 +1084,36 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 			For(obj).
 			Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotContentToParentContent)).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
+		// Damaged-artifact wake-up (Phase 2a): enqueue the owning SnapshotContent when its durable
+		// MCP/VSC artifacts change. Guarded by RESTMapping so a not-yet-installed CRD (e.g.
+		// VolumeSnapshotContent under envtest) degrades to "no watch" instead of failing startup;
+		// revalidation on the next reconcile still recomputes state (INV-RECONCILE-TRUTH).
+		builder = r.addArtifactWakeUpWatches(builder)
 		if err := builder.Complete(r); err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
 		}
 		r.activeContentWatchSet[key] = struct{}{}
 	}
 	return nil
+}
+
+// addArtifactWakeUpWatches adds enqueue-only Watches for the durable artifacts (ManifestCheckpoint,
+// VolumeSnapshotContent) routed by ownerRef -> SnapshotContent. Each watch is added only when the GVK is
+// RESTMappable so a missing CRD does not fail manager startup (the watch is simply absent and the next
+// reconcile still revalidates from truth refs). Handlers never write status.
+func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder) *builder.Builder {
+	logger := ctrl.Log.WithName("snapshotcontent-controller")
+	for _, gvk := range artifactWakeUpGVKs() {
+		if _, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			logger.Info("artifact wake-up watch skipped (GVK not RESTMappable yet); relying on reconcile-time revalidation",
+				"gvk", gvk.String(), "reason", err.Error())
+			continue
+		}
+		artifactObj := &unstructured.Unstructured{}
+		artifactObj.SetGroupVersionKind(gvk)
+		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapArtifactToOwningSnapshotContent))
+	}
+	return b
 }
 
 func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manager, snapshotGVK schema.GroupVersionKind) error {
@@ -1027,5 +1157,37 @@ func mapSnapshotContentToParentContent(_ context.Context, obj client.Object) []r
 			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
 		}
 	}
+	return nil
+}
+
+// manifestCheckpointGVK / volumeSnapshotContentGVK are the durable top-level artifacts whose
+// create/update/delete events must wake the owning SnapshotContent (INV-OWNCHAIN). Routing is strictly
+// by the artifact's ownerRef -> SnapshotContent; no reverse-index by dataRefs[] and no chunk shortcut.
+func artifactWakeUpGVKs() []schema.GroupVersionKind {
+	return []schema.GroupVersionKind{
+		{Group: ssv1alpha1.SchemeGroupVersion.Group, Version: ssv1alpha1.SchemeGroupVersion.Version, Kind: "ManifestCheckpoint"},
+		{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"},
+	}
+}
+
+// mapArtifactToOwningSnapshotContent routes a durable-artifact event (ManifestCheckpoint /
+// VolumeSnapshotContent) to its owning SnapshotContent by ownerRef only. It NEVER writes conditions or
+// patches status — it only enqueues a reconcile.Request. If the ownerRef chain is missing or broken it
+// logs a diagnostic and drops the event; the next reconcile recomputes state from truth refs
+// (INV-RECONCILE-TRUTH). Tombstone/last-known objects on delete still carry ownerRefs, so routing works.
+func mapArtifactToOwningSnapshotContent(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil {
+		return nil
+	}
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
+		}
+	}
+	log.FromContext(ctx).V(1).Info(
+		"artifact event has no owning SnapshotContent ownerRef; dropping (revalidation backstops on next reconcile)",
+		"artifactKind", obj.GetObjectKind().GroupVersionKind().Kind,
+		"artifact", obj.GetName(),
+	)
 	return nil
 }

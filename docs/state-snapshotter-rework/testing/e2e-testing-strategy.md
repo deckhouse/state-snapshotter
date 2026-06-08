@@ -123,7 +123,7 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 
 ## Status propagation and progress/degradation visibility
 
-Дизайн — [`design/status-propagation-and-visibility.md`](../design/status-propagation-and-visibility.md); контракт — [`spec/system-spec.md` §3.9.10](../spec/system-spec.md). Две фазы: **Phase 1** (progress-aware `Ready=False`) — реализована; **Phase 2** (damaged-artifact wake-up/revalidation) — следующий срез. Тяжёлый сквозной e2e-прогон выполняется **вместе с Phase 2** (gate ниже).
+Дизайн — [`design/status-propagation-and-visibility.md`](../design/status-propagation-and-visibility.md); контракт — [`spec/system-spec.md` §3.9.10 / §3.9.10.1](../spec/system-spec.md). Фазы: **Phase 1** (progress-aware `Ready=False`) — реализована; **Phase 2a** (MCP/VSC damaged-artifact wake-up/revalidation) — реализована. Тяжёлый сквозной live-e2e (delete MCP/VSC у Ready-дерева на кластере) — gate ниже.
 
 | ID | Сценарий | Уровень | Статус |
 |----|----------|---------|--------|
@@ -134,8 +134,16 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 | P1-U5 | already `Ready=True` content, reconcile видит missing published artifact → `RequestsReady=False`/`ArtifactMissing`/`Ready=False`, kind/name в message (без watch) | unit | ✅ `progress_visibility_test.go` |
 | P1-U6 | Snapshot mirror: pre-bind fallback → `ContentBindingPending`; после bind — verbatim mirror content.Ready | unit | ✅ `ready_mirror_test.go` |
 | P1-I1 | bound Snapshot зеркалит content Ready после status-only обновления content | integration | ✅ `snapshot_content_ready_propagation_test.go` |
-| P1-E1 | e2e: во время создания root `Ready=False` с осмысленным reason/message; на ожидании детей message содержит count; финал `Ready=True/Completed` | e2e | ⬜ gate с Phase 2 |
-| P2-* | damaged-artifact revalidation: chunk/MCP/VSC удалён/деградировал после `Ready=True` → flip `Ready=False` вниз по дереву; sibling isolation; full live/e2e | watch + e2e | ⬜ Phase 2 |
+| P1-E1 | e2e: во время создания root `Ready=False` с осмысленным reason/message; на ожидании детей message содержит count; финал `Ready=True/Completed` | e2e | ⬜ gate с Phase 2a live |
+| P2a-U1 | MCP NotFound → `ManifestCapturePending` (non-terminal); MCP `Ready=False/Failed` → `ManifestCheckpointFailed` (terminal); non-terminal false → pending | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-U2 | wake-up map: artifact с ownerRef `SnapshotContent` → один reconcile.Request; без него → nil (enqueue-only) | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-U3 | VSC ownerRef self-heal: добавляет ownerRef, сохраняет foreign ref; missing VSC — no-op; deleting VSC не патчится | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-U4 | propagation: leaf `ArtifactMissing` → parent `ChildrenFailed` (terminal), ready-sibling нетронут; leaf `DataCapturePending` → parent `ChildrenPending` (non-terminal) | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-U5 | MCP `Ready=True`, chunk из `MCP.status.chunks[]` missing → `ManifestCheckpointFailed`, message с mcp+chunk (exact GET, no list/watch); все chunks на месте → ready | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-I1 | Ready-лист с Ready MCP; MCP флипает `Ready=False/Failed`; MCP-watch будит content → `RequestsReady=False`/`ManifestCheckpointFailed`/`Ready=False` (без правки content) | integration/envtest | ✅ `snapshotcontent_mcp_degradation_wakeup_test.go` |
+| P2a-I2 | Ready-лист (MCP Ready + chunk); chunk удалён (сам не будит) + bump MCP → reconcile видит missing chunk → `ManifestCheckpointFailed` с именем chunk | integration/envtest | ✅ `snapshotcontent_mcp_degradation_wakeup_test.go` |
+| P2a-E1 | live: delete VSC / fail MCP у Ready-дерева на кластере → flip `Ready=False` вниз до root `Snapshot`; sibling isolation. VSC-watch не тестируется в envtest (нет VSC CRD) | live-e2e | ⬜ gate (cluster) |
+| P2b-* | chunk wake-up (chunk→MCP→content watch, чтобы delete сам будил reconcile) + chunk content/consistency (checksum) в conditions; `ArtifactFailed` для деградировавшего VSC | watch + e2e | ⬜ отдельный ADR/RBAC |
 
 ## Нефункциональные
 

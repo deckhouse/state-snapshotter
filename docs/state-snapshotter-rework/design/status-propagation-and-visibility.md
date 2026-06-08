@@ -114,11 +114,95 @@ upload/download semantics.
 The content message MUST NOT read the Snapshot for cosmetics (no content→snapshot dependency); the empty-MCP
 message is generic: `waiting for manifest capture checkpoint to be published`.
 
-## 5. Phase 2 — damaged-artifact revalidation (next slice)
+## 5. Phase 2a — MCP/VSC degradation wake-up (this slice)
 
-- Add artifact→content watches (ManifestCheckpoint, VolumeSnapshotContent) so a degraded artifact after
-  `Ready=True` wakes the owning SnapshotContent.
-- Wire `ArtifactFailed` for the "was ready, now degraded" case.
-- Propagation up + sibling isolation already hold via ancestor-chain aggregation (Phase 1) — proven by tests.
-- Chunk-level integrity depends on MCP/VSC surfacing degraded status (documented dependency).
-- Full live/e2e pass over both slices.
+Phase 2a is **not** a new condition model — the model already exists (§1–§3). It only guarantees that a
+degraded **durable artifact** (ManifestCheckpoint, VolumeSnapshotContent) automatically **wakes** the owning
+`SnapshotContent` so the existing aggregator recomputes `RequestsReady`/`Ready` and the failure propagates up.
+
+**Core split (model-wide):**
+
+- **truth = explicit refs** in `status`/`spec` (`status.manifestCheckpointName`, `status.dataRefs[]`,
+  `status.childrenSnapshotContentRefs[]`). Truth defines what MUST exist and be valid.
+- **ownerRef = lifecycle / GC / wake-up routing / linkage self-healing**. ownerRef never decides membership or
+  validation.
+- **watch handler = enqueue only**, never writes conditions.
+
+**No watermark (simplification accepted in 2a).** Classification is based **only** on the current artifact
+state, never on a prior `Ready=True`. "If a published ref exists, the artifact MUST exist and be valid."
+
+Manifest path (surfaced only through `RequestsReady`):
+
+- no `manifestCheckpointName` → `ManifestCapturePending`;
+- `manifestCheckpointName` set, MCP **NotFound** → `ManifestCapturePending` (legitimate: the name is published
+  before the MCP is created — `capture.go`);
+- MCP `Ready=False` with terminal `Failed` reason → `ManifestCheckpointFailed` (terminal, MCP message kept);
+- MCP `Ready=False` non-terminal / no Ready condition → `ManifestCapturePending`;
+- MCP `Ready=True` → validate chunk integrity (below), then continue data validation.
+
+Chunk **existence** (exact-ref GET, **only** when MCP `Ready=True`):
+
+- iterate `MCP.status.chunks[]` (truth) and GET each `ManifestCheckpointContentChunk/<name>`, stopping at the
+  first one that is `NotFound` → `ManifestCheckpointFailed` (terminal),
+  message `ManifestCheckpoint <mcp> references missing chunk <chunk>`;
+- **existence only — never content.** The reconcile check does NOT read/decode `.spec.data` and does NOT verify
+  checksums; that is content validation and stays on the explicit read/download/archive path. The GET is
+  **metadata-only** (`PartialObjectMetadata`) so the chunk payload is never transferred on reconcile;
+- a transient (non-`NotFound`) GET error is returned as a reconcile error (requeue), **not** mapped to a terminal
+  failure — a network blip must not falsely break the tree;
+- **get-only, no list/watch.** The check uses the uncached `APIReader` on purpose: a cached client Get would make
+  the controller cache start a chunk informer (implicit list/watch), which 2a forbids;
+- **chunk deletion does not self-wake** a reconcile (no chunk watch). This is accepted: every reconcile recomputes
+  correctly, and the read/download/archive path fails immediately on use regardless. So a chunk deleted under a
+  `Ready=True` content may leave a stale `Ready=True` until the next reconcile (any MCP/VSC/child event, or a
+  parent/child relay) wakes the content.
+
+Data path (surfaced only through `RequestsReady`):
+
+- `dataRef` published, VSC **NotFound** → `ArtifactMissing` (terminal: `dataRefs[]` is published only after the
+  VSC exists and is owned, so a missing VSC is a real integrity loss);
+- VSC exists but `readyToUse=false` / no ready → `DataCapturePending` (pending; **not** turned into a terminal
+  failure in 2a);
+- VSC ready → ok.
+
+`ArtifactFailed` is **deferred** (not wired in 2a): `readyToUse=false` is treated as transient
+`DataCapturePending`, consistent with "status reflects the artifact's current state, not its history".
+
+**Wake-up watches (ownerRef-only, enqueue-only) — `INV-OWNCHAIN`:**
+
+```
+ManifestCheckpoint event → MCP.ownerRef → SnapshotContent → enqueue SnapshotContent
+VolumeSnapshotContent event → VSC.ownerRef → SnapshotContent → enqueue SnapshotContent
+child SnapshotContent Ready change → child.ownerRef → parent SnapshotContent → enqueue parent (already present)
+```
+
+- Handlers only build `reconcile.Request`; they never patch status. A missing/broken ownerRef is logged and
+  dropped; the next reconcile still recomputes from truth (`INV-RECONCILE-TRUTH`).
+- **No reverse-index** by `dataRefs[]` and **no chunk→content shortcut**. Chunk wake-up, if ever added, must hop
+  `chunk → MCP.ownerRef → SnapshotContent` (intermediate parents are never skipped).
+- Each watch is registered guarded by RESTMapping: a not-yet-installed CRD (e.g. `VolumeSnapshotContent` under
+  envtest) degrades to "no watch" instead of failing startup; correctness is preserved by reconcile-time
+  revalidation.
+
+**VSC ownerRef self-healing.** On every reconcile the content re-asserts the `SnapshotContent` ownerRef on each
+VSC referenced by `status.dataRefs[]` (same handoff shape as the snapshot-side publisher; idempotent;
+best-effort). This keeps ownerRef-only wake-up robust without using `dataRefs[]` as a routing index. A missing
+VSC is left to data readiness (`ArtifactMissing`); a deleting VSC is not patched.
+
+**Propagation & sibling isolation** already hold via ancestor-chain aggregation (Phase 1): a terminal leg
+(`ArtifactMissing`/`ManifestCheckpointFailed`) propagates as `ChildrenFailed`; a pending leg
+(`DataCapturePending`/`ManifestCapturePending`) propagates as `ChildrenPending`; only the ancestor chain
+degrades, ready siblings stay `Ready=True`; root `Snapshot` mirrors root content `Ready`.
+
+**RBAC.** MCP and VSC already have `get/list/watch`; chunks already have `get` (used by the exact-ref check).
+Chunk `list/watch` is **not** added. Chunk `delete` is unused (deletion is GC via ownerRef `Controller=true`);
+removing it is an optional separate cleanup.
+
+## 6. Out of scope (Phase 2a)
+
+- `ManifestCheckpointContentChunk` `list/watch` and a **chunk→content wake-up** (so chunk deletion self-wakes a
+  reconcile); chunk→content shortcut routing (any future chunk wake-up must hop `chunk → MCP → SnapshotContent`).
+- Chunk **content/consistency** validation beyond existence (e.g. checksum re-verification in conditions); that
+  stays on the read/download/archive path.
+- Reverse-index wake-up by `status.dataRefs[]`.
+- `ArtifactFailed` wiring; periodic polling; restore/download/upload semantics.
