@@ -21,182 +21,160 @@ package integration
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-var _ = Describe("Integration: SnapshotContentController - Ready Contract", func() {
+// Ready Contract on the current 4-condition model: SnapshotContent owns Ready, derived from
+// RequestsReady (its own ManifestCheckpoint/data refs) AND ChildrenReady (direct child SnapshotContents).
+// The controller only manages the common SnapshotContent GVK, so these specs operate on the common type and
+// drive readiness through a real Ready ManifestCheckpoint (never force-writing the content Ready condition).
+var _ = Describe("Integration: SnapshotContentController - Ready Contract", Serial, func() {
 	var (
-		ctx        context.Context
-		contentGVK schema.GroupVersionKind
-		mcpGVK     schema.GroupVersionKind
+		ctx         context.Context
+		contentCtrl *controllers.SnapshotContentController
 	)
+
+	commonGVK := unifiedbootstrap.CommonSnapshotContentGVK()
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		contentGVK = schema.GroupVersionKind{
-			Group:   "test.deckhouse.io",
-			Version: "v1alpha1",
-			Kind:    "TestSnapshotContent",
-		}
-		mcpGVK = schema.GroupVersionKind{
-			Group:   "state-snapshotter.deckhouse.io",
-			Version: "v1alpha1",
-			Kind:    "ManifestCheckpoint",
-		}
-	})
-
-	It("should NOT set Ready=True when manifestCheckpointName is empty", func() {
-		contentObj := &unstructured.Unstructured{}
-		contentObj.SetGroupVersionKind(contentGVK)
-		contentObj.SetName("ready-contract-no-mcp")
-		err := k8sClient.Create(ctx, contentObj)
-		Expect(err).NotTo(HaveOccurred())
-
-		contentCtrl, err := controllers.NewSnapshotContentController(
+		var err error
+		contentCtrl, err = controllers.NewSnapshotContentController(
 			k8sClient,
 			mgr.GetAPIReader(),
 			scheme,
 			mgr.GetRESTMapper(),
 			testCfg,
-			[]schema.GroupVersionKind{contentGVK},
+			[]schema.GroupVersionKind{commonGVK},
 		)
 		Expect(err).NotTo(HaveOccurred())
+	})
 
-		_, err = contentCtrl.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Name: contentObj.GetName()},
+	createContent := func(generateName string) (string, string) {
+		c := &storagev1alpha1.SnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: generateName},
+			Spec:       storagev1alpha1.SnapshotContentSpec{DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain},
+		}
+		Expect(k8sClient.Create(ctx, c)).To(Succeed())
+		name := c.Name
+		DeferCleanup(func() {
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}}))
 		})
-		Expect(err).NotTo(HaveOccurred())
+		var uid string
+		Eventually(func(g Gomega) {
+			fresh := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, fresh)).To(Succeed())
+			uid = string(fresh.UID)
+			g.Expect(uid).NotTo(BeEmpty())
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+		return name, uid
+	}
 
-		fresh := &unstructured.Unstructured{}
-		fresh.SetGroupVersionKind(contentGVK)
-		err = k8sClient.Get(ctx, types.NamespacedName{Name: contentObj.GetName()}, fresh)
-		Expect(err).NotTo(HaveOccurred())
+	readyMCP := func(mcpName, contentName, contentUID string) {
+		ensureManifestCheckpointStatus(ctx, mcpName, contentName, contentUID, func(m *ssv1alpha1.ManifestCheckpoint) {
+			meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+				Type:    ssv1alpha1.ManifestCheckpointConditionTypeReady,
+				Status:  metav1.ConditionTrue,
+				Reason:  ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+				Message: "checkpoint ready",
+			})
+		})
+		DeferCleanup(func() {
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: mcpName}}))
+		})
+	}
 
-		contentLike, err := snapshot.ExtractSnapshotContentLike(fresh)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(snapshot.IsReady(contentLike)).To(BeFalse(), "Ready must stay False without manifestCheckpointName")
+	reconcile := func(name string) {
+		_, _ = contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name}})
+	}
+
+	It("should NOT set Ready=True when manifestCheckpointName is empty", func() {
+		name, _ := createContent("ready-contract-no-mcp-")
+
+		// Without a published manifestCheckpointName the content can never be RequestsReady, so the controller
+		// must keep Ready=False. The controller owns Ready; the test only observes it.
+		Consistently(func(g Gomega) {
+			reconcile(name)
+			c := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, c)).To(Succeed())
+			g.Expect(meta.IsStatusConditionTrue(c.Status.Conditions, snapshot.ConditionReady)).
+				To(BeFalse(), "Ready must stay False without manifestCheckpointName")
+		}, 3*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 
 	It("should require children to be Ready before setting Ready=True", func() {
-		// Create MCR for parent (required for MCP ref UID)
-		parentMCR := &unstructured.Unstructured{}
-		parentMCR.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "state-snapshotter.deckhouse.io",
-			Version: "v1alpha1",
-			Kind:    "ManifestCaptureRequest",
-		})
-		parentMCR.SetName("mcr-parent")
-		parentMCR.SetNamespace("default")
-		parentMCR.Object["spec"] = map[string]interface{}{
-			"targets": []interface{}{},
-		}
-		Expect(k8sClient.Create(ctx, parentMCR)).To(Succeed())
+		// Child content without a checkpoint yet -> stays not Ready.
+		childName, childUID := createContent("rc-child-")
 
-		// Create MCP for parent
-		parentMCP := &unstructured.Unstructured{}
-		parentMCP.SetGroupVersionKind(mcpGVK)
-		parentMCP.SetName("mcp-parent-ready-contract")
-		parentMCP.Object["spec"] = map[string]interface{}{
-			"sourceNamespace": "default",
-			"manifestCaptureRequestRef": map[string]interface{}{
-				"name":      parentMCR.GetName(),
-				"namespace": parentMCR.GetNamespace(),
-				"uid":       string(parentMCR.GetUID()),
-			},
-		}
-		Expect(k8sClient.Create(ctx, parentMCP)).To(Succeed())
+		// Parent content: own Ready ManifestCheckpoint + a direct child ref.
+		parentName, parentUID := createContent("rc-parent-")
+		parentMCP := "mcp-" + parentName
+		readyMCP(parentMCP, parentName, parentUID)
 
-		// Create child SnapshotContent (not Ready yet)
-		child := &unstructured.Unstructured{}
-		child.SetGroupVersionKind(contentGVK)
-		child.SetName("child-ready-contract")
-		Expect(k8sClient.Create(ctx, child)).To(Succeed())
-		freshChildForStatus := &unstructured.Unstructured{}
-		freshChildForStatus.SetGroupVersionKind(contentGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: child.GetName()}, freshChildForStatus)).To(Succeed())
-		freshChildForStatus.Object["status"] = map[string]interface{}{
-			"manifestCheckpointName": parentMCP.GetName(),
-		}
-		Expect(k8sClient.Status().Update(ctx, freshChildForStatus)).To(Succeed())
-
-		// Create parent SnapshotContent with child ref
-		parent := &unstructured.Unstructured{}
-		parent.SetGroupVersionKind(contentGVK)
-		parent.SetName("parent-ready-contract")
-		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
-		freshParentForStatus := &unstructured.Unstructured{}
-		freshParentForStatus.SetGroupVersionKind(contentGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: parent.GetName()}, freshParentForStatus)).To(Succeed())
-		freshParentForStatus.Object["status"] = map[string]interface{}{
-			"manifestCheckpointName": parentMCP.GetName(),
-			"childrenSnapshotContentRefs": []interface{}{
-				map[string]interface{}{
-					"kind": contentGVK.Kind,
-					"name": child.GetName(),
-				},
-			},
-		}
-		Expect(k8sClient.Status().Update(ctx, freshParentForStatus)).To(Succeed())
-
-		contentCtrl, err := controllers.NewSnapshotContentController(
-			k8sClient,
-			mgr.GetAPIReader(),
-			scheme,
-			mgr.GetRESTMapper(),
-			testCfg,
-			[]schema.GroupVersionKind{contentGVK},
-		)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Parent should not become Ready while child is not Ready
-		_, err = contentCtrl.Reconcile(ctx, ctrl.Request{
-			NamespacedName: types.NamespacedName{Name: parent.GetName()},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		freshParent := &unstructured.Unstructured{}
-		freshParent.SetGroupVersionKind(contentGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: parent.GetName()}, freshParent)).To(Succeed())
-		parentLike, err := snapshot.ExtractSnapshotContentLike(freshParent)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(snapshot.IsReady(parentLike)).To(BeFalse(), "Parent must stay not Ready while child is not Ready")
-
-		// Mark child Ready=True
-		freshChild := &unstructured.Unstructured{}
-		freshChild.SetGroupVersionKind(contentGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: child.GetName()}, freshChild)).To(Succeed())
-		childLike, err := snapshot.ExtractSnapshotContentLike(freshChild)
-		Expect(err).NotTo(HaveOccurred())
-		snapshot.SetCondition(childLike, snapshot.ConditionReady, metav1.ConditionTrue, snapshot.ReasonReady, "Child ready")
-		snapshot.SyncConditionsToUnstructured(freshChild, childLike.GetStatusConditions())
-		Expect(k8sClient.Status().Update(ctx, freshChild)).To(Succeed())
-
-		// Reconcile parent and expect Ready=True (may require requeue)
-		Eventually(func() bool {
-			_, _ = contentCtrl.Reconcile(ctx, ctrl.Request{
-				NamespacedName: types.NamespacedName{Name: parent.GetName()},
-			})
-
-			freshParent2 := &unstructured.Unstructured{}
-			freshParent2.SetGroupVersionKind(contentGVK)
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: parent.GetName()}, freshParent2); err != nil {
-				return false
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			c := &storagev1alpha1.SnapshotContent{}
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: parentName}, c); err != nil {
+				return err
 			}
-			parentLike2, err := snapshot.ExtractSnapshotContentLike(freshParent2)
-			if err != nil {
-				return false
+			c.Status.ManifestCheckpointName = parentMCP
+			c.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.SnapshotContentChildRef{{Name: childName}}
+			return k8sClient.Status().Update(ctx, c)
+		})).To(Succeed())
+
+		// ChildrenReady gate: parent must stay Ready=False while the child is not Ready, even though the
+		// parent's own RequestsReady is satisfied.
+		Consistently(func(g Gomega) {
+			reconcile(childName)
+			reconcile(parentName)
+			c := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: parentName}, c)).To(Succeed())
+			ready := meta.FindStatusCondition(c.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse), "parent must stay not Ready while child is not Ready")
+		}, 3*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		// Drive the child genuinely Ready via its own Ready ManifestCheckpoint (controller owns Ready).
+		childMCP := "mcp-" + childName
+		readyMCP(childMCP, childName, childUID)
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			c := &storagev1alpha1.SnapshotContent{}
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: childName}, c); err != nil {
+				return err
 			}
-			return snapshot.IsReady(parentLike2)
-		}, "10s", "100ms").Should(BeTrue(), "Parent must become Ready after child is Ready")
+			c.Status.ManifestCheckpointName = childMCP
+			return k8sClient.Status().Update(ctx, c)
+		})).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			reconcile(childName)
+			c := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: childName}, c)).To(Succeed())
+			g.Expect(meta.IsStatusConditionTrue(c.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed(), "child should become Ready=True")
+
+		// With the child Ready, the parent's only remaining gate (ChildrenReady) is satisfied -> Ready=True.
+		Eventually(func(g Gomega) {
+			reconcile(childName)
+			reconcile(parentName)
+			c := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: parentName}, c)).To(Succeed())
+			g.Expect(meta.IsStatusConditionTrue(c.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed(), "parent must become Ready after child is Ready")
 	})
 })

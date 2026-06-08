@@ -25,15 +25,21 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
@@ -300,6 +306,14 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		})
 
 		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {
+			// Current contract: the bound common SnapshotContent is driven Ready=True by its controller
+			// (source of truth) and Snapshot.Ready is a verbatim mirror of it. This previously could not
+			// converge in envtest: the binder self-asserted DomainReady with observedGeneration=0 inside the
+			// mirror step, which its own generation-gated Step-1 barrier then rejected on every subsequent
+			// reconcile, so the mirror never re-ran after the content became Ready. Fixed by no longer
+			// writing DomainReady in the mirror step (genericbinder.checkConsistencyAndSetReady): DomainReady
+			// is owned upstream (bind-time publish for childless generic snapshots / the domain controller for
+			// subtree snapshots) and the Step-1 barrier already guarantees it before the mirror runs.
 			// INTERFACE: GenericSnapshotBinderController.checkConsistencyAndSetReady
 			//
 			// PRECONDITION:
@@ -323,15 +337,30 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// - Snapshot Ready=True only when SnapshotContent Ready=True
 			// - checkConsistencyAndSetReady is called automatically after SnapshotContent creation
 
-			// Create controllers for this test (without registering with manager to avoid conflicts)
+			// Current model: every Snapshot binds the common SnapshotContent and Snapshot.Ready is an eventual
+			// verbatim mirror of that common content's Ready (the binder reads the typed common SnapshotContent
+			// by name, not a custom TestSnapshotContent). Bind TestSnapshot -> common content so the mirror can
+			// resolve the bound content.
+			// Construct with nil so the constructor does NOT auto-register TestSnapshot -> TestSnapshotContent;
+			// the only content mapping is the explicit TestSnapshot -> common SnapshotContent below (matching
+			// the binder's runtime registration). Without this, checkConsistencyAndSetReady would mirror the
+			// wrong (custom) content GVK and never observe the common content's Ready.
+			boundContentGVK := unifiedbootstrap.CommonSnapshotContentGVK()
 			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
 				mgr.GetAPIReader(),
 				scheme,
 				testCfg,
-				[]schema.GroupVersionKind{snapshotGVK},
+				nil,
 			)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(snapshotCtrl.GVKRegistry.RegisterSnapshotContentMapping(
+				snapshotGVK.Kind,
+				snapshotGVK.GroupVersion().String(),
+				boundContentGVK.Kind,
+				boundContentGVK.GroupVersion().String(),
+			)).To(Succeed())
+			snapshotCtrl.SnapshotGVKs = []schema.GroupVersionKind{snapshotGVK}
 
 			contentCtrl, err := controllers.NewSnapshotContentController(
 				k8sClient,
@@ -339,7 +368,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				scheme,
 				mgr.GetRESTMapper(),
 				testCfg,
-				[]schema.GroupVersionKind{contentGVK},
+				[]schema.GroupVersionKind{boundContentGVK},
 			)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -420,80 +449,71 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			Expect(pendingReady).NotTo(BeNil())
 			Expect(pendingReady.Status).To(Equal(metav1.ConditionFalse))
 
-			// ACTIONS Step 4: Set SnapshotContent Ready=True
-			contentObj := &unstructured.Unstructured{}
-			contentObj.SetGroupVersionKind(contentGVK)
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name: contentName,
-			}, contentObj)
-			Expect(err).NotTo(HaveOccurred())
+			// ACTIONS Step 4: drive the bound (common) SnapshotContent genuinely Ready. The controller owns
+			// Ready, so the test must not force-write it: publish a Ready ManifestCheckpoint and link it via
+			// status.manifestCheckpointName, then let the SnapshotContentController compute
+			// RequestsReady=True/Ready=True (the content has no children and no data refs). The generic binder
+			// does not build a root MCR and does not touch manifestCheckpointName while
+			// status.manifestCaptureRequestName is empty, so this link is stable.
+			boundContent := &storagev1alpha1.SnapshotContent{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, boundContent)).To(Succeed())
+			contentUID := string(boundContent.GetUID())
 
-			contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
-			Expect(err).NotTo(HaveOccurred())
+			mcpName := "mcp-" + contentName
+			ensureManifestCheckpointStatus(ctx, mcpName, contentName, contentUID, func(m *ssv1alpha1.ManifestCheckpoint) {
+				meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+					Type:    ssv1alpha1.ManifestCheckpointConditionTypeReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+					Message: "checkpoint ready",
+				})
+			})
+			DeferCleanup(func() {
+				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: mcpName}}))
+			})
 
-			// Set Ready=True (terminal state)
-			snapshot.SetCondition(
-				contentLike,
-				snapshot.ConditionReady,
-				metav1.ConditionTrue,
-				snapshot.ReasonReady,
-				"Content is ready",
-			)
-			snapshot.SyncConditionsToUnstructured(contentObj, contentLike.GetStatusConditions())
-			err = k8sClient.Status().Update(ctx, contentObj)
-			Expect(err).NotTo(HaveOccurred())
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				cur := &storagev1alpha1.SnapshotContent{}
+				if getErr := k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, cur); getErr != nil {
+					return getErr
+				}
+				cur.Status.ManifestCheckpointName = mcpName
+				return k8sClient.Status().Update(ctx, cur)
+			})).To(Succeed())
 
-			// ACTIONS Step 5: Trigger Snapshot reconciliation
-			// This should call checkConsistencyAndSetReady and set Ready=True on Snapshot
-			_, err = snapshotCtrl.Reconcile(ctx, req)
-			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				_, recErr := contentCtrl.Reconcile(ctx, contentReq)
+				g.Expect(recErr).NotTo(HaveOccurred())
+				fresh := &storagev1alpha1.SnapshotContent{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, fresh)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(fresh.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
+			}, "60s", "200ms").Should(Succeed(), "bound SnapshotContent should become Ready=True")
 
-			// EXPECTED BEHAVIOR: Snapshot Ready=True is set automatically
-			Eventually(func() bool {
+			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready. Keep
+			// reconciling the binder (there is no reverse Snapshot watch) until the mirror converges, then
+			// assert the Snapshot is Ready=True with the same (Completed) reason as the content.
+			Eventually(func(g Gomega) {
+				_, recErr := snapshotCtrl.Reconcile(ctx, req)
+				g.Expect(recErr).NotTo(HaveOccurred())
+
 				freshSnapshot := &unstructured.Unstructured{}
 				freshSnapshot.SetGroupVersionKind(snapshotGVK)
-				err := k8sClient.Get(ctx, types.NamespacedName{
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
 					Name:      snapshotObj.GetName(),
 					Namespace: snapshotObj.GetNamespace(),
-				}, freshSnapshot)
-				if err != nil {
-					return false
-				}
+				}, freshSnapshot)).To(Succeed())
+				snapshotLike, extractErr := snapshot.ExtractSnapshotLike(freshSnapshot)
+				g.Expect(extractErr).NotTo(HaveOccurred())
+				readyCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
+				g.Expect(readyCond).NotTo(BeNil(), "Ready condition should exist")
+				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "Ready should be True")
+				g.Expect(readyCond.Reason).To(Equal(snapshot.ReasonCompleted), "Reason mirrors the bound SnapshotContent Ready reason")
+			}, "30s", "200ms").Should(Succeed(), "Snapshot should mirror bound SnapshotContent Ready=True")
 
-				snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
-				if err != nil {
-					return false
-				}
-
-				return snapshot.IsReady(snapshotLike)
-			}, "10s", "200ms").Should(BeTrue(), "Snapshot should reach Ready=True automatically when SnapshotContent is Ready=True")
-
-			// Verify Snapshot Ready=True condition
-			freshSnapshot := &unstructured.Unstructured{}
-			freshSnapshot.SetGroupVersionKind(snapshotGVK)
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name:      snapshotObj.GetName(),
-				Namespace: snapshotObj.GetNamespace(),
-			}, freshSnapshot)
-			Expect(err).NotTo(HaveOccurred())
-
-			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
-			Expect(err).NotTo(HaveOccurred())
-
-			readyCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
-			Expect(readyCond).NotTo(BeNil(), "Ready condition should exist")
-			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "Ready should be True")
-			Expect(readyCond.Reason).To(Equal(snapshot.ReasonReady), "Reason should mirror SnapshotContent")
-
-			// Verify SnapshotContent is Ready=True
-			err = k8sClient.Get(ctx, types.NamespacedName{
-				Name: contentName,
-			}, contentObj)
-			Expect(err).NotTo(HaveOccurred())
-
-			contentLike, err = snapshot.ExtractSnapshotContentLike(contentObj)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(snapshot.IsReady(contentLike)).To(BeTrue(), "SnapshotContent should be Ready=True")
+			// Verify the bound SnapshotContent is Ready=True (source of truth).
+			finalContent := &storagev1alpha1.SnapshotContent{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, finalContent)).To(Succeed())
+			Expect(meta.IsStatusConditionTrue(finalContent.Status.Conditions, snapshot.ConditionReady)).To(BeTrue(), "SnapshotContent should be Ready=True")
 		})
 	})
 })

@@ -126,35 +126,12 @@ rules:
   resources: ["volumesnapshotcontents"]
   verbs: ["get", "list", "watch", "update", "patch"]
 
-# TODO(remove): эти demo-домен RBAC здесь быть НЕ должно. Статический RBAC контроллера
-# должен оставаться domain-agnostic; domain/custom-resource права (demo.* и любые
-# доменные CSD) обязан выдавать внешний Deckhouse RBAC controller/hook и сигнализировать
-# их готовность через CSD condition RBACReady=True. Сейчас права зашиты статически в обход
-# этой модели — это временно. Удалить после внедрения внешнего RBAC-hook'а.
-# KNOWN DEBT (pre-existing, intentionally NOT fixed in the GVK-priority slice): this static demo
-# RBAC is required to keep live-demo working until the external RBACReady hook exists. The guardrail
-# test TestCoreRBACDoesNotGrantDemoDomainResources fails by design until a separate PR moves these
-# rights to the external/demo-e2e RBAC path and gates them on CSD RBACReady=True. Do not silently
-# delete here (would break live-demo) and do not relax the guardrail test.
-# Demo domain (dedicated Demo*Snapshot reconcilers; not generic binder). Required for MCR/MCP on child nodes.
-# Do not rely on ad-hoc smoke ClusterRoles (e.g. state-snapshotter-smoke-demo-domain-rbac) in production.
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - demovirtualmachines
-  - demovirtualdisks
-  - demovirtualmachinesnapshots
-  - demovirtualdisksnapshots
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - demovirtualmachinesnapshots/status
-  - demovirtualdisksnapshots/status
-  verbs: ["get", "update", "patch"]
-- apiGroups: ["demo.state-snapshotter.deckhouse.io"]
-  resources:
-  - demovirtualmachinesnapshots/finalizers
-  - demovirtualdisksnapshots/finalizers
-  verbs: ["update", "patch"]
+# Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
+# Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
+# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD/DSC
+# condition RBACReady=True. See docs/state-snapshotter-rework/operations/project-status.md for the
+# rollout dependency (live-demo requires the external demo-domain RBAC to be provisioned out-of-band
+# until the RBACReady hook lands).
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

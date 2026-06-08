@@ -2,6 +2,7 @@ package snapshotcontent
 
 import (
 	"context"
+	goerrors "errors"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -135,6 +137,33 @@ func TestContentPlanChunkPresentReady(t *testing.T) {
 	}
 }
 
+// MCP Ready=True but a chunk GET fails transiently (non-NotFound): must surface as a reconcile
+// error (requeue) and never publish a terminal ManifestCheckpointFailed from a transient blip.
+func TestContentPlanChunkTransientErrorRequeues(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	mcp := manifestCheckpointWithReady("mcp-chunks-flaky", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
+	mcp.Status.Chunks = []ssv1alpha1.ChunkInfo{{Name: "flaky-chunk-0", Index: 0}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp).
+		WithInterceptorFuncs(interceptor.Funcs{
+			// Only the chunk existence check uses metadata-only GET; fail exactly that, transiently.
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*metav1.PartialObjectMetadata); ok {
+					return goerrors.New("apiserver temporarily unavailable")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	content := commonContentWithStatus("c", "mcp-chunks-flaky")
+	if _, err := r.buildCommonSnapshotContentStatusPlan(ctx, content); err == nil {
+		t.Fatalf("transient chunk GET error must propagate as a reconcile error (requeue), got nil")
+	} else if strings.Contains(err.Error(), "missing chunk") {
+		t.Fatalf("transient error must not be reported as a missing chunk: %v", err)
+	}
+}
+
 // --- Wake-up mapping: artifact ownerRef -> owning SnapshotContent, enqueue only ---
 
 func TestMapArtifactToOwningSnapshotContentWithOwnerRef(t *testing.T) {
@@ -157,18 +186,32 @@ func TestMapArtifactToOwningSnapshotContentWithOwnerRef(t *testing.T) {
 	}
 }
 
+// No SnapshotContent ownerRef (none at all, or only a foreign owner) must never route, for either
+// artifact kind. Covers MCP/VSC with no ownerRef and MCP/VSC with a foreign-only ownerRef.
 func TestMapArtifactToOwningSnapshotContentNoOwnerRef(t *testing.T) {
-	art := &unstructured.Unstructured{}
-	art.SetName("orphan")
-	art.SetGroupVersionKind(unstructuredGVKForKind("VolumeSnapshotContent"))
-	// Only a foreign (non-SnapshotContent) ownerRef -> must not route.
-	art.SetOwnerReferences([]metav1.OwnerReference{{
-		APIVersion: "example.com/v1",
-		Kind:       "Foo",
-		Name:       "foo-1",
-	}})
-	if reqs := mapArtifactToOwningSnapshotContent(context.Background(), art); reqs != nil {
-		t.Fatalf("expected nil (no SnapshotContent ownerRef), got %v", reqs)
+	foreign := []metav1.OwnerReference{{APIVersion: "example.com/v1", Kind: "Foo", Name: "foo-1"}}
+	cases := []struct {
+		name string
+		kind string
+		refs []metav1.OwnerReference
+	}{
+		{"mcp-no-owner", "ManifestCheckpoint", nil},
+		{"mcp-foreign-owner", "ManifestCheckpoint", foreign},
+		{"vsc-no-owner", "VolumeSnapshotContent", nil},
+		{"vsc-foreign-owner", "VolumeSnapshotContent", foreign},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			art := &unstructured.Unstructured{}
+			art.SetName(tc.name)
+			art.SetGroupVersionKind(unstructuredGVKForKind(tc.kind))
+			if tc.refs != nil {
+				art.SetOwnerReferences(tc.refs)
+			}
+			if reqs := mapArtifactToOwningSnapshotContent(context.Background(), art); reqs != nil {
+				t.Fatalf("expected nil (no SnapshotContent ownerRef), got %v", reqs)
+			}
+		})
 	}
 }
 
@@ -208,6 +251,39 @@ func TestSelfHealVSCOwnerRefAddsAndPreservesForeign(t *testing.T) {
 	}
 	if !foundForeign {
 		t.Fatalf("self-heal must preserve foreign non-controller ownerRef; refs=%v", got.GetOwnerReferences())
+	}
+}
+
+// VSC already carries the correct SnapshotContent controller ownerRef: self-heal must be a no-op
+// (no Patch), so steady-state reconciles do not churn the artifact.
+func TestSelfHealVSCAlreadyOwnedNoUpdate(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	vsc := volumeSnapshotContentObject("vsc-owned", true)
+	ctrlTrue := true
+	vsc.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "SnapshotContent",
+		Name:       "owning-content",
+		UID:        types.UID("content-uid"),
+		Controller: &ctrlTrue,
+	}})
+	var patchCalls int
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls++
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	content := commonContentReadyWithMCPAndDataRefs("owning-content", "mcp-ok", "vsc-owned")
+	content.SetUID(types.UID("content-uid"))
+	r.selfHealDataArtifactOwnerRefs(ctx, content)
+
+	if patchCalls != 0 {
+		t.Fatalf("self-heal must not patch an already-correctly-owned VSC; patchCalls=%d", patchCalls)
 	}
 }
 

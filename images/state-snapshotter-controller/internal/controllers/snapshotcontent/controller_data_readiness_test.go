@@ -60,6 +60,25 @@ func TestResolveDataReadinessVSCNotReadyToUse(t *testing.T) {
 	}
 }
 
+// VSC exists but has no status.readyToUse field at all (e.g. freshly provisioned): treated the same
+// as readyToUse=false -> DataCapturePending (pending, never terminal).
+func TestResolveDataReadinessVSCReadyToUseMissing(t *testing.T) {
+	r, content := dataReadinessFixture(t,
+		dataBinding("pvc-1", "vsc-noready", true),
+		withVSCNoReadyToUse("vsc-noready"),
+	)
+	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
+	if err != nil {
+		t.Fatalf("resolveDataReadiness: %v", err)
+	}
+	if ready || reason != snapshot.ReasonDataCapturePending {
+		t.Fatalf("expected DataCapturePending for missing readyToUse, got ready=%v reason=%q msg=%q", ready, reason, msg)
+	}
+	if !strings.Contains(msg, "0/1 ready") || !strings.Contains(msg, "vsc-noready") {
+		t.Fatalf("expected progress count and pending name in message, got %q", msg)
+	}
+}
+
 func TestResolveDataReadinessOneVSCReady(t *testing.T) {
 	r, content := dataReadinessFixture(t,
 		dataBinding("pvc-1", "vsc-ready", true),
@@ -164,6 +183,20 @@ type dataReadinessFixtureState struct {
 func withVSC(name string, readyToUse bool) dataReadinessOption {
 	return func(s *dataReadinessFixtureState) {
 		s.vscs = append(s.vscs, volumeSnapshotContentObject(name, readyToUse))
+	}
+}
+
+// withVSCNoReadyToUse adds a VolumeSnapshotContent that has no status.readyToUse field at all.
+func withVSCNoReadyToUse(name string) dataReadinessOption {
+	return func(s *dataReadinessFixtureState) {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "snapshot.storage.k8s.io",
+			Version: "v1",
+			Kind:    kindVolumeSnapshotContent,
+		})
+		obj.SetName(name)
+		s.vscs = append(s.vscs, obj)
 	}
 }
 

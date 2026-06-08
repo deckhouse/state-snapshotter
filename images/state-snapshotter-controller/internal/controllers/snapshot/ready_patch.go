@@ -31,11 +31,23 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// patchSnapshotChildSnapshotFailedBridge writes the ONE non-mirror Snapshot.Ready value permitted by the
-// single-aggregator contract (snapshot-rework/2026-06-03-snapshot-conditions-model.md): Ready=False/
-// ChildrenFailed when a child Snapshot terminally failed capture planning before any child
-// SnapshotContent could reflect it (the content tree cannot represent a child-Snapshot capture failure).
-// Every other Snapshot.Ready transition is a mirror of the bound SnapshotContent.Ready.
+// patchSnapshotChildSnapshotFailedBridge writes a local (non-mirror) Snapshot.Ready=False/ChildrenFailed
+// for the child-Snapshot terminal capture-failure bridge: a child Snapshot terminally failed capture
+// planning before any child SnapshotContent existed to reflect it, so the content tree cannot represent
+// the failure (snapshot-rework/2026-06-03-snapshot-conditions-model.md §5.2).
+//
+// Mirror contract (INV-COND2 single aggregator / INV-COND4 mirror-not-recompute): Snapshot.Ready is
+// mirror-only (a verbatim copy of the bound SnapshotContent.Ready status/reason/message) EXCEPT for
+// failures that cannot be represented in the content tree yet. Those local Ready=False writes are:
+//   - pre-bind / pre-publish planning or capture failures (failCapture, and the
+//     mirrorSnapshotReadyFromBoundContent fallback to ContentBindingPending);
+//   - NamespaceNotFound (no namespace, so no content can be produced);
+//   - this child-Snapshot terminal capture-failure bridge.
+//
+// The bridge is NOT limited to the pre-bind window: a parent may already be bound when a child Snapshot
+// terminally fails capture planning before any child SnapshotContent exists to carry the failure, so this
+// is the one local write that can occur after the parent's own bind/publish. Every other Snapshot.Ready
+// transition is a verbatim mirror of the bound SnapshotContent.Ready.
 func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 	ctx context.Context,
 	parentKey types.NamespacedName,

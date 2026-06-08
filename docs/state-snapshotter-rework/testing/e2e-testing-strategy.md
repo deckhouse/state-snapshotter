@@ -135,15 +135,32 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 | P1-U6 | Snapshot mirror: pre-bind fallback → `ContentBindingPending`; после bind — verbatim mirror content.Ready | unit | ✅ `ready_mirror_test.go` |
 | P1-I1 | bound Snapshot зеркалит content Ready после status-only обновления content | integration | ✅ `snapshot_content_ready_propagation_test.go` |
 | P1-E1 | e2e: во время создания root `Ready=False` с осмысленным reason/message; на ожидании детей message содержит count; финал `Ready=True/Completed` | e2e | ⬜ gate с Phase 2a live |
-| P2a-U1 | MCP NotFound → `ManifestCapturePending` (non-terminal); MCP `Ready=False/Failed` → `ManifestCheckpointFailed` (terminal); non-terminal false → pending | unit | ✅ `phase2a_wakeup_test.go` |
-| P2a-U2 | wake-up map: artifact с ownerRef `SnapshotContent` → один reconcile.Request; без него → nil (enqueue-only) | unit | ✅ `phase2a_wakeup_test.go` |
-| P2a-U3 | VSC ownerRef self-heal: добавляет ownerRef, сохраняет foreign ref; missing VSC — no-op; deleting VSC не патчится | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-U1 | MCP NotFound → `ManifestCapturePending` (non-terminal); MCP `Ready=False/Failed` → `ManifestCheckpointFailed` (terminal); non-terminal false / no Ready cond → pending | unit | ✅ `phase2a_wakeup_test.go`, `content_aggregation_test.go` |
+| P2a-U2 | wake-up map: artifact с ownerRef `SnapshotContent` → один reconcile.Request; без ownerRef или foreign-only (MCP и VSC) → nil (enqueue-only) | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-U3 | VSC ownerRef self-heal: добавляет ownerRef, сохраняет foreign ref; already-correct → без Patch (idempotent); missing VSC — no-op; deleting VSC не патчится | unit | ✅ `phase2a_wakeup_test.go` |
 | P2a-U4 | propagation: leaf `ArtifactMissing` → parent `ChildrenFailed` (terminal), ready-sibling нетронут; leaf `DataCapturePending` → parent `ChildrenPending` (non-terminal) | unit | ✅ `phase2a_wakeup_test.go` |
-| P2a-U5 | MCP `Ready=True`, chunk из `MCP.status.chunks[]` missing → `ManifestCheckpointFailed`, message с mcp+chunk (exact GET, no list/watch); все chunks на месте → ready | unit | ✅ `phase2a_wakeup_test.go` |
-| P2a-I1 | Ready-лист с Ready MCP; MCP флипает `Ready=False/Failed`; MCP-watch будит content → `RequestsReady=False`/`ManifestCheckpointFailed`/`Ready=False` (без правки content) | integration/envtest | ✅ `snapshotcontent_mcp_degradation_wakeup_test.go` |
+| P2a-U5 | MCP `Ready=True`, chunk из `MCP.status.chunks[]` missing → `ManifestCheckpointFailed`, message с mcp+chunk (exact GET, no list/watch); все chunks на месте → ready; transient chunk GET error → reconcile error (requeue), не терминал | unit | ✅ `phase2a_wakeup_test.go` |
+| P2a-U6 | data leg: VSC NotFound → `ArtifactMissing`; `readyToUse=false`/поле отсутствует → `DataCapturePending` с `X/Y ready`; `readyToUse=true` → ready; прогресс по нескольким VSC | unit | ✅ `controller_data_readiness_test.go` |
+| P2a-I1 | Ready-лист с Ready MCP; MCP флипает `Ready=False/Failed`; MCP-watch будит content → `RequestsReady=False`/`ManifestCheckpointFailed`/`Ready=False` (без правки content); затем MCP назад `Ready=True` → recovery до `Ready=True/Completed` (I1R) | integration/envtest | ✅ `snapshotcontent_mcp_degradation_wakeup_test.go` |
 | P2a-I2 | Ready-лист (MCP Ready + chunk); chunk удалён (сам не будит) + bump MCP → reconcile видит missing chunk → `ManifestCheckpointFailed` с именем chunk | integration/envtest | ✅ `snapshotcontent_mcp_degradation_wakeup_test.go` |
-| P2a-E1 | live: delete VSC / fail MCP у Ready-дерева на кластере → flip `Ready=False` вниз до root `Snapshot`; sibling isolation. VSC-watch не тестируется в envtest (нет VSC CRD) | live-e2e | ⬜ gate (cluster) |
+| P2a-I3 | Ready data-лист (Ready MCP + ready VSC); `readyToUse=false` → VSC-watch будит content → `DataCapturePending`/`Ready=False`; `readyToUse=true` → recovery до `Ready=True` | integration/envtest (guard: VSC CRD) | ✅ `snapshotcontent_vsc_degradation_wakeup_test.go` |
+| P2a-I4 | Ready data-лист; VSC удалён → VSC-watch будит content → `ArtifactMissing`/`Ready=False` (terminal requests) | integration/envtest (guard: VSC CRD) | ✅ `snapshotcontent_vsc_degradation_wakeup_test.go` |
+| P2a-I5 | VSC ownerRef self-heal на reconcile: снять `SnapshotContent` ownerRef (оставив foreign) + bump content → ownerRef восстановлен, foreign сохранён | integration/envtest (guard: VSC CRD) | ✅ `snapshotcontent_vsc_degradation_wakeup_test.go` |
+| P2a-E1 | live: на реальном кластере (tree-demo, depth ≥ 2) повредить leaf-артефакт (delete VSC / fail MCP / delete chunk+bump) → flip `Ready=False` вверх по дереву (`ChildrenFailed`/`ChildrenPending`) вплоть до verbatim-mirror в root `Snapshot`; sibling isolation; recovery после восстановления. Runbook ниже | live-e2e | ⬜ gate (cluster) |
 | P2b-* | chunk wake-up (chunk→MCP→content watch, чтобы delete сам будил reconcile) + chunk content/consistency (checksum) в conditions; `ArtifactFailed` для деградировавшего VSC | watch + e2e | ⬜ отдельный ADR/RBAC |
+
+> Примечание по envtest и VSC: integration/envtest сервит `VolumeSnapshotContent` CRD только когда на CRD-path добавлены sibling `storage-foundation/crds` (см. `integrationResolveFoundationCRDDir`, override `STORAGE_FOUNDATION_CRDS`). P2a-I3/I4/I5 при отсутствии VSC API делают `Skip` с явной причиной (семантика покрыта unit-уровнем `controller_data_readiness_test.go` и остаётся за live-gate P2a-E1).
+
+#### P2a-E1 live runbook (cluster gate)
+
+Выполняется на кластере с задеплоенным контроллером и tree-demo (root `Snapshot` → VM child → Disk leaf с MCP/VSC), не в envtest. Корректность на reconcile уже доказана unit+integration; live-gate проверяет сквозной mirror до root `Snapshot` и sibling isolation на реальном GC/RBAC.
+
+1. Baseline: `kubectl get snapshot -n <ns> <root> -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'` == `True`; root/VM/Disk `SnapshotContent` и sibling — `Ready=True`; в графе нет `MISSING`. Зафиксировать имена leaf MCP, VSC(ы) и `MCP.status.chunks[]`.
+2. MCP Failed: `kubectl patch manifestcheckpoint <mcp> --subresource=status --type=merge -p '{"status":{"conditions":[{"type":"Ready","status":"False","reason":"Failed","message":"e2e injected MCP failure","lastTransitionTime":"<now>"}]}}'` → ждать leaf `RequestsReady=False/ManifestCheckpointFailed`, вверх `ChildrenFailed`, root `Snapshot Ready=False` (mirror); затем patch назад `Ready=True` → full recovery.
+3. VSC `readyToUse=false` (если допускает admission): patch VSC status → leaf `DataCapturePending`, вверх `ChildrenPending`, root `Snapshot Ready=False`; назад `true` → recovery. Если status patch заблокирован — использовать сценарий 4.
+4. VSC deleted: `kubectl delete volumesnapshotcontent <vsc>` → leaf `ArtifactMissing`, вверх `ChildrenFailed`, root mirror; sibling остаётся `Ready=True`; после теста пересоздать namespace (удаление VSC может быть необратимым).
+5. Chunk missing (декларированное ограничение): `kubectl delete manifestcheckpointcontentchunk <chunk>` затем bump MCP (`kubectl annotate manifestcheckpoint <mcp> e2e/bump=$(date +%s) --overwrite`) → leaf `ManifestCheckpointFailed` с именем chunk. Без bump статус может остаться `Ready=True` (chunk-watch намеренно не реализован в 2a).
+6. Прогресс при создании (best-effort, тайминг гоночный): сразу после создания root — `Ready=False` с pending-reason/`ContentBindingPending`; пока артефакты/дети не готовы — message содержит `X/Y ready`; финал — `Ready=True/Completed`.
 
 ## Нефункциональные
 

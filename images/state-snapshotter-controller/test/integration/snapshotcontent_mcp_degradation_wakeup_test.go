@@ -25,6 +25,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -78,42 +79,17 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 		})).To(Succeed())
 
 		// Create the MCP owned by the content (ownerRef MCP -> SnapshotContent) and mark it Ready=True.
-		ctrlTrue := true
-		mcp := &ssv1alpha1.ManifestCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: mcpName,
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-					Kind:       "SnapshotContent",
-					Name:       contentName,
-					UID:        types.UID(contentUID),
-					Controller: &ctrlTrue,
-				}},
-			},
-			Spec: ssv1alpha1.ManifestCheckpointSpec{
-				SourceNamespace: "default",
-				ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{
-					Name: "mcr-" + contentName, Namespace: "default", UID: "mcr-uid",
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, mcp)).To(Succeed())
-		DeferCleanup(func() {
-			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: mcpName}}))
-		})
-		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			m := &ssv1alpha1.ManifestCheckpoint{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, m); err != nil {
-				return err
-			}
+		ensureManifestCheckpointStatus(ctx, mcpName, contentName, contentUID, func(m *ssv1alpha1.ManifestCheckpoint) {
 			meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
 				Type:    ssv1alpha1.ManifestCheckpointConditionTypeReady,
 				Status:  metav1.ConditionTrue,
 				Reason:  ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
 				Message: "checkpoint ready",
 			})
-			return k8sClient.Status().Update(ctx, m)
-		})).To(Succeed())
+		})
+		DeferCleanup(func() {
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: mcpName}}))
+		})
 
 		// Content reaches Ready=True (requests ready, no children).
 		Eventually(func(g Gomega) {
@@ -126,19 +102,14 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 		}, 60*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		// Degrade the MCP: Ready=False with terminal Failed reason. Only the MCP event should drive the flip.
-		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			m := &ssv1alpha1.ManifestCheckpoint{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, m); err != nil {
-				return err
-			}
+		ensureManifestCheckpointStatus(ctx, mcpName, contentName, contentUID, func(m *ssv1alpha1.ManifestCheckpoint) {
 			meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
 				Type:    ssv1alpha1.ManifestCheckpointConditionTypeReady,
 				Status:  metav1.ConditionFalse,
 				Reason:  ssv1alpha1.ManifestCheckpointConditionReasonFailed,
 				Message: "checkpoint corrupted",
 			})
-			return k8sClient.Status().Update(ctx, m)
-		})).To(Succeed())
+		})
 
 		// MCP watch wakes the owning content; it recomputes RequestsReady=False -> Ready=False/ManifestCheckpointFailed.
 		Eventually(func(g Gomega) {
@@ -148,6 +119,25 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(ready.Reason).To(Equal(snapshot.ReasonManifestCheckpointFailed))
+		}, 60*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		// P2a-I1R recovery: flip the MCP back to Ready=True; the MCP watch wakes the content again and it
+		// returns to Ready=True/Completed (degradation and recovery share the same revalidation pipeline).
+		ensureManifestCheckpointStatus(ctx, mcpName, contentName, contentUID, func(m *ssv1alpha1.ManifestCheckpoint) {
+			meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+				Type:    ssv1alpha1.ManifestCheckpointConditionTypeReady,
+				Status:  metav1.ConditionTrue,
+				Reason:  ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+				Message: "checkpoint recovered",
+			})
+		})
+		Eventually(func(g Gomega) {
+			c := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, c)).To(Succeed())
+			ready := meta.FindStatusCondition(c.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(ready.Reason).To(Equal(snapshot.ReasonCompleted))
 		}, 60*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 
@@ -197,36 +187,16 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpointContentChunk{ObjectMeta: metav1.ObjectMeta{Name: chunkName}}))
 		})
 
-		ctrlTrue := true
-		mcp := &ssv1alpha1.ManifestCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: mcpName,
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "SnapshotContent",
-					Name: contentName, UID: types.UID(contentUID), Controller: &ctrlTrue,
-				}},
-			},
-			Spec: ssv1alpha1.ManifestCheckpointSpec{
-				SourceNamespace:           "default",
-				ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{Name: "mcr-" + contentName, Namespace: "default", UID: "mcr-uid"},
-			},
-		}
-		Expect(k8sClient.Create(ctx, mcp)).To(Succeed())
-		DeferCleanup(func() {
-			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: mcpName}}))
-		})
-		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			m := &ssv1alpha1.ManifestCheckpoint{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, m); err != nil {
-				return err
-			}
+		ensureManifestCheckpointStatus(ctx, mcpName, contentName, contentUID, func(m *ssv1alpha1.ManifestCheckpoint) {
 			m.Status.Chunks = []ssv1alpha1.ChunkInfo{{Name: chunkName, Index: 0}}
 			meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
 				Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
 				Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted, Message: "checkpoint ready",
 			})
-			return k8sClient.Status().Update(ctx, m)
-		})).To(Succeed())
+		})
+		DeferCleanup(func() {
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: mcpName}}))
+		})
 
 		// Content reaches Ready=True (MCP Ready + chunk present).
 		Eventually(func(g Gomega) {
@@ -239,17 +209,12 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 
 		// Delete the chunk (does not self-wake), then bump the MCP to trigger a reconcile via the MCP watch.
 		Expect(k8sClient.Delete(ctx, &ssv1alpha1.ManifestCheckpointContentChunk{ObjectMeta: metav1.ObjectMeta{Name: chunkName}})).To(Succeed())
-		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			m := &ssv1alpha1.ManifestCheckpoint{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, m); err != nil {
-				return err
-			}
+		ensureManifestCheckpointStatus(ctx, mcpName, contentName, contentUID, func(m *ssv1alpha1.ManifestCheckpoint) {
 			meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
 				Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
 				Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted, Message: "checkpoint ready (bump to wake content)",
 			})
-			return k8sClient.Status().Update(ctx, m)
-		})).To(Succeed())
+		})
 
 		Eventually(func(g Gomega) {
 			c := &storagev1alpha1.SnapshotContent{}
@@ -262,3 +227,50 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 		}, 60*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 })
+
+// ensureManifestCheckpointStatus makes the MCP status setup robust under cross-spec envtest churn.
+// Cluster-scoped objects can transiently 404 on a read immediately after a successful Create when
+// other Serial specs are tearing down cluster-scoped resources; the production controller never
+// deletes MCPs, so this only hardens test setup (not the behavior under test). It ensures the MCP
+// exists (re-creating it with the SnapshotContent ownerRef if absent), applies the status mutation,
+// and retries on conflict/NotFound until the Status().Update succeeds.
+func ensureManifestCheckpointStatus(
+	ctx context.Context,
+	mcpName, contentName, contentUID string,
+	mutate func(*ssv1alpha1.ManifestCheckpoint),
+) {
+	ctrlTrue := true
+	EventuallyWithOffset(1, func() error {
+		m := &ssv1alpha1.ManifestCheckpoint{}
+		err := k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, m)
+		switch {
+		case apierrors.IsNotFound(err):
+			m = &ssv1alpha1.ManifestCheckpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: mcpName,
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+						Kind:       "SnapshotContent",
+						Name:       contentName,
+						UID:        types.UID(contentUID),
+						Controller: &ctrlTrue,
+					}},
+				},
+				Spec: ssv1alpha1.ManifestCheckpointSpec{
+					SourceNamespace:           "default",
+					ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{Name: "mcr-" + contentName, Namespace: "default", UID: "mcr-uid"},
+				},
+			}
+			if cErr := k8sClient.Create(ctx, m); cErr != nil {
+				return cErr
+			}
+			if gErr := k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, m); gErr != nil {
+				return gErr
+			}
+		case err != nil:
+			return err
+		}
+		mutate(m)
+		return k8sClient.Status().Update(ctx, m)
+	}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+}

@@ -203,13 +203,17 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 			g.Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 		}, "30s", "200ms").Should(Succeed(), "MCR should complete only after MCP ownerRef is handed off to SnapshotContent")
 
-		_, err = snapshotCtrl.Reconcile(ctx, req)
-		Expect(err).NotTo(HaveOccurred())
-		freshSnapshot := &unstructured.Unstructured{}
-		freshSnapshot.SetGroupVersionKind(snapshotGVK)
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshSnapshot)).To(Succeed())
-		freshLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(snapshot.IsReady(freshLike)).To(BeTrue())
+		// Snapshot.Ready is an eventual mirror of the bound SnapshotContent.Ready: keep reconciling
+		// (the generic binder polls pending content because there is no reverse Snapshot watch).
+		Eventually(func(g Gomega) {
+			_, err := snapshotCtrl.Reconcile(ctx, req)
+			g.Expect(err).NotTo(HaveOccurred())
+			freshSnapshot := &unstructured.Unstructured{}
+			freshSnapshot.SetGroupVersionKind(snapshotGVK)
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshSnapshot)).To(Succeed())
+			freshLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(snapshot.IsReady(freshLike)).To(BeTrue())
+		}, "30s", "200ms").Should(Succeed(), "Snapshot should mirror bound SnapshotContent Ready=True")
 	})
 })

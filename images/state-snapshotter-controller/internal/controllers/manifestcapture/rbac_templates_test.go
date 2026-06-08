@@ -92,20 +92,27 @@ func extractYAMLRuleBlock(content, resource string) string {
 	return content[start : idx+end]
 }
 
+// TestCoreRBACDoesNotGrantDemoDomainResources enforces rbac-source-of-truth: the controller SA static
+// RBAC (templates/controller/rbac-for-us.yaml) must stay domain-agnostic. Domain/demo rights are granted
+// externally by the Deckhouse RBAC controller/hook and signalled via CSD/DSC RBACReady=True.
+//
+// Scope is deliberately the controller SA template only. The admin-kubeconfig template
+// (templates/rbac-for-us.yaml, manual kubectl / demo-e2e read path) and the webhook template
+// (templates/webhooks/rbac-for-us.yaml, MCR target validation inventory) legitimately reference demo
+// resources and are guarded by TestAdminKubeconfigRBACIsManualReadPath /
+// TestWebhookRBACDoesNotUseWildcardResourceReads — they are NOT the controller SA production RBAC.
 func TestCoreRBACDoesNotGrantDemoDomainResources(t *testing.T) {
 	repoRoot := filepath.Clean("../../../../..")
-	templatesDir := filepath.Join(repoRoot, "templates")
+	controllerTemplate := filepath.Join(repoRoot, "templates", "controller", "rbac-for-us.yaml")
 
-	for _, path := range templateYAMLFiles(t, templatesDir) {
-		content := readTemplate(t, path)
-		for _, forbidden := range []string{
-			"demo.state-snapshotter.deckhouse.io",
-			"demovirtualmachines",
-			"demovirtualdisks",
-		} {
-			if strings.Contains(content, forbidden) {
-				t.Fatalf("%s must not hardcode demo/domain RBAC resource %q", path, forbidden)
-			}
+	content := readTemplate(t, controllerTemplate)
+	for _, forbidden := range []string{
+		"demo.state-snapshotter.deckhouse.io",
+		"demovirtualmachines",
+		"demovirtualdisks",
+	} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("%s must not hardcode demo/domain RBAC resource %q (grant it externally via RBACReady)", controllerTemplate, forbidden)
 		}
 	}
 }

@@ -582,11 +582,33 @@ func genericBinderObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSp
 	return true
 }
 
-// propagateReadyFalseToParent propagates Ready=False to parent Snapshot if:
-// - Snapshot was Ready=True
-// - Parent exists and is not being deleted
-// - Parent was Ready=True
-// This implements the tree consistency rule from deletion algorithm
+// propagateReadyFalseToParent recursively writes Ready=False/ChildSnapshotMissing directly into the
+// ancestor Snapshot chain when a previously Ready=True child Snapshot is deleted.
+//
+// LEGACY EXCEPTION (architecturally suspicious — slated for removal/replacement).
+//
+// This is a remnant of the pre-conditions-model deletion algorithm
+// (snapshot-rework/unified-snapshot-deletion-algorithm.md, which still describes the removed
+// InProgress/Ready model). It is a direct recursive recompute-and-write into parent Snapshot.status that
+// bypasses SnapshotContent, which conflicts with the current single-aggregator contract
+// (snapshot-rework/2026-06-03-snapshot-conditions-model.md):
+//   - INV-COND2: Ready is aggregated in exactly one place — on SnapshotContent (RequestsReady &&
+//     ChildrenReady); everywhere else Ready is a mirror. Local recompute is forbidden.
+//   - INV-COND4: Snapshot.Ready := mirror(SnapshotContent.Ready); the snapshot side does not compute its
+//     own reason. ChildSnapshotMissing is exactly such a self-computed, non-mirror reason.
+//   - INV-FAIL1: structural/failure propagation up the tree is content-driven via ChildrenReady on
+//     SnapshotContent, not via direct writes onto live Snapshot objects.
+//
+// Target replacement: drive ancestor readiness from SnapshotContent.ChildrenReady aggregation
+// (durable content survives child-Snapshot deletion via ObjectKeeper TTL), and let Snapshot.Ready mirror
+// it, instead of this recursive Status().Update walk. This path is currently not covered by unit tests.
+//
+// TODO(conditions-model): remove this method and the deletion-time call site, or convert the deletion
+// signal into a content-driven ChildrenReady recomputation. Until then it is retained only as a
+// best-effort, non-fatal deletion-time hint (the caller already ignores its error).
+//
+// Guards (unchanged): propagate only if the deleted Snapshot was Ready=True, the parent exists, is not
+// being deleted, and was Ready=True.
 func (r *GenericSnapshotBinderController) propagateReadyFalseToParent(
 	ctx context.Context,
 	_ snapshot.SnapshotLike,
@@ -709,7 +731,14 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 ) error {
 	logger := log.FromContext(ctx)
 	contentName := snapshotLike.GetStatusContentName()
-	snapshot.SetCondition(snapshotLike, snapshot.ConditionDomainReady, metav1.ConditionTrue, snapshot.ReasonCompleted, "generic snapshot has no children")
+	// DomainReady is intentionally NOT written here. This function is a pure Ready mirror and is only
+	// reached after the Step-1 barrier (isDomainPlanningComplete) has already confirmed DomainReady=True
+	// for the current generation. DomainReady is owned upstream: childless generic snapshots get it at
+	// bind time via snapshotbinding.PatchUnstructuredBoundContentName (observedGeneration == generation);
+	// subtree snapshots get it from their domain controller. Re-asserting it here previously clobbered
+	// that owner: with observedGeneration=0 it deadlocked this very barrier (mirror never re-ran), and
+	// stamping the current generation would instead overwrite the domain controller's DomainReady on
+	// snapshots that actually have children.
 	if contentName == "" {
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}
