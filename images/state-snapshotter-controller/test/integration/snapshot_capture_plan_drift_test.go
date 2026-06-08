@@ -87,9 +87,6 @@ var _ = Describe("Integration: Snapshot CapturePlanDrift (N2a)", func() {
 				Labels: map[string]string{
 					"state-snapshotter.deckhouse.io/snapshot-uid": string(snap.UID),
 				},
-				Annotations: map[string]string{
-					namespacemanifest.AnnotationBoundSnapshotContent: contentName,
-				},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 					Kind:       "Snapshot",

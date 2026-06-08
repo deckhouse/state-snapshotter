@@ -27,9 +27,6 @@ import (
 // CheckpointNamePrefix is the prefix for ManifestCheckpoint names and related chunk names (must match manifest line).
 const CheckpointNamePrefix = "mcp-"
 
-// AnnotationBoundSnapshotContent on ManifestCaptureRequest: ManifestCheckpoint ownerRef targets this SnapshotContent.
-const AnnotationBoundSnapshotContent = "state-snapshotter.deckhouse.io/bound-snapshot-content"
-
 // SnapshotMCRName returns the deterministic ManifestCaptureRequest name for a Snapshot root (design §4.7).
 func SnapshotMCRName(uid types.UID) string {
 	return fmt.Sprintf("snap-%s", uid)

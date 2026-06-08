@@ -548,9 +548,6 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 				Labels: map[string]string{
 					labelSnapshotUID: string(nsSnap.UID),
 				},
-				Annotations: map[string]string{
-					namespacemanifest.AnnotationBoundSnapshotContent: content.Name,
-				},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{Targets: specTargets},
 		}
@@ -580,17 +577,6 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 		if !manifestCaptureRequestHasOwnerRefToSnapshot(existing.OwnerReferences, nsSnap) {
 			base := existing.DeepCopy()
 			existing.OwnerReferences = append(existing.OwnerReferences, snapshotOwnerReferenceForMCR(nsSnap))
-			if err := r.Client.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
-				return nil, ctrl.Result{}, err
-			}
-			return nil, ctrl.Result{Requeue: true}, nil
-		}
-		if existing.Annotations == nil || existing.Annotations[namespacemanifest.AnnotationBoundSnapshotContent] != content.Name {
-			base := existing.DeepCopy()
-			if existing.Annotations == nil {
-				existing.Annotations = map[string]string{}
-			}
-			existing.Annotations[namespacemanifest.AnnotationBoundSnapshotContent] = content.Name
 			if err := r.Client.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
 				return nil, ctrl.Result{}, err
 			}

@@ -100,8 +100,8 @@
 
 Полная схема полей OK — в [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md) и ADR там же. Ниже — **design lock** для N2a/N2b, согласованный с текущим кодом manifest-линии:
 
-- **Общий (generic) путь MCR** в `ManifestCheckpointController`: при отсутствии привязки к SnapshotContent создаётся UID-aware OK **`ret-mcr-<hash>`** в **FollowObject** на MCR; **ManifestCheckpoint** получает `ownerReference` → этот OK; **chunks** → MCP.
-- **Namespace N2a-путь:** на MCR ставится аннотация **`state-snapshotter.deckhouse.io/bound-snapshot-content`** (имя root SnapshotContent); тогда **ManifestCheckpoint** создаётся с **`ownerReference` → `SnapshotContent`** (**controller: true**), **без** OK `ret-mcr-*` для MCP. MCR после успешного capture удаляется (§4.7) — MCP **не** должен зависеть от дальнейшего существования MCR.
+- **Единый путь MCR** в `ManifestCheckpointController` (INV-EXECUTION-OK): для **любого** MCR создаётся UID-aware execution OK **`ret-mcr-<hash>`** в **FollowObject** на MCR; **ManifestCheckpoint** создаётся с `ownerReference` → этот execution OK (**controller: true**); **chunks** → MCP. Контроллер запроса **не** зависит от существования SnapshotContent и **не** создаёт артефакты, сразу принадлежащие SnapshotContent.
+- **Handoff (INV-HANDOFF):** передачу владения MCP с execution OK на **SnapshotContent** делает **только** `SnapshotContentController` (`validateCommonContentManifestCheckpoint` → `ensureManifestCheckpointOwnedByContent`), когда опубликован `status.manifestCheckpointName` и MCP Ready. После handoff MCP принадлежит SnapshotContent и переживает удаление MCR; execution OK (FollowObject → MCR) собирается внешним ObjectKeeper-контроллером после удаления MCR. Прежняя namespace-N2a ветка с аннотацией `state-snapshotter.deckhouse.io/bound-snapshot-content` (MCP сразу `ownerReference → SnapshotContent`, без execution OK) **удалена** — поведение унифицировано.
 
 #### 4.3.1 Правило: ownerReference vs ObjectKeeper
 
@@ -211,14 +211,14 @@ This Secret is stored together with `.data` and `.stringData`.
 
 | Утверждение §4.3 | В коде |
 |------------------|--------|
-| Generic: ObjectKeeper для MCR в **`FollowObject`** (следует за UID MCR) | Да, если **нет** аннотации bound SnapshotContent на MCR (`ret-mcr-*`, см. ~L297–L363). |
-| Generic: имя OK **`ret-mcr-<hash(namespace/name/uid)>`** | Да. |
-| Generic: **ManifestCheckpoint** **ownerReference → ObjectKeeper** `ret-mcr-…` (controller) | Да на generic-пути. |
-| **Namespace N2a:** при **`AnnotationBoundSnapshotContent`** — **ManifestCheckpoint** **ownerReference → `SnapshotContent`** (controller), **без** `ret-mcr-*` | Да (~L272–L296). |
+| Единый путь: execution ObjectKeeper для MCR в **`FollowObject`** (следует за UID MCR) для **любого** MCR | Да (`ret-mcr-*`). |
+| Имя OK **`ret-mcr-<hash(namespace/name/uid)>`** | Да. |
+| **ManifestCheckpoint** **ownerReference → execution ObjectKeeper** `ret-mcr-…` (controller) на создании | Да. |
+| Handoff MCP **ownerReference → `SnapshotContent`** делает только `SnapshotContentController` (после Ready + опубликованного `status.manifestCheckpointName`) | Да (`ensureManifestCheckpointOwnedByContent`). |
 | **Chunks** **ownerReference → ManifestCheckpoint** | Да (поток create chunks). |
 | Root OK **`ret-snap-…`**: **`FollowObjectWithTTL`** на **`Snapshot`**; **SnapshotContent `ownerReferences` → этот OK** | Да, `snapshot_capture.go` (`ensureSnapshotRootObjectKeeper`). |
 
-Итог: **два manifest-пути** (generic vs namespace-bound) и root OK — как в §4.3. При смене логики в коде — обновлять §4.3 и эту таблицу.
+Итог: **единый manifest-путь** (execution OK → MCP → handoff на SnapshotContent) и root OK — как в §4.3. При смене логики в коде — обновлять §4.3 и эту таблицу.
 
 ---
 
@@ -230,7 +230,7 @@ This Secret is stored together with `.data` and `.stringData`.
 
 1. **Имя `ManifestCaptureRequest`:** детерминированно от **`Snapshot.metadata.uid`**: **`snap-{metadata.uid}`** (UID с дефисами — допустимое имя). Namespace MCR = **`metadata.namespace` того же `Snapshot`**. **`Get`** по этому ключу — основной путь ensure.
 2. **Имя `ManifestCheckpoint`:** от **UID экземпляра MCR** (после `Create`), та же формула, что в `ManifestCheckpointController` / `pkg/namespacemanifest` — префикс **`mcp-`** + **16 hex** от SHA256(UID MCR) (первые 8 байт). Общая функция в коде — без дублирования строки алгоритма.
-3. **Labels (дополнительно):** **`state-snapshotter.deckhouse.io/snapshot-uid=<root-uid>`**; аннотация **`state-snapshotter.deckhouse.io/bound-snapshot-content=<content-name>`** на MCR — для namespace-bound пути в manifest-контроллере. **`metadata.ownerReferences` → `Snapshot`** (**controller: true**) — очистка in-flight MCR при полном удалении root из API (GC); у существующего MCR без ref — **patch** (merge) при reconcile; иной **`Snapshot`** в ownerReferences того же MCR — ошибка.
+3. **Labels (дополнительно):** **`state-snapshotter.deckhouse.io/snapshot-uid=<root-uid>`**. **`metadata.ownerReferences` → `Snapshot`** (**controller: true**) — очистка in-flight MCR при полном удалении root из API (GC); у существующего MCR без ref — **patch** (merge) при reconcile; иной **`Snapshot`** в ownerReferences того же MCR — ошибка. (Аннотация `bound-snapshot-content` удалена вместе со снапшот-bound веткой MCP — связывание идёт через `status.manifestCheckpointName` на SnapshotContent и handoff.)
 4. **Stale / пересоздание root с тем же `metadata.name`:** если MCR **`snap-{uid}`** существует, но label **snapshot-uid** не совпадает с текущим root UID — MCR **чужой**; ошибка (см. тест recreate). **Root OK** `ret-snap-…`: same namespace/name root Snapshot cannot reuse retained root ObjectKeeper if that ObjectKeeper follows an old Snapshot UID; новый run должен fail closed или дождаться удаления/истечения старого OK.
 
 **После успешного capture (стабильное состояние N2a):**

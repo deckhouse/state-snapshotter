@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -100,18 +99,22 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			g.Expect(wantMCP).NotTo(BeEmpty())
 			mcp := &ssv1alpha1.ManifestCheckpoint{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: wantMCP}, mcp)).To(Succeed())
+			// Unified lifecycle: the MCP is created owned by the execution ObjectKeeper and then handed off
+			// to SnapshotContent by SnapshotContentController. After convergence the controller owner is the
+			// root SnapshotContent and the MCP no longer has an ObjectKeeper ownerRef (the execution OK object
+			// itself may still exist in envtest; only the ownerRef is asserted here).
 			g.Expect(mcpOwnerRefToRootContent(mcp.OwnerReferences, fresh.Status.BoundSnapshotContentName, sc.UID)).To(BeTrue())
 			for _, ref := range mcp.OwnerReferences {
-				g.Expect(ref.Kind).NotTo(Equal("ObjectKeeper"), "N2a path must not retain MCP via ret-mcr ObjectKeeper")
+				g.Expect(ref.Kind).NotTo(Equal("ObjectKeeper"), "after handoff the MCP must no longer have an ObjectKeeper ownerRef")
 			}
 			g.Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
 			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Namespace).To(Equal(nsName))
 			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Name).To(Equal(mcrName))
 			g.Expect(mcp.Spec.ManifestCaptureRequestRef.UID).NotTo(BeEmpty())
-
-			retMCRKeeper := namespacemanifest.ManifestCaptureRequestObjectKeeperName(nsName, mcrName, types.UID(mcp.Spec.ManifestCaptureRequestRef.UID))
-			err := k8sClient.Get(ctx, client.ObjectKey{Name: retMCRKeeper}, &deckhousev1alpha1.ObjectKeeper{})
-			g.Expect(errors.IsNotFound(err)).To(BeTrue())
+			// Durability is guaranteed by the MCP being owned by SnapshotContent (asserted above), not by the
+			// transient execution ObjectKeeper. The execution OK itself is garbage-collected by the external
+			// Deckhouse ObjectKeeper controller (FollowObject -> MCR) once the MCR is deleted; that controller
+			// is not present in envtest, so its eventual removal is not asserted here.
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
