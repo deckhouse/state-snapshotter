@@ -426,7 +426,7 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		requestsMessage: "waiting for manifest capture",
 		childrenReady:   metav1.ConditionTrue,
 		childrenReason:  snapshot.ReasonCompleted,
-		childrenMessage: "no child content or all child content ready",
+		childrenMessage: "no child content",
 	}
 
 	if err := r.fillRequestsLeg(ctx, obj, &plan); err != nil {
@@ -442,6 +442,8 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.childrenReason = childReason
 		plan.childrenMessage = childMessage
 		plan.childrenFailed = childReason == snapshot.ReasonChildrenFailed
+	} else if childMessage != "" {
+		plan.childrenMessage = childMessage
 	}
 
 	switch {
@@ -609,7 +611,10 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		return false, snapshot.ReasonChildrenPending,
 			"waiting for child snapshot contents: " + formatReadyProgress(readyCount, total, pendingNames), nil
 	}
-	return true, "", "", nil
+	if total == 0 {
+		return true, "", "no child content", nil
+	}
+	return true, "", fmt.Sprintf("%d/%d child content ready", readyCount, total), nil
 }
 
 // childTerminalLeafInfo distills a terminal child's Ready condition into the original failed leaf's

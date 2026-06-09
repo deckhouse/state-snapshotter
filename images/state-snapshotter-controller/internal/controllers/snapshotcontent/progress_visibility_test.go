@@ -149,6 +149,36 @@ func TestChildrenFailedLeafChainThreeLevels(t *testing.T) {
 	}
 }
 
+// ChildrenReady=True message must reflect the actual node state: a leaf with no children says
+// "no child content"; a parent with all children ready says "<ready>/<total> child content ready"
+// (not a generic ambiguous phrase).
+func TestChildrenReadySuccessMessageReflectsState(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	childA := contentWithReadyCond("child-a", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
+	childB := contentWithReadyCond("child-b", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(childA, childB).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	leaf := parentContentWithChildRefs("leaf")
+	ready, _, msg, err := r.validateCommonContentChildren(ctx, leaf)
+	if err != nil {
+		t.Fatalf("validate leaf: %v", err)
+	}
+	if !ready || msg != "no child content" {
+		t.Fatalf("leaf children: ready=%v msg=%q, want true/%q", ready, msg, "no child content")
+	}
+
+	parent := parentContentWithChildRefs("parent", "child-a", "child-b")
+	ready, _, msg, err = r.validateCommonContentChildren(ctx, parent)
+	if err != nil {
+		t.Fatalf("validate parent: %v", err)
+	}
+	if !ready || msg != "2/2 child content ready" {
+		t.Fatalf("parent children: ready=%v msg=%q, want true/%q", ready, msg, "2/2 child content ready")
+	}
+}
+
 func dataRefEntry(targetUID, vscName string) map[string]interface{} {
 	return map[string]interface{}{
 		"targetUID": targetUID,
