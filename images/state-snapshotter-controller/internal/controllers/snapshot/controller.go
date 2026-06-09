@@ -241,6 +241,18 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Imported snapshots: all children and data refs are pre-published by the import controller.
+	// Skip child-graph planning (reconcileParentOwnedChildGraph clears ChildrenSnapshotRefs when
+	// no CSD mappings exist) and the subsequent PublishSnapshotContentChildrenFromSnapshotRefs
+	// call (would erase childrenSnapshotContentRefs set by the import controller).
+	if isImportedObject(nsSnap) {
+		if err := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
 	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
 	if err != nil {
 		if patchErr := r.patchSnapshotDomainReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
@@ -257,15 +269,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if !graphPublished {
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
-	}
-
-	// Imported snapshots have all prerequisites pre-published by the import controller;
-	// skip live MCR/VCR capture and only mirror content Ready status.
-	if isImportedObject(nsSnap) {
-		if err := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
