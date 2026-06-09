@@ -50,6 +50,19 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["create", "get", "delete"]
 
+# SnapshotImportRequest (namespaced): created by CLI, reconciled by import controller
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["snapshotimportrequests"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["snapshotimportrequests/status"]
+  verbs: ["get", "update", "patch"]
+
+# SnapshotImportManifestChunk (namespaced): created by CLI, consumed then deleted by import controller
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["snapshotimportmanifestchunks"]
+  verbs: ["get", "list", "watch", "delete"]
+
 # ObjectKeeper (cluster-scoped): controller creates/patches spec (drift/TTL/followRef); never deletes.
 # Deletion is Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained content/MCP.
 # No objectkeepers/status: state-snapshotter does not write ObjectKeeper status.
@@ -61,6 +74,11 @@ rules:
 - apiGroups: [""]
   resources: ["namespaces"]
   verbs: ["get", "list", "watch"]
+
+# PersistentVolumeClaim: import controller deletes staging PVCs after VSC capture
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "delete"]
 
 # Snapshot root capture allowlist (read-only)
 - apiGroups: [""]
@@ -127,6 +145,8 @@ rules:
   verbs: ["get", "list", "watch", "update", "patch"]
 
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
+# Import controller: creating domain snapshot objects (e.g. DemoVirtualMachineSnapshot) during import
+# also requires domain RBAC, which is granted externally via CSD/RBACReady hook (same as live capture).
 # Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
 # granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD/DSC
 # condition RBACReady=True. See docs/state-snapshotter-rework/operations/project-status.md for the

@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -257,6 +258,16 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if !graphPublished {
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
+
+	// Imported snapshots have all prerequisites pre-published by the import controller;
+	// skip live MCR/VCR capture and only mirror content Ready status.
+	if isImportedObject(nsSnap) {
+		if err := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
 }
 
@@ -388,4 +399,11 @@ func snapshotContentObjectMeta(nsSnap *storagev1alpha1.Snapshot) metav1.ObjectMe
 		Name:       snapshotContentName(nsSnap),
 		Finalizers: []string{snapshotpkg.FinalizerParentProtect},
 	}
+}
+
+// isImportedObject reports whether a Snapshot carries the imported annotation set by the import controller.
+// When true, live MCR/VCR capture and CSD child discovery are skipped.
+func isImportedObject(obj *storagev1alpha1.Snapshot) bool {
+	v, ok := obj.GetAnnotations()[ssv1alpha1.AnnotationImported]
+	return ok && v == "true"
 }

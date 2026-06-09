@@ -160,7 +160,7 @@ func main() {
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
 	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
-	_ = storagev1alpha1.AddToScheme(fullScheme)    // storage.deckhouse.io (Snapshot, SnapshotContent)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (Snapshot, SnapshotContent)
 	_ = demov1alpha1.AddToScheme(fullScheme)      // demo.state-snapshotter.deckhouse.io (PR5a)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
@@ -321,6 +321,13 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("CustomSnapshotDefinition reconciler added to manager")
+
+	if err := controllers.AddSnapshotImportRequestControllerToManager(mgr, log, cfgParams); err != nil {
+		log.Error(err, "Failed to add SnapshotImportRequestController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("SnapshotImportRequestController added to manager")
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.

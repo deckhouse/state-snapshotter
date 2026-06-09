@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -111,6 +112,32 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	// This controller is materialization-only.
 	if s.DeletionTimestamp != nil {
 		return ctrl.Result{}, nil
+	}
+
+	// Imported VM snapshots have MCP, dataRefs, children, and SnapshotContent pre-published by the
+	// import controller; skip live source validation, child disk discovery, and MCR creation, and
+	// only mirror content Ready.
+	if isImportedDemoObject(s) {
+		contentName := demoVirtualMachineSnapshotContentName(s.Namespace, s.Name)
+		reader := demoReconcilerReader(r.APIReader, r.Client)
+		handled, err := demoMirrorOnlyIfHandoffComplete(
+			ctx, r.Client, reader,
+			s.Namespace, controllercommon.KindDemoVirtualMachineSnapshot, s.Name, contentName,
+			s.Status.ManifestCaptureRequestName,
+			func(status metav1.ConditionStatus, reason, message string) error {
+				return patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, status, reason, message)
+			},
+			func() error {
+				return patchDemoVirtualMachineSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, "")
+			},
+		)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if handled {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	resolution := resolveDemoSnapshotSource(s.GetAnnotations(), s.Namespace, controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)

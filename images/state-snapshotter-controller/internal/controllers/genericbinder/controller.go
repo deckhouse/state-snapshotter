@@ -185,6 +185,22 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
+	// Imported generic snapshots have SnapshotContent, MCP, and dataRefs pre-published by the import
+	// controller.  Skip the DomainReady barrier, ObjectKeeper creation, and MCR/VCR live capture.
+	// Only mirror the pre-published content Ready status.
+	if obj.GetAnnotations()[ssv1alpha1.AnnotationImported] == "true" {
+		if snapshotLike.GetStatusContentName() != "" {
+			if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
+				return ctrl.Result{}, err
+			}
+			if !snapshot.IsReady(snapshotLike) {
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot
 	// refs, create MCR/VCR) for the current generation.
 	if !isDomainPlanningComplete(snapshotLike) {

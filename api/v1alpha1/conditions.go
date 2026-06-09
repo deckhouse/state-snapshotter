@@ -43,3 +43,21 @@ const (
 	// Failed: checkpoint creation failed (Ready=False, terminal)
 	ManifestCheckpointConditionReasonFailed = "Failed"
 )
+
+// SnapshotImportRequest condition constants.
+const (
+	SnapshotImportRequestConditionTypeReady = "Ready"
+
+	// Importing: import in progress (Ready=False, non-terminal)
+	SnapshotImportRequestConditionReasonImporting = "Importing"
+
+	// Completed: import succeeded, root Snapshot is Ready (Ready=True)
+	SnapshotImportRequestConditionReasonCompleted = "Completed"
+
+	// Failed: import failed (Ready=False, terminal)
+	SnapshotImportRequestConditionReasonFailed = "Failed"
+
+	// AnnotationImported is set on Snapshot/SnapshotContent/domain snapshot objects created by the
+	// import controller. Reconcilers check this annotation to skip live MCR/VCR capture.
+	AnnotationImported = "state-snapshotter.deckhouse.io/imported"
+)

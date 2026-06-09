@@ -1,0 +1,12 @@
+# VolumeSnapshot для demo-pvc.
+# Применять ПОСЛЕ того как Job write-demo-data завершится (status.complete=true).
+# sds-local-volume-snapshot-class → local.csi.storage.deckhouse.io (тот же provisioner что e2e-local-sc-thin).
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: demo-vs
+  namespace: snapshot-demo-full
+spec:
+  volumeSnapshotClassName: sds-local-volume-snapshot-class
+  source:
+    persistentVolumeClaimName: demo-pvc

@@ -32,6 +32,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	snapshotcontroller "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotimport"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -127,6 +128,15 @@ func AddManifestCheckpointControllerToManager(
 		return err
 	}
 	return nil
+}
+
+// AddSnapshotImportRequestControllerToManager registers the SnapshotImportRequest controller.
+func AddSnapshotImportRequestControllerToManager(
+	mgr ctrl.Manager,
+	log logger.LoggerInterface,
+	cfg *config.Options,
+) error {
+	return snapshotimport.AddSnapshotImportRequestControllerToManager(mgr, log, cfg)
 }
 
 // AddCustomSnapshotDefinitionControllerToManager registers the CSD reconciler (registry/status).

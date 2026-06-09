@@ -17,12 +17,8 @@ limitations under the License.
 package manifestcapture
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -48,6 +44,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	mcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/manifestcheckpoint"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -1091,15 +1088,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 // compressToBytes compresses data with gzip and returns the compressed bytes.
 // This is used for size checking against MaxChunkSizeBytes limit.
 func (r *ManifestCheckpointController) compressToBytes(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	if _, err := gw.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to write to gzip: %w", err)
-	}
-	if err := gw.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close gzip: %w", err)
-	}
-	return buf.Bytes(), nil
+	return mcpkg.CompressToBytes(data)
 }
 
 // normalizeObjectForJSON normalizes an object to ensure it's a pure map[string]interface{}
@@ -1129,14 +1118,7 @@ func (r *ManifestCheckpointController) normalizeObjectForJSON(obj interface{}) i
 
 // calculateChunkChecksum calculates SHA256 hash of the compressed chunk data
 func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData string) string {
-	// Decode base64 to get raw compressed data
-	data, err := base64.StdEncoding.DecodeString(compressedData)
-	if err != nil {
-		// If decoding fails, hash the base64 string itself
-		data = []byte(compressedData)
-	}
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
+	return mcpkg.CalculateChecksum(compressedData)
 }
 
 // loadConfigFromConfigMap loads controller configuration from optional ConfigMap

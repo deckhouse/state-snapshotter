@@ -740,6 +740,7 @@ var _ = BeforeSuite(func() {
 	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
 	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
 	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
+	Expect(controllers.AddSnapshotImportRequestControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,

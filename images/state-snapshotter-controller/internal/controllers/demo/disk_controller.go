@@ -21,6 +21,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"time"
+
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
@@ -91,6 +93,31 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	// This controller is materialization-only.
 	if s.DeletionTimestamp != nil {
 		return ctrl.Result{}, nil
+	}
+
+	// Imported disk snapshots have MCP, dataRefs, and SnapshotContent pre-published by the import
+	// controller; skip live source validation and MCR creation and only mirror content Ready.
+	if isImportedDemoObject(s) {
+		contentName := demoVirtualDiskSnapshotContentName(s.Namespace, s.Name)
+		reader := demoReconcilerReader(r.APIReader, r.Client)
+		handled, err := demoMirrorOnlyIfHandoffComplete(
+			ctx, r.Client, reader,
+			s.Namespace, controllercommon.KindDemoVirtualDiskSnapshot, s.Name, contentName,
+			s.Status.ManifestCaptureRequestName,
+			func(status metav1.ConditionStatus, reason, message string) error {
+				return patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, status, reason, message)
+			},
+			func() error {
+				return patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, "")
+			},
+		)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if handled {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	resolution := resolveDemoSnapshotSource(s.GetAnnotations(), s.Namespace, controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
