@@ -40,4 +40,6 @@ Legacy terms are allowed only in explicitly historical documents. Do not use his
 
 **Conditions snapshot/SnapshotContent (DomainReady / RequestsReady / ChildrenReady / Ready) + failure propagation:** draft ADR — [`2026-06-03-snapshot-conditions-model.md`](2026-06-03-snapshot-conditions-model.md). Нормативные выдержки переносятся в `spec/system-spec.md` §3.8 / §3.9.7.
 
+**Orphan PVC root residual via standard CSI VolumeSnapshot (capture-side):** ADR — [`2026-06-09-orphan-pvc-csi-volumesnapshot.md`](2026-06-09-orphan-pvc-csi-volumesnapshot.md). Нормативная выдержка — `spec/system-spec.md` §3.9.11.
+
 **N2b PR4 (aggregated manifests download):** current normative contract — [`spec/snapshot-aggregated-read.md`](../docs/state-snapshotter-rework/spec/snapshot-aggregated-read.md) and [`api/snapshot-read.md`](../docs/state-snapshotter-rework/api/snapshot-read.md); разбиение по PR — [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md) §2.4.2; кластерный smoke — [`testing/e2e-testing-strategy.md`](../docs/state-snapshotter-rework/testing/e2e-testing-strategy.md).

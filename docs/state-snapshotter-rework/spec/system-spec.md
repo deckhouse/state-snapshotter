@@ -202,7 +202,7 @@ Artifacts referenced by SnapshotContent.status:
 
 - **MUST:** **multi-PVC** on one logical object **MUST** be represented as **multiple `dataRefs[]` entries** (and corresponding MCR targets) on **one** `SnapshotContent`, **not** as extra child snapshot nodes created **only** because another PVC appeared.
 - **MUST:** **`children*Refs`** are used **only** for **real** domain decomposition (separate snapshot kinds / lifecycle), not as a PVC-counting mechanism.
-- **MUST NOT:** model “one volume → one SnapshotContent → one `dataRef`” as the target architecture.
+- **MUST NOT:** model “one volume → one SnapshotContent → one `dataRef`” as the target architecture. (Orphan-PVC root residual uses a `Snapshot`-level visibility leaf, **not** a content node — see **§3.9.11**.)
 
 #### §3.9.5. Symmetric bulk requests (MCR / VCR)
 
@@ -216,7 +216,7 @@ Artifacts referenced by SnapshotContent.status:
 #### §3.9.6. Capture execution and publish
 
 - **MUST:** per logical node, the snapshot controller runs **one capture plan** that ensures **one MCR** (`spec.targets[]` = manifest scope) and **in parallel one VCR** (`spec.targets[]` = PVC/data scope). Execution requests **MUST** use **ownerRef → owning Snapshot**; durable artifacts **MUST** use **ownerRef → owning SnapshotContent** after handoff.
-- **MUST:** publish on **`SnapshotContent`**: **`status.manifestCheckpointName`** ← **`MCR.status.checkpointName`**; **`status.dataRefs[]`** ← **`VCR.status.dataRefs[]`** (after handoff). Published refs **MUST NOT** reference **VolumeCaptureRequest**, **ManifestCaptureRequest**, or other execution requests.
+- **MUST:** publish on **`SnapshotContent`**: **`status.manifestCheckpointName`** ← **`MCR.status.checkpointName`**; **`status.dataRefs[]`** ← **`VCR.status.dataRefs[]`** (after handoff). Published refs **MUST NOT** reference **VolumeCaptureRequest**, **ManifestCaptureRequest**, or other execution requests. **Root residual orphan-PVC exception:** the **root** node MAY publish a `dataRefs[]` entry from a CSI-`VolumeSnapshot`-bound VSC instead of from a VCR — see **§3.9.11**; the published artifact is still a `VolumeSnapshotContent`, never a `VolumeSnapshot` or execution request.
 - **MUST:** snapshot temporary status uses **`manifestCaptureRequestName`** and **`volumeCaptureRequestName`** (singular each), not a list of VCRs per PVC.
 
 #### §3.9.7. Ready (condition model: `RequestsReady` / `ChildrenReady` / `Ready`)
@@ -245,7 +245,7 @@ SnapshotContent.Ready         = RequestsReady ∧ ChildrenReady
 #### §3.9.9. Boundaries
 
 - **MUST NOT:** treat **Pod** (or other workload) using a PVC as the **owner** of volume capture; Pod usage may affect **`status.dataConsistency`** (or equivalent) on the owning snapshot node only.
-- **MUST NOT:** implement VCR/VSC CSI driver wiring, Ceph/Rook sidecar compatibility, or shadow **`VolumeSnapshot`** workarounds in **state-snapshotter**; that remains **storage-foundation**.
+- **MUST NOT:** implement VCR/VSC CSI driver wiring, Ceph/Rook sidecar compatibility, or shadow **`VolumeSnapshot`** workarounds in **state-snapshotter**; that remains **storage-foundation**. **Exception (narrow):** root residual capture of **orphan PVCs** MAY create a **standard** `VolumeSnapshot` (no driver wiring/sidecars) — see **§3.9.11**.
 
 **PVC list vs ownership (residual root):**
 
@@ -283,3 +283,16 @@ Phase 2a guarantees that a degraded **durable artifact** (`ManifestCheckpoint`, 
 - **MUST (`INV-RECONCILE-TRUTH`):** correctness is produced by `SnapshotContentController` reconcile, which **MUST** recompute state from truth refs on every reconcile; watches are only a liveness/latency optimization. A missed event **MUST NOT** change the eventual state. Each artifact watch **MAY** be registered guarded by RESTMapping so a not-yet-installed CRD degrades to "no watch" rather than failing startup.
 - **MUST (ownerRef self-healing):** on reconcile the owning `SnapshotContent` **MUST** idempotently re-assert its ownerRef on each `VolumeSnapshotContent` referenced by `status.dataRefs[]` (same owner-ref shape as the snapshot-side publisher), so ownerRef-only wake-up stays robust without using `dataRefs[]` for routing. A missing VSC is left to data readiness (`ArtifactMissing`); a deleting VSC **MUST NOT** be patched; this helper **MUST NOT** write status or fail reconcile.
 - **Chunk wake-up / deeper validation out of scope (this phase):** `ManifestCheckpointContentChunk` `list/watch` is **not** granted, so chunk deletion does not self-wake (covered above); chunk **content/consistency** beyond existence (e.g. checksum re-verify in conditions) stays on the read/download/archive path. A future `chunk → MCP → SnapshotContent` wake-up (and any chunk `list/watch`) requires an explicit ADR/RBAC decision. Chunk lifecycle is create + ownerRef-cascaded GC (`Controller=true`); the controller does not delete chunks.
+
+#### §3.9.11. Orphan PVC: root residual via standard CSI VolumeSnapshot
+
+Capture-side carve-out for the **root namespace node only** and **orphan/uncovered PVCs only** (namespace PVC − subtree-covered `pvcUID`s − policy exclusions). Normative rationale and conflict resolution: ADR [`snapshot-rework/2026-06-09-orphan-pvc-csi-volumesnapshot.md`](../../../snapshot-rework/2026-06-09-orphan-pvc-csi-volumesnapshot.md). Restore is **out of scope** (capture-side only); `restore-rollout-guard` is unaffected.
+
+- **MUST:** the namespace/root controller **MUST NOT** create a `VolumeCaptureRequest` for residual/orphan PVCs. **VCR remains domain-owned** (§3.9.5–§3.9.6 unchanged for non-root/domain nodes).
+- **MAY:** for an orphan PVC the root controller **MAY** create a **standard** `snapshot.storage.k8s.io/v1` `VolumeSnapshot` (`spec.source.persistentVolumeClaimName` = the PVC). This is the **narrow exception** to §3.9.9 "no shadow `VolumeSnapshot`": no CSI driver wiring / sidecars / vendor compatibility is implemented; the external-snapshotter performs the work.
+- **MUST:** after the `VolumeSnapshot` is bound (`status.boundVolumeSnapshotContentName` set, `status.readyToUse=true`), the root controller **MUST** publish the bound **`VolumeSnapshotContent`** into root `SnapshotContent.status.dataRefs[]` (`target` = source PVC identity incl. `pvcUID`; `artifact` = `VolumeSnapshotContent`). The data leg readiness/diagnostics reuse §3.9.10 (`DataCapturePending` / `ArtifactMissing`).
+- **MUST:** the bound VSC is the **durable artifact**: the `VolumeSnapshot` deletion policy **MUST** retain the bound VSC (`deletionPolicy=Retain`), and the controller **MUST** hand off the VSC ownerRef → root `SnapshotContent` (durable-artifact handoff per §3.9.6). VSC removal is owned by the unified content deletion algorithm, not by VS deletion.
+- **MAY (visibility only):** the `VolumeSnapshot` **MAY** be recorded as a leaf in `Snapshot.status.childrenSnapshotRefs[]` (`apiVersion`/`kind`/`name`) for tree visibility/lifecycle. It **MUST NOT** be added to `SnapshotContent.status.childrenSnapshotContentRefs[]`. Content readiness aggregation (`ChildrenReady`, §3.9.7) and PVC dedup (`subtree-covered pvcUID`s, §3.9.3/§3.9.8) are **content-driven** and **MUST NOT** observe this VS leaf. This preserves §3.9.4 (no one-volume→one-content **content** node).
+- **MUST:** the PVC manifest **MUST** remain in the root MCP (PVC stays in the manifest allowlist).
+- **MUST:** `VolumeSnapshot` objects **MUST NOT** enter any MCP / manifest inventory / aggregated manifests, for **all** VS (not only those created here). The allowlist already excludes VS; an explicit capture-side filter **MUST** keep VS out even if the allowlist is later widened.
+- **MUST NOT (API):** `dataRefs[]` **MUST NOT** be extended with a `snapshotRef` field in this slice (code-level TODO only); the VS → VSC link is reconstructable at restore time from the PVC manifest + VSC.
