@@ -40,3 +40,12 @@ func TestBuildManifestCaptureTargets_EmptyNamespaceHasNoTargets(t *testing.T) {
 		t.Fatalf("expected no targets in empty namespace, got %#v", targets)
 	}
 }
+
+func TestIsForbiddenManifestTargetRejectsVolumeSnapshot(t *testing.T) {
+	if !isForbiddenManifestTarget("snapshot.storage.k8s.io/v1", "VolumeSnapshot") {
+		t.Fatal("VolumeSnapshot must never be captured into ManifestCheckpoint inventory")
+	}
+	if isForbiddenManifestTarget("v1", "PersistentVolumeClaim") {
+		t.Fatal("PVC manifest must remain eligible for ManifestCheckpoint inventory")
+	}
+}

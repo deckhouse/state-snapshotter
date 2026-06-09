@@ -12,6 +12,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.Client, contentName, mcpName string) error {
@@ -74,6 +75,9 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 	}
 	out := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(childSnapshotRefs))
 	for _, childRef := range childSnapshotRefs {
+		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(childRef) {
+			continue
+		}
 		childContentName, err := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, readClient, childRef, parentNamespace)
 		if err != nil {
 			if errors.Is(err, usecase.ErrRunGraphChildNotBound) ||

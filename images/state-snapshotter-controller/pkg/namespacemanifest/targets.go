@@ -26,6 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // n2aNamespacedGVR is the built-in allowlist for N2a (design §4.5), without optional networkpolicies.
@@ -78,6 +80,9 @@ func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, nam
 			if kind == "" {
 				continue
 			}
+			if isForbiddenManifestTarget(apiVersion, kind) {
+				continue
+			}
 			targets = append(targets, ManifestTarget{
 				APIVersion: apiVersion,
 				Kind:       kind,
@@ -88,6 +93,10 @@ func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, nam
 
 	sortManifestTargets(targets)
 	return targets, nil
+}
+
+func isForbiddenManifestTarget(apiVersion, kind string) bool {
+	return apiVersion == snapshotpkg.CSISnapshotAPIVersion && kind == snapshotpkg.KindVolumeSnapshot
 }
 
 func sortManifestTargets(targets []ManifestTarget) {

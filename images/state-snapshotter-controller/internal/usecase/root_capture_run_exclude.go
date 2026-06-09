@@ -32,6 +32,7 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // Run-graph errors for root manifest capture (INV-S0 / INV-E1, E5).
@@ -120,6 +121,9 @@ func collectRunSubtreeManifestExcludeKeys(
 
 	for i := range rootNS.Status.ChildrenSnapshotRefs {
 		ch := rootNS.Status.ChildrenSnapshotRefs[i]
+		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ch) {
+			continue
+		}
 		resolved, err := ResolveChildSnapshotRefToBoundContentName(ctx, c, ch, rootNS.Namespace)
 		if err != nil {
 			return nil, err

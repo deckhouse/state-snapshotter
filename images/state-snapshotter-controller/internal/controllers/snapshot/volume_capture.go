@@ -36,8 +36,9 @@ import (
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// ensureVolumeCaptureLeg creates the bulk VCR and records status.volumeCaptureRequestName.
-// It does not block the manifest (MCR) leg: MCR/VCR are independent bulk capture legs (N5 PR-4).
+// ensureVolumeCaptureLeg creates root residual data artifacts.
+// For orphan/uncovered PVCs the namespace root uses standard CSI VolumeSnapshots (ADR 2026-06-09);
+// domain/non-root VCR publishing helpers below remain for domain-owned capture paths.
 func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -50,6 +51,9 @@ func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 	}
 	if len(targets) == 0 {
 		return nil
+	}
+	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
+		return r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, targets)
 	}
 
 	vcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}
@@ -79,6 +83,9 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 	}
 	if len(targets) == 0 {
 		return ctrl.Result{}, nil
+	}
+	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
+		return r.reconcileOrphanPVCVolumeSnapshotPublish(ctx, nsSnap, content, targets, allowRequeue)
 	}
 
 	vcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}

@@ -126,6 +126,11 @@ rules:
   resources: ["volumesnapshotcontents"]
   verbs: ["get", "list", "watch", "update", "patch"]
 
+# VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
 # Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
 # granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD/DSC
