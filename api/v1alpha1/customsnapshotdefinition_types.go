@@ -23,7 +23,6 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=csd
-// +kubebuilder:printcolumn:name="Owner",type=string,JSONPath=`.spec.ownerModule`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
 // CustomSnapshotDefinition registers custom snapshot types for platform modules.
 // See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
@@ -44,10 +43,6 @@ type CustomSnapshotDefinitionList struct {
 
 // +k8s:deepcopy-gen=true
 type CustomSnapshotDefinitionSpec struct {
-	// OwnerModule identifies the owning Deckhouse module (audit/RBAC); immutable in v1alpha1.
-	// +kubebuilder:validation:Required
-	OwnerModule string `json:"ownerModule"`
-
 	// SnapshotResourceMapping declares source resource CRD -> snapshot CRD mappings.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1

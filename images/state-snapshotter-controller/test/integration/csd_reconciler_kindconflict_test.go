@@ -71,14 +71,12 @@ var _ = Describe("Integration: CSD reconciler KindConflict", func() {
 		a := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: nameA},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule:             "mod-a",
 				SnapshotResourceMapping: sharedMapping(),
 			},
 		}
 		b := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: nameB},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule:             "mod-b",
 				SnapshotResourceMapping: sharedMapping(),
 			},
 		}

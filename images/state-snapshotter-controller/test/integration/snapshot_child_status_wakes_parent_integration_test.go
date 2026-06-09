@@ -59,7 +59,6 @@ var _ = Describe("Integration: NSS parent woken by child snapshot status", Seria
 		csd := &ssv1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: csdName},
 			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule: "integration-nss-e6-status",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
 						Source: ssv1alpha1.SnapshotGVKRef{

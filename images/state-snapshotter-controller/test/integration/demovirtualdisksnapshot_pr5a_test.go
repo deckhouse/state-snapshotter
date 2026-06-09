@@ -57,7 +57,6 @@ var _ = Describe("Integration: PR5a DemoVirtualDiskSnapshot graph wiring", Seria
 		csd := &ssv1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: csdName},
 			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule: "integration-pr5a",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
 						Source: ssv1alpha1.SnapshotGVKRef{

@@ -98,7 +98,6 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule:             "integration-t4",
 				SnapshotResourceMapping: registrationMapping(),
 			},
 		}
@@ -128,7 +127,6 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule:             "integration-elig",
 				SnapshotResourceMapping: registrationMapping(),
 			},
 		}

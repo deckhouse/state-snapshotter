@@ -95,7 +95,6 @@ var _ = Describe("Integration: CustomSnapshotDefinition API smoke", Serial, func
 				Name: smokeName,
 			},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule: "integration-test",
 				// RegistrationTest* CRDs: avoids hanging a global TestSnapshot watch (lifecycle tests use direct Reconcile on TestSnapshot).
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{

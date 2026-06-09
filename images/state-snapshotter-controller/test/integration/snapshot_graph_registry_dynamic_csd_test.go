@@ -64,7 +64,6 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 		csd := &ssv1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: csdName},
 			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule: "integration-dynamic-graph",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
 						Source: ssv1alpha1.SnapshotGVKRef{
@@ -135,7 +134,6 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 		csd := &ssv1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: globalCSD},
 			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule: "integration-global-graph-delete",
 				SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 					{
 						Source: ssv1alpha1.SnapshotGVKRef{

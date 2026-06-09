@@ -420,7 +420,6 @@ kind: CustomSnapshotDefinition
 metadata:
   name: ${CSD_NAME}
 spec:
-  ownerModule: live-demo
   snapshotResourceMapping:
   - source:
       apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1

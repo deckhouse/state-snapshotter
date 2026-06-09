@@ -49,7 +49,7 @@ write_obj manifestcapturerequests.state-snapshotter.deckhouse.io mcr-root <<EOF
 EOF
 
 write_obj customsnapshotdefinitions.state-snapshotter.deckhouse.io smoke-demo <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"CustomSnapshotDefinition","metadata":{"name":"smoke-demo","uid":"csd-smoke-uid"},"spec":{"ownerModule":"smoke","snapshotResourceMapping":[{"source":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk"},"snapshot":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot"},"priority":0}]},"status":{"conditions":[{"type":"Accepted","status":"True","reason":"Valid"},{"type":"RBACReady","status":"True","reason":"Smoke"}]}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"CustomSnapshotDefinition","metadata":{"name":"smoke-demo","uid":"csd-smoke-uid"},"spec":{"snapshotResourceMapping":[{"source":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk"},"snapshot":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot"},"priority":0}]},"status":{"conditions":[{"type":"Accepted","status":"True","reason":"Valid"},{"type":"RBACReady","status":"True","reason":"Smoke"}]}}
 EOF
 
 write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-root <<EOF

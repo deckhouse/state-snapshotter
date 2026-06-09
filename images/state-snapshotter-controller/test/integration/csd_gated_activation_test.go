@@ -316,7 +316,6 @@ func createEligibleDemoDiskCSD(ctx context.Context, name string) {
 	csd := &ssv1alpha1.CustomSnapshotDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-			OwnerModule: "integration-csd-gated-demo",
 			SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 				{
 					Source: ssv1alpha1.SnapshotGVKRef{
@@ -358,7 +357,6 @@ func createEligibleDemoVMAndDiskCSD(ctx context.Context, name string) {
 	csd := &ssv1alpha1.CustomSnapshotDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-			OwnerModule: "integration-csd-gated-demo",
 			SnapshotResourceMapping: []ssv1alpha1.SnapshotResourceMappingEntry{
 				{
 					Source: ssv1alpha1.SnapshotGVKRef{

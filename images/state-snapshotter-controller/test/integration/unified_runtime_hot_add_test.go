@@ -86,7 +86,6 @@ var _ = Describe("Integration: unified runtime hot-add (CSD → Sync)", Serial, 
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: hotCSDName},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule: "integration-hot-add",
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
 						Source: storagev1alpha1.SnapshotGVKRef{

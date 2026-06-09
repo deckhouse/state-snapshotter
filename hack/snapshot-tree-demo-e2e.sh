@@ -337,7 +337,6 @@ kind: CustomSnapshotDefinition
 metadata:
   name: ${CSD_NAME}
 spec:
-  ownerModule: tree-demo-e2e
   snapshotResourceMapping:
     - source:
         apiVersion: ${DEMO_API}

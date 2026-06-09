@@ -10,7 +10,6 @@ kind: CustomSnapshotDefinition
 metadata:
   name: demo-live-vm-disk
 spec:
-  ownerModule: live-demo
   snapshotResourceMapping:
     - source:
         apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1

@@ -575,7 +575,6 @@ kind: CustomSnapshotDefinition
 metadata:
   name: smoke-demo-disk-only
 spec:
-  ownerModule: smoke
   snapshotResourceMapping:
   - source:
       apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
@@ -682,7 +681,6 @@ kind: CustomSnapshotDefinition
 metadata:
   name: smoke-demo-vm-disk
 spec:
-  ownerModule: smoke
   snapshotResourceMapping:
   - source:
       apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1

@@ -17,9 +17,6 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.ownerModule
-      name: Owner
-      type: string
     - jsonPath: .status.conditions[?(@.type=="Accepted")].status
       name: Accepted
       type: string
@@ -66,10 +63,6 @@ spec:
                 required:
                 - serviceRef
                 type: object
-              ownerModule:
-                description: OwnerModule identifies the owning Deckhouse module (audit/RBAC);
-                  immutable in v1alpha1.
-                type: string
               snapshotResourceMapping:
                 description: SnapshotResourceMapping declares source resource CRD
                   -> snapshot CRD mappings.
@@ -118,7 +111,6 @@ spec:
                 minItems: 1
                 type: array
             required:
-            - ownerModule
             - snapshotResourceMapping
             type: object
           status:

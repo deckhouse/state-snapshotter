@@ -48,7 +48,6 @@ var _ = Describe("Integration: CSD reconciler InvalidSpec", func() {
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: dupKindName},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				OwnerModule: "integration-test",
 				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
 					{
 						Source: storagev1alpha1.SnapshotGVKRef{

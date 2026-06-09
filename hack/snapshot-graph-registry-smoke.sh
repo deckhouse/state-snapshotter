@@ -84,7 +84,6 @@ kind: CustomSnapshotDefinition
 metadata:
   name: ${CSD_NAME}
 spec:
-  ownerModule: smoke-ssg
   snapshotResourceMapping:
     - source:
         apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
