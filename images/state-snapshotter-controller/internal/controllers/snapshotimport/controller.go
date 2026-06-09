@@ -222,8 +222,12 @@ func (r *SnapshotImportRequestReconciler) reconcileNode(
 	}
 
 	if len(node.Children) > 0 {
-		if err := r.publishChildren(ctx, ns, node, contentName, nodeByID); err != nil {
+		result, err := r.publishChildren(ctx, ns, node, contentName, nodeByID)
+		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("publish children: %w", err)
+		}
+		if result.Requeue || result.RequeueAfter > 0 {
+			return result, nil
 		}
 	}
 
@@ -413,12 +417,17 @@ func (r *SnapshotImportRequestReconciler) ensureManifestCheckpoint(
 			},
 		},
 	}
-	if err := r.Client.Create(ctx, newMCP); err != nil && !apierrors.IsAlreadyExists(err) {
-		return ctrl.Result{}, fmt.Errorf("create ManifestCheckpoint: %w", err)
+	if err := r.Client.Create(ctx, newMCP); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return ctrl.Result{}, fmt.Errorf("create ManifestCheckpoint: %w", err)
+		}
+		// MCP was created by a prior reconcile — fetch directly from the API server
+		// (bypass the informer cache which may not have caught up yet).
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, newMCP); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, newMCP); err != nil {
-		return ctrl.Result{}, err
-	}
+	// If Create succeeded, newMCP.UID is already populated from the API server response.
 
 	chunkInfos := make([]ssv1alpha1.ChunkInfo, 0, len(nodeChunks))
 	var totalObjects int
@@ -655,13 +664,14 @@ func (r *SnapshotImportRequestReconciler) ensureDataRefs(
 }
 
 // publishChildren sets ChildrenSnapshotRefs on the Snapshot and ChildrenSnapshotContentRefs on the SnapshotContent.
+// Returns Requeue=true when child snapshots are not yet bound to their content (transient — caller should requeue).
 func (r *SnapshotImportRequestReconciler) publishChildren(
 	ctx context.Context,
 	ns string,
 	node ssv1alpha1.ImportNode,
 	contentName string,
 	nodeByID map[string]ssv1alpha1.ImportNode,
-) error {
+) (ctrl.Result, error) {
 	childRefs := make([]storagev1alpha1.SnapshotChildRef, 0, len(node.Children))
 	for _, childID := range node.Children {
 		childNode, ok := nodeByID[childID]
@@ -688,16 +698,22 @@ func (r *SnapshotImportRequestReconciler) publishChildren(
 			snap.Status.ChildrenSnapshotRefs = childRefs
 			return r.Client.Status().Patch(ctx, snap, client.MergeFrom(base))
 		}); err != nil {
-			return fmt.Errorf("set children refs on Snapshot: %w", err)
+			return ctrl.Result{}, fmt.Errorf("set children refs on Snapshot: %w", err)
 		}
 	}
 
-	_, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(
-		ctx, r.Client, nil, ns, contentName, childRefs)
+	// Use the direct API reader (not the cache) so that status.boundSnapshotContentName
+	// set on child snapshots in the same reconcile loop is visible immediately.
+	allBound, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(
+		ctx, r.Client, r.APIReader, ns, contentName, childRefs)
 	if err != nil {
-		return fmt.Errorf("publish children content refs: %w", err)
+		return ctrl.Result{}, fmt.Errorf("publish children content refs: %w", err)
 	}
-	return nil
+	if !allBound {
+		// Child snapshots are not yet bound — requeue to retry once the cache catches up.
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return ctrl.Result{}, nil
 }
 
 // isSnapshotReady checks if the snapshot object has Ready=True condition.
