@@ -46,6 +46,8 @@
 
 **Latest pre-e2e smoke:** 2026-04-29 пройден на реальном кластере с test-only domain RBAC до `RBACReady=True` (no-CSD root, disk-only CSD, VM+Disk CSD, content tree, MCP/chunks, namespace-relative aggregated API output, negative API и cleanup). 2026-05-06 PR4 smoke после UID-aware MCR OK и retained-read hardening прошёл на текущем временном поведении `/snapshots/{name}/manifests` после root delete. **TODO:** долгосрочно retained manifests должны читаться через durable `/snapshotcontents/{contentName}/manifests`; deleted Snapshot name через root ObjectKeeper не является целевым retained read API.
 
+**Follow-up (failure-prop test coverage):** e2e Stage 13 (delete child `SnapshotContent`) проверяет в основном recovery, а не сам момент invalidation — binder может пересоздать content быстрее, чем bash успевает опросить. Закрепить контракт отдельным unit/integration тестом: child `SnapshotContent` missing → parent content `ChildrenReady=False` / parent `Snapshot` `Ready=False` (до recovery).
+
 **Для команды (одно предложение):** **generic snapshot tree workstream**: граф по **`children*Refs`**, subtree exclude через registry, children-readiness parent content **`Ready`** агрегируется `SnapshotContentController`, snapshot **`Ready`** только зеркалит bound content, child→parent через dynamic watches.
 
 **Критерий «сделано до M-трека»:** ядро R2/R3, D1–D3, R5, точечные integration (RBAC / eligibility) — в коде; **все тесты зелёные**, включая `go test -tags=integration ./test/integration/...`.
