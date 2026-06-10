@@ -97,6 +97,38 @@ func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing
 	}
 }
 
+// A deleted child snapshot is gone from the API, so the relay can no longer read its identity. It must
+// reconstruct the child from the watch GVK + request key and still wake every parent that references
+// it, otherwise child-Snapshot deletion would not be propagated event-driven (INV-FAIL-PROP).
+func TestBuildSyntheticDeletedChild_MatchesReferencingParent(t *testing.T) {
+	ctx := context.Background()
+	gvk := schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "DemoSnap"}
+
+	parent := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "parent"},
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
+				{APIVersion: "demo.test/v1", Kind: "DemoSnap", Name: "snap-1"},
+			},
+		},
+	}
+	sc := runtime.NewScheme()
+	if err := storagev1alpha1.AddToScheme(sc); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).Build()
+
+	// Synthetic child built only from GVK + namespace/name (the object itself no longer exists).
+	synthetic := buildSyntheticDeletedChild(gvk, "ns-a", "snap-1")
+	if synthetic.GetAPIVersion() != "demo.test/v1" || synthetic.GetKind() != "DemoSnap" {
+		t.Fatalf("synthetic child GVK mismatch: %s/%s", synthetic.GetAPIVersion(), synthetic.GetKind())
+	}
+	reqs := findParentsReferencingChildSnapshot(ctx, cl, synthetic)
+	if len(reqs) != 1 || reqs[0].Namespace != "ns-a" || reqs[0].Name != "parent" {
+		t.Fatalf("deleted child should wake referencing parent, got %+v", reqs)
+	}
+}
+
 func TestFindParentsReferencingChildSnapshot_SameNameDifferentGVKNoFalsePositive(t *testing.T) {
 	ctx := context.Background()
 	gvkChild := schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "KindB"}

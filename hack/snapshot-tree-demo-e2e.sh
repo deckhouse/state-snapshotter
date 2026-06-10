@@ -28,7 +28,17 @@
 #   domain-pvc-vcr manifest-no-volumesnapshot domain-pvc-failure-coverage
 #   03-priority-inverted
 #   04-domainready-barrier 05-ownership-handoff 06-mcp-failure 07-mcp-recovery
-#   08-vsc-pending 09-vsc-recovery 10-vsc-missing 11-chunk-missing
+#   08-vsc-pending 09-vsc-recovery
+#   12-child-snapshot-deleted 13-snapshotcontent-deleted 14-mcp-deleted
+#   17-child-ready-false 18-recovery 15-chunk-deleted 16-orphan-vsc-deleted
+#   10-vsc-missing 11-chunk-missing
+#
+# Failure-propagation / parent-invalidation stages (12-18) exercise literal deletion of required
+# descendants/artifacts and assert the invariant "parent Ready=True IFF all required
+# descendants/artifacts are present and healthy" plus recovery. Recoverable deletions (12,13,14,17)
+# restore the tree and run before the consolidation gate 18-recovery; the non-recoverable deletions
+# (15-chunk-deleted, 16-orphan-vsc-deleted) intentionally leave the tree degraded and therefore run
+# AFTER 18, joining the destructive tail with 10/11.
 #
 # Usage: ./hack/snapshot-tree-demo-e2e.sh
 #
@@ -1628,6 +1638,291 @@ else
 fi
 save_artifacts "09-vsc-recovery" "${NS}"
 log "09-vsc-recovery: done"
+
+# ===========================================================================
+# Failure propagation & parent invalidation (literal deletion + recovery).
+#
+# Invariant under test: parent Ready=True IFF all required descendants/artifacts are present and
+# healthy. Recoverable deletions (12,13,14,17) must invalidate the parent and then heal back to
+# Ready=True; the consolidation gate 18-recovery confirms the whole tree is Ready again. The
+# non-recoverable deletions (15,16) run after 18 because they intentionally degrade the tree.
+# ===========================================================================
+
+# resolve_main_tree_handles re-derives the live tree handles (ROOT_CONTENT/VM_SNAP/SIBLING_*/LEAF_*/
+# LEAF_MCP) from the current cluster state. Recoverable deletions recreate child snapshots/contents
+# with NEW UIDs (and therefore new content names), so handles captured in 02-tree-ready go stale; every
+# destructive stage below re-resolves before/after instead of trusting cached names.
+resolve_main_tree_handles() {
+	local rj vmj
+	rj="$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")"
+	ROOT_CONTENT="$(echo "${rj}" | jq -r '.status.boundSnapshotContentName // ""')"
+	VM_SNAP="$(echo "${rj}" | jq -r '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualMachineSnapshot")][0].name // ""')"
+	SIBLING_SNAP="$(echo "${rj}" | jq -r '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")][0].name // ""')"
+	vmj="{}"
+	[[ -n "${VM_SNAP}" ]] && vmj="$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")"
+	VM_CONTENT="$(echo "${vmj}" | jq -r '.status.boundSnapshotContentName // ""')"
+	LEAF_SNAP="$(echo "${vmj}" | jq -r '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")][0].name // ""')"
+	LEAF_CONTENT=""
+	[[ -n "${LEAF_SNAP}" ]] && LEAF_CONTENT="$(kubectl -n "${NS}" get "${DISKSNAP_RES}" "${LEAF_SNAP}" -o jsonpath='{.status.boundSnapshotContentName}' 2>/dev/null || true)"
+	SIBLING_CONTENT=""
+	[[ -n "${SIBLING_SNAP}" ]] && SIBLING_CONTENT="$(kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o jsonpath='{.status.boundSnapshotContentName}' 2>/dev/null || true)"
+	LEAF_MCP=""
+	[[ -n "${LEAF_CONTENT}" ]] && LEAF_MCP="$(kubectl get "${CONTENT_RES}" "${LEAF_CONTENT}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
+}
+
+# wait_root_not_completed: wait until the root Snapshot Ready leaves True/Completed (invalidation).
+wait_root_not_completed() {
+	wait_until "root Snapshot leaves Ready=Completed" \
+		bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0] | (.status+\"/\"+.reason)) // \"\"') != True/Completed ]]"
+}
+
+# ---------------------------------------------------------------------------
+# 12-child-snapshot-deleted (recoverable: parent recreates the child, tree heals)
+# ---------------------------------------------------------------------------
+begin_stage "12-child-snapshot-deleted"
+resolve_main_tree_handles
+CDIR="$(stage_dir 12-child-snapshot-deleted)"
+if [[ -z "${SIBLING_SNAP}" ]]; then
+	soft "no standalone DemoVirtualDiskSnapshot child to delete; skipping 12"
+else
+	CHILD_UID_BEFORE="$(kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o yaml >"${CDIR}/child-before-delete.yaml" 2>/dev/null || true
+	printf 'child=%s\nuid_before=%s\n' "${SIBLING_SNAP}" "${CHILD_UID_BEFORE}" >"${CDIR}/handles.txt"
+	if kubectl -n "${NS}" delete "${DISKSNAP_RES}" "${SIBLING_SNAP}" --wait=false 2>/dev/null; then
+		# Invalidation (racey: recreation may be fast on a healthy cluster) — best-effort.
+		wait_root_not_completed && note "12: root left Ready=Completed after child snapshot deletion" \
+			|| soft "12: did not observe root leaving Ready=Completed (recreation likely raced ahead)"
+		# HARD evidence the woken parent recomputed coverage: child recreated with a new UID.
+		wait_until "child snapshot ${SIBLING_SNAP} recreated (new UID)" \
+			bash -c "u=\$(kubectl -n '${NS}' get '${DISKSNAP_RES}' '${SIBLING_SNAP}' -o jsonpath='{.metadata.uid}' 2>/dev/null || true); [[ -n \"\${u}\" && \"\${u}\" != '${CHILD_UID_BEFORE}' ]]" \
+			|| die "12: deleted child snapshot ${SIBLING_SNAP} not recreated by the woken parent (UID unchanged=${CHILD_UID_BEFORE})"
+		CHILD_UID_AFTER="$(kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+		printf 'uid_after=%s\n' "${CHILD_UID_AFTER}" >>"${CDIR}/handles.txt"
+		# Recovery.
+		wait_snapshot_ready "${NS}" "${SNAP}" || die "12: tree did not recover Ready=True after child snapshot recreation"
+		note "12: child snapshot deletion invalidated then recovered (uid ${CHILD_UID_BEFORE}->${CHILD_UID_AFTER})"
+	else
+		soft "12: could not delete child snapshot ${SIBLING_SNAP}; skipping"
+	fi
+fi
+resolve_main_tree_handles
+save_graph "12-child-snapshot-deleted" "${NS}" "${SNAP}" "tree" "logical"
+save_artifacts "12-child-snapshot-deleted" "${NS}"
+log "12-child-snapshot-deleted: done"
+
+# ---------------------------------------------------------------------------
+# 13-snapshotcontent-deleted (recoverable: binder recreates child content)
+# ---------------------------------------------------------------------------
+begin_stage "13-snapshotcontent-deleted"
+resolve_main_tree_handles
+CDIR="$(stage_dir 13-snapshotcontent-deleted)"
+if [[ -z "${SIBLING_CONTENT}" ]]; then
+	soft "no standalone child SnapshotContent to delete; skipping 13"
+else
+	CONTENT_UID_BEFORE="$(kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+	kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o yaml >"${CDIR}/content-before-delete.yaml" 2>/dev/null || true
+	printf 'content=%s\nuid_before=%s\n' "${SIBLING_CONTENT}" "${CONTENT_UID_BEFORE}" >"${CDIR}/handles.txt"
+	# A child SnapshotContent carries FinalizerParentProtect; delete sets deletionTimestamp and the
+	# content controller cascade-removes finalizers, then GC deletes it and the binder recreates it
+	# from the still-bound child snapshot.
+	if kubectl delete "${CONTENT_RES}" "${SIBLING_CONTENT}" --wait=false 2>/dev/null; then
+		wait_until "root content ${ROOT_CONTENT} ChildrenReady=False after child content delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
+			&& note "13: root content ChildrenReady=False after child content deletion" \
+			|| soft "13: did not observe root ChildrenReady=False (recreation likely raced ahead)"
+		# Recovery: content recreated (new UID) and tree Ready=True again.
+		wait_until "child content ${SIBLING_CONTENT} present again" \
+			bash -c "kubectl get '${CONTENT_RES}' '${SIBLING_CONTENT}' -o name >/dev/null 2>&1" \
+			|| soft "13: child content ${SIBLING_CONTENT} was not recreated within window"
+		CONTENT_UID_AFTER="$(kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+		printf 'uid_after=%s\n' "${CONTENT_UID_AFTER}" >>"${CDIR}/handles.txt"
+		wait_snapshot_ready "${NS}" "${SNAP}" || soft "13: tree did not recover Ready=True after child content recreation"
+		note "13: child SnapshotContent deletion propagated to root then recovered (uid ${CONTENT_UID_BEFORE}->${CONTENT_UID_AFTER})"
+	else
+		soft "13: could not delete child content ${SIBLING_CONTENT}; skipping"
+	fi
+fi
+resolve_main_tree_handles
+save_graph "13-snapshotcontent-deleted" "${NS}" "${SNAP}" "tree" "logical"
+save_artifacts "13-snapshotcontent-deleted" "${NS}"
+log "13-snapshotcontent-deleted: done"
+
+# ---------------------------------------------------------------------------
+# 14-mcp-deleted (ManifestCheckpoint deletion -> RequestsReady invalidation)
+# ---------------------------------------------------------------------------
+begin_stage "14-mcp-deleted"
+resolve_main_tree_handles
+CDIR="$(stage_dir 14-mcp-deleted)"
+if [[ -z "${LEAF_MCP}" || -z "${LEAF_CONTENT}" ]]; then
+	soft "no leaf MCP/content resolved; skipping 14"
+else
+	kubectl get "${MCP_RES}" "${LEAF_MCP}" -o yaml >"${CDIR}/mcp-before-delete.yaml" 2>/dev/null || true
+	printf 'leaf_content=%s\nleaf_mcp=%s\n' "${LEAF_CONTENT}" "${LEAF_MCP}" >"${CDIR}/handles.txt"
+	# A published MCP referenced by content.status.manifestCheckpointName is removed. The owning
+	# SnapshotContent is woken via the ManifestCheckpoint ownerRef wake-up watch; reconcile reclassifies
+	# the now-missing MCP as ManifestCapturePending (NotFound is the legitimate pre-publish window) so the
+	# requests leg flips and Ready leaves True (no stale Ready=True over a missing checkpoint).
+	if kubectl delete "${MCP_RES}" "${LEAF_MCP}" --wait=false 2>/dev/null; then
+		wait_until "leaf content ${LEAF_CONTENT} RequestsReady=False after MCP delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
+			&& note "14: leaf content RequestsReady=False after MCP deletion" \
+			|| soft "14: leaf content RequestsReady did not flip after MCP deletion"
+		wait_until "root content ${ROOT_CONTENT} not Ready=True after MCP delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') != True ]]" \
+			&& note "14: root content left Ready=True after leaf MCP deletion" \
+			|| soft "14: root content stayed Ready=True after leaf MCP deletion (investigate propagation)"
+		# Recovery is environment-dependent (the capture path must re-publish the checkpoint); best-effort.
+		wait_snapshot_ready "${NS}" "${SNAP}" \
+			&& note "14: tree recovered Ready=True after MCP re-publication" \
+			|| soft "14: tree did not recover Ready=True within window (MCP re-publication may require capture re-run; documented)"
+	else
+		soft "14: could not delete MCP ${LEAF_MCP}; skipping"
+	fi
+fi
+resolve_main_tree_handles
+save_graph "14-mcp-deleted" "${NS}" "${SNAP}" "tree" "logical"
+save_artifacts "14-mcp-deleted" "${NS}"
+log "14-mcp-deleted: done"
+
+# ---------------------------------------------------------------------------
+# 17-child-ready-false (child Ready=False must invalidate parent; then recover)
+# ---------------------------------------------------------------------------
+begin_stage "17-child-ready-false"
+resolve_main_tree_handles
+CDIR="$(stage_dir 17-child-ready-false)"
+# Drive a child Ready=False deterministically by failing the standalone child's own MCP (its content
+# RequestsReady -> Ready flips False), then assert the root does NOT stay Ready=True, then restore.
+SIBLING_MCP=""
+[[ -n "${SIBLING_CONTENT}" ]] && SIBLING_MCP="$(kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
+if [[ -z "${SIBLING_MCP}" ]]; then
+	soft "no standalone child MCP resolved; skipping 17"
+else
+	printf 'sibling_content=%s\nsibling_mcp=%s\n' "${SIBLING_CONTENT}" "${SIBLING_MCP}" >"${CDIR}/handles.txt"
+	if patch_mcp_ready "${SIBLING_MCP}" "False" "Failed" "tree-demo 17 child Ready=False"; then
+		wait_until "standalone child content ${SIBLING_CONTENT} Ready=False" content_ready_false "${SIBLING_CONTENT}" \
+			|| soft "17: standalone child content did not flip Ready=False"
+		wait_until "root Snapshot ${SNAP} not Ready=True (child failed)" \
+			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') != True ]]" \
+			&& note "17: root did not stay Ready=True while a child is Ready=False" \
+			|| die "17: root stayed Ready=True while a required child is Ready=False (stale Ready=True)"
+		# Recovery.
+		patch_mcp_ready "${SIBLING_MCP}" "True" "Ready" "tree-demo 17 recovery" || soft "17: could not restore child MCP"
+		wait_until "standalone child content ${SIBLING_CONTENT} Ready=True" content_ready_true "${SIBLING_CONTENT}" \
+			|| soft "17: standalone child content did not recover Ready=True"
+		wait_snapshot_ready "${NS}" "${SNAP}" || soft "17: tree did not recover Ready=True after child recovery"
+		note "17: child Ready=False propagated to root and recovered"
+	else
+		soft "17: cannot patch standalone child MCP ${SIBLING_MCP} (RBAC); skipping"
+	fi
+fi
+resolve_main_tree_handles
+save_graph "17-child-ready-false" "${NS}" "${SNAP}" "tree" "logical"
+save_artifacts "17-child-ready-false" "${NS}"
+log "17-child-ready-false: done"
+
+# ---------------------------------------------------------------------------
+# 18-recovery (consolidation gate: tree fully healed after recoverable deletions)
+# ---------------------------------------------------------------------------
+begin_stage "18-recovery"
+resolve_main_tree_handles
+wait_snapshot_ready "${NS}" "${SNAP}" \
+	&& note "18: root Snapshot Ready=True after all recoverable invalidations" \
+	|| soft "18: root Snapshot not Ready=True at consolidation (a recoverable stage may not have healed in this environment)"
+for c in "${ROOT_CONTENT}" "${VM_CONTENT}" "${LEAF_CONTENT}" "${SIBLING_CONTENT}"; do
+	[[ -n "${c}" ]] || continue
+	content_ready_true "${c}" && note "18: content ${c} Ready=True" || soft "18: content ${c} not Ready=True at recovery"
+done
+# Mirror equality must hold regardless of recovery timing (HARD).
+RS="$(ready_triple "$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")")"
+RC="$(ready_triple "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")")"
+[[ "${RS}" == "${RC}" ]] || die "18: root Snapshot Ready mirror mismatch at recovery: snap=[${RS}] content=[${RC}]"
+note "18: recovery mirror OK [${RS}]"
+save_graph "18-recovery" "${NS}" "${SNAP}" "tree" "logical"
+save_artifacts "18-recovery" "${NS}"
+log "18-recovery: done"
+
+# ---------------------------------------------------------------------------
+# 15-chunk-deleted (TERMINAL: missing chunk = ManifestCheckpointFailed integrity loss)
+# ---------------------------------------------------------------------------
+# Non-recoverable by design (the chunk payload is gone). Runs after 18 because it permanently degrades
+# the leaf. Chunk deletion does NOT wake reconcile (no chunk watch in Phase 2a), so an MCP bump is used
+# to trigger revalidation; the integrity check then fails closed (no stale Ready=True over lost data).
+begin_stage "15-chunk-deleted"
+resolve_main_tree_handles
+CDIR="$(stage_dir 15-chunk-deleted)"
+if [[ -z "${LEAF_MCP}" ]]; then
+	soft "no leaf MCP resolved; skipping 15"
+else
+	CHUNK="$(kubectl get "${CHUNK_RES}" -o json 2>/dev/null | jq -r --arg m "${LEAF_MCP}" \
+		'[.items[]?|select(.spec.checkpointName==$m)][0].metadata.name // ""')"
+	[[ -n "${CHUNK}" ]] || CHUNK="$(kubectl get "${CHUNK_RES}" "${LEAF_MCP}-0" -o name 2>/dev/null | sed 's#.*/##' || true)"
+	if [[ -z "${CHUNK}" ]]; then
+		soft "15: could not resolve a chunk for MCP ${LEAF_MCP}; skipping"
+	else
+		printf 'leaf_content=%s\nleaf_mcp=%s\nchunk=%s\n' "${LEAF_CONTENT}" "${LEAF_MCP}" "${CHUNK}" >"${CDIR}/handles.txt"
+		kubectl get "${MCP_RES}" "${LEAF_MCP}" -o yaml >"${CDIR}/mcp-before-delete.yaml" 2>/dev/null || true
+		kubectl_ctrl get "${CHUNK_RES}" "${CHUNK}" -o yaml >"${CDIR}/chunk-before-delete.yaml" 2>/dev/null || true
+		if kubectl delete "${CHUNK_RES}" "${CHUNK}" --wait=false 2>/dev/null; then
+			kubectl annotate "${MCP_RES}" "${LEAF_MCP}" "tree-demo.state-snapshotter.deckhouse.io/bump=$(date +%s)" --overwrite >/dev/null 2>&1 \
+				|| kubectl_ctrl annotate "${MCP_RES}" "${LEAF_MCP}" "tree-demo.state-snapshotter.deckhouse.io/bump=$(date +%s)" --overwrite >/dev/null 2>&1 || true
+			wait_until "leaf content ${LEAF_CONTENT} RequestsReady=False after chunk delete+bump" \
+				bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
+				|| soft "15: leaf RequestsReady did not flip after chunk delete+bump"
+			RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" RequestsReady reason)"
+			[[ "${RR_REASON}" == "ManifestCheckpointFailed" ]] && note "15: missing chunk surfaced ManifestCheckpointFailed (terminal integrity loss)" \
+				|| soft "15: chunk-missing reason=${RR_REASON} (expected ManifestCheckpointFailed)"
+			wait_until "root Snapshot ${SNAP} Ready=False after chunk delete" \
+				bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
+				|| soft "15: root did not flip Ready=False after chunk delete"
+			note "15: LIMITATION — chunk deletion alone does not wake reconcile; an MCP bump was required (no chunk watch in Phase 2a)"
+		else
+			soft "15: could not delete chunk ${CHUNK}; skipping"
+		fi
+	fi
+fi
+save_artifacts "15-chunk-deleted" "${NS}"
+log "15-chunk-deleted: done"
+
+# ---------------------------------------------------------------------------
+# 16-orphan-vsc-deleted (TERMINAL: retained orphan VSC lost -> ArtifactMissing)
+# ---------------------------------------------------------------------------
+# The orphan demo-pvc data leg is durable via a retained VolumeSnapshotContent referenced by the root
+# content dataRefs[]; the CSI VolumeSnapshot is only a visibility leaf. Deleting the retained VSC is a
+# real data loss: the root content must flip RequestsReady=False/ArtifactMissing (no stale Ready=True
+# over a missing data artifact). Non-recoverable (Retain means CSI will not recreate it).
+begin_stage "16-orphan-vsc-deleted"
+resolve_main_tree_handles
+CDIR="$(stage_dir 16-orphan-vsc-deleted)"
+ORPHAN_PVC_UID="$(kubectl -n "${NS}" get pvc demo-pvc -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+ORPHAN_VSC=""
+[[ -n "${ROOT_CONTENT}" && -n "${ORPHAN_PVC_UID}" ]] && ORPHAN_VSC="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}" \
+	| jq -r --arg u "${ORPHAN_PVC_UID}" '[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")][0].artifact.name // ""')"
+if [[ -z "${ORPHAN_VSC}" ]]; then
+	soft "16: no orphan demo-pvc VSC in root dataRefs (CSI fulfillment may be pending); skipping"
+else
+	printf 'root_content=%s\norphan_pvc_uid=%s\norphan_vsc=%s\n' "${ROOT_CONTENT}" "${ORPHAN_PVC_UID}" "${ORPHAN_VSC}" >"${CDIR}/handles.txt"
+	kubectl get "${VSC_RES}" "${ORPHAN_VSC}" -o yaml >"${CDIR}/orphan-vsc-before-delete.yaml" 2>/dev/null || true
+	if kubectl delete "${VSC_RES}" "${ORPHAN_VSC}" --wait=false 2>/dev/null; then
+		wait_until "root content ${ROOT_CONTENT} RequestsReady=False after orphan VSC delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
+			|| soft "16: root RequestsReady did not flip after orphan VSC delete (VSC ownerRef wake-up may be degraded; revalidation backstops)"
+		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" RequestsReady reason)"
+		[[ "${RR_REASON}" == "ArtifactMissing" ]] && note "16: orphan VSC deletion surfaced ArtifactMissing at root" \
+			|| soft "16: orphan VSC missing reason=${RR_REASON} (expected ArtifactMissing)"
+		wait_until "root Snapshot ${SNAP} Ready=False after orphan VSC delete" \
+			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
+			|| soft "16: root did not flip Ready=False after orphan VSC delete"
+		[[ -n "${LEAF_CONTENT}" && "${LEAF_CONTENT}" != "${ROOT_CONTENT}" ]] && { content_ready_true "${LEAF_CONTENT}" \
+			&& note "16: domain disk content isolation held under orphan VSC delete" \
+			|| soft "16: domain disk content not Ready under orphan VSC delete (isolation?)"; }
+		note "16: orphan (visibility-leaf) data artifact loss invalidated the root identically to the domain path"
+	else
+		soft "16: could not delete orphan VSC ${ORPHAN_VSC}; skipping"
+	fi
+fi
+save_graph "16-orphan-vsc-deleted" "${NS}" "${SNAP}" "tree" "logical"
+save_artifacts "16-orphan-vsc-deleted" "${NS}"
+log "16-orphan-vsc-deleted: done"
 
 # ---------------------------------------------------------------------------
 # 10-vsc-missing (terminal artifact-missing; destructive — cleans NS after)

@@ -156,9 +156,19 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 Выполняется на кластере с задеплоенным контроллером и tree-demo (root `Snapshot` → VM child → Disk leaf с MCP/VSC), не в envtest. Корректность на reconcile уже доказана unit+integration; live-gate проверяет сквозной mirror до root `Snapshot` и sibling isolation на реальном GC/RBAC.
 
 > Автоматический staged-прогон шагов ниже: `hack/snapshot-tree-demo-e2e.sh`
-> (стадии `00-preflight`..`11-chunk-missing`, артефакты `artifacts/tree-demo-<run-id>/`;
+> (стадии `00-preflight`..`11-chunk-missing`, включая failure-propagation /
+> parent-invalidation блок `12-child-snapshot-deleted`, `13-snapshotcontent-deleted`,
+> `14-mcp-deleted`, `17-child-ready-false`, `18-recovery` (recoverable) и терминальные
+> `15-chunk-deleted`, `16-orphan-vsc-deleted`; артефакты `artifacts/tree-demo-<run-id>/`;
 > ядро инвариантов — hard-fail, гоночное — `SOFT`). Описание стадий —
 > [`snapshot-tree-demo-runbook.md` §9](snapshot-tree-demo-runbook.md#9-staged-diagnostic-hacksnapshot-tree-demo-e2esh). Шаги 1–6 ниже — ручной эквивалент.
+>
+> Стадии 12–18 проверяют инвариант **INV-FAIL-PROP** (`spec/system-spec.md` §3.8): parent
+> `Ready=True` IFF все обязательные потомки/артефакты present+healthy. Recoverable-удаления
+> (12/13/14/17) инвалидируют дерево и восстанавливают `Ready=True`; терминальные (15/16)
+> намеренно деградируют дерево и идут после `18-recovery`. Удаление orphan VS visibility-leaf
+> само по себе **не** инвалидирует, пока retained VSC жив (durable artifact, §3.9.11); инвалидирует
+> именно потеря VSC (стадия 16).
 
 1. Baseline: `kubectl get snapshot -n <ns> <root> -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'` == `True`; root/VM/Disk `SnapshotContent` и sibling — `Ready=True`; в графе нет `MISSING`. Зафиксировать имена leaf MCP, VSC(ы) и `MCP.status.chunks[]`.
 2. MCP Failed: `kubectl patch manifestcheckpoint <mcp> --subresource=status --type=merge -p '{"status":{"conditions":[{"type":"Ready","status":"False","reason":"Failed","message":"e2e injected MCP failure","lastTransitionTime":"<now>"}]}}'` → ждать leaf `RequestsReady=False/ManifestCheckpointFailed`, вверх `ChildrenFailed`, root `Snapshot Ready=False` (mirror); затем patch назад `Ready=True` → full recovery.

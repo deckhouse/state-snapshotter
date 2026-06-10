@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
@@ -133,8 +134,15 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 	u.SetGroupVersionKind(r.gvk)
 	if err := childReader.Get(ctx, req.NamespacedName, u); err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			logger.Info("nss child relay: child not found (ignored)")
-			return ctrl.Result{}, nil
+			// Child snapshot deletion (or a delete that already raced past the cache): the object is
+			// gone, so we cannot read its identity, but the relay already knows the child's GVK
+			// (r.gvk) and its key (req). Synthesize a minimal child object and STILL wake every parent
+			// Snapshot whose status.childrenSnapshotRefs reference it. Without this, a deleted child
+			// Snapshot would not be propagated event-driven to the parent — invalidation/recovery would
+			// rely only on the content-side ownerRef chain and the 30s polling fallback
+			// (INV-FAIL-PROP: a missing required descendant must wake the parent so Ready is recomputed).
+			logger.Info("nss child relay: child not found; waking referencing parents for deletion-driven recompute")
+			return r.enqueueParentsForDeletedChild(ctx, childReader, req)
 		}
 		logger.Info("nss child relay: get child failed", "error", err.Error())
 		return ctrl.Result{}, err
@@ -154,6 +162,47 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 		logger.Info("nss child relay: no Snapshot parents reference this child (strict ref mismatch or empty graph)")
 		return ctrl.Result{}, nil
 	}
+	return r.reconcileParents(ctx, reqs)
+}
+
+// enqueueParentsForDeletedChild handles the delete event for a child snapshot whose object is already
+// gone from the API. It reconstructs a minimal unstructured child from the relay's known GVK and the
+// request key (namespace/name) — exactly the fields findParentsReferencingChildSnapshot matches on
+// (apiVersion, kind, name, namespace) — and reconciles every parent Snapshot that still references it.
+// This makes child-Snapshot deletion an event-driven parent wake-up instead of relying solely on the
+// content-side ownerRef chain and the polling fallback.
+func (r *nssChildSnapshotWatchRelay) enqueueParentsForDeletedChild(ctx context.Context, childReader client.Reader, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).V(1)
+	if req.Namespace == "" {
+		// Run tree is namespace-local; a cluster-scoped child key cannot match any namespaced parent.
+		return ctrl.Result{}, nil
+	}
+	synthetic := buildSyntheticDeletedChild(r.gvk, req.Namespace, req.Name)
+	reqs := findParentsReferencingChildSnapshot(ctx, childReader, synthetic)
+	if len(reqs) == 0 {
+		logger.Info("nss child relay: deleted child has no referencing parents (already pruned)")
+		return ctrl.Result{}, nil
+	}
+	return r.reconcileParents(ctx, reqs)
+}
+
+// buildSyntheticDeletedChild reconstructs the minimal child snapshot identity (apiVersion, kind,
+// namespace, name) needed to match parents' status.childrenSnapshotRefs after the real object has been
+// deleted from the API. Only the fields findParentsReferencingChildSnapshot reads are populated.
+func buildSyntheticDeletedChild(gvk schema.GroupVersionKind, namespace, name string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	u.SetNamespace(namespace)
+	u.SetName(name)
+	return u
+}
+
+// reconcileParents drives parent Snapshot reconciles for the given requests and folds their results
+// into a single best result (requeue wins, longest RequeueAfter wins) plus the first error. Returning
+// the error preserves the controller-runtime backoff requeue of the child event so a transient parent
+// failure is retried rather than dropped.
+func (r *nssChildSnapshotWatchRelay) reconcileParents(ctx context.Context, reqs []reconcile.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).V(1)
 	parentNames := make([]string, 0, len(reqs))
 	for _, pr := range reqs {
 		parentNames = append(parentNames, pr.Namespace+"/"+pr.Name)

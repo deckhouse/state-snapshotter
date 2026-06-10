@@ -159,6 +159,17 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 		return false, "", "", fmt.Errorf("get VolumeSnapshotContent %s: %w", name, err)
 	}
 
+	// A VSC with a deletionTimestamp is going away: it MUST NOT count as a healthy durable artifact
+	// even while it still exists and reports readyToUse=true (otherwise the parent would hold a stale
+	// Ready=True over a data artifact that is being deleted). Treat it as ArtifactMissing — the same
+	// terminal classification the data leg uses once the object is fully gone — so the transition is
+	// monotonic and does not flip ready→pending→missing. The deleting VSC is intentionally not
+	// ownerRef self-healed (see selfHealDataArtifactOwnerRefs), keeping the two paths consistent.
+	if !artifactObj.GetDeletionTimestamp().IsZero() {
+		return false, snapshot.ReasonArtifactMissing,
+			fmt.Sprintf("VolumeSnapshotContent %s is being deleted", name), nil
+	}
+
 	readyToUse, found, err := unstructured.NestedBool(artifactObj.Object, "status", "readyToUse")
 	if err != nil {
 		return false, "", "", fmt.Errorf("read VolumeSnapshotContent %s status.readyToUse: %w", name, err)

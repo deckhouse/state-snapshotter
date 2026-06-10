@@ -4,7 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -131,6 +133,25 @@ func TestResolveDataReadinessTwoVSCBothReady(t *testing.T) {
 	}
 }
 
+// A VSC that is being deleted (deletionTimestamp set) must not keep the parent Ready=True even though
+// it still exists and reports readyToUse=true. Classified terminal ArtifactMissing (INV-FAIL-PROP).
+func TestResolveDataReadinessVSCDeleting(t *testing.T) {
+	r, content := dataReadinessFixture(t,
+		dataBinding("pvc-1", "vsc-deleting", true),
+		withVSCDeleting("vsc-deleting"),
+	)
+	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
+	if err != nil {
+		t.Fatalf("resolveDataReadiness: %v", err)
+	}
+	if ready || reason != snapshot.ReasonArtifactMissing {
+		t.Fatalf("expected ArtifactMissing for deleting VSC, got ready=%v reason=%q msg=%q", ready, reason, msg)
+	}
+	if !strings.Contains(msg, "vsc-deleting") {
+		t.Fatalf("expected deleting VSC name in message, got %q", msg)
+	}
+}
+
 func TestResolveDataReadinessUnknownArtifactKind(t *testing.T) {
 	binding := dataBinding("pvc-1", "other-artifact", true)
 	binding.Artifact.Kind = "UnknownVolumeBackend"
@@ -196,6 +217,19 @@ func withVSCNoReadyToUse(name string) dataReadinessOption {
 			Kind:    kindVolumeSnapshotContent,
 		})
 		obj.SetName(name)
+		s.vscs = append(s.vscs, obj)
+	}
+}
+
+// withVSCDeleting adds a VolumeSnapshotContent that still exists and reports readyToUse=true but
+// carries a deletionTimestamp (a finalizer is required by the fake client to keep it present). It must
+// be classified ArtifactMissing — a deleting durable artifact is not healthy.
+func withVSCDeleting(name string) dataReadinessOption {
+	return func(s *dataReadinessFixtureState) {
+		obj := volumeSnapshotContentObject(name, true)
+		obj.SetFinalizers([]string{"state-snapshotter.deckhouse.io/artifact-protect"})
+		now := metav1.NewTime(time.Now())
+		obj.SetDeletionTimestamp(&now)
 		s.vscs = append(s.vscs, obj)
 	}
 }
