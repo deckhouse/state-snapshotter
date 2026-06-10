@@ -28,6 +28,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -47,7 +48,7 @@ type Server struct {
 // caCert: optional CA certificate bytes for mTLS (if provided, mTLS is mandatory - no fallback)
 // allowedClientCNs: list of allowed client certificate CNs for mTLS (comma-separated)
 // Returns nil if caCert is specified but cannot be parsed
-func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string, restMappers ...meta.RESTMapper) *Server {
+func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string, cfg *config.Options, restMappers ...meta.RESTMapper) *Server {
 	var restMapper meta.RESTMapper
 	if len(restMappers) > 0 {
 		restMapper = restMappers[0]
@@ -60,7 +61,9 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
 	restoreService := restore.NewService(directClient, archiveService)
 	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
-	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper)
+	importHandler := NewImportHandler(directClient, cfg, logger)
+	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper).
+		WithImportHandler(importHandler)
 
 	// Setup routes
 	mux := http.NewServeMux()

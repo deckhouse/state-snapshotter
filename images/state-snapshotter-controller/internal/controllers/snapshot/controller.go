@@ -162,6 +162,12 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return res, nil
 	}
 
+	// Import path: spec.existingContentRef is set by the import build endpoint.
+	// Skip all capture logic and bind directly to the referenced SnapshotContent.
+	if nsSnap.Spec.ExistingContentRef != nil && nsSnap.Spec.ExistingContentRef.Name != "" {
+		return r.reconcileImportBound(ctx, nsSnap, rootOK)
+	}
+
 	var ns corev1.Namespace
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Namespace}, &ns); err != nil {
 		if errors.IsNotFound(err) {

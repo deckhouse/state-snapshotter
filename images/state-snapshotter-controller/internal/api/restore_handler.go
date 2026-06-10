@@ -21,11 +21,12 @@ import (
 )
 
 type RestoreHandler struct {
-	client       client.Client
-	service      *restore.Service
-	logger       logger.LoggerInterface
-	nsAggregated *usecase.AggregatedNamespaceManifests
-	restMapper   meta.RESTMapper
+	client        client.Client
+	service       *restore.Service
+	logger        logger.LoggerInterface
+	nsAggregated  *usecase.AggregatedNamespaceManifests
+	restMapper    meta.RESTMapper
+	importHandler *ImportHandler
 }
 
 func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests, restMappers ...meta.RESTMapper) *RestoreHandler {
@@ -40,6 +41,12 @@ func NewRestoreHandler(client client.Client, service *restore.Service, logger lo
 		nsAggregated: nsAggregated,
 		restMapper:   restMapper,
 	}
+}
+
+// WithImportHandler attaches the import handler so import routes are served in the same mux pattern.
+func (h *RestoreHandler) WithImportHandler(ih *ImportHandler) *RestoreHandler {
+	h.importHandler = ih
+	return h
 }
 
 func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
@@ -68,6 +75,29 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 			}
 			snapshotName := parts[2]
 			subresource := parts[3]
+			// Import routes (write operations) are handled before the GET-only guard.
+			if h.importHandler != nil {
+				switch subresource {
+				case "import-manifests":
+					if len(parts) != 5 {
+						h.writeKubernetesErrorResponse(w, http.StatusBadRequest, "BadRequest", "nodeId required")
+						return
+					}
+					if r.Method != http.MethodPut {
+						h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only PUT is supported for import-manifests")
+						return
+					}
+					h.importHandler.HandleImportManifests(w, r, namespace, snapshotName, parts[4])
+					return
+				case "import-build":
+					if r.Method != http.MethodPost {
+						h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only POST is supported for import-build")
+						return
+					}
+					h.importHandler.HandleImportBuild(w, r, namespace, snapshotName)
+					return
+				}
+			}
 			if r.Method != http.MethodGet {
 				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
 				return

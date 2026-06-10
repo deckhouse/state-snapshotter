@@ -44,6 +44,21 @@ type SnapshotList struct {
 type SnapshotSpec struct {
 	// SnapshotClassName optionally selects class/policy (aligned with unified snapshot model; resolution is N2+).
 	SnapshotClassName string `json:"snapshotClassName,omitempty"`
+
+	// ExistingContentRef is an optional reference to an already-existing SnapshotContent.
+	// When set, the Snapshot controller skips all capture logic (MCR/VCR/child graph) and
+	// binds directly to the referenced SnapshotContent. Used by d8 snapshot upload after the
+	// import build endpoint assembles the content tree.
+	// +optional
+	ExistingContentRef *SnapshotExistingContentRef `json:"existingContentRef,omitempty"`
+}
+
+// SnapshotExistingContentRef references an already-existing SnapshotContent by name.
+// +k8s:deepcopy-gen=true
+type SnapshotExistingContentRef struct {
+	// Name is the cluster-scoped name of the SnapshotContent to bind to.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // +k8s:deepcopy-gen=true

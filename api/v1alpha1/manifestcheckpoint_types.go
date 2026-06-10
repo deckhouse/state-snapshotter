@@ -42,13 +42,15 @@ type ManifestCheckpointList struct {
 
 // +k8s:deepcopy-gen=true
 type ManifestCheckpointSpec struct {
-	// SourceNamespace is the namespace of the original ManifestCaptureRequest
+	// SourceNamespace is the namespace of the original ManifestCaptureRequest.
+	// For import-mode checkpoints (d8 snapshot upload) this holds the target namespace.
 	// +kubebuilder:validation:Required
 	SourceNamespace string `json:"sourceNamespace"`
 
-	// ManifestCaptureRequestRef references the ManifestCaptureRequest that created this checkpoint
-	// +kubebuilder:validation:Required
-	ManifestCaptureRequestRef *ObjectReference `json:"manifestCaptureRequestRef"`
+	// ManifestCaptureRequestRef references the ManifestCaptureRequest that created this checkpoint.
+	// Nil for import-mode checkpoints created directly by the snapshot import API (d8 snapshot upload).
+	// +optional
+	ManifestCaptureRequestRef *ObjectReference `json:"manifestCaptureRequestRef,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true

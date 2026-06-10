@@ -45,6 +45,21 @@ spec:
             type: object
           spec:
             properties:
+              existingContentRef:
+                description: |-
+                  ExistingContentRef is an optional reference to an already-existing SnapshotContent.
+                  When set, the Snapshot controller skips all capture logic (MCR/VCR/child graph) and
+                  binds directly to the referenced SnapshotContent. Used by d8 snapshot upload after the
+                  import build endpoint assembles the content tree.
+                properties:
+                  name:
+                    description: Name is the cluster-scoped name of the SnapshotContent
+                      to bind to.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               snapshotClassName:
                 description: SnapshotClassName optionally selects class/policy (aligned
                   with unified snapshot model; resolution is N2+).

@@ -47,8 +47,9 @@ spec:
           spec:
             properties:
               manifestCaptureRequestRef:
-                description: ManifestCaptureRequestRef references the ManifestCaptureRequest
-                  that created this checkpoint
+                description: |-
+                  ManifestCaptureRequestRef references the ManifestCaptureRequest that created this checkpoint.
+                  Nil for import-mode checkpoints created directly by the snapshot import API (d8 snapshot upload).
                 properties:
                   name:
                     description: Name of the referred object
@@ -66,10 +67,11 @@ spec:
                 - uid
                 type: object
               sourceNamespace:
-                description: SourceNamespace is the namespace of the original ManifestCaptureRequest
+                description: |-
+                  SourceNamespace is the namespace of the original ManifestCaptureRequest.
+                  For import-mode checkpoints (d8 snapshot upload) this holds the target namespace.
                 type: string
             required:
-            - manifestCaptureRequestRef
             - sourceNamespace
             type: object
           status:
