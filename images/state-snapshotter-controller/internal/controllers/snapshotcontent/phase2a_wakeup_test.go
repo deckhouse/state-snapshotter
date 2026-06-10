@@ -260,6 +260,12 @@ func TestSelfHealVSCAlreadyOwnedNoUpdate(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	vsc := volumeSnapshotContentObject("vsc-owned", true)
+	// Already-correct means BOTH the controller ownerRef AND the durable deletionPolicy=Retain are in
+	// place (the handoff/self-heal enforces Retain, see EnsureVolumeSnapshotContentsOwnedByContent), so a
+	// steady-state reconcile must not patch.
+	if err := unstructured.SetNestedField(vsc.Object, "Retain", "spec", "deletionPolicy"); err != nil {
+		t.Fatalf("set deletionPolicy: %v", err)
+	}
 	ctrlTrue := true
 	vsc.SetOwnerReferences([]metav1.OwnerReference{{
 		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),

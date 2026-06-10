@@ -48,7 +48,16 @@ func PublishSnapshotContentDataRefs(ctx context.Context, c client.Client, conten
 	})
 }
 
-// EnsureVolumeSnapshotContentsOwnedByContent patches VSC ownerReferences to the bound SnapshotContent.
+// volumeSnapshotContentRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot /
+// VolumeCaptureRequest is deleted (durable-artifact contract, ADR 2026-06-09 / spec §3.9.6, §3.9.11).
+const volumeSnapshotContentRetainPolicy = "Retain"
+
+// EnsureVolumeSnapshotContentsOwnedByContent performs the durable-artifact handoff for each bound VSC:
+// it re-parents the VSC ownerReference to the bound SnapshotContent AND forces spec.deletionPolicy to
+// Retain so the artifact survives deletion of the per-run VolumeSnapshot/VCR. This mirrors the orphan
+// PVC path (ensureVolumeSnapshotContentRetain): without the Retain step a class-default Delete policy
+// would let the underlying snapshot be garbage-collected, breaking durability (the domain VCR path
+// previously left the VSC at deletionPolicy=Delete).
 func EnsureVolumeSnapshotContentsOwnedByContent(
 	ctx context.Context,
 	c client.Client,
@@ -88,15 +97,27 @@ func ensureVolumeSnapshotContentOwnedByContent(
 			UID:        content.UID,
 			Controller: func() *bool { b := true; return &b }(),
 		}
-		refs, changed, err := snapshotContentControllerOwnerRefsForHandoff(obj.GetOwnerReferences(), ownerRef)
+		refs, ownerChanged, err := snapshotContentControllerOwnerRefsForHandoff(obj.GetOwnerReferences(), ownerRef)
 		if err != nil {
 			return fmt.Errorf("VolumeSnapshotContent %s: %w", vscName, err)
 		}
-		if !changed {
+		policy, _, perr := unstructured.NestedString(obj.Object, "spec", "deletionPolicy")
+		if perr != nil {
+			return fmt.Errorf("read VolumeSnapshotContent %s deletionPolicy: %w", vscName, perr)
+		}
+		policyChanged := policy != volumeSnapshotContentRetainPolicy
+		if !ownerChanged && !policyChanged {
 			return nil
 		}
 		base := obj.DeepCopy()
-		obj.SetOwnerReferences(refs)
+		if ownerChanged {
+			obj.SetOwnerReferences(refs)
+		}
+		if policyChanged {
+			if serr := unstructured.SetNestedField(obj.Object, volumeSnapshotContentRetainPolicy, "spec", "deletionPolicy"); serr != nil {
+				return fmt.Errorf("set VolumeSnapshotContent %s deletionPolicy=Retain: %w", vscName, serr)
+			}
+		}
 		return c.Patch(ctx, obj, client.MergeFrom(base))
 	})
 }
