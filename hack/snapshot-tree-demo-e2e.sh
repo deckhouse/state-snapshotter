@@ -796,6 +796,15 @@ fi
 if [[ "$(kubectl auth can-i create "${MCR_RES}" --as="${CONTROLLER_SA}" -n "${NS}" 2>/dev/null || echo no)" != "yes" ]]; then
 	soft "controller SA cannot create ${MCR_RES} in target ns; capture will stall"
 fi
+# Pre-existing CSD claiming the demo snapshot kinds => guaranteed KindConflict for THIS run's CSD,
+# which would only surface as a 600s "never Accepted" timeout much later. CSDs are cluster-scoped, so
+# a leftover from an interrupted prior run survives namespace cleanup. Fail fast with the offenders
+# named (the run has not created its own CSD yet, so any demo-mapping CSD here is foreign).
+PREEXISTING_DEMO_CSD="$(kubectl get "${CSD_RES}" -o json 2>/dev/null \
+	| jq -r '[.items[]? | select(any(.spec.snapshotResourceMapping[]?; .source.kind == "DemoVirtualMachine" or .source.kind == "DemoVirtualDisk")) | .metadata.name] | join(", ")' 2>/dev/null || true)"
+if [[ -n "${PREEXISTING_DEMO_CSD}" ]]; then
+	die "pre-existing CSD(s) already claim the demo snapshot kinds: ${PREEXISTING_DEMO_CSD}. This run's CSD ${CSD_NAME} would hit Accepted=False/KindConflict. Delete the leftover CSD(s) first: kubectl delete ${CSD_RES} ${PREEXISTING_DEMO_CSD// /,}"
+fi
 # Fresh objects must NOT carry deprecated conditions.
 {
 	echo "module_ns=${MOD_NS}"

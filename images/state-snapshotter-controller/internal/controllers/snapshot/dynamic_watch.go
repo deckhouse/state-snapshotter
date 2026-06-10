@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
@@ -153,16 +154,50 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 	reqs := findParentsReferencingChildSnapshot(ctx, childReader, u)
 	if len(reqs) == 0 {
 		bound, hasBound, _ := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
-		if hasBound && bound != "" {
-			// Domain controllers may patch child status (bound) before the parent Snapshot lists the
-			// child in status.childrenSnapshotRefs; retry shortly instead of dropping the event.
-			logger.Info("nss child relay: bound child but no parent Snapshot matched yet; requeue")
+		// Only retry for a genuine create/registration race: a DIRECT child of a unified Snapshot
+		// (controller-owned by a `Snapshot`) that is already bound but whose owning parent has not yet
+		// listed it in status.childrenSnapshotRefs. The parent will add it within a reconcile or two, so
+		// a short requeue closes the window.
+		//
+		// We MUST gate this on the unified-Snapshot controller owner, otherwise this branch hot-loops
+		// forever (RequeueAfter has no attempt cap) for two object classes that no unified Snapshot will
+		// ever reference and that are propagated by other means:
+		//   - the head/root Snapshot itself: it has NO ownerReference and no parent by definition;
+		//   - a nested grandchild owned by a DOMAIN snapshot (e.g. a disk snapshot owned by a VM
+		//     snapshot): its propagation flows through the content ownerRef chain, not this relay.
+		// (Bug: such objects were requeued every 200ms indefinitely, pinning a reconcile worker.)
+		if hasBound && bound != "" && childHasUnifiedSnapshotControllerOwner(u) {
+			logger.Info("nss child relay: bound direct child not yet listed by its owning Snapshot; requeue")
 			return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
-		logger.Info("nss child relay: no Snapshot parents reference this child (strict ref mismatch or empty graph)")
+		logger.Info("nss child relay: no Snapshot parent references this child and it is not a bound unified-Snapshot-owned direct child; not requeuing")
 		return ctrl.Result{}, nil
 	}
 	return r.reconcileParents(ctx, reqs)
+}
+
+// childHasUnifiedSnapshotControllerOwner reports whether the child object is controller-owned by a
+// unified Snapshot (storage.deckhouse.io/<v>, Kind=Snapshot). Such an object is a direct child of a
+// Snapshot run tree and is expected to be listed in that parent's status.childrenSnapshotRefs, so the
+// relay may briefly retry while the parent catches up. The head/root Snapshot (no ownerReference) and
+// children owned by domain snapshots return false.
+func childHasUnifiedSnapshotControllerOwner(u *unstructured.Unstructured) bool {
+	if u == nil {
+		return false
+	}
+	for _, or := range u.GetOwnerReferences() {
+		if or.Controller == nil || !*or.Controller {
+			continue
+		}
+		gv, err := schema.ParseGroupVersion(or.APIVersion)
+		if err != nil {
+			continue
+		}
+		if gv.Group == storagev1alpha1.SchemeGroupVersion.Group && or.Kind == "Snapshot" {
+			return true
+		}
+	}
+	return false
 }
 
 // enqueueParentsForDeletedChild handles the delete event for a child snapshot whose object is already

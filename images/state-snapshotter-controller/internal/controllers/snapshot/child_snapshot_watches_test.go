@@ -159,3 +159,69 @@ func TestFindParentsReferencingChildSnapshot_SameNameDifferentGVKNoFalsePositive
 		t.Fatalf("expected no parent, got %+v", reqs)
 	}
 }
+
+// The relay's "bound child not yet listed -> requeue" race mitigation MUST fire only for direct
+// children controller-owned by a unified Snapshot. The head/root Snapshot (no ownerReference) and
+// grandchildren owned by a domain snapshot MUST NOT match, otherwise the relay hot-loops forever.
+func TestChildHasUnifiedSnapshotControllerOwner(t *testing.T) {
+	ctrlTrue := true
+	ctrlFalse := false
+	snapAPIVersion := storagev1alpha1.SchemeGroupVersion.String()
+
+	newChild := func(owners ...metav1.OwnerReference) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "DemoSnap"})
+		u.SetNamespace("ns-a")
+		u.SetName("child")
+		u.SetOwnerReferences(owners)
+		return u
+	}
+
+	cases := []struct {
+		name  string
+		child *unstructured.Unstructured
+		want  bool
+	}{
+		{
+			name:  "root snapshot has no ownerReference",
+			child: newChild(),
+			want:  false,
+		},
+		{
+			name: "direct child controller-owned by unified Snapshot",
+			child: newChild(metav1.OwnerReference{
+				APIVersion: snapAPIVersion, Kind: "Snapshot", Name: "root", Controller: &ctrlTrue,
+			}),
+			want: true,
+		},
+		{
+			name: "grandchild owned by a domain snapshot",
+			child: newChild(metav1.OwnerReference{
+				APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+				Kind:       "DemoVirtualMachineSnapshot", Name: "vm", Controller: &ctrlTrue,
+			}),
+			want: false,
+		},
+		{
+			name: "non-controller owner Snapshot does not count",
+			child: newChild(metav1.OwnerReference{
+				APIVersion: snapAPIVersion, Kind: "Snapshot", Name: "root", Controller: &ctrlFalse,
+			}),
+			want: false,
+		},
+		{
+			name: "Snapshot kind in a different group does not count",
+			child: newChild(metav1.OwnerReference{
+				APIVersion: "other.group/v1", Kind: "Snapshot", Name: "x", Controller: &ctrlTrue,
+			}),
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := childHasUnifiedSnapshotControllerOwner(tc.child); got != tc.want {
+				t.Fatalf("childHasUnifiedSnapshotControllerOwner=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
