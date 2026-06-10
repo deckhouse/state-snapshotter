@@ -112,7 +112,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
 			return ctrl.Result{}, gerr
 		}
-		hasSubtree := len(freshParent.Status.ChildrenSnapshotRefs) > 0
+		hasSubtree := hasNonVisibilitySnapshotChildren(freshParent.Status.ChildrenSnapshotRefs)
 		// Transient subtree state while childrenSnapshotRefs are populated or child snapshot is still binding;
 		// do not fail capture as ListFailed — requeue like ChildrenPending.
 		transientChildGraph := errors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
@@ -180,8 +180,8 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 				return ctrl.Result{}, gerr
 			}
 			// Subtree-root: plan drift is not the primary convergence path; delete stale MCR and retry with fresh targets.
-			// Plain N2a (no childrenSnapshotRefs): terminal CapturePlanDrift for operator visibility.
-			if len(freshParent.Status.ChildrenSnapshotRefs) > 0 {
+			// Plain N2a (no real domain children; VS visibility leaves do not count): terminal CapturePlanDrift for operator visibility.
+			if hasNonVisibilitySnapshotChildren(freshParent.Status.ChildrenSnapshotRefs) {
 				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
 					return ctrl.Result{}, delErr
 				}

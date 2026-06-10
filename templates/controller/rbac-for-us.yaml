@@ -127,9 +127,25 @@ rules:
   verbs: ["get", "list", "watch", "update", "patch"]
 
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves.
+# No "update": the controller only creates, adopts via ownerRef patch, and deletes stale leaves.
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  verbs: ["get", "list", "watch", "create", "patch", "delete"]
+
+# VolumeSnapshotClass (CSI): orphan PVC data leg resolves the class via the PVC StorageClass
+# annotation and validates its driver. Read-only, fetched directly (APIReader), so "get" is enough.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotclasses"]
+  verbs: ["get"]
+
+# PersistentVolume (cluster-scoped) and StorageClass: orphan PVC data leg reads the bound PV CSI driver
+# and the StorageClass volumesnapshotclass annotation. Read-only, fetched directly (APIReader).
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get"]
 
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
 # Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are

@@ -33,6 +33,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	volumecapturectrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
@@ -49,11 +50,13 @@ func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 		_, ferr := r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
 		return ferr
 	}
+	// Root residual/orphan scope runs even with zero targets so stale nss-vs-* leaves (PVCs that became
+	// covered by a domain controller) are pruned. The domain VCR path keeps the zero-targets fast return.
+	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
+		return r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, content, targets)
+	}
 	if len(targets) == 0 {
 		return nil
-	}
-	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
-		return r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, targets)
 	}
 
 	vcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}
@@ -81,11 +84,13 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 	if err != nil {
 		return r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
 	}
-	if len(targets) == 0 {
-		return ctrl.Result{}, nil
-	}
+	// Residual/orphan root scope runs even with zero targets so a stale VCR / status.volumeCaptureRequestName
+	// left by a previous (VCR-based) run is cleared. The VCR path keeps the zero-targets fast return below.
 	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
 		return r.reconcileOrphanPVCVolumeSnapshotPublish(ctx, nsSnap, content, targets, allowRequeue)
+	}
+	if len(targets) == 0 {
+		return ctrl.Result{}, nil
 	}
 
 	vcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}
@@ -105,7 +110,7 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 
 	if failed, reason, msg := volumecapturectrl.VolumeCaptureRequestFailed(vcr); failed {
 		// Retain VCR and status.volumeCaptureRequestName for operator debugging (see design docs).
-		return r.failCapture(ctx, nsSnap, content, "VolumeCaptureFailed", fmt.Sprintf("%s: %s", reason, msg))
+		return r.failCapture(ctx, nsSnap, content, snapshotpkg.ReasonVolumeCaptureFailed, fmt.Sprintf("%s: %s", reason, msg))
 	}
 
 	if !volumecapturectrl.VolumeCaptureRequestReady(vcr) {

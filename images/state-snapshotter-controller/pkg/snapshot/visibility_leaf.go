@@ -19,8 +19,23 @@ package snapshot
 import storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 
 const (
-	CSISnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
-	KindVolumeSnapshot    = "VolumeSnapshot"
+	// CSISnapshotGroup is the external-snapshotter API group.
+	CSISnapshotGroup = "snapshot.storage.k8s.io"
+	// CSISnapshotVersion is the external-snapshotter API version we interact with.
+	CSISnapshotVersion = "v1"
+	// CSISnapshotAPIVersion is the external-snapshotter group/version (apiVersion string).
+	CSISnapshotAPIVersion = CSISnapshotGroup + "/" + CSISnapshotVersion
+	// KindVolumeSnapshot is the CSI VolumeSnapshot kind.
+	KindVolumeSnapshot = "VolumeSnapshot"
+	// KindVolumeSnapshotContent is the CSI VolumeSnapshotContent kind.
+	KindVolumeSnapshotContent = "VolumeSnapshotContent"
+	// KindVolumeSnapshotClass is the CSI VolumeSnapshotClass kind.
+	KindVolumeSnapshotClass = "VolumeSnapshotClass"
+
+	// AnnotationStorageClassVolumeSnapshotClass is the StorageClass annotation that names the
+	// VolumeSnapshotClass to use for volumes provisioned by that StorageClass. The orphan-PVC data leg
+	// resolves the class through this annotation (PVC -> StorageClass -> annotation), mirroring the VCR path.
+	AnnotationStorageClassVolumeSnapshotClass = "storage.deckhouse.io/volumesnapshotclass"
 )
 
 // IsVolumeSnapshotVisibilityLeaf reports whether a Snapshot-level child ref is a CSI VolumeSnapshot

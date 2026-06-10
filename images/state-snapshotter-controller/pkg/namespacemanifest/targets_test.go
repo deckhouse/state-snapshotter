@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
@@ -38,6 +39,44 @@ func TestBuildManifestCaptureTargets_EmptyNamespaceHasNoTargets(t *testing.T) {
 	}
 	if len(targets) != 0 {
 		t.Fatalf("expected no targets in empty namespace, got %#v", targets)
+	}
+}
+
+func TestBuildManifestCaptureTargets_PVCCapturedVolumeSnapshotExcluded(t *testing.T) {
+	volumeSnapshotsGVR := schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
+	listKinds := make(map[schema.GroupVersionResource]string, len(n2aNamespacedGVR)+1)
+	for _, gvr := range n2aNamespacedGVR {
+		listKinds[gvr] = gvr.Resource + "List"
+	}
+	listKinds[volumeSnapshotsGVR] = "VolumeSnapshotList"
+
+	pvc := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata":   map[string]interface{}{"name": "pvc-a", "namespace": "ns1"},
+	}}
+	vs := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "snapshot.storage.k8s.io/v1",
+		"kind":       "VolumeSnapshot",
+		"metadata":   map[string]interface{}{"name": "nss-vs-a", "namespace": "ns1"},
+	}}
+	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), listKinds, pvc, vs)
+
+	targets, err := BuildManifestCaptureTargets(context.Background(), dyn, "ns1")
+	if err != nil {
+		t.Fatalf("BuildManifestCaptureTargets: %v", err)
+	}
+	var pvcFound bool
+	for _, target := range targets {
+		if target.Kind == "VolumeSnapshot" {
+			t.Fatalf("VolumeSnapshot must never enter manifest inventory, got %#v", target)
+		}
+		if target.APIVersion == "v1" && target.Kind == "PersistentVolumeClaim" && target.Name == "pvc-a" {
+			pvcFound = true
+		}
+	}
+	if !pvcFound {
+		t.Fatalf("PVC manifest must remain in inventory, got %#v", targets)
 	}
 }
 

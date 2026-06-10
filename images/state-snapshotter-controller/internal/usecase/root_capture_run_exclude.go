@@ -86,7 +86,8 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if err != nil {
 		return nil, err
 	}
-	if len(rootNS.Status.ChildrenSnapshotRefs) == 0 {
+	if !hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) {
+		// Only VS visibility leaves (or none): no real subtree to exclude; capture own scope directly.
 		return namespacemanifest.AppendOwnedPVCManifestTargets(base, ownedPVC, nil, targetNamespace), nil
 	}
 	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
@@ -95,6 +96,18 @@ func BuildRootNamespaceManifestCaptureTargets(
 	}
 	filtered := namespacemanifest.FilterManifestTargets(base, excl, targetNamespace)
 	return namespacemanifest.AppendOwnedPVCManifestTargets(filtered, ownedPVC, excl, targetNamespace), nil
+}
+
+// hasNonVisibilityChildSnapshotRefs reports whether any child ref is a real domain/subtree child.
+// CSI VolumeSnapshot visibility leaves (orphan-PVC data leg) are excluded.
+func hasNonVisibilityChildSnapshotRefs(refs []storagev1alpha1.SnapshotChildRef) bool {
+	for i := range refs {
+		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(refs[i]) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func collectRunSubtreeManifestExcludeKeys(

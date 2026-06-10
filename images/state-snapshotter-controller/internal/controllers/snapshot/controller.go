@@ -117,6 +117,7 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 			snapshotContentToSnapshotEnqueueHandler(mgr.GetClient()),
 			builder.WithPredicates(passAll),
 		)
+	b = r.addOrphanVolumeSnapshotWatch(b, mgr)
 	return b.Complete(r)
 }
 

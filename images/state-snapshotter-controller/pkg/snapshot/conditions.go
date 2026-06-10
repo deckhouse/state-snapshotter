@@ -57,6 +57,10 @@ const (
 	ReasonDataCapturePending       = "DataCapturePending"
 	ReasonDataArtifactInvalid      = "DataArtifactInvalid"
 	ReasonDataArtifactNotSupported = "DataArtifactNotSupported"
+	// ReasonVolumeCaptureFailed is the terminal data-leg reason when volume capture failed: a failed
+	// VolumeCaptureRequest (domain path) or a terminal CSI VolumeSnapshot/VolumeSnapshotContent error
+	// (namespace-root orphan-PVC path, ADR 2026-06-09 / spec §3.9.11).
+	ReasonVolumeCaptureFailed = "VolumeCaptureFailed"
 	// ReasonManifestCheckpointFailed is the terminal requests-leg reason when the bound ManifestCheckpoint
 	// is terminally failed. Used by SnapshotContent aggregation (own requests leg) and the terminal
 	// child-content classification.
