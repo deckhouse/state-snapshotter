@@ -9,6 +9,9 @@
 #   - RequestsReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
 #   - damaged-leaf Ready=False propagation to root and recovery back to Ready=True;
 #   - sibling isolation;
+#   - both volume-capture data paths: an orphan/standalone PVC (demo-pvc) captured via a CSI
+#     VolumeSnapshot visibility leaf at the namespace root, and a PVC nested under a
+#     DemoVirtualDisk (demo-pvc-disk) captured via the domain VolumeCaptureRequest path;
 #   - root/demo Snapshot Ready as a verbatim mirror of bound SnapshotContent.Ready
 #     (no local Ready recompute required to pass).
 #
@@ -20,7 +23,10 @@
 #     best-effort: they emit WARN + SOFT and store artifacts instead of aborting the run.
 #
 # Artifacts: ${TREE_DEMO_ARTIFACT_DIR:-artifacts}/tree-demo-<run-id>/<stage>/
-#   00-preflight 01-priority-vm-first 02-tree-ready 03-priority-inverted
+#   00-preflight topology-disk-only referenced-pvc-without-disk-csd orphan-pvc-cleanup
+#   01-priority-vm-first 02-tree-ready topology-vm-disk orphan-pvc-vs
+#   domain-pvc-vcr manifest-no-volumesnapshot domain-pvc-failure-coverage
+#   03-priority-inverted
 #   04-domainready-barrier 05-ownership-handoff 06-mcp-failure 07-mcp-recovery
 #   08-vsc-pending 09-vsc-recovery 10-vsc-missing 11-chunk-missing
 #
@@ -64,6 +70,9 @@ BIND_IMAGE="${TREE_DEMO_BIND_IMAGE:-registry.k8s.io/pause:3.9}"
 CONTROLLER_SA="${TREE_DEMO_CONTROLLER_SA:-system:serviceaccount:${MOD_NS}:controller}"
 
 NS="${TREE_DEMO_NAMESPACE:-snapshot-demo-tree-${RUN_ID}}"
+NS_TOPO_DISK_ONLY="${NS}-disk-only"
+NS_REF_PVC_NO_DISK_CSD="${NS}-ref-pvc-no-disk-csd"
+NS_DOMAIN_PVC_FAIL="${NS}-domain-pvc-fail"
 NS_PRIORITY_INV="${NS}-priority-inv"
 NS_DOMAIN_BARRIER="${NS}-domain-barrier"
 CSD_NAME="tree-demo-vm-disk-${RUN_ID}"
@@ -83,7 +92,10 @@ MCR_RES="manifestcapturerequests.state-snapshotter.deckhouse.io"
 MCP_RES="manifestcheckpoints.state-snapshotter.deckhouse.io"
 CHUNK_RES="manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io"
 CSD_RES="customsnapshotdefinitions.state-snapshotter.deckhouse.io"
+VCR_RES="volumecapturerequests.storage.deckhouse.io"
+VS_RES="volumesnapshots.snapshot.storage.k8s.io"
 VSC_RES="volumesnapshotcontents.snapshot.storage.k8s.io"
+VSCLASS_RES="volumesnapshotclasses.snapshot.storage.k8s.io"
 OK_RES="objectkeepers.deckhouse.io"
 VM_RES="demovirtualmachines.demo.state-snapshotter.deckhouse.io"
 DISK_RES="demovirtualdisks.demo.state-snapshotter.deckhouse.io"
@@ -103,6 +115,7 @@ LEAF_CONTENT=""
 LEAF_MCP=""
 SIBLING_SNAP=""     # disk-standalone DemoVirtualDiskSnapshot (root child)
 SIBLING_CONTENT=""
+DOMAIN_VCR_OBSERVED=0
 
 log() { printf '%s\n' "$*" >&2; }
 soft() {
@@ -234,6 +247,11 @@ wait_snapshot_ready() {
 
 pvc_bound() { [[ "$(kubectl -n "$1" get pvc "$2" -o jsonpath='{.status.phase}' 2>/dev/null)" == "Bound" ]]; }
 
+storage_class_binding_mode() {
+	kubectl get storageclass "${STORAGE_CLASS}" -o json 2>/dev/null \
+		| jq -r '.volumeBindingMode // "Immediate"'
+}
+
 # demo_mirror_equal <res> <ns> <snap> <content>: demo Snapshot Ready triple == bound content Ready triple.
 demo_mirror_equal() {
 	[[ -n "$3" && -n "$4" ]] || return 1
@@ -275,11 +293,90 @@ spec:
       storage: 1Gi
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: demo-pvc-disk
+  namespace: ${ns}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: bind-demo-pvc
   namespace: ${ns}
 spec:
+  # Required for WaitForFirstConsumer StorageClasses: scheduling this pod lets Kubernetes
+  # choose a node and bind both demo PVCs before the snapshot run starts.
+  restartPolicy: Never
+  containers:
+    - name: hold
+      image: ${BIND_IMAGE}
+      volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: data-disk
+          mountPath: /data-disk
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: demo-pvc
+    - name: data-disk
+      persistentVolumeClaim:
+        claimName: demo-pvc-disk
+---
+apiVersion: ${DEMO_API}
+kind: DemoVirtualMachine
+metadata:
+  name: vm-1
+  namespace: ${ns}
+spec:
+  virtualDiskName: disk-vm
+---
+apiVersion: ${DEMO_API}
+kind: DemoVirtualDisk
+metadata:
+  name: disk-vm
+  namespace: ${ns}
+spec:
+  persistentVolumeClaimName: demo-pvc-disk
+---
+apiVersion: ${DEMO_API}
+kind: DemoVirtualDisk
+metadata:
+  name: disk-standalone
+  namespace: ${ns}
+spec: {}
+EOF
+}
+
+apply_referenced_pvc_without_disk_csd_source() {
+	local ns="$1"
+	kubectl get namespace "${ns}" >/dev/null 2>&1 || kubectl create namespace "${ns}" >/dev/null
+	kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-1
+  namespace: ${ns}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bind-pvc-1
+  namespace: ${ns}
+spec:
+  # Required for WaitForFirstConsumer StorageClasses so pvc-1 reaches Bound before snapshotting.
   restartPolicy: Never
   containers:
     - name: hold
@@ -290,29 +387,60 @@ spec:
   volumes:
     - name: data
       persistentVolumeClaim:
-        claimName: demo-pvc
----
-apiVersion: ${DEMO_API}
-kind: DemoVirtualMachine
-metadata:
-  name: vm-1
-  namespace: ${ns}
-spec: {}
+        claimName: pvc-1
 ---
 apiVersion: ${DEMO_API}
 kind: DemoVirtualDisk
 metadata:
-  name: disk-vm
+  name: disk-1
   namespace: ${ns}
 spec:
-  virtualMachineName: vm-1
+  persistentVolumeClaimName: pvc-1
+EOF
+}
+
+apply_domain_pvc_failure_source() {
+	local ns="$1"
+	kubectl get namespace "${ns}" >/dev/null 2>&1 || kubectl create namespace "${ns}" >/dev/null
+	kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-fail
+  namespace: ${ns}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bind-pvc-fail
+  namespace: ${ns}
+spec:
+  # Required for WaitForFirstConsumer StorageClasses so pvc-fail reaches Bound before VCR injection.
+  restartPolicy: Never
+  containers:
+    - name: hold
+      image: ${BIND_IMAGE}
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: pvc-fail
 ---
 apiVersion: ${DEMO_API}
 kind: DemoVirtualDisk
 metadata:
-  name: disk-standalone
+  name: disk-fail
   namespace: ${ns}
-spec: {}
+spec:
+  persistentVolumeClaimName: pvc-fail
 EOF
 }
 
@@ -326,6 +454,10 @@ metadata:
   namespace: ${ns}
 spec: {}
 EOF
+}
+
+delete_csd() {
+	kubectl delete "${CSD_RES}" "${CSD_NAME}" --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
 }
 
 # apply_csd <vm_priority> <disk_priority>
@@ -345,6 +477,25 @@ spec:
         apiVersion: ${DEMO_API}
         kind: DemoVirtualMachineSnapshot
       priority: ${vmp}
+    - source:
+        apiVersion: ${DEMO_API}
+        kind: DemoVirtualDisk
+      snapshot:
+        apiVersion: ${DEMO_API}
+        kind: DemoVirtualDiskSnapshot
+      priority: ${diskp}
+EOF
+}
+
+apply_disk_only_csd() {
+	local diskp="$1"
+	kubectl apply -f - <<EOF
+apiVersion: ${SS_API}
+kind: CustomSnapshotDefinition
+metadata:
+  name: ${CSD_NAME}
+spec:
+  snapshotResourceMapping:
     - source:
         apiVersion: ${DEMO_API}
         kind: DemoVirtualDisk
@@ -430,11 +581,19 @@ save_artifacts() {
 	dump_kind "${res}" "demovirtualdisksnapshots" "${ns}" "${DISKSNAP_RES}"
 	dump_kind "${res}" "snapshots" "${ns}" "${SNAP_RES}"
 	dump_kind "${res}" "manifestcapturerequests" "${ns}" "${MCR_RES}"
+	dump_kind "${res}" "volumecapturerequests" "${ns}" "${VCR_RES}"
+	dump_kind "${res}" "volumesnapshots" "${ns}" "${VS_RES}"
 	dump_kind "${res}" "snapshotcontents" "" "${CONTENT_RES}"
 	dump_kind "${res}" "manifestcheckpoints" "" "${MCP_RES}"
 	dump_kind "${res}" "volumesnapshotcontents" "" "${VSC_RES}"
 	dump_kind "${res}" "customsnapshotdefinitions" "" "${CSD_RES}"
 	[[ "${HAS_OBJECTKEEPER}" == "1" ]] && dump_kind "${res}" "objectkeepers" "" "${OK_RES}"
+	kubectl -n "${ns}" get "${SNAP_RES}" "${SNAP}" -o json 2>/dev/null \
+		| jq '.status.childrenSnapshotRefs // []' >"${dir}/childrenSnapshotRefs.json" 2>/dev/null || true
+	kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
+		| jq '[.items[]? | {name: .metadata.name, dataRefs: (.status.dataRefs // [])}]' >"${dir}/dataRefs.json" 2>/dev/null || true
+	kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/${ns}/snapshots/${SNAP}/manifests" \
+		>"${dir}/aggregated-manifests.json" 2>"${dir}/aggregated-manifests.err" || true
 	kubectl get events -n "${ns}" --sort-by=.metadata.creationTimestamp >"${res}/events.txt" 2>/dev/null || true
 	condition_table "${ns}" >"${dir}/conditions.txt" 2>/dev/null || true
 	ownerref_table "${ns}" >"${dir}/ownerrefs.txt" 2>/dev/null || true
@@ -487,6 +646,72 @@ ownerref_table() {
 		((.metadata.ownerReferences // []) | map(.kind + "/" + .name) | join(",") // "none")'
 }
 
+dump_content_mcp_chunks() {
+	local content="$1" out="$2" label="$3"
+	local mcp chunk_dir chunk
+	mkdir -p "${out}/${label}/chunks"
+	kubectl get "${CONTENT_RES}" "${content}" -o yaml >"${out}/${label}/content.yaml" 2>/dev/null || return 1
+	kubectl get "${CONTENT_RES}" "${content}" -o json >"${out}/${label}/content.json" 2>/dev/null || return 1
+	mcp="$(kubectl get "${CONTENT_RES}" "${content}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
+	[[ -n "${mcp}" ]] || return 1
+	printf '%s\n' "${mcp}" >"${out}/${label}/mcp-name.txt"
+	kubectl get "${MCP_RES}" "${mcp}" -o yaml >"${out}/${label}/mcp.yaml" 2>/dev/null || return 1
+	kubectl get "${MCP_RES}" "${mcp}" -o json >"${out}/${label}/mcp.json" 2>/dev/null || return 1
+	chunk_dir="${out}/${label}/chunks"
+	while IFS= read -r chunk; do
+		[[ -n "${chunk}" ]] || continue
+		kubectl_ctrl get "${CHUNK_RES}" "${chunk}" -o yaml >"${chunk_dir}/${chunk}.yaml" 2>/dev/null || return 1
+		kubectl_ctrl get "${CHUNK_RES}" "${chunk}" -o json >"${chunk_dir}/${chunk}.json" 2>/dev/null || return 1
+	done < <(jq -r '.status.chunks[]?.name // empty' "${out}/${label}/mcp.json")
+	python3 - "${chunk_dir}" "${out}/${label}/chunk-objects.json" <<'PY'
+import base64, gzip, json, pathlib, sys
+chunk_dir = pathlib.Path(sys.argv[1])
+out = pathlib.Path(sys.argv[2])
+objects = []
+for path in sorted(chunk_dir.glob("*.json")):
+    with path.open() as f:
+        chunk = json.load(f)
+    data = chunk.get("spec", {}).get("data", "")
+    if not data:
+        continue
+    decoded = gzip.decompress(base64.b64decode(data))
+    payload = json.loads(decoded)
+    if isinstance(payload, list):
+        objects.extend(payload)
+    else:
+        objects.append(payload)
+with out.open("w") as f:
+    json.dump(objects, f, indent=2, sort_keys=True)
+PY
+}
+
+assert_no_vs_vsc_in_content_mcp() {
+	local content="$1" out="$2" label="$3"
+	dump_content_mcp_chunks "${content}" "${out}" "${label}" || die "cannot dump raw MCP/chunks for content ${content}"
+	jq -e '[.[]?|select(.kind=="VolumeSnapshot" or .kind=="VolumeSnapshotContent")]|length==0' \
+		"${out}/${label}/chunk-objects.json" >/dev/null \
+		|| die "raw MCP chunks for ${content} contain VolumeSnapshot/VolumeSnapshotContent"
+}
+
+assert_datarefs_target_uid_unique() {
+	local out="$1"; shift
+	local content
+	mkdir -p "${out}"
+	: >"${out}/datarefs-by-content.jsonl"
+	for content in "$@"; do
+		[[ -n "${content}" ]] || continue
+		kubectl get "${CONTENT_RES}" "${content}" -o json 2>/dev/null \
+			| jq -c --arg c "${content}" '(.status.dataRefs // [])[]? | {content: $c, targetUID, target, artifact}' \
+			>>"${out}/datarefs-by-content.jsonl"
+	done
+	jq -s '
+		group_by(.targetUID)
+		| map(select((.[0].targetUID // "") != "" and length > 1))
+		| length == 0
+	' "${out}/datarefs-by-content.jsonl" >/dev/null \
+		|| die "duplicate dataRefs targetUID across snapshot contents (see ${out}/datarefs-by-content.jsonl)"
+}
+
 # save_graph <stage> <ns> <snap> <name> <mode>
 save_graph() {
 	local stage="$1" ns="$2" snap="$3" name="$4" mode="${5:-logical}"
@@ -506,11 +731,11 @@ save_graph() {
 cleanup_on_exit() {
 	local rc=$?
 	if [[ "${TREE_DEMO_SKIP_CLEANUP:-0}" == "1" ]]; then
-		log "SKIP cleanup: TREE_DEMO_SKIP_CLEANUP=1 (namespaces ${NS} ${NS_PRIORITY_INV} ${NS_DOMAIN_BARRIER}, CSD ${CSD_NAME} kept)"
+		log "SKIP cleanup: TREE_DEMO_SKIP_CLEANUP=1 (namespaces ${NS} ${NS_TOPO_DISK_ONLY} ${NS_REF_PVC_NO_DISK_CSD} ${NS_DOMAIN_PVC_FAIL} ${NS_PRIORITY_INV} ${NS_DOMAIN_BARRIER}, CSD ${CSD_NAME} kept)"
 		return 0
 	fi
 	kubectl delete "${CSD_RES}" "${CSD_NAME}" --ignore-not-found=true --wait=false 2>/dev/null || true
-	kubectl delete namespace "${NS}" "${NS_PRIORITY_INV}" "${NS_DOMAIN_BARRIER}" --ignore-not-found=true --wait=false 2>/dev/null || true
+	kubectl delete namespace "${NS}" "${NS_TOPO_DISK_ONLY}" "${NS_REF_PVC_NO_DISK_CSD}" "${NS_DOMAIN_PVC_FAIL}" "${NS_PRIORITY_INV}" "${NS_DOMAIN_BARRIER}" --ignore-not-found=true --wait=false 2>/dev/null || true
 	return "${rc}"
 }
 trap cleanup_on_exit EXIT
@@ -518,6 +743,7 @@ trap cleanup_on_exit EXIT
 # =============================================================================
 need_cmd kubectl
 need_cmd jq
+need_cmd python3
 mkdir -p "${RUN_ARTIFACT_DIR}"
 log "== tree-demo-e2e run_id=${RUN_ID} ns=${NS} sc=${STORAGE_CLASS} module=${MOD_NS}"
 log "Artifacts: ${RUN_ARTIFACT_DIR}"
@@ -527,10 +753,22 @@ log "Artifacts: ${RUN_ARTIFACT_DIR}"
 # ---------------------------------------------------------------------------
 begin_stage "00-preflight"
 kubectl get storageclass "${STORAGE_CLASS}" >/dev/null || die "storageclass ${STORAGE_CLASS} missing"
+STORAGE_CLASS_BINDING_MODE="$(storage_class_binding_mode)"
+case "${STORAGE_CLASS_BINDING_MODE}" in
+Immediate | WaitForFirstConsumer)
+	note "StorageClass ${STORAGE_CLASS} volumeBindingMode=${STORAGE_CLASS_BINDING_MODE}; bind pods are created before PVC Bound waits"
+	;;
+*)
+	soft "StorageClass ${STORAGE_CLASS} has unexpected volumeBindingMode=${STORAGE_CLASS_BINDING_MODE}; PVC binding behavior may differ"
+	;;
+esac
 kubectl get crd \
 	snapshots.storage.deckhouse.io snapshotcontents.storage.deckhouse.io \
 	manifestcheckpoints.state-snapshotter.deckhouse.io manifestcapturerequests.state-snapshotter.deckhouse.io \
 	customsnapshotdefinitions.state-snapshotter.deckhouse.io \
+	volumecapturerequests.storage.deckhouse.io \
+	volumesnapshots.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io \
+	volumesnapshotclasses.snapshot.storage.k8s.io \
 	demovirtualmachines.demo.state-snapshotter.deckhouse.io \
 	demovirtualdisks.demo.state-snapshotter.deckhouse.io \
 	demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io \
@@ -553,11 +791,127 @@ fi
 	echo "module_ns=${MOD_NS}"
 	echo "controller_sa=${CONTROLLER_SA}"
 	echo "storage_class=${STORAGE_CLASS}"
+	echo "storage_class_volume_binding_mode=${STORAGE_CLASS_BINDING_MODE}"
+	echo "wait_for_first_consumer_bind_pods=bind-demo-pvc,bind-pvc-1,bind-pvc-fail"
 	echo "has_objectkeeper=${HAS_OBJECTKEEPER}"
 	kubectl api-resources 2>/dev/null | grep -E 'snapshot|manifest|customsnapshot|demovirtual|objectkeeper' || true
 } >"$(stage_dir 00-preflight)/preflight.txt"
 save_artifacts "00-preflight" "${NS}"
 log "00-preflight: PASS"
+
+# ---------------------------------------------------------------------------
+# topology-disk-only (reference != coverage: VM link does not cover disk)
+# ---------------------------------------------------------------------------
+begin_stage "topology-disk-only"
+delete_csd
+apply_disk_only_csd 10
+ensure_csd_eligible
+apply_source_namespace "${NS_TOPO_DISK_ONLY}"
+wait_until "disk-only demo-pvc-disk Bound" pvc_bound "${NS_TOPO_DISK_ONLY}" demo-pvc-disk || soft "disk-only demo-pvc-disk not Bound; disk data leg may wait on CSI"
+apply_root_snapshot "${NS_TOPO_DISK_ONLY}"
+wait_until "disk-only root Snapshot bound" snap_bound "${NS_TOPO_DISK_ONLY}" "${SNAP}" || die "disk-only root Snapshot never bound"
+wait_snapshot_ready "${NS_TOPO_DISK_ONLY}" "${SNAP}" || die "disk-only root Snapshot did not become Ready"
+DISK_ONLY_ROOT_JSON="$(get_json "${SNAP_RES}" "${NS_TOPO_DISK_ONLY}" "${SNAP}")"
+DISK_ONLY_VM_CHILDREN="$(echo "${DISK_ONLY_ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualMachineSnapshot")]|length')"
+DISK_ONLY_DISK_CHILDREN="$(echo "${DISK_ONLY_ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")]|length')"
+[[ "${DISK_ONLY_VM_CHILDREN}" == "0" ]] || die "disk-only root must not contain DemoVirtualMachineSnapshot child"
+[[ "${DISK_ONLY_DISK_CHILDREN}" == "2" ]] || die "disk-only root expected two DemoVirtualDiskSnapshot children, got ${DISK_ONLY_DISK_CHILDREN}"
+kubectl -n "${NS_TOPO_DISK_ONLY}" get "${VM_RES},${DISK_RES}" -o json 2>/dev/null \
+	| jq -e 'all(.items[]?; ((.metadata.ownerReferences // [])|length)==0)' >/dev/null \
+	|| die "disk-only source objects unexpectedly carry ownerReferences; this scenario expects topology without ownerReferences"
+DISK_ONLY_CHILD_NAMES="$(echo "${DISK_ONLY_ROOT_JSON}" | jq -r '.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")|.name')"
+DISK_ONLY_SOURCES="$(
+	for child in ${DISK_ONLY_CHILD_NAMES}; do
+		kubectl -n "${NS_TOPO_DISK_ONLY}" get "${DISKSNAP_RES}" "${child}" -o json 2>/dev/null \
+			| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+	done | sort
+)"
+printf '%s\n' "${DISK_ONLY_SOURCES}" >"$(stage_dir topology-disk-only)/disk-child-source-names.txt"
+grep -qx 'disk-standalone' "$(stage_dir topology-disk-only)/disk-child-source-names.txt" || die "disk-only root missing disk-standalone child source"
+grep -qx 'disk-vm' "$(stage_dir topology-disk-only)/disk-child-source-names.txt" || die "disk-only root missing disk-vm child source (VM reference must not imply coverage)"
+kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/${NS_TOPO_DISK_ONLY}/snapshots/${SNAP}/manifests" \
+	>"$(stage_dir topology-disk-only)/aggregated.json" 2>/dev/null || die "disk-only aggregated manifests route failed"
+jq -e '[.[]?|select(.apiVersion=="'"${DEMO_API}"'" and .kind=="DemoVirtualDisk" and (.metadata.name=="disk-vm" or .metadata.name=="disk-standalone"))]|length==2' \
+	"$(stage_dir topology-disk-only)/aggregated.json" >/dev/null \
+	|| die "disk-only aggregated manifests must include both DemoVirtualDisk manifests via child subtrees"
+note "disk-only: VM CSD absent, disk-vm and disk-standalone are top-level disk snapshots; ownerReferences are not topology"
+save_graph "topology-disk-only" "${NS_TOPO_DISK_ONLY}" "${SNAP}" "topology-disk-only" "logical"
+save_artifacts "topology-disk-only" "${NS_TOPO_DISK_ONLY}"
+log "topology-disk-only: PASS"
+
+# ---------------------------------------------------------------------------
+# referenced-pvc-without-disk-csd (Disk -> PVC link does not cover PVC)
+# ---------------------------------------------------------------------------
+begin_stage "referenced-pvc-without-disk-csd"
+delete_csd
+apply_referenced_pvc_without_disk_csd_source "${NS_REF_PVC_NO_DISK_CSD}"
+wait_until "referenced-pvc pvc-1 Bound" pvc_bound "${NS_REF_PVC_NO_DISK_CSD}" pvc-1 || soft "referenced-pvc pvc-1 not Bound; orphan VS may wait on CSI"
+apply_root_snapshot "${NS_REF_PVC_NO_DISK_CSD}"
+wait_until "referenced-pvc root Snapshot bound" snap_bound "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}" || die "referenced-pvc root Snapshot never bound"
+wait_snapshot_ready "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}" || die "referenced-pvc root Snapshot did not become Ready"
+REF_ROOT_JSON="$(get_json "${SNAP_RES}" "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}")"
+REF_ROOT_CONTENT="$(echo "${REF_ROOT_JSON}" | jq -r '.status.boundSnapshotContentName // ""')"
+REF_PVC_UID="$(kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get pvc pvc-1 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+echo "${REF_ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")]|length==0' >/dev/null \
+	|| die "referenced-pvc root must not create DemoVirtualDiskSnapshot when Disk CSD is absent"
+echo "${REF_ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
+	|| die "referenced-pvc root must create CSI VolumeSnapshot visibility leaf for uncovered pvc-1"
+kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VCR_RES}" -o json 2>/dev/null \
+	| jq -e --arg n "pvc-1" '[.items[]?|select(any(.spec.targets[]?; .name==$n))]|length==0' >/dev/null \
+	|| die "namespace root must not create VCR for uncovered pvc-1"
+[[ -n "${REF_ROOT_CONTENT}" ]] || die "referenced-pvc root content missing"
+get_json "${CONTENT_RES}" "" "${REF_ROOT_CONTENT}" | jq -e --arg u "${REF_PVC_UID}" \
+	'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
+	|| die "referenced-pvc root content must publish pvc-1 VSC in dataRefs"
+note "referenced-pvc: Disk spec references pvc-1, but without Disk CSD the PVC is orphan and uses VS/VSC, not VCR"
+save_graph "referenced-pvc-without-disk-csd" "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}" "referenced-pvc-without-disk-csd" "logical"
+save_artifacts "referenced-pvc-without-disk-csd" "${NS_REF_PVC_NO_DISK_CSD}"
+log "referenced-pvc-without-disk-csd: PASS"
+
+# ---------------------------------------------------------------------------
+# orphan-pvc-cleanup (soft: VS lifecycle cleanup, retained VSC durability)
+# ---------------------------------------------------------------------------
+begin_stage "orphan-pvc-cleanup"
+REF_VS="$(echo "${REF_ROOT_JSON}" | jq -r '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")][0].name // ""')"
+REF_VSC="$(get_json "${CONTENT_RES}" "" "${REF_ROOT_CONTENT}" | jq -r --arg u "${REF_PVC_UID}" '[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")][0].artifact.name // ""')"
+{
+	echo "root_snapshot=${SNAP}"
+	echo "root_content=${REF_ROOT_CONTENT}"
+	echo "orphan_vs=${REF_VS}"
+	echo "orphan_vsc=${REF_VSC}"
+} >"$(stage_dir orphan-pvc-cleanup)/handles.txt"
+[[ -n "${REF_VS}" ]] && kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" -o yaml >"$(stage_dir orphan-pvc-cleanup)/orphan-vs-before-delete.yaml" 2>/dev/null || true
+[[ -n "${REF_VSC}" ]] && kubectl get "${VSC_RES}" "${REF_VSC}" -o yaml >"$(stage_dir orphan-pvc-cleanup)/orphan-vsc-before-delete.yaml" 2>/dev/null || true
+kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" delete "${SNAP_RES}" "${SNAP}" --wait=false >/dev/null 2>&1 \
+	|| soft "orphan cleanup: could not delete root Snapshot"
+if [[ -n "${REF_VS}" ]]; then
+	deadline=$((SECONDS + 120))
+	while ((SECONDS < deadline)); do
+		if ! kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" >/dev/null 2>&1; then
+			note "orphan cleanup: VolumeSnapshot ${REF_VS} was removed after root delete"
+			break
+		fi
+		sleep 2
+	done
+	if kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" -o yaml >"$(stage_dir orphan-pvc-cleanup)/orphan-vs-after-delete.yaml" 2>/dev/null; then
+		soft "orphan cleanup: VolumeSnapshot ${REF_VS} still exists after root delete window"
+	fi
+else
+	soft "orphan cleanup: orphan VS handle missing"
+fi
+if [[ -n "${REF_VSC}" ]]; then
+	if kubectl get "${VSC_RES}" "${REF_VSC}" -o json >"$(stage_dir orphan-pvc-cleanup)/orphan-vsc-after-delete.json" 2>/dev/null; then
+		jq -e '.spec.deletionPolicy == "Retain"' "$(stage_dir orphan-pvc-cleanup)/orphan-vsc-after-delete.json" >/dev/null \
+			&& note "orphan cleanup: retained VSC ${REF_VSC} remains with deletionPolicy=Retain" \
+			|| soft "orphan cleanup: VSC ${REF_VSC} remains but deletionPolicy is not Retain"
+	else
+		soft "orphan cleanup: retained VSC ${REF_VSC} disappeared after root delete"
+	fi
+else
+	soft "orphan cleanup: VSC handle missing"
+fi
+save_artifacts "orphan-pvc-cleanup" "${NS_REF_PVC_NO_DISK_CSD}"
+log "orphan-pvc-cleanup: done"
 
 # ---------------------------------------------------------------------------
 # 01-priority-vm-first  (GVK/priority registration)
@@ -586,11 +940,28 @@ log "01-priority-vm-first: PASS"
 # ---------------------------------------------------------------------------
 begin_stage "02-tree-ready"
 apply_source_namespace "${NS}"
-wait_until "demo-pvc Bound in ${NS}" pvc_bound "${NS}" demo-pvc || soft "demo-pvc not Bound; data leg may be empty"
+wait_until "demo-pvc Bound in ${NS}" pvc_bound "${NS}" demo-pvc || soft "demo-pvc not Bound; orphan VS data leg may be empty"
+wait_until "demo-pvc-disk Bound in ${NS}" pvc_bound "${NS}" demo-pvc-disk || soft "demo-pvc-disk not Bound; disk VCR data leg may be empty"
 apply_root_snapshot "${NS}"
 wait_until "root Snapshot bound in ${NS}" snap_bound "${NS}" "${SNAP}" || die "root Snapshot never bound"
 ROOT_CONTENT="$(kubectl -n "${NS}" get "${SNAP_RES}" "${SNAP}" -o jsonpath='{.status.boundSnapshotContentName}')"
 note "root content=${ROOT_CONTENT}"
+DOMAIN_VCR_OBSERVED=0
+VCR_OBS_DEADLINE=$((SECONDS + 120))
+while ((SECONDS < VCR_OBS_DEADLINE)); do
+	kubectl -n "${NS}" get "${VCR_RES}" -o json >"$(stage_dir 02-tree-ready)/domain-vcr-observed.json.tmp" 2>/dev/null || true
+	if jq -e '[.items[]?|select(any(.spec.targets[]?; .name=="demo-pvc-disk"))]|length>=1' \
+		"$(stage_dir 02-tree-ready)/domain-vcr-observed.json.tmp" >/dev/null 2>&1; then
+		mv "$(stage_dir 02-tree-ready)/domain-vcr-observed.json.tmp" "$(stage_dir 02-tree-ready)/domain-vcr-observed.json"
+		DOMAIN_VCR_OBSERVED=1
+		note "observed domain VCR for demo-pvc-disk before handoff"
+		break
+	fi
+	snap_ready_true "${NS}" "${SNAP}" && break
+	sleep 1
+done
+rm -f "$(stage_dir 02-tree-ready)/domain-vcr-observed.json.tmp"
+[[ "${DOMAIN_VCR_OBSERVED}" == "1" ]] || note "domain VCR for demo-pvc-disk was not observed before Ready; it may be created and cleaned quickly after handoff"
 wait_snapshot_ready "${NS}" "${SNAP}" || die "root Snapshot did not become Ready"
 
 # Resolve tree via kind-aware childrenSnapshotRefs.
@@ -634,6 +1005,48 @@ for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}
 	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || soft "content ${c} ChildrenReady != True"
 done
 
+# --- two-PVC capture paths -------------------------------------------------
+# demo-pvc       : orphan/standalone at root  -> CSI VolumeSnapshot visibility leaf + VSC in ROOT content dataRefs.
+# demo-pvc-disk  : nested under DemoVirtualDisk/disk-vm -> domain VCR path -> VSC in the DISK content dataRefs.
+# Topology invariants below hold regardless of CSI fulfillment; positive data-ref checks rely on the
+# content Ready=True gate above (a Ready content has its data leg handed off).
+ORPHAN_PVC_UID="$(kubectl -n "${NS}" get pvc demo-pvc -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+DISK_PVC_UID="$(kubectl -n "${NS}" get pvc demo-pvc-disk -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")"
+LEAF_CONTENT_JSON="{}"
+[[ -n "${LEAF_CONTENT}" ]] && LEAF_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")"
+
+# Invariant: the nested disk PVC is NEVER a root orphan (no root dataRef for it).
+echo "${ROOT_CONTENT_JSON}" | jq -e --arg u "${DISK_PVC_UID}" \
+	'($u=="") or ([.status.dataRefs[]?|select(.targetUID==$u)]|length==0)' >/dev/null \
+	|| die "nested demo-pvc-disk must NOT appear in root SnapshotContent dataRefs (belongs to disk-vm content)"
+# Invariant: the orphan PVC is NEVER on the disk content.
+echo "${LEAF_CONTENT_JSON}" | jq -e --arg u "${ORPHAN_PVC_UID}" \
+	'($u=="") or ([.status.dataRefs[]?|select(.targetUID==$u)]|length==0)' >/dev/null \
+	|| die "orphan demo-pvc must NOT appear in disk content dataRefs (belongs to root)"
+
+# Orphan demo-pvc -> VS visibility leaf path.
+if [[ -n "${ORPHAN_PVC_UID}" ]]; then
+	echo "${ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
+		&& note "orphan demo-pvc: root VolumeSnapshot visibility leaf present" \
+		|| soft "no root VolumeSnapshot leaf for orphan demo-pvc (check StorageClass volumesnapshotclass annotation / CSI driver)"
+	echo "${ROOT_CONTENT_JSON}" | jq -e --arg u "${ORPHAN_PVC_UID}" \
+		'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
+		&& note "orphan demo-pvc: VSC published in root content dataRefs" \
+		|| soft "orphan demo-pvc VSC not in root content dataRefs yet (CSI fulfillment pending)"
+fi
+
+# Nested demo-pvc-disk -> domain VCR -> VSC on disk-vm content.
+if [[ -n "${DISK_PVC_UID}" && -n "${LEAF_CONTENT}" ]]; then
+	echo "${LEAF_CONTENT_JSON}" | jq -e --arg u "${DISK_PVC_UID}" \
+		'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
+		&& note "nested demo-pvc-disk: VSC published in disk content ${LEAF_CONTENT} dataRefs (VCR path)" \
+		|| soft "nested demo-pvc-disk VSC not in disk content ${LEAF_CONTENT} dataRefs yet (CSI fulfillment pending)"
+	# The disk PVC must NOT be a root VolumeSnapshot leaf: count root VS leaves <= number of orphan PVCs (1).
+	N_ROOT_VS="$(echo "${ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length')"
+	[[ "${N_ROOT_VS}" -le 1 ]] || soft "expected at most 1 root VolumeSnapshot leaf (orphan demo-pvc only), got ${N_ROOT_VS} (nested disk PVC leaking into root orphan path?)"
+fi
+
 # ConfigMap captured in a manifest checkpoint but NOT a child snapshot (manifest-only object).
 echo "${ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="ConfigMap")]|length==0' >/dev/null \
 	|| die "ConfigMap must not be a child snapshot"
@@ -655,6 +1068,254 @@ note "mirror OK: root Snapshot Ready == root content Ready [${RS}]"
 save_graph "02-tree-ready" "${NS}" "${SNAP}" "tree" "logical"
 save_artifacts "02-tree-ready" "${NS}"
 log "02-tree-ready: PASS"
+
+# ---------------------------------------------------------------------------
+# topology-vm-disk (VM + Disk CSD: referenced disk covered by VM subtree)
+# ---------------------------------------------------------------------------
+begin_stage "topology-vm-disk"
+ROOT_JSON="$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")"
+VM_JSON="$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")"
+[[ "$(kubectl -n "${NS}" get "${VM_RES}" vm-1 -o jsonpath='{.spec.virtualDiskName}' 2>/dev/null)" == "disk-vm" ]] \
+	|| die "vm+disk topology: vm-1.spec.virtualDiskName must be disk-vm"
+[[ "$(kubectl -n "${NS}" get "${DISK_RES}" disk-vm -o jsonpath='{.spec.persistentVolumeClaimName}' 2>/dev/null)" == "demo-pvc-disk" ]] \
+	|| die "vm+disk topology: disk-vm.spec.persistentVolumeClaimName must be demo-pvc-disk"
+[[ "$(echo "${ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualMachineSnapshot")]|length')" == "1" ]] \
+	|| die "vm+disk topology: root must contain exactly one DemoVirtualMachineSnapshot"
+[[ "$(echo "${ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")]|length')" == "1" ]] \
+	|| die "vm+disk topology: root must contain only standalone DemoVirtualDiskSnapshot"
+ROOT_DISK_SOURCE="$(
+	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o json 2>/dev/null \
+		| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+)"
+VM_DISK_SOURCE="$(
+	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${LEAF_SNAP}" -o json 2>/dev/null \
+		| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+)"
+[[ "${ROOT_DISK_SOURCE}" == "disk-standalone" ]] || die "vm+disk topology: root disk child source=${ROOT_DISK_SOURCE}, expected disk-standalone"
+[[ "${VM_DISK_SOURCE}" == "disk-vm" ]] || die "vm+disk topology: VM disk child source=${VM_DISK_SOURCE}, expected disk-vm"
+echo "${ROOT_JSON}" | jq -e --arg leaf "${LEAF_SNAP}" \
+	'[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot" and .name==$leaf)]|length==0' >/dev/null \
+	|| die "vm+disk topology: disk-vm must not be a direct root child once VM actually snapshots it"
+printf '%s\n' "spec links are the topology source: vm-1.spec.virtualDiskName=disk-vm; disk-vm.spec.persistentVolumeClaimName=demo-pvc-disk." \
+	>"$(stage_dir topology-vm-disk)/topology-source.txt"
+note "spec links are the topology source"
+note "vm+disk: root has VM child + standalone disk only; disk-vm is covered inside VM subtree"
+save_graph "topology-vm-disk" "${NS}" "${SNAP}" "topology-vm-disk" "logical"
+save_artifacts "topology-vm-disk" "${NS}"
+log "topology-vm-disk: PASS"
+
+# ---------------------------------------------------------------------------
+# orphan-pvc-vs (namespace residual PVC uses CSI VolumeSnapshot, not VCR)
+# ---------------------------------------------------------------------------
+begin_stage "orphan-pvc-vs"
+ROOT_JSON="$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")"
+ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")"
+ORPHAN_PVC_UID="$(kubectl -n "${NS}" get pvc demo-pvc -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+[[ -n "${ORPHAN_PVC_UID}" ]] || die "orphan-pvc-vs: demo-pvc UID missing"
+kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o yaml >"$(stage_dir orphan-pvc-vs)/root-content.yaml" 2>/dev/null || true
+echo "${ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
+	|| die "orphan-pvc-vs: root childrenSnapshotRefs must include a VolumeSnapshot visibility leaf"
+kubectl -n "${NS}" get "${VS_RES}" -o json >"$(stage_dir orphan-pvc-vs)/volumesnapshots.json" 2>/dev/null \
+	|| die "orphan-pvc-vs: cannot list VolumeSnapshots"
+jq -e '[.items[]?|select(.spec.source.persistentVolumeClaimName=="demo-pvc")]|length>=1' \
+	"$(stage_dir orphan-pvc-vs)/volumesnapshots.json" >/dev/null \
+	|| die "orphan-pvc-vs: no CSI VolumeSnapshot found for demo-pvc"
+ORPHAN_VS="$(jq -r '[.items[]?|select(.spec.source.persistentVolumeClaimName=="demo-pvc")][0].metadata.name // ""' "$(stage_dir orphan-pvc-vs)/volumesnapshots.json")"
+[[ -n "${ORPHAN_VS}" ]] || die "orphan-pvc-vs: cannot resolve orphan VolumeSnapshot name"
+kubectl -n "${NS}" get "${VS_RES}" "${ORPHAN_VS}" -o yaml >"$(stage_dir orphan-pvc-vs)/orphan-vs.yaml" 2>/dev/null || true
+kubectl -n "${NS}" get "${VS_RES}" "${ORPHAN_VS}" -o json >"$(stage_dir orphan-pvc-vs)/orphan-vs.json" 2>/dev/null || true
+ROOT_UID="$(echo "${ROOT_JSON}" | jq -r '.metadata.uid // ""')"
+jq -e --arg name "${SNAP}" --arg uid "${ROOT_UID}" '
+	any(.metadata.ownerReferences[]?; .apiVersion=="'"${STORAGE_API}"'" and .kind=="Snapshot" and .name==$name and .uid==$uid and (.controller // false) == false)
+	and ([.metadata.ownerReferences[]?|select((.controller // false)==true)]|length==0)
+' "$(stage_dir orphan-pvc-vs)/orphan-vs.json" >/dev/null \
+	|| die "orphan-pvc-vs: VolumeSnapshot must have non-controller ownerRef to root Snapshot and no controller=true ownerRef"
+ORPHAN_VS_CLASS="$(jq -r '.spec.volumeSnapshotClassName // ""' "$(stage_dir orphan-pvc-vs)/orphan-vs.json")"
+[[ -n "${ORPHAN_VS_CLASS}" ]] || die "orphan-pvc-vs: VolumeSnapshot spec.volumeSnapshotClassName must be explicitly set"
+SC_VS_CLASS="$(kubectl get storageclass "${STORAGE_CLASS}" -o json 2>/dev/null | jq -r '.metadata.annotations["storage.deckhouse.io/volumesnapshotclass"] // ""' || true)"
+[[ -z "${SC_VS_CLASS}" || "${ORPHAN_VS_CLASS}" == "${SC_VS_CLASS}" ]] \
+	|| die "orphan-pvc-vs: VolumeSnapshotClass ${ORPHAN_VS_CLASS} does not match StorageClass annotation ${SC_VS_CLASS}"
+kubectl get "${VSCLASS_RES}" "${ORPHAN_VS_CLASS}" -o yaml >"$(stage_dir orphan-pvc-vs)/orphan-vsclass.yaml" 2>/dev/null || true
+kubectl -n "${NS}" get "${VCR_RES}" -o json 2>/dev/null \
+	| jq -e '[.items[]?|select(any(.spec.targets[]?; .name=="demo-pvc"))]|length==0' >/dev/null \
+	|| die "orphan-pvc-vs: namespace root must not create VCR for orphan demo-pvc"
+echo "${ROOT_CONTENT_JSON}" | jq -e --arg u "${ORPHAN_PVC_UID}" \
+	'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
+	|| die "orphan-pvc-vs: root SnapshotContent must publish demo-pvc VSC in dataRefs"
+ORPHAN_VSC="$(echo "${ROOT_CONTENT_JSON}" | jq -r --arg u "${ORPHAN_PVC_UID}" '[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")][0].artifact.name // ""')"
+[[ -n "${ORPHAN_VSC}" ]] || die "orphan-pvc-vs: cannot resolve orphan VSC from root dataRefs"
+kubectl get "${VSC_RES}" "${ORPHAN_VSC}" -o yaml >"$(stage_dir orphan-pvc-vs)/orphan-vsc.yaml" 2>/dev/null || true
+kubectl get "${VSC_RES}" "${ORPHAN_VSC}" -o json >"$(stage_dir orphan-pvc-vs)/orphan-vsc.json" 2>/dev/null || true
+jq -e '.spec.deletionPolicy == "Retain"' "$(stage_dir orphan-pvc-vs)/orphan-vsc.json" >/dev/null \
+	|| die "orphan-pvc-vs: bound VSC deletionPolicy must be Retain"
+echo "${ROOT_CONTENT_JSON}" | jq -e --arg vm "${VM_CONTENT}" --arg disk "${SIBLING_CONTENT}" \
+	'(.status.childrenSnapshotContentRefs // []) as $refs
+	| ($refs|length)==2
+	  and any($refs[]?; .name==$vm)
+	  and any($refs[]?; .name==$disk)' >/dev/null \
+	|| die "orphan-pvc-vs: VolumeSnapshot visibility leaf must not become a SnapshotContent subtree child"
+echo "${ROOT_CONTENT_JSON}" | jq -e --arg vs "${ORPHAN_VS}" \
+	'([.status.childrenSnapshotContentRefs[]?|select(.name==$vs)]|length)==0' >/dev/null \
+	|| die "orphan-pvc-vs: childrenSnapshotContentRefs must not reference the orphan VolumeSnapshot"
+kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
+	| jq -e --arg vs "${ORPHAN_VS}" --arg ns "${NS}" '
+		[.items[]?|select(
+			(any(.metadata.ownerReferences[]?; .kind=="VolumeSnapshot" and .name==$vs))
+			or ((.metadata.annotations["state-snapshotter.deckhouse.io/source-ref"] // "{}" | fromjson?) as $src | $src.kind == "VolumeSnapshot" and $src.name == $vs and $src.namespace == $ns)
+		)]|length==0' >/dev/null \
+	|| die "orphan-pvc-vs: no SnapshotContent may be materialized for the VolumeSnapshot visibility leaf"
+note "orphan-pvc-vs: demo-pvc uses CSI VolumeSnapshot visibility leaf + root dataRefs, with no namespace VCR"
+save_graph "orphan-pvc-vs" "${NS}" "${SNAP}" "orphan-pvc-vs" "logical"
+save_artifacts "orphan-pvc-vs" "${NS}"
+log "orphan-pvc-vs: PASS"
+
+# ---------------------------------------------------------------------------
+# domain-pvc-vcr (domain-covered PVC uses VCR and is not duplicated as orphan)
+# ---------------------------------------------------------------------------
+begin_stage "domain-pvc-vcr"
+ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")"
+LEAF_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")"
+DISK_PVC_UID="$(kubectl -n "${NS}" get pvc demo-pvc-disk -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+[[ -n "${DISK_PVC_UID}" ]] || die "domain-pvc-vcr: demo-pvc-disk UID missing"
+kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o yaml >"$(stage_dir domain-pvc-vcr)/root-content.yaml" 2>/dev/null || true
+kubectl get "${CONTENT_RES}" "${LEAF_CONTENT}" -o yaml >"$(stage_dir domain-pvc-vcr)/leaf-content.yaml" 2>/dev/null || true
+kubectl -n "${NS}" get "${VCR_RES}" -o json >"$(stage_dir domain-pvc-vcr)/volumecapturerequests.json" 2>/dev/null \
+	|| die "domain-pvc-vcr: cannot list VolumeCaptureRequests"
+if jq -e '[.items[]?|select(any(.spec.targets[]?; .name=="demo-pvc-disk"))]|length>=1' \
+	"$(stage_dir domain-pvc-vcr)/volumecapturerequests.json" >/dev/null; then
+	note "domain-pvc-vcr: live VCR for demo-pvc-disk still present"
+elif [[ "${DOMAIN_VCR_OBSERVED}" == "1" && -f "$(stage_dir 02-tree-ready)/domain-vcr-observed.json" ]]; then
+	cp "$(stage_dir 02-tree-ready)/domain-vcr-observed.json" "$(stage_dir domain-pvc-vcr)/domain-vcr-observed-before-handoff.json"
+	note "domain-pvc-vcr: VCR for demo-pvc-disk was observed before handoff and later cleaned"
+else
+	die "domain-pvc-vcr: did not observe a VCR for demo-pvc-disk before or after handoff"
+fi
+kubectl -n "${NS}" get "${VS_RES}" -o json 2>/dev/null \
+	| jq -e '[.items[]?|select(.spec.source.persistentVolumeClaimName=="demo-pvc-disk")]|length==0' >/dev/null \
+	|| die "domain-pvc-vcr: demo-pvc-disk must not leak into root orphan VolumeSnapshot path"
+echo "${ROOT_CONTENT_JSON}" | jq -e --arg u "${DISK_PVC_UID}" \
+	'[.status.dataRefs[]?|select(.targetUID==$u)]|length==0' >/dev/null \
+	|| die "domain-pvc-vcr: root dataRefs must not duplicate domain-covered demo-pvc-disk"
+echo "${LEAF_CONTENT_JSON}" | jq -e --arg u "${DISK_PVC_UID}" \
+	'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
+	|| die "domain-pvc-vcr: disk SnapshotContent must publish demo-pvc-disk VSC in dataRefs"
+DOMAIN_VSC="$(echo "${LEAF_CONTENT_JSON}" | jq -r --arg u "${DISK_PVC_UID}" '[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")][0].artifact.name // ""')"
+[[ -n "${DOMAIN_VSC}" ]] || die "domain-pvc-vcr: cannot resolve domain VSC from leaf dataRefs"
+kubectl get "${VSC_RES}" "${DOMAIN_VSC}" -o yaml >"$(stage_dir domain-pvc-vcr)/domain-vsc.yaml" 2>/dev/null || true
+kubectl get "${VSC_RES}" "${DOMAIN_VSC}" -o json >"$(stage_dir domain-pvc-vcr)/domain-vsc.json" 2>/dev/null || true
+jq -e '.spec.deletionPolicy == "Retain"' "$(stage_dir domain-pvc-vcr)/domain-vsc.json" >/dev/null \
+	|| die "domain-pvc-vcr: domain VSC deletionPolicy must be Retain"
+assert_datarefs_target_uid_unique "$(stage_dir domain-pvc-vcr)" "${ROOT_CONTENT}" "${VM_CONTENT}" "${LEAF_CONTENT}" "${SIBLING_CONTENT}"
+note "domain-pvc-vcr: demo-pvc-disk is covered by disk domain VCR and absent from root orphan VS/dataRefs"
+save_graph "domain-pvc-vcr" "${NS}" "${SNAP}" "domain-pvc-vcr" "logical"
+save_artifacts "domain-pvc-vcr" "${NS}"
+log "domain-pvc-vcr: PASS"
+
+# ---------------------------------------------------------------------------
+# manifest-no-volumesnapshot (data artifacts stay out of MCP/aggregated manifests)
+# ---------------------------------------------------------------------------
+begin_stage "manifest-no-volumesnapshot"
+kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o yaml >"$(stage_dir manifest-no-volumesnapshot)/root-content.yaml" 2>/dev/null || true
+kubectl get "${CONTENT_RES}" "${LEAF_CONTENT}" -o yaml >"$(stage_dir manifest-no-volumesnapshot)/leaf-content.yaml" 2>/dev/null || true
+kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/${NS}/snapshots/${SNAP}/manifests" \
+	>"$(stage_dir manifest-no-volumesnapshot)/aggregated.json" 2>/dev/null \
+	|| die "manifest-no-volumesnapshot: aggregated manifests route failed"
+jq -e '[.[]?|select(.kind=="PersistentVolumeClaim" and (.metadata.name=="demo-pvc" or .metadata.name=="demo-pvc-disk"))]|length==2' \
+	"$(stage_dir manifest-no-volumesnapshot)/aggregated.json" >/dev/null \
+	|| die "manifest-no-volumesnapshot: aggregated manifests must include both PVC manifests"
+jq -e '[.[]?|select(.kind=="VolumeSnapshot" or .kind=="VolumeSnapshotContent")]|length==0' \
+	"$(stage_dir manifest-no-volumesnapshot)/aggregated.json" >/dev/null \
+	|| die "manifest-no-volumesnapshot: aggregated manifests must not include VolumeSnapshot or VolumeSnapshotContent"
+get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}" | jq -e \
+	'[.status.dataRefs[]?|select(.artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
+	|| die "manifest-no-volumesnapshot: root dataRefs must still reference VolumeSnapshotContent artifact"
+for pair in "root:${ROOT_CONTENT}" "vm:${VM_CONTENT}" "leaf:${LEAF_CONTENT}" "sibling:${SIBLING_CONTENT}"; do
+	label="${pair%%:*}"
+	content="${pair#*:}"
+	[[ -n "${content}" ]] || continue
+	assert_no_vs_vsc_in_content_mcp "${content}" "$(stage_dir manifest-no-volumesnapshot)/raw-mcp" "${label}"
+done
+jq -e '[.[]?|select(.kind=="PersistentVolumeClaim" and .metadata.name=="demo-pvc")]|length>=1' \
+	"$(stage_dir manifest-no-volumesnapshot)/raw-mcp/root/chunk-objects.json" >/dev/null \
+	|| die "manifest-no-volumesnapshot: raw root MCP chunks must include orphan PVC demo-pvc"
+jq -e '[.[]?|select(.kind=="PersistentVolumeClaim" and .metadata.name=="demo-pvc-disk")]|length>=1' \
+	"$(stage_dir manifest-no-volumesnapshot)/raw-mcp/leaf/chunk-objects.json" >/dev/null \
+	|| die "manifest-no-volumesnapshot: raw disk leaf MCP chunks must include domain PVC demo-pvc-disk"
+note "manifest-no-volumesnapshot: PVC manifests are present, CSI VS/VSC manifests are absent, VSC remains only as dataRefs artifact"
+save_graph "manifest-no-volumesnapshot" "${NS}" "${SNAP}" "manifest-no-volumesnapshot" "logical"
+save_artifacts "manifest-no-volumesnapshot" "${NS}"
+log "manifest-no-volumesnapshot: PASS"
+
+# ---------------------------------------------------------------------------
+# domain-pvc-failure-coverage (soft diagnostic: planned subtree capture failure)
+# ---------------------------------------------------------------------------
+begin_stage "domain-pvc-failure-coverage"
+cat >"$(stage_dir domain-pvc-failure-coverage)/expected-outcome.txt" <<'EOF'
+Desired behavior when a disk subtree is planned but its PVC capture fails:
+- PASS: root fails closed deterministically (Ready=False with a concrete failure reason); or
+- PASS: root explicitly falls back to orphan PVC CSI VolumeSnapshot path and publishes a root dataRef; but
+- FAIL/SOFT: root reaches Ready=True without either domain coverage or orphan fallback for that PVC.
+This protects the invariant "coverage only after actual capture" from silent PVC loss.
+EOF
+apply_domain_pvc_failure_source "${NS_DOMAIN_PVC_FAIL}"
+wait_until "domain-failure pvc-fail Bound" pvc_bound "${NS_DOMAIN_PVC_FAIL}" pvc-fail || soft "domain-failure pvc-fail not Bound; VCR may not progress"
+apply_root_snapshot "${NS_DOMAIN_PVC_FAIL}"
+wait_until "domain-failure root Snapshot bound" snap_bound "${NS_DOMAIN_PVC_FAIL}" "${SNAP}" || soft "domain-failure root Snapshot did not bind"
+DOMAIN_FAIL_VCR=""
+deadline=$((SECONDS + 180))
+while ((SECONDS < deadline)); do
+	kubectl -n "${NS_DOMAIN_PVC_FAIL}" get "${VCR_RES}" -o json >"$(stage_dir domain-pvc-failure-coverage)/vcr-list-before-inject.json" 2>/dev/null || true
+	DOMAIN_FAIL_VCR="$(jq -r '[.items[]?|select(any(.spec.targets[]?; .name=="pvc-fail"))][0].metadata.name // ""' "$(stage_dir domain-pvc-failure-coverage)/vcr-list-before-inject.json" 2>/dev/null || true)"
+	[[ -n "${DOMAIN_FAIL_VCR}" ]] && break
+	if snap_ready_terminal_false "${NS_DOMAIN_PVC_FAIL}" "${SNAP}"; then
+		break
+	fi
+	sleep 2
+done
+if [[ -n "${DOMAIN_FAIL_VCR}" ]]; then
+	kubectl -n "${NS_DOMAIN_PVC_FAIL}" get "${VCR_RES}" "${DOMAIN_FAIL_VCR}" -o yaml >"$(stage_dir domain-pvc-failure-coverage)/vcr-before-inject.yaml" 2>/dev/null || true
+	VCR_FAIL_PATCH="$(jq -n --arg now "$(now_rfc3339)" '{
+		status: {
+			conditions: [{
+				type: "Ready",
+				status: "False",
+				reason: "InjectedFailure",
+				message: "tree-demo injected domain VCR failure",
+				lastTransitionTime: $now
+			}]
+		}
+	}')"
+	kubectl -n "${NS_DOMAIN_PVC_FAIL}" patch "${VCR_RES}" "${DOMAIN_FAIL_VCR}" --subresource=status --type=merge -p "${VCR_FAIL_PATCH}" >/dev/null 2>&1 \
+		|| kubectl_ctrl -n "${NS_DOMAIN_PVC_FAIL}" patch "${VCR_RES}" "${DOMAIN_FAIL_VCR}" --subresource=status --type=merge -p "${VCR_FAIL_PATCH}" >/dev/null 2>&1 \
+		|| soft "domain-failure: could not inject terminal VCR failure"
+	kubectl -n "${NS_DOMAIN_PVC_FAIL}" get "${VCR_RES}" "${DOMAIN_FAIL_VCR}" -o yaml >"$(stage_dir domain-pvc-failure-coverage)/vcr-after-inject.yaml" 2>/dev/null || true
+else
+	soft "domain-failure: VCR for pvc-fail was not observed before terminal state/timeout"
+fi
+sleep "$((POLL_SEC * 4))"
+FAIL_ROOT_JSON="$(get_json "${SNAP_RES}" "${NS_DOMAIN_PVC_FAIL}" "${SNAP}")"
+FAIL_ROOT_CONTENT="$(echo "${FAIL_ROOT_JSON}" | jq -r '.status.boundSnapshotContentName // ""')"
+FAIL_PVC_UID="$(kubectl -n "${NS_DOMAIN_PVC_FAIL}" get pvc pvc-fail -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+FAIL_READY="$(ready_triple "${FAIL_ROOT_JSON}")"
+echo "${FAIL_ROOT_JSON}" | jq '{children: .status.childrenSnapshotRefs, ready: ([.status.conditions[]?|select(.type=="Ready")][0]), content: .status.boundSnapshotContentName}' \
+	>"$(stage_dir domain-pvc-failure-coverage)/root-after-inject.summary.json" 2>/dev/null || true
+if echo "${FAIL_READY}" | grep -qE '^False\|'; then
+	note "domain-failure: root failed closed after domain VCR failure [${FAIL_READY}]"
+elif echo "${FAIL_READY}" | grep -qE '^True\|' && [[ -n "${FAIL_ROOT_CONTENT}" && -n "${FAIL_PVC_UID}" ]]; then
+	FAIL_ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${FAIL_ROOT_CONTENT}")"
+	kubectl -n "${NS_DOMAIN_PVC_FAIL}" get "${VS_RES}" -o json >"$(stage_dir domain-pvc-failure-coverage)/volumesnapshots-after-inject.json" 2>/dev/null || true
+	if echo "${FAIL_ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
+		&& echo "${FAIL_ROOT_CONTENT_JSON}" | jq -e --arg u "${FAIL_PVC_UID}" '[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null; then
+		note "domain-failure: root fell back to orphan VS/dataRefs for pvc-fail after failed domain capture"
+	else
+		soft "domain-failure: root Ready=True without fail-closed state or orphan VS/dataRefs fallback for pvc-fail (potential silent loss)"
+	fi
+else
+	soft "domain-failure: root did not reach clear fail-closed or fallback outcome yet [${FAIL_READY}]"
+fi
+save_graph "domain-pvc-failure-coverage" "${NS_DOMAIN_PVC_FAIL}" "${SNAP}" "domain-pvc-failure-coverage" "logical"
+save_artifacts "domain-pvc-failure-coverage" "${NS_DOMAIN_PVC_FAIL}"
+log "domain-pvc-failure-coverage: done"
 
 # ---------------------------------------------------------------------------
 # 03-priority-inverted (priority must influence planning, or fail closed)

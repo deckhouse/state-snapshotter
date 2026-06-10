@@ -40,6 +40,14 @@ spec:
           metadata:
             type: object
           spec:
+            properties:
+              virtualDiskName:
+                description: |-
+                  VirtualDiskName links this VM to a DemoVirtualDisk for snapshot-tree planning (parent -> child).
+                  The reference points DOWN the hierarchy (VM -> Disk -> PVC), mirroring
+                  DemoVirtualDisk.spec.persistentVolumeClaimName. Kubernetes ownerReferences are lifecycle
+                  metadata only and are not used as topology source-of-truth.
+                type: string
             type: object
           status:
             type: object

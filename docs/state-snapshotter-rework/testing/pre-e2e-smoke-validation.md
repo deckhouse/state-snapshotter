@@ -435,21 +435,16 @@ apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
 kind: DemoVirtualMachine
 metadata:
   name: vm-1
-spec: {}
-EOF
-
-VM_UID=$(kubectl -n "$NS" get demovirtualmachine vm-1 -o jsonpath='{.metadata.uid}')
-
-cat <<EOF | kubectl -n "$NS" apply -f -
+spec:
+  # Topology points DOWN and is name-based: the VM names its disk in the same namespace,
+  # mirroring DemoVirtualDisk.spec.persistentVolumeClaimName -> PVC. ownerReferences are NOT
+  # a snapshot-tree topology source.
+  virtualDiskName: disk-vm
+---
 apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
 kind: DemoVirtualDisk
 metadata:
   name: disk-vm
-  ownerReferences:
-  - apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
-    kind: DemoVirtualMachine
-    name: vm-1
-    uid: ${VM_UID}
 spec: {}
 ---
 apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
@@ -620,13 +615,13 @@ snapshot_graph_artifact \
   "CSD eligibility: only the disk CSD is registered; disk snapshots are eligible, while VM remains a source/inventory object without custom snapshot expansion."
 ```
 
-Ожидаемо детерминированно:
+Ожидаемо детерминированно. VM CSD не зарегистрирован, поэтому VM-узел не снапшотится; диск, на который VM ссылается через `spec.virtualDiskName`, не покрыт ни одним VM-subtree и поэтому captured standalone — ровно так же, как nested PVC становится orphan-PVC, если его диск не снапшотится:
 
-- `disk-vm` с `ownerReference -> DemoVirtualMachine/vm-1` не становится direct child root;
-- `disk-vm` не представлен в `root.childrenSnapshotRefs`;
-- root own MCP не включает `disk-vm`;
-- root aggregated read не включает `disk-vm`;
-- `disk-standalone` без ownerRef при disk-only CSD становится top-level child.
+- `disk-vm` (на него ссылается `vm-1.spec.virtualDiskName`) становится top-level direct child root, потому что его VM не снапшотится;
+- `disk-standalone` также становится top-level direct child;
+- оба представлены в `root.childrenSnapshotRefs` как `DemoVirtualDiskSnapshot`;
+- `vm-1` остаётся source/inventory объектом без custom snapshot expansion (нет `DemoVirtualMachineSnapshot`);
+- `ownerReferences` на исходных объектах не влияют на состав дерева.
 
 Получите generated disk child refs из root:
 
@@ -640,17 +635,19 @@ DISK_ONLY_CHILDREN=$(kubectl -n "$NS" get snapshot root-disk-only -o json \
 test -n "$DISK_ONLY_CHILDREN"
 ```
 
-Для каждого direct disk child проверьте snapshot и subtree:
+Для каждого direct disk child выведите snapshot и его `sourceRef`, затем убедитесь, что покрыты оба диска (`disk-vm` и `disk-standalone`):
 
 ```shell
+DISK_ONLY_SOURCES=""
 for child in $DISK_ONLY_CHILDREN; do
   kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o yaml
-  assert_source_ref \
-    demovirtualdisksnapshot "$child" \
-    demo.state-snapshotter.deckhouse.io/v1alpha1 \
-    DemoVirtualDisk \
-    disk-standalone
+  src=$(kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o json \
+    | jq -r '.spec.sourceRef.name // (.metadata.annotations["state-snapshotter.deckhouse.io/source-ref"] // "")')
+  DISK_ONLY_SOURCES="${DISK_ONLY_SOURCES} ${src}"
 done
+
+echo "$DISK_ONLY_SOURCES" | grep -q disk-vm
+echo "$DISK_ONLY_SOURCES" | grep -q disk-standalone
 ```
 
 Проверка root aggregated read:
@@ -662,7 +659,7 @@ kubectl get --raw \
   | jq .
 ```
 
-Ожидаемо в `/tmp/root-disk-only-manifests.json` нет VM-owned `DemoVirtualDisk/disk-vm` ни как direct child subtree, ни как root MCP payload. Direct disk child MCP должен содержать `DemoVirtualDisk/disk-standalone`.
+Ожидаемо в `/tmp/root-disk-only-manifests.json` присутствуют **оба** диска как direct child subtree: `DemoVirtualDisk/disk-vm` и `DemoVirtualDisk/disk-standalone` (VM-узел не снапшотится, поэтому VM-referenced диск captured standalone). Custom snapshot для `vm-1` не разворачивается.
 
 ## 9. CSD graph activation: VM + Disk CSD полный parent/child graph
 
@@ -765,8 +762,9 @@ kubectl -n "$NS" get snapshot root-full -o json \
 kubectl -n "$NS" get snapshot root-full -o json \
   | jq -e '.status.childrenSnapshotRefs[]? | select(.kind=="DemoVirtualMachineSnapshot")'
 
-# Root не должен иметь direct child для VM-owned disk-vm.
-# Direct DemoVirtualDiskSnapshot child допустим только для standalone disk без ownerRef.
+# Здесь VM снапшотится (VM CSD зарегистрирован), поэтому disk-vm покрыт VM-subtree и
+# НЕ должен быть direct child root. Direct DemoVirtualDiskSnapshot child допустим только для
+# диска, на который не ссылается ни одна снапшотящаяся VM (например, disk-standalone).
 ROOT_DISK_CHILDREN=$(kubectl -n "$NS" get snapshot root-full -o json \
   | jq -r '.status.childrenSnapshotRefs[]? | select(.kind=="DemoVirtualDiskSnapshot") | .name')
 for child in $ROOT_DISK_CHILDREN; do

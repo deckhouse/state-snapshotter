@@ -62,8 +62,9 @@ kubectl auth can-i get manifestcheckpointcontentchunks.state-snapshotter.deckhou
 ## 2. Подготовить source namespace
 
 ```bash
-# ns + CM + PVC + bind Pod + VM + VM-linked disk + standalone disk
-# VM->Disk link is spec.virtualMachineName, not ownerReferences.
+# ns + CM + 2 PVC + bind Pod + VM + VM-linked disk + standalone disk
+# Hierarchy refs point DOWN: VM.spec.virtualDiskName -> Disk,
+# Disk.spec.persistentVolumeClaimName -> PVC (not ownerReferences).
 kubectl apply -f "$MANIFEST_DIR/01-source.yaml"
 
 # gate: PVC Bound до Snapshot (local-thin = WaitForFirstConsumer; bind Pod уже в source)

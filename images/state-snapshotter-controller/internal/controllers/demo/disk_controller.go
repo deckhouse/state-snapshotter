@@ -142,29 +142,51 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
+	// Disk PVC data leg (spec.persistentVolumeClaimName): create the VCR early so the PVC becomes
+	// subtree-covered (root must not turn it into an orphan VolumeSnapshot), then hand off the bound
+	// VolumeSnapshotContent into this content's dataRefs[]. A manifest-only disk reports dataComplete.
+	dataComplete, dataReason, dataMessage, err := r.reconcileDemoVirtualDiskDataLeg(ctx, s, source, contentName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if dataReason != "" {
+		if perr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, dataReason, dataMessage); perr != nil {
+			return ctrl.Result{}, perr
+		}
+		if dataReason == snapshot.ReasonArtifactMissing {
+			// PVC may still appear (creation race); keep polling.
+			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+		}
+		// Terminal volume-capture failure: surfaced as Ready=False, no endless raw requeue.
+		return ctrl.Result{}, nil
+	}
+
 	reader := demoReconcilerReader(r.APIReader, r.Client)
 	// Post-publish the demo snapshot is mirror-only: once manifest capture is published and the MCP
 	// is handed off to SnapshotContent, never re-run capture. A failed published MCP is mirrored from
-	// the bound content (no re-capture); recovery is woken by the bound-content watch.
-	if handled, err := demoMirrorOnlyIfHandoffComplete(
-		ctx,
-		r.Client,
-		reader,
-		s.Namespace,
-		controllercommon.KindDemoVirtualDiskSnapshot,
-		s.Name,
-		contentName,
-		s.Status.ManifestCaptureRequestName,
-		func(status metav1.ConditionStatus, reason, message string) error {
-			return patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, status, reason, message)
-		},
-		func() error {
-			return patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, "")
-		},
-	); err != nil {
-		return ctrl.Result{}, err
-	} else if handled {
-		return ctrl.Result{}, nil
+	// the bound content (no re-capture); recovery is woken by the bound-content watch. With a data leg
+	// the mirror-only short-circuit only applies once the data leg is also handed off.
+	if dataComplete {
+		if handled, err := demoMirrorOnlyIfHandoffComplete(
+			ctx,
+			r.Client,
+			reader,
+			s.Namespace,
+			controllercommon.KindDemoVirtualDiskSnapshot,
+			s.Name,
+			contentName,
+			s.Status.ManifestCaptureRequestName,
+			func(status metav1.ConditionStatus, reason, message string) error {
+				return patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, status, reason, message)
+			},
+			func() error {
+				return patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, "")
+			},
+		); err != nil {
+			return ctrl.Result{}, err
+		} else if handled {
+			return ctrl.Result{}, nil
+		}
 	}
 
 	mcr, err := ensureDemoSnapshotManifestCaptureRequest(
@@ -183,6 +205,11 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 	if mcr == nil {
+		// Manifest leg is handed off. If the data leg is still pending, keep polling so the bound
+		// VolumeSnapshotContent gets published; otherwise nothing is left to do this pass.
+		if !dataComplete {
+			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 	if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {

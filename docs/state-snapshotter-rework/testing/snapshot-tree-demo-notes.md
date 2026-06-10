@@ -9,21 +9,40 @@
 ## Картина целиком
 
 ```
-DemoVirtualMachine vm-1 ─owns─► DemoVirtualDisk disk-vm        ConfigMap demo-snapshot-cm
-DemoVirtualDisk disk-standalone                                 PVC demo-pvc (Bound)
+DemoVirtualMachine vm-1 ─spec.virtualDiskName─► DemoVirtualDisk disk-vm   ConfigMap demo-snapshot-cm
+   (disk-vm.spec.persistentVolumeClaimName = demo-pvc-disk)               PVC demo-pvc      (orphan, Bound)
+DemoVirtualDisk disk-standalone                                          PVC demo-pvc-disk (nested, Bound)
+   связи иерархии направлены ВНИЗ: VM ─► Disk ─► PVC (ownerRefs — только lifecycle)
+   topology ≠ coverage (формула `INV-TOPO-COV`, spec §3.6.1):
+     • topology source: spec links downward;
+     • ownerReferences are not topology;
+     • reference does not imply coverage;
+     • top-level exclusion happens only after actual child snapshot coverage.
                          │  CustomSnapshotDefinition demo-live-vm-disk
                          ▼
               Snapshot demo-tree (spec: {})
-                         │ controller: MCR + VCR + child snapshots
+                         │ controller: MCR + (VS | VCR) + child snapshots
         ┌────────────────┼───────────────────────────────────────────┐
         ▼                ▼                                             ▼
   childrenSnapshotRefs   manifest leg                              data leg
-  ├─ DemoVirtualMachineSnapshot(vm-1)   MCR ─► ManifestCheckpoint ─► Chunk(s)   VCR ─► VolumeSnapshotContent
-  │    └─ DemoVirtualDiskSnapshot(disk-vm)        (снапшот манифестов)            (снапшот данных)
-  └─ DemoVirtualDiskSnapshot(disk-standalone)
+  ├─ DemoVirtualMachineSnapshot(vm-1)   MCR ─► ManifestCheckpoint ─► Chunk(s)
+  │    └─ DemoVirtualDiskSnapshot(disk-vm) ── data: VCR ─► VolumeSnapshotContent  (nested demo-pvc-disk)
+  ├─ DemoVirtualDiskSnapshot(disk-standalone)
+  └─ VolumeSnapshot nss-vs-* (visibility leaf) ── data: VS ─► VolumeSnapshotContent (orphan demo-pvc)
 
 каждый узел: Snapshot ─bound─► SnapshotContent (cluster) ─ownerRef─► ObjectKeeper (follow + TTL)
 ```
+
+### Два пути захвата тома (демо проверяет оба)
+
+| PVC | Где живёт | Data-путь | Где артефакт (VSC) | Манифест PVC |
+|---|---|---|---|---|
+| `demo-pvc` | standalone/orphan прямо в namespace | root создаёт **CSI VolumeSnapshot** как visibility-leaf (`nss-vs-*` в `Snapshot.status.childrenSnapshotRefs[]`); VCR **не** создаётся | `dataRefs[]` **root** SnapshotContent | в **root** MCP |
+| `demo-pvc-disk` | вложена в `DemoVirtualDisk/disk-vm` (`spec.persistentVolumeClaimName`) | доменный диск создаёт **VolumeCaptureRequest** (как любой доменный узел), затем handoff VSC | `dataRefs[]` **disk-vm** SnapshotContent | в **disk-vm** MCP |
+
+Инвариант: вложенная `demo-pvc-disk` является subtree-covered (через `dataRefs[]`/in-flight VCR
+у disk-vm content), поэтому root **не** считает её сиротой и **не** создаёт для неё VS. Сам объект
+`VolumeSnapshot` (nss-vs-*) — это только data-leg сироты, он **не** попадает в ManifestCheckpoint.
 
 | Сущность | Роль |
 |---|---|

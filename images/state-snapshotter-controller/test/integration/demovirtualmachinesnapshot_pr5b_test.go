@@ -178,21 +178,14 @@ var _ = Describe("Integration: PR5b DemoVirtualMachineSnapshot + disk under VM",
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "pr5b-cm", Namespace: nsName}, Data: map[string]string{"k": "v"}}
 		Expect(k8sClient.Create(testCtx, cm)).To(Succeed())
 
+		// VM -> Disk topology is the downward, name-based spec link (same namespace), not ownerReferences.
 		vmResource := &demov1alpha1.DemoVirtualMachine{
 			ObjectMeta: metav1.ObjectMeta{Name: "demo-vm-1", Namespace: nsName},
+			Spec:       demov1alpha1.DemoVirtualMachineSpec{VirtualDiskName: "demo-disk-1"},
 		}
 		Expect(k8sClient.Create(testCtx, vmResource)).To(Succeed())
 		diskResource := &demov1alpha1.DemoVirtualDisk{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "demo-disk-1",
-				Namespace: nsName,
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       "DemoVirtualMachine",
-					Name:       vmResource.Name,
-					UID:        vmResource.UID,
-				}},
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: "demo-disk-1", Namespace: nsName},
 		}
 		Expect(k8sClient.Create(testCtx, diskResource)).To(Succeed())
 

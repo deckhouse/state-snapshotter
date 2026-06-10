@@ -150,6 +150,15 @@ Artifacts referenced by SnapshotContent.status:
 
 - **MUST NOT:** использовать **CSD** или **`ownerReference`** как источник истины **состава** логического дерева или для **dedup**; **CSD** — регистрация типов / runtime watches (**§0**); **`ownerReference`** — lifecycle / GC ([`design/demo-domain-csd/08-universal-snapshot-tree-model.md`](../design/demo-domain-csd/08-universal-snapshot-tree-model.md) часть B).
 
+#### §3.6.1. Topology vs coverage (нормативная формула — `INV-TOPO-COV`)
+
+Source-сторона иерархии (например `DemoVirtualMachine.spec.virtualDiskName -> DemoVirtualDisk`, `DemoVirtualDisk.spec.persistentVolumeClaimName -> PersistentVolumeClaim`) и snapshot-сторона покрытия — **разные** вещи и не должны смешиваться:
+
+- **topology source: spec links downward** — иерархию задаёт **только** направленная вниз spec-ссылка родителя на ребёнка по имени в том же namespace (parent → child). Никакой другой сигнал не задаёт топологию.
+- **ownerReferences are not topology** — Kubernetes `ownerReferences` на source-объектах **MUST NOT** трактоваться как источник топологии дерева; они — lifecycle / GC.
+- **reference does not imply coverage** — наличие spec-ссылки (parent ссылается на child) **само по себе не означает**, что child покрыт. Ссылка — это намерение/топология, не факт захвата.
+- **top-level exclusion happens only after actual child snapshot coverage** — ресурс исключается из top-level (не становится прямым ребёнком root) **только после фактического покрытия** реальным потомком: child snapshot опубликован и покрытие наблюдаемо через дерево (`status.childrenSnapshotRefs` / descendant `SnapshotContent.status.dataRefs[]` / in-flight VCR targets — **§3.5**). Если родитель не снапшотится (его kind не eligible через CSD), его child **не** покрыт и захватывается standalone как top-level — ровно так же, как nested PVC становится orphan-PVC, если его диск не снапшотится.
+
 ### §3.7. Ссылки на тесты и дизайн
 
 - Порядок атомарных PR под имплементацию **§3** (без повторения MUST): [`design/implementation-plan.md`](../design/implementation-plan.md) **§2.4.4**.

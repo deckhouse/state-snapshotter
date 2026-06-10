@@ -119,25 +119,23 @@ var _ = Describe("Integration: CSD-gated demo domain activation", Serial, func()
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
-	It("does not create top-level disk snapshots for VM-owned disks when only disk CSD is registered", func() {
+	It("captures a VM-referenced disk as a top-level disk snapshot when only disk CSD is registered", func() {
 		testCtx := context.Background()
 		nsName := createIntegrationNamespace(testCtx, "csd-gated-owned-disk-only-")
 
+		// Topology points DOWN and is name-based: the VM names its disk via spec.virtualDiskName in the
+		// same namespace, mirroring DemoVirtualDisk.spec.persistentVolumeClaimName -> PVC. Kubernetes
+		// ownerReferences are NOT a topology source. Because the VM kind is not snapshotted here (only
+		// the disk CSD is registered), nothing captures the disk under a VM subtree, so the disk is
+		// captured standalone at the root - exactly like a nested PVC whose owning disk is not being
+		// snapshotted falls back to orphan-PVC capture.
 		vm := &demov1alpha1.DemoVirtualMachine{
 			ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: nsName},
+			Spec:       demov1alpha1.DemoVirtualMachineSpec{VirtualDiskName: "disk-vm"},
 		}
 		Expect(k8sClient.Create(testCtx, vm)).To(Succeed())
 		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDisk{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "disk-vm",
-				Namespace: nsName,
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       "DemoVirtualMachine",
-					Name:       vm.Name,
-					UID:        vm.UID,
-				}},
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-vm", Namespace: nsName},
 		})).To(Succeed())
 
 		createEligibleDemoDiskCSD(testCtx, csdName)
@@ -155,25 +153,20 @@ var _ = Describe("Integration: CSD-gated demo domain activation", Serial, func()
 			ready := meta.FindStatusCondition(root.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(root.Status.ChildrenSnapshotRefs).To(BeEmpty())
+			g.Expect(root.Status.ChildrenSnapshotRefs).To(ContainElement(SatisfyAll(
+				HaveField("APIVersion", demov1alpha1.SchemeGroupVersion.String()),
+				HaveField("Kind", "DemoVirtualDiskSnapshot"),
+			)))
 			g.Expect(root.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 			rootContentName = root.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		diskSnapshots := &demov1alpha1.DemoVirtualDiskSnapshotList{}
 		Expect(k8sClient.List(testCtx, diskSnapshots, client.InNamespace(nsName))).To(Succeed())
-		Expect(diskSnapshots.Items).To(BeEmpty())
-
-		rootContent := &storagev1alpha1.SnapshotContent{}
-		Expect(k8sClient.Get(testCtx, types.NamespacedName{Name: rootContentName}, rootContent)).To(Succeed())
-		Expect(rootContent.Status.ChildrenSnapshotContentRefs).To(BeEmpty())
-		Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty(), "root own capture always materializes an MCP, even when empty")
-		rootObjects := integrationArchiveObjectsFromMCP(testCtx, rootContent.Status.ManifestCheckpointName)
-		Expect(rootObjects).To(BeEmpty(), "root own MCP should be empty when no namespace-scoped allowlist objects remain")
+		Expect(diskSnapshots.Items).To(HaveLen(1), "VM-referenced disk is captured standalone when its VM is not snapshotted")
 
 		aggregated := integrationAggregatedObjects(testCtx, usecase.SnapshotContentGVK(), rootContentName)
-		Expect(integrationObjectsContainKind(aggregated, "DemoVirtualDisk")).To(BeFalse())
-		Expect(integrationObjectsContainKindName(aggregated, "DemoVirtualDisk", "disk-vm")).To(BeFalse())
+		Expect(integrationObjectsContainKindName(aggregated, "DemoVirtualDisk", "disk-vm")).To(BeTrue())
 	})
 
 	It("creates VM as top-level child and disk only under VM when VM and disk CSD are registered", func() {
@@ -186,21 +179,14 @@ var _ = Describe("Integration: CSD-gated demo domain activation", Serial, func()
 		})
 
 		nsName := createIntegrationNamespace(testCtx, "csd-gated-owned-disk-vm-")
+		// VM -> Disk topology is the downward, name-based spec link (same namespace), not ownerReferences.
 		vm := &demov1alpha1.DemoVirtualMachine{
 			ObjectMeta: metav1.ObjectMeta{Name: "vm-1", Namespace: nsName},
+			Spec:       demov1alpha1.DemoVirtualMachineSpec{VirtualDiskName: "disk-vm"},
 		}
 		Expect(k8sClient.Create(testCtx, vm)).To(Succeed())
 		Expect(k8sClient.Create(testCtx, &demov1alpha1.DemoVirtualDisk{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "disk-vm",
-				Namespace: nsName,
-				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       "DemoVirtualMachine",
-					Name:       vm.Name,
-					UID:        vm.UID,
-				}},
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-vm", Namespace: nsName},
 		})).To(Succeed())
 
 		createEligibleDemoVMAndDiskCSD(testCtx, vmDiskCSDName)

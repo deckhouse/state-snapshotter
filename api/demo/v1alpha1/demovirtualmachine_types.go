@@ -31,7 +31,14 @@ type DemoVirtualMachine struct {
 	Status DemoVirtualMachineStatus `json:"status,omitempty"`
 }
 
-type DemoVirtualMachineSpec struct{}
+type DemoVirtualMachineSpec struct {
+	// VirtualDiskName links this VM to a DemoVirtualDisk for snapshot-tree planning (parent -> child).
+	// The reference points DOWN the hierarchy (VM -> Disk -> PVC), mirroring
+	// DemoVirtualDisk.spec.persistentVolumeClaimName. Kubernetes ownerReferences are lifecycle
+	// metadata only and are not used as topology source-of-truth.
+	// +optional
+	VirtualDiskName string `json:"virtualDiskName,omitempty"`
+}
 
 type DemoVirtualMachineStatus struct{}
 

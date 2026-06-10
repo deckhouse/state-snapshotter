@@ -30,12 +30,39 @@ type DemoVirtualDisk struct {
 	Status            DemoVirtualDiskStatus `json:"status,omitempty"`
 }
 
+// +k8s:deepcopy-gen=true
 type DemoVirtualDiskSpec struct {
-	// VirtualMachineName links this disk to a DemoVirtualMachine for snapshot-tree
-	// planning. Kubernetes ownerReferences are lifecycle metadata only and are
-	// not used as topology source-of-truth.
+	// PersistentVolumeClaimName is the in-namespace PVC backing this disk. When set, the disk snapshot
+	// owns the PVC data leg: it creates a VolumeCaptureRequest for the PVC and publishes the bound
+	// VolumeSnapshotContent into its SnapshotContent.status.dataRefs[]. The PVC then becomes a
+	// subtree-covered volume and the namespace root MUST NOT treat it as an orphan PVC (no root VS).
+	// When empty the disk is manifest-only (no data leg).
 	// +optional
-	VirtualMachineName string `json:"virtualMachineName,omitempty"`
+	PersistentVolumeClaimName string `json:"persistentVolumeClaimName,omitempty"`
+
+	// DataSource, when set, declares restore intent: this disk is to be provisioned from an existing
+	// snapshot, mirroring how PVC.spec.dataSource references a VolumeSnapshot. The reference points to a
+	// DemoVirtualDiskSnapshot. This records intent only; restore reconcile is not implemented yet.
+	// +optional
+	DataSource *DemoVirtualDiskDataSource `json:"dataSource,omitempty"`
+}
+
+// DemoVirtualDiskDataSource references the restore source for a DemoVirtualDisk, mirroring the typed
+// PVC.spec.dataSource (which references a VolumeSnapshot). Today only DemoVirtualDiskSnapshot is supported.
+// +k8s:deepcopy-gen=true
+type DemoVirtualDiskDataSource struct {
+	// APIGroup of the source object's kind (for example demo.state-snapshotter.deckhouse.io). An empty
+	// value refers to the core API group.
+	// +optional
+	APIGroup string `json:"apiGroup,omitempty"`
+
+	// Kind of the source object (for example DemoVirtualDiskSnapshot).
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+
+	// Name of the source object in the same namespace as the disk.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 type DemoVirtualDiskStatus struct{}

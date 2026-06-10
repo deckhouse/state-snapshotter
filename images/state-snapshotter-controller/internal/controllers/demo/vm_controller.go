@@ -411,8 +411,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 	return r.Client.Patch(ctx, child, client.MergeFrom(base))
 }
 
+// demoDiskOwnedByVM resolves the snapshot-tree parent->child link from the VM side:
+// DemoVirtualMachine.spec.virtualDiskName names the owned disk (VM -> Disk -> PVC). The disk no longer
+// carries a back-reference to the VM, so topology flows strictly downward.
 func demoDiskOwnedByVM(disk *demov1alpha1.DemoVirtualDisk, vm *demov1alpha1.DemoVirtualMachine) bool {
-	return disk.Spec.VirtualMachineName == vm.Name
+	return vm.Spec.VirtualDiskName != "" && vm.Spec.VirtualDiskName == disk.Name
 }
 
 func patchDemoVirtualMachineSnapshotDomainReady(
