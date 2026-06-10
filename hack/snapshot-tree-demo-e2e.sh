@@ -13,7 +13,12 @@
 #     VolumeSnapshot visibility leaf at the namespace root, and a PVC nested under a
 #     DemoVirtualDisk (demo-pvc-disk) captured via the domain VolumeCaptureRequest path;
 #   - root/demo Snapshot Ready as a verbatim mirror of bound SnapshotContent.Ready
-#     (no local Ready recompute required to pass).
+#     (no local Ready recompute required to pass);
+#   - restore compiler (/manifests-with-data-restoration): apply-ready output validation only —
+#     endpoint liveness + no VRR, restore-safe sanitize + targetNamespace rewrite, orphan PVC ->
+#     dataSourceRef VolumeSnapshot, domain DemoVirtualDisk -> spec.dataSource + covered PVC
+#     suppression, child-before-parent ordering, and server-side dry-run apply into a fresh namespace.
+#     This validates the ALREADY implemented compiler; it does not change capture/tree/contract.
 #
 # This is a DIAGNOSTIC scenario, not a fragile one-shot e2e:
 #   - core invariants hard-fail (preflight, tree shape, happy-path Ready, MCP-failure
@@ -26,6 +31,9 @@
 #   00-preflight topology-disk-only referenced-pvc-without-disk-csd orphan-pvc-cleanup
 #   01-priority-vm-first 02-tree-ready topology-vm-disk orphan-pvc-vs
 #   domain-pvc-vcr manifest-no-volumesnapshot domain-pvc-failure-coverage
+#   20-restore-endpoint-basic 21-restore-sanitize-and-namespace
+#   22-restore-orphan-pvc-datasource 23-restore-domain-disk-datasource
+#   24-restore-vm-disk-order 25-restore-dry-run-apply
 #   03-priority-inverted
 #   04-domainready-barrier 05-ownership-handoff 06-mcp-failure 07-mcp-recovery
 #   08-vsc-pending 09-vsc-recovery
@@ -57,6 +65,7 @@
 #   TREE_DEMO_SKIP_INVERSION  1 = skip 03-priority-inverted (avoid global CSD churn)
 #   TREE_DEMO_SKIP_VSC        1 = skip 08/09/10 VSC stages
 #   TREE_DEMO_SKIP_CHUNK      1 = skip 11-chunk-missing
+#   TREE_DEMO_SKIP_RESTORE    1 = skip 20-25 restore compiler stages
 #
 # DESTRUCTIVE STAGES: 10-vsc-missing deletes a VolumeSnapshotContent (recovery is NOT always
 # possible — that is expected) and then drops the main namespace; 11-chunk-missing deletes a
@@ -85,6 +94,7 @@ NS_REF_PVC_NO_DISK_CSD="${NS}-ref-pvc-no-disk-csd"
 NS_DOMAIN_PVC_FAIL="${NS}-domain-pvc-fail"
 NS_PRIORITY_INV="${NS}-priority-inv"
 NS_DOMAIN_BARRIER="${NS}-domain-barrier"
+NS_RESTORE="${NS}-restore"
 CSD_NAME="tree-demo-vm-disk-${RUN_ID}"
 SNAP="demo-tree"
 
@@ -138,6 +148,7 @@ note() {
 	[[ -n "${CURRENT_STAGE}" ]] && printf 'NOTE: %s\n' "$*" >>"$(stage_dir "${CURRENT_STAGE}")/notes.txt" 2>/dev/null || true
 }
 die() {
+	_KUBECTL_RETRY_DISABLED=1
 	log "ERROR[${CURRENT_STAGE}]: $*"
 	[[ -n "${CURRENT_STAGE}" ]] && save_artifacts "${CURRENT_STAGE}" 2>/dev/null || true
 	dump_controller_logs_hint
@@ -147,11 +158,64 @@ die() {
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { log "ERROR: missing required command: $1"; exit 1; }; }
 now_rfc3339() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# Resilient kubectl wrapper (transient tunnel / API-server connectivity).
+#
+# Long staged runs against this cluster are fronted by an SSH tunnel / port-forward that
+# intermittently drops; a bare `kubectl` then exits non-zero and `set -e` aborts the whole run
+# mid-way (observed repeatedly aborting at later stages with "connect: connection refused" to
+# 127.0.0.1:<port>). This wrapper transparently retries ONLY transient connectivity failures
+# (connection refused / dial tcp / TLS handshake / EOF / "unable to connect to the server" /
+# timeouts) with linear backoff for up to KUBECTL_RETRY_SEC seconds, so a tunnel the operator
+# re-establishes is ridden out instead of failing the run. Any other non-zero exit (NotFound,
+# validation, conflict, assertion-style get) returns immediately and unchanged, preserving the
+# original control flow and `set -e` semantics for callers.
+#
+# stdin is buffered and re-fed only for "-f -" applies/replaces so a retry can resubmit the
+# manifest after the first attempt has already consumed the heredoc/pipe. Retries are disabled via
+# _KUBECTL_RETRY_DISABLED on the death/cleanup paths so they fail fast instead of hanging.
+_KUBECTL_RETRY_DISABLED=0
+KUBECTL_RETRY_SEC="${TREE_DEMO_KUBECTL_RETRY_SEC:-480}"
+kubectl() {
+	local waited=0 delay=3 rc=0 errfile buffer_stdin=0 stdin_data=""
+	case " $* " in
+	*" -f - "* | *" -f- "*) buffer_stdin=1 ;;
+	esac
+	if [[ "${buffer_stdin}" == "1" ]]; then
+		stdin_data="$(cat)"
+	fi
+	errfile="$(mktemp)"
+	while :; do
+		rc=0
+		if [[ "${buffer_stdin}" == "1" ]]; then
+			command kubectl "$@" <<<"${stdin_data}" 2>"${errfile}" || rc=$?
+		else
+			command kubectl "$@" 2>"${errfile}" || rc=$?
+		fi
+		if [[ "${rc}" -eq 0 ]]; then
+			cat "${errfile}" >&2
+			rm -f "${errfile}"
+			return 0
+		fi
+		if [[ "${_KUBECTL_RETRY_DISABLED}" != "1" ]] &&
+			[[ "${waited}" -lt "${KUBECTL_RETRY_SEC}" ]] &&
+			grep -qiE 'connection refused|dial tcp|i/o timeout|TLS handshake|unable to connect to the server|connection reset|unexpected EOF|http2: client connection|net/http: request canceled|Client\.Timeout exceeded|the server is currently unable to handle the request|EOF$' "${errfile}"; then
+			log "kubectl transient connectivity error (waited ${waited}s/${KUBECTL_RETRY_SEC}s) — retry in ${delay}s :: $(tr '\n' ' ' <"${errfile}" | head -c 160)"
+			sleep "${delay}"
+			waited=$((waited + delay))
+			[[ "${delay}" -lt 15 ]] && delay=$((delay + 3))
+			continue
+		fi
+		cat "${errfile}" >&2
+		rm -f "${errfile}"
+		return "${rc}"
+	done
+}
+
 kubectl_ctrl() { kubectl --as="${CONTROLLER_SA}" "$@"; }
 
 dump_controller_logs_hint() {
 	log "HINT: controller logs — kubectl logs -n ${MOD_NS} -l app=controller --tail=300"
-	kubectl logs -n "${MOD_NS}" -l app=controller --tail=60 2>/dev/null | tail -30 >&2 || true
+	command kubectl logs -n "${MOD_NS}" -l app=controller --tail=60 2>/dev/null | tail -30 >&2 || true
 }
 
 stage_dir() { printf '%s/%s' "${RUN_ARTIFACT_DIR}" "$1"; }
@@ -740,12 +804,13 @@ save_graph() {
 
 cleanup_on_exit() {
 	local rc=$?
+	_KUBECTL_RETRY_DISABLED=1
 	if [[ "${TREE_DEMO_SKIP_CLEANUP:-0}" == "1" ]]; then
-		log "SKIP cleanup: TREE_DEMO_SKIP_CLEANUP=1 (namespaces ${NS} ${NS_TOPO_DISK_ONLY} ${NS_REF_PVC_NO_DISK_CSD} ${NS_DOMAIN_PVC_FAIL} ${NS_PRIORITY_INV} ${NS_DOMAIN_BARRIER}, CSD ${CSD_NAME} kept)"
+		log "SKIP cleanup: TREE_DEMO_SKIP_CLEANUP=1 (namespaces ${NS} ${NS_TOPO_DISK_ONLY} ${NS_REF_PVC_NO_DISK_CSD} ${NS_DOMAIN_PVC_FAIL} ${NS_PRIORITY_INV} ${NS_DOMAIN_BARRIER} ${NS_RESTORE}, CSD ${CSD_NAME} kept)"
 		return 0
 	fi
 	kubectl delete "${CSD_RES}" "${CSD_NAME}" --ignore-not-found=true --wait=false 2>/dev/null || true
-	kubectl delete namespace "${NS}" "${NS_TOPO_DISK_ONLY}" "${NS_REF_PVC_NO_DISK_CSD}" "${NS_DOMAIN_PVC_FAIL}" "${NS_PRIORITY_INV}" "${NS_DOMAIN_BARRIER}" --ignore-not-found=true --wait=false 2>/dev/null || true
+	kubectl delete namespace "${NS}" "${NS_TOPO_DISK_ONLY}" "${NS_REF_PVC_NO_DISK_CSD}" "${NS_DOMAIN_PVC_FAIL}" "${NS_PRIORITY_INV}" "${NS_DOMAIN_BARRIER}" "${NS_RESTORE}" --ignore-not-found=true --wait=false 2>/dev/null || true
 	return "${rc}"
 }
 trap cleanup_on_exit EXIT
@@ -1264,6 +1329,172 @@ note "manifest-no-volumesnapshot: PVC manifests are present, CSI VS/VSC manifest
 save_graph "manifest-no-volumesnapshot" "${NS}" "${SNAP}" "manifest-no-volumesnapshot" "logical"
 save_artifacts "manifest-no-volumesnapshot" "${NS}"
 log "manifest-no-volumesnapshot: PASS"
+
+# ===========================================================================
+# Restore compiler cluster e2e (stages 20-25).
+#
+# Scope: validate the ALREADY implemented /manifests-with-data-restoration compiler on the live
+# main-namespace tree built above (root=${SNAP} in ${NS}). These stages READ the endpoint and assert
+# the output is apply-ready; they do NOT change capture/tree-building, dataRefs[]/children*Refs, the
+# compiler contract, or solve retained-read. The endpoint output is a JSON array of manifests; jq uses
+# (.items? // .) — error-safe: a bare array stays as-is, and a future {items:[...]} envelope still works.
+#
+# Restore endpoint output (resolved once in 20, reused by 21-25).
+RESTORE_OUT=""
+if [[ "${TREE_DEMO_SKIP_RESTORE:-0}" == "1" ]]; then
+	begin_stage "20-restore-endpoint-basic"
+	note "restore compiler stages 20-25 skipped (TREE_DEMO_SKIP_RESTORE=1)"
+	log "20-restore-endpoint-basic: skipped"
+else
+	# -----------------------------------------------------------------------
+	# 20-restore-endpoint-basic (endpoint is live, JSON, non-empty, no VRR)
+	# -----------------------------------------------------------------------
+	begin_stage "20-restore-endpoint-basic"
+	kubectl get namespace "${NS_RESTORE}" >/dev/null 2>&1 || kubectl create namespace "${NS_RESTORE}" >/dev/null
+	RESTORE_OUT="$(stage_dir 20-restore-endpoint-basic)/manifests-with-data-restoration.json"
+	kubectl get --raw \
+		"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/${NS}/snapshots/${SNAP}/manifests-with-data-restoration?targetNamespace=${NS_RESTORE}" \
+		>"${RESTORE_OUT}" 2>"$(stage_dir 20-restore-endpoint-basic)/endpoint.err" \
+		|| die "20-restore-endpoint-basic: restore endpoint request failed (see endpoint.err)"
+	jq -e '.' "${RESTORE_OUT}" >/dev/null \
+		|| die "20-restore-endpoint-basic: endpoint did not return valid JSON"
+	jq -e '((.items? // .) | type) == "array" and ((.items? // .) | length) > 0' "${RESTORE_OUT}" >/dev/null \
+		|| die "20-restore-endpoint-basic: restore output is empty"
+	jq -e '[(.items? // .)[] | select(.kind == "VolumeRestoreRequest")] | length == 0' "${RESTORE_OUT}" >/dev/null \
+		|| die "20-restore-endpoint-basic: output must not contain VolumeRestoreRequest (VRR is removed from read-path)"
+	note "20-restore-endpoint-basic: endpoint live, JSON, non-empty, no VRR (target ns ${NS_RESTORE})"
+	save_artifacts "20-restore-endpoint-basic" "${NS}"
+	log "20-restore-endpoint-basic: PASS"
+
+	# -----------------------------------------------------------------------
+	# 21-restore-sanitize-and-namespace (restore-safe sanitize + ns rewrite)
+	# -----------------------------------------------------------------------
+	begin_stage "21-restore-sanitize-and-namespace"
+	jq -e '
+		all((.items? // .)[];
+			(.metadata | has("uid") | not) and
+			(.metadata | has("resourceVersion") | not) and
+			(.metadata | has("managedFields") | not) and
+			(.metadata | has("ownerReferences") | not) and
+			(.metadata | has("finalizers") | not) and
+			(has("status") | not)
+		)
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "21-restore-sanitize-and-namespace: output still carries runtime/server-managed fields (uid/resourceVersion/managedFields/ownerReferences/finalizers/status)"
+	# Restore compiler is namespaced-only (MVP): every emitted object is namespaced and rewritten to the
+	# target namespace; cluster-scoped objects are dropped (none must remain without a namespace).
+	jq -e --arg ns "${NS_RESTORE}" '
+		all((.items? // .)[]; (.metadata.namespace // "") == $ns)
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "21-restore-sanitize-and-namespace: not every object was rewritten to targetNamespace ${NS_RESTORE} (or a cluster-scoped object leaked)"
+	note "21-restore-sanitize-and-namespace: sanitized + all objects in ${NS_RESTORE}"
+	save_artifacts "21-restore-sanitize-and-namespace" "${NS}"
+	log "21-restore-sanitize-and-namespace: PASS"
+
+	# -----------------------------------------------------------------------
+	# 22-restore-orphan-pvc-datasource (orphan PVC -> dataSourceRef VolumeSnapshot)
+	# -----------------------------------------------------------------------
+	begin_stage "22-restore-orphan-pvc-datasource"
+	jq -e '
+		[(.items? // .)[]
+			| select(.apiVersion == "v1" and .kind == "PersistentVolumeClaim" and .metadata.name == "demo-pvc")
+		] | length == 1
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "22-restore-orphan-pvc-datasource: expected exactly one orphan PVC demo-pvc in output"
+	jq -e '
+		[(.items? // .)[]
+			| select(.kind == "PersistentVolumeClaim" and .metadata.name == "demo-pvc")
+			| select(.spec.dataSourceRef.kind == "VolumeSnapshot")
+			| select((.spec.dataSourceRef.name // "") != "")
+			| select((.spec.dataSourceRef.apiGroup // "") == "snapshot.storage.k8s.io")
+		] | length == 1
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "22-restore-orphan-pvc-datasource: demo-pvc must have spec.dataSourceRef -> VolumeSnapshot (snapshot.storage.k8s.io) with a non-empty name"
+	# The compiler must resolve the VS visibility-leaf name captured for demo-pvc (set in orphan-pvc-vs).
+	if [[ -n "${ORPHAN_VS:-}" ]]; then
+		jq -e --arg vs "${ORPHAN_VS}" '
+			[(.items? // .)[]
+				| select(.kind == "PersistentVolumeClaim" and .metadata.name == "demo-pvc")
+				| select(.spec.dataSourceRef.name == $vs)
+			] | length == 1
+		' "${RESTORE_OUT}" >/dev/null \
+			|| die "22-restore-orphan-pvc-datasource: demo-pvc dataSourceRef.name must be the orphan VolumeSnapshot leaf ${ORPHAN_VS}"
+	fi
+	# Stale captured PVC binding fields must be stripped.
+	jq -e '
+		all((.items? // .)[] | select(.kind == "PersistentVolumeClaim");
+			(.spec | has("volumeName") | not) and (.spec | has("dataSource") | not)
+		)
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "22-restore-orphan-pvc-datasource: PVC output must not carry spec.volumeName or spec.dataSource"
+	# VS/VSC are transferred separately (data + tree); the compiler only references them, never emits them.
+	jq -e '
+		[(.items? // .)[] | select(.kind == "VolumeSnapshot" or .kind == "VolumeSnapshotContent")] | length == 0
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "22-restore-orphan-pvc-datasource: output must not emit VolumeSnapshot/VolumeSnapshotContent objects"
+	note "22-restore-orphan-pvc-datasource: demo-pvc -> dataSourceRef VolumeSnapshot, VS/VSC not emitted"
+	save_artifacts "22-restore-orphan-pvc-datasource" "${NS}"
+	log "22-restore-orphan-pvc-datasource: PASS"
+
+	# -----------------------------------------------------------------------
+	# 23-restore-domain-disk-datasource (DemoVirtualDisk -> dataSource + covered PVC suppressed)
+	# -----------------------------------------------------------------------
+	begin_stage "23-restore-domain-disk-datasource"
+	# disk-vm (covered, under VM) and disk-standalone (root child) are each captured under their own
+	# DemoVirtualDiskSnapshot, so both must be rewritten to restore from that snapshot.
+	for disk in disk-vm disk-standalone; do
+		jq -e --arg d "${disk}" '
+			[(.items? // .)[]
+				| select(.apiVersion == "'"${DEMO_API}"'" and .kind == "DemoVirtualDisk" and .metadata.name == $d)
+				| select(.spec.dataSource.kind == "DemoVirtualDiskSnapshot")
+				| select((.spec.dataSource.name // "") != "")
+			] | length == 1
+		' "${RESTORE_OUT}" >/dev/null \
+			|| die "23-restore-domain-disk-datasource: DemoVirtualDisk ${disk} must have spec.dataSource -> DemoVirtualDiskSnapshot with a non-empty name"
+	done
+	# demo-pvc-disk is owned/covered by disk-vm: the restored disk recreates it, so it must NOT appear as
+	# a standalone PVC restore object (covered-PVC suppression).
+	jq -e '
+		[(.items? // .)[]
+			| select(.kind == "PersistentVolumeClaim" and .metadata.name == "demo-pvc-disk")
+		] | length == 0
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "23-restore-domain-disk-datasource: covered PVC demo-pvc-disk must not be emitted as a standalone PVC"
+	note "23-restore-domain-disk-datasource: both disks point at their DemoVirtualDiskSnapshot; covered demo-pvc-disk suppressed"
+	save_artifacts "23-restore-domain-disk-datasource" "${NS}"
+	log "23-restore-domain-disk-datasource: PASS"
+
+	# -----------------------------------------------------------------------
+	# 24-restore-vm-disk-order (post-order output: child disk before parent VM)
+	# -----------------------------------------------------------------------
+	begin_stage "24-restore-vm-disk-order"
+	jq -e '
+		(.items? // .) as $o
+		| ([$o | to_entries[] | select(.value.kind == "DemoVirtualDisk" and .value.metadata.name == "disk-vm") | .key][0]) as $disk
+		| ([$o | to_entries[] | select(.value.kind == "DemoVirtualMachine" and .value.metadata.name == "vm-1") | .key][0]) as $vm
+		| ($disk != null) and ($vm != null) and ($disk < $vm)
+	' "${RESTORE_OUT}" >/dev/null \
+		|| die "24-restore-vm-disk-order: restored disk-vm must appear before its parent vm-1 (child-before-parent post-order output)"
+	note "24-restore-vm-disk-order: disk-vm precedes vm-1 in output"
+	save_artifacts "24-restore-vm-disk-order" "${NS}"
+	log "24-restore-vm-disk-order: PASS"
+
+	# -----------------------------------------------------------------------
+	# 25-restore-dry-run-apply (manifests are truly apply-ready)
+	# -----------------------------------------------------------------------
+	begin_stage "25-restore-dry-run-apply"
+	# kubectl apply needs a single document/List, not a bare JSON array; wrap the output in a v1 List.
+	# No -n: every object already carries its rewritten namespace (verified in stage 21), and passing -n
+	# alongside in-manifest namespaces can make apply reject mismatched/empty namespaces.
+	jq '{apiVersion: "v1", kind: "List", items: (.items? // .)}' "${RESTORE_OUT}" \
+		>"$(stage_dir 25-restore-dry-run-apply)/restore-list.json"
+	kubectl apply --dry-run=server -f "$(stage_dir 25-restore-dry-run-apply)/restore-list.json" \
+		>"$(stage_dir 25-restore-dry-run-apply)/dry-run.out" 2>&1 \
+		|| { cat "$(stage_dir 25-restore-dry-run-apply)/dry-run.out" >&2; die "25-restore-dry-run-apply: server-side dry-run apply rejected the restore manifests (sanitize gap; see dry-run.out)"; }
+	note "25-restore-dry-run-apply: server-side dry-run apply accepted all restore manifests in ${NS_RESTORE}"
+	save_artifacts "25-restore-dry-run-apply" "${NS}"
+	log "25-restore-dry-run-apply: PASS"
+fi
 
 # ---------------------------------------------------------------------------
 # domain-pvc-failure-coverage (soft diagnostic: planned subtree capture failure)
