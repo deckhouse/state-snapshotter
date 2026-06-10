@@ -185,6 +185,55 @@ func TestClassifyGenericChildSnapshotReady_TerminalVsPending(t *testing.T) {
 	}
 }
 
+// A domain child Snapshot whose volume capture failed terminally (DemoVirtualDiskSnapshot
+// Ready=False/VolumeCaptureFailed) must classify as a terminal child failure so the parent
+// Snapshot.Ready bridge can fail closed. Before this was wired the parent held a stale Ready=True
+// over lost volume data (INV-FAIL-PROP), because the bound child SnapshotContent reports its data leg
+// ready from an empty dataRefs[] and cannot represent the capture failure.
+func TestSummarizeChildSnapshotTerminalFailures_VolumeCaptureFailedIsTerminal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ns := "ns1"
+	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
+	u := demoSnapshotUnstructuredReady(ns, "disk-fail", gvk, "c1", metav1.ConditionFalse, snapshot.ReasonVolumeCaptureFailed)
+	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
+	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
+		refDemoDisk("disk-fail"),
+	}, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum.HasFailed || len(sum.Messages) == 0 {
+		t.Fatalf("VolumeCaptureFailed child must be a terminal failure, got %+v", sum)
+	}
+}
+
+// The classifier's terminal-reason set must stay in sync with the volume-capture / plan terminal
+// failCapture reasons documented in ready_patch.go. These are carried by a child Snapshot's Ready=False
+// before any child SnapshotContent can represent them.
+func TestChildSnapshotTerminalReadyReasons_IncludesVolumeCaptureTerminals(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		snapshot.ReasonVolumeCaptureFailed,
+		"VolumeCaptureTargetsFailed",
+		"DuplicateCoveredPVCUID",
+	} {
+		if !IsSnapshotChildTerminalReadyFailure(reason) {
+			t.Fatalf("reason %q must be classified as a terminal child capture failure", reason)
+		}
+	}
+}
+
+func TestClassifyGenericChildSnapshotReady_VolumeCaptureFailedTerminal(t *testing.T) {
+	t.Parallel()
+	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
+	u := demoSnapshotUnstructuredReady("ns", "x", gvk, "content", metav1.ConditionFalse, snapshot.ReasonVolumeCaptureFailed)
+	c, msg := ClassifyGenericChildSnapshotReady(u, gvk, "ns", "x")
+	if c != SnapshotChildReadyClassFailed || msg == "" {
+		t.Fatalf("got %v %q", c, msg)
+	}
+}
+
 func TestClassifySnapshotChildReady_DelegatesToGeneric(t *testing.T) {
 	t.Parallel()
 	ch := &storagev1alpha1.Snapshot{

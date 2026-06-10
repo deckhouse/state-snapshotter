@@ -360,4 +360,108 @@ var _ = Describe("Integration: terminal child-Snapshot failure bridge sets paren
 			g.Expect(pr.Message).To(ContainSubstring("CapturePlanDrift"))
 		}, 180*time.Second, 300*time.Millisecond).Should(Succeed())
 	})
+
+	// Regression (INV-FAIL-PROP): a child whose VOLUME capture fails terminally
+	// (Ready=False/VolumeCaptureFailed — the domain DemoVirtualDiskSnapshot path) must propagate to the
+	// parent Snapshot.Ready=False/ChildrenFailed. The child's bound SnapshotContent cannot represent this
+	// (its data leg reads from an empty dataRefs[] and reports ready), so the child-Snapshot terminal
+	// failure bridge is the only path — and VolumeCaptureFailed was previously missing from its terminal
+	// reason set, leaving the parent stale Ready=True over lost volume data.
+	It("sets parent Ready=False ChildrenFailed when child hits terminal VolumeCaptureFailed", func() {
+		ctx := context.Background()
+
+		ns := &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "nss-e6-volfail-",
+				Labels: map[string]string{
+					"state-snapshotter.deckhouse.io/test": "snapshot-e6-volfail",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		nsName := ns.Name
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
+		})
+
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "nss-e6-volfail-cm", Namespace: nsName},
+			Data:       map[string]string{"k": "v"},
+		}
+		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+		parentName := "parent-e6-volfail"
+		childName := "child-e6-volfail"
+
+		parent := &storagev1alpha1.Snapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: parentName, Namespace: nsName},
+			Spec:       storagev1alpha1.SnapshotSpec{},
+		}
+		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
+
+		child := &storagev1alpha1.Snapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: childName, Namespace: nsName},
+			Spec:       storagev1alpha1.SnapshotSpec{},
+		}
+		Expect(k8sClient.Create(ctx, child)).To(Succeed())
+
+		parentKey := types.NamespacedName{Namespace: nsName, Name: parentName}
+		childKey := types.NamespacedName{Namespace: nsName, Name: childName}
+
+		Eventually(func(g Gomega) {
+			ch := &storagev1alpha1.Snapshot{}
+			g.Expect(k8sClient.Get(ctx, childKey, ch)).To(Succeed())
+			g.Expect(ch.Status.BoundSnapshotContentName).NotTo(BeEmpty())
+			g.Expect(ch.UID).NotTo(BeEmpty())
+		}, 180*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		childSnap := &storagev1alpha1.Snapshot{}
+		Expect(k8sClient.Get(ctx, childKey, childSnap)).To(Succeed())
+
+		Expect(mergeChildGraphIntoRoot(ctx, k8sClient, nsName, parentName, childName, childSnap.Status.BoundSnapshotContentName)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			childFresh := &storagev1alpha1.Snapshot{}
+			g.Expect(k8sClient.Get(ctx, childKey, childFresh)).To(Succeed())
+			childBase := childFresh.DeepCopy()
+			meta.SetStatusCondition(&childFresh.Status.Conditions, metav1.Condition{
+				Type:               snapshot.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             snapshot.ReasonVolumeCaptureFailed,
+				Message:            "integration terminal volume capture failure",
+				ObservedGeneration: childFresh.Generation,
+				LastTransitionTime: metav1.Now(),
+			})
+			g.Expect(k8sClient.Status().Patch(ctx, childFresh, client.MergeFrom(childBase))).To(Succeed())
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			ch := &storagev1alpha1.Snapshot{}
+			g.Expect(k8sClient.Get(ctx, childKey, ch)).To(Succeed())
+			cr := meta.FindStatusCondition(ch.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(cr).NotTo(BeNil())
+			g.Expect(cr.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(cr.Reason).To(Equal(snapshot.ReasonVolumeCaptureFailed))
+		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			pKick := &storagev1alpha1.Snapshot{}
+			g.Expect(k8sClient.Get(ctx, parentKey, pKick)).To(Succeed())
+			pKickBase := pKick.DeepCopy()
+			if pKick.Annotations == nil {
+				pKick.Annotations = map[string]string{}
+			}
+			pKick.Annotations["state-snapshotter.deckhouse.io/integration-parent-kick"] = fmt.Sprintf("%d", time.Now().UnixNano())
+			g.Expect(k8sClient.Patch(ctx, pKick, client.MergeFrom(pKickBase))).To(Succeed())
+
+			p := &storagev1alpha1.Snapshot{}
+			g.Expect(k8sClient.Get(ctx, parentKey, p)).To(Succeed())
+			pr := meta.FindStatusCondition(p.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(pr).NotTo(BeNil())
+			g.Expect(pr.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(pr.Reason).To(Equal(snapshot.ReasonChildrenFailed))
+			g.Expect(pr.Message).To(ContainSubstring(childKey.String()))
+			g.Expect(pr.Message).To(ContainSubstring(snapshot.ReasonVolumeCaptureFailed))
+		}, 180*time.Second, 300*time.Millisecond).Should(Succeed())
+	})
 })
