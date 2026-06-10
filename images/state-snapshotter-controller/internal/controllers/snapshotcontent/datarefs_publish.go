@@ -90,6 +90,13 @@ func ensureVolumeSnapshotContentOwnedByContent(
 		if err := c.Get(ctx, client.ObjectKey{Name: vscName}, obj); err != nil {
 			return err
 		}
+		// A VSC that is being deleted MUST NOT be patched (spec §3.9.10): touching ownerRef or
+		// deletionPolicy on an object with a deletionTimestamp is pointless (it is going away) and could
+		// race finalizer removal. Data readiness already treats a deleting VSC as ArtifactMissing. The
+		// self-heal caller pre-checks this too; the guard here makes the publish-path handoff equally safe.
+		if !obj.GetDeletionTimestamp().IsZero() {
+			return nil
+		}
 		ownerRef := metav1.OwnerReference{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 			Kind:       "SnapshotContent",
