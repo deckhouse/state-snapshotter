@@ -20,12 +20,20 @@
 #     suppression, child-before-parent ordering, and server-side dry-run apply into a fresh namespace.
 #     This validates the ALREADY implemented compiler; it does not change capture/tree/contract.
 #
-# This is a DIAGNOSTIC scenario, not a fragile one-shot e2e:
-#   - core invariants hard-fail (preflight, tree shape, happy-path Ready, MCP-failure
-#     propagation + sibling isolation, MCP recovery, mirror equality);
-#   - racey / environment-dependent checks (priority inversion shape, DomainReady timeline,
-#     ownership-handoff intermediates, VSC pending/recovery/missing, chunk-missing) are
-#     best-effort: they emit WARN + SOFT and store artifacts instead of aborting the run.
+# Outcome model: STRICTLY BINARY. A group either PASSES (exit 0) or FAILS (exit 1) with a concrete
+# reason. There is no "soft finding" / "completed with N warnings" verdict.
+#   - die "<reason>"     -> INVARIANT violated (architecture bug): expected vs observed is logged,
+#                           artifacts are saved, controller log hint is dumped, run exits 1.
+#   - require "<reason>" -> PRECONDITION not satisfied (environment/RBAC/capability/setup, not an
+#                           architecture bug): run exits 1 with a PRECONDITION-tagged reason so the
+#                           operator can tell "fix the cluster" from "fix the code".
+#   - note "<text>"      -> purely informational timeline marker; NEVER affects the verdict. Used only
+#                           for genuinely non-invariant observations (e.g. a fast self-heal transient
+#                           that may be missed by polling, while the real invariant — recovery to
+#                           Ready=True — is asserted with die right after).
+# Every invalidation/recovery assertion is made deterministic by a BOUNDED wait (WAIT_SEC for capture
+# readiness, INVALIDATION_WAIT_SEC for failure-propagation/self-heal): the expected terminal state is
+# reached within the window (PASS) or it is not and we die with the last observed state (FAIL, why).
 #
 # Artifacts: ${TREE_DEMO_ARTIFACT_DIR:-artifacts}/tree-demo-<run-id>/<stage>/
 #   00-preflight topology-disk-only referenced-pvc-without-disk-csd orphan-pvc-cleanup
@@ -41,26 +49,46 @@
 #   17-child-ready-false 18-recovery 15-chunk-deleted 16-orphan-vsc-deleted
 #   10-vsc-missing 11-chunk-missing
 #
-# Failure-propagation / parent-invalidation stages (12-18) exercise literal deletion of required
-# descendants/artifacts and assert the invariant "parent Ready=True IFF all required
-# descendants/artifacts are present and healthy" plus recovery. Recoverable deletions (12,13,14,17)
-# restore the tree and run before the consolidation gate 18-recovery; the non-recoverable deletions
-# (15-chunk-deleted, 16-orphan-vsc-deleted) intentionally leave the tree degraded and therefore run
-# AFTER 18, joining the destructive tail with 10/11.
+# Failure-propagation / parent-invalidation stages (12-18) assert the invariant "parent Ready=True IFF
+# all required durable descendants/artifacts are present and healthy". Stage 12 is a SELF-HEAL case
+# (deleting a child Snapshot OBJECT loses no durable artifact: the planner re-ensures it and the parent
+# stays Ready). Stages 13 (child content), 14 (MCP), 15 (chunk), 16 (orphan VSC) and 17 (child
+# Ready=False) are real invalidations on artifact loss / child failure. Recoverable ones (13,14,17)
+# heal and run before the consolidation gate 18-recovery; the non-recoverable artifact losses
+# (15-chunk-deleted, 16-orphan-vsc-deleted) intentionally leave the tree degraded and run AFTER 18,
+# joining the destructive tail with 10/11. These stages use a short observation cap
+# (TREE_DEMO_INVALIDATION_WAIT_SEC, ~3 reconciles), not the capture-readiness WAIT_SEC.
 #
-# Usage: ./hack/snapshot-tree-demo-e2e.sh
+# Usage: ./hack/snapshot-tree-demo-e2e.sh            # full linear run (legacy, ~15 min)
+#        TREE_DEMO_GROUP=core ./hack/snapshot-tree-demo-e2e.sh   # one <=5 min logical group
+#
+# Run logical groups separately (each <=5 min, survives a flaky tunnel):
+#   topology core domain priority failure-leaf failure-delete failure-child failure-destructive restore
+# See the "test group selection" block below for the exact stage membership of each group.
 #
 # Env:
+#   TREE_DEMO_GROUP           logical group to run (default: all = full linear run). One of:
+#                             topology|core|domain|priority|failure-leaf|failure-delete|
+#                             failure-child|failure-destructive|restore. All groups except
+#                             `topology` rebuild the main tree (00+01+02) first, so each is
+#                             self-contained and independently runnable.
 #   TREE_DEMO_NAMESPACE       main demo namespace (default: snapshot-demo-tree-<run-id>)
 #   TREE_DEMO_STORAGE_CLASS   default: local-thin
 #   TREE_DEMO_MODULE_NS       controller namespace (default: d8-state-snapshotter)
 #   TREE_DEMO_CONTROLLER_SA   impersonation SA for status patches/chunk reads
 #                             (default: system:serviceaccount:<module-ns>:controller)
-#   TREE_DEMO_WAIT_SEC        per-wait hard cap seconds (default: 600)
+#   TREE_DEMO_WAIT_SEC        per-wait hard cap seconds for capture readiness (default: 600)
+#   TREE_DEMO_INVALIDATION_WAIT_SEC  short cap for failure-propagation/self-heal observations in
+#                             stages 12-18/10/11 (default: 30 — a few reconciles, not a capture wait)
 #   TREE_DEMO_POLL_SEC        poll interval seconds (default: 5)
 #   TREE_DEMO_WAIT_LOG_EVERY_SEC progress log interval (default: 30)
 #   TREE_DEMO_ARTIFACT_DIR    artifact root (default: artifacts)
 #   TREE_DEMO_BIND_IMAGE      bind pod image for WaitForFirstConsumer PVCs
+#   TREE_DEMO_PVC_SIZE        requested size for empty demo PVCs (default: 1Mi). These tests validate
+#                             architecture/control-plane semantics, not data payload movement.
+#   TREE_DEMO_SKIP_GRAPH      1 = skip per-stage graph rendering (snapshot-graph.sh) — much faster;
+#                             graph is a diagnostic aid, not an assertion. Use while debugging tests.
+#   TREE_DEMO_SKIP_RESTORE    1 = skip restore-compiler stages 20-25
 #   TREE_DEMO_SKIP_CLEANUP    1 = keep namespaces and leave CSD as last set
 #   TREE_DEMO_SKIP_INVERSION  1 = skip 03-priority-inverted (avoid global CSD churn)
 #   TREE_DEMO_SKIP_VSC        1 = skip 08/09/10 VSC stages
@@ -83,10 +111,51 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)"
 STORAGE_CLASS="${TREE_DEMO_STORAGE_CLASS:-local-thin}"
 MOD_NS="${TREE_DEMO_MODULE_NS:-d8-state-snapshotter}"
 WAIT_SEC="${TREE_DEMO_WAIT_SEC:-600}"
+# Short cap for failure-propagation / self-heal OBSERVATIONS (stages 12-18, 10, 11). These watch for an
+# event-driven status transition (invalidation, re-ensure, recovery) that the controller produces within
+# a reconcile or two, or — for an unmet expectation — never. The capture-readiness WAIT_SEC=600 is wrong
+# here: on the "never" path it burns ~10 min per check (observed: stage 12 took 646s waiting for a
+# transition that by design does not happen). A few reconciles + slack is correct.
+INVALIDATION_WAIT_SEC="${TREE_DEMO_INVALIDATION_WAIT_SEC:-30}"
 POLL_SEC="${TREE_DEMO_POLL_SEC:-5}"
 WAIT_LOG_EVERY_SEC="${TREE_DEMO_WAIT_LOG_EVERY_SEC:-30}"
 BIND_IMAGE="${TREE_DEMO_BIND_IMAGE:-registry.k8s.io/pause:3.9}"
+PVC_SIZE="${TREE_DEMO_PVC_SIZE:-1Mi}"
 CONTROLLER_SA="${TREE_DEMO_CONTROLLER_SA:-system:serviceaccount:${MOD_NS}:controller}"
+
+# ---- test group selection ---------------------------------------------------
+# The full linear suite is ~15 min and does not survive a flaky tunnel. Split it into logical,
+# independently runnable groups (target <=5 min each) via TREE_DEMO_GROUP. Every group except
+# `topology` is self-contained: it rebuilds the main tree (00-preflight + 01 + 02) before its own
+# stages, so groups can run in any order and on their own. Groups:
+#   all                  legacy full linear run (default)
+#   topology             topology-disk-only, referenced-pvc-without-disk-csd, orphan-pvc-cleanup
+#   core                 [tree] topology-vm-disk, orphan-pvc-vs, domain-pvc-vcr, manifest-no-volumesnapshot
+#   domain               [tree] domain-pvc-failure-coverage, 04-domainready-barrier, 05-ownership-handoff
+#   priority             [tree] 03-priority-inverted
+#   failure-leaf         [tree] 06-mcp-failure, 07-mcp-recovery, 08-vsc-pending, 09-vsc-recovery
+#   failure-delete       [tree] 12-child-snapshot-deleted, 13-snapshotcontent-deleted, 14-mcp-deleted
+#   failure-child        [tree] 17-child-ready-false, 18-recovery
+#   failure-destructive  [tree] 15-chunk-deleted, 16-orphan-vsc-deleted, 10-vsc-missing, 11-chunk-missing
+#   restore              [tree] 20-25 restore-compiler stages
+# 00-preflight always runs (fail-fast env check). [tree] = main tree rebuilt first.
+GROUP="${TREE_DEMO_GROUP:-all}"
+# grp <name>: true when the active group is <name> (or the legacy "all" full run).
+grp() { [[ "${GROUP}" == "all" || "${GROUP}" == "$1" ]]; }
+# need_main_tree: true when the active group must build the main tree (01-priority-vm-first + 02-tree-ready).
+need_main_tree() {
+	case "${GROUP}" in
+	all | core | domain | priority | failure-leaf | failure-delete | failure-child | failure-destructive | restore) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+case "${GROUP}" in
+all | topology | core | domain | priority | failure-leaf | failure-delete | failure-child | failure-destructive | restore) ;;
+*)
+	printf 'ERROR: unknown TREE_DEMO_GROUP=%s\n  valid: all topology core domain priority failure-leaf failure-delete failure-child failure-destructive restore\n' "${GROUP}" >&2
+	exit 2
+	;;
+esac
 
 NS="${TREE_DEMO_NAMESPACE:-snapshot-demo-tree-${RUN_ID}}"
 NS_TOPO_DISK_ONLY="${NS}-disk-only"
@@ -123,7 +192,6 @@ VMSNAP_RES="demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io"
 DISKSNAP_RES="demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io"
 
 CURRENT_STAGE=""
-SOFT_FAILURES=0
 HAS_OBJECTKEEPER=0
 
 # Tree handles (resolved in 02-tree-ready).
@@ -138,11 +206,6 @@ SIBLING_CONTENT=""
 DOMAIN_VCR_OBSERVED=0
 
 log() { printf '%s\n' "$*" >&2; }
-soft() {
-	SOFT_FAILURES=$((SOFT_FAILURES + 1))
-	log "SOFT[${CURRENT_STAGE}]: $*"
-	[[ -n "${CURRENT_STAGE}" ]] && printf 'SOFT: %s\n' "$*" >>"$(stage_dir "${CURRENT_STAGE}")/notes.txt" 2>/dev/null || true
-}
 note() {
 	log "NOTE[${CURRENT_STAGE}]: $*"
 	[[ -n "${CURRENT_STAGE}" ]] && printf 'NOTE: %s\n' "$*" >>"$(stage_dir "${CURRENT_STAGE}")/notes.txt" 2>/dev/null || true
@@ -154,6 +217,9 @@ die() {
 	dump_controller_logs_hint
 	exit 1
 }
+# require: a PRECONDITION (environment / RBAC / capability / test-setup) was not satisfied. Not an
+# architecture bug, but the run cannot validate anything further, so fail fast with a clear tag.
+require() { die "PRECONDITION: $*"; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { log "ERROR: missing required command: $1"; exit 1; }; }
 now_rfc3339() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -268,19 +334,24 @@ res_for_kind() {
 
 # ---- wait helpers -----------------------------------------------------------
 
-wait_until() {
-	local desc="$1"; shift
-	local deadline=$((SECONDS + WAIT_SEC)) start=${SECONDS} last=${SECONDS}
+# wait_until_to <timeout_sec> <desc> <cmd...>: poll <cmd> until success or <timeout_sec> elapses.
+wait_until_to() {
+	local timeout="$1" desc="$2"; shift 2
+	local deadline=$((SECONDS + timeout)) start=${SECONDS} last=${SECONDS}
 	while ((SECONDS < deadline)); do
 		if "$@"; then log "OK ${desc}"; return 0; fi
 		if ((SECONDS - last >= WAIT_LOG_EVERY_SEC)); then
-			log "WAIT: ${desc} ($((SECONDS - start))s / ${WAIT_SEC}s)"; last=${SECONDS}
+			log "WAIT: ${desc} ($((SECONDS - start))s / ${timeout}s)"; last=${SECONDS}
 		fi
 		sleep "${POLL_SEC}"
 	done
-	log "ERROR: timeout waiting for ${desc} (${WAIT_SEC}s) [stage=${CURRENT_STAGE}]"
+	log "ERROR: timeout waiting for ${desc} (${timeout}s) [stage=${CURRENT_STAGE}]"
 	return 1
 }
+
+# wait_until uses the capture-readiness cap (WAIT_SEC). For failure-propagation/self-heal observations
+# use wait_until_to "${INVALIDATION_WAIT_SEC}" ... instead (a few reconciles, not a 10-min capture wait).
+wait_until() { wait_until_to "${WAIT_SEC}" "$@"; }
 
 snap_bound() {
 	kubectl -n "$1" get "${SNAP_RES}" "$2" -o json 2>/dev/null \
@@ -301,8 +372,8 @@ snap_ready_terminal_false() {
 }
 
 wait_snapshot_ready() {
-	local ns="$1" snap="$2"
-	local deadline=$((SECONDS + WAIT_SEC)) start=${SECONDS} last=${SECONDS}
+	local ns="$1" snap="$2" timeout="${3:-${WAIT_SEC}}"
+	local deadline=$((SECONDS + timeout)) start=${SECONDS} last=${SECONDS}
 	while ((SECONDS < deadline)); do
 		if snap_ready_true "${ns}" "${snap}"; then log "OK Snapshot ${ns}/${snap} Ready"; return 0; fi
 		if snap_ready_terminal_false "${ns}" "${snap}"; then
@@ -310,12 +381,12 @@ wait_snapshot_ready() {
 			return 1
 		fi
 		if ((SECONDS - last >= WAIT_LOG_EVERY_SEC)); then
-			log "WAIT: Snapshot ${ns}/${snap} Ready ($((SECONDS - start))s / ${WAIT_SEC}s): $(ready_triple "$(get_json "${SNAP_RES}" "${ns}" "${snap}")")"
+			log "WAIT: Snapshot ${ns}/${snap} Ready ($((SECONDS - start))s / ${timeout}s): $(ready_triple "$(get_json "${SNAP_RES}" "${ns}" "${snap}")")"
 			last=${SECONDS}
 		fi
 		sleep "${POLL_SEC}"
 	done
-	log "ERROR: timeout waiting for Snapshot ${ns}/${snap} Ready (${WAIT_SEC}s)"
+	log "ERROR: timeout waiting for Snapshot ${ns}/${snap} Ready (${timeout}s)"
 	return 1
 }
 
@@ -337,7 +408,7 @@ demo_mirror_equal() {
 wait_demo_mirror() {
 	[[ -n "$2" && -n "$3" ]] || { note "demo $4 mirror: handle missing (snap=$2 content=$3); skipped"; return 0; }
 	wait_until "demo $4 Snapshot Ready mirrors bound content" demo_mirror_equal "$1" "${NS}" "$2" "$3" \
-		|| soft "demo $4 Snapshot Ready != bound content Ready (demo content->snapshot watch lag/regression): snap=[$(ready_triple "$(get_json "$1" "${NS}" "$2")")] content=[$(ready_triple "$(get_json "${CONTENT_RES}" "" "$3")")]"
+		|| die "demo $4 Snapshot Ready != bound content Ready (demo content->snapshot watch lag/regression): snap=[$(ready_triple "$(get_json "$1" "${NS}" "$2")")] content=[$(ready_triple "$(get_json "${CONTENT_RES}" "" "$3")")]"
 }
 
 # ---- source / CSD bootstrap -------------------------------------------------
@@ -364,7 +435,7 @@ spec:
   storageClassName: ${STORAGE_CLASS}
   resources:
     requests:
-      storage: 1Gi
+      storage: ${PVC_SIZE}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -376,7 +447,7 @@ spec:
   storageClassName: ${STORAGE_CLASS}
   resources:
     requests:
-      storage: 1Gi
+      storage: ${PVC_SIZE}
 ---
 apiVersion: v1
 kind: Pod
@@ -442,7 +513,7 @@ spec:
   storageClassName: ${STORAGE_CLASS}
   resources:
     requests:
-      storage: 1Gi
+      storage: ${PVC_SIZE}
 ---
 apiVersion: v1
 kind: Pod
@@ -487,7 +558,7 @@ spec:
   storageClassName: ${STORAGE_CLASS}
   resources:
     requests:
-      storage: 1Gi
+      storage: ${PVC_SIZE}
 ---
 apiVersion: v1
 kind: Pod
@@ -605,7 +676,7 @@ ensure_csd_eligible() {
 	patch_csd_rbac_ready
 	wait_until "CSD ${CSD_NAME} RBACReady=True" \
 		bash -c "kubectl get '${CSD_RES}' '${CSD_NAME}' -o json | jq -e '[.status.conditions[]?|select(.type==\"RBACReady\" and .status==\"True\")]|length>=1' >/dev/null" \
-		|| soft "CSD RBACReady not True (external hook may own it); tree may not build"
+		|| require "CSD ${CSD_NAME} RBACReady not True (manual patch did not stick / external hook owns it); tree cannot build"
 }
 
 # inversion_safe: priority inversion mutates the GLOBAL CSD priority, which affects every namespace
@@ -792,6 +863,13 @@ save_graph() {
 	local dir graph_dir
 	dir="$(stage_dir "${stage}")"
 	graph_dir="${dir}/graph"
+	# Graph rendering (snapshot-graph.sh) is the single most expensive per-stage step — it makes many
+	# impersonated chunk reads + a graphviz render and dominates wall time. It is a diagnostic aid, not
+	# an assertion, so allow turning it off while iterating on the test logic itself. Re-enable (unset
+	# the flag) once stages pass to capture the visual artifacts.
+	if [[ "${TREE_DEMO_SKIP_GRAPH:-0}" == "1" ]]; then
+		return 0
+	fi
 	mkdir -p "${graph_dir}"
 	[[ -f "${SCRIPT_DIR}/snapshot-graph.sh" ]] || return 0
 	bash "${SCRIPT_DIR}/snapshot-graph.sh" --namespace "${ns}" --snapshot "${snap}" \
@@ -802,6 +880,26 @@ save_graph() {
 
 # ---- cleanup ----------------------------------------------------------------
 
+# reclaim_run_vscs: VolumeSnapshotContents are cluster-scoped and the handoff forces
+# deletionPolicy=Retain for durability, so they AND their physical thin-pool snapshots survive
+# namespace deletion (Retain = the CSI driver does not delete the backend snapshot when the VSC object
+# is GC'd). Across repeated runs this leaks snapshots and exhausts the thin pool. On cleanup, flip this
+# run's VSCs back to Delete so the backend snapshot is reclaimed, then remove them. Matched by the bound
+# VolumeSnapshot namespace (still populated here because we reclaim before deleting namespaces). Only
+# touches VSCs bound to THIS run's namespaces — never another workload's artifacts.
+reclaim_run_vscs() {
+	local nss="${NS}|${NS_TOPO_DISK_ONLY}|${NS_REF_PVC_NO_DISK_CSD}|${NS_DOMAIN_PVC_FAIL}|${NS_PRIORITY_INV}|${NS_DOMAIN_BARRIER}|${NS_RESTORE}"
+	local vscs v
+	vscs="$(command kubectl get "${VSC_RES}" -o json 2>/dev/null \
+		| jq -r --arg re "^(${nss})$" '.items[]|select((.spec.volumeSnapshotRef.namespace // "")|test($re))|.metadata.name' 2>/dev/null || true)"
+	[[ -n "${vscs}" ]] || return 0
+	for v in ${vscs}; do
+		command kubectl patch "${VSC_RES}" "${v}" --type=merge -p '{"spec":{"deletionPolicy":"Delete"}}' >/dev/null 2>&1 || true
+		command kubectl delete "${VSC_RES}" "${v}" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+	done
+	log "cleanup: reclaimed run VolumeSnapshotContents (Delete + remove) to free thin pool: $(echo "${vscs}" | tr '\n' ' ')"
+}
+
 cleanup_on_exit() {
 	local rc=$?
 	_KUBECTL_RETRY_DISABLED=1
@@ -810,6 +908,7 @@ cleanup_on_exit() {
 		return 0
 	fi
 	kubectl delete "${CSD_RES}" "${CSD_NAME}" --ignore-not-found=true --wait=false 2>/dev/null || true
+	reclaim_run_vscs
 	kubectl delete namespace "${NS}" "${NS_TOPO_DISK_ONLY}" "${NS_REF_PVC_NO_DISK_CSD}" "${NS_DOMAIN_PVC_FAIL}" "${NS_PRIORITY_INV}" "${NS_DOMAIN_BARRIER}" "${NS_RESTORE}" --ignore-not-found=true --wait=false 2>/dev/null || true
 	return "${rc}"
 }
@@ -834,7 +933,7 @@ Immediate | WaitForFirstConsumer)
 	note "StorageClass ${STORAGE_CLASS} volumeBindingMode=${STORAGE_CLASS_BINDING_MODE}; bind pods are created before PVC Bound waits"
 	;;
 *)
-	soft "StorageClass ${STORAGE_CLASS} has unexpected volumeBindingMode=${STORAGE_CLASS_BINDING_MODE}; PVC binding behavior may differ"
+	require "StorageClass ${STORAGE_CLASS} has unexpected volumeBindingMode=${STORAGE_CLASS_BINDING_MODE} (expected Immediate or WaitForFirstConsumer); PVC binding behavior is unknown"
 	;;
 esac
 kubectl get crd \
@@ -856,10 +955,10 @@ kubectl get pods -n "${MOD_NS}" -l app=controller >"$(stage_dir 00-preflight)/co
 	|| note "could not list controller pods in ${MOD_NS}"
 # External demo-domain RBAC (granted by Deckhouse RBAC controller in production).
 if [[ "$(kubectl auth can-i get "${VM_RES}" --as="system:serviceaccount:${MOD_NS}:webhooks" -n "${NS}" 2>/dev/null || echo no)" != "yes" ]]; then
-	soft "webhook SA cannot get demo inventory (${VM_RES}); tree may fail with SubtreeManifestCapturePending — grant external demo-domain RBAC + redeploy"
+	require "webhook SA cannot get demo inventory (${VM_RES}); tree would fail with SubtreeManifestCapturePending — grant external demo-domain RBAC + redeploy"
 fi
 if [[ "$(kubectl auth can-i create "${MCR_RES}" --as="${CONTROLLER_SA}" -n "${NS}" 2>/dev/null || echo no)" != "yes" ]]; then
-	soft "controller SA cannot create ${MCR_RES} in target ns; capture will stall"
+	require "controller SA cannot create ${MCR_RES} in target ns; capture would stall"
 fi
 # Pre-existing CSD claiming the demo snapshot kinds => guaranteed KindConflict for THIS run's CSD,
 # which would only surface as a 600s "never Accepted" timeout much later. CSDs are cluster-scoped, so
@@ -875,6 +974,7 @@ fi
 	echo "module_ns=${MOD_NS}"
 	echo "controller_sa=${CONTROLLER_SA}"
 	echo "storage_class=${STORAGE_CLASS}"
+	echo "pvc_size=${PVC_SIZE}"
 	echo "storage_class_volume_binding_mode=${STORAGE_CLASS_BINDING_MODE}"
 	echo "wait_for_first_consumer_bind_pods=bind-demo-pvc,bind-pvc-1,bind-pvc-fail"
 	echo "has_objectkeeper=${HAS_OBJECTKEEPER}"
@@ -883,6 +983,8 @@ fi
 save_artifacts "00-preflight" "${NS}"
 log "00-preflight: PASS"
 
+# ===== GROUP topology: independent namespaces; no main tree =====
+if grp topology; then
 # ---------------------------------------------------------------------------
 # topology-disk-only (reference != coverage: VM link does not cover disk)
 # ---------------------------------------------------------------------------
@@ -891,7 +993,7 @@ delete_csd
 apply_disk_only_csd 10
 ensure_csd_eligible
 apply_source_namespace "${NS_TOPO_DISK_ONLY}"
-wait_until "disk-only demo-pvc-disk Bound" pvc_bound "${NS_TOPO_DISK_ONLY}" demo-pvc-disk || soft "disk-only demo-pvc-disk not Bound; disk data leg may wait on CSI"
+wait_until "disk-only demo-pvc-disk Bound" pvc_bound "${NS_TOPO_DISK_ONLY}" demo-pvc-disk || require "disk-only demo-pvc-disk never Bound within ${WAIT_SEC}s"
 apply_root_snapshot "${NS_TOPO_DISK_ONLY}"
 wait_until "disk-only root Snapshot bound" snap_bound "${NS_TOPO_DISK_ONLY}" "${SNAP}" || die "disk-only root Snapshot never bound"
 wait_snapshot_ready "${NS_TOPO_DISK_ONLY}" "${SNAP}" || die "disk-only root Snapshot did not become Ready"
@@ -929,7 +1031,7 @@ log "topology-disk-only: PASS"
 begin_stage "referenced-pvc-without-disk-csd"
 delete_csd
 apply_referenced_pvc_without_disk_csd_source "${NS_REF_PVC_NO_DISK_CSD}"
-wait_until "referenced-pvc pvc-1 Bound" pvc_bound "${NS_REF_PVC_NO_DISK_CSD}" pvc-1 || soft "referenced-pvc pvc-1 not Bound; orphan VS may wait on CSI"
+wait_until "referenced-pvc pvc-1 Bound" pvc_bound "${NS_REF_PVC_NO_DISK_CSD}" pvc-1 || require "referenced-pvc pvc-1 never Bound within ${WAIT_SEC}s"
 apply_root_snapshot "${NS_REF_PVC_NO_DISK_CSD}"
 wait_until "referenced-pvc root Snapshot bound" snap_bound "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}" || die "referenced-pvc root Snapshot never bound"
 wait_snapshot_ready "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}" || die "referenced-pvc root Snapshot did not become Ready"
@@ -938,22 +1040,29 @@ REF_ROOT_CONTENT="$(echo "${REF_ROOT_JSON}" | jq -r '.status.boundSnapshotConten
 REF_PVC_UID="$(kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get pvc pvc-1 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 echo "${REF_ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")]|length==0' >/dev/null \
 	|| die "referenced-pvc root must not create DemoVirtualDiskSnapshot when Disk CSD is absent"
-echo "${REF_ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
-	|| die "referenced-pvc root must create CSI VolumeSnapshot visibility leaf for uncovered pvc-1"
 kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VCR_RES}" -o json 2>/dev/null \
 	| jq -e --arg n "pvc-1" '[.items[]?|select(any(.spec.targets[]?; .name==$n))]|length==0' >/dev/null \
 	|| die "namespace root must not create VCR for uncovered pvc-1"
 [[ -n "${REF_ROOT_CONTENT}" ]] || die "referenced-pvc root content missing"
-get_json "${CONTENT_RES}" "" "${REF_ROOT_CONTENT}" | jq -e --arg u "${REF_PVC_UID}" \
-	'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
-	|| die "referenced-pvc root content must publish pvc-1 VSC in dataRefs"
+# CSI-fulfilled artifacts (VS visibility leaf + VSC dataRef) are part of capture readiness, so they are
+# bound by the capture budget (WAIT_SEC) — same as the orphan-pvc-vs core stage — not the invalidation
+# budget. The orphan VSC is fulfilled by the external CSI snapshot controller, whose latency belongs to
+# capture, so a 30s invalidation window would false-fail on slow CSI fulfillment.
+wait_until_to "${WAIT_SEC}" "referenced-pvc root CSI VolumeSnapshot visibility leaf present" \
+	bash -c "kubectl -n '${NS_REF_PVC_NO_DISK_CSD}' get '${SNAP_RES}' '${SNAP}' -o json | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind==\"VolumeSnapshot\")]|length>=1' >/dev/null" \
+	|| die "referenced-pvc root did not create a CSI VolumeSnapshot visibility leaf for uncovered pvc-1 within ${WAIT_SEC}s"
+wait_until_to "${WAIT_SEC}" "referenced-pvc root content publishes pvc-1 VSC in dataRefs" \
+	bash -c "kubectl get '${CONTENT_RES}' '${REF_ROOT_CONTENT}' -o json | jq -e '[.status.dataRefs[]?|select(.targetUID==\"${REF_PVC_UID}\" and .artifact.kind==\"VolumeSnapshotContent\")]|length>=1' >/dev/null" \
+	|| die "referenced-pvc root content did not publish pvc-1 VSC in dataRefs within ${WAIT_SEC}s"
+# Refresh after the bounded waits so the orphan-pvc-cleanup stage sees the now-published VS leaf.
+REF_ROOT_JSON="$(get_json "${SNAP_RES}" "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}")"
 note "referenced-pvc: Disk spec references pvc-1, but without Disk CSD the PVC is orphan and uses VS/VSC, not VCR"
 save_graph "referenced-pvc-without-disk-csd" "${NS_REF_PVC_NO_DISK_CSD}" "${SNAP}" "referenced-pvc-without-disk-csd" "logical"
 save_artifacts "referenced-pvc-without-disk-csd" "${NS_REF_PVC_NO_DISK_CSD}"
 log "referenced-pvc-without-disk-csd: PASS"
 
 # ---------------------------------------------------------------------------
-# orphan-pvc-cleanup (soft: VS lifecycle cleanup, retained VSC durability)
+# orphan-pvc-cleanup (HARD: VS visibility-leaf GC on root delete + retained VSC durability)
 # ---------------------------------------------------------------------------
 begin_stage "orphan-pvc-cleanup"
 REF_VS="$(echo "${REF_ROOT_JSON}" | jq -r '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")][0].name // ""')"
@@ -966,37 +1075,38 @@ REF_VSC="$(get_json "${CONTENT_RES}" "" "${REF_ROOT_CONTENT}" | jq -r --arg u "$
 } >"$(stage_dir orphan-pvc-cleanup)/handles.txt"
 [[ -n "${REF_VS}" ]] && kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" -o yaml >"$(stage_dir orphan-pvc-cleanup)/orphan-vs-before-delete.yaml" 2>/dev/null || true
 [[ -n "${REF_VSC}" ]] && kubectl get "${VSC_RES}" "${REF_VSC}" -o yaml >"$(stage_dir orphan-pvc-cleanup)/orphan-vsc-before-delete.yaml" 2>/dev/null || true
+[[ -n "${REF_VS}" ]] || require "orphan cleanup: orphan VolumeSnapshot handle missing (tree did not build a CSI VS visibility leaf for pvc-1)"
+[[ -n "${REF_VSC}" ]] || require "orphan cleanup: retained VSC handle missing (root content published no VSC dataRef for pvc-1)"
 kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" delete "${SNAP_RES}" "${SNAP}" --wait=false >/dev/null 2>&1 \
-	|| soft "orphan cleanup: could not delete root Snapshot"
-if [[ -n "${REF_VS}" ]]; then
-	deadline=$((SECONDS + 120))
-	while ((SECONDS < deadline)); do
-		if ! kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" >/dev/null 2>&1; then
-			note "orphan cleanup: VolumeSnapshot ${REF_VS} was removed after root delete"
-			break
-		fi
-		sleep 2
-	done
-	if kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" -o yaml >"$(stage_dir orphan-pvc-cleanup)/orphan-vs-after-delete.yaml" 2>/dev/null; then
-		soft "orphan cleanup: VolumeSnapshot ${REF_VS} still exists after root delete window"
+	|| die "orphan cleanup: could not delete root Snapshot ${SNAP}"
+# Invariant: the orphan CSI VolumeSnapshot visibility leaf is garbage-collected with the root Snapshot.
+deadline=$((SECONDS + 120)); vs_gone=0
+while ((SECONDS < deadline)); do
+	if ! kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" >/dev/null 2>&1; then
+		vs_gone=1
+		note "orphan cleanup: VolumeSnapshot ${REF_VS} was removed after root delete"
+		break
 	fi
-else
-	soft "orphan cleanup: orphan VS handle missing"
+	sleep 2
+done
+if [[ "${vs_gone}" != "1" ]]; then
+	kubectl -n "${NS_REF_PVC_NO_DISK_CSD}" get "${VS_RES}" "${REF_VS}" -o yaml >"$(stage_dir orphan-pvc-cleanup)/orphan-vs-after-delete.yaml" 2>/dev/null || true
+	die "orphan cleanup: VolumeSnapshot ${REF_VS} still exists 120s after root Snapshot delete (visibility leaf not GC'd)"
 fi
-if [[ -n "${REF_VSC}" ]]; then
-	if kubectl get "${VSC_RES}" "${REF_VSC}" -o json >"$(stage_dir orphan-pvc-cleanup)/orphan-vsc-after-delete.json" 2>/dev/null; then
-		jq -e '.spec.deletionPolicy == "Retain"' "$(stage_dir orphan-pvc-cleanup)/orphan-vsc-after-delete.json" >/dev/null \
-			&& note "orphan cleanup: retained VSC ${REF_VSC} remains with deletionPolicy=Retain" \
-			|| soft "orphan cleanup: VSC ${REF_VSC} remains but deletionPolicy is not Retain"
-	else
-		soft "orphan cleanup: retained VSC ${REF_VSC} disappeared after root delete"
-	fi
+# Invariant: the retained data artifact (VSC, deletionPolicy=Retain) MUST survive the root delete (durable).
+if kubectl get "${VSC_RES}" "${REF_VSC}" -o json >"$(stage_dir orphan-pvc-cleanup)/orphan-vsc-after-delete.json" 2>/dev/null; then
+	jq -e '.spec.deletionPolicy == "Retain"' "$(stage_dir orphan-pvc-cleanup)/orphan-vsc-after-delete.json" >/dev/null \
+		&& note "orphan cleanup: retained VSC ${REF_VSC} remains with deletionPolicy=Retain (durable)" \
+		|| die "orphan cleanup: VSC ${REF_VSC} remains but deletionPolicy is not Retain (durability broken)"
 else
-	soft "orphan cleanup: VSC handle missing"
+	die "orphan cleanup: retained VSC ${REF_VSC} disappeared after root delete (durable data artifact lost)"
 fi
 save_artifacts "orphan-pvc-cleanup" "${NS_REF_PVC_NO_DISK_CSD}"
 log "orphan-pvc-cleanup: done"
+fi # end GROUP topology
 
+# ===== MAIN TREE BOOTSTRAP (01 + 02): built by every group except `topology` =====
+if need_main_tree; then
 # ---------------------------------------------------------------------------
 # 01-priority-vm-first  (GVK/priority registration)
 # ---------------------------------------------------------------------------
@@ -1024,8 +1134,8 @@ log "01-priority-vm-first: PASS"
 # ---------------------------------------------------------------------------
 begin_stage "02-tree-ready"
 apply_source_namespace "${NS}"
-wait_until "demo-pvc Bound in ${NS}" pvc_bound "${NS}" demo-pvc || soft "demo-pvc not Bound; orphan VS data leg may be empty"
-wait_until "demo-pvc-disk Bound in ${NS}" pvc_bound "${NS}" demo-pvc-disk || soft "demo-pvc-disk not Bound; disk VCR data leg may be empty"
+wait_until "demo-pvc Bound in ${NS}" pvc_bound "${NS}" demo-pvc || require "demo-pvc never Bound within ${WAIT_SEC}s"
+wait_until "demo-pvc-disk Bound in ${NS}" pvc_bound "${NS}" demo-pvc-disk || require "demo-pvc-disk never Bound within ${WAIT_SEC}s"
 apply_root_snapshot "${NS}"
 wait_until "root Snapshot bound in ${NS}" snap_bound "${NS}" "${SNAP}" || die "root Snapshot never bound"
 ROOT_CONTENT="$(kubectl -n "${NS}" get "${SNAP_RES}" "${SNAP}" -o jsonpath='{.status.boundSnapshotContentName}')"
@@ -1055,7 +1165,7 @@ N_ROOT_VMSNAP="$(echo "${ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|sele
 N_ROOT_DISKSNAP="$(echo "${ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")]|length')"
 SIBLING_SNAP="$(echo "${ROOT_JSON}" | jq -r '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")][0].name // ""')"
 [[ -n "${VM_SNAP}" ]] || die "root has no DemoVirtualMachineSnapshot child (tree shape wrong)"
-[[ "${N_ROOT_VMSNAP}" == "1" ]] || soft "expected exactly 1 root VM snapshot child, got ${N_ROOT_VMSNAP}"
+[[ "${N_ROOT_VMSNAP}" == "1" ]] || die "expected exactly 1 root VM snapshot child, got ${N_ROOT_VMSNAP}"
 [[ "${N_ROOT_DISKSNAP}" == "1" ]] || die "expected exactly 1 root Disk snapshot child (standalone only), got ${N_ROOT_DISKSNAP} (covered VM disk may be duplicated at root)"
 [[ -n "${SIBLING_SNAP}" ]] || die "root has no standalone DemoVirtualDiskSnapshot child"
 
@@ -1063,7 +1173,7 @@ VM_JSON="$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")"
 LEAF_SNAP="$(echo "${VM_JSON}" | jq -r '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")][0].name // ""')"
 N_VM_DISK="$(echo "${VM_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualDiskSnapshot")]|length')"
 [[ -n "${LEAF_SNAP}" ]] || die "VM snapshot ${VM_SNAP} has no DemoVirtualDiskSnapshot child (covered disk missing from VM subtree)"
-[[ "${N_VM_DISK}" == "1" ]] || soft "expected 1 disk under VM, got ${N_VM_DISK}"
+[[ "${N_VM_DISK}" == "1" ]] || die "expected 1 disk under VM, got ${N_VM_DISK}"
 
 VM_CONTENT="$(echo "${VM_JSON}" | jq -r '.status.boundSnapshotContentName // ""')"
 LEAF_CONTENT="$(kubectl -n "${NS}" get "${DISKSNAP_RES}" "${LEAF_SNAP}" -o jsonpath='{.status.boundSnapshotContentName}' 2>/dev/null || true)"
@@ -1085,8 +1195,8 @@ for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}
 	[[ -n "${c}" ]] || continue
 	wait_until "SnapshotContent ${c} Ready=True" content_ready_true "${c}" || die "content ${c} not Ready"
 	cj="$(get_json "${CONTENT_RES}" "" "${c}")"
-	[[ "$(cond_field "${cj}" RequestsReady status)" == "True" ]] || soft "content ${c} RequestsReady != True"
-	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || soft "content ${c} ChildrenReady != True"
+	[[ "$(cond_field "${cj}" RequestsReady status)" == "True" ]] || die "content ${c} RequestsReady != True while Ready=True (inconsistent aggregation)"
+	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || die "content ${c} ChildrenReady != True while Ready=True (inconsistent aggregation)"
 done
 
 # --- two-PVC capture paths -------------------------------------------------
@@ -1109,26 +1219,28 @@ echo "${LEAF_CONTENT_JSON}" | jq -e --arg u "${ORPHAN_PVC_UID}" \
 	'($u=="") or ([.status.dataRefs[]?|select(.targetUID==$u)]|length==0)' >/dev/null \
 	|| die "orphan demo-pvc must NOT appear in disk content dataRefs (belongs to root)"
 
-# Orphan demo-pvc -> VS visibility leaf path.
+# Orphan demo-pvc -> VS visibility leaf path. The VS leaf and its VSC dataRef are fulfilled by the
+# external CSI snapshot controller, so they belong to the CAPTURE budget (WAIT_SEC) — not the invalidation
+# budget — and are bounded-waited so a CSI fulfillment lag is ridden out, not silently passed nor false-failed.
 if [[ -n "${ORPHAN_PVC_UID}" ]]; then
-	echo "${ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
-		&& note "orphan demo-pvc: root VolumeSnapshot visibility leaf present" \
-		|| soft "no root VolumeSnapshot leaf for orphan demo-pvc (check StorageClass volumesnapshotclass annotation / CSI driver)"
-	echo "${ROOT_CONTENT_JSON}" | jq -e --arg u "${ORPHAN_PVC_UID}" \
-		'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
-		&& note "orphan demo-pvc: VSC published in root content dataRefs" \
-		|| soft "orphan demo-pvc VSC not in root content dataRefs yet (CSI fulfillment pending)"
+	wait_until_to "${WAIT_SEC}" "orphan demo-pvc root VolumeSnapshot visibility leaf present" \
+		bash -c "kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind==\"VolumeSnapshot\")]|length>=1' >/dev/null" \
+		|| die "no root VolumeSnapshot leaf for orphan demo-pvc within ${WAIT_SEC}s (check StorageClass volumesnapshotclass annotation / CSI driver)"
+	wait_until_to "${WAIT_SEC}" "orphan demo-pvc VSC in root content dataRefs" \
+		bash -c "kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -e '[.status.dataRefs[]?|select(.targetUID==\"${ORPHAN_PVC_UID}\" and .artifact.kind==\"VolumeSnapshotContent\")]|length>=1' >/dev/null" \
+		|| die "orphan demo-pvc VSC not in root content dataRefs within ${WAIT_SEC}s (CSI fulfillment did not publish)"
+	note "orphan demo-pvc: root VolumeSnapshot visibility leaf + VSC dataRef present"
 fi
 
-# Nested demo-pvc-disk -> domain VCR -> VSC on disk-vm content.
+# Nested demo-pvc-disk -> domain VCR -> VSC on disk-vm content (VCR path is also capture-budget fulfillment).
 if [[ -n "${DISK_PVC_UID}" && -n "${LEAF_CONTENT}" ]]; then
-	echo "${LEAF_CONTENT_JSON}" | jq -e --arg u "${DISK_PVC_UID}" \
-		'[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null \
-		&& note "nested demo-pvc-disk: VSC published in disk content ${LEAF_CONTENT} dataRefs (VCR path)" \
-		|| soft "nested demo-pvc-disk VSC not in disk content ${LEAF_CONTENT} dataRefs yet (CSI fulfillment pending)"
+	wait_until_to "${WAIT_SEC}" "nested demo-pvc-disk VSC in disk content ${LEAF_CONTENT} dataRefs" \
+		bash -c "kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -e '[.status.dataRefs[]?|select(.targetUID==\"${DISK_PVC_UID}\" and .artifact.kind==\"VolumeSnapshotContent\")]|length>=1' >/dev/null" \
+		|| die "nested demo-pvc-disk VSC not in disk content ${LEAF_CONTENT} dataRefs within ${WAIT_SEC}s (VCR path fulfillment)"
+	note "nested demo-pvc-disk: VSC published in disk content ${LEAF_CONTENT} dataRefs (VCR path)"
 	# The disk PVC must NOT be a root VolumeSnapshot leaf: count root VS leaves <= number of orphan PVCs (1).
-	N_ROOT_VS="$(echo "${ROOT_JSON}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length')"
-	[[ "${N_ROOT_VS}" -le 1 ]] || soft "expected at most 1 root VolumeSnapshot leaf (orphan demo-pvc only), got ${N_ROOT_VS} (nested disk PVC leaking into root orphan path?)"
+	N_ROOT_VS="$(get_json "${SNAP_RES}" "${NS}" "${SNAP}" | jq '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length')"
+	[[ "${N_ROOT_VS}" -le 1 ]] || die "expected at most 1 root VolumeSnapshot leaf (orphan demo-pvc only), got ${N_ROOT_VS} (nested disk PVC leaking into root orphan path?)"
 fi
 
 # ConfigMap captured in a manifest checkpoint but NOT a child snapshot (manifest-only object).
@@ -1139,7 +1251,7 @@ if kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1
 	jq -e '[.[]?|select(.kind=="ConfigMap" and .metadata.name=="demo-snapshot-cm")]|length>=1' \
 		"$(stage_dir 02-tree-ready)/aggregated.json" >/dev/null \
 		&& note "ConfigMap demo-snapshot-cm present in aggregated manifests (manifest-only)" \
-		|| soft "ConfigMap not found in aggregated manifests (may be in a child MCP; check graph)"
+		|| die "ConfigMap demo-snapshot-cm not found in aggregated manifests (manifest-only object missing from snapshot)"
 else
 	note "aggregated manifests route returned non-200 (may be 409 duplicate-in-subtree, or RBAC); see graph"
 fi
@@ -1152,7 +1264,10 @@ note "mirror OK: root Snapshot Ready == root content Ready [${RS}]"
 save_graph "02-tree-ready" "${NS}" "${SNAP}" "tree" "logical"
 save_artifacts "02-tree-ready" "${NS}"
 log "02-tree-ready: PASS"
+fi # end MAIN TREE BOOTSTRAP
 
+# ===== GROUP core: structural assertions over the main tree =====
+if grp core; then
 # ---------------------------------------------------------------------------
 # topology-vm-disk (VM + Disk CSD: referenced disk covered by VM subtree)
 # ---------------------------------------------------------------------------
@@ -1196,6 +1311,10 @@ ROOT_JSON="$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")"
 ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")"
 ORPHAN_PVC_UID="$(kubectl -n "${NS}" get pvc demo-pvc -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 [[ -n "${ORPHAN_PVC_UID}" ]] || die "orphan-pvc-vs: demo-pvc UID missing"
+wait_until_to "${WAIT_SEC}" "root SnapshotContent publishes demo-pvc VSC dataRef" \
+	bash -c "kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json 2>/dev/null | jq -e --arg u '${ORPHAN_PVC_UID}' '[.status.dataRefs[]?|select(.targetUID==\$u and .artifact.kind==\"VolumeSnapshotContent\")]|length>=1' >/dev/null" \
+	|| die "orphan-pvc-vs: root SnapshotContent must publish demo-pvc VSC in dataRefs"
+ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")"
 kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o yaml >"$(stage_dir orphan-pvc-vs)/root-content.yaml" 2>/dev/null || true
 echo "${ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
 	|| die "orphan-pvc-vs: root childrenSnapshotRefs must include a VolumeSnapshot visibility leaf"
@@ -1261,6 +1380,11 @@ ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")"
 LEAF_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")"
 DISK_PVC_UID="$(kubectl -n "${NS}" get pvc demo-pvc-disk -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 [[ -n "${DISK_PVC_UID}" ]] || die "domain-pvc-vcr: demo-pvc-disk UID missing"
+wait_until_to "${WAIT_SEC}" "disk SnapshotContent publishes demo-pvc-disk VSC dataRef" \
+	bash -c "kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json 2>/dev/null | jq -e --arg u '${DISK_PVC_UID}' '[.status.dataRefs[]?|select(.targetUID==\$u and .artifact.kind==\"VolumeSnapshotContent\")]|length>=1' >/dev/null" \
+	|| die "domain-pvc-vcr: disk SnapshotContent must publish demo-pvc-disk VSC in dataRefs"
+ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")"
+LEAF_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")"
 kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o yaml >"$(stage_dir domain-pvc-vcr)/root-content.yaml" 2>/dev/null || true
 kubectl get "${CONTENT_RES}" "${LEAF_CONTENT}" -o yaml >"$(stage_dir domain-pvc-vcr)/leaf-content.yaml" 2>/dev/null || true
 kubectl -n "${NS}" get "${VCR_RES}" -o json >"$(stage_dir domain-pvc-vcr)/volumecapturerequests.json" 2>/dev/null \
@@ -1299,6 +1423,9 @@ log "domain-pvc-vcr: PASS"
 # manifest-no-volumesnapshot (data artifacts stay out of MCP/aggregated manifests)
 # ---------------------------------------------------------------------------
 begin_stage "manifest-no-volumesnapshot"
+wait_until_to "${WAIT_SEC}" "root dataRefs still reference VolumeSnapshotContent artifact" \
+	bash -c "kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json 2>/dev/null | jq -e '[.status.dataRefs[]?|select(.artifact.kind==\"VolumeSnapshotContent\")]|length>=1' >/dev/null" \
+	|| die "manifest-no-volumesnapshot: root dataRefs must still reference VolumeSnapshotContent artifact"
 kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o yaml >"$(stage_dir manifest-no-volumesnapshot)/root-content.yaml" 2>/dev/null || true
 kubectl get "${CONTENT_RES}" "${LEAF_CONTENT}" -o yaml >"$(stage_dir manifest-no-volumesnapshot)/leaf-content.yaml" 2>/dev/null || true
 kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/${NS}/snapshots/${SNAP}/manifests" \
@@ -1329,6 +1456,7 @@ note "manifest-no-volumesnapshot: PVC manifests are present, CSI VS/VSC manifest
 save_graph "manifest-no-volumesnapshot" "${NS}" "${SNAP}" "manifest-no-volumesnapshot" "logical"
 save_artifacts "manifest-no-volumesnapshot" "${NS}"
 log "manifest-no-volumesnapshot: PASS"
+fi # end GROUP core
 
 # ===========================================================================
 # Restore compiler cluster e2e (stages 20-25).
@@ -1340,6 +1468,8 @@ log "manifest-no-volumesnapshot: PASS"
 # (.items? // .) — error-safe: a bare array stays as-is, and a future {items:[...]} envelope still works.
 #
 # Restore endpoint output (resolved once in 20, reused by 21-25).
+# ===== GROUP restore: 20-25 restore-compiler stages over the main tree =====
+if grp restore; then
 RESTORE_OUT=""
 if [[ "${TREE_DEMO_SKIP_RESTORE:-0}" == "1" ]]; then
 	begin_stage "20-restore-endpoint-basic"
@@ -1495,22 +1625,32 @@ else
 	save_artifacts "25-restore-dry-run-apply" "${NS}"
 	log "25-restore-dry-run-apply: PASS"
 fi
+fi # end GROUP restore
 
+# ===== GROUP domain (part 1/2): planned subtree capture failure =====
+if grp domain; then
 # ---------------------------------------------------------------------------
-# domain-pvc-failure-coverage (soft diagnostic: planned subtree capture failure)
+# domain-pvc-failure-coverage (HARD when the injected failure HOLDS: planned subtree capture failure)
 # ---------------------------------------------------------------------------
 begin_stage "domain-pvc-failure-coverage"
 cat >"$(stage_dir domain-pvc-failure-coverage)/expected-outcome.txt" <<'EOF'
-Desired behavior when a disk subtree is planned but its PVC capture fails:
-- PASS: root fails closed deterministically (Ready=False with a concrete failure reason); or
-- PASS: root explicitly falls back to orphan PVC CSI VolumeSnapshot path and publishes a root dataRef; but
-- FAIL/SOFT: root reaches Ready=True without either domain coverage or orphan fallback for that PVC.
-This protects the invariant "coverage only after actual capture" from silent PVC loss.
+We perturb a planned disk subtree by injecting VCR Ready=False for pvc-fail, then give the owning
+volume-capture controller the full invalidation window to settle into a deterministic terminal state.
+An injected VCR-status patch cannot be made to stick against the owning controller on a snapshottable
+(empty) PVC, so the outcome is decided on observable state, not on the (racy) injection sticking:
+- INJECT did not stick (VCR back to Ready=True): empty pvc-fail snapshot SUCCEEDED ->
+    PASS iff a durable VSC dataRef for pvc-fail (by target UID) is published in some SnapshotContent;
+    FAIL (die) on success-without-artifact. (Domain terminal-failure propagation: integration tests.)
+- INJECT held (VCR Ready=False) AND root Ready=False: PASS (failed closed / propagated).
+- INJECT held AND durable VSC dataRef for pvc-fail present: PASS (data durable; stale VCR status only).
+- INJECT held AND root Ready=True AND no durable artifact for pvc-fail: FAIL (die) — stale Ready=True
+    over lost data (INV-FAIL-PROP violation). The durable check is tree-wide and keyed by pvc-fail UID,
+    because the domain path publishes the VSC dataRef in the disk SnapshotContent (not the root content).
 EOF
 apply_domain_pvc_failure_source "${NS_DOMAIN_PVC_FAIL}"
-wait_until "domain-failure pvc-fail Bound" pvc_bound "${NS_DOMAIN_PVC_FAIL}" pvc-fail || soft "domain-failure pvc-fail not Bound; VCR may not progress"
+wait_until "domain-failure pvc-fail Bound" pvc_bound "${NS_DOMAIN_PVC_FAIL}" pvc-fail || require "domain-failure pvc-fail never Bound within ${WAIT_SEC}s"
 apply_root_snapshot "${NS_DOMAIN_PVC_FAIL}"
-wait_until "domain-failure root Snapshot bound" snap_bound "${NS_DOMAIN_PVC_FAIL}" "${SNAP}" || soft "domain-failure root Snapshot did not bind"
+wait_until "domain-failure root Snapshot bound" snap_bound "${NS_DOMAIN_PVC_FAIL}" "${SNAP}" || require "domain-failure root Snapshot never bound within ${WAIT_SEC}s"
 DOMAIN_FAIL_VCR=""
 deadline=$((SECONDS + 180))
 while ((SECONDS < deadline)); do
@@ -1537,36 +1677,74 @@ if [[ -n "${DOMAIN_FAIL_VCR}" ]]; then
 	}')"
 	kubectl -n "${NS_DOMAIN_PVC_FAIL}" patch "${VCR_RES}" "${DOMAIN_FAIL_VCR}" --subresource=status --type=merge -p "${VCR_FAIL_PATCH}" >/dev/null 2>&1 \
 		|| kubectl_ctrl -n "${NS_DOMAIN_PVC_FAIL}" patch "${VCR_RES}" "${DOMAIN_FAIL_VCR}" --subresource=status --type=merge -p "${VCR_FAIL_PATCH}" >/dev/null 2>&1 \
-		|| soft "domain-failure: could not inject terminal VCR failure"
+		|| require "domain-failure: could not inject terminal VCR failure on ${DOMAIN_FAIL_VCR}"
 	kubectl -n "${NS_DOMAIN_PVC_FAIL}" get "${VCR_RES}" "${DOMAIN_FAIL_VCR}" -o yaml >"$(stage_dir domain-pvc-failure-coverage)/vcr-after-inject.yaml" 2>/dev/null || true
 else
-	soft "domain-failure: VCR for pvc-fail was not observed before terminal state/timeout"
+	require "domain-failure: VCR for pvc-fail was not observed before terminal state/timeout (cannot inject a domain capture failure)"
 fi
-sleep "$((POLL_SEC * 4))"
-FAIL_ROOT_JSON="$(get_json "${SNAP_RES}" "${NS_DOMAIN_PVC_FAIL}" "${SNAP}")"
-FAIL_ROOT_CONTENT="$(echo "${FAIL_ROOT_JSON}" | jq -r '.status.boundSnapshotContentName // ""')"
 FAIL_PVC_UID="$(kubectl -n "${NS_DOMAIN_PVC_FAIL}" get pvc pvc-fail -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+[[ -n "${FAIL_PVC_UID}" ]] || require "domain-failure: cannot resolve pvc-fail UID (needed to verify durable artifact by target)"
+# Deterministic settle: an injected VCR-status patch CANNOT be made to stick against the owning
+# volume-capture controller on a snapshottable (empty) PVC — the controller reconciles such a VCR back to
+# Ready=True. So instead of sampling once after a fixed sleep (a timing artifact), give the owning
+# controller the full invalidation window to reach one of the two deterministic terminal states, and stop
+# as soon as either is reached:
+#   (a) VCR reconciled back to Ready=True  -> capture SUCCEEDED (no failure to propagate), or
+#   (b) root Snapshot Ready=False          -> failure propagated / failed closed.
+settle_deadline=$((SECONDS + INVALIDATION_WAIT_SEC))
+while ((SECONDS < settle_deadline)); do
+	VCR_READY_AFTER="$(cond_field "$(get_json "${VCR_RES}" "${NS_DOMAIN_PVC_FAIL}" "${DOMAIN_FAIL_VCR}")" Ready status)"
+	ROOT_READY_NOW="$(cond_field "$(get_json "${SNAP_RES}" "${NS_DOMAIN_PVC_FAIL}" "${SNAP}")" Ready status)"
+	[[ "${VCR_READY_AFTER}" == "True" || "${ROOT_READY_NOW}" == "False" ]] && break
+	sleep "${POLL_SEC}"
+done
+VCR_READY_AFTER="$(cond_field "$(get_json "${VCR_RES}" "${NS_DOMAIN_PVC_FAIL}" "${DOMAIN_FAIL_VCR}")" Ready status)"
+INJECT_HELD=0
+[[ "${VCR_READY_AFTER}" == "False" ]] && INJECT_HELD=1
+FAIL_ROOT_JSON="$(get_json "${SNAP_RES}" "${NS_DOMAIN_PVC_FAIL}" "${SNAP}")"
 FAIL_READY="$(ready_triple "${FAIL_ROOT_JSON}")"
+# Durable-artifact check, TREE-WIDE and keyed by the pvc-fail target UID. The domain path publishes the
+# VSC dataRef in the *disk* SnapshotContent (not the root content) and uses a VCR (not an orphan VS leaf),
+# so the previous root-content/orphan-VS-only check looked at the wrong objects. SnapshotContents are
+# cluster-scoped; filtering by FAIL_PVC_UID isolates pvc-fail's artifact from any other tree's contents.
+FAIL_DURABLE=0
+if kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
+	| jq -e --arg u "${FAIL_PVC_UID}" '[.items[]?|.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null; then
+	FAIL_DURABLE=1
+fi
 echo "${FAIL_ROOT_JSON}" | jq '{children: .status.childrenSnapshotRefs, ready: ([.status.conditions[]?|select(.type=="Ready")][0]), content: .status.boundSnapshotContentName}' \
 	>"$(stage_dir domain-pvc-failure-coverage)/root-after-inject.summary.json" 2>/dev/null || true
-if echo "${FAIL_READY}" | grep -qE '^False\|'; then
-	note "domain-failure: root failed closed after domain VCR failure [${FAIL_READY}]"
-elif echo "${FAIL_READY}" | grep -qE '^True\|' && [[ -n "${FAIL_ROOT_CONTENT}" && -n "${FAIL_PVC_UID}" ]]; then
-	FAIL_ROOT_CONTENT_JSON="$(get_json "${CONTENT_RES}" "" "${FAIL_ROOT_CONTENT}")"
-	kubectl -n "${NS_DOMAIN_PVC_FAIL}" get "${VS_RES}" -o json >"$(stage_dir domain-pvc-failure-coverage)/volumesnapshots-after-inject.json" 2>/dev/null || true
-	if echo "${FAIL_ROOT_JSON}" | jq -e '[.status.childrenSnapshotRefs[]?|select(.kind=="VolumeSnapshot")]|length>=1' >/dev/null \
-		&& echo "${FAIL_ROOT_CONTENT_JSON}" | jq -e --arg u "${FAIL_PVC_UID}" '[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")]|length>=1' >/dev/null; then
-		note "domain-failure: root fell back to orphan VS/dataRefs for pvc-fail after failed domain capture"
-	else
-		soft "domain-failure: root Ready=True without fail-closed state or orphan VS/dataRefs fallback for pvc-fail (potential silent loss)"
-	fi
+printf 'vcr=%s\nvcr_ready_after_settle=%s\ninject_held=%s\nroot_ready=%s\nfail_pvc_uid=%s\nfail_pvc_durable_dataref=%s\n' \
+	"${DOMAIN_FAIL_VCR}" "${VCR_READY_AFTER:-<none>}" "${INJECT_HELD}" "${FAIL_READY}" "${FAIL_PVC_UID}" "${FAIL_DURABLE}" \
+	>"$(stage_dir domain-pvc-failure-coverage)/inject-outcome.txt"
+if [[ "${INJECT_HELD}" != "1" ]]; then
+	# (a) Controller reconciled the VCR back to Ready=${VCR_READY_AFTER}: the empty pvc-fail snapshot
+	# SUCCEEDED. There is no terminal failure to propagate (an injected VCR-status patch cannot be made to
+	# stick against the owning controller on a snapshottable PVC; domain-path terminal-failure propagation
+	# is asserted deterministically in the controller integration tests). The positive invariant still
+	# holds deterministically: a successful capture MUST have published a durable VSC dataRef for pvc-fail.
+	[[ "${FAIL_DURABLE}" == "1" ]] \
+		|| die "domain-failure: pvc-fail capture reported success (VCR Ready=${VCR_READY_AFTER}) but NO durable VSC dataRef for pvc-fail (uid=${FAIL_PVC_UID}) is published in any SnapshotContent (success without artifact — INV-FAIL-PROP violation; see inject-outcome.txt)"
+	note "domain-failure: injected VCR Ready=False did not stick (owning controller reconciled ${DOMAIN_FAIL_VCR} back to Ready=${VCR_READY_AFTER} within ${INVALIDATION_WAIT_SEC}s); empty pvc-fail snapshot succeeded with a durable VSC dataRef. root Ready=[${FAIL_READY}] is correct. Domain-path terminal-failure propagation is covered by integration tests."
+elif echo "${FAIL_READY}" | grep -qE '^False\|'; then
+	# (b) VCR held Ready=False AND root failed closed — failure propagated correctly.
+	note "domain-failure: root failed closed over a HELD domain VCR failure [${FAIL_READY}]"
+elif [[ "${FAIL_DURABLE}" == "1" ]]; then
+	# (c) VCR held Ready=False but the durable VSC dataRef for pvc-fail IS published: the data is durable
+	# and the stale VCR status is cosmetic only, so root Ready=True is correct (artifact-backed, not lost).
+	note "domain-failure: VCR held Ready=False, but a durable VSC dataRef for pvc-fail (uid=${FAIL_PVC_UID}) IS published; data is durable (stale VCR status only). root Ready=[${FAIL_READY}] is correct."
 else
-	soft "domain-failure: root did not reach clear fail-closed or fallback outcome yet [${FAIL_READY}]"
+	# (d) VCR held Ready=False, root Ready=True, and NO durable artifact for pvc-fail anywhere: genuine
+	# stale Ready=True over lost data.
+	die "domain-failure: root Ready=[${FAIL_READY}] with VCR held Ready=False and NO durable VSC dataRef for pvc-fail (uid=${FAIL_PVC_UID}) in any SnapshotContent (stale Ready=True over lost data — INV-FAIL-PROP violation; see inject-outcome.txt)"
 fi
 save_graph "domain-pvc-failure-coverage" "${NS_DOMAIN_PVC_FAIL}" "${SNAP}" "domain-pvc-failure-coverage" "logical"
 save_artifacts "domain-pvc-failure-coverage" "${NS_DOMAIN_PVC_FAIL}"
 log "domain-pvc-failure-coverage: done"
+fi # end GROUP domain (part 1/2)
 
+# ===== GROUP priority: 03-priority-inverted (global CSD priority flip) =====
+if grp priority; then
 # ---------------------------------------------------------------------------
 # 03-priority-inverted (priority must influence planning, or fail closed)
 # ---------------------------------------------------------------------------
@@ -1574,7 +1752,7 @@ begin_stage "03-priority-inverted"
 if [[ "${TREE_DEMO_SKIP_INVERSION:-0}" == "1" ]]; then
 	note "skipped (TREE_DEMO_SKIP_INVERSION=1)"
 elif ! inversion_safe; then
-	soft "skipped priority inversion: a global CSD priority flip is unsafe with demo workload outside this run (${INVERSION_BLOCKERS}). Run on an isolated cluster, or set TREE_DEMO_SKIP_INVERSION=1 to acknowledge."
+	require "priority inversion is unsafe: a global CSD priority flip would disturb demo workload outside this run (${INVERSION_BLOCKERS}). Run on an isolated cluster, or set TREE_DEMO_SKIP_INVERSION=1 to acknowledge and skip."
 	{ echo "inversion skipped (unsafe global CSD churn)"; echo "blockers: ${INVERSION_BLOCKERS}"; } >"$(stage_dir 03-priority-inverted)/skipped.txt"
 	kubectl get "${VMSNAP_RES},${DISKSNAP_RES}" -A -o wide >"$(stage_dir 03-priority-inverted)/demo-snapshots-all-namespaces.txt" 2>/dev/null || true
 	kubectl get "${CSD_RES}" -o yaml >"$(stage_dir 03-priority-inverted)/customsnapshotdefinitions.yaml" 2>/dev/null || true
@@ -1582,7 +1760,7 @@ else
 	apply_csd 10 100
 	ensure_csd_eligible
 	apply_source_namespace "${NS_PRIORITY_INV}"
-	wait_until "demo-pvc Bound in ${NS_PRIORITY_INV}" pvc_bound "${NS_PRIORITY_INV}" demo-pvc || soft "inverted demo-pvc not Bound"
+	wait_until "demo-pvc Bound in ${NS_PRIORITY_INV}" pvc_bound "${NS_PRIORITY_INV}" demo-pvc || require "inverted demo-pvc never Bound within ${WAIT_SEC}s"
 	apply_root_snapshot "${NS_PRIORITY_INV}"
 	# Expected behavior (recorded so the stage proves a planner decision, not "something happened").
 	EXP="$(stage_dir 03-priority-inverted)/expected-vs-actual.txt"
@@ -1627,7 +1805,7 @@ else
 		elif echo "${INV_READY}" | grep -qE 'PriorityLayerPending|GraphPlanningFailed|ChildGraphPending|SourceIdentity'; then
 			note "PASS (fail-closed): inverted priority produced explicit planner refusal: [${INV_READY}]"
 		else
-			soft "priority inversion did NOT change the planner decision and gave no fail-closed reason: baseline root(VM=${N_ROOT_VMSNAP},Disk=${N_ROOT_DISKSNAP}) VMdisk=${N_VM_DISK} == inverted root(VM=${INV_VM},Disk=${INV_DISK}) VMdisk=${INV_VM_DISK} (priority appears to NOT affect planning — see expected-vs-actual.txt)"
+			die "priority inversion did NOT change the planner decision and gave no fail-closed reason: baseline root(VM=${N_ROOT_VMSNAP},Disk=${N_ROOT_DISKSNAP}) VMdisk=${N_VM_DISK} == inverted root(VM=${INV_VM},Disk=${INV_DISK}) VMdisk=${INV_VM_DISK} (priority does NOT affect planning — see expected-vs-actual.txt)"
 		fi
 	else
 		note "inverted root Snapshot never bound within window (possible fail-closed/slow planner); recorded"
@@ -1638,10 +1816,13 @@ else
 	# Restore vm-first priority so the main tree (case 02) stays consistent for later stages.
 	apply_csd 100 10
 	ensure_csd_eligible
-	wait_snapshot_ready "${NS}" "${SNAP}" || soft "main tree did not reconverge to Ready after CSD restore"
+	wait_snapshot_ready "${NS}" "${SNAP}" || die "main tree did not reconverge to Ready after CSD priority restore"
 fi
 log "03-priority-inverted: done"
+fi # end GROUP priority
 
+# ===== GROUP domain (part 2/2): 04-domainready-barrier + 05-ownership-handoff =====
+if grp domain; then
 # ---------------------------------------------------------------------------
 # 04-domainready-barrier (domain-owned, generation-gated planning handoff)
 # ---------------------------------------------------------------------------
@@ -1684,8 +1865,8 @@ while ((SECONDS < deadline)); do
 	[[ "${dr_seen}" == "1" && -n "${bound}" ]] && break
 	sleep 2
 done
-[[ "${bound_before_dr}" == "0" ]] || soft "barrier: content bound before current-gen DomainReady (barrier may be weak); see timeline.txt"
-[[ "${dr_seen}" == "1" ]] && note "barrier: DomainReady=True reached current generation" || soft "barrier: DomainReady=True/current-gen not observed within window"
+[[ "${bound_before_dr}" == "0" ]] || die "barrier: SnapshotContent bound BEFORE current-gen DomainReady=True (planning barrier violated — content must not bind until domain is ready; see timeline.txt)"
+[[ "${dr_seen}" == "1" ]] && note "barrier: DomainReady=True reached current generation" || die "barrier: DomainReady=True at current generation not observed within 120s (barrier never satisfied; see timeline.txt)"
 note "stale-DomainReady injection not performed (out of scope; documented limitation)"
 save_artifacts "04-domainready-barrier" "${NS_DOMAIN_BARRIER}"
 kubectl delete namespace "${NS_DOMAIN_BARRIER}" --ignore-not-found=true --wait=false 2>/dev/null || true
@@ -1705,7 +1886,7 @@ if [[ -n "${LEAF_MCP}" ]]; then
 	mcp_owner="$(kubectl get "${MCP_RES}" "${LEAF_MCP}" -o json 2>/dev/null \
 		| jq -r '[.metadata.ownerReferences[]?|select(.kind=="SnapshotContent")]|length' 2>/dev/null || echo 0)"
 	[[ "${mcp_owner}" -ge 1 ]] && note "leaf MCP ${LEAF_MCP} ownerRef -> SnapshotContent (handed off)" \
-		|| soft "leaf MCP ${LEAF_MCP} not owned by SnapshotContent: $(kubectl get "${MCP_RES}" "${LEAF_MCP}" -o jsonpath='{.metadata.ownerReferences}' 2>/dev/null)"
+		|| die "leaf MCP ${LEAF_MCP} not owned by SnapshotContent (handoff incomplete): $(kubectl get "${MCP_RES}" "${LEAF_MCP}" -o jsonpath='{.metadata.ownerReferences}' 2>/dev/null)"
 else
 	note "no leaf MCP resolved; skipping MCP handoff check"
 fi
@@ -1728,13 +1909,14 @@ if [[ -n "${DATA_CONTENT}" ]]; then
 		vsc_owner="$(kubectl get "${VSC_RES}" "${VSC_NAME}" -o json 2>/dev/null \
 			| jq -r '[.metadata.ownerReferences[]?|select(.kind=="SnapshotContent")]|length' 2>/dev/null || echo 0)"
 		[[ "${vsc_owner}" -ge 1 ]] && note "VSC ${VSC_NAME} ownerRef -> SnapshotContent (handed off)" \
-			|| soft "VSC ${VSC_NAME} not owned by SnapshotContent (handoff incomplete or different owner)"
+			|| die "VSC ${VSC_NAME} not owned by SnapshotContent (handoff incomplete or different owner)"
 	fi
 else
 	note "no tree content has dataRefs[] (no volume captured in this run); data-leg handoff check skipped"
 fi
 save_artifacts "05-ownership-handoff" "${NS}"
 log "05-ownership-handoff: done"
+fi # end GROUP domain (part 2/2)
 
 # ---------------------------------------------------------------------------
 # 06-mcp-failure (damaged leaf propagates to root; sibling isolation)
@@ -1748,29 +1930,31 @@ patch_mcp_ready() {
 		|| kubectl_ctrl patch "${MCP_RES}" "${mcp}" --subresource=status --type=merge -p "${patch}" >/dev/null 2>&1
 }
 
+# ===== GROUP failure-leaf: 06/07 MCP fail+recovery, 08/09 VSC pending+recovery =====
+if grp failure-leaf; then
 MCP_FAILURE_DONE=0
 begin_stage "06-mcp-failure"
 if [[ -z "${LEAF_MCP}" ]]; then
-	soft "no leaf MCP to fail; skipping 06/07"
+	die "no leaf MCP resolved on the healthy tree (cannot exercise MCP-failure propagation; tree shape/capture incomplete)"
 else
 	if ! patch_mcp_ready "${LEAF_MCP}" "False" "Failed" "tree-demo injected MCP failure"; then
-		soft "cannot patch MCP ${LEAF_MCP} status (RBAC); skipping 06/07"
+		require "cannot patch MCP ${LEAF_MCP} status (RBAC); cannot inject MCP failure"
 	else
 		MCP_FAILURE_DONE=1
 		wait_until "leaf content ${LEAF_CONTENT} RequestsReady=False" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| soft "leaf RequestsReady did not flip False"
+			|| die "leaf content ${LEAF_CONTENT} RequestsReady did not flip False after MCP failure"
 		LEAF_RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" RequestsReady reason)"
-		[[ "${LEAF_RR_REASON}" == "ManifestCheckpointFailed" ]] || soft "leaf RequestsReady reason=${LEAF_RR_REASON} (expected ManifestCheckpointFailed)"
-		wait_until "leaf content ${LEAF_CONTENT} Ready=False" content_ready_false "${LEAF_CONTENT}" || soft "leaf content did not flip Ready=False"
+		[[ "${LEAF_RR_REASON}" == "ManifestCheckpointFailed" ]] || die "leaf RequestsReady reason=${LEAF_RR_REASON} (expected ManifestCheckpointFailed)"
+		wait_until "leaf content ${LEAF_CONTENT} Ready=False" content_ready_false "${LEAF_CONTENT}" || die "leaf content did not flip Ready=False after MCP failure"
 		[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content ${VM_CONTENT} ChildrenReady=False" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${VM_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			|| soft "VM content ChildrenReady did not flip False"; }
+			|| die "VM content ${VM_CONTENT} ChildrenReady did not flip False (propagation broken)"; }
 		wait_until "root content ${ROOT_CONTENT} ChildrenReady=False" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
 			|| die "root content ChildrenReady did not flip False (propagation broken)"
 		ROOT_CR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" ChildrenReady reason)"
-		[[ "${ROOT_CR_REASON}" == "ChildrenFailed" ]] || soft "root ChildrenReady reason=${ROOT_CR_REASON} (expected ChildrenFailed)"
+		[[ "${ROOT_CR_REASON}" == "ChildrenFailed" ]] || die "root ChildrenReady reason=${ROOT_CR_REASON} (expected ChildrenFailed)"
 		wait_until "root Snapshot ${SNAP} Ready=False" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
 			|| die "root Snapshot did not flip Ready=False"
@@ -1780,7 +1964,7 @@ else
 		[[ "${RS}" == "${RC}" ]] || die "failure mirror mismatch: snap=[${RS}] content=[${RC}]"
 		# Message contains failed-leaf signal (best-effort).
 		echo "${RC}" | grep -q "${LEAF_CONTENT}" && note "root Ready message references failed leaf ${LEAF_CONTENT}" \
-			|| soft "root Ready message does not name failed leaf (msg=[${RC}])"
+			|| note "root Ready message does not name failed leaf (informational; msg=[${RC}])"
 		# Sibling isolation.
 		[[ -n "${SIBLING_CONTENT}" ]] && { content_ready_true "${SIBLING_CONTENT}" \
 			&& note "sibling content ${SIBLING_CONTENT} remained Ready=True (isolation OK)" \
@@ -1800,15 +1984,15 @@ log "06-mcp-failure: done"
 # ---------------------------------------------------------------------------
 begin_stage "07-mcp-recovery"
 if [[ "${MCP_FAILURE_DONE}" == "1" ]]; then
-	patch_mcp_ready "${LEAF_MCP}" "True" "Ready" "tree-demo recovery" || soft "cannot restore MCP ${LEAF_MCP}"
-	wait_until "leaf content ${LEAF_CONTENT} Ready=True" content_ready_true "${LEAF_CONTENT}" || soft "leaf did not recover"
-	[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content recover Ready=True" content_ready_true "${VM_CONTENT}" || soft "VM content did not recover"; }
+	patch_mcp_ready "${LEAF_MCP}" "True" "Ready" "tree-demo recovery" || require "cannot restore MCP ${LEAF_MCP} status (RBAC)"
+	wait_until "leaf content ${LEAF_CONTENT} Ready=True" content_ready_true "${LEAF_CONTENT}" || die "leaf content did not recover Ready=True after MCP restore"
+	[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content recover Ready=True" content_ready_true "${VM_CONTENT}" || die "VM content did not recover Ready=True after MCP restore"; }
 	wait_until "root content ${ROOT_CONTENT} Ready=True" content_ready_true "${ROOT_CONTENT}" || die "root content did not recover Ready=True"
 	wait_snapshot_ready "${NS}" "${SNAP}" || die "root Snapshot did not recover Ready=True"
 	RS="$(ready_triple "$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")")"
 	RC="$(ready_triple "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")")"
 	[[ "${RS}" == "${RC}" ]] || die "recovery mirror mismatch: snap=[${RS}] content=[${RC}]"
-	[[ -n "${SIBLING_CONTENT}" ]] && { content_ready_true "${SIBLING_CONTENT}" || soft "sibling not Ready after recovery"; }
+	[[ -n "${SIBLING_CONTENT}" ]] && { content_ready_true "${SIBLING_CONTENT}" || die "sibling content ${SIBLING_CONTENT} not Ready=True after recovery"; }
 	# Slice 3 demo content->snapshot watch: demo Snapshots mirror recovery back to Ready=True.
 	wait_demo_mirror "${DISKSNAP_RES}" "${LEAF_SNAP}" "${LEAF_CONTENT}" "leaf-disk"
 	wait_demo_mirror "${VMSNAP_RES}" "${VM_SNAP}" "${VM_CONTENT}" "vm"
@@ -1850,15 +2034,15 @@ else
 		VSC_PENDING_DONE=1
 		wait_until "content ${DATA_CONTENT} RequestsReady=False (data pending)" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| soft "content ${DATA_CONTENT} RequestsReady did not flip on VSC not-ready"
+			|| die "content ${DATA_CONTENT} RequestsReady did not flip False on VSC readyToUse=false"
 		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" RequestsReady reason)"
-		[[ "${RR_REASON}" == "DataCapturePending" ]] || soft "data pending reason=${RR_REASON} (expected DataCapturePending)"
+		[[ "${RR_REASON}" == "DataCapturePending" ]] || die "data pending reason=${RR_REASON} (expected DataCapturePending)"
 		wait_until "root Snapshot Ready=False mirror" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
-			|| soft "root Snapshot did not flip on VSC pending"
+			|| die "root Snapshot did not flip Ready=False on VSC pending (propagation broken)"
 		RS="$(ready_triple "$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")")"
 		RC="$(ready_triple "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")")"
-		[[ "${RS}" == "${RC}" ]] || soft "vsc-pending mirror mismatch: snap=[${RS}] content=[${RC}]"
+		[[ "${RS}" == "${RC}" ]] || die "vsc-pending mirror mismatch: snap=[${RS}] content=[${RC}]"
 		note "VSC readyToUse=false surfaced DataCapturePending (non-terminal) up to root mirror"
 	else
 		note "cannot patch VSC ${DATA_VSC} status (admission/RBAC); VSC pending not exercised"
@@ -1869,23 +2053,31 @@ log "08-vsc-pending: done"
 
 begin_stage "09-vsc-recovery"
 if [[ "${VSC_PENDING_DONE}" == "1" ]]; then
-	patch_vsc_ready_to_use "${DATA_VSC}" true || soft "cannot restore VSC ${DATA_VSC}"
-	wait_until "content ${DATA_CONTENT} Ready=True after VSC recovery" content_ready_true "${DATA_CONTENT}" || soft "content did not recover after VSC restore"
-	wait_snapshot_ready "${NS}" "${SNAP}" || soft "root Snapshot did not recover after VSC restore"
+	patch_vsc_ready_to_use "${DATA_VSC}" true || require "cannot restore VSC ${DATA_VSC} status (admission/RBAC)"
+	wait_until "content ${DATA_CONTENT} Ready=True after VSC recovery" content_ready_true "${DATA_CONTENT}" || die "content ${DATA_CONTENT} did not recover Ready=True after VSC restore"
+	wait_snapshot_ready "${NS}" "${SNAP}" || die "root Snapshot did not recover Ready=True after VSC restore"
 	note "VSC readyToUse=true restored tree"
 else
 	note "skipped (no VSC pending injected)"
 fi
 save_artifacts "09-vsc-recovery" "${NS}"
 log "09-vsc-recovery: done"
+fi # end GROUP failure-leaf
 
 # ===========================================================================
 # Failure propagation & parent invalidation (literal deletion + recovery).
 #
-# Invariant under test: parent Ready=True IFF all required descendants/artifacts are present and
-# healthy. Recoverable deletions (12,13,14,17) must invalidate the parent and then heal back to
-# Ready=True; the consolidation gate 18-recovery confirms the whole tree is Ready again. The
-# non-recoverable deletions (15,16) run after 18 because they intentionally degrade the tree.
+# Invariant under test: parent Ready=True IFF all required durable descendants/artifacts are present
+# and healthy. Two distinct behaviours are covered, do not conflate them:
+#   - SELF-HEAL of ephemeral ORCHESTRATION (stage 12): deleting a child Snapshot OBJECT loses no
+#     durable artifact, so the parent must STAY Ready while the planner re-ensures the child. No
+#     invalidation is expected here.
+#   - INVALIDATION on loss/failure of a durable ARTIFACT or a child's health: 13 (child
+#     SnapshotContent), 14 (MCP), 15 (chunk), 16 (orphan VSC) and 17 (child Ready=False) must flip the
+#     parent off Ready=True; recoverable ones (13,14,17) then heal back and the consolidation gate
+#     18-recovery confirms the tree is Ready again. The non-recoverable artifact losses (15,16) run
+#     after 18 because they intentionally degrade the tree.
+# All observations here use the short INVALIDATION_WAIT_SEC (a few reconciles), never the capture cap.
 # ===========================================================================
 
 # resolve_main_tree_handles re-derives the live tree handles (ROOT_CONTENT/VM_SNAP/SIBLING_*/LEAF_*/
@@ -1910,39 +2102,61 @@ resolve_main_tree_handles() {
 	[[ -n "${LEAF_CONTENT}" ]] && LEAF_MCP="$(kubectl get "${CONTENT_RES}" "${LEAF_CONTENT}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
 }
 
-# wait_root_not_completed: wait until the root Snapshot Ready leaves True/Completed (invalidation).
-wait_root_not_completed() {
-	wait_until "root Snapshot leaves Ready=Completed" \
-		bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0] | (.status+\"/\"+.reason)) // \"\"') != True/Completed ]]"
+# root_ready_completed: true while the root Snapshot Ready is verbatim True/Completed.
+root_ready_completed() {
+	[[ "$(get_json "${SNAP_RES}" "${NS}" "${SNAP}" | jq -r '([.status.conditions[]?|select(.type=="Ready")][0] | (.status+"/"+.reason)) // ""')" == "True/Completed" ]]
 }
 
 # ---------------------------------------------------------------------------
-# 12-child-snapshot-deleted (recoverable: parent recreates the child, tree heals)
+# 12-child-snapshot-deleted (SELF-HEAL, not invalidation)
 # ---------------------------------------------------------------------------
+# A child Snapshot object (e.g. a standalone DemoVirtualDiskSnapshot) is ephemeral ORCHESTRATION, not a
+# durable descendant. The parent Snapshot reconcile re-plans the child graph on every pass from the LIVE
+# source inventory (reconcileParentOwnedChildGraph -> ensureParentOwnedChildSnapshot), with a
+# DETERMINISTIC child name nss-child-<hash(parent|GVK|GVK|sourceName|sourceUID)>. So deleting the child
+# Snapshot while its source object still exists is SELF-HEALED: the planner recreates it (same name, NEW
+# UID). Crucially this does NOT touch the durable artifacts (the child SnapshotContent / its MCP / VSC),
+# which is why the root stays Ready=Completed throughout — per INV-FAIL-PROP the required durable
+# descendants/artifacts are all still present and healthy. There is NO invalidation here by design (the
+# earlier "wait for root to leave Ready=Completed" was a wrong model: nothing was lost). Real artifact
+# invalidation is exercised by 13 (child content), 14 (MCP), 15 (chunk), 16 (orphan VSC), 17 (child
+# Ready=False). Short INVALIDATION_WAIT_SEC: re-ensure is event-driven (a reconcile or two).
+# ===== GROUP failure-delete: 12 self-heal, 13 child-content delete, 14 MCP delete =====
+if grp failure-delete; then
 begin_stage "12-child-snapshot-deleted"
 resolve_main_tree_handles
 CDIR="$(stage_dir 12-child-snapshot-deleted)"
 if [[ -z "${SIBLING_SNAP}" ]]; then
-	soft "no standalone DemoVirtualDiskSnapshot child to delete; skipping 12"
+	die "12: no standalone DemoVirtualDiskSnapshot child resolved on the healthy tree (cannot exercise self-heal)"
 else
 	CHILD_UID_BEFORE="$(kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o yaml >"${CDIR}/child-before-delete.yaml" 2>/dev/null || true
 	printf 'child=%s\nuid_before=%s\n' "${SIBLING_SNAP}" "${CHILD_UID_BEFORE}" >"${CDIR}/handles.txt"
-	if kubectl -n "${NS}" delete "${DISKSNAP_RES}" "${SIBLING_SNAP}" --wait=false 2>/dev/null; then
-		# Invalidation (racey: recreation may be fast on a healthy cluster) — best-effort.
-		wait_root_not_completed && note "12: root left Ready=Completed after child snapshot deletion" \
-			|| soft "12: did not observe root leaving Ready=Completed (recreation likely raced ahead)"
-		# HARD evidence the woken parent recomputed coverage: child recreated with a new UID.
-		wait_until "child snapshot ${SIBLING_SNAP} recreated (new UID)" \
+	root_ready_completed && note "12: root Ready=Completed before child snapshot delete" \
+		|| require "12: root not Ready=Completed before delete (tree not healthy at stage start)"
+	DEL_OUT="$(kubectl -n "${NS}" delete "${DISKSNAP_RES}" "${SIBLING_SNAP}" --wait=false 2>&1)"
+	DEL_RC=$?
+	printf '%s\n' "${DEL_OUT}" >"${CDIR}/delete-stderr.txt"
+	if [[ "${DEL_RC}" -eq 0 ]]; then
+		# HARD: the planner self-heals the deleted child from the live source (same deterministic name,
+		# new UID). This is the positive evidence the parent re-ensures its orchestration graph.
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "child snapshot ${SIBLING_SNAP} re-ensured (new UID)" \
 			bash -c "u=\$(kubectl -n '${NS}' get '${DISKSNAP_RES}' '${SIBLING_SNAP}' -o jsonpath='{.metadata.uid}' 2>/dev/null || true); [[ -n \"\${u}\" && \"\${u}\" != '${CHILD_UID_BEFORE}' ]]" \
-			|| die "12: deleted child snapshot ${SIBLING_SNAP} not recreated by the woken parent (UID unchanged=${CHILD_UID_BEFORE})"
+			|| die "12: deleted child snapshot ${SIBLING_SNAP} not re-ensured by the planner (UID unchanged=${CHILD_UID_BEFORE}); source object missing or planning gated"
 		CHILD_UID_AFTER="$(kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 		printf 'uid_after=%s\n' "${CHILD_UID_AFTER}" >>"${CDIR}/handles.txt"
-		# Recovery.
-		wait_snapshot_ready "${NS}" "${SNAP}" || die "12: tree did not recover Ready=True after child snapshot recreation"
-		note "12: child snapshot deletion invalidated then recovered (uid ${CHILD_UID_BEFORE}->${CHILD_UID_AFTER})"
+		# Root must stay Ready=Completed: deleting orchestration must NOT invalidate durable artifacts.
+		# Sample across the window; any flip to non-True/Completed would mean the content tree was wrongly
+		# disturbed by an orchestration-only delete.
+		stayed=1
+		for _ in $(seq 1 6); do root_ready_completed || { stayed=0; break; }; sleep 2; done
+		[[ "${stayed}" == "1" ]] && note "12: root stayed Ready=Completed across child re-ensure (durable artifacts untouched)" \
+			|| die "12: root left Ready=Completed during child re-ensure (orchestration-only delete must NOT invalidate durable artifacts)"
+		wait_snapshot_ready "${NS}" "${SNAP}" "${INVALIDATION_WAIT_SEC}" \
+			|| die "12: root Snapshot not Ready=True after child snapshot self-heal"
+		note "12: child snapshot deletion self-healed by planner (uid ${CHILD_UID_BEFORE}->${CHILD_UID_AFTER}); no invalidation, durable artifacts and root Ready intact"
 	else
-		soft "12: could not delete child snapshot ${SIBLING_SNAP}; skipping"
+		die "12: could not delete child snapshot ${SIBLING_SNAP} (rc=${DEL_RC}): $(printf '%s' "${DEL_OUT}" | tr '\n' ' ' | head -c 200)"
 	fi
 fi
 resolve_main_tree_handles
@@ -1957,7 +2171,7 @@ begin_stage "13-snapshotcontent-deleted"
 resolve_main_tree_handles
 CDIR="$(stage_dir 13-snapshotcontent-deleted)"
 if [[ -z "${SIBLING_CONTENT}" ]]; then
-	soft "no standalone child SnapshotContent to delete; skipping 13"
+	die "13: no standalone child SnapshotContent resolved on the healthy tree (cannot exercise child-content deletion)"
 else
 	CONTENT_UID_BEFORE="$(kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 	kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o yaml >"${CDIR}/content-before-delete.yaml" 2>/dev/null || true
@@ -1965,21 +2179,28 @@ else
 	# A child SnapshotContent carries FinalizerParentProtect; delete sets deletionTimestamp and the
 	# content controller cascade-removes finalizers, then GC deletes it and the binder recreates it
 	# from the still-bound child snapshot.
-	if kubectl delete "${CONTENT_RES}" "${SIBLING_CONTENT}" --wait=false 2>/dev/null; then
-		wait_until "root content ${ROOT_CONTENT} ChildrenReady=False after child content delete" \
+	DEL_OUT="$(kubectl delete "${CONTENT_RES}" "${SIBLING_CONTENT}" --wait=false 2>&1)"
+	DEL_RC=$?
+	printf '%s\n' "${DEL_OUT}" >"${CDIR}/delete-stderr.txt"
+	if [[ "${DEL_RC}" -eq 0 ]]; then
+		# Transient invalidation observation only: the binder may recreate the child content so fast that
+		# the brief root ChildrenReady=False window is not caught by polling. This is NOT the invariant
+		# (the invariants — child recreated + tree recovers Ready=True — are asserted hard below), so a
+		# miss here is informational, never a verdict.
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} ChildrenReady=False after child content delete" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			&& note "13: root content ChildrenReady=False after child content deletion" \
-			|| soft "13: did not observe root ChildrenReady=False (recreation likely raced ahead)"
-		# Recovery: content recreated (new UID) and tree Ready=True again.
-		wait_until "child content ${SIBLING_CONTENT} present again" \
+			&& note "13: root content ChildrenReady=False observed after child content deletion" \
+			|| note "13: transient root ChildrenReady=False not observed (recreation raced ahead; informational)"
+		# HARD invariant: the binder recreates the child content (new UID) and the tree recovers Ready=True.
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "child content ${SIBLING_CONTENT} present again" \
 			bash -c "kubectl get '${CONTENT_RES}' '${SIBLING_CONTENT}' -o name >/dev/null 2>&1" \
-			|| soft "13: child content ${SIBLING_CONTENT} was not recreated within window"
+			|| die "13: child content ${SIBLING_CONTENT} was not recreated within ${INVALIDATION_WAIT_SEC}s (binder did not re-bind deleted child content)"
 		CONTENT_UID_AFTER="$(kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
 		printf 'uid_after=%s\n' "${CONTENT_UID_AFTER}" >>"${CDIR}/handles.txt"
-		wait_snapshot_ready "${NS}" "${SNAP}" || soft "13: tree did not recover Ready=True after child content recreation"
+		wait_snapshot_ready "${NS}" "${SNAP}" "${INVALIDATION_WAIT_SEC}" || die "13: tree did not recover Ready=True within ${INVALIDATION_WAIT_SEC}s after child content recreation"
 		note "13: child SnapshotContent deletion propagated to root then recovered (uid ${CONTENT_UID_BEFORE}->${CONTENT_UID_AFTER})"
 	else
-		soft "13: could not delete child content ${SIBLING_CONTENT}; skipping"
+		die "13: could not delete child content ${SIBLING_CONTENT} (rc=${DEL_RC}): $(printf '%s' "${DEL_OUT}" | tr '\n' ' ' | head -c 200)"
 	fi
 fi
 resolve_main_tree_handles
@@ -1994,7 +2215,7 @@ begin_stage "14-mcp-deleted"
 resolve_main_tree_handles
 CDIR="$(stage_dir 14-mcp-deleted)"
 if [[ -z "${LEAF_MCP}" || -z "${LEAF_CONTENT}" ]]; then
-	soft "no leaf MCP/content resolved; skipping 14"
+	die "14: no leaf MCP/content resolved on the healthy tree (cannot exercise MCP deletion)"
 else
 	kubectl get "${MCP_RES}" "${LEAF_MCP}" -o yaml >"${CDIR}/mcp-before-delete.yaml" 2>/dev/null || true
 	printf 'leaf_content=%s\nleaf_mcp=%s\n' "${LEAF_CONTENT}" "${LEAF_MCP}" >"${CDIR}/handles.txt"
@@ -2002,31 +2223,40 @@ else
 	# SnapshotContent is woken via the ManifestCheckpoint ownerRef wake-up watch; reconcile reclassifies
 	# the now-missing MCP as ManifestCapturePending (NotFound is the legitimate pre-publish window) so the
 	# requests leg flips and Ready leaves True (no stale Ready=True over a missing checkpoint).
-	if kubectl delete "${MCP_RES}" "${LEAF_MCP}" --wait=false 2>/dev/null; then
-		wait_until "leaf content ${LEAF_CONTENT} RequestsReady=False after MCP delete" \
+	DEL_OUT="$(kubectl delete "${MCP_RES}" "${LEAF_MCP}" --wait=false 2>&1)"
+	DEL_RC=$?
+	printf '%s\n' "${DEL_OUT}" >"${CDIR}/delete-stderr.txt"
+	if [[ "${DEL_RC}" -eq 0 ]]; then
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} RequestsReady=False after MCP delete" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
 			&& note "14: leaf content RequestsReady=False after MCP deletion" \
-			|| soft "14: leaf content RequestsReady did not flip after MCP deletion"
-		wait_until "root content ${ROOT_CONTENT} not Ready=True after MCP delete" \
+			|| die "14: leaf content ${LEAF_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after MCP deletion (ownerRef wake-up broken)"
+		# HARD INV-FAIL-PROP: the root content must NOT stay Ready=True over a now-missing checkpoint.
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} not Ready=True after MCP delete" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') != True ]]" \
 			&& note "14: root content left Ready=True after leaf MCP deletion" \
-			|| soft "14: root content stayed Ready=True after leaf MCP deletion (investigate propagation)"
-		# Recovery is environment-dependent (the capture path must re-publish the checkpoint); best-effort.
-		wait_snapshot_ready "${NS}" "${SNAP}" \
+			|| die "14: root content stayed Ready=True after leaf MCP deletion within ${INVALIDATION_WAIT_SEC}s (stale Ready=True over a missing checkpoint — INV-FAIL-PROP violation)"
+		# Recovery here requires the capture path to re-run and re-publish the checkpoint, which is not
+		# guaranteed inside the short observation window (documented limitation; the consolidation gate
+		# 18-recovery asserts steady-state recovery). Informational only — not a verdict.
+		wait_snapshot_ready "${NS}" "${SNAP}" "${INVALIDATION_WAIT_SEC}" \
 			&& note "14: tree recovered Ready=True after MCP re-publication" \
-			|| soft "14: tree did not recover Ready=True within window (MCP re-publication may require capture re-run; documented)"
+			|| note "14: tree did not recover Ready=True within ${INVALIDATION_WAIT_SEC}s (MCP re-publication requires a capture re-run; informational, see 18-recovery)"
 	else
-		soft "14: could not delete MCP ${LEAF_MCP}; skipping"
+		die "14: could not delete MCP ${LEAF_MCP} (rc=${DEL_RC}): $(printf '%s' "${DEL_OUT}" | tr '\n' ' ' | head -c 200)"
 	fi
 fi
 resolve_main_tree_handles
 save_graph "14-mcp-deleted" "${NS}" "${SNAP}" "tree" "logical"
 save_artifacts "14-mcp-deleted" "${NS}"
 log "14-mcp-deleted: done"
+fi # end GROUP failure-delete
 
 # ---------------------------------------------------------------------------
 # 17-child-ready-false (child Ready=False must invalidate parent; then recover)
 # ---------------------------------------------------------------------------
+# ===== GROUP failure-child: 17 child Ready=False propagation, 18 recovery gate =====
+if grp failure-child; then
 begin_stage "17-child-ready-false"
 resolve_main_tree_handles
 CDIR="$(stage_dir 17-child-ready-false)"
@@ -2035,24 +2265,37 @@ CDIR="$(stage_dir 17-child-ready-false)"
 SIBLING_MCP=""
 [[ -n "${SIBLING_CONTENT}" ]] && SIBLING_MCP="$(kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
 if [[ -z "${SIBLING_MCP}" ]]; then
-	soft "no standalone child MCP resolved; skipping 17"
+	die "17: no standalone child MCP resolved on the healthy tree (cannot drive a child Ready=False)"
 else
 	printf 'sibling_content=%s\nsibling_mcp=%s\n' "${SIBLING_CONTENT}" "${SIBLING_MCP}" >"${CDIR}/handles.txt"
 	if patch_mcp_ready "${SIBLING_MCP}" "False" "Failed" "tree-demo 17 child Ready=False"; then
-		wait_until "standalone child content ${SIBLING_CONTENT} Ready=False" content_ready_false "${SIBLING_CONTENT}" \
-			|| soft "17: standalone child content did not flip Ready=False"
-		wait_until "root Snapshot ${SNAP} not Ready=True (child failed)" \
-			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') != True ]]" \
-			&& note "17: root did not stay Ready=True while a child is Ready=False" \
-			|| die "17: root stayed Ready=True while a required child is Ready=False (stale Ready=True)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "standalone child content ${SIBLING_CONTENT} Ready=False" content_ready_false "${SIBLING_CONTENT}" \
+			|| die "17: standalone child content ${SIBLING_CONTENT} did not flip Ready=False within ${INVALIDATION_WAIT_SEC}s after MCP failure (cannot drive the child-failed precondition)"
+		if wait_until_to "${INVALIDATION_WAIT_SEC}" "root Snapshot ${SNAP} not Ready=True (child failed)" \
+			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') != True ]]"; then
+			note "17: root did not stay Ready=True while a child is Ready=False"
+		else
+			# Propagation evidence dump: was the failed sibling content actually tracked as a child of the
+			# root content (status.childrenSnapshotContentRefs), and what is the root content aggregation?
+			kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o json >"${CDIR}/sibling-content.json" 2>&1 || true
+			kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o json >"${CDIR}/root-content.json" 2>&1 || true
+			kubectl -n "${NS}" get "${SNAP_RES}" "${SNAP}" -o json >"${CDIR}/root-snapshot.json" 2>&1 || true
+			log "17 DIAG: sibling=${SIBLING_CONTENT} ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/sibling-content.json" 2>/dev/null)"
+			log "17 DIAG: root content ChildrenReady=$(jq -r '([.status.conditions[]?|select(.type=="ChildrenReady")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null) Ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null)"
+			log "17 DIAG: root content childrenSnapshotContentRefs=$(jq -c '[.status.childrenSnapshotContentRefs[]?.name]//[]' "${CDIR}/root-content.json" 2>/dev/null)"
+			log "17 DIAG: sibling tracked in root refs=$(jq -r --arg s "${SIBLING_CONTENT}" '([.status.childrenSnapshotContentRefs[]?|select(.name==$s)]|length)//0' "${CDIR}/root-content.json" 2>/dev/null)"
+			# restore the MCP before dying so we do not leave the tree wedged for SKIP_CLEANUP inspection.
+			patch_mcp_ready "${SIBLING_MCP}" "True" "Ready" "tree-demo 17 restore-before-die" || true
+			die "17: root stayed Ready=True while a required child is Ready=False (stale Ready=True; see ${CDIR}/root-content.json)"
+		fi
 		# Recovery.
-		patch_mcp_ready "${SIBLING_MCP}" "True" "Ready" "tree-demo 17 recovery" || soft "17: could not restore child MCP"
-		wait_until "standalone child content ${SIBLING_CONTENT} Ready=True" content_ready_true "${SIBLING_CONTENT}" \
-			|| soft "17: standalone child content did not recover Ready=True"
-		wait_snapshot_ready "${NS}" "${SNAP}" || soft "17: tree did not recover Ready=True after child recovery"
+		patch_mcp_ready "${SIBLING_MCP}" "True" "Ready" "tree-demo 17 recovery" || require "17: could not restore child MCP ${SIBLING_MCP} status (RBAC)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "standalone child content ${SIBLING_CONTENT} Ready=True" content_ready_true "${SIBLING_CONTENT}" \
+			|| die "17: standalone child content ${SIBLING_CONTENT} did not recover Ready=True within ${INVALIDATION_WAIT_SEC}s"
+		wait_snapshot_ready "${NS}" "${SNAP}" "${INVALIDATION_WAIT_SEC}" || die "17: tree did not recover Ready=True within ${INVALIDATION_WAIT_SEC}s after child recovery"
 		note "17: child Ready=False propagated to root and recovered"
 	else
-		soft "17: cannot patch standalone child MCP ${SIBLING_MCP} (RBAC); skipping"
+		require "17: cannot patch standalone child MCP ${SIBLING_MCP} status (RBAC); cannot drive child Ready=False"
 	fi
 fi
 resolve_main_tree_handles
@@ -2065,12 +2308,12 @@ log "17-child-ready-false: done"
 # ---------------------------------------------------------------------------
 begin_stage "18-recovery"
 resolve_main_tree_handles
-wait_snapshot_ready "${NS}" "${SNAP}" \
+wait_snapshot_ready "${NS}" "${SNAP}" "${INVALIDATION_WAIT_SEC}" \
 	&& note "18: root Snapshot Ready=True after all recoverable invalidations" \
-	|| soft "18: root Snapshot not Ready=True at consolidation (a recoverable stage may not have healed in this environment)"
+	|| die "18: root Snapshot not Ready=True at consolidation within ${INVALIDATION_WAIT_SEC}s (a recoverable invalidation did not heal)"
 for c in "${ROOT_CONTENT}" "${VM_CONTENT}" "${LEAF_CONTENT}" "${SIBLING_CONTENT}"; do
 	[[ -n "${c}" ]] || continue
-	content_ready_true "${c}" && note "18: content ${c} Ready=True" || soft "18: content ${c} not Ready=True at recovery"
+	content_ready_true "${c}" && note "18: content ${c} Ready=True" || die "18: content ${c} not Ready=True at recovery consolidation"
 done
 # Mirror equality must hold regardless of recovery timing (HARD).
 RS="$(ready_triple "$(get_json "${SNAP_RES}" "${NS}" "${SNAP}")")"
@@ -2080,6 +2323,7 @@ note "18: recovery mirror OK [${RS}]"
 save_graph "18-recovery" "${NS}" "${SNAP}" "tree" "logical"
 save_artifacts "18-recovery" "${NS}"
 log "18-recovery: done"
+fi # end GROUP failure-child
 
 # ---------------------------------------------------------------------------
 # 15-chunk-deleted (TERMINAL: missing chunk = ManifestCheckpointFailed integrity loss)
@@ -2087,36 +2331,41 @@ log "18-recovery: done"
 # Non-recoverable by design (the chunk payload is gone). Runs after 18 because it permanently degrades
 # the leaf. Chunk deletion does NOT wake reconcile (no chunk watch in Phase 2a), so an MCP bump is used
 # to trigger revalidation; the integrity check then fails closed (no stale Ready=True over lost data).
+# ===== GROUP failure-destructive: 15 chunk, 16 orphan VSC, 10 VSC missing, 11 chunk missing =====
+# Terminal/degrading stages; run last (10 drops the main namespace).
+if grp failure-destructive; then
 begin_stage "15-chunk-deleted"
 resolve_main_tree_handles
 CDIR="$(stage_dir 15-chunk-deleted)"
 if [[ -z "${LEAF_MCP}" ]]; then
-	soft "no leaf MCP resolved; skipping 15"
+	die "15: no leaf MCP resolved on the tree (cannot exercise chunk deletion)"
 else
 	CHUNK="$(kubectl get "${CHUNK_RES}" -o json 2>/dev/null | jq -r --arg m "${LEAF_MCP}" \
 		'[.items[]?|select(.spec.checkpointName==$m)][0].metadata.name // ""')"
 	[[ -n "${CHUNK}" ]] || CHUNK="$(kubectl get "${CHUNK_RES}" "${LEAF_MCP}-0" -o name 2>/dev/null | sed 's#.*/##' || true)"
 	if [[ -z "${CHUNK}" ]]; then
-		soft "15: could not resolve a chunk for MCP ${LEAF_MCP}; skipping"
+		die "15: could not resolve a chunk for MCP ${LEAF_MCP} (expected at least one published chunk)"
 	else
 		printf 'leaf_content=%s\nleaf_mcp=%s\nchunk=%s\n' "${LEAF_CONTENT}" "${LEAF_MCP}" "${CHUNK}" >"${CDIR}/handles.txt"
 		kubectl get "${MCP_RES}" "${LEAF_MCP}" -o yaml >"${CDIR}/mcp-before-delete.yaml" 2>/dev/null || true
 		kubectl_ctrl get "${CHUNK_RES}" "${CHUNK}" -o yaml >"${CDIR}/chunk-before-delete.yaml" 2>/dev/null || true
-		if kubectl delete "${CHUNK_RES}" "${CHUNK}" --wait=false 2>/dev/null; then
+		CHUNK_DEL_OUT="$(kubectl delete "${CHUNK_RES}" "${CHUNK}" --wait=false 2>&1)"; CHUNK_DEL_RC=$?
+		printf '%s\n' "${CHUNK_DEL_OUT}" >"${CDIR}/delete-stderr.txt"
+		if [[ "${CHUNK_DEL_RC}" -eq 0 ]]; then
 			kubectl annotate "${MCP_RES}" "${LEAF_MCP}" "tree-demo.state-snapshotter.deckhouse.io/bump=$(date +%s)" --overwrite >/dev/null 2>&1 \
 				|| kubectl_ctrl annotate "${MCP_RES}" "${LEAF_MCP}" "tree-demo.state-snapshotter.deckhouse.io/bump=$(date +%s)" --overwrite >/dev/null 2>&1 || true
-			wait_until "leaf content ${LEAF_CONTENT} RequestsReady=False after chunk delete+bump" \
+			wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} RequestsReady=False after chunk delete+bump" \
 				bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-				|| soft "15: leaf RequestsReady did not flip after chunk delete+bump"
+				|| die "15: leaf content ${LEAF_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after chunk delete+bump (integrity check did not fail closed)"
 			RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" RequestsReady reason)"
 			[[ "${RR_REASON}" == "ManifestCheckpointFailed" ]] && note "15: missing chunk surfaced ManifestCheckpointFailed (terminal integrity loss)" \
-				|| soft "15: chunk-missing reason=${RR_REASON} (expected ManifestCheckpointFailed)"
-			wait_until "root Snapshot ${SNAP} Ready=False after chunk delete" \
+				|| die "15: chunk-missing reason=${RR_REASON} (expected ManifestCheckpointFailed)"
+			wait_until_to "${INVALIDATION_WAIT_SEC}" "root Snapshot ${SNAP} Ready=False after chunk delete" \
 				bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
-				|| soft "15: root did not flip Ready=False after chunk delete"
+				|| die "15: root Snapshot did not flip Ready=False within ${INVALIDATION_WAIT_SEC}s after chunk delete (stale Ready=True over lost chunk — INV-FAIL-PROP violation)"
 			note "15: LIMITATION — chunk deletion alone does not wake reconcile; an MCP bump was required (no chunk watch in Phase 2a)"
 		else
-			soft "15: could not delete chunk ${CHUNK}; skipping"
+			die "15: could not delete chunk ${CHUNK} (rc=${CHUNK_DEL_RC}): $(printf '%s' "${CHUNK_DEL_OUT}" | tr '\n' ' ' | head -c 200)"
 		fi
 	fi
 fi
@@ -2138,26 +2387,28 @@ ORPHAN_VSC=""
 [[ -n "${ROOT_CONTENT}" && -n "${ORPHAN_PVC_UID}" ]] && ORPHAN_VSC="$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}" \
 	| jq -r --arg u "${ORPHAN_PVC_UID}" '[.status.dataRefs[]?|select(.targetUID==$u and .artifact.kind=="VolumeSnapshotContent")][0].artifact.name // ""')"
 if [[ -z "${ORPHAN_VSC}" ]]; then
-	soft "16: no orphan demo-pvc VSC in root dataRefs (CSI fulfillment may be pending); skipping"
+	die "16: no orphan demo-pvc VSC in root dataRefs (02-tree-ready asserted it; data leg lost before this stage)"
 else
 	printf 'root_content=%s\norphan_pvc_uid=%s\norphan_vsc=%s\n' "${ROOT_CONTENT}" "${ORPHAN_PVC_UID}" "${ORPHAN_VSC}" >"${CDIR}/handles.txt"
 	kubectl get "${VSC_RES}" "${ORPHAN_VSC}" -o yaml >"${CDIR}/orphan-vsc-before-delete.yaml" 2>/dev/null || true
-	if kubectl delete "${VSC_RES}" "${ORPHAN_VSC}" --wait=false 2>/dev/null; then
-		wait_until "root content ${ROOT_CONTENT} RequestsReady=False after orphan VSC delete" \
+	VSC_DEL_OUT="$(kubectl delete "${VSC_RES}" "${ORPHAN_VSC}" --wait=false 2>&1)"; VSC_DEL_RC=$?
+	printf '%s\n' "${VSC_DEL_OUT}" >"${CDIR}/delete-stderr.txt"
+	if [[ "${VSC_DEL_RC}" -eq 0 ]]; then
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} RequestsReady=False after orphan VSC delete" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| soft "16: root RequestsReady did not flip after orphan VSC delete (VSC ownerRef wake-up may be degraded; revalidation backstops)"
+			|| die "16: root content RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (artifact wake-up + revalidation both failed to fire)"
 		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" RequestsReady reason)"
 		[[ "${RR_REASON}" == "ArtifactMissing" ]] && note "16: orphan VSC deletion surfaced ArtifactMissing at root" \
-			|| soft "16: orphan VSC missing reason=${RR_REASON} (expected ArtifactMissing)"
-		wait_until "root Snapshot ${SNAP} Ready=False after orphan VSC delete" \
+			|| die "16: orphan VSC missing reason=${RR_REASON} (expected ArtifactMissing)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root Snapshot ${SNAP} Ready=False after orphan VSC delete" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
-			|| soft "16: root did not flip Ready=False after orphan VSC delete"
+			|| die "16: root Snapshot did not flip Ready=False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (stale Ready=True over a missing data artifact — INV-FAIL-PROP violation)"
 		[[ -n "${LEAF_CONTENT}" && "${LEAF_CONTENT}" != "${ROOT_CONTENT}" ]] && { content_ready_true "${LEAF_CONTENT}" \
 			&& note "16: domain disk content isolation held under orphan VSC delete" \
-			|| soft "16: domain disk content not Ready under orphan VSC delete (isolation?)"; }
+			|| die "16: domain disk content ${LEAF_CONTENT} not Ready under orphan VSC delete (isolation broken)"; }
 		note "16: orphan (visibility-leaf) data artifact loss invalidated the root identically to the domain path"
 	else
-		soft "16: could not delete orphan VSC ${ORPHAN_VSC}; skipping"
+		die "16: could not delete orphan VSC ${ORPHAN_VSC} (rc=${VSC_DEL_RC}): $(printf '%s' "${VSC_DEL_OUT}" | tr '\n' ' ' | head -c 200)"
 	fi
 fi
 save_graph "16-orphan-vsc-deleted" "${NS}" "${SNAP}" "tree" "logical"
@@ -2176,13 +2427,13 @@ elif [[ -z "${DATA_VSC}" ]]; then
 	note "no VSC dataRef to delete; skipped"
 	save_artifacts "10-vsc-missing" "${NS}"
 elif kubectl delete "${VSC_RES}" "${DATA_VSC}" --wait=false 2>/dev/null; then
-	wait_until "content ${DATA_CONTENT} RequestsReady=False (artifact missing)" \
+	wait_until_to "${INVALIDATION_WAIT_SEC}" "content ${DATA_CONTENT} RequestsReady=False (artifact missing)" \
 		bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-		|| soft "content RequestsReady did not flip on VSC delete (artifact-missing watch may be limited)"
+		|| die "content ${DATA_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after VSC delete (artifact-missing not detected)"
 	RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" RequestsReady reason)"
-	[[ "${RR_REASON}" == "ArtifactMissing" ]] || soft "missing-artifact reason=${RR_REASON} (expected ArtifactMissing)"
+	[[ "${RR_REASON}" == "ArtifactMissing" ]] || die "missing-artifact reason=${RR_REASON} (expected ArtifactMissing)"
 	[[ -n "${SIBLING_CONTENT}" && "${SIBLING_CONTENT}" != "${DATA_CONTENT}" ]] && { content_ready_true "${SIBLING_CONTENT}" \
-		&& note "sibling isolation held under VSC delete" || soft "sibling not Ready under VSC delete"; }
+		&& note "sibling isolation held under VSC delete" || die "sibling content ${SIBLING_CONTENT} not Ready under VSC delete (isolation broken)"; }
 	note "VSC deletion surfaced ArtifactMissing; main namespace will be cleaned (recovery not possible)"
 	save_artifacts "10-vsc-missing" "${NS}"
 	# Destructive: recreate is not possible — drop the main namespace so later runs are clean.
@@ -2235,29 +2486,29 @@ else
 		MCP_REFS_CHUNK_AFTER="$(kubectl get "${MCP_RES}" "${LEAF_MCP}" -o json 2>/dev/null \
 			| jq -r --arg c "${CHUNK}" '[(.status.chunks // [])[] | (if type=="object" then (.name // .) else . end)] | index($c) != null' 2>/dev/null || echo unknown)"
 		note "MCP.status.chunks still references ${CHUNK} after delete+bump: ${MCP_REFS_CHUNK_AFTER} (expected true: dangling ref, list not rewritten away)"
-		wait_until "leaf content ${LEAF_CONTENT} RequestsReady=False after chunk delete + bump" \
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} RequestsReady=False after chunk delete + bump" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| soft "leaf RequestsReady did not flip after chunk delete + bump"
+			|| die "leaf content ${LEAF_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after chunk delete + MCP bump (integrity revalidation did not fail closed)"
 		RR_MSG="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" RequestsReady message)"
 		echo "${RR_MSG}" | grep -q "${CHUNK}" && note "RequestsReady message names missing chunk ${CHUNK}" \
-			|| soft "RequestsReady message does not name missing chunk (msg=[${RR_MSG}])"
+			|| note "RequestsReady message does not name missing chunk (informational; msg=[${RR_MSG}])"
 		note "LIMITATION: chunk deletion alone does not wake reconcile; an MCP update/bump is required (no chunk->MCP watch in Phase 2a)"
 		fi
 		save_artifacts "11-chunk-missing" "${NS}"
 	fi
 fi
 log "11-chunk-missing: done"
+fi # end GROUP failure-destructive
 
 # ---------------------------------------------------------------------------
 log ""
 {
 	echo "run_id=${RUN_ID}"
 	echo "namespace=${NS}"
-	echo "soft_failures=${SOFT_FAILURES}"
+	echo "group=${GROUP}"
+	echo "verdict=PASS"
 } >"${RUN_ARTIFACT_DIR}/SUMMARY.txt"
-if [[ "${SOFT_FAILURES}" -gt 0 ]]; then
-	log "== tree-demo-e2e COMPLETED with ${SOFT_FAILURES} SOFT finding(s) — review per-stage notes.txt"
-else
-	log "== tree-demo-e2e PASSED (no soft findings)"
-fi
+# Reaching here means every stage in the selected group passed: any invariant violation (die) or
+# unmet precondition (require) would have exited non-zero earlier. Outcome is strictly binary.
+log "== tree-demo-e2e PASSED (group=${GROUP}) — all invariants held"
 log "Artifacts: ${RUN_ARTIFACT_DIR}"
