@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/demo"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
@@ -58,7 +59,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 
 	// Create archive handler with directClient for ManifestCheckpoint
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
-	restoreService := restore.NewService(directClient, archiveService)
+	restoreService := restore.NewService(directClient, archiveService, demo.NewRestoreTransformer())
 	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
 	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper)
 

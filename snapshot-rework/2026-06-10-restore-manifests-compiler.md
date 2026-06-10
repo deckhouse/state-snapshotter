@@ -214,22 +214,32 @@ snapshot/control-plane kinds. Явный exclude (никогда не эмитя
 apply-ready выдаче их быть не должно — они только резолвятся для ссылок.) Иначе passthrough мог бы
 случайно вернуть старые доменные snapshot CR / internal-объекты.
 
-**MVP (этот этап):** не делаем новые demo-эндпоинты и не выносим интерфейс наружу — реализуем
-inline-хелперы прямо в коде restore-пайплайна, с явной пометкой временного слоя:
+**Как реализовано (вместо inline-хелперов MVP).** Изначально планировались inline demo-хелперы
+(`transformDemoVDisk`/`transformDemoVM`) прямо в restore-пайплайне с TODO на вынос. Вместо этого
+сразу введён зарегистрированный in-process Go-интерфейс (нового HTTP subresource по-прежнему нет),
+чтобы доменная логика жила рядом со своими типами, а generic `internal/usecase/restore` оставался
+domain-free (см. repo guard `TestProductionSourcesDoNotNameDemoSnapshotKinds`):
 
 ```go
-func transformNodeForRestore(node SnapshotContentNode, children []RestoredNode) ([]unstructured.Unstructured, error) {
-    objs := sanitizeForRestore(node.Manifests)
-    objs = transformPVCsToDataSources(objs, node.DataBindings)
-    objs = transformDemoVDisk(objs, node.DataBindings, children)
-    objs = transformDemoVM(objs, children)
-    return objs, nil
+type DomainRestoreTransformer interface {
+    // PVC, которые доменный объект пересоздаёт на restore (covered) — их generic-слой не эмитит как
+    // отдельный PVC и не считает orphan.
+    CoveredPVCNames(node *RestoreNode, objects []unstructured.Unstructured) map[string]struct{}
+    // Доводит один уже-санитайзенный доменный объект до apply-ready. children — уже скомпилированные
+    // (restore-ready) объекты дочерних снапшотов этого узла (post-order, снизу вверх), чтобы родитель
+    // мог ссылаться на восстановленных детей. Возвращает handled=true, если объект его.
+    TransformObject(node *RestoreNode, obj *unstructured.Unstructured, children []NodeResult) (bool, error)
 }
-// TODO: replace demo inline restore transforms with domain restore adapter calls.
 ```
 
-Позже эти хелперы заменяются на external/domain adapters (по тому же интерфейсу), без изменения
-HTTP-контракта.
+- **Bottom-up:** `compileNode` обходит дерево post-order, сперва компилирует детей и передаёт их
+  `NodeResult` в `TransformObject` родителя (закрепляет ADR-требование «parent can use restored
+  manifests of children», даже если текущий demo VM — no-op).
+- **Один владелец объекта:** если объект пометили `handled=true` два и более трансформера — это
+  contract violation (неоднозначный restore), а не «последний победил».
+- Реализация demo: `internal/controllers/demo/restore_transform.go` (`DemoVirtualDisk` →
+  `spec.dataSource` на свой `DemoVirtualDiskSnapshot`; covered PVC диска подавляется; `DemoVirtualMachine`
+  и прочее — no-op). Регистрируется в `restore.Service` в `internal/api/server.go`.
 
 #### D7. Эндпоинты НИКОГДА не возвращают `VolumeRestoreRequest`
 
@@ -277,6 +287,16 @@ PVC тоже, но VS как restore-facing объект нужен только
 Хелпер `transformPVCsToDataSources` **не** должен слепо обрабатывать все PVC в манифестах узла:
 без классификации он рискует превратить domain-covered PVC в orphan-PVC restore (двойное
 восстановление одного тома).
+
+**Текущая (MVP) семантика ordinary PVC без `dataRef` (зафиксировано).** Сейчас компилятор **не может**
+отличить «у PVC нет данных» от «`dataRef` потерян», поэтому PVC без совпадающего `dataRef` и не
+покрытый доменным объектом трактуется как **обычный manifest-only PVC и проходит насквозь**
+(sanitized, с переписанным namespace, без `dataSourceRef`). Это осознанный MVP-компромисс и
+потенциальная скрытая потеря данных, если `dataRef` действительно был утерян. Поведение
+зафиксировано guard-тестом (`TestTransformNode_OrdinaryPVCWithoutDataRefPassThrough`).
+**TODO/follow-up:** ввести явный признак «ожидался data-restore» (например, аннотацию на PVC при
+capture или политику узла), чтобы PVC без `dataRef`, для которого данные ожидались, давал contract
+violation, а не молчаливый пустой PVC.
 
 **Разрешение имени `VolumeSnapshot` для orphan PVC (без дублирования в `dataRefs[]`).**
 `dataRefs[]` остаётся data-layer контрактом и хранит durable артефакт = `VolumeSnapshotContent`
@@ -335,7 +355,11 @@ demo/manual API-compat поле, выводимое из аннотации. Gen
   к orphan PVC data-артефактам. Для orphan PVC с `dataRef` на VSC `X` compiler ОБЯЗАН найти ровно
   один `VolumeSnapshot` (visibility-leaf в `Snapshot.status.childrenSnapshotRefs[]`) с
   `spec.source.volumeSnapshotContentName == X` и выставить `PVC.spec.dataSourceRef` на этот VS в
-  `targetNamespace`; 0 или >1 VS на VSC — contract violation. Domain-covered PVC **не** порождают
+  `targetNamespace`; 0 или >1 VS на VSC — contract violation. **Fail-closed по состоянию leaf:**
+  endpoint собирает apply-ready PVC со ссылкой на этот VS, поэтому VS leaf, который удаляется
+  (`metadata.deletionTimestamp != nil`), не `status.readyToUse`, или с пустым
+  `status.boundVolumeSnapshotContentName`, — это ошибка (not-ready / contract violation), а не
+  пропуск. Domain-covered PVC **не** порождают
   PVC `dataSourceRef`-манифест (восстанавливаются через доменный трансформер). Orphan-ность — по
   покрытию дерева/доменному владению, **не** по наличию VS/VSC.
 - **INV-RC11 (target references valid in target namespace):** compiler эмитит только ссылки,

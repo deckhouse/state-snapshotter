@@ -12,36 +12,77 @@ import (
 )
 
 type Service struct {
-	resolver   *Resolver
-	loader     *Loader
-	transform  *Transformer
-	kubeClient client.Client
+	resolver     *Resolver
+	loader       *Loader
+	kubeClient   client.Client
+	transformers []DomainRestoreTransformer
 }
 
-func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService) *Service {
+// NewService builds the restore compiler. Domain restore transformers (e.g. the demo controllers'
+// transformer) are registered here so the generic pipeline stays domain-free.
+func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService, transformers ...DomainRestoreTransformer) *Service {
 	return &Service{
-		resolver:   NewResolver(kubeClient),
-		loader:     NewLoader(kubeClient, archiveService),
-		transform:  NewTransformer(),
-		kubeClient: kubeClient,
+		resolver:     NewResolver(kubeClient),
+		loader:       NewLoader(kubeClient, archiveService),
+		kubeClient:   kubeClient,
+		transformers: transformers,
 	}
 }
 
+// BuildManifestsWithDataRestoration is the restore compiler: it walks the Snapshot run tree and
+// compiles apply-ready manifests bottom-up (post-order), rewriting data references so the output can
+// be applied directly into targetNamespace. It never emits VolumeRestoreRequest or other
+// control-plane objects (ADR 2026-06-10).
 func (s *Service) BuildManifestsWithDataRestoration(ctx context.Context, opts Options) ([]byte, error) {
-	if opts.TargetNamespace != "" && opts.TargetNamespace != opts.SnapshotNamespace {
-		return nil, fmt.Errorf("%w: targetNamespace differs from snapshot namespace (MVP limitation)", ErrBadRequest)
+	targetNamespace := opts.TargetNamespace
+	if targetNamespace == "" {
+		targetNamespace = opts.SnapshotNamespace
 	}
-	root, err := s.resolver.ResolveSnapshotTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
+
+	root, err := s.resolver.ResolveRestoreTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
 	if err != nil {
 		return nil, err
 	}
 
-	objects, err := s.collectManifests(ctx, root, opts)
+	result, err := s.compileNode(ctx, root, targetNamespace)
 	if err != nil {
 		return nil, err
 	}
 
-	return marshalObjects(objects)
+	return marshalObjects(result.Objects)
+}
+
+// compileNode compiles a RestoreNode in post-order: children are compiled first so their results are
+// available to the parent transform, then this node's manifests are loaded and transformed.
+func (s *Service) compileNode(ctx context.Context, node *RestoreNode, targetNamespace string) (NodeResult, error) {
+	childResults := make([]NodeResult, 0, len(node.Children))
+	childObjects := make([]unstructured.Unstructured, 0)
+	for _, child := range node.Children {
+		childResult, err := s.compileNode(ctx, child, targetNamespace)
+		if err != nil {
+			return NodeResult{}, err
+		}
+		childResults = append(childResults, childResult)
+		childObjects = append(childObjects, childResult.Objects...)
+	}
+
+	raw, err := s.loader.LoadManifests(ctx, node.ManifestCheckpointName)
+	if err != nil {
+		return NodeResult{}, err
+	}
+	// Pass the compiled children so a parent domain transform can reference its restored children
+	// (post-order, bottom-up).
+	nodeObjects, err := transformNodeObjects(node, raw, s.transformers, childResults, targetNamespace)
+	if err != nil {
+		return NodeResult{}, err
+	}
+
+	// Emit children before the parent (post-order output): leaf data objects (e.g. a disk) come
+	// before objects that depend on them (e.g. a VM), which is friendlier for a straight apply.
+	objects := make([]unstructured.Unstructured, 0, len(nodeObjects)+len(childObjects))
+	objects = append(objects, childObjects...)
+	objects = append(objects, nodeObjects...)
+	return NodeResult{Node: node, Objects: objects}, nil
 }
 
 func (s *Service) BuildManifests(ctx context.Context, opts Options) ([]byte, error) {
@@ -58,28 +99,6 @@ func (s *Service) BuildManifests(ctx context.Context, opts Options) ([]byte, err
 		return nil, err
 	}
 	return marshalObjects(objects)
-}
-
-func (s *Service) collectManifests(ctx context.Context, node *SnapshotContentNode, opts Options) ([]unstructured.Unstructured, error) {
-	raw, err := s.loader.LoadManifests(ctx, node.ManifestCheckpointName)
-	if err != nil {
-		return nil, err
-	}
-	// Transform uses this node's DataBindings only; child MCP PVCs are collected in child recursion.
-	result, err := s.transform.Transform(raw, opts, node)
-	if err != nil {
-		return nil, err
-	}
-
-	objects := result.Objects
-	for _, child := range node.Children {
-		childObjects, err := s.collectManifests(ctx, child, opts)
-		if err != nil {
-			return nil, err
-		}
-		objects = append(objects, childObjects...)
-	}
-	return objects, nil
 }
 
 func (s *Service) collectRawManifests(ctx context.Context, node *SnapshotContentNode) ([]unstructured.Unstructured, error) {
