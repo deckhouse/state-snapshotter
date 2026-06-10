@@ -629,7 +629,7 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		}
 	})
 
-	t.Run("duplicate 409", func(t *testing.T) {
+	t.Run("duplicate across nodes is deduplicated", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		arch := NewArchiveService(cl, cl, log)
 		agg := NewAggregatedNamespaceManifests(cl, arch, nil)
@@ -649,10 +649,48 @@ func TestAggregatedNamespaceManifests_Errors(t *testing.T) {
 		_ = cl.Create(ctx, root)
 		ns := aggManifestNS("root-content")
 		_ = cl.Create(ctx, ns)
-		_, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
-		var st *AggregatedStatusError
-		if !errors.As(err, &st) || st.HTTPStatus != http.StatusConflict {
-			t.Fatalf("got %v", err)
+		raw, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
+		if err != nil {
+			t.Fatalf("expected dedup success, got %v", err)
+		}
+		var arr []map[string]interface{}
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			t.Fatal(err)
+		}
+		if len(arr) != 1 {
+			t.Fatalf("expected 1 deduplicated object, got %d", len(arr))
+		}
+	})
+
+	t.Run("namespace-relative object is included not dropped", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		arch := NewArchiveService(cl, cl, log)
+		agg := NewAggregatedNamespaceManifests(cl, arch, nil)
+		// Object already namespace-relative (no metadata.namespace), as produced by a
+		// prior aggregated download and re-uploaded via import-manifests. It must NOT be
+		// dropped by the namespace-relative guard.
+		relObj := []map[string]interface{}{
+			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "rel"}},
+		}
+		d, cs := aggManifestEncodeChunk(relObj)
+		ch := aggManifestCreateChunk("ch-rel", "mcp-rel", d, cs)
+		_ = cl.Create(ctx, ch)
+		mcp := aggManifestReadyMCP("mcp-rel", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+		_ = cl.Create(ctx, mcp)
+		root := aggManifestContent("root-content", "mcp-rel")
+		_ = cl.Create(ctx, root)
+		ns := aggManifestNS("root-content")
+		_ = cl.Create(ctx, ns)
+		raw, err := agg.BuildAggregatedJSON(ctx, "ns1", "snap")
+		if err != nil {
+			t.Fatalf("expected success, got %v", err)
+		}
+		var arr []map[string]interface{}
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			t.Fatal(err)
+		}
+		if len(arr) != 1 {
+			t.Fatalf("expected namespace-relative object to be included, got %d objects", len(arr))
 		}
 	})
 

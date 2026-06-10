@@ -23,7 +23,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -296,7 +295,7 @@ func TestGenericSnapshotAggregatedManifests_HTTP_Errors(t *testing.T) {
 
 	log, _ := logger.NewLogger("error")
 
-	t.Run("duplicate object returns 409", func(t *testing.T) {
+	t.Run("duplicate object across nodes is deduplicated", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		dup := []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "same", "namespace": "ns1"}},
@@ -322,9 +321,9 @@ func TestGenericSnapshotAggregatedManifests_HTTP_Errors(t *testing.T) {
 		})
 		srv := newGenericAggregatedTestServer(t, cl, log)
 		defer srv.Close()
-		body := getRawResponse(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualmachinesnapshots/vm-dup/manifests", http.StatusConflict)
-		if !jsonContainsString(body, "duplicate object detected in snapshot tree") {
-			t.Fatalf("expected duplicate error, got %s", string(body))
+		objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/demovirtualmachinesnapshots/vm-dup/manifests", http.StatusOK)
+		if len(objects) != 1 {
+			t.Fatalf("expected 1 deduplicated object, got %d: %#v", len(objects), objects)
 		}
 	})
 
@@ -470,8 +469,4 @@ func containsKindName(objects []map[string]interface{}, kind, name string) bool 
 		}
 	}
 	return false
-}
-
-func jsonContainsString(body []byte, needle string) bool {
-	return strings.Contains(string(body), needle)
 }

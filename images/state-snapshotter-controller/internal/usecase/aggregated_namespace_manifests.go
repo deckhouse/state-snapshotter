@@ -291,19 +291,42 @@ func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(
 		if err != nil {
 			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
 		}
+		// The aggregated endpoint returns each node's full subtree, so an object that
+		// lives in a child node also appears under every ancestor. Deduplicate by
+		// identity (keep the first occurrence) instead of failing with 409: a snapshot
+		// tree that legitimately repeats an object across levels must still aggregate.
 		if _, dup := seenKeys[key]; dup {
-			return NewAggregatedStatusError(http.StatusConflict, "Conflict",
-				fmt.Sprintf("duplicate object detected in snapshot tree: %s", key))
-		}
-		seenKeys[key] = struct{}{}
-		if !makeAggregatedObjectNamespaceRelative(obj) {
 			continue
 		}
+		seenKeys[key] = struct{}{}
+		// The source Namespace object is captured as part of a namespace snapshot, but
+		// it must not be re-created when restoring into a (possibly different) target
+		// namespace; exclude it from the aggregated set.
+		if isAggregatedNamespaceObject(obj) {
+			continue
+		}
+		// Make the object namespace-relative for portable re-apply. Objects that are
+		// already relative (e.g. re-uploaded archive manifests whose namespace was
+		// stripped at download time) MUST still be included — never drop them just
+		// because there is no namespace left to strip.
+		makeAggregatedObjectNamespaceRelative(obj)
 		*objects = append(*objects, obj)
 	}
 	return nil
 }
 
+// isAggregatedNamespaceObject reports whether obj is a core/v1 Namespace, which is
+// excluded from aggregated manifests (see appendObjectsFromManifestCheckpoint).
+func isAggregatedNamespaceObject(obj map[string]interface{}) bool {
+	apiVersion, _ := obj["apiVersion"].(string)
+	kind, _ := obj["kind"].(string)
+	return apiVersion == "v1" && kind == "Namespace"
+}
+
+// makeAggregatedObjectNamespaceRelative removes metadata.namespace when present so
+// the manifest can be re-applied into any target namespace. It is best-effort: a
+// missing metadata or an already-empty namespace is not an error, and the object is
+// kept as-is by the caller.
 func makeAggregatedObjectNamespaceRelative(obj map[string]interface{}) bool {
 	meta, ok := obj["metadata"].(map[string]interface{})
 	if !ok {
