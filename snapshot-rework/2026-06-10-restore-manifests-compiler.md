@@ -222,6 +222,11 @@ snapshot/control-plane kinds. Явный exclude (никогда не эмитя
 apply-ready выдаче их быть не должно — они только резолвятся для ссылок.) Иначе passthrough мог бы
 случайно вернуть старые доменные snapshot CR / internal-объекты.
 
+> **Целевой контракт доменной трансформации** (versioned AdmissionReview-подобный, per-node,
+> patch+suppress, generic владеет набором/sanitize/dedup, домен — чистая функция) вынесен в отдельный
+> ADR: `snapshot-rework/2026-06-13-domain-restore-transform-contract.md`. Описанный ниже in-process
+> `DomainRestoreTransformer` — это v0-реализация той же семантики; внешний транспорт — future work.
+
 **Как реализовано (вместо inline-хелперов MVP).** Изначально планировались inline demo-хелперы
 (`transformDemoVDisk`/`transformDemoVM`) прямо в restore-пайплайне с TODO на вынос. Вместо этого
 сразу введён зарегистрированный in-process Go-интерфейс (нового HTTP subresource по-прежнему нет),
