@@ -122,8 +122,16 @@ func (r *Resolver) buildTree(ctx context.Context, contentGVK schema.GroupVersion
 // not-ready node, or an unresolvable VolumeSnapshot leaf, aborts the whole resolution.
 func (r *Resolver) ResolveRestoreTree(ctx context.Context, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
 	rootGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+	return r.ResolveRestoreSubtree(ctx, rootGVK, snapshotNamespace, snapshotName)
+}
+
+// ResolveRestoreSubtree resolves the restore tree starting from an arbitrary snapshot node identified
+// by its GVK (the namespaced root Snapshot, or a domain snapshot CR such as DemoVirtualMachineSnapshot
+// / DemoVirtualDiskSnapshot). It compiles that node and everything below it, so the restore endpoint
+// can return apply-ready manifests for a single subtree, not only the whole namespace.
+func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
 	rootObj := &unstructured.Unstructured{}
-	rootObj.SetGroupVersionKind(rootGVK)
+	rootObj.SetGroupVersionKind(gvk)
 	if err := r.client.Get(ctx, client.ObjectKey{Namespace: snapshotNamespace, Name: snapshotName}, rootObj); err != nil {
 		if errors.IsNotFound(err) {
 			return nil, fmt.Errorf("%w: snapshot %s/%s", ErrNotFound, snapshotNamespace, snapshotName)
@@ -312,10 +320,10 @@ func ensureSnapshotReady(snapshotObj *unstructured.Unstructured) error {
 	}
 	conditions := snapshotLike.GetStatusConditions()
 	ready := meta.FindStatusCondition(conditions, "Ready")
-	if ready == nil {
-		return nil
-	}
-	if ready.Status != metav1.ConditionTrue {
+	// A snapshot used in the restore tree must be explicitly Ready=True. A missing Ready condition
+	// (e.g. mid-reconcile) is treated as not ready: the restore compiler must never compile from an
+	// unfinished snapshot node.
+	if ready == nil || ready.Status != metav1.ConditionTrue {
 		return fmt.Errorf("%w: Snapshot %s is not Ready", ErrNotReady, snapshotObj.GetName())
 	}
 	return nil

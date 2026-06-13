@@ -136,3 +136,112 @@ func TestSanitizeForRestore_StripsKindSpecificFields(t *testing.T) {
 		t.Fatal("Service spec.selector must be preserved")
 	}
 }
+
+func TestSanitizeForRestore_StripsRestoreBreakingAnnotations(t *testing.T) {
+	pvc := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]interface{}{
+			"name":      "data",
+			"namespace": "source-ns",
+			"annotations": map[string]interface{}{
+				"kubectl.kubernetes.io/last-applied-configuration": "{\"x\":1}",
+				"pv.kubernetes.io/bind-completed":                  "yes",
+				"pv.kubernetes.io/bound-by-controller":             "yes",
+				"volume.kubernetes.io/selected-node":               "node-1",
+				"app.kubernetes.io/name":                           "keep",
+			},
+		},
+		"spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}},
+	}}
+	out, keep := sanitizeForRestore(pvc, "restore-ns")
+	if !keep {
+		t.Fatal("PVC must be kept")
+	}
+	anns, _, _ := unstructured.NestedStringMap(out.Object, "metadata", "annotations")
+	for _, k := range restoreBreakingAnnotations {
+		if _, ok := anns[k]; ok {
+			t.Fatalf("annotation %q must be stripped", k)
+		}
+	}
+	if anns["app.kubernetes.io/name"] != "keep" {
+		t.Fatal("unrelated annotation must be preserved")
+	}
+}
+
+func TestSanitizeForRestore_DropsEmptyAnnotationsMap(t *testing.T) {
+	cm := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"name":      "cfg",
+			"namespace": "source-ns",
+			"annotations": map[string]interface{}{
+				"kubectl.kubernetes.io/last-applied-configuration": "{}",
+			},
+		},
+	}}
+	out, _ := sanitizeForRestore(cm, "restore-ns")
+	if _, found, _ := unstructured.NestedMap(out.Object, "metadata", "annotations"); found {
+		t.Fatal("annotations map should be removed when it becomes empty")
+	}
+}
+
+func TestSanitizeForRestore_StripsServiceNodePortAndLoadBalancerIP(t *testing.T) {
+	svc := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata":   map[string]interface{}{"name": "web", "namespace": "source-ns"},
+		"spec": map[string]interface{}{
+			"type":           "LoadBalancer",
+			"loadBalancerIP": "1.2.3.4",
+			"ports": []interface{}{
+				map[string]interface{}{"port": int64(80), "targetPort": int64(8080), "nodePort": int64(30080)},
+				map[string]interface{}{"port": int64(443), "nodePort": int64(30443)},
+			},
+		},
+	}}
+	out, _ := sanitizeForRestore(svc, "restore-ns")
+	if _, ok, _ := unstructured.NestedString(out.Object, "spec", "loadBalancerIP"); ok {
+		t.Fatal("Service spec.loadBalancerIP must be stripped")
+	}
+	ports, _, _ := unstructured.NestedSlice(out.Object, "spec", "ports")
+	if len(ports) != 2 {
+		t.Fatalf("expected 2 ports preserved, got %d", len(ports))
+	}
+	for _, p := range ports {
+		pm, _ := p.(map[string]interface{})
+		if _, ok := pm["nodePort"]; ok {
+			t.Fatal("Service spec.ports[].nodePort must be stripped")
+		}
+		if _, ok := pm["port"]; !ok {
+			t.Fatal("Service spec.ports[].port must be preserved")
+		}
+	}
+}
+
+func TestSanitizeForRestore_RewritesRoleBindingServiceAccountNamespace(t *testing.T) {
+	rb := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "rbac.authorization.k8s.io/v1",
+		"kind":       "RoleBinding",
+		"metadata":   map[string]interface{}{"name": "rb", "namespace": "source-ns"},
+		"roleRef":    map[string]interface{}{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "r"},
+		"subjects": []interface{}{
+			map[string]interface{}{"kind": "ServiceAccount", "name": "sa", "namespace": "source-ns"},
+			map[string]interface{}{"kind": "User", "name": "alice", "apiGroup": "rbac.authorization.k8s.io"},
+		},
+	}}
+	out, keep := sanitizeForRestore(rb, "restore-ns")
+	if !keep {
+		t.Fatal("RoleBinding must be kept")
+	}
+	subjects, _, _ := unstructured.NestedSlice(out.Object, "subjects")
+	sa, _ := subjects[0].(map[string]interface{})
+	if sa["namespace"] != "restore-ns" {
+		t.Fatalf("ServiceAccount subject namespace = %v, want restore-ns", sa["namespace"])
+	}
+	user, _ := subjects[1].(map[string]interface{})
+	if _, ok := user["namespace"]; ok {
+		t.Fatal("User subject must not get a namespace")
+	}
+}

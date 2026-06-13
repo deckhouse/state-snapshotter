@@ -140,19 +140,16 @@ func TestTransformNode_GenericPassThrough(t *testing.T) {
 	}
 }
 
-func TestTransformNode_OrdinaryPVCWithoutDataRefPassThrough(t *testing.T) {
+func TestTransformNode_PVCWithoutDataRefFailsClosed(t *testing.T) {
 	pvc := pvcManifest("plain-pvc", "source-ns", "uid-plain")
 	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}, VSCToVS: map[string]string{}}
 
-	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, nil, nil, "restore-ns")
-	if err != nil {
-		t.Fatalf("transformNodeObjects: %v", err)
+	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, nil, nil, "restore-ns")
+	if err == nil {
+		t.Fatal("expected error: a PVC without a data binding must not be emitted data-less")
 	}
-	if len(out) != 1 {
-		t.Fatalf("expected 1 object, got %d", len(out))
-	}
-	if _, found, _ := unstructured.NestedMap(out[0].Object, "spec", "dataSourceRef"); found {
-		t.Fatal("ordinary PVC without dataRef must not get a dataSourceRef")
+	if !errors.Is(err, ErrContractViolation) {
+		t.Fatalf("expected ErrContractViolation, got %v", err)
 	}
 }
 

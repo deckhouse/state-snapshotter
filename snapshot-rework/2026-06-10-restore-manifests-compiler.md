@@ -110,12 +110,20 @@ const (
 
 Для `manifests-with-data-restoration` режим `restore-safe` **обязателен** и удаляет:
 
-- `metadata`: `uid`, `resourceVersion`, `generation`, `creationTimestamp`, `managedFields`,
-  `ownerReferences`, `finalizers`;
+- `metadata`: `uid`, `resourceVersion`, `generation`, `creationTimestamp`, `deletionTimestamp`,
+  `deletionGracePeriodSeconds`, `managedFields`, `ownerReferences`, `finalizers`, `selfLink`;
 - `metadata.namespace` → переписать на `targetNamespace` (для namespaced объектов);
+- `metadata.annotations`: `kubectl.kubernetes.io/last-applied-configuration`,
+  `pv.kubernetes.io/bind-completed`, `pv.kubernetes.io/bound-by-controller`,
+  `volume.kubernetes.io/selected-node` (stale/bind-аннотации исходного кластера; пустая map после
+  чистки удаляется);
 - `status`;
 - kind-specific: `PVC.spec.volumeName`, `PVC.spec.dataSource`, `PVC.spec.dataSourceRef` (до
-  restore-трансформации); `Service.spec.clusterIP/clusterIPs/ipFamilies/ipFamilyPolicy`.
+  restore-трансформации); `Service.spec.clusterIP/clusterIPs/ipFamilies/ipFamilyPolicy/healthCheckNodePort/loadBalancerIP`
+  и `Service.spec.ports[].nodePort`;
+- in-spec namespace rewrite: `RoleBinding.subjects[].namespace` для `kind: ServiceAccount` →
+  `targetNamespace` (namespace переезжает целиком, иначе RBAC после restore ссылается на исходный
+  namespace). Прочие in-spec namespace-ссылки доменных CR — ответственность `DomainRestoreTransformer`.
 
 Для `/manifests` сохраняется текущее поведение (`namespace-relative`: убрать `metadata.namespace`,
 отбросить cluster-scoped; плюс уже всегда режутся `status`/`managedFields` в `ArchiveService`).
@@ -281,22 +289,21 @@ PVC тоже, но VS как restore-facing объект нужен только
 
 - **orphan PVC** → emit `PVC` с `spec.dataSourceRef` на VS (резолв через leaf, см. ниже);
 - **domain-covered PVC** → **suppress** PVC, восстановить через доменный объект (`DemoVirtualDisk` и т.п.);
-- **ordinary PVC без `dataRef`** → pass-through **только** если он не предполагает data-restore;
-  иначе — contract violation.
+- **PVC без `dataRef` и не покрытый доменным объектом** → **contract violation** (fail-closed).
 
 Хелпер `transformPVCsToDataSources` **не** должен слепо обрабатывать все PVC в манифестах узла:
 без классификации он рискует превратить domain-covered PVC в orphan-PVC restore (двойное
 восстановление одного тома).
 
-**Текущая (MVP) семантика ordinary PVC без `dataRef` (зафиксировано).** Сейчас компилятор **не может**
-отличить «у PVC нет данных» от «`dataRef` потерян», поэтому PVC без совпадающего `dataRef` и не
-покрытый доменным объектом трактуется как **обычный manifest-only PVC и проходит насквозь**
-(sanitized, с переписанным namespace, без `dataSourceRef`). Это осознанный MVP-компромисс и
-потенциальная скрытая потеря данных, если `dataRef` действительно был утерян. Поведение
-зафиксировано guard-тестом (`TestTransformNode_OrdinaryPVCWithoutDataRefPassThrough`).
-**TODO/follow-up:** ввести явный признак «ожидался data-restore» (например, аннотацию на PVC при
-capture или политику узла), чтобы PVC без `dataRef`, для которого данные ожидались, давал contract
-violation, а не молчаливый пустой PVC.
+**Семантика PVC без `dataRef` (MVP, зафиксировано: fail-closed).** Эмитить namespaced-PVC без
+`dataSourceRef` опасно: restore создаст PVC **без данных** (молчаливая потеря данных). Поэтому
+любой PVC в namespace snapshot, который **не** покрыт доменным объектом и для которого **не** найден
+`dataRefs` → `VolumeSnapshot` binding, даёт `ErrContractViolation` (409) и обваливает весь ответ.
+Инвариант: **любой emitted PVC обязан иметь `spec.dataSourceRef`**. Поведение зафиксировано
+guard-тестом (`TestTransformNode_PVCWithoutDataRefFailsClosed`).
+**TODO/follow-up:** ввести явный признак «stateless / пустой PVC, данные не бэкапим и пустое
+восстановление безопасно» (аннотация на PVC при capture или политика узла), чтобы разрешить
+осознанный data-less passthrough; до тех пор passthrough PVC без данных запрещён.
 
 **Разрешение имени `VolumeSnapshot` для orphan PVC (без дублирования в `dataRefs[]`).**
 `dataRefs[]` остаётся data-layer контрактом и хранит durable артефакт = `VolumeSnapshotContent`
@@ -341,8 +348,10 @@ demo/manual API-compat поле, выводимое из аннотации. Gen
   от runtime-полей (D3) и namespaced-объекты переписаны на `targetNamespace`.
 - **INV-RC5 (dedup):** дубль по `apiVersion|kind|namespace|name` (после трансформации) — `409`,
   без молчаливого merge/overwrite (как в `spec/snapshot-aggregated-read.md`).
-- **INV-RC6 (Ready gating):** restore-компиляция требует `Ready=True` на каждом узле дерева;
-  при не-Ready/missing/failed ребёнке — fail-whole (`409`/`404`/`400` по таксономии ошибок).
+- **INV-RC6 (Ready gating):** restore-компиляция требует **явного** `Ready=True` на каждом узле
+  дерева — и на Snapshot/доменном snapshot-CR, и на его SnapshotContent. **Отсутствующее** условие
+  `Ready` трактуется как not-ready (`ErrNotReady`), а не как успех (mid-reconcile узел не должен
+  попадать в restore). При не-Ready/missing/failed узле — fail-whole (`409`/`404`/`400`).
 - **INV-RC7 (no name-coupling):** source identity извлекается через generic-контракт
   (annotation/adapter), а не через хардкод `spec.sourceRef` доменного CR.
 - **INV-RC8 (no new endpoint):** доменные restore-преобразования — внутренние Go-трансформеры;

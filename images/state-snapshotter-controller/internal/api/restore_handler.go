@@ -87,15 +87,18 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 			}
 			name := parts[2]
 			sub := parts[3]
-			if sub != "manifests" {
-				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
-				return
-			}
 			if r.Method != http.MethodGet {
 				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
 				return
 			}
-			h.HandleGenericSnapshotAggregatedManifests(w, r, namespace, parts[1], name)
+			switch sub {
+			case "manifests":
+				h.HandleGenericSnapshotAggregatedManifests(w, r, namespace, parts[1], name)
+			case "manifests-with-data-restoration":
+				h.HandleGenericSnapshotManifestsWithDataRestoration(w, r, namespace, parts[1], name)
+			default:
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
+			}
 		}
 	})
 }
@@ -168,6 +171,28 @@ func (h *RestoreHandler) HandleSnapshotAggregatedManifests(w http.ResponseWriter
 	}
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned Snapshot aggregated manifests", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+}
+
+func (h *RestoreHandler) HandleGenericSnapshotManifestsWithDataRestoration(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
+	start := time.Now()
+	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	opts := restore.Options{
+		SnapshotName:      snapshotName,
+		SnapshotNamespace: namespace,
+		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
+		RestoreStrategy:   r.URL.Query().Get("restoreStrategy"),
+	}
+	data, err := h.service.BuildManifestsWithDataRestorationForNode(r.Context(), snapshotGVK, opts)
+	if err != nil {
+		h.writeRestoreError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned per-node manifests-with-data-restoration", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
 }
 
 func (h *RestoreHandler) HandleGenericSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {

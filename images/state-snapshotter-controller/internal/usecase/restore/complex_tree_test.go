@@ -425,6 +425,58 @@ func TestBuildManifestsWithDataRestoration_ComplexTree(t *testing.T) {
 	}
 }
 
+// TestBuildManifestsWithDataRestorationForNode_VMSubtree proves the per-node restore endpoint
+// compiles only the subtree rooted at the given snapshot node (here the VM), not the whole namespace.
+func TestBuildManifestsWithDataRestorationForNode_VMSubtree(t *testing.T) {
+	root := treeNode{
+		name:      "app",
+		manifests: []map[string]interface{}{cmManifest("config")},
+		children: []treeNode{
+			{
+				kind: "DemoVirtualMachineSnapshot", name: "vm-a-snap",
+				manifests: []map[string]interface{}{vmManifest("vm-a", "disk-a1")},
+				children: []treeNode{
+					{
+						kind: "DemoVirtualDiskSnapshot", name: "disk-a1-snap",
+						manifests: []map[string]interface{}{diskManifest("disk-a1", "pvc-a1"), pvcManifestRaw("pvc-a1", "uid-a1")},
+					},
+				},
+			},
+			{
+				kind: "DemoVirtualDiskSnapshot", name: "disk-standalone-snap",
+				manifests: []map[string]interface{}{diskManifest("disk-standalone", "")},
+			},
+		},
+	}
+	svc := buildComplexService(t, root)
+
+	gvk := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}
+	out, err := svc.BuildManifestsWithDataRestorationForNode(context.Background(), gvk, Options{
+		SnapshotName: "vm-a-snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+	})
+	if err != nil {
+		t.Fatalf("BuildManifestsWithDataRestorationForNode: %v", err)
+	}
+	objects := decodeObjects(t, out)
+
+	if !hasObj(objects, "DemoVirtualMachine", "vm-a") {
+		t.Fatal("VM subtree must contain vm-a")
+	}
+	if got := dataSourceName(objects, "DemoVirtualDisk", "disk-a1"); got != "disk-a1-snap" {
+		t.Fatalf("disk-a1 dataSource.name = %q, want disk-a1-snap", got)
+	}
+	// Nodes outside the VM subtree must NOT appear.
+	if hasObj(objects, "DemoVirtualDisk", "disk-standalone") {
+		t.Fatal("disk-standalone is a sibling subtree and must not be compiled for the VM node")
+	}
+	if hasObj(objects, "ConfigMap", "config") {
+		t.Fatal("root namespace objects must not be compiled for the VM node")
+	}
+	if hasObj(objects, "PersistentVolumeClaim", "pvc-a1") {
+		t.Fatal("covered PVC must be suppressed")
+	}
+}
+
 // TestBuildManifestsWithDataRestoration_DuplicateAcrossBranchesFailsClosed proves the final dedup
 // rejects two sibling subtrees that compile the same object identity (apiVersion|kind|ns|name).
 func TestBuildManifestsWithDataRestoration_DuplicateAcrossBranchesFailsClosed(t *testing.T) {

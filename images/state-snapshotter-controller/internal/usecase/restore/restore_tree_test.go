@@ -242,6 +242,74 @@ func TestResolveRestoreTree_DuplicateVSForSameVSCFailsClosed(t *testing.T) {
 	}
 }
 
+func TestResolveRestoreTree_RootMissingReadyConditionFailsClosed(t *testing.T) {
+	scheme := restoreTreeScheme()
+	// Root snapshot has bound content + ready content, but NO Ready condition of its own.
+	root := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "source-ns"},
+		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "root-content"},
+	}
+	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent).Build()
+
+	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
+	if err == nil {
+		t.Fatal("expected error when root Snapshot has no Ready=True condition")
+	}
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("expected ErrNotReady, got %v", err)
+	}
+}
+
+func TestResolveRestoreTree_ChildSnapshotNotReadyFailsClosed(t *testing.T) {
+	scheme := restoreTreeScheme()
+	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
+		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
+	})
+	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	// Child snapshot CR itself is not Ready (its content is Ready).
+	diskSnap := domainSnapshotObj("DemoVirtualDiskSnapshot", "disk-snap", "disk-content", nil, false)
+	diskContent := readySnapshotContent("disk-content", "mcp-disk", nil)
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, diskSnap, diskContent).Build()
+
+	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
+	if err == nil {
+		t.Fatal("expected error when a child snapshot CR is not Ready")
+	}
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("expected ErrNotReady, got %v", err)
+	}
+}
+
+func TestResolveRestoreTree_CycleFailsClosed(t *testing.T) {
+	scheme := restoreTreeScheme()
+	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
+		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "a"},
+	})
+	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	// a -> b -> a forms a cycle in the snapshot run tree.
+	a := domainSnapshotObj("DemoVirtualDiskSnapshot", "a", "a-content", []storagev1alpha1.SnapshotChildRef{
+		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "b"},
+	}, true)
+	aContent := readySnapshotContent("a-content", "mcp-a", nil)
+	b := domainSnapshotObj("DemoVirtualDiskSnapshot", "b", "b-content", []storagev1alpha1.SnapshotChildRef{
+		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "a"},
+	}, true)
+	bContent := readySnapshotContent("b-content", "mcp-b", nil)
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, a, aContent, b, bContent).Build()
+
+	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
+	if err == nil {
+		t.Fatal("expected error on a cycle in the snapshot run tree")
+	}
+	if !errors.Is(err, ErrContractViolation) {
+		t.Fatalf("expected ErrContractViolation, got %v", err)
+	}
+}
+
 func TestResolveRestoreTree_ChildNotReadyFailsClosed(t *testing.T) {
 	scheme := restoreTreeScheme()
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{

@@ -73,9 +73,11 @@ func sanitizeForRestore(obj unstructured.Unstructured, targetNamespace string) (
 
 	out := obj.DeepCopy()
 	stripRuntimeMetadata(out)
+	stripRestoreBreakingAnnotations(out)
 	unstructured.RemoveNestedField(out.Object, "status")
 	out.SetNamespace(targetNamespace)
 	stripKindSpecificFields(out)
+	rewriteInSpecNamespaces(out, targetNamespace)
 	return *out, true
 }
 
@@ -96,6 +98,31 @@ func stripRuntimeMetadata(out *unstructured.Unstructured) {
 	}
 }
 
+// restoreBreakingAnnotations are server/scheduler-managed annotations that must not survive into
+// restore output: kubectl's last-applied snapshot (stale, carries the source namespace) and the
+// PVC bind/scheduler annotations that pin a PVC to a specific PV/node of the source cluster.
+var restoreBreakingAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+	"pv.kubernetes.io/bind-completed",
+	"pv.kubernetes.io/bound-by-controller",
+	"volume.kubernetes.io/selected-node",
+}
+
+func stripRestoreBreakingAnnotations(out *unstructured.Unstructured) {
+	anns, found, err := unstructured.NestedMap(out.Object, "metadata", "annotations")
+	if err != nil || !found || len(anns) == 0 {
+		return
+	}
+	for _, k := range restoreBreakingAnnotations {
+		delete(anns, k)
+	}
+	if len(anns) == 0 {
+		unstructured.RemoveNestedField(out.Object, "metadata", "annotations")
+		return
+	}
+	_ = unstructured.SetNestedMap(out.Object, anns, "metadata", "annotations")
+}
+
 func stripKindSpecificFields(out *unstructured.Unstructured) {
 	switch out.GetKind() {
 	case pvcKind:
@@ -108,9 +135,62 @@ func stripKindSpecificFields(out *unstructured.Unstructured) {
 		}
 	case "Service":
 		if out.GetAPIVersion() == "v1" {
-			for _, f := range []string{"clusterIP", "clusterIPs", "ipFamilies", "ipFamilyPolicy", "healthCheckNodePort"} {
+			// clusterIP(s)/ipFamilies/loadBalancerIP and per-port nodePort are allocated by the
+			// target cluster; keeping them causes immutable-field / conflict errors on apply.
+			for _, f := range []string{"clusterIP", "clusterIPs", "ipFamilies", "ipFamilyPolicy", "healthCheckNodePort", "loadBalancerIP"} {
 				unstructured.RemoveNestedField(out.Object, "spec", f)
 			}
+			stripServiceNodePorts(out)
 		}
+	}
+}
+
+func stripServiceNodePorts(out *unstructured.Unstructured) {
+	ports, found, err := unstructured.NestedSlice(out.Object, "spec", "ports")
+	if err != nil || !found {
+		return
+	}
+	for i := range ports {
+		p, ok := ports[i].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		delete(p, "nodePort")
+		ports[i] = p
+	}
+	_ = unstructured.SetNestedSlice(out.Object, ports, "spec", "ports")
+}
+
+// rewriteInSpecNamespaces rewrites namespace references that live inside spec/subjects (not
+// metadata.namespace, which is already rewritten). For a namespace-wholesale restore, a RoleBinding's
+// ServiceAccount subjects must follow the moved namespace, otherwise RBAC keeps pointing at the
+// source namespace.
+func rewriteInSpecNamespaces(out *unstructured.Unstructured, targetNamespace string) {
+	if out.GetKind() != "RoleBinding" {
+		return
+	}
+	subjects, found, err := unstructured.NestedSlice(out.Object, "subjects")
+	if err != nil || !found {
+		return
+	}
+	changed := false
+	for i := range subjects {
+		s, ok := subjects[i].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		kind, _ := s["kind"].(string)
+		if kind != "ServiceAccount" {
+			continue
+		}
+		if _, has := s["namespace"]; !has {
+			continue
+		}
+		s["namespace"] = targetNamespace
+		subjects[i] = s
+		changed = true
+	}
+	if changed {
+		_ = unstructured.SetNestedSlice(out.Object, subjects, "subjects")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -34,12 +35,27 @@ func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService
 // be applied directly into targetNamespace. It never emits VolumeRestoreRequest or other
 // control-plane objects (ADR 2026-06-10).
 func (s *Service) BuildManifestsWithDataRestoration(ctx context.Context, opts Options) ([]byte, error) {
+	return s.buildRestore(ctx, opts, func() (*RestoreNode, error) {
+		return s.resolver.ResolveRestoreTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
+	})
+}
+
+// BuildManifestsWithDataRestorationForNode compiles the restore subtree rooted at a specific snapshot
+// node (the namespaced root Snapshot or a domain snapshot CR identified by gvk), so the endpoint can
+// return apply-ready manifests for that node only, e.g. a single VM or disk snapshot.
+func (s *Service) BuildManifestsWithDataRestorationForNode(ctx context.Context, gvk schema.GroupVersionKind, opts Options) ([]byte, error) {
+	return s.buildRestore(ctx, opts, func() (*RestoreNode, error) {
+		return s.resolver.ResolveRestoreSubtree(ctx, gvk, opts.SnapshotNamespace, opts.SnapshotName)
+	})
+}
+
+func (s *Service) buildRestore(ctx context.Context, opts Options, resolveRoot func() (*RestoreNode, error)) ([]byte, error) {
 	targetNamespace := opts.TargetNamespace
 	if targetNamespace == "" {
 		targetNamespace = opts.SnapshotNamespace
 	}
 
-	root, err := s.resolver.ResolveRestoreTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
+	root, err := resolveRoot()
 	if err != nil {
 		return nil, err
 	}

@@ -63,12 +63,19 @@ func transformNodeObjects(node *RestoreNode, raw []unstructured.Unstructured, tr
 			if _, c := covered[name]; c {
 				continue
 			}
-			if vs, ok := orphanVS[name]; ok {
-				setPVCDataSourceRef(&sanitized, vs)
+			vs, ok := orphanVS[name]
+			if !ok {
+				// Fail closed: emitting a namespaced PVC without a dataSourceRef would restore it
+				// empty (silent data loss). A PVC in a namespace snapshot must be either covered by a
+				// domain object or backed by a dataRefs -> VolumeSnapshot binding.
+				// TODO(restore): add an explicit "stateless/empty PVC" annotation or policy to allow
+				// a deliberate data-less passthrough; until then any emitted PVC must have data.
+				return nil, fmt.Errorf(
+					"%w: PVC %s/%s has no data binding and is not covered by a domain object; refusing to emit a data-less PVC",
+					ErrContractViolation, sanitized.GetNamespace(), name,
+				)
 			}
-			// Ordinary PVC without a dataRefs binding passes through sanitized.
-			// TODO(restore): a PVC that is expected to be data-restored but has no dataRef should be
-			// a contract violation; the MVP cannot yet distinguish "no data" from "missing data".
+			setPVCDataSourceRef(&sanitized, vs)
 			out = append(out, sanitized)
 			continue
 		}
