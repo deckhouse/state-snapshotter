@@ -65,7 +65,7 @@ RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending > Completed
 ```
 
 Terminal own-request failures win over child failures; terminal failures win over pending; own requests win over
-children at equal severity. `DomainReady` is a gate/barrier and is NOT part of this formula.
+children at equal severity. `ChildrenSnapshotReady` is a gate/barrier and is NOT part of this formula.
 
 ## 3. Message formats
 

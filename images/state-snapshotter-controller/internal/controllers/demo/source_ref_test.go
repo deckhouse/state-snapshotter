@@ -193,9 +193,9 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("expected Ready=True Completed, got %#v", ready)
 	}
-	domainReady := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionDomainReady)
+	domainReady := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionChildrenSnapshotReady)
 	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected DomainReady=True for leaf disk snapshot, got %#v", domainReady)
+		t.Fatalf("expected ChildrenSnapshotReady=True for leaf disk snapshot, got %#v", domainReady)
 	}
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
 		t.Fatalf("get content after ready: %v", err)
@@ -554,9 +554,9 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}}) {
 		t.Fatalf("unexpected VM child refs: %#v", vmSnap.Status.ChildrenSnapshotRefs)
 	}
-	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionDomainReady)
+	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionChildrenSnapshotReady)
 	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected VM DomainReady=True after writing child refs, got %#v", domainReady)
+		t.Fatalf("expected VM ChildrenSnapshotReady=True after writing child refs, got %#v", domainReady)
 	}
 	// A1 (Slice 3): after bind the VM mirrors the bound SnapshotContent.Ready reason instead of writing a
 	// local ChildrenPending. No SnapshotContentController runs in this direct-reconcile unit test, so the
@@ -704,9 +704,9 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 	}
 	assertDemoSnapshotOwnedBy(t, child, conflictingOwner.APIVersion, conflictingOwner.Kind, conflictingOwner.Name)
 	vmSnap := getDemoVMSnapshot(t, cl)
-	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionDomainReady)
+	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionChildrenSnapshotReady)
 	if domainReady == nil || domainReady.Status != metav1.ConditionFalse || domainReady.Reason != snapshot.ReasonCreateChildFailed {
-		t.Fatalf("expected DomainReady=False CreateChildFailed, got %#v", domainReady)
+		t.Fatalf("expected ChildrenSnapshotReady=False CreateChildFailed, got %#v", domainReady)
 	}
 }
 

@@ -177,7 +177,7 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			// Note: We don't actually create BackupClass in fake client to avoid CRD issues
 			// Instead, we'll mock the Get call
 
-			// PRECONDITION: Create Snapshot with DomainReady=True
+			// PRECONDITION: Create Snapshot with ChildrenSnapshotReady=True
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-snapshot")
@@ -215,12 +215,12 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			_ = wrapperClient.Status().Update(ctx, snapshotObj)
 
 			// Pass the generation-gated binder barrier at reconcile time: the mocked Get returns a copy
-			// of snapshotObj, so set DomainReady=True with observedGeneration == metadata.generation here
+			// of snapshotObj, so set ChildrenSnapshotReady=True with observedGeneration == metadata.generation here
 			// (after Create, which may reset generation). The barrier must accept current-generation only.
 			snapshotObj.SetGeneration(2)
 			Expect(unstructured.SetNestedSlice(snapshotObj.Object, []interface{}{
 				map[string]interface{}{
-					"type":               snapshot.ConditionDomainReady,
+					"type":               snapshot.ConditionChildrenSnapshotReady,
 					"status":             string(metav1.ConditionTrue),
 					"reason":             snapshot.ReasonCompleted,
 					"message":            "domain planning complete",

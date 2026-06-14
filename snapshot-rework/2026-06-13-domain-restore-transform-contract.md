@@ -1,149 +1,99 @@
-# ADR: Domain restore-transform contract (manifests-with-data-restoration)
+# ADR: Direction for domain restore-transform contract
 
 - **Дата:** 2026-06-13
-- **Статус:** Proposed (целевая модель). Текущий in-process `DomainRestoreTransformer` — это v0-реализация той же семантики; внешний транспорт — future work.
+- **Статус:** Proposed — фиксируем **направление** (форму будущего контракта), а не детальную API-схему.
 - **Связано с:** `snapshot-rework/2026-06-10-restore-manifests-compiler.md` (restore compiler), `docs/state-snapshotter-rework/spec/system-spec.md`.
 
 ## Контекст
 
-Restore compiler (`manifests-with-data-restoration`) компилирует дерево снапшотов в apply-ready манифесты снизу вверх. Доменная часть (например `DemoVirtualDisk` → `spec.dataSource` на свой снапшот; covered-PVC) сейчас живёт **в том же бинаре** как in-process реализация интерфейса `restore.DomainRestoreTransformer` (`internal/controllers/demo/restore_transform.go`), зарегистрированного в `restore.Service` через `NewService(..., transformers...)`.
+Restore compiler (`manifests-with-data-restoration`) компилирует дерево снапшотов в apply-ready манифесты снизу вверх. Доменная часть (например `DemoVirtualDisk` → `spec.dataSource` на свой снапшот; covered-PVC) сейчас живёт **в том же бинаре** как in-process реализация Go-интерфейса `restore.DomainRestoreTransformer` (`internal/controllers/demo/restore_transform.go`).
 
-Цель — вынести доменную логику за границу generic-компилятора так, чтобы:
-1. generic-компилятор оставался **domain-free** (не знает имён доменных полей/kind'ов);
-2. домены подключались декларативно, без пересборки контроллера;
-3. контракт был **versioned и эволюционируемым** — он заведомо будет неидеален, и неидеальность должна чиниться **аддитивно** (новые поля/версия), а не сломом формы.
+Это нормально для текущего этапа, но стратегически доменная restore-логика — это **будущая публичная граница между state-snapshotter core и доменными модулями**:
 
-Ключевое осознание: «APIService» — не самоцель. Нужны три его свойства: декларативный discovery, стабильный versioned-контракт, RBAC/mTLS. Их можно получить без превращения каждого домена в aggregated apiserver (см. «Транспорт»).
+1. Это **публичный контракт** между core и доменами, а не внутренняя деталь.
+2. **Доменные модули могут жить вне core** (отдельные модули/контроллеры/команды).
+3. Поэтому контракт должен быть **независим от Go-интерфейса** (transport-independent), а не «вот наш Go-тип, импортируйте его».
+4. Сейчас **разрабатывается v0 этого контракта** — in-process реализация. Это **самостоятельный вариант**, а не временная заглушка: **никаких миграций не предполагается**. v0 — полноценная реализация контракта, просто без внешнего транспорта.
+5. Точная форма endpoint / request / response — **отдельный ADR/design doc позже**.
 
-## Решение (зафиксированная форма)
+Контракт заведомо будет неидеален. Цель сейчас — зафиксировать **форму** (что меняется аддитивно, а что является несущей конструкцией), не углубляясь в поля.
 
-Целевой контракт доменной restore-трансформации:
+## Решение (направление, high-level форма)
 
-- **Гранулярность: per-node.** Один вызов на узел дерева (совпадает с post-order). Домен видит объекты своего узла и результаты **прямых** детей.
-- **Generic владеет набором объектов и инвариантами.** Generic делает sanitize, namespace rewrite, dedup, ordering и владеет множеством объектов. Домен **только мутирует** свои объекты и объявляет, что подавить.
-- **Модель мутации: patches + suppress** (AdmissionReview-подобно). Домен возвращает патчи к **своим** объектам и список объектов на подавление. Домен **не** возвращает полные манифесты и **не** создаёт новые объекты (в v1alpha1).
-- **Versioned envelope.** Запрос/ответ обёрнуты как `AdmissionReview`: `apiVersion`, `kind`, `request{}`/`response{}`. Внутри версии — только аддитивные поля.
-- **Домен — чистая идемпотентная функция запроса.** Без сайд-эффектов; generic свободно ретраит/кэширует; fail-whole безопасен.
-- **Один контракт — много транспортов.** Контракт = типы request/response. In-process, REST и (опционально) aggregated APIService используют **одни и те же типы**; меняется только транспорт.
+Будущий контракт доменной restore-трансформации:
 
-## Контракт (v1alpha1)
+- **AdmissionReview-подобный** request/response.
+- **Versioned envelope** — эволюция аддитивная, ломающие изменения только через новую версию.
+- **Per-node вызов** — один вызов на узел дерева (совпадает с post-order).
+- **Generic владеет набором объектов** — sanitize, namespace rewrite, dedup, ordering и само множество объектов остаются за core.
+- **Domain возвращает mutations + suppress intent** — домен правит свои объекты и объявляет, что подавить; он **не** возвращает полный набор манифестов.
+- **Children — read-only контекст** — результаты детей передаются для справки, домен их не мутирует.
+- **No additions в v1alpha1** — трансформация **не создаёт** новые объекты.
+- **Fail-whole on contract violation** — любое нарушение контракта (или недоступность домена) валит весь restore, без частичной выдачи.
 
-### Request
+Суть направления одной фразой: **generic — главный; domain не создаёт объекты, а возвращает patch/suppress; контракт versioned и transport-independent.**
 
-```jsonc
-{
-  "apiVersion": "restore.state-snapshotter.deckhouse.io/v1alpha1",
-  "kind": "RestoreTransformRequest",
-  "request": {
-    "uid": "…",                         // трассировка/идемпотентность
-    "node": { "apiVersion": "...", "kind": "DemoVirtualDiskSnapshot", "name": "...", "namespace": "ns" },
-    "targetNamespace": "restore-ns",
-    "dataRefs": [ /* PVC -> VSC артефакты ЭТОГО узла (read-only) */ ],
-    "objects": [ /* sanitized объекты узла; generic уже почистил (read-only вход, мутируется только через patches) */ ],
-    "children": [
-      {
-        "node": { ... },
-        "objects": [ /* restored объекты ПРЯМОГО ребёнка (read-only context) */ ]
-      }
-    ]
-  }
-}
-```
+## Design principles (нормативно)
 
-### Response
+Два принципа фиксируются как направление (без детальной схемы):
 
-```jsonc
-{
-  "apiVersion": "restore.state-snapshotter.deckhouse.io/v1alpha1",
-  "kind": "RestoreTransformResponse",
-  "response": {
-    "uid": "…",                         // = request.uid
-    "allowed": true,                    // false => fail-whole, message обязателен
-    "message": "",
-    "patches": [
-      { "target": { /* objectRef ИЗ request.objects */ }, "patchType": "JSONPatch", "patch": [ /* RFC6902 */ ] }
-    ],
-    "suppress": [ { /* objectRef ИЗ request.objects */ } ]  // generic не эмитит эти объекты
-  }
-}
-```
+### P1. Domain-owned field allowlist (а не denylist запрещённых полей)
 
-### Нормативные правила (INV-DRT)
+Доменный модуль **обязан объявить, какие поля он вправе менять** для каждого обслуживаемого GVK. Generic guard отклоняет **любую** мутацию вне этого allowlist. Allowlist предпочтительнее denylist запрещённых полей: denylist приходится вечно догонять под новые runtime-поля, allowlist конечен, явен и самодокументируем.
 
-- **INV-DRT1 (suppress scope).** `suppress[]` ссылается **только** на объекты `request.objects` (текущий узел). Подавить объект ребёнка/родителя нельзя — иначе домен ломает generic-инварианты дерева. children передаются **read-only как контекст**.
-- **INV-DRT2 (patch scope).** `patches[].target` — **только** объекты `request.objects`. Патчить children запрещено (например VM-трансформер не имеет права мутировать диск). children — read-only.
-- **INV-DRT3 (generic валидирует результат патча).** После применения патчей generic проверяет каждый объект; нарушение → fail-whole (`ErrContractViolation`):
-  - `apiVersion`/`kind`/`metadata.name`/`metadata.namespace` **не изменились**;
-  - объект **не стал** cluster-scoped (namespace не опустошён);
-  - **запрещённые/runtime-поля не вернулись** (то, что вырезал sanitizer: `uid`, `resourceVersion`, `managedFields`, `status`, stale-аннотации, `PVC.spec.volumeName` и т.п.);
-  - не появились **control-plane kinds** (Snapshot/SnapshotContent/VS/VSC/VRR/`*Snapshot`).
-  То есть домен **не может обойти sanitizer через patch**.
-- **INV-DRT4 (no additions в v1alpha1).** Трансформация **не создаёт новые объекты**. Набор объектов на выходе ⊆ входного (минус `suppress`). Расширение `additions` — будущая версия, явно вне v1alpha1.
-- **INV-DRT5 (single owner).** Объект обрабатывается максимум одним доменом (discovery по `handlesGroups`, см. ниже). 0 доменов = generic passthrough (объект проходит как есть после sanitize).
-- **INV-DRT6 (pure/idempotent).** Трансформация — чистая функция запроса, без сайд-эффектов и без чтения внешнего состояния, влияющего на результат.
-- **INV-DRT7 (fail-whole).** `allowed=false`, недоступность домена, таймаут или провал валидации (INV-DRT3) → падает весь restore (`409 Conflict` для контрактных нарушений / `503` для недоступности). Частичной выдачи нет.
-
-### children: форма на вырост
-
-Для MVP `children[].objects` — полные restored-манифесты прямого ребёнка. Контракт **резервирует** место под облегчённый вариант, чтобы payload не пух на глубоких деревьях:
-
-```jsonc
-"children": [ { "node": {...}, "objects": [...], "outputs": [ /* summary: refs/ключевые поля */ ] } ]
-```
-
-Переход на summary (или передачу только `outputs`) — аддитивное изменение в рамках версии; домены, которым хватает идентичности ребёнка (например VM нужен лишь `kind/name` восстановленного диска), смогут не запрашивать полные объекты.
-
-## Discovery и capability negotiation
-
-Переиспользуем существующий реестр доменов — `DomainSpecificSnapshotController` (DSC). Домен объявляет:
-
-```yaml
-spec:
-  restoreTransform:
-    handlesGroups: ["demo.state-snapshotter.deckhouse.io"]   # какие группы CR обслуживает (INV-DRT5)
-    supportedContractVersions: ["restore.state-snapshotter.deckhouse.io/v1alpha1"]
-    # транспорт (для remote): service ref + path; для in-process отсутствует
-    service: { name: ..., namespace: ..., port: 443, path: /restore-transform }
-```
-
-- Generic строит карту `group → домен` из **готовых** (`Ready=True`) DSC; коллизия (две группы-владельца на один объект) → `ErrContractViolation`.
-- Generic выбирает максимально общую `supportedContractVersions`. Контракт устарел у домена → договорённость по версии, без флаг-дня.
-
-## Транспорт (эволюция, контракт неизменен)
+Пример (иллюстративно, не финальная схема):
 
 ```
-сейчас:   in-process DomainRestoreTransformer (demo) — v0 реализация семантики ниже
-интерим:  тот же контракт по REST (webhook-style) к domain Service; discovery из DSC; mTLS
-цель:     по желанию отдельный домен промотируется в aggregated APIService subresource
+DemoVirtualDisk:
+  allowed restore mutations:
+    - spec.dataSource
 ```
 
-- **In-process (сейчас):** Go-интерфейс, нулевая сеть.
-- **REST/webhook (интерим):** `POST https://<domain-svc>.<ns>.svc:443/restore-transform`, mTLS как у admission-вебхуков. Лёгкий: ноль аггрегации per-domain, discovery через DSC.
-- **Aggregated APIService (опционально):** `POST /apis/<domain-group>/v1alpha1/namespaces/{ns}/{resource}/{name}/restore-transform`. k8s-native, но cert+`APIService`+аггрегация **на каждый домен** — применять точечно, не по умолчанию.
+Тогда домен не сможет — даже прислав patch — изменить `metadata.name`, `metadata.namespace`, `spec.storageClassName`, `spec.resources`, `status` и т.п.: всё вне allowlist отклоняется. Identity (GVK/name/namespace) и scope автоматически неизменны, т.к. вне allowlist.
 
-Все три используют один и тот же `RestoreTransformRequest/Response`.
+Нормативно:
+- prefer allowlist over denylist;
+- domain declares mutable field paths per handled GVK;
+- generic OutputGuard rejects mutations outside the allowlist.
 
-## Рассмотренные альтернативы (и почему отклонены)
+### P2. Transport-independent OutputGuard
 
-- **Replace-манифесты (домен возвращает полные объекты узла).** Отклонено: generic теряет контроль над набором объектов, dedup и sanitizer обходятся; restore compiler быстро превращается в **набор доменных mini-restore-компиляторов** с расходящимися инвариантами. Patch+suppress даёт ту же выразительность, сохраняя ownership.
-- **Per-object вызов.** Отклонено: round-trip на каждый объект, потеря контекста соседей.
-- **Per-subtree (домен traverse сам).** Отклонено: домены дублируют обход и generic-инварианты (sanitize/dedup/ordering), неизбежный дрейф.
-- **Типизированный intent (домен возвращает не патчи, а «dataSource=…»).** Отклонено как единственная модель: слишком жёстко для неизвестных доменов. Patch-модель покрывает intent-случаи и оставляет гибкость; при желании поверх patch можно ввести типизированные intent-хелперы позже (аддитивно).
+Restore compiler **обязан** валидировать результат доменной трансформации через generic `OutputGuard`. Один и тот же guard защищает **и** in-process v0-реализацию, **и** возможные будущие remote/API-трансформеры. Настоящая граница — это контракт + guard, а транспорт — сменная деталь; v0 служит conformance-эталоном.
 
-## Migration note
+Нормативно:
+- OutputGuard is transport-independent;
+- the same guard protects the in-process v0 and any future remote implementation;
+- v0 develops guard + allowlist first, **not** HTTP/API transport.
 
-- Текущий Go `restore.DomainRestoreTransformer` (`TransformObject` + `CoveredPVCNames`) — это **in-process реализация той же семантической модели**: `TransformObject` ≙ `patches` для своего объекта, `CoveredPVCNames` ≙ `suppress`. Внешний транспорт (REST/APIService) — future work.
-- Следующий шаг (после принятия ADR, отдельной задачей): при необходимости привести текущий интерфейс ближе к контракту — выразить мутацию как «patch к своему объекту» и обобщить `CoveredPVCNames` → `suppress []objectRef`, плюс добавить generic-валидацию результата (INV-DRT3), которая полезна уже и для in-process.
-- Реализация внешнего транспорта и расширение DSC под `restoreTransform` — отдельные задачи; этот ADR фиксирует только целевую форму контракта.
+## Почему так (несущая конструкция)
 
-## Открытые вопросы (аддитивно, вне v1alpha1)
+- **Generic-владение набором** не даёт restore compiler'у разъехаться в набор доменных mini-компиляторов с расходящимися инвариантами (sanitize/dedup/order). Поэтому **replace-манифесты отклонены** как модель: mutation+suppress даёт ту же выразительность, сохраняя контроль за core.
+- **No additions + read-only children** удерживают доменную поверхность минимальной и предотвращают обход core-инвариантов (домен не может «протащить» новые объекты, подавить чужие или мутировать соседние узлы).
+- **Versioned + transport-independent** — единственный способ пережить будущую неидеальность контракта без флаг-дня и без переписывания доменов.
 
-- `additions`: домен создаёт новые объекты (с строгой валидацией identity/scope) — новая версия.
-- `patchType` помимо `JSONPatch` (strategic-merge / server-side apply).
-- `children.outputs` summary вместо полных объектов — оптимизация payload на глубоких деревьях.
-- batching нескольких узлов в один вызов.
-- кросс-узловой контроль одинакового VSC у разных узлов (сейчас проверяется только в пределах узла).
+## v0 (разрабатываемый вариант)
+
+- **Никаких миграций.** Разрабатывается **v0** этого контракта как in-process реализация. Это конечный самостоятельный вариант на текущем этапе, а не переходный слой «до миграции».
+- Go `restore.DomainRestoreTransformer` (`TransformObject` + `CoveredPVCNames`) — **и есть** in-process v0 этого контракта: `TransformObject` ≙ mutation своего объекта, `CoveredPVCNames` ≙ suppress intent.
+- Объём v0 (в этом порядке): зафиксировать интерфейс как in-process v0; добавить generic `OutputGuard` поверх трансформера; ввести allowlist-валидацию (P1) внутри guard (P2); привести `CoveredPVCNames` к suppress-семантике; покрыть тестами границы домена.
+- **v0 начинается с `OutputGuard` + allowlist, а не с HTTP/API транспорта.** Внешний транспорт — это **отдельное возможное будущее направление** (см. Open questions), не запланированный переход от v0; именно поэтому контракт transport-independent — чтобы такой вариант не ломал v0.
+
+## Open questions / future design (отдельные ADR/design docs)
+
+Намеренно **не** фиксируется в этом ADR:
+
+- **exact transport** — HTTP webhook vs aggregated APIService vs иное;
+- **exact request/response schema** — точные JSON-поля envelope, patch и suppress;
+- **discovery** — поля в `DomainSpecificSnapshotController` (какие группы обслуживает домен, версии контракта, адрес);
+- **payload size / children summary** — полные манифесты детей vs облегчённый summary на глубоких деревьях;
+- **authn / authz** — mTLS, RBAC, доверие к доменному ответу;
+- **timeout / retry policy** — поведение при медленном/недоступном домене (с учётом того, что трансформация задумана как чистая/идемпотентная);
+- **allowlist declaration format** — как именно домен объявляет mutable field paths per GVK (P1) и точный перечень проверок `OutputGuard` (P2);
+- **typed intents vs raw patches** — высокоуровневые декларативные intents поверх/вместо сырых патчей;
+- **RestorePlan / preview / diff** — детерминированный материализованный артефакт восстановления как отдельная сущность;
+- **domain conformance suite** — исполняемый набор проверок инвариантов для внешних доменных трансформеров;
+- **diagnostics schema** — машиночитаемая причина при fail-whole (какой узел/домен/объект и почему).
 
 ## Главный итог
 
-Неидеальным будет **содержание** контракта (какие поля домену реально нужны) — и это ок, потому что аддитивно. Сломать больно может только **форма**: гранулярность, владелец набора объектов, наличие версии. ADR фиксирует именно эти три по образцу `AdmissionReview`, поэтому будущая неидеальность лечится новой минорной версией, а не миграцией.
+Мы не говорим доменным командам «вот API, реализуйте». Мы фиксируем **форму будущего API**: generic главный; domain не создаёт объекты и возвращает patch/suppress; контракт versioned и transport-independent. Сейчас разрабатывается **v0** этого контракта как in-process реализация — самостоятельный вариант, **без миграций**. Точные поля и транспорт — следующими документами.

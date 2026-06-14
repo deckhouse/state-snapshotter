@@ -112,8 +112,8 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish DomainReady=True for the current generation.
-			setSnapshotDomainReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish ChildrenSnapshotReady=True for the current generation.
+			setSnapshotChildrenSnapshotReadyCurrent(ctx, snapshotObj)
 
 			// Create SnapshotContent via GenericSnapshotBinderController
 			// Create controllers for this test

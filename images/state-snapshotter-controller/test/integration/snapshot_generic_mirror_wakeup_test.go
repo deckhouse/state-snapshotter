@@ -88,9 +88,9 @@ var _ = Describe("Integration: generic Snapshot mirrors bound SnapshotContent Re
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, snap))
 		})
 
-		// Simulate the domain controller publishing DomainReady=True for the current generation so the
+		// Simulate the domain controller publishing ChildrenSnapshotReady=True for the current generation so the
 		// generic binder barrier passes (RegistrationTestSnapshot has no real domain controller).
-		setSnapshotDomainReadyCurrent(ctx, snap)
+		setSnapshotChildrenSnapshotReadyCurrent(ctx, snap)
 
 		snapKey := types.NamespacedName{Namespace: "default", Name: "gen-mirror-wakeup"}
 

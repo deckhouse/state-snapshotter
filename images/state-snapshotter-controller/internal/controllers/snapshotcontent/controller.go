@@ -418,7 +418,7 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 //	RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending > Completed
 //
 // Terminal failures win over pending (actionable first) and the node's own leg wins over children at
-// equal severity. DomainReady is NOT part of this formula; it is only a gate/barrier upstream.
+// equal severity. ChildrenSnapshotReady is NOT part of this formula; it is only a gate/barrier upstream.
 func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
 	plan := commonContentStatusPlan{
 		requestsReady:   metav1.ConditionFalse,

@@ -120,9 +120,9 @@ func NewGenericSnapshotBinderController(
 }
 
 // isDomainPlanningComplete reports whether the domain controller finished planning for the snapshot's
-// current generation: DomainReady=True with observedGeneration == metadata.generation.
+// current generation: ChildrenSnapshotReady=True with observedGeneration == metadata.generation.
 func isDomainPlanningComplete(snapshotLike snapshot.SnapshotLike) bool {
-	c := snapshot.GetCondition(snapshotLike, snapshot.ConditionDomainReady)
+	c := snapshot.GetCondition(snapshotLike, snapshot.ConditionChildrenSnapshotReady)
 	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == snapshotLike.GetGeneration()
 }
 
@@ -188,7 +188,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot
 	// refs, create MCR/VCR) for the current generation.
 	if !isDomainPlanningComplete(snapshotLike) {
-		logger.V(1).Info("Waiting for domain controller to finish planning (DomainReady)")
+		logger.V(1).Info("Waiting for domain controller to finish planning (ChildrenSnapshotReady)")
 		return ctrl.Result{}, nil
 	}
 
@@ -591,13 +591,13 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 ) error {
 	logger := log.FromContext(ctx)
 	contentName := snapshotLike.GetStatusContentName()
-	// DomainReady is intentionally NOT written here. This function is a pure Ready mirror and is only
-	// reached after the Step-1 barrier (isDomainPlanningComplete) has already confirmed DomainReady=True
-	// for the current generation. DomainReady is owned exclusively by the domain/namespace controller that
+	// ChildrenSnapshotReady is intentionally NOT written here. This function is a pure Ready mirror and is only
+	// reached after the Step-1 barrier (isDomainPlanningComplete) has already confirmed ChildrenSnapshotReady=True
+	// for the current generation. ChildrenSnapshotReady is owned exclusively by the domain/namespace controller that
 	// plans the snapshot; the common layer (this binder and the shared binding helpers) only waits on the
 	// barrier and MUST NOT self-publish it (Slice 2). Re-asserting it here previously clobbered that owner:
 	// with observedGeneration=0 it deadlocked this very barrier (mirror never re-ran), and stamping the
-	// current generation would instead overwrite the domain controller's DomainReady.
+	// current generation would instead overwrite the domain controller's ChildrenSnapshotReady.
 	if contentName == "" {
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}

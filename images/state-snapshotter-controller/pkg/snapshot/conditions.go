@@ -21,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Condition types: the final 4-condition model (DomainReady, RequestsReady, ChildrenReady, Ready).
+// Condition types: the final 4-condition model (ChildrenSnapshotReady, RequestsReady, ChildrenReady, Ready).
 const (
 	// ConditionReady indicates the object is ready for use.
 	// On SnapshotContent it is the single aggregate: Ready = RequestsReady && ChildrenReady.
@@ -36,10 +36,10 @@ const (
 	// (a leaf with no children is ChildrenReady=True vacuously).
 	ConditionChildrenReady = "ChildrenReady"
 
-	// ConditionDomainReady indicates that the domain controller finished planning.
+	// ConditionChildrenSnapshotReady indicates that the domain controller finished planning.
 	// It is a gate/barrier (not part of the Ready formula); readers must require
 	// observedGeneration == generation.
-	ConditionDomainReady = "DomainReady"
+	ConditionChildrenSnapshotReady = "ChildrenSnapshotReady"
 )
 
 // Reasons for Ready=False
@@ -90,15 +90,15 @@ const (
 	ReasonChildrenFailed = "ChildrenFailed"
 )
 
-// Reasons for DomainReady=False.
+// Reasons for ChildrenSnapshotReady=False.
 const (
 	ReasonChildGraphPending = "ChildGraphPending"
 	ReasonListFailed        = "ListFailed"
 	ReasonCreateChildFailed = "CreateChildFailed"
 	// ReasonPriorityLayerPending is set on a parent Snapshot while a higher-priority child snapshot
-	// layer has not yet published a current DomainReady=True. This is NOT a failure and has no deadline:
+	// layer has not yet published a current ChildrenSnapshotReady=True. This is NOT a failure and has no deadline:
 	// a child snapshot (e.g. a large-storage capture) may legitimately stay pending for hours. The
-	// parent holds DomainReady=False/PriorityLayerPending (with the pending children listed in the
+	// parent holds ChildrenSnapshotReady=False/PriorityLayerPending (with the pending children listed in the
 	// message) and never starts capture until the layer is ready. Waiting is woken primarily by child
 	// watches; a RequeueAfter polling fallback covers a missed watch event.
 	ReasonPriorityLayerPending = "PriorityLayerPending"
@@ -106,7 +106,7 @@ const (
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
 	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
 	// DSC RBACReady); the planner must not treat a Forbidden source list as "no objects" (that would
-	// silently drop coverage). Instead it degrades the graph (DomainReady=False) and requeues so coverage
+	// silently drop coverage). Instead it degrades the graph (ChildrenSnapshotReady=False) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"
 	// ReasonSourceIdentityAnnotationMismatch is set when an existing child snapshot's generic source

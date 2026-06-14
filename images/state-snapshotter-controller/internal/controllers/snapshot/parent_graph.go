@@ -84,7 +84,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 			layerRefs = append(layerRefs, refs...)
 		}
 		desiredRefs = append(desiredRefs, layerRefs...)
-		ready, terminalMessage, pending, err := r.priorityLayerDomainReady(ctx, nsSnap.Namespace, layerRefs)
+		ready, terminalMessage, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, nsSnap.Namespace, layerRefs)
 		if err != nil {
 			return false, false, err
 		}
@@ -95,10 +95,10 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		if !ready {
 			// Unbounded by design: a child snapshot (e.g. large-storage capture) may stay pending for
-			// hours. Hold DomainReady=False/PriorityLayerPending listing the pending children for
+			// hours. Hold ChildrenSnapshotReady=False/PriorityLayerPending listing the pending children for
 			// diagnosability; never fail by duration. Capture stays gated until the layer is ready.
 			sortSnapshotChildRefs(desiredRefs)
-			message := fmt.Sprintf("waiting for priority %d child snapshots to publish current DomainReady=True; %s", priority, summarizePendingChildren(pending))
+			message := fmt.Sprintf("waiting for priority %d child snapshots to publish current ChildrenSnapshotReady=True; %s", priority, summarizePendingChildren(pending))
 			changed, err := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonPriorityLayerPending, message)
 			return changed, false, err
 		}
@@ -240,7 +240,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 
 // sourceIdentityAnnotationMismatchError signals that an existing child snapshot's source identity
 // annotation drifted from the planner-managed value. It is fail-closed (no self-heal): the planner
-// surfaces a terminal DomainReady=False/SourceIdentityAnnotationMismatch condition instead of an
+// surfaces a terminal ChildrenSnapshotReady=False/SourceIdentityAnnotationMismatch condition instead of an
 // endlessly requeued error or a silent rewrite that could mask external corruption/races.
 type sourceIdentityAnnotationMismatchError struct {
 	msg string
@@ -250,7 +250,7 @@ func (e *sourceIdentityAnnotationMismatchError) Error() string { return e.msg }
 
 // sourceListForbiddenError signals that listing a mapped source kind was rejected with Forbidden.
 // RBAC for domain/custom sources is granted externally (DSC RBACReady), so the planner degrades the
-// graph (DomainReady=False/SourceListForbidden) and requeues instead of treating Forbidden as an empty
+// graph (ChildrenSnapshotReady=False/SourceListForbidden) and requeues instead of treating Forbidden as an empty
 // result (which would silently drop coverage) or as a hard reconcile error (noisy log spam while
 // waiting for RBAC to be granted).
 type sourceListForbiddenError struct {
@@ -376,15 +376,15 @@ func coverageObjectKey(identity controllercommon.SnapshotSourceIdentity) string 
 	return identity.APIVersion + "|" + identity.Kind + "|" + identity.Namespace + "|" + identity.Name + "|" + identity.UID
 }
 
-// priorityLayerDomainReady reports whether every child snapshot in a priority layer has published a
-// current DomainReady=True (observedGeneration == metadata.generation; Ready=True does NOT substitute
-// DomainReady=True). Returns:
-//   - ready: all children are DomainReady=True for their current generation;
+// priorityLayerChildrenSnapshotReady reports whether every child snapshot in a priority layer has published a
+// current ChildrenSnapshotReady=True (observedGeneration == metadata.generation; Ready=True does NOT substitute
+// ChildrenSnapshotReady=True). Returns:
+//   - ready: all children are ChildrenSnapshotReady=True for their current generation;
 //   - terminalMessage: non-empty only when a child surfaced a terminal failure condition (the only
-//     thing that turns the layer into DomainReady=False/GraphPlanningFailed); duration never does;
+//     thing that turns the layer into ChildrenSnapshotReady=False/GraphPlanningFailed); duration never does;
 //   - pending: human-readable descriptors of the children not yet ready (for the PriorityLayerPending
 //     message). Waiting on these is unbounded by design.
-func (r *SnapshotReconciler) priorityLayerDomainReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, terminalMessage string, pending []string, err error) {
+func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, terminalMessage string, pending []string, err error) {
 	for _, ref := range refs {
 		gv, err := schema.ParseGroupVersion(ref.APIVersion)
 		if err != nil {
@@ -407,8 +407,8 @@ func (r *SnapshotReconciler) priorityLayerDomainReady(ctx context.Context, names
 		if err != nil {
 			return false, "", nil, err
 		}
-		if !conditionSliceHasCurrentTrue(conditions, snapshotpkg.ConditionDomainReady, child.GetGeneration()) {
-			pending = append(pending, describePendingChildDomainReady(conditions, gvk, namespace, ref.Name, child.GetGeneration()))
+		if !conditionSliceHasCurrentTrue(conditions, snapshotpkg.ConditionChildrenSnapshotReady, child.GetGeneration()) {
+			pending = append(pending, describePendingChildChildrenSnapshotReady(conditions, gvk, namespace, ref.Name, child.GetGeneration()))
 		}
 	}
 	if len(pending) > 0 {
@@ -432,17 +432,17 @@ func summarizePendingChildren(pending []string) string {
 	return fmt.Sprintf("pending children (first %d of %d): %s", maxPendingChildrenInMessage, len(pending), strings.Join(pending[:maxPendingChildrenInMessage], ", "))
 }
 
-// describePendingChildDomainReady renders a compact, diagnosable descriptor for a child whose
-// DomainReady is not yet current: it reports the observed DomainReady status/reason, distinguishes a
+// describePendingChildChildrenSnapshotReady renders a compact, diagnosable descriptor for a child whose
+// ChildrenSnapshotReady is not yet current: it reports the observed ChildrenSnapshotReady status/reason, distinguishes a
 // missing condition from a stale observedGeneration, so the parent's PriorityLayerPending message
 // makes an hours-long wait explainable rather than silent.
-func describePendingChildDomainReady(conditions []interface{}, gvk schema.GroupVersionKind, namespace, name string, generation int64) string {
+func describePendingChildChildrenSnapshotReady(conditions []interface{}, gvk schema.GroupVersionKind, namespace, name string, generation int64) string {
 	for _, raw := range conditions {
 		m, ok := raw.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		if m["type"] != snapshotpkg.ConditionDomainReady {
+		if m["type"] != snapshotpkg.ConditionChildrenSnapshotReady {
 			continue
 		}
 		status, _ := m["status"].(string)
@@ -450,19 +450,19 @@ func describePendingChildDomainReady(conditions []interface{}, gvk schema.GroupV
 		observed, hasObserved := conditionObservedGeneration(m)
 		switch {
 		case status == string(metav1.ConditionTrue) && !hasObserved:
-			return fmt.Sprintf("%s/%s/%s (DomainReady=True without observedGeneration; want %d)", gvk.String(), namespace, name, generation)
+			return fmt.Sprintf("%s/%s/%s (ChildrenSnapshotReady=True without observedGeneration; want %d)", gvk.String(), namespace, name, generation)
 		case status == string(metav1.ConditionTrue) && observed != generation:
-			return fmt.Sprintf("%s/%s/%s (DomainReady=True observedGeneration=%d, stale; want %d)", gvk.String(), namespace, name, observed, generation)
+			return fmt.Sprintf("%s/%s/%s (ChildrenSnapshotReady=True observedGeneration=%d, stale; want %d)", gvk.String(), namespace, name, observed, generation)
 		default:
-			return fmt.Sprintf("%s/%s/%s (DomainReady=%s/%s)", gvk.String(), namespace, name, status, reason)
+			return fmt.Sprintf("%s/%s/%s (ChildrenSnapshotReady=%s/%s)", gvk.String(), namespace, name, status, reason)
 		}
 	}
-	return fmt.Sprintf("%s/%s/%s (no DomainReady condition yet)", gvk.String(), namespace, name)
+	return fmt.Sprintf("%s/%s/%s (no ChildrenSnapshotReady condition yet)", gvk.String(), namespace, name)
 }
 
 // conditionObservedGeneration extracts a condition's observedGeneration (int64/float64) and whether
 // the field was present. A missing observedGeneration is treated as "not current" by the strict
-// DomainReady contract.
+// ChildrenSnapshotReady contract.
 func conditionObservedGeneration(m map[string]interface{}) (int64, bool) {
 	switch observed := m["observedGeneration"].(type) {
 	case int64:
@@ -476,7 +476,7 @@ func conditionObservedGeneration(m map[string]interface{}) (int64, bool) {
 
 func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.GroupVersionKind, namespace, name string) (bool, string) {
 	conditions, _, err := unstructured.NestedSlice(child.Object, "status", "conditions")
-	if err == nil && conditionSliceHasCurrentFalseReason(conditions, snapshotpkg.ConditionDomainReady, snapshotpkg.ReasonGraphPlanningFailed, child.GetGeneration()) {
+	if err == nil && conditionSliceHasCurrentFalseReason(conditions, snapshotpkg.ConditionChildrenSnapshotReady, snapshotpkg.ReasonGraphPlanningFailed, child.GetGeneration()) {
 		return true, fmt.Sprintf("child snapshot %s/%s/%s failed graph planning", gvk.String(), namespace, name)
 	}
 	class, message := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, name)
@@ -490,7 +490,7 @@ func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.G
 // current generation (observedGeneration == metadata.generation). The Ready-based terminal classifier
 // (usecase.ClassifyGenericChildSnapshotReady) does not check observedGeneration, so without this guard
 // a stale Ready=False/<terminal reason> from an older spec generation could trip a false terminal
-// failure in the wave gate. Mirrors the strict DomainReady contract: a terminal state counts only when
+// failure in the wave gate. Mirrors the strict ChildrenSnapshotReady contract: a terminal state counts only when
 // the child has confirmed it for the current generation.
 func readyConditionIsCurrentTerminal(child *unstructured.Unstructured) bool {
 	rc := usecase.CurrentReadyCondition(child)
@@ -506,7 +506,7 @@ func conditionSliceHasCurrentTrue(conditions []interface{}, typ string, generati
 		if m["type"] != typ || m["status"] != string(metav1.ConditionTrue) {
 			continue
 		}
-		// Strict contract: DomainReady=True counts only with observedGeneration == metadata.generation.
+		// Strict contract: ChildrenSnapshotReady=True counts only with observedGeneration == metadata.generation.
 		// A missing or stale observedGeneration means the child has not confirmed the current spec, so
 		// the layer stays pending (never silently treated as ready).
 		observed, ok := conditionObservedGeneration(m)
@@ -524,7 +524,7 @@ func conditionSliceHasCurrentFalseReason(conditions []interface{}, typ, reason s
 		if m["type"] != typ || m["status"] != string(metav1.ConditionFalse) || m["reason"] != reason {
 			continue
 		}
-		// Strict contract: a terminal DomainReady=False is only current with observedGeneration ==
+		// Strict contract: a terminal ChildrenSnapshotReady=False is only current with observedGeneration ==
 		// metadata.generation. A stale/missing observedGeneration is treated as not-yet-current
 		// (pending), so a child must re-confirm failure for the current spec generation.
 		observed, ok := conditionObservedGeneration(m)
@@ -557,7 +557,7 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefsCondition(
 			return err
 		}
 		effective = mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
-		domainReady := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionDomainReady)
+		domainReady := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionChildrenSnapshotReady)
 		domainReadyCurrent := domainReady != nil &&
 			domainReady.Status == status &&
 			domainReady.Reason == reason &&
@@ -569,7 +569,7 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefsCondition(
 		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), effective...)
 		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionDomainReady,
+			Type:               snapshotpkg.ConditionChildrenSnapshotReady,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,
@@ -581,7 +581,7 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefsCondition(
 	return changed, err
 }
 
-func (r *SnapshotReconciler) patchSnapshotDomainReady(
+func (r *SnapshotReconciler) patchSnapshotChildrenSnapshotReady(
 	ctx context.Context,
 	key types.NamespacedName,
 	status metav1.ConditionStatus,
@@ -593,7 +593,7 @@ func (r *SnapshotReconciler) patchSnapshotDomainReady(
 		if err := r.Client.Get(ctx, key, cur); err != nil {
 			return err
 		}
-		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionDomainReady)
+		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionChildrenSnapshotReady)
 		if existing != nil &&
 			existing.Status == status &&
 			existing.Reason == reason &&
@@ -604,7 +604,7 @@ func (r *SnapshotReconciler) patchSnapshotDomainReady(
 		base := cur.DeepCopy()
 		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionDomainReady,
+			Type:               snapshotpkg.ConditionChildrenSnapshotReady,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,

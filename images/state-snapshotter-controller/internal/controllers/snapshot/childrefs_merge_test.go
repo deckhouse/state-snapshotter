@@ -63,17 +63,17 @@ func TestMergeSnapshotChildRefs(t *testing.T) {
 	}
 }
 
-func TestPriorityLayerDomainReady(t *testing.T) {
+func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 	ctx := context.Background()
 	readyChild := demoSnapshotChild("ready", []metav1.Condition{{
-		Type:               snapshotpkg.ConditionDomainReady,
+		Type:               snapshotpkg.ConditionChildrenSnapshotReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             snapshotpkg.ReasonCompleted,
 		ObservedGeneration: 1,
 	}})
 	pendingChild := demoSnapshotChild("pending", nil)
 	failedChild := demoSnapshotChild("failed", []metav1.Condition{{
-		Type:               snapshotpkg.ConditionDomainReady,
+		Type:               snapshotpkg.ConditionChildrenSnapshotReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             snapshotpkg.ReasonGraphPlanningFailed,
 		Message:            "child graph failed",
@@ -82,7 +82,7 @@ func TestPriorityLayerDomainReady(t *testing.T) {
 
 	t.Run("all graph ready", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerDomainReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready")})
 		if err != nil || !ready || terminal != "" || len(pending) != 0 {
 			t.Fatalf("want ready with no terminal/pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -90,23 +90,23 @@ func TestPriorityLayerDomainReady(t *testing.T) {
 
 	t.Run("pending blocks lower priority without terminal message", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(pendingChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerDomainReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending with no terminal message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
-		if !strings.Contains(pending[0], "no DomainReady condition yet") {
-			t.Fatalf("pending descriptor should explain missing DomainReady, got %q", pending[0])
+		if !strings.Contains(pending[0], "no ChildrenSnapshotReady condition yet") {
+			t.Fatalf("pending descriptor should explain missing ChildrenSnapshotReady, got %q", pending[0])
 		}
 	})
 
 	t.Run("graph ready true without observedGeneration stays pending", func(t *testing.T) {
 		child := demoSnapshotChildRawConditions("noobserved", 1, []map[string]interface{}{{
-			"type":   snapshotpkg.ConditionDomainReady,
+			"type":   snapshotpkg.ConditionChildrenSnapshotReady,
 			"status": string(metav1.ConditionTrue),
 			"reason": snapshotpkg.ReasonCompleted,
 		}})
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
-		ready, terminal, pending, err := r.priorityLayerDomainReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("noobserved")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("noobserved")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -117,13 +117,13 @@ func TestPriorityLayerDomainReady(t *testing.T) {
 
 	t.Run("graph ready true with stale observedGeneration stays pending", func(t *testing.T) {
 		child := demoSnapshotChildRawConditions("stale", 3, []map[string]interface{}{{
-			"type":               snapshotpkg.ConditionDomainReady,
+			"type":               snapshotpkg.ConditionChildrenSnapshotReady,
 			"status":             string(metav1.ConditionTrue),
 			"reason":             snapshotpkg.ReasonCompleted,
 			"observedGeneration": int64(2),
 		}})
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
-		ready, terminal, pending, err := r.priorityLayerDomainReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("stale")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("stale")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -134,7 +134,7 @@ func TestPriorityLayerDomainReady(t *testing.T) {
 
 	t.Run("terminal graph failure returns message", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(failedChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerDomainReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("failed")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("failed")})
 		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed graph planning") {
 			t.Fatalf("want terminal failure message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -143,14 +143,14 @@ func TestPriorityLayerDomainReady(t *testing.T) {
 	t.Run("ready-based terminal failure requires current observedGeneration", func(t *testing.T) {
 		staleTerminal := demoSnapshotChildReadyTerminal("ready-stale", 3, 2, "ListFailed")
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(staleTerminal).Build()}
-		ready, terminal, pending, err := r.priorityLayerDomainReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-stale")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-stale")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("stale terminal Ready must be pending, not terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
 
 		currentTerminal := demoSnapshotChildReadyTerminal("ready-current", 3, 3, "ListFailed")
 		r = &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(currentTerminal).Build()}
-		ready, terminal, pending, err = r.priorityLayerDomainReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-current")})
+		ready, terminal, pending, err = r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-current")})
 		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed") {
 			t.Fatalf("current terminal Ready must be terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -434,7 +434,7 @@ func demoSnapshotChild(name string, conditions []metav1.Condition) *unstructured
 }
 
 // demoSnapshotChildRawConditions builds a child snapshot with explicit raw condition maps, so a test
-// can omit observedGeneration entirely (to exercise the strict DomainReady contract) or set a stale
+// can omit observedGeneration entirely (to exercise the strict ChildrenSnapshotReady contract) or set a stale
 // value, which the typed helper cannot express.
 func demoSnapshotChildRawConditions(name string, generation int64, conditions []map[string]interface{}) *unstructured.Unstructured {
 	items := make([]interface{}, 0, len(conditions))

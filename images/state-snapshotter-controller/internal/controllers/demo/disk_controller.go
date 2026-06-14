@@ -215,10 +215,10 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {
 		return ctrl.Result{}, err
 	}
-	// DomainReady=True is published only now: for a leaf disk "domain planning complete" means its own
+	// ChildrenSnapshotReady=True is published only now: for a leaf disk "domain planning complete" means its own
 	// manifest capture request is created/published (it has no child snapshots). Publishing it earlier
 	// (before the MCR) would let readers proceed before the request even existed.
-	if err := patchDemoVirtualDiskSnapshotDomainReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "manifest capture request planned"); err != nil {
+	if err := patchDemoVirtualDiskSnapshotChildrenSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, snapshot.ReasonCompleted, "manifest capture request planned"); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, manifestcapture.ManifestCheckpointNameFromRequest(mcr)); err != nil {
@@ -253,7 +253,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	return ctrl.Result{}, nil
 }
 
-func patchDemoVirtualDiskSnapshotDomainReady(
+func patchDemoVirtualDiskSnapshotChildrenSnapshotReady(
 	ctx context.Context,
 	c client.Client,
 	diskKey types.NamespacedName,
@@ -266,13 +266,13 @@ func patchDemoVirtualDiskSnapshotDomainReady(
 		if err := c.Get(ctx, diskKey, o); err != nil {
 			return err
 		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionDomainReady); rc != nil &&
+		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionChildrenSnapshotReady); rc != nil &&
 			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
 			return nil
 		}
 		base := o.DeepCopy()
 		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionDomainReady,
+			Type:               snapshot.ConditionChildrenSnapshotReady,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,

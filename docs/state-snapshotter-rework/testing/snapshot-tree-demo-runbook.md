@@ -16,7 +16,7 @@ restore, opt. каскадный GC по TTL. Детали/контракт/вн
 Части 5–7 **опциональны**; часть A (разделы 1–4) самодостаточна.
 
 > **Автоматический staged-диагностический прогон.** Разделы 1–4 ниже — ручной
-> happy-path. Для полной проверки архитектуры (priority planning → DomainReady
+> happy-path. Для полной проверки архитектуры (priority planning → ChildrenSnapshotReady
 > barrier → handoff → Phase 2a/Slice 3 propagation/recovery) с сохранением
 > артефактов по стадиям используйте `hack/snapshot-tree-demo-e2e.sh` — см.
 > [§9 «Staged diagnostic»](#9-staged-diagnostic-hacksnapshot-tree-demo-e2esh).
@@ -336,7 +336,7 @@ cd /path/to/state-snapshotter
 | `01-priority-vm-first` | регистрация CSD (GVK/priority), `Accepted`/`RBACReady`, VM priority > Disk |
 | `02-tree-ready` | форма дерева (root→VM→disk-vm; standalone disk как root child; covered disk не дублируется; ConfigMap в MCP, не child); happy-path `RequestsReady/ChildrenReady/Ready=True`; baseline mirror root `Snapshot.Ready == content.Ready` |
 | `03-priority-inverted` | инверсия priority (Disk>VM) в чистом namespace: форма меняется **или** fail-closed с явной причиной; CSD восстанавливается в VM-first. **Авто-skip**, если на кластере есть чужие demo-снапшоты/CSD вне этого прогона (глобальный CSD-priority flip их бы задел) |
-| `04-domainready-barrier` | **hard**: каждый domain snapshot `DomainReady=True` и `observedGeneration == generation`; ни один `SnapshotContent` не несёт `DomainReady` (нет self-publication common-слоя). **soft**: timeline (content не биндится до current-gen `DomainReady`) |
+| `04-domainready-barrier` | **hard**: каждый domain snapshot `ChildrenSnapshotReady=True` и `observedGeneration == generation`; ни один `SnapshotContent` не несёт `ChildrenSnapshotReady` (нет self-publication common-слоя). **soft**: timeline (content не биндится до current-gen `ChildrenSnapshotReady`) |
 | `05-ownership-handoff` | MCP/VSC `ownerRef -> SnapshotContent` после handoff (steady-state); execution `ObjectKeeper ret-mcr-*`; `dataRefs` после handoff. **Limitation:** окно «born under execution OK» в live может быть пропущено — birth-семантика покрыта integration-тестами (записано в `notes.txt`) |
 | `06-mcp-failure` | leaf MCP `Ready=False` → leaf `RequestsReady=False/ManifestCheckpointFailed` → parent/root `ChildrenReady=False/ChildrenFailed` → root `Snapshot Ready=False` (verbatim mirror); sibling `Ready=True` |
 | `07-mcp-recovery` | возврат MCP `Ready=True` → дерево/root recover `Ready=True`; mirror совпадает |
@@ -353,9 +353,9 @@ cd /path/to/state-snapshotter
 > остался недеструктивным.
 
 Hard-fail (ядро инвариантов): preflight, форма дерева, happy-path `Ready`,
-финальный `DomainReady` (=True, current-gen, не на `SnapshotContent`),
+финальный `ChildrenSnapshotReady` (=True, current-gen, не на `SnapshotContent`),
 MCP-failure propagation + sibling isolation, MCP recovery, равенство mirror.
-Остальное (инверсия, DomainReady timeline, handoff-интермедиаты, demo content→snapshot
+Остальное (инверсия, ChildrenSnapshotReady timeline, handoff-интермедиаты, demo content→snapshot
 mirror, VSC/chunk) — `SOFT` с записью в `notes.txt`, прогон не падает. Итог: `SUMMARY.txt`
 (`soft_failures=N`). На каждой стадии: `resources/` (YAML/JSON), `conditions.txt`,
 `ownerrefs.txt`, `graph/` (DOT/SVG), `notes.txt`.
