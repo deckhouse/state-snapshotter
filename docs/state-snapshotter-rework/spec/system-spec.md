@@ -249,7 +249,6 @@ SnapshotContent.Ready          = ManifestsReady ∧ VolumesReady ∧ ChildrenRea
 - **MUST (sequencing, v1):** волюмная нога оценивается **только после** готовности манифестной. Пока `ManifestsReady != True`, `VolumesReady=Unknown` с reason `ManifestCapturePending` (нога ещё не оценивалась — это не отказ тома). Независимая оценка ног — future follow-up. Validator order остаётся manifest → data (all refs) → children.
 - **MUST (приоритет reason у `Ready`):** при нескольких упавших ногах несётся один reason в строгом порядке `manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed` (терминальные провалы первыми; свой узел перед детьми при равной тяжести).
 - **MUST (INV-COND1, gate-импликация):** `ManifestsReady=True ⇒ ChildrenSnapshotReady=True` и `VolumesReady=True ⇒ ChildrenSnapshotReady=True`; requests не появляются без планирования. Это держит `Snapshot.Ready == Content.Ready` при том, что `ChildrenSnapshotReady` **не** входит в формулу `Ready`.
-- **MUST (no stale legacy leg):** `SnapshotContentController` **MUST NOT** write the retired `RequestsReady` condition and **MUST** prune it from `SnapshotContent.status.conditions[]` when present, so previously-reconciled objects converge to `ManifestsReady`/`VolumesReady` and no stale `RequestsReady` lingers.
 
 #### §3.9.8. Restore and dedup (data path)
 

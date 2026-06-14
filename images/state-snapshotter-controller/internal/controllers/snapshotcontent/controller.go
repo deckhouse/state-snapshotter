@@ -381,13 +381,6 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		}
 	}
 
-	// The legacy single RequestsReady condition was split into ManifestsReady/VolumesReady (ADR
-	// 2026-06-03 §2.2). It is no longer written and MUST NOT linger on already-reconciled
-	// SnapshotContent status: prune it so stale objects converge to the new model.
-	if pruneContentCondition(contentLike, legacyConditionRequestsReady) {
-		changed = true
-	}
-
 	if !changed {
 		return plan.readyStatus == metav1.ConditionTrue, nil
 	}
@@ -400,21 +393,6 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		return false, err
 	}
 	return plan.readyStatus == metav1.ConditionTrue, nil
-}
-
-// legacyConditionRequestsReady is the retired SnapshotContent condition type that was split into
-// ManifestsReady/VolumesReady. It is only referenced to prune stale copies from existing objects.
-const legacyConditionRequestsReady = "RequestsReady"
-
-// pruneContentCondition removes a condition type from contentLike's status, reporting whether it was
-// present (so the caller can mark the status changed and trigger an update).
-func pruneContentCondition(contentLike snapshot.SnapshotContentLike, conditionType string) bool {
-	conds := contentLike.GetStatusConditions()
-	if !meta.RemoveStatusCondition(&conds, conditionType) {
-		return false
-	}
-	contentLike.SetStatusConditions(conds)
-	return true
 }
 
 // upsertContentCondition sets desired (type/status/reason/message + observedGeneration) on contentLike
