@@ -16,7 +16,7 @@ Both states travel up through the **same** pipeline; nothing analyses state on t
 
 ```
 leaf SnapshotContent
-  RequestsReady=False (specific artifact/request reason)
+  ManifestsReady=False / VolumesReady=False (specific artifact/request reason)
   Ready=False
         │
         ▼
@@ -33,12 +33,12 @@ root Snapshot
   Ready := verbatim mirror(bound SnapshotContent.Ready)
 ```
 
-**Single aggregator (INV-COND2):** `SnapshotContent.Ready = RequestsReady && ChildrenReady`, computed only by
+**Single aggregator (INV-COND2):** `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildrenReady`, computed only by
 `SnapshotContentController.buildCommonSnapshotContentStatusPlan`.
 
 **Mirror-only Snapshot (INV-COND4):** `Snapshot.Ready := mirror(SnapshotContent.Ready)` (status/reason/message
 copied verbatim). After bind the Snapshot controller writes **no** semantic `Ready` state — neither pending nor
-terminal; a terminal MCP failure flows through content (`RequestsReady=False/ManifestCheckpointFailed`) and is
+terminal; a terminal MCP failure flows through content (`ManifestsReady=False/ManifestCheckpointFailed`) and is
 mirrored (eventual consistency). A namespaced `Snapshot` MUST NOT re-traverse children, read child conditions, or
 build its own diagnostics. The only exception is the bridge for failures the content tree cannot yet represent:
 a terminal child-`Snapshot` capture failure before any child SnapshotContent exists, and pre-publish
@@ -61,11 +61,11 @@ capture-planning failures (build/list targets, plan drift) that occur before req
 Reason priority on `Ready=False` (single reason chosen when several legs are unsatisfied):
 
 ```
-RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending > Completed
+manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed
 ```
 
-Terminal own-request failures win over child failures; terminal failures win over pending; own requests win over
-children at equal severity. `ChildrenSnapshotReady` is a gate/barrier and is NOT part of this formula.
+Terminal own-leg failures win over child failures; terminal failures win over pending; own legs win over
+children at equal severity (manifest leg before volume leg). `ChildrenSnapshotReady` is a gate/barrier and is NOT part of this formula.
 
 ## 3. Message formats
 
@@ -99,13 +99,13 @@ Propagation rule when a parent inspects a terminal child `C`:
 
 Scope:
 
-- richer reason/message for `RequestsReady=False` (`ManifestCapturePending`, `DataCapturePending`,
-  `ManifestCheckpointFailed`, `ArtifactMissing`, `DataArtifactInvalid`/`NotSupported`);
+- richer reason/message for `ManifestsReady=False` (`ManifestCapturePending`, `ManifestCheckpointFailed`) and
+  `VolumesReady=False` (`DataCapturePending`, `ArtifactMissing`, `DataArtifactInvalid`/`NotSupported`);
 - richer reason/message for `ChildrenReady=False` (`ChildrenPending` with count, `ChildrenFailed` with leaf chain);
 - early `Ready=False` on SnapshotContent right after creation (no MCP name → `ManifestCapturePending`);
 - `Snapshot.Ready` verbatim mirror; pre-bind transitional `ContentBindingPending` only;
 - recompute degraded state correctly **if already woken** — e.g. SnapshotContent already `Ready=True`, a later
-  reconcile sees a published artifact missing → `RequestsReady=False`/`ArtifactMissing` → `Ready=False`. This does
+  reconcile sees a published artifact missing → `VolumesReady=False`/`ArtifactMissing` → `Ready=False`. This does
   not need a watch and is covered by a unit test.
 
 Out of scope for Phase 1: damaged-artifact **wake-up** (watches/revalidation), restore/download validation, new
@@ -118,7 +118,7 @@ message is generic: `waiting for manifest capture checkpoint to be published`.
 
 Phase 2a is **not** a new condition model — the model already exists (§1–§3). It only guarantees that a
 degraded **durable artifact** (ManifestCheckpoint, VolumeSnapshotContent) automatically **wakes** the owning
-`SnapshotContent` so the existing aggregator recomputes `RequestsReady`/`Ready` and the failure propagates up.
+`SnapshotContent` so the existing aggregator recomputes `ManifestsReady`/`VolumesReady`/`Ready` and the failure propagates up.
 
 **Core split (model-wide):**
 
@@ -131,7 +131,7 @@ degraded **durable artifact** (ManifestCheckpoint, VolumeSnapshotContent) automa
 **No watermark (simplification accepted in 2a).** Classification is based **only** on the current artifact
 state, never on a prior `Ready=True`. "If a published ref exists, the artifact MUST exist and be valid."
 
-Manifest path (surfaced only through `RequestsReady`):
+Manifest path (surfaced only through `ManifestsReady`):
 
 - no `manifestCheckpointName` → `ManifestCapturePending`;
 - `manifestCheckpointName` set, MCP **NotFound** → `ManifestCapturePending` (legitimate: the name is published
@@ -157,7 +157,7 @@ Chunk **existence** (exact-ref GET, **only** when MCP `Ready=True`):
   `Ready=True` content may leave a stale `Ready=True` until the next reconcile (any MCP/VSC/child event, or a
   parent/child relay) wakes the content.
 
-Data path (surfaced only through `RequestsReady`):
+Data path (surfaced only through `VolumesReady`):
 
 - `dataRef` published, VSC **NotFound** → `ArtifactMissing` (terminal: `dataRefs[]` is published only after the
   VSC exists and is owned, so a missing VSC is a real integrity loss);

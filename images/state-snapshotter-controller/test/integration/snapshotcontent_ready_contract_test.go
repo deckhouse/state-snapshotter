@@ -40,8 +40,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// Ready Contract on the current 4-condition model: SnapshotContent owns Ready, derived from
-// RequestsReady (its own ManifestCheckpoint/data refs) AND ChildrenReady (direct child SnapshotContents).
+// Ready Contract on the current condition model: SnapshotContent owns Ready, derived from
+// ManifestsReady (its own ManifestCheckpoint) AND VolumesReady (its own data refs) AND ChildrenReady (direct child SnapshotContents).
 // The controller only manages the common SnapshotContent GVK, so these specs operate on the common type and
 // drive readiness through a real Ready ManifestCheckpoint (never force-writing the content Ready condition).
 var _ = Describe("Integration: SnapshotContentController - Ready Contract", Serial, func() {
@@ -107,7 +107,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 	It("should NOT set Ready=True when manifestCheckpointName is empty", func() {
 		name, _ := createContent("ready-contract-no-mcp-")
 
-		// Without a published manifestCheckpointName the content can never be RequestsReady, so the controller
+		// Without a published manifestCheckpointName the content can never be ManifestsReady, so the controller
 		// must keep Ready=False. The controller owns Ready; the test only observes it.
 		Consistently(func(g Gomega) {
 			reconcile(name)
@@ -138,7 +138,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 		})).To(Succeed())
 
 		// ChildrenReady gate: parent must stay Ready=False while the child is not Ready, even though the
-		// parent's own RequestsReady is satisfied.
+		// parent's own ManifestsReady/VolumesReady are satisfied.
 		Consistently(func(g Gomega) {
 			reconcile(childName)
 			reconcile(parentName)

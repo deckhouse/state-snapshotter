@@ -6,7 +6,7 @@
 #   - GVK/priority registration and priority-driven tree shape (+ inversion);
 #   - ChildrenSnapshotReady planning barrier (domain-owned, generation-gated);
 #   - artifacts born under execution ObjectKeeper and handed off to SnapshotContent;
-#   - RequestsReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
+#   - ManifestsReady / VolumesReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
 #   - damaged-leaf Ready=False propagation to root and recovery back to Ready=True;
 #   - sibling isolation;
 #   - both volume-capture data paths: an orphan/standalone PVC (demo-pvc) captured via a CSI
@@ -745,33 +745,35 @@ save_artifacts() {
 	printf 'namespace=%s\nrun_id=%s\nstage=%s\ncsd=%s\n' "${ns}" "${RUN_ID}" "${stage}" "${CSD_NAME}" >"${dir}/run-context.txt"
 }
 
-# condition_table <ns>: Ready/RequestsReady/ChildrenReady/ChildrenSnapshotReady for snapshots + contents.
+# condition_table <ns>: Ready/ManifestsReady/VolumesReady/ChildrenReady/ChildrenSnapshotReady for snapshots + contents.
 condition_table() {
 	local ns="$1"
-	printf '%-22s %-34s %-44s\n' "KIND" "NAME" "Ready|RequestsReady|ChildrenReady|ChildrenSnapshotReady(obsGen/gen)"
+	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumesReady|ChildrenReady|ChildrenSnapshotReady(obsGen/gen)"
 	local res
 	for res in "${SNAP_RES}" "${VMSNAP_RES}" "${DISKSNAP_RES}"; do
 		kubectl -n "${ns}" get "${res}" -o json 2>/dev/null | jq -r '
 			.items[]? | [
 				.kind, .metadata.name,
 				(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="RequestsReady")][0].status)//"-") + "|" +
+				(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
+				(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].status)//"-") + "(" +
 				((([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].observedGeneration)//0)|tostring) + "/" +
 				((.metadata.generation//0)|tostring) + ")"
 			] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
-			| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-44s\n' "${k}" "${n}" "${c}"; done
+			| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
 	done
 	kubectl get "${CONTENT_RES}" -o json 2>/dev/null | jq -r '
 		.items[]? | [
 			"SnapshotContent", .metadata.name,
 			(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="RequestsReady")][0].status)//"-") + "|" +
+			(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
+			(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].status)//"-")
 		] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
-		| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-44s\n' "${k}" "${n}" "${c}"; done
+		| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
 }
 
 # ownerref_table <ns>: MCP/VSC/SnapshotContent ownerRefs (lifecycle/handoff view).
@@ -1190,12 +1192,13 @@ note "contents: root=${ROOT_CONTENT} vm=${VM_CONTENT} leaf=${LEAF_CONTENT} sibli
 	echo "sibling_snapshot=${SIBLING_SNAP}"; echo "sibling_content=${SIBLING_CONTENT}"
 } >"$(stage_dir 02-tree-ready)/tree-handles.txt"
 
-# Happy-path conditions: every content RequestsReady=ChildrenReady=Ready=True.
+# Happy-path conditions: every content ManifestsReady=VolumesReady=ChildrenReady=Ready=True.
 for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}"; do
 	[[ -n "${c}" ]] || continue
 	wait_until "SnapshotContent ${c} Ready=True" content_ready_true "${c}" || die "content ${c} not Ready"
 	cj="$(get_json "${CONTENT_RES}" "" "${c}")"
-	[[ "$(cond_field "${cj}" RequestsReady status)" == "True" ]] || die "content ${c} RequestsReady != True while Ready=True (inconsistent aggregation)"
+	[[ "$(cond_field "${cj}" ManifestsReady status)" == "True" ]] || die "content ${c} ManifestsReady != True while Ready=True (inconsistent aggregation)"
+	[[ "$(cond_field "${cj}" VolumesReady status)" == "True" ]] || die "content ${c} VolumesReady != True while Ready=True (inconsistent aggregation)"
 	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || die "content ${c} ChildrenReady != True while Ready=True (inconsistent aggregation)"
 done
 
@@ -1941,11 +1944,11 @@ else
 		require "cannot patch MCP ${LEAF_MCP} status (RBAC); cannot inject MCP failure"
 	else
 		MCP_FAILURE_DONE=1
-		wait_until "leaf content ${LEAF_CONTENT} RequestsReady=False" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| die "leaf content ${LEAF_CONTENT} RequestsReady did not flip False after MCP failure"
-		LEAF_RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" RequestsReady reason)"
-		[[ "${LEAF_RR_REASON}" == "ManifestCheckpointFailed" ]] || die "leaf RequestsReady reason=${LEAF_RR_REASON} (expected ManifestCheckpointFailed)"
+		wait_until "leaf content ${LEAF_CONTENT} ManifestsReady=False" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ManifestsReady\")][0].status)//\"\"') == False ]]" \
+			|| die "leaf content ${LEAF_CONTENT} ManifestsReady did not flip False after MCP failure"
+		LEAF_RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" ManifestsReady reason)"
+		[[ "${LEAF_RR_REASON}" == "ManifestCheckpointFailed" ]] || die "leaf ManifestsReady reason=${LEAF_RR_REASON} (expected ManifestCheckpointFailed)"
 		wait_until "leaf content ${LEAF_CONTENT} Ready=False" content_ready_false "${LEAF_CONTENT}" || die "leaf content did not flip Ready=False after MCP failure"
 		[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content ${VM_CONTENT} ChildrenReady=False" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${VM_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
@@ -2032,10 +2035,10 @@ elif [[ -z "${DATA_VSC}" ]]; then
 else
 	if patch_vsc_ready_to_use "${DATA_VSC}" false; then
 		VSC_PENDING_DONE=1
-		wait_until "content ${DATA_CONTENT} RequestsReady=False (data pending)" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| die "content ${DATA_CONTENT} RequestsReady did not flip False on VSC readyToUse=false"
-		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" RequestsReady reason)"
+		wait_until "content ${DATA_CONTENT} VolumesReady=False (data pending)" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
+			|| die "content ${DATA_CONTENT} VolumesReady did not flip False on VSC readyToUse=false"
+		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumesReady reason)"
 		[[ "${RR_REASON}" == "DataCapturePending" ]] || die "data pending reason=${RR_REASON} (expected DataCapturePending)"
 		wait_until "root Snapshot Ready=False mirror" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
@@ -2209,7 +2212,7 @@ save_artifacts "13-snapshotcontent-deleted" "${NS}"
 log "13-snapshotcontent-deleted: done"
 
 # ---------------------------------------------------------------------------
-# 14-mcp-deleted (ManifestCheckpoint deletion -> RequestsReady invalidation)
+# 14-mcp-deleted (ManifestCheckpoint deletion -> ManifestsReady invalidation)
 # ---------------------------------------------------------------------------
 begin_stage "14-mcp-deleted"
 resolve_main_tree_handles
@@ -2222,15 +2225,15 @@ else
 	# A published MCP referenced by content.status.manifestCheckpointName is removed. The owning
 	# SnapshotContent is woken via the ManifestCheckpoint ownerRef wake-up watch; reconcile reclassifies
 	# the now-missing MCP as ManifestCapturePending (NotFound is the legitimate pre-publish window) so the
-	# requests leg flips and Ready leaves True (no stale Ready=True over a missing checkpoint).
+	# manifest leg flips and Ready leaves True (no stale Ready=True over a missing checkpoint).
 	DEL_OUT="$(kubectl delete "${MCP_RES}" "${LEAF_MCP}" --wait=false 2>&1)"
 	DEL_RC=$?
 	printf '%s\n' "${DEL_OUT}" >"${CDIR}/delete-stderr.txt"
 	if [[ "${DEL_RC}" -eq 0 ]]; then
-		wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} RequestsReady=False after MCP delete" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			&& note "14: leaf content RequestsReady=False after MCP deletion" \
-			|| die "14: leaf content ${LEAF_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after MCP deletion (ownerRef wake-up broken)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} ManifestsReady=False after MCP delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ManifestsReady\")][0].status)//\"\"') == False ]]" \
+			&& note "14: leaf content ManifestsReady=False after MCP deletion" \
+			|| die "14: leaf content ${LEAF_CONTENT} ManifestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after MCP deletion (ownerRef wake-up broken)"
 		# HARD INV-FAIL-PROP: the root content must NOT stay Ready=True over a now-missing checkpoint.
 		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} not Ready=True after MCP delete" \
 			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') != True ]]" \
@@ -2261,7 +2264,7 @@ begin_stage "17-child-ready-false"
 resolve_main_tree_handles
 CDIR="$(stage_dir 17-child-ready-false)"
 # Drive a child Ready=False deterministically by failing the standalone child's own MCP (its content
-# RequestsReady -> Ready flips False), then assert the root does NOT stay Ready=True, then restore.
+# ManifestsReady -> Ready flips False), then assert the root does NOT stay Ready=True, then restore.
 SIBLING_MCP=""
 [[ -n "${SIBLING_CONTENT}" ]] && SIBLING_MCP="$(kubectl get "${CONTENT_RES}" "${SIBLING_CONTENT}" -o jsonpath='{.status.manifestCheckpointName}' 2>/dev/null || true)"
 if [[ -z "${SIBLING_MCP}" ]]; then
@@ -2354,10 +2357,10 @@ else
 		if [[ "${CHUNK_DEL_RC}" -eq 0 ]]; then
 			kubectl annotate "${MCP_RES}" "${LEAF_MCP}" "tree-demo.state-snapshotter.deckhouse.io/bump=$(date +%s)" --overwrite >/dev/null 2>&1 \
 				|| kubectl_ctrl annotate "${MCP_RES}" "${LEAF_MCP}" "tree-demo.state-snapshotter.deckhouse.io/bump=$(date +%s)" --overwrite >/dev/null 2>&1 || true
-			wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} RequestsReady=False after chunk delete+bump" \
-				bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-				|| die "15: leaf content ${LEAF_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after chunk delete+bump (integrity check did not fail closed)"
-			RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" RequestsReady reason)"
+			wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} ManifestsReady=False after chunk delete+bump" \
+				bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ManifestsReady\")][0].status)//\"\"') == False ]]" \
+				|| die "15: leaf content ${LEAF_CONTENT} ManifestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after chunk delete+bump (integrity check did not fail closed)"
+			RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" ManifestsReady reason)"
 			[[ "${RR_REASON}" == "ManifestCheckpointFailed" ]] && note "15: missing chunk surfaced ManifestCheckpointFailed (terminal integrity loss)" \
 				|| die "15: chunk-missing reason=${RR_REASON} (expected ManifestCheckpointFailed)"
 			wait_until_to "${INVALIDATION_WAIT_SEC}" "root Snapshot ${SNAP} Ready=False after chunk delete" \
@@ -2377,7 +2380,7 @@ log "15-chunk-deleted: done"
 # ---------------------------------------------------------------------------
 # The orphan demo-pvc data leg is durable via a retained VolumeSnapshotContent referenced by the root
 # content dataRefs[]; the CSI VolumeSnapshot is only a visibility leaf. Deleting the retained VSC is a
-# real data loss: the root content must flip RequestsReady=False/ArtifactMissing (no stale Ready=True
+# real data loss: the root content must flip VolumesReady=False/ArtifactMissing (no stale Ready=True
 # over a missing data artifact). Non-recoverable (Retain means CSI will not recreate it).
 begin_stage "16-orphan-vsc-deleted"
 resolve_main_tree_handles
@@ -2394,10 +2397,10 @@ else
 	VSC_DEL_OUT="$(kubectl delete "${VSC_RES}" "${ORPHAN_VSC}" --wait=false 2>&1)"; VSC_DEL_RC=$?
 	printf '%s\n' "${VSC_DEL_OUT}" >"${CDIR}/delete-stderr.txt"
 	if [[ "${VSC_DEL_RC}" -eq 0 ]]; then
-		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} RequestsReady=False after orphan VSC delete" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| die "16: root content RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (artifact wake-up + revalidation both failed to fire)"
-		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" RequestsReady reason)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} VolumesReady=False after orphan VSC delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
+			|| die "16: root content VolumesReady did not flip False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (artifact wake-up + revalidation both failed to fire)"
+		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" VolumesReady reason)"
 		[[ "${RR_REASON}" == "ArtifactMissing" ]] && note "16: orphan VSC deletion surfaced ArtifactMissing at root" \
 			|| die "16: orphan VSC missing reason=${RR_REASON} (expected ArtifactMissing)"
 		wait_until_to "${INVALIDATION_WAIT_SEC}" "root Snapshot ${SNAP} Ready=False after orphan VSC delete" \
@@ -2427,10 +2430,10 @@ elif [[ -z "${DATA_VSC}" ]]; then
 	note "no VSC dataRef to delete; skipped"
 	save_artifacts "10-vsc-missing" "${NS}"
 elif kubectl delete "${VSC_RES}" "${DATA_VSC}" --wait=false 2>/dev/null; then
-	wait_until_to "${INVALIDATION_WAIT_SEC}" "content ${DATA_CONTENT} RequestsReady=False (artifact missing)" \
-		bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-		|| die "content ${DATA_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after VSC delete (artifact-missing not detected)"
-	RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" RequestsReady reason)"
+	wait_until_to "${INVALIDATION_WAIT_SEC}" "content ${DATA_CONTENT} VolumesReady=False (artifact missing)" \
+		bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
+		|| die "content ${DATA_CONTENT} VolumesReady did not flip False within ${INVALIDATION_WAIT_SEC}s after VSC delete (artifact-missing not detected)"
+	RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumesReady reason)"
 	[[ "${RR_REASON}" == "ArtifactMissing" ]] || die "missing-artifact reason=${RR_REASON} (expected ArtifactMissing)"
 	[[ -n "${SIBLING_CONTENT}" && "${SIBLING_CONTENT}" != "${DATA_CONTENT}" ]] && { content_ready_true "${SIBLING_CONTENT}" \
 		&& note "sibling isolation held under VSC delete" || die "sibling content ${SIBLING_CONTENT} not Ready under VSC delete (isolation broken)"; }
@@ -2486,12 +2489,12 @@ else
 		MCP_REFS_CHUNK_AFTER="$(kubectl get "${MCP_RES}" "${LEAF_MCP}" -o json 2>/dev/null \
 			| jq -r --arg c "${CHUNK}" '[(.status.chunks // [])[] | (if type=="object" then (.name // .) else . end)] | index($c) != null' 2>/dev/null || echo unknown)"
 		note "MCP.status.chunks still references ${CHUNK} after delete+bump: ${MCP_REFS_CHUNK_AFTER} (expected true: dangling ref, list not rewritten away)"
-		wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} RequestsReady=False after chunk delete + bump" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"RequestsReady\")][0].status)//\"\"') == False ]]" \
-			|| die "leaf content ${LEAF_CONTENT} RequestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after chunk delete + MCP bump (integrity revalidation did not fail closed)"
-		RR_MSG="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" RequestsReady message)"
-		echo "${RR_MSG}" | grep -q "${CHUNK}" && note "RequestsReady message names missing chunk ${CHUNK}" \
-			|| note "RequestsReady message does not name missing chunk (informational; msg=[${RR_MSG}])"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "leaf content ${LEAF_CONTENT} ManifestsReady=False after chunk delete + bump" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${LEAF_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ManifestsReady\")][0].status)//\"\"') == False ]]" \
+			|| die "leaf content ${LEAF_CONTENT} ManifestsReady did not flip False within ${INVALIDATION_WAIT_SEC}s after chunk delete + MCP bump (integrity revalidation did not fail closed)"
+		RR_MSG="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" ManifestsReady message)"
+		echo "${RR_MSG}" | grep -q "${CHUNK}" && note "ManifestsReady message names missing chunk ${CHUNK}" \
+			|| note "ManifestsReady message does not name missing chunk (informational; msg=[${RR_MSG}])"
 		note "LIMITATION: chunk deletion alone does not wake reconcile; an MCP update/bump is required (no chunk->MCP watch in Phase 2a)"
 		fi
 		save_artifacts "11-chunk-missing" "${NS}"

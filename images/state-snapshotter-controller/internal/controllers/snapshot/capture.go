@@ -156,9 +156,9 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			// (BuildRootNamespaceManifestCaptureTargets) when a descendant ManifestCheckpoint is terminally
 			// Failed, so the root's exclude set cannot be computed and the root MCR/MCP is NOT created yet.
 			// At this point the root SnapshotContent has no published manifestCheckpointName, so it cannot
-			// express the root's own RequestsReady terminal failure — hence the local failCapture bridge.
+			// express the root's own manifest leg (ManifestsReady) terminal failure — hence the local failCapture bridge.
 			// The underlying descendant terminal failure is ALSO representable via the content tree
-			// (descendant content RequestsReady=False -> ancestor ChildrenReady=False -> root content Ready
+			// (descendant content ManifestsReady=False -> ancestor ChildrenReady=False -> root content Ready
 			// =False -> root Snapshot mirror) once child content refs are published; converting this to pure
 			// content-driven propagation is a deferred follow-up (out of scope for Slice 3), not a hidden
 			// post-publish recompute.
@@ -203,7 +203,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if apierrors.IsNotFound(err) {
 			// After bind, Snapshot.Ready is a mirror of bound SnapshotContent.Ready (INV-COND4): the content
-			// controller computes RequestsReady from the published manifestCheckpointName. Do NOT write a
+			// controller computes ManifestsReady from the published manifestCheckpointName. Do NOT write a
 			// local pending reason here (no second source of truth).
 			if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); mErr != nil {
 				return ctrl.Result{}, mErr
@@ -216,7 +216,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
 	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
 		// After bind the Snapshot never writes semantic Ready state (INV-COND4) — not even a terminal MCP
-		// failure. SnapshotContent aggregation owns RequestsReady/Ready (ManifestCheckpointFailed included)
+		// failure. SnapshotContent aggregation owns ManifestsReady/Ready (ManifestCheckpointFailed included)
 		// from the published manifestCheckpointName; the Snapshot only mirrors it. Eventual consistency: if
 		// content has not recomputed yet the mirror falls back to ContentBindingPending and we requeue.
 		if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); mErr != nil {

@@ -39,7 +39,7 @@ import (
 
 // Phase 2a damaged-artifact wake-up (MCP path): a SnapshotContent that reached Ready=True via a Ready
 // ManifestCheckpoint must, when that MCP later flips to Ready=False/Failed, be woken by the MCP watch
-// (ownerRef MCP -> SnapshotContent) and recompute RequestsReady=False / Ready=False with
+// (ownerRef MCP -> SnapshotContent) and recompute ManifestsReady=False / Ready=False with
 // reason ManifestCheckpointFailed. No content spec/status edit triggers the flip — only the MCP event.
 var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Serial, func() {
 	It("flips content Ready=False/ManifestCheckpointFailed when the bound MCP fails", func() {
@@ -111,7 +111,7 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 			})
 		})
 
-		// MCP watch wakes the owning content; it recomputes RequestsReady=False -> Ready=False/ManifestCheckpointFailed.
+		// MCP watch wakes the owning content; it recomputes ManifestsReady=False -> Ready=False/ManifestCheckpointFailed.
 		Eventually(func(g Gomega) {
 			c := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, c)).To(Succeed())

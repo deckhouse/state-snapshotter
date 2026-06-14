@@ -19,9 +19,10 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// --- Revalidation semantics (Phase 2a): MCP state surfaced only through RequestsReady ---
+// --- Revalidation semantics (Phase 2a): MCP state surfaced only through ManifestsReady ---
 
-// manifestCheckpointName set, MCP NotFound -> pending (legitimate publish-before-create window).
+// manifestCheckpointName set, MCP NotFound -> manifest leg pending (legitimate publish-before-create
+// window). While the manifest leg is not Ready, the volume leg is Unknown/ManifestCapturePending.
 func TestContentPlanMCPNotFoundPending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -33,8 +34,11 @@ func TestContentPlanMCPNotFoundPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.requestsReady != metav1.ConditionFalse || plan.requestsFailed {
-		t.Fatalf("requestsReady=%s failed=%v, want False/non-terminal", plan.requestsReady, plan.requestsFailed)
+	if plan.manifestsReady != metav1.ConditionFalse || plan.manifestsFailed {
+		t.Fatalf("manifestsReady=%s failed=%v, want False/non-terminal", plan.manifestsReady, plan.manifestsFailed)
+	}
+	if plan.volumesReady != metav1.ConditionUnknown || plan.volumesReason != snapshot.ReasonManifestCapturePending {
+		t.Fatalf("volumesReady=%s/%s, want Unknown/%s (volume leg not evaluated yet)", plan.volumesReady, plan.volumesReason, snapshot.ReasonManifestCapturePending)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCapturePending {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonManifestCapturePending)
@@ -57,8 +61,11 @@ func TestContentPlanMCPFailedTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.requestsReady != metav1.ConditionFalse || !plan.requestsFailed {
-		t.Fatalf("requestsReady=%s failed=%v, want False/terminal", plan.requestsReady, plan.requestsFailed)
+	if plan.manifestsReady != metav1.ConditionFalse || !plan.manifestsFailed {
+		t.Fatalf("manifestsReady=%s failed=%v, want False/terminal", plan.manifestsReady, plan.manifestsFailed)
+	}
+	if plan.volumesReady != metav1.ConditionUnknown {
+		t.Fatalf("volumesReady=%s, want Unknown (volume leg not evaluated under manifest failure)", plan.volumesReady)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCheckpointFailed {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonManifestCheckpointFailed)
@@ -81,7 +88,7 @@ func TestContentPlanMCPNonTerminalFalsePending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.requestsFailed {
+	if plan.manifestsFailed {
 		t.Fatalf("non-terminal MCP Ready=False must not be terminal")
 	}
 	if plan.readyReason != snapshot.ReasonManifestCapturePending {
@@ -106,8 +113,8 @@ func TestContentPlanChunkMissingTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.requestsReady != metav1.ConditionFalse || !plan.requestsFailed {
-		t.Fatalf("requestsReady=%s failed=%v, want False/terminal", plan.requestsReady, plan.requestsFailed)
+	if plan.manifestsReady != metav1.ConditionFalse || !plan.manifestsFailed {
+		t.Fatalf("manifestsReady=%s failed=%v, want False/terminal", plan.manifestsReady, plan.manifestsFailed)
 	}
 	if plan.readyReason != snapshot.ReasonManifestCheckpointFailed {
 		t.Fatalf("ready reason=%s, want %s", plan.readyReason, snapshot.ReasonManifestCheckpointFailed)
@@ -335,7 +342,7 @@ func TestSelfHealVSCDeletingNotPatched(t *testing.T) {
 
 // --- Propagation: terminal vs pending child classification, with sibling isolation ---
 
-// A leaf RequestsReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
+// A leaf VolumesReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
 // and only the failed child drives the failure (the ready sibling is untouched).
 func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	ctx := context.Background()
@@ -362,7 +369,7 @@ func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	}
 }
 
-// A leaf RequestsReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
+// A leaf VolumesReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
 // not ChildrenFailed (a transient child must not fail the tree).
 func TestPropagationDataCapturePendingToChildrenPending(t *testing.T) {
 	ctx := context.Background()

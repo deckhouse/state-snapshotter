@@ -36,7 +36,7 @@ import (
 // Intentionally NOT gated on current MCP Ready / content Ready (the previous behavior). Once the MCP
 // is published and its ownership is handed off to the SnapshotContent, manifest capture is DONE for
 // this content. A later MCP Ready=False/Failed (durable post-publish artifact degradation) must be
-// reflected by status (SnapshotContentController -> SnapshotContent.RequestsReady=False/
+// reflected by status (SnapshotContentController -> SnapshotContent.ManifestsReady=False/
 // ManifestCheckpointFailed -> tree), NOT silently repaired by re-running capture. Gating handoff on
 // MCP readiness made a failed published MCP look like "capture incomplete", which caused the demo
 // reconciler to create a fresh MCR/MCP and mask the failure (re-capture). Ownership is the durable

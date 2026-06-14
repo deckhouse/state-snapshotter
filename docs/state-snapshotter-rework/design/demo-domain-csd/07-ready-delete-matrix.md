@@ -56,9 +56,9 @@
 
 **Текущая runtime-модель** (нормативно — [`spec/system-spec.md`](../../spec/system-spec.md) §3.8 / §3.9.7):
 
-- Готовность вычисляется **ровно на `SnapshotContent`** (единственный агрегатор, INV-COND2): `SnapshotContent.Ready = RequestsReady && ChildrenReady`.
+- Готовность вычисляется **ровно на `SnapshotContent`** (единственный агрегатор, INV-COND2): `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildrenReady`.
 - `Snapshot.Ready` — **зеркало** bound `SnapshotContent.Ready` (status/reason/message копируются), без локального пересчёта дерева (INV-COND4).
-- Приоритет reason у `Ready` (один reason при нескольких упавших ногах): `RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending > Completed` — терминальные провалы первыми, свой узел перед детьми.
+- Приоритет reason у `Ready` (один reason при нескольких упавших ногах): `manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed` — терминальные провалы первыми, свой узел перед детьми (manifest перед volume).
 - Failure листа поднимается **только** по ancestor-chain (INV-FAIL1): каждый предок получает `ChildrenReady=False` / `Ready=False` / reason `ChildrenFailed`, а `message` сохраняет имя failed-потомка и исходный reason/message (кумулятивно по глубине); sibling-ветки не затрагиваются.
 - Единственное не-mirror исключение для `Snapshot.Ready` — bridge терминального capture-failure дочернего **`Snapshot`**, который дерево контента ещё не может выразить (терминальные child-failure'ы вычисляет `usecase.SummarizeChildSnapshotTerminalFailures`, **без** pending-агрегации).
 - Для child selection используется strict ref (`apiVersion`/`kind`/`name`) и один `Get` в namespace родителя.
@@ -69,7 +69,7 @@
 2. Каждый предок-`SnapshotContent` при агрегации видит ребёнка `Ready=False` → выставляет `ChildrenReady=False` / `Ready=False` (reason `ChildrenFailed`) и сохраняет имя/первопричину в `message`.
 3. Каскад **до корня**: root `SnapshotContent`, затем root `Snapshot.Ready` как зеркало.
 
-**Политика `reason` / `message`:** reason родительского `SnapshotContent` выбирается по приоритету §3.9.7 (`RequestsFailed > ChildrenFailed > RequestsPending > ChildrenPending`), а не по лексикографическому порядку refs. В `message` допускается контекст по дочерним узлам.
+**Политика `reason` / `message`:** reason родительского `SnapshotContent` выбирается по приоритету §3.9.7 (`manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending`), а не по лексикографическому порядку refs. В `message` допускается контекст по дочерним узлам.
 
 **INV-R5 (несколько детей с разными `reason`).** При нескольких неготовых детях reason родителя определяется тем же приоритетом (`ChildrenFailed` приоритетнее `ChildrenPending`), без tie-break по ключу refs.
 

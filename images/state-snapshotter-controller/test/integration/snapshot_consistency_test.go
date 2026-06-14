@@ -205,7 +205,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 
 		It("should NOT set Ready=False when Content is missing (never was Ready=True)", func() {
 			// PRECONDITION: Create Snapshot with contentName but Content doesn't exist
-			// Snapshot was NEVER Ready=True (still binding / RequestsReady pending)
+			// Snapshot was NEVER Ready=True (still binding / ManifestsReady pending)
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-missing-content-never-ready")

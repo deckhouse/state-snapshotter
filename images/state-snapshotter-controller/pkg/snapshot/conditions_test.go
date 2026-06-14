@@ -445,15 +445,15 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 
 		// Set multiple conditions
 		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
-		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
 
 		// All conditions should exist
 		if GetCondition(obj, ConditionReady) == nil {
 			t.Error("Expected Ready condition to exist")
 		}
-		if GetCondition(obj, ConditionRequestsReady) == nil {
-			t.Error("Expected RequestsReady condition to exist")
+		if GetCondition(obj, ConditionManifestsReady) == nil {
+			t.Error("Expected ManifestsReady condition to exist")
 		}
 		if GetCondition(obj, ConditionChildrenReady) == nil {
 			t.Error("Expected ChildrenReady condition to exist")
@@ -618,7 +618,7 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 			conditions: []metav1.Condition{},
 		}
 		// Set a different condition
-		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		// Try to get Ready condition (doesn't exist)
 		cond := GetCondition(obj, ConditionReady)
 		if cond != nil {
@@ -633,7 +633,7 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 		}
 		// Set multiple conditions
 		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
-		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
 
 		// Get Ready condition
@@ -648,13 +648,13 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 			t.Errorf("Expected Ready condition status=True, got %v", readyCond.Status)
 		}
 
-		// Get RequestsReady condition
-		requestsReadyCond := GetCondition(obj, ConditionRequestsReady)
-		if requestsReadyCond == nil {
-			t.Fatal("Expected RequestsReady condition to exist")
+		// Get ManifestsReady condition
+		manifestsReadyCond := GetCondition(obj, ConditionManifestsReady)
+		if manifestsReadyCond == nil {
+			t.Fatal("Expected ManifestsReady condition to exist")
 		}
-		if requestsReadyCond.Type != ConditionRequestsReady {
-			t.Errorf("Expected condition type=%s, got %s", ConditionRequestsReady, requestsReadyCond.Type)
+		if manifestsReadyCond.Type != ConditionManifestsReady {
+			t.Errorf("Expected condition type=%s, got %s", ConditionManifestsReady, manifestsReadyCond.Type)
 		}
 	})
 }
@@ -693,7 +693,7 @@ func TestHasCondition_EdgeCases(t *testing.T) {
 			conditions: []metav1.Condition{},
 		}
 		// Set a different condition
-		SetCondition(obj, ConditionRequestsReady, metav1.ConditionTrue, "Processing", "In progress")
+		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		// Check for Ready condition (doesn't exist)
 		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
 		if has {

@@ -237,7 +237,7 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 // TestDemoVirtualDiskSnapshot_FailedHandedOffMCPDoesNotRecapture mirrors live tree-demo Stage 06.
 // Once the demo disk snapshot has published its ManifestCheckpoint and the MCP is handed off (owned)
 // by the SnapshotContent, patching that MCP Ready=False/Failed is a durable post-publish degradation:
-// SnapshotContentController must degrade the content (RequestsReady=False/ManifestCheckpointFailed),
+// SnapshotContentController must degrade the content (ManifestsReady=False/ManifestCheckpointFailed),
 // the demo snapshot must mirror Ready=False, and the demo reconciler must NOT create a fresh MCR/MCP
 // (no re-capture that would silently mask the failure).
 func TestDemoVirtualDiskSnapshot_FailedHandedOffMCPDoesNotRecapture(t *testing.T) {
@@ -336,8 +336,8 @@ func TestDemoVirtualDiskSnapshot_FailedHandedOffMCPDoesNotRecapture(t *testing.T
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
 		t.Fatalf("get content after MCP failure: %v", err)
 	}
-	if rr := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionRequestsReady); rr == nil || rr.Status != metav1.ConditionFalse || rr.Reason != snapshot.ReasonManifestCheckpointFailed {
-		t.Fatalf("expected content RequestsReady=False/ManifestCheckpointFailed, got %#v", rr)
+	if rr := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionManifestsReady); rr == nil || rr.Status != metav1.ConditionFalse || rr.Reason != snapshot.ReasonManifestCheckpointFailed {
+		t.Fatalf("expected content ManifestsReady=False/ManifestCheckpointFailed, got %#v", rr)
 	}
 	if cr := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady); cr == nil || cr.Status != metav1.ConditionFalse {
 		t.Fatalf("expected content Ready=False after MCP failure, got %#v", cr)

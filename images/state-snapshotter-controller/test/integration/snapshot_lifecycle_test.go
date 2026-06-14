@@ -452,7 +452,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// ACTIONS Step 4: drive the bound (common) SnapshotContent genuinely Ready. The controller owns
 			// Ready, so the test must not force-write it: publish a Ready ManifestCheckpoint and link it via
 			// status.manifestCheckpointName, then let the SnapshotContentController compute
-			// RequestsReady=True/Ready=True (the content has no children and no data refs). The generic binder
+			// ManifestsReady=True/VolumesReady=True/Ready=True (the content has no children and no data refs). The generic binder
 			// does not build a root MCR and does not touch manifestCheckpointName while
 			// status.manifestCaptureRequestName is empty, so this link is stable.
 			boundContent := &storagev1alpha1.SnapshotContent{}

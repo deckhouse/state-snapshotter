@@ -21,16 +21,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Condition types: the final 4-condition model (ChildrenSnapshotReady, RequestsReady, ChildrenReady, Ready).
+// Condition types: the public condition model
+// (ChildrenSnapshotReady, ManifestsReady, VolumesReady, ChildrenReady, Ready).
 const (
 	// ConditionReady indicates the object is ready for use.
-	// On SnapshotContent it is the single aggregate: Ready = RequestsReady && ChildrenReady.
+	// On SnapshotContent it is the single aggregate: Ready = ManifestsReady && VolumesReady && ChildrenReady.
 	// On Snapshot it mirrors the bound SnapshotContent.Ready, except for terminal child-Snapshot capture failures.
 	ConditionReady = "Ready"
 
-	// ConditionRequestsReady reports that this node's own requests completed and durable refs are
-	// published on SnapshotContent (manifestCheckpointName, dataRefs[]). It does not consider children.
-	ConditionRequestsReady = "RequestsReady"
+	// ConditionManifestsReady reports this node's own manifest leg readiness: the manifest
+	// capture checkpoint (status.manifestCheckpointName) is published and Ready (empty archive counts).
+	// It does not consider the volume leg or children.
+	ConditionManifestsReady = "ManifestsReady"
+
+	// ConditionVolumesReady reports this node's own volume/data leg readiness: all required data
+	// artifacts (status.dataRefs[]) are Ready (an empty dataRefs[] is VolumesReady=True vacuously).
+	// It does not consider the manifest leg or children.
+	ConditionVolumesReady = "VolumesReady"
 
 	// ConditionChildrenReady reports that all child SnapshotContents are Ready=True
 	// (a leaf with no children is ChildrenReady=True vacuously).
@@ -48,7 +55,7 @@ const (
 	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
 	ReasonArtifactMissing      = "ArtifactMissing"
 	// ReasonArtifactNotReady is an internal/compat reason for "artifact exists but not ready yet".
-	// The data leg surfaces this state on RequestsReady/Ready as ReasonDataCapturePending (progress-aware);
+	// The data leg surfaces this state on VolumesReady/Ready as ReasonDataCapturePending (progress-aware);
 	// ReasonArtifactNotReady is retained for internal classification and backward compatibility.
 	ReasonArtifactNotReady = "ArtifactNotReady"
 	// ReasonDataCapturePending is the surfaced pending reason for the data leg: published data artifacts

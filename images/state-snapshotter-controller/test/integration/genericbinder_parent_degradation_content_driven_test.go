@@ -214,7 +214,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		Eventually(parentContentConditionIs(snapshot.ConditionChildrenReady, metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
 			Should(Succeed(), "parent SnapshotContent.ChildrenReady must fall to False after the child content degrades")
 		Eventually(parentContentConditionIs(snapshot.ConditionReady, metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
-			Should(Succeed(), "parent SnapshotContent.Ready must fall to False (Ready = RequestsReady && ChildrenReady)")
+			Should(Succeed(), "parent SnapshotContent.Ready must fall to False (Ready = ManifestsReady && VolumesReady && ChildrenReady)")
 		Eventually(parentSnapshotReadyIs(metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
 			Should(Succeed(), "parent Snapshot.Ready must fall to False via SnapshotContent ChildrenReady + mirror, NOT via recursive snapshot patching")
 
