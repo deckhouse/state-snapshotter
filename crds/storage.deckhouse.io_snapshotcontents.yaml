@@ -16,7 +16,26 @@ spec:
     singular: snapshotcontent
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ManifestsReady")].status
+      name: Manifests
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="VolumesReady")].status
+      name: Volumes
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ChildrenReady")].status
+      name: Children
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: SnapshotContent holds the result of a snapshot (shared carrier
