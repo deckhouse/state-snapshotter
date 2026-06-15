@@ -121,6 +121,15 @@ rules:
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
+# VolumeRestoreRequest (storage-foundation): SnapshotExport ensures one per data leaf
+# (VolumeSnapshotContent -> PVC) in the export namespace and reads its Ready condition.
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumerestorerequests"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumerestorerequests/status"]
+  verbs: ["get", "update", "patch"]
+
 # SnapshotExport / SnapshotImport orchestration CRs (namespaced): the controllers watch them and
 # write status + manage their finalizer (update on the primary resource). The CRs themselves are
 # created/deleted by the d8 snapshot CLI (see admin-kubeconfig role), not by the controller.

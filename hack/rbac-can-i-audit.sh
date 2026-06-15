@@ -31,6 +31,8 @@ can_i "${SA}" create manifestcheckpoints.state-snapshotter.deckhouse.io
 can_i "${SA}" patch snapshotcontents.storage.deckhouse.io/status
 can_i "${SA}" create volumecapturerequests.storage.deckhouse.io -n "${NS}"
 can_i "${SA}" delete volumecapturerequests.storage.deckhouse.io -n "${NS}"
+can_i "${SA}" create volumerestorerequests.storage.deckhouse.io -n "${NS}"
+can_i "${SA}" delete volumerestorerequests.storage.deckhouse.io -n "${NS}"
 can_i "${SA}" patch volumesnapshotcontents.snapshot.storage.k8s.io
 can_i "${SA}" list manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io
 
