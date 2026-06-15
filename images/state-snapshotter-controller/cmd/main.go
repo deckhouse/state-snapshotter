@@ -50,6 +50,7 @@ import (
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
@@ -210,12 +211,11 @@ func main() {
 	}
 	log.Info("NamespaceGenericSnapshotBinderController added to manager")
 
-	if err := controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr, cfgParams); err != nil {
-		log.Error(err, "Failed to add DemoVirtualDiskGenericSnapshotBinderController to manager")
-		cancel()
-		os.Exit(1)
-	}
-	log.Info("DemoVirtualDiskGenericSnapshotBinderController added to manager")
+	// Demo dedicated controllers (DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot) are NOT
+	// registered at boot. Their informers require cluster-scoped RBAC on demo.* that the Deckhouse
+	// hook grants only after the CSD becomes Accepted=True; registering them here would block the
+	// manager's cache sync on forbidden list/watch and deadlock CSD reconciliation. They are activated
+	// lazily by the unified runtime Syncer once the CSD is watch-eligible (Accepted+RBACReady).
 
 	if err := controllers.AddSnapshotExportControllerToManager(mgr); err != nil {
 		log.Error(err, "Failed to add SnapshotExportController to manager")
@@ -230,13 +230,6 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("SnapshotImportController added to manager")
-
-	if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, cfgParams); err != nil {
-		log.Error(err, "Failed to add DemoVirtualMachineGenericSnapshotBinderController to manager")
-		cancel()
-		os.Exit(1)
-	}
-	log.Info("DemoVirtualMachineGenericSnapshotBinderController added to manager")
 
 	contentController, err := controllers.NewSnapshotContentController(
 		mgr.GetClient(),
@@ -320,6 +313,20 @@ func main() {
 	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
+	// Activators for the demo dedicated controllers. The Syncer invokes each one at most once, only
+	// after the matching CSD is watch-eligible (Accepted+RBACReady) so the demo.* RBAC granted by the
+	// hook is already in place. DemoVirtualDiskSnapshot must be registered before DemoVirtualMachineSnapshot
+	// (the VM controller Watches the disk snapshot type); the Syncer enforces that order via
+	// unifiedbootstrap.DedicatedSnapshotControllerKinds.
+	demoActivators := map[string]unifiedruntime.DedicatedControllerActivator{
+		controllercommon.KindDemoVirtualDiskSnapshot: func(m ctrl.Manager) error {
+			return controllers.AddDemoVirtualDiskSnapshotControllerToManager(m, cfgParams)
+		},
+		controllercommon.KindDemoVirtualMachineSnapshot: func(m ctrl.Manager) error {
+			return controllers.AddDemoVirtualMachineSnapshotControllerToManager(m, cfgParams)
+		},
+	}
+
 	unifiedSync := unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
@@ -327,6 +334,7 @@ func main() {
 		mgr.GetAPIReader(),
 		snapshotController,
 		contentController,
+		demoActivators,
 	)
 
 	if err := controllers.AddCustomSnapshotDefinitionControllerToManager(mgr, log, cfgParams, unifiedSync.Sync, graphRegProvider.Refresh); err != nil {

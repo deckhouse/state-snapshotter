@@ -48,6 +48,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -759,10 +760,20 @@ var _ = BeforeSuite(func() {
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
-	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
-	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
+	// Demo dedicated controllers are NOT registered at boot (mirrors cmd/main.go). They are activated by
+	// the unified runtime Syncer via demoActivators once their CSD is watch-eligible. The suite activates
+	// them through that real deferred path below (see "activate demo dedicated controllers").
 	Expect(controllers.AddSnapshotExportControllerToManager(mgr)).To(Succeed())
 	Expect(controllers.AddSnapshotImportControllerToManager(mgr)).To(Succeed())
+
+	demoActivators := map[string]unifiedruntime.DedicatedControllerActivator{
+		controllercommon.KindDemoVirtualDiskSnapshot: func(m ctrl.Manager) error {
+			return controllers.AddDemoVirtualDiskSnapshotControllerToManager(m, testCfg)
+		},
+		controllercommon.KindDemoVirtualMachineSnapshot: func(m ctrl.Manager) error {
+			return controllers.AddDemoVirtualMachineSnapshotControllerToManager(m, testCfg)
+		},
+	}
 
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,
@@ -771,6 +782,7 @@ var _ = BeforeSuite(func() {
 		mgr.GetAPIReader(),
 		snapshotController,
 		contentController,
+		demoActivators,
 	)
 	Expect(controllers.AddCustomSnapshotDefinitionControllerToManager(mgr, integrationLog, testCfg, unifiedSyncer.Sync, integrationSnapshotGraphRegistryRefresh)).To(Succeed())
 
@@ -814,6 +826,32 @@ var _ = BeforeSuite(func() {
 	Eventually(func() error {
 		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"})
 	}).Should(Succeed(), "RESTMapper should discover RegistrationTestSnapshot")
+
+	// Activate demo dedicated controllers through the real deferred path: create a temporary eligible
+	// CSD (disk+VM), wait until the unified runtime Syncer registers both demo controllers, then delete
+	// it and refresh the graph registry. controller-runtime controllers are never unregistered and
+	// activeSnapshotGVKKeys is monotonic, so the demo controllers stay running for the whole suite (like
+	// the previous boot registration) — while the snapshot graph registry is left empty of demo kinds at
+	// suite start, so CSD-gated discovery specs still observe "no demo without CSD". This exercises the
+	// production activation path instead of registering demo controllers eagerly at boot.
+	const suiteDemoBootstrapCSD = "integration-suite-bootstrap-demo"
+	createEligibleDemoVMAndDiskCSD(testCtx, suiteDemoBootstrapCSD)
+	demoDiskSnapshotKey := demov1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindDemoVirtualDiskSnapshot).String()
+	demoVMSnapshotKey := demov1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindDemoVirtualMachineSnapshot).String()
+	Eventually(func(g Gomega) {
+		keys := unifiedSyncer.ActiveSnapshotGVKKeys()
+		g.Expect(keys).To(HaveKey(demoDiskSnapshotKey))
+		g.Expect(keys).To(HaveKey(demoVMSnapshotKey))
+	}).WithTimeout(60 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed(),
+		"unified runtime Syncer should activate both demo dedicated controllers after the CSD is watch-eligible")
+	Expect(client.IgnoreNotFound(k8sClient.Delete(testCtx, &ssv1alpha1.CustomSnapshotDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: suiteDemoBootstrapCSD},
+	}))).To(Succeed())
+	Eventually(func() bool {
+		err := k8sClient.Get(testCtx, client.ObjectKey{Name: suiteDemoBootstrapCSD}, &ssv1alpha1.CustomSnapshotDefinition{})
+		return errors.IsNotFound(err)
+	}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
+	Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())
 
 	// Create default BackupClass for tests (after client is ready)
 	backupClassObj := &unstructured.Unstructured{}
