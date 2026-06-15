@@ -645,6 +645,11 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// Minimal cross-repo CRDs (VolumeRestoreRequest, DataExport, DataImport) driven as unstructured by
+	// the SnapshotExport/SnapshotImport controllers; the export/import integration specs simulate the
+	// external controllers by writing their status directly.
+	integrationInstallExportImportCRDs(testCtx, cfg)
+
 	crdEstablished := func(name string) bool {
 		obj, err := crdClient.CustomResourceDefinitions().Get(testCtx, name, metav1.GetOptions{})
 		if err != nil {
@@ -666,6 +671,11 @@ var _ = BeforeSuite(func() {
 		"backupclasses.storage.deckhouse.io",
 		"snapshots.storage.deckhouse.io",
 		"snapshotcontents.storage.deckhouse.io",
+		"snapshotexports.storage.deckhouse.io",
+		"snapshotimports.storage.deckhouse.io",
+		"volumerestorerequests.storage.deckhouse.io",
+		"dataexports.storage.deckhouse.io",
+		"dataimports.storage.deckhouse.io",
 		"demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 		"demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
 		"demovirtualmachines.demo.state-snapshotter.deckhouse.io",
@@ -740,6 +750,8 @@ var _ = BeforeSuite(func() {
 	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
 	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
 	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, testCfg)).To(Succeed())
+	Expect(controllers.AddSnapshotExportControllerToManager(mgr)).To(Succeed())
+	Expect(controllers.AddSnapshotImportControllerToManager(mgr)).To(Succeed())
 
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,
@@ -771,6 +783,7 @@ var _ = BeforeSuite(func() {
 	}).Should(BeTrue())
 
 	integrationEnsureVolumeCaptureRequestCRD(testCtx, cfg)
+	integrationWaitExportImportMappings()
 
 	// Wait for RESTMapper to discover test GVKs (avoid discovery race)
 	waitForMapping := func(gvk schema.GroupVersionKind) error {
