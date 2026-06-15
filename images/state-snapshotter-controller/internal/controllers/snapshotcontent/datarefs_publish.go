@@ -20,14 +20,81 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
+
+// EnrichDataBindingsWithVolumeMetadata fills volumeMode/fsType/accessModes/storageClassName on each
+// PVC-targeted binding by reading the live source PVC (and its bound PV). CSI snapshots are
+// mode-agnostic, so this metadata MUST be captured now to faithfully restore the volume on export
+// (VolumeRestoreRequest builds CSI VolumeCapabilities from it) and to recreate the PVC on import.
+//
+// direct is a non-cached reader used for the cluster-scoped PV read: the controller's RBAC grants only
+// "get" on persistentvolumes, so a cached read would start a cluster-wide PV informer whose initial
+// LIST is Forbidden (and the fsType read would fail). Callers pass their API reader (directReader);
+// when nil it falls back to c.
+//
+// It mutates and returns the same slice. A transient read error is returned so the caller requeues
+// instead of publishing partial metadata (which would otherwise be frozen by the steady-state coverage
+// gate). Only a genuinely-gone source PVC (NotFound) is tolerated: it is logged and its binding's
+// metadata is left empty, since there is nothing left to read.
+func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, direct client.Reader, bindings []storagev1alpha1.SnapshotDataBinding) ([]storagev1alpha1.SnapshotDataBinding, error) {
+	if direct == nil {
+		direct = c
+	}
+	log := logf.FromContext(ctx)
+	for i := range bindings {
+		b := &bindings[i]
+		if b.Target.Kind != "PersistentVolumeClaim" || b.Target.Name == "" {
+			continue
+		}
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: b.Target.Namespace, Name: b.Target.Name}, pvc); err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("source PVC gone; skipping volume-metadata enrichment",
+					"pvc", b.Target.Namespace+"/"+b.Target.Name)
+				continue
+			}
+			return bindings, fmt.Errorf("read source PVC %s/%s for volume metadata: %w", b.Target.Namespace, b.Target.Name, err)
+		}
+		// PVC.spec.volumeMode defaults to Filesystem when nil (Kubernetes semantics).
+		if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != "" {
+			b.VolumeMode = string(*pvc.Spec.VolumeMode)
+		} else {
+			b.VolumeMode = string(corev1.PersistentVolumeFilesystem)
+		}
+		if len(pvc.Spec.AccessModes) > 0 {
+			modes := make([]string, 0, len(pvc.Spec.AccessModes))
+			for _, am := range pvc.Spec.AccessModes {
+				modes = append(modes, string(am))
+			}
+			b.AccessModes = modes
+		}
+		if pvc.Spec.StorageClassName != nil {
+			b.StorageClassName = *pvc.Spec.StorageClassName
+		}
+		// fsType lives on the bound PV's CSI source (ignored for Block volumes). Read via the direct
+		// reader so the get-only PV RBAC suffices and no cluster-wide PV cache is started.
+		if b.VolumeMode != string(corev1.PersistentVolumeBlock) && pvc.Spec.VolumeName != "" {
+			pv := &corev1.PersistentVolume{}
+			if err := direct.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
+				return bindings, fmt.Errorf("read bound PV %s for fsType of PVC %s/%s: %w", pvc.Spec.VolumeName, b.Target.Namespace, b.Target.Name, err)
+			}
+			if pv.Spec.CSI != nil {
+				b.FsType = pv.Spec.CSI.FSType
+			}
+		}
+	}
+	return bindings, nil
+}
 
 // PublishSnapshotContentDataRefs copies durable data bindings onto logical SnapshotContent (N5 PR-4).
 func PublishSnapshotContentDataRefs(ctx context.Context, c client.Client, contentName string, refs []storagev1alpha1.SnapshotDataBinding) error {
@@ -148,6 +215,24 @@ func snapshotDataRefsEqual(a, b []storagev1alpha1.SnapshotDataBinding) bool {
 			return false
 		}
 		if x.Artifact != y.Artifact {
+			return false
+		}
+		if x.VolumeMode != y.VolumeMode || x.FsType != y.FsType || x.StorageClassName != y.StorageClassName {
+			return false
+		}
+		if !stringSlicesEqual(x.AccessModes, y.AccessModes) {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

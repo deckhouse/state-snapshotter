@@ -74,6 +74,14 @@ const (
 	// is a verbatim mirror of SnapshotContent.Ready and this reason is not used.
 	ReasonContentBindingPending = "ContentBindingPending"
 	ReasonDeleting              = "Deleting"
+	// ReasonSourceContentNotFound is the non-terminal static-bind reason on a Snapshot whose
+	// spec.source.snapshotContentName references a SnapshotContent that does not exist yet (the import
+	// controller may not have pre-provisioned it). The controller requeues without failing terminally.
+	ReasonSourceContentNotFound = "SourceContentNotFound"
+	// ReasonSnapshotContentMisbound is the terminal static-bind reason when the referenced
+	// SnapshotContent.spec.snapshotRef does not point back at this Snapshot (cross-binding). Because
+	// SnapshotContent.spec is immutable, the only fix is editing spec.source, so this is not requeued.
+	ReasonSnapshotContentMisbound = "SnapshotContentMisbound"
 
 	// ReasonChildrenPending is set while a required child SnapshotContent/Snapshot is not yet bound,
 	// has no Ready condition, is Ready=False with a non-terminal reason, or root capture is not complete
