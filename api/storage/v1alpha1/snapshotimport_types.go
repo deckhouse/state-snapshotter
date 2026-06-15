@@ -33,6 +33,8 @@ const (
 	// SnapshotImportConditionCaptured is True once every populated PVC has been captured into a
 	// durable VolumeSnapshotContent (via VolumeCaptureRequest).
 	SnapshotImportConditionCaptured = "Captured"
+	// SnapshotImportConditionDataReceived is True once every data upload has been signalled finished.
+	SnapshotImportConditionDataReceived = "DataReceived"
 	// SnapshotImportConditionReady is True once the snapshot tree has been pre-provisioned.
 	SnapshotImportConditionReady = "Ready"
 )
@@ -42,6 +44,21 @@ const (
 	// SnapshotImportReasonStorageClassMappingRequired marks UploadsPrepared=False when one or more
 	// source StorageClasses cannot be resolved in the target cluster and need spec.storageClassMapping.
 	SnapshotImportReasonStorageClassMappingRequired = "StorageClassMappingRequired"
+	// SnapshotImportReasonDataSizeUnknown marks UploadsPrepared=False when a data node has no known
+	// volume size in the index; a sizeless PVC template would be rejected, so it fails closed.
+	SnapshotImportReasonDataSizeUnknown = "DataSizeUnknown"
+	// SnapshotImportReasonIndexUnreadable marks UploadsPrepared=False when the uploaded index cannot
+	// be read or parsed.
+	SnapshotImportReasonIndexUnreadable = "IndexUnreadable"
+	// SnapshotImportReasonUploadsPending / ReasonAllUploadsReady track per-data upload-endpoint readiness.
+	SnapshotImportReasonUploadsPending  = "UploadsPending"
+	SnapshotImportReasonAllUploadsReady = "AllUploadsReady"
+	// SnapshotImportReasonAllDataUploaded marks DataReceived=True once all data uploads finished.
+	SnapshotImportReasonAllDataUploaded = "AllDataUploaded"
+	// SnapshotImportReasonAllCaptured marks Captured=True once all populated PVCs are captured.
+	SnapshotImportReasonAllCaptured = "AllCaptured"
+	// SnapshotImportReasonImported marks Ready=True once the snapshot tree is pre-provisioned.
+	SnapshotImportReasonImported = "Imported"
 )
 
 // +kubebuilder:object:root=true

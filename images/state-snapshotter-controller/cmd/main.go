@@ -217,6 +217,20 @@ func main() {
 	}
 	log.Info("DemoVirtualDiskGenericSnapshotBinderController added to manager")
 
+	if err := controllers.AddSnapshotExportControllerToManager(mgr); err != nil {
+		log.Error(err, "Failed to add SnapshotExportController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("SnapshotExportController added to manager")
+
+	if err := controllers.AddSnapshotImportControllerToManager(mgr); err != nil {
+		log.Error(err, "Failed to add SnapshotImportController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("SnapshotImportController added to manager")
+
 	if err := controllers.AddDemoVirtualMachineSnapshotControllerToManager(mgr, cfgParams); err != nil {
 		log.Error(err, "Failed to add DemoVirtualMachineGenericSnapshotBinderController to manager")
 		cancel()

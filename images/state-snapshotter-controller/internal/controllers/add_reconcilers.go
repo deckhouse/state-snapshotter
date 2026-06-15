@@ -32,6 +32,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	snapshotcontroller "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotexport"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotimport"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -88,6 +90,16 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 
 func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 	return demo.AddDemoVirtualDiskSnapshotControllerToManager(mgr, cfg)
+}
+
+// AddSnapshotExportControllerToManager registers the SnapshotExport reconciler (export orchestration).
+func AddSnapshotExportControllerToManager(mgr ctrl.Manager) error {
+	return snapshotexport.AddSnapshotExportControllerToManager(mgr)
+}
+
+// AddSnapshotImportControllerToManager registers the SnapshotImport reconciler (import orchestration).
+func AddSnapshotImportControllerToManager(mgr ctrl.Manager) error {
+	return snapshotimport.AddSnapshotImportControllerToManager(mgr)
 }
 
 func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
