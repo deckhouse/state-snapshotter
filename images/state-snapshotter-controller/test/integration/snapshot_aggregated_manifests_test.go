@@ -127,7 +127,7 @@ func aggregatedManifestsIntegrationStartServer() *httptest.Server {
 	agg := usecase.NewAggregatedNamespaceManifests(k8sClient, arch, nil)
 	ah := api.NewArchiveHandler(k8sClient, arch, log)
 	rs := restore.NewService(k8sClient, arch)
-	rh := api.NewRestoreHandler(k8sClient, rs, log, agg)
+	rh := api.NewRestoreHandler(k8sClient, rs, log, agg, nil, nil)
 	mux := http.NewServeMux()
 	ah.SetupRoutes(mux)
 	rh.SetupRoutes(mux)

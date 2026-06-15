@@ -4,27 +4,36 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: snapshots.storage.deckhouse.io
+  name: snapshotimports.storage.deckhouse.io
 spec:
   group: storage.deckhouse.io
   names:
-    kind: Snapshot
-    listKind: SnapshotList
-    plural: snapshots
+    kind: SnapshotImport
+    listKind: SnapshotImportList
+    plural: snapshotimports
     shortNames:
-    - snap
-    singular: snapshot
+    - snapimp
+    singular: snapshotimport
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.boundSnapshotContentName
-      name: Content
+    - jsonPath: .spec.snapshotName
+      name: Snapshot
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
       type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'Snapshot requests a namespace state/configuration snapshot (MVP:
-          design snapshot-controller.md).'
+        description: |-
+          SnapshotImport orchestrates uploading (importing) a whole Snapshot hierarchy.
+
+          It is a namespaced, user-facing resource. The controller publishes upload endpoints for the
+          index, the whole-tree manifests and per-data-snapshot volume data; it populates a PVC per data
+          snapshot via DataImport, captures each PVC into a durable VolumeSnapshotContent via
+          VolumeCaptureRequest, then pre-provisions the cluster-scoped SnapshotContent tree and the
+          statically-bound snapshot CRs. All intermediate objects live in this namespace.
         properties:
           apiVersion:
             description: |-
@@ -45,68 +54,30 @@ spec:
             type: object
           spec:
             properties:
-              snapshotClassName:
-                description: SnapshotClassName optionally selects class/policy (aligned
-                  with unified snapshot model; resolution is N2+).
+              publish:
+                description: Publish exposes upload endpoints outside the cluster
+                  (Ingress/Route) when true.
+                type: boolean
+              snapshotName:
+                description: SnapshotName is the desired name of the root Snapshot
+                  to (re)create on import (same namespace).
+                minLength: 1
                 type: string
-              source:
+              storageClassMapping:
+                additionalProperties:
+                  type: string
                 description: |-
-                  Source optionally binds this Snapshot to pre-provisioned content (CSI-like static binding).
-                  When omitted, the controller performs dynamic namespace capture (default behaviour).
-                  When set, the controller takes the static-bind path: it does not create MCR/VCR and
-                  validates that the referenced SnapshotContent points back at this Snapshot via spec.snapshotRef.
-                properties:
-                  snapshotContentName:
-                    description: |-
-                      SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-                      (static pre-provisioning, analogous to volumeSnapshotContentName). It is required when
-                      source is set: presence of spec.source is the signal to take the static-bind path, so an
-                      empty content name would flip the snapshot into static mode with nothing to bind to.
-                    minLength: 1
-                    type: string
-                required:
-                - snapshotContentName
+                  StorageClassMapping optionally remaps source StorageClass names (from the index) to target
+                  StorageClass names. Sources not present in the map are looked up by identity in the cluster.
                 type: object
+            required:
+            - snapshotName
             type: object
           status:
             properties:
-              boundSnapshotContentName:
-                description: |-
-                  BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
-                  The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
-                type: string
-              childrenSnapshotRefs:
-                description: |-
-                  ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
-                  in the N2b run tree. Generic reconcile resolves each child with one Get by ref GVK (no demo-kind
-                  branching and no registry scan for child selection); it is not limited to Snapshot.
-                  Child namespace is implicit and always equals parent Snapshot namespace.
-                  Populated by domain controllers or merge helpers that own graph edges.
-                items:
-                  description: |-
-                    SnapshotChildRef identifies one child snapshot object in the run tree (element of
-                    status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
-                    generic code resolves the object with a single client Get — no registry scan and no ambiguity.
-
-                    Snapshot-run tree is namespace-local to the root Snapshot: the child object MUST live
-                    in the same namespace as that parent. Namespace is implicit and always taken from parent
-                    Snapshot namespace. Cross-namespace refs are not part of this model.
-                  properties:
-                    apiVersion:
-                      type: string
-                    kind:
-                      type: string
-                    name:
-                      type: string
-                  required:
-                  - apiVersion
-                  - kind
-                  - name
-                  type: object
-                type: array
               conditions:
-                description: Conditions represent the latest observations (Ready,
-                  Bound, Failed, etc.).
+                description: Conditions represent the latest observations (IndexReceived,
+                  UploadsPrepared, Captured, Ready).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -162,21 +133,61 @@ spec:
                   - type
                   type: object
                 type: array
-              manifestCaptureRequestName:
+              dataSnapshots:
                 description: |-
-                  ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
-                  Snapshot controllers use it as execution state and clear it after the result is published to SnapshotContent.
+                  DataSnapshots lists per-data-snapshot upload endpoints, prepared once the index is received
+                  and all target StorageClasses are resolved.
+                items:
+                  description: SnapshotImportDataEntry is one data snapshot's upload
+                    endpoint and capture progress.
+                  properties:
+                    capturedSnapshotContentName:
+                      description: |-
+                        CapturedSnapshotContentName is the durable VolumeSnapshotContent captured from the populated
+                        PVC (via VolumeCaptureRequest), referenced from the recreated SnapshotContent.dataRefs[].
+                      type: string
+                    snapshotID:
+                      description: SnapshotID is the stable archive identifier "<kind>--<namespace>--<name>"
+                        from the index.
+                      minLength: 1
+                      type: string
+                    uploadCA:
+                      description: |-
+                        UploadCA is the base64-encoded PEM CA bundle to trust when uploading to the internal UploadURL.
+                        It is empty for a published (externally-trusted) endpoint.
+                      type: string
+                    uploadReady:
+                      description: UploadReady indicates the populating PVC + importer
+                        endpoint are ready to receive data.
+                      type: boolean
+                    uploadURL:
+                      description: UploadURL is the endpoint to upload this snapshot's
+                        volume data (set when UploadReady).
+                      type: string
+                    uploaded:
+                      description: Uploaded indicates the client signalled completion
+                        of this data upload.
+                      type: boolean
+                  required:
+                  - snapshotID
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - snapshotID
+                x-kubernetes-list-type: map
+              indexUploadURL:
+                description: IndexUploadURL is where the client uploads the hierarchy
+                  index (available immediately).
+                type: string
+              manifestsUploadURL:
+                description: ManifestsUploadURL is where the client uploads the whole-tree
+                  manifests archive.
                 type: string
               observedGeneration:
-                description: ObservedGeneration is the metadata.generation the controller
-                  last reconciled into this status.
+                description: ObservedGeneration is the spec generation last reconciled
+                  into this status.
                 format: int64
                 type: integer
-              volumeCaptureRequestName:
-                description: |-
-                  VolumeCaptureRequestName is the temporary bulk VCR owned by this snapshot while the volume leg runs.
-                  Cleared after VCR.status.dataRefs[] is published to bound SnapshotContent and artifacts are handed off.
-                type: string
             type: object
         type: object
     served: true

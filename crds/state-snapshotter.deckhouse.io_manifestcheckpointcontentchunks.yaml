@@ -70,6 +70,13 @@ spec:
               objectsCount:
                 description: ObjectsCount is the number of objects in this chunk
                 type: integer
+              rawBytes:
+                description: |-
+                  RawBytes is the decoded (pre-gzip) byte length of this chunk. It is set for opaque
+                  raw-blob chunks (resumable import uploads) so the resume offset can be summed without
+                  decompressing every chunk. It is 0/absent for object-array capture chunks.
+                format: int64
+                type: integer
             required:
             - checkpointName
             - data

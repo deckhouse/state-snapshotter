@@ -68,11 +68,58 @@ rules:
   resources:
   - snapshots/manifests
   - snapshots/manifests-with-data-restoration
+  # snapshots/index is the machine-readable hierarchy the export download reads to
+  # discover per-node manifests/data (d8 snapshot export download).
+  - snapshots/index
   - manifestcheckpoints/manifests
   - demovirtualmachinesnapshots/manifests
   - demovirtualdisksnapshots/manifests
   verbs:
   - get
+# SnapshotExport / SnapshotImport are user-facing orchestration CRs created and
+# deleted by the d8 snapshot export/import CLI.
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshotexports
+  - snapshotimports
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshotexports/status
+  - snapshotimports/status
+  verbs:
+  - get
+# Import upload subresources: the CLI POST/PUT/HEADs index + per-node manifests
+# through the aggregated apiserver (POST->create, PUT->update, GET/HEAD->get).
+- apiGroups:
+  - subresources.state-snapshotter.deckhouse.io
+  resources:
+  - snapshotimports/index
+  - snapshotimports/manifests
+  verbs:
+  - get
+  - create
+  - update
+# Data-pod authorization: storage-volume-data-manager's data-exporter authorizes
+# data transfer with a SubjectAccessReview for `create` on the download subresource
+# of dataexports (export) / dataimports (import) in the resource namespace. This is
+# the functional grant (the CRD does not declare a `download` subresource).
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - dataexports/download
+  - dataimports/download
+  verbs:
+  - create
 - apiGroups:
   - deckhouse.io
   resources:

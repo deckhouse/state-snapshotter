@@ -55,6 +55,12 @@ type ManifestCheckpointContentChunkSpec struct {
 	// ObjectsCount is the number of objects in this chunk
 	ObjectsCount int `json:"objectsCount"`
 
+	// RawBytes is the decoded (pre-gzip) byte length of this chunk. It is set for opaque
+	// raw-blob chunks (resumable import uploads) so the resume offset can be summed without
+	// decompressing every chunk. It is 0/absent for object-array capture chunks.
+	// +optional
+	RawBytes int64 `json:"rawBytes,omitempty"`
+
 	// Checksum is the SHA256 hash of the compressed chunk data (base64 encoded)
 	// Used for integrity validation and debugging
 	Checksum string `json:"checksum,omitempty"`

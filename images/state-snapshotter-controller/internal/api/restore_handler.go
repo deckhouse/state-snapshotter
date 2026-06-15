@@ -21,24 +21,24 @@ import (
 )
 
 type RestoreHandler struct {
-	client       client.Client
-	service      *restore.Service
-	logger       logger.LoggerInterface
-	nsAggregated *usecase.AggregatedNamespaceManifests
-	restMapper   meta.RESTMapper
+	client        client.Client
+	service       *restore.Service
+	logger        logger.LoggerInterface
+	nsAggregated  *usecase.AggregatedNamespaceManifests
+	importUploads *ImportUploadHandler
+	restMapper    meta.RESTMapper
 }
 
-func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests, restMappers ...meta.RESTMapper) *RestoreHandler {
-	var restMapper meta.RESTMapper
-	if len(restMappers) > 0 {
-		restMapper = restMappers[0]
-	}
+// NewRestoreHandler builds the handler. restMapper may be nil (the generic domain-snapshot
+// subresource routes then report an unsupported-resource error instead of resolving a GVK).
+func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests, importUploads *ImportUploadHandler, restMapper meta.RESTMapper) *RestoreHandler {
 	return &RestoreHandler{
-		client:       client,
-		service:      service,
-		logger:       logger,
-		nsAggregated: nsAggregated,
-		restMapper:   restMapper,
+		client:        client,
+		service:       service,
+		logger:        logger,
+		nsAggregated:  nsAggregated,
+		importUploads: importUploads,
+		restMapper:    restMapper,
 	}
 }
 
@@ -53,6 +53,17 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 		}
 		namespace := parts[0]
 		switch parts[1] {
+		case "snapshotimports":
+			// Upload (HEAD/POST/PUT) subresources; method handling lives in the upload handler.
+			if h.importUploads == nil {
+				h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "import upload handler not configured")
+				return
+			}
+			if len(parts) != 4 {
+				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "subresource required")
+				return
+			}
+			h.importUploads.Handle(w, r, namespace, parts[2], parts[3])
 		case "snapshots":
 			if len(parts) == 2 {
 				if r.Method != http.MethodGet {
@@ -77,6 +88,8 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 				h.HandleSnapshotAggregatedManifests(w, r, namespace, snapshotName)
 			case "manifests-with-data-restoration":
 				h.HandleGetSnapshotManifestsWithDataRestoration(w, r, namespace, snapshotName)
+			case "index":
+				h.HandleGetSnapshotIndex(w, r, namespace, snapshotName)
 			default:
 				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 			}
@@ -96,6 +109,8 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 				h.HandleGenericSnapshotAggregatedManifests(w, r, namespace, parts[1], name)
 			case "manifests-with-data-restoration":
 				h.HandleGenericSnapshotManifestsWithDataRestoration(w, r, namespace, parts[1], name)
+			case "index":
+				h.HandleGenericSnapshotIndex(w, r, namespace, parts[1], name)
 			default:
 				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 			}
@@ -158,8 +173,55 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 	h.logger.Info("Returned manifests-with-data-restoration", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
 }
 
+func (h *RestoreHandler) HandleGetSnapshotIndex(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
+	start := time.Now()
+	opts := restore.Options{
+		SnapshotName:      snapshotName,
+		SnapshotNamespace: namespace,
+	}
+	data, err := h.service.BuildIndex(r.Context(), opts)
+	if err != nil {
+		h.writeRestoreError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned snapshot index", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+}
+
+func (h *RestoreHandler) HandleGenericSnapshotIndex(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
+	start := time.Now()
+	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	opts := restore.Options{
+		SnapshotName:      snapshotName,
+		SnapshotNamespace: namespace,
+	}
+	data, err := h.service.BuildIndexForNode(r.Context(), snapshotGVK, opts)
+	if err != nil {
+		h.writeRestoreError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned per-node snapshot index", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
+}
+
 func (h *RestoreHandler) HandleSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
 	start := time.Now()
+	// Per-node retrieval (?node=<id>): the export-side counterpart of the per-node import upload.
+	// Returns a single node's own ManifestCheckpoint objects so the CLI can re-upload them per node.
+	if node := r.URL.Query().Get("node"); node != "" {
+		data, err := h.service.BuildNodeManifests(r.Context(), namespace, snapshotName, node)
+		if err != nil {
+			h.writeAggregatedError(w, err)
+			return
+		}
+		h.writeJSONResponse(w, r, data)
+		h.logger.Info("Returned Snapshot per-node manifests", "snapshot", snapshotName, "namespace", namespace, "node", node, "duration", time.Since(start))
+		return
+	}
 	if h.nsAggregated == nil {
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "aggregated manifests handler not configured")
 		return
@@ -249,27 +311,24 @@ func (h *RestoreHandler) writeAggregatedError(w http.ResponseWriter, err error) 
 		h.writeKubernetesErrorResponse(w, st.HTTPStatus, st.Reason, st.Message)
 		return
 	}
-	h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", err.Error())
+	// Don't echo internal error text to clients; log it and return a generic 5xx message.
+	h.logger.Error(err, "aggregated subresource internal error")
+	h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "internal error")
 }
 
 func (h *RestoreHandler) writeRestoreError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	reason := "InternalError"
-	message := err.Error()
-
 	switch {
 	case errors.Is(err, restore.ErrBadRequest):
-		status = http.StatusBadRequest
-		reason = "BadRequest"
+		h.writeKubernetesErrorResponse(w, http.StatusBadRequest, "BadRequest", err.Error())
 	case errors.Is(err, restore.ErrNotFound) || apierrors.IsNotFound(err):
-		status = http.StatusNotFound
-		reason = "NotFound"
+		h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", err.Error())
 	case errors.Is(err, restore.ErrNotReady) || errors.Is(err, restore.ErrContractViolation):
-		status = http.StatusConflict
-		reason = "Conflict"
+		h.writeKubernetesErrorResponse(w, http.StatusConflict, "Conflict", err.Error())
+	default:
+		// Client-opaque internal error: log the detail, return a generic message.
+		h.logger.Error(err, "restore internal error")
+		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "internal error")
 	}
-
-	h.writeKubernetesErrorResponse(w, status, reason, message)
 }
 
 func (h *RestoreHandler) writeJSONResponse(w http.ResponseWriter, r *http.Request, data []byte) {

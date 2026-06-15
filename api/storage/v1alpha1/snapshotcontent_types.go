@@ -55,6 +55,14 @@ type SnapshotContentSpec struct {
 	// DeletionPolicy controls whether the controller may delete this SnapshotContent when the root snapshot is removed.
 	// +kubebuilder:validation:Enum=Retain;Delete
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
+
+	// SnapshotRef is an immutable back-reference to the owning Snapshot, mirroring
+	// VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time (in particular
+	// by the import path for pre-provisioned content) and enables the static-binding handshake:
+	// a Snapshot with spec.source.snapshotContentName binds only when this ref points back at it.
+	// The whole spec is immutable, so this ref cannot change after creation.
+	// +optional
+	SnapshotRef *SnapshotSubjectRef `json:"snapshotRef,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -92,6 +100,27 @@ type SnapshotDataBinding struct {
 
 	// Artifact references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
 	Artifact SnapshotDataArtifactRef `json:"artifact"`
+
+	// VolumeMode records the source volume mode (Block or Filesystem). CSI snapshots are
+	// mode-agnostic, so this is persisted here to drive the unified export (VolumeRestoreRequest)
+	// and to recreate the PVC on import. Typed as a string to keep the api module dependency-free;
+	// controllers convert it to corev1.PersistentVolumeMode.
+	// +kubebuilder:validation:Enum=Block;Filesystem
+	// +optional
+	VolumeMode string `json:"volumeMode,omitempty"`
+
+	// FsType records the source filesystem type (Filesystem volumes only).
+	// +optional
+	FsType string `json:"fsType,omitempty"`
+
+	// AccessModes records the source PVC access modes (e.g. ReadWriteOnce, ReadWriteMany).
+	// +optional
+	AccessModes []string `json:"accessModes,omitempty"`
+
+	// StorageClassName records the source StorageClass of the captured volume. Used by the
+	// aggregated /index and by import StorageClass mapping.
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true

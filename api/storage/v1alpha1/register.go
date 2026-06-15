@@ -39,6 +39,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&SnapshotList{},
 		&SnapshotContent{},
 		&SnapshotContentList{},
+		&SnapshotExport{},
+		&SnapshotExportList{},
+		&SnapshotImport{},
+		&SnapshotImportList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
