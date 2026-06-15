@@ -52,11 +52,13 @@ func resolveEligibleGVRs(
 	for _, csd := range eligible {
 		var errMsgs []string
 		for _, entry := range csd.Spec.SnapshotResourceMapping {
+			// On resolve error the returned GVR is the zero value; never collect it, or the
+			// ClusterRole would gain an empty (resource: "") rule. Record the failure so the
+			// CSD stays pending and is retried once discovery catches up.
 			srcGVR, err := resolve(entry.Source)
 			if err != nil {
 				errMsgs = append(errMsgs, fmt.Sprintf("source %s/%s: %v", entry.Source.APIVersion, entry.Source.Kind, err))
-			}
-			if _, ok := seenSource[srcGVR]; !ok {
+			} else if _, ok := seenSource[srcGVR]; !ok {
 				seenSource[srcGVR] = struct{}{}
 				sourceGVRs = append(sourceGVRs, srcGVR)
 			}
@@ -64,8 +66,7 @@ func resolveEligibleGVRs(
 			snapGVR, err := resolve(entry.Snapshot)
 			if err != nil {
 				errMsgs = append(errMsgs, fmt.Sprintf("snapshot %s/%s: %v", entry.Snapshot.APIVersion, entry.Snapshot.Kind, err))
-			}
-			if _, ok := seenSnapshot[snapGVR]; !ok {
+			} else if _, ok := seenSnapshot[snapGVR]; !ok {
 				seenSnapshot[snapGVR] = struct{}{}
 				snapshotGVRs = append(snapshotGVRs, snapGVR)
 			}
