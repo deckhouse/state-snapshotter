@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -650,6 +651,11 @@ var _ = BeforeSuite(func() {
 	// external controllers by writing their status directly.
 	integrationInstallExportImportCRDs(testCtx, cfg)
 
+	// Minimal CSI VolumeSnapshot CRD so the namespace-root orphan-PVC data leg can Get/Create it instead
+	// of aborting the reconcile on a no-match (N5 PR-7 specs). VolumeSnapshotContent/Class are
+	// intentionally NOT installed (see integrationInstallCSISnapshotCRDs).
+	integrationInstallCSISnapshotCRDs(testCtx, cfg)
+
 	crdEstablished := func(name string) bool {
 		obj, err := crdClient.CustomResourceDefinitions().Get(testCtx, name, metav1.GetOptions{})
 		if err != nil {
@@ -676,6 +682,7 @@ var _ = BeforeSuite(func() {
 		"volumerestorerequests.storage.deckhouse.io",
 		"dataexports.storage.deckhouse.io",
 		"dataimports.storage.deckhouse.io",
+		"volumesnapshots.snapshot.storage.k8s.io",
 		"demovirtualdisks.demo.state-snapshotter.deckhouse.io",
 		"demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
 		"demovirtualmachines.demo.state-snapshotter.deckhouse.io",
@@ -695,6 +702,10 @@ var _ = BeforeSuite(func() {
 		Scheme:                 scheme,
 		HealthProbeBindAddress: "0",
 		LeaderElection:         false,
+		// Several specs and the unified-runtime Syncer both register a controller for the same
+		// test.deckhouse.io/RegistrationTestSnapshot GVK on this single shared manager; without this the
+		// second registration is rejected for a duplicate controller name. Test-only.
+		Controller: crconfig.Controller{SkipNameValidation: ptrBool(true)},
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(mgr).NotTo(BeNil())
@@ -784,6 +795,7 @@ var _ = BeforeSuite(func() {
 
 	integrationEnsureVolumeCaptureRequestCRD(testCtx, cfg)
 	integrationWaitExportImportMappings()
+	integrationWaitCSISnapshotMappings()
 
 	// Wait for RESTMapper to discover test GVKs (avoid discovery race)
 	waitForMapping := func(gvk schema.GroupVersionKind) error {

@@ -36,7 +36,16 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, func() {
+// Label("isolated"): these root-MCR residual-convergence specs are correct in isolation (they pass on
+// their own in seconds) but are timing-sensitive to the reconcile-queue load of the full shared-manager
+// suite. envtest does not ship the CSI VolumeSnapshotContent CRD (the SnapshotExport spec deliberately
+// relies on its absence, see snapshot_export_test.go), so many other specs leave SnapshotContents whose
+// data-artifact Get returns a hard no-match and requeues forever; under that background churn the PR-7
+// root reconcile can miss the 180s window. Rather than install that CRD (which would break the export
+// invariant) or bump reconcile concurrency (which worsens MCR delete/rebuild races), these specs are run
+// in their own `go test` pass (fresh envtest + manager, no accumulated churn) via the `isolated` label
+// filter wired in the Makefile. Keep Serial too: even within their own pass they must not interleave.
+var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, Label("isolated"), func() {
 	It("two PVC vertical slice: child covers pvc-a, root MCR captures only residual pvc-b", func() {
 		ctx := context.Background()
 		ns := pr7CreateNamespace(ctx, "n5-pr7-two-pvc")
