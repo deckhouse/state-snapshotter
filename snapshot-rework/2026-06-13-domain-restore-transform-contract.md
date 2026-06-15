@@ -82,6 +82,7 @@ Restore compiler **обязан** валидировать результат д
 
 Намеренно **не** фиксируется в этом ADR:
 
+- **per-object vs per-node** — логический API: вызов на каждый объект (как в PoC: `CoveredPVCNames`/`TransformObject`, два вызова на объект) vs один node-level вызов (все объекты узла → изменённые объекты + `suppressRefs`). PoC-форма — транспортный компромисс, не финальный публичный контракт;
 - **exact transport** — HTTP webhook vs aggregated APIService vs иное;
 - **exact request/response schema** — точные JSON-поля envelope, patch и suppress;
 - **discovery** — поля в `DomainSpecificSnapshotController` (какие группы обслуживает домен, версии контракта, адрес);
@@ -97,3 +98,89 @@ Restore compiler **обязан** валидировать результат д
 ## Главный итог
 
 Мы не говорим доменным командам «вот API, реализуйте». Мы фиксируем **форму будущего API**: generic главный; domain не создаёт объекты и возвращает patch/suppress; контракт versioned и transport-independent. Сейчас разрабатывается **v0** этого контракта как in-process реализация — самостоятельный вариант, **без миграций**. Точные поля и транспорт — следующими документами.
+
+## Appendix: PoC transport (демонстрация для доменных команд)
+
+> **Статус: PoC / демонстрация.** Это **не** production-контракт и **не** Kubernetes APIService. Это исполняемый пример HTTP-транспорта поверх того же семантического контракта (mutation своего объекта + suppress), чтобы доменные команды видели форму запроса/ответа. Точный транспорт по-прежнему открыт (см. Open questions) — этот PoC его не фиксирует и не является миграцией от in-process v0.
+
+**Граница владения (читать до копирования паттерна).** Транспорт делится строго:
+
+```
+generic state-snapshotter:  только transport-agnostic интерфейс DomainRestoreTransformer + REST-клиент
+domain controller:          REST-сервер / transform endpoint
+```
+
+Generic core **не хостит** доменное API и **не поднимает** доменный endpoint. В PoC сервер живёт в том же бинаре **только потому, что демо-домен (PR5a) и так вшит в этот бинарь**; при этом он регистрируется через **обвязку демо-домена** (`demo.AddRestoreTransformServerToManager`, manager Runnable — как любой доменный контроллер), а **не** в generic `cmd/main.go` и **не** в generic core. Это **не** целевая архитектура: в production реальный доменный контроллер обслуживает endpoint из своего модуля/бинаря, а generic держит только клиент. Анти-паттерн, которого избегаем: «generic state-snapshotter поднимает REST-сервер для domain transform».
+
+**Расположение в коде (layering).** Wire-контракт вынесен в импортируемый пакет, отдельно от generic-имплементации и от домена:
+
+```
+pkg/restoretransform          — импортируемый wire-контракт (DTO, endpoint path, version, env). Ноль зависимостей.
+internal/usecase/restore      — generic implementation detail (REST-клиент, DomainRestoreTransformer-адаптер, интеграция с RestoreNode). Потребитель контракта, не владелец.
+internal/controllers/demo     — PoC domain implementation (HTTP handler/server) контракта.
+```
+
+Почему так: отдельный доменный модуль **не может** импортировать `internal/` чужого модуля. Контракт обязан жить в `pkg/restoretransform`, иначе для внешнего домена это не контракт. Generic restore — потребитель контракта, а не его владелец; демо — одна из реализаций.
+
+**Что это даёт.** Тот же `restore.DomainRestoreTransformer` обслуживается по HTTP: generic-сторона — domain-free REST-клиент (`restore.RESTTransformer`), доменная сторона — тонкий HTTP-адаптер над своей in-process-логикой (демо: `demo.RestoreTransformHandler`). Поведение восстановления при включённом эндпоинте эквивалентно in-process-варианту.
+
+**Включение (PoC).** Один env драйвит обе стороны; не задан — работает прежний in-process путь:
+
+```
+RESTORE_TRANSFORM_ENDPOINT=http://127.0.0.1:9181/apis/restore.state-snapshotter.deckhouse.io/v1alpha1/transform
+```
+
+При заданном env restore compiler (generic) делегирует трансформацию по этому URL — это конфигурация **клиента**. Демо-домен (владелец endpoint) поднимает HTTP-сервер на loopback-хосте, и для PoC адрес прослушивания выводится из того же URL — это **сокращение PoC** ради одного env; в production доменный контроллер владел бы своей listen-конфигурацией отдельно. **Никаких новых k8s-объектов** (Service/APIService) — co-located loopback HTTP в том же поде.
+
+**Канонический эндпоинт (то, что реализует доменная команда):**
+
+```
+POST /apis/restore.state-snapshotter.deckhouse.io/v1alpha1/transform
+Content-Type: application/json
+```
+
+**Request** (`object` — уже sanitized unstructured; `node.snapshotRef` — снапшот-CR, владеющий узлом; `children` — read-only контекст):
+
+`uid` — **непрозрачный** per-call токен корреляции: домен обязан вернуть его как есть и **не** парсить (identity объекта — в `targetRef`, не в `uid`).
+
+```json
+{
+  "request": {
+    "uid": "a1b2c3d4-0000-0000-0000-000000000000",
+    "targetRef": { "apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1", "kind": "DemoVirtualDisk", "namespace": "restored-ns", "name": "disk-a" },
+    "node": { "snapshotRef": { "apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1", "kind": "DemoVirtualDiskSnapshot", "namespace": "source-ns", "name": "disk-a-snap" } },
+    "restoreContext": { "sourceNamespace": "source-ns", "targetNamespace": "restored-ns" },
+    "object": { "apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1", "kind": "DemoVirtualDisk", "metadata": { "name": "disk-a", "namespace": "restored-ns" }, "spec": { "persistentVolumeClaimName": "disk-a-pvc" } },
+    "dataRefs": [],
+    "children": []
+  }
+}
+```
+
+**Response** (PoC возвращает полный трансформированный объект, не patch; `suppressRefs` — PoC только PVC):
+
+```json
+{
+  "response": {
+    "uid": "a1b2c3d4-0000-0000-0000-000000000000",
+    "handled": true,
+    "allowed": true,
+    "object": { "apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1", "kind": "DemoVirtualDisk", "metadata": { "name": "disk-a", "namespace": "restored-ns" }, "spec": { "persistentVolumeClaimName": "disk-a-pvc", "dataSource": { "apiGroup": "demo.state-snapshotter.deckhouse.io", "kind": "DemoVirtualDiskSnapshot", "name": "disk-a-snap" } } },
+    "suppressRefs": [ { "apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "restored-ns", "name": "disk-a-pvc" } ],
+    "warnings": []
+  }
+}
+```
+
+Объект не обслуживается доменом → `{"response":{"uid":"…","handled":false,"allowed":true}}`. Ошибка домена → `allowed:false` + `status.{reason,message}`.
+
+**Минимальные generic-гарантии в PoC (владелец пайплайна — generic):** `response.uid` обязан совпадать с `request.uid`; при `handled:true` обязан присутствовать `object`; generic отклоняет смену identity (GVK/name/namespace) доменом; `allowed:false` — hard fail-whole; `suppressRefs` не-PVC (или PVC без имени) — fail-closed (`ErrContractViolation`), а не молчаливый пропуск; недоступный/битый endpoint — restore падает, без частичного результата. Полный `OutputGuard`/allowlist (P1/P2) в PoC ещё **не** реализован — это остаётся целевой работой v0.
+
+**Что PoC доказал (и что НЕ зафиксировано как финальный API).** Доказано одно: доменную трансформацию можно вынести за процесс по HTTP, **не ломая** generic restore pipeline (`transformNodeObjects` не тронут). Это и есть результат — transport boundary существует. При этом **текущая форма контракта не считается финальным публичным API**: два метода
+
+```
+CoveredPVCNames(node, objects) -> set of PVC names   // suppress intent
+TransformObject(node, object, children) -> mutated object
+```
+
+удобны для минимальной интеграции, но порождают **два вызова на объект** (suppress-нога + transform-нога) — это осознанный **транспортный компромисс PoC**, а не рекомендация для долгоживущего API. Открытый вопрос дизайна — **per-object vs per-node** (один node-level вызов: все объекты узла на вход → изменённые объекты + `suppressRefs` на выход). Решение откладывается в отдельный design step; PoC его намеренно не предрешает.

@@ -126,9 +126,9 @@ func (r *Resolver) ResolveRestoreTree(ctx context.Context, snapshotNamespace, sn
 }
 
 // ResolveRestoreSubtree resolves the restore tree starting from an arbitrary snapshot node identified
-// by its GVK (the namespaced root Snapshot, or a domain snapshot CR such as DemoVirtualMachineSnapshot
-// / DemoVirtualDiskSnapshot). It compiles that node and everything below it, so the restore endpoint
-// can return apply-ready manifests for a single subtree, not only the whole namespace.
+// by its GVK (the namespaced root Snapshot, or any domain snapshot CR, e.g. a per-VM or per-disk
+// snapshot). It compiles that node and everything below it, so the restore endpoint can return
+// apply-ready manifests for a single subtree, not only the whole namespace.
 func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
 	rootObj := &unstructured.Unstructured{}
 	rootObj.SetGroupVersionKind(gvk)

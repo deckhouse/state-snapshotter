@@ -21,6 +21,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net/http"
+	"net/url"
+	"os"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -29,6 +31,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/demo"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/restoretransform"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -40,6 +43,28 @@ type Server struct {
 	logger         logger.LoggerInterface
 	tlsCertFile    string
 	tlsKeyFile     string
+}
+
+// selectDomainRestoreTransformer returns the REST transform client when restoretransform.EnvEndpoint
+// is set, otherwise the in-process demo transformer. The REST client is domain-free; the matching
+// endpoint is owned and served by the domain controller (demo, co-located loopback for the PoC).
+func selectDomainRestoreTransformer(logger logger.LoggerInterface) restore.DomainRestoreTransformer {
+	endpoint := os.Getenv(restoretransform.EnvEndpoint)
+	if endpoint == "" {
+		return demo.NewRestoreTransformer()
+	}
+	// Validate the endpoint at startup so a misconfiguration is obvious in the logs. We deliberately do
+	// NOT fall back to the in-process transformer on a bad URL: silently changing behaviour would hide
+	// the misconfiguration. The REST client is returned regardless, so every transform call fails
+	// loudly (fail-whole / fail-closed) instead of producing a partial restore.
+	if u, err := url.Parse(endpoint); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		logger.Error(err, "[api] RESTORE_TRANSFORM_ENDPOINT is not a valid http(s) URL; restore transform calls will fail", "endpoint", endpoint)
+	} else {
+		logger.Info("[api] restore transform delegated to REST endpoint (PoC transport)", "endpoint", endpoint)
+	}
+	return restore.NewRESTTransformer(endpoint).WithErrorSink(func(err error) {
+		logger.Error(err, "[api] restore transform REST suppress call failed (fail-closed)")
+	})
 }
 
 // NewServer creates a new HTTP API server
@@ -59,7 +84,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 
 	// Create archive handler with directClient for ManifestCheckpoint
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
-	restoreService := restore.NewService(directClient, archiveService, demo.NewRestoreTransformer())
+	restoreService := restore.NewService(directClient, archiveService, selectDomainRestoreTransformer(logger))
 	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
 	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper)
 

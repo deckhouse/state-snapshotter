@@ -160,7 +160,7 @@ func main() {
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
 	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
-	_ = storagev1alpha1.AddToScheme(fullScheme)    // storage.deckhouse.io (Snapshot, SnapshotContent)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (Snapshot, SnapshotContent)
 	_ = demov1alpha1.AddToScheme(fullScheme)      // demo.state-snapshotter.deckhouse.io (PR5a)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
@@ -223,6 +223,16 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("DemoVirtualMachineGenericSnapshotBinderController added to manager")
+
+	// PoC transport (ADR 2026-06-13): the demo domain serves its own restore-transform endpoint. It is
+	// owned by the demo domain, not generic core, and is a no-op unless RESTORE_TRANSFORM_ENDPOINT is
+	// set. No Kubernetes objects (Service/APIService) are introduced; production domains serve this
+	// from their own module/binary.
+	if err := controllers.AddDemoRestoreTransformServerToManager(mgr, log); err != nil {
+		log.Error(err, "Failed to add demo restore-transform endpoint to manager")
+		cancel()
+		os.Exit(1)
+	}
 
 	contentController, err := controllers.NewSnapshotContentController(
 		mgr.GetClient(),
