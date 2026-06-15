@@ -28,6 +28,27 @@ const (
 	SnapshotExportConditionDataReady = "DataReady"
 )
 
+// SnapshotExport condition reasons.
+const (
+	// SnapshotExportReasonInvalidSpec marks Ready=False when the spec is invalid (e.g. empty snapshotRef).
+	SnapshotExportReasonInvalidSpec = "InvalidSpec"
+	// SnapshotExportReasonSnapshotNotReady marks Ready=False while the source snapshot tree is not
+	// resolvable yet (snapshot not Ready / bound content missing). Non-terminal (requeued).
+	SnapshotExportReasonSnapshotNotReady = "SnapshotNotReady"
+	// SnapshotExportReasonVolumeModeUnknown marks Ready=False when a data leaf has no captured
+	// volumeMode; defaulting would risk a wrong-mode (Block vs Filesystem) restore, so it fails closed.
+	SnapshotExportReasonVolumeModeUnknown = "VolumeModeUnknown"
+	// SnapshotExportReasonDataExportFailed marks Ready=False when a leaf's VolumeRestoreRequest or
+	// DataExport reports a failure. The failure detail is surfaced in the condition message.
+	SnapshotExportReasonDataExportFailed = "DataExportFailed"
+	// SnapshotExportReasonDataPending marks Ready/DataReady=False while leaves are still converging.
+	SnapshotExportReasonDataPending = "DataPending"
+	// SnapshotExportReasonAllDataReady marks DataReady=True once every leaf serves a download endpoint.
+	SnapshotExportReasonAllDataReady = "AllDataReady"
+	// SnapshotExportReasonPublished marks Ready=True once index, manifests and all data are published.
+	SnapshotExportReasonPublished = "Published"
+)
+
 // LocalSnapshotRef references a root Snapshot in the same namespace as the referrer.
 // +k8s:deepcopy-gen=true
 type LocalSnapshotRef struct {

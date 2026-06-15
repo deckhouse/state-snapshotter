@@ -121,6 +121,37 @@ rules:
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
+# SnapshotExport / SnapshotImport orchestration CRs (namespaced): the controllers watch them and
+# write status + manage their finalizer (update on the primary resource). The CRs themselves are
+# created/deleted by the d8 snapshot CLI (see admin-kubeconfig role), not by the controller.
+- apiGroups: ["storage.deckhouse.io"]
+  resources:
+  - "snapshotexports"
+  - "snapshotimports"
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["storage.deckhouse.io"]
+  resources:
+  - "snapshotexports/status"
+  - "snapshotimports/status"
+  verbs: ["get", "update", "patch"]
+
+# DataExport (export) / DataImport (import): storage-volume-data-manager CRs the orchestrators
+# create to serve/populate the intermediate PVC and delete during cleanup. The controller does NOT
+# need the dataexports/dataimports download subresource: data transfer (and its SubjectAccessReview)
+# is performed by the d8 snapshot CLI user, not the controller SA.
+- apiGroups: ["storage.deckhouse.io"]
+  resources:
+  - "dataexports"
+  - "dataimports"
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# PersistentVolumeClaim write access for the orchestrators: SnapshotExport adds a non-controller
+# ownerRef to the restored PVC (update/patch); SnapshotImport deletes the populated PVC during
+# cleanup. Read access is granted in the root-capture allowlist above.
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["update", "patch", "delete"]
+
 # VolumeSnapshotContent handoff after VCR publish (ownerRef -> SnapshotContent)
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshotcontents"]

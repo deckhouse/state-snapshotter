@@ -39,6 +39,10 @@ const (
 	FinalizerArtifactProtect = "snapshot.deckhouse.io/artifact-protect"
 	// FinalizerSnapshot blocks Snapshot deletion until cleanup completes.
 	FinalizerSnapshot = "snapshot.finalizers.deckhouse.io"
+	// FinalizerSnapshotExport blocks SnapshotExport deletion until intermediate objects are released.
+	FinalizerSnapshotExport = "snapshotexport.finalizers.deckhouse.io"
+	// FinalizerSnapshotImport blocks SnapshotImport deletion until upload blobs are cleaned up.
+	FinalizerSnapshotImport = "snapshotimport.finalizers.deckhouse.io"
 	// AnnotationParentDeleted marks SnapshotContent as detached from parent Snapshot.
 	AnnotationParentDeleted = "snapshot.deckhouse.io/parent-deleted"
 )
