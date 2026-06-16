@@ -84,4 +84,9 @@ func prepareSuite() {
 
 	suiteApply, err = storagekube.NewApplyClient(suiteRestCfg)
 	Expect(err).NotTo(HaveOccurred(), "build apply client")
+
+	// apiserver AbsPath transport for the status-driven control plane (index / per-node manifests):
+	// the suite follows URLs published in CR status, treating the index as an opaque blob.
+	suiteAPI, err = newAPITransport(suiteRestCfg)
+	Expect(err).NotTo(HaveOccurred(), "build apiserver AbsPath transport")
 }

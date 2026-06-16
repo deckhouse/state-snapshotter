@@ -61,15 +61,6 @@ clusterDefinition:
         dependencies:
           - "snapshot-controller"
           - "sds-node-configurator"
-      # VolumeRestoreRequest / VolumeCaptureRequest executors used by the export
-      # data path. Override to the branch/PR build that carries the volumeMode
-      # VRR contract via STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE.
-      - name: "storage-foundation"
-        version: 1
-        enabled: true
-        modulePullOverride: "main"
-        dependencies:
-          - "sds-node-configurator"
       # DataExport / DataImport transport. Override via
       # STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE.
       - name: "storage-volume-data-manager"
@@ -77,13 +68,28 @@ clusterDefinition:
         enabled: true
         modulePullOverride: "main"
         dependencies: []
-      # SnapshotExport CRD + controller. Override via
-      # STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE to the snapshot-export-import-crs build.
+      # SnapshotExport CRD + controller. MUST be enabled before storage-foundation:
+      # storage-foundation's module.yaml declares requirements.modules.state-snapshotter
+      # (>= 0.0.0) and Deckhouse keeps it disabled ("dependency 'state-snapshotter'
+      # is disabled") until state-snapshotter is up. Hence state-snapshotter depends
+      # only on leaf modules here (no storage-foundation dep, which would be a cycle).
+      # Override via STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE to the
+      # snapshot-export-import-crs build.
       - name: "state-snapshotter"
         version: 1
         enabled: true
         modulePullOverride: "main"
         dependencies:
           - "snapshot-controller"
-          - "storage-foundation"
           - "storage-volume-data-manager"
+      # VolumeRestoreRequest / VolumeCaptureRequest executors used by the export
+      # data path. Depends on state-snapshotter to match its module.yaml
+      # requirement and enable in the right order. Override to the branch/PR build
+      # that carries the volumeMode VRR contract via
+      # STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE.
+      - name: "storage-foundation"
+        version: 1
+        enabled: true
+        modulePullOverride: "main"
+        dependencies:
+          - "state-snapshotter"

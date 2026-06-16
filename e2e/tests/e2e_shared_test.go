@@ -82,6 +82,14 @@ var (
 	snapshotExportGVR = schema.GroupVersionResource{
 		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotexports",
 	}
+	snapshotImportGVR = schema.GroupVersionResource{
+		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotimports",
+	}
+	// Domain snapshot GVRs (demo.state-snapshotter.deckhouse.io/v1alpha1) used to drive typed
+	// subtree export (snapshotRef -> a DemoVirtualDiskSnapshot) and the server-side /view endpoint.
+	demoDiskSnapshotGVR = schema.GroupVersionResource{
+		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots",
+	}
 	// csdGVR is cluster-scoped (state-snapshotter.deckhouse.io/v1alpha1).
 	csdGVR = schema.GroupVersionResource{
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "customsnapshotdefinitions",
@@ -113,6 +121,7 @@ var (
 	suiteClientset        *kubernetes.Clientset
 	suiteDyn              dynamic.Interface
 	suiteApply            *storagekube.ApplyClient
+	suiteAPI              *apiTransport
 
 	// suiteNamespace is the random test namespace, set by the spec once created.
 	// Surfaced in the AfterSuite "left in place" banner.
@@ -230,15 +239,28 @@ func waitCRCondition(ctx context.Context, gvr schema.GroupVersionResource, ns, n
 	}
 }
 
-// getExportDataSnapshots returns status.dataSnapshots of a SnapshotExport.
-func getExportDataSnapshots(ctx context.Context, ns, name string) ([]map[string]interface{}, error) {
-	obj, err := getResource(ctx, snapshotExportGVR, ns, name)
+// getExportSnapshots returns the flat per-node status.snapshots[] of a SnapshotExport. Each entry
+// carries the node's own manifestsURL plus, for data nodes, volumeMode/dataURL/dataCA/ready. The CLI
+// (and the SRK REST client this suite emulates) never parse the opaque index: they follow these URLs.
+func getExportSnapshots(ctx context.Context, ns, name string) ([]map[string]interface{}, error) {
+	return getStatusSnapshots(ctx, snapshotExportGVR, ns, name)
+}
+
+// getImportSnapshots returns the flat per-node status.snapshots[] of a SnapshotImport (per-node
+// manifestsUploadURL + data uploadURL/uploadCA/uploadReady/volumeMode), published after server-side
+// re-root.
+func getImportSnapshots(ctx context.Context, ns, name string) ([]map[string]interface{}, error) {
+	return getStatusSnapshots(ctx, snapshotImportGVR, ns, name)
+}
+
+func getStatusSnapshots(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) ([]map[string]interface{}, error) {
+	obj, err := getResource(ctx, gvr, ns, name)
 	if err != nil {
 		return nil, err
 	}
-	raw, ok, err := unstructured.NestedSlice(obj.Object, "status", "dataSnapshots")
+	raw, ok, err := unstructured.NestedSlice(obj.Object, "status", "snapshots")
 	if err != nil {
-		return nil, fmt.Errorf("read status.dataSnapshots of %s/%s: %w", ns, name, err)
+		return nil, fmt.Errorf("read status.snapshots of %s/%s: %w", ns, name, err)
 	}
 	if !ok {
 		return nil, nil
@@ -250,6 +272,16 @@ func getExportDataSnapshots(ctx context.Context, ns, name string) ([]map[string]
 		}
 	}
 	return out, nil
+}
+
+// getStatusString reads a single string field from a CR's status.
+func getStatusString(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, field string) (string, error) {
+	obj, err := getResource(ctx, gvr, ns, name)
+	if err != nil {
+		return "", err
+	}
+	s, _, err := unstructured.NestedString(obj.Object, "status", field)
+	return s, err
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

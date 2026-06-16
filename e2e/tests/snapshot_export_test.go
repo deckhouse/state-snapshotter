@@ -172,19 +172,56 @@ var _ = Describe("Snapshot export (state-snapshotter)", Ordered, func() {
 		Expect(found).To(BeTrue(), "Ready condition present")
 		Expect(reason).To(Equal(reasonPublished), "Ready reason")
 
-		By("asserting at least one data snapshot serves a download endpoint")
-		entries, err := getExportDataSnapshots(ctx, testNamespace, snapshotExportName)
+		By("reading the flat per-node status.snapshots[]")
+		entries, err := getExportSnapshots(ctx, testNamespace, snapshotExportName)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(entries).NotTo(BeEmpty(), "status.dataSnapshots non-empty")
-		var withURL int
+		Expect(entries).NotTo(BeEmpty(), "status.snapshots non-empty")
+
+		By("following status.indexURL as an opaque blob (the suite never parses it)")
+		indexURL, err := getStatusString(ctx, snapshotExportGVR, testNamespace, snapshotExportName, "indexURL")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(indexURL).NotTo(BeEmpty(), "status.indexURL published")
+		rawIndex, code, err := suiteAPI.get(ctx, indexURL)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(code).To(Equal(200), "GET indexURL")
+		Expect(rawIndex).NotTo(BeEmpty(), "index blob non-empty")
+
+		By("following each node's per-node manifestsURL (data and dataless)")
+		var dataNodes []map[string]interface{}
 		for _, e := range entries {
-			if url, _ := e["dataURL"].(string); url != "" {
-				withURL++
+			murl, _ := e["manifestsURL"].(string)
+			Expect(murl).NotTo(BeEmpty(), "every node carries a manifestsURL")
+			raw, mc, merr := suiteAPI.get(ctx, murl)
+			Expect(merr).NotTo(HaveOccurred(), "GET manifestsURL %s", murl)
+			Expect(mc).To(Equal(200), "GET manifestsURL %s", murl)
+			Expect(raw).NotTo(BeEmpty(), "manifests blob non-empty")
+			if hasData, _ := e["hasData"].(bool); hasData {
+				dataNodes = append(dataNodes, e)
 			}
 		}
-		Expect(withURL).To(BeNumerically(">", 0), "at least one dataSnapshot has a dataURL")
+		Expect(dataNodes).NotTo(BeEmpty(), "at least one data node in status.snapshots")
 
-		GinkgoWriter.Printf("SnapshotExport %s/%s published %d data snapshot(s)\n", testNamespace, snapshotExportName, len(entries))
+		By("bringing up the in-cluster downloader (SA + RBAC + curl pod)")
+		Expect(ensureDataPod(ctx, testNamespace, podReadyTimeout)).To(Succeed(), "curl pod Ready")
+
+		By("authenticating to each data node's endpoint from inside the cluster")
+		for _, e := range dataNodes {
+			id, _ := e["snapshotID"].(string)
+			dataURL, _ := e["dataURL"].(string)
+			ready, _ := e["ready"].(bool)
+			volumeMode, _ := e["volumeMode"].(string)
+			Expect(ready).To(BeTrue(), "data node %s ready", id)
+			Expect(dataURL).NotTo(BeEmpty(), "data node %s has dataURL", id)
+			apiPath := "api/v1/files/"
+			if volumeMode == volumeModeBlock {
+				apiPath = "api/v1/block"
+			}
+			Expect(dataReachable(ctx, testNamespace, dataURL, apiPath)).
+				To(Succeed(), "data endpoint %s (%s) authorized + reachable", id, volumeMode)
+		}
+
+		GinkgoWriter.Printf("SnapshotExport %s/%s published %d node(s), %d with data\n",
+			testNamespace, snapshotExportName, len(entries), len(dataNodes))
 	})
 })
 
