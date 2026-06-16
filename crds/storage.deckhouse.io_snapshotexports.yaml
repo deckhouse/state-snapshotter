@@ -23,6 +23,10 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .spec.ttl
+      name: TTL
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -68,8 +72,18 @@ spec:
                 required:
                 - name
                 type: object
+              ttl:
+                description: |-
+                  TTL is the idle time-to-live for the export's data endpoints, propagated verbatim to each child
+                  DataExport. The countdown is reset by active downloads (enforced in the SVDM pod). Once every
+                  data leaf's DataExport idles out, the export becomes terminal (Ready=False, reason=Expired) and
+                  its heavy children are freed. Required. Format: <h><m><s>, e.g. "2h45m".
+                minLength: 1
+                pattern: ^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$
+                type: string
             required:
             - snapshotRef
+            - ttl
             type: object
           status:
             properties:

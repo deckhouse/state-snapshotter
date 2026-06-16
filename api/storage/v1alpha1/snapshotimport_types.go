@@ -59,6 +59,10 @@ const (
 	SnapshotImportReasonAllCaptured = "AllCaptured"
 	// SnapshotImportReasonImported marks Ready=True once the snapshot tree is pre-provisioned.
 	SnapshotImportReasonImported = "Imported"
+	// SnapshotImportReasonExpired marks Ready=False (terminal, latched) when a data node's child
+	// DataImport idled out past spec.ttl before its upload finished: the controller frees the heavy
+	// children (DataImport, populated PVC) and leaves the SnapshotImport as a tombstone to delete.
+	SnapshotImportReasonExpired = "Expired"
 )
 
 // +kubebuilder:object:root=true
@@ -66,6 +70,7 @@ const (
 // +kubebuilder:resource:scope=Namespaced,shortName=snapimp
 // +kubebuilder:printcolumn:name="Snapshot",type=string,JSONPath=`.spec.snapshotName`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="TTL",type=string,JSONPath=`.spec.ttl`,priority=1
 // SnapshotImport orchestrates uploading (importing) a whole Snapshot hierarchy.
 //
 // It is a namespaced, user-facing resource. The controller publishes upload endpoints for the
@@ -93,6 +98,15 @@ type SnapshotImportSpec struct {
 	// SnapshotName is the desired name of the root Snapshot to (re)create on import (same namespace).
 	// +kubebuilder:validation:MinLength=1
 	SnapshotName string `json:"snapshotName"`
+
+	// TTL is the idle time-to-live for the import's upload endpoints, propagated verbatim to each child
+	// DataImport. The countdown is reset by active uploads (enforced in the SVDM pod). If a data node's
+	// DataImport idles out before its upload finishes, the import becomes terminal (Ready=False,
+	// reason=Expired) and its heavy children are freed. Required. Format: <h><m><s>, e.g. "2h45m".
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$`
+	TTL string `json:"ttl"`
 
 	// StorageClassMapping optionally remaps source StorageClass names (from the index) to target
 	// StorageClass names. Sources not present in the map are looked up by identity in the cluster.

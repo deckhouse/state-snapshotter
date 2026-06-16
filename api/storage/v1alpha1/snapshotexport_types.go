@@ -47,6 +47,10 @@ const (
 	SnapshotExportReasonAllDataReady = "AllDataReady"
 	// SnapshotExportReasonPublished marks Ready=True once index, manifests and all data are published.
 	SnapshotExportReasonPublished = "Published"
+	// SnapshotExportReasonExpired marks Ready=False (terminal, latched) once every data leaf's child
+	// DataExport has idled out past spec.ttl: the controller frees the heavy children (restored PVC,
+	// DataExport, VRR) and leaves the SnapshotExport as a tombstone for the user/CLI to delete.
+	SnapshotExportReasonExpired = "Expired"
 )
 
 // LocalSnapshotRef references a root Snapshot in the same namespace as the referrer.
@@ -61,6 +65,7 @@ type LocalSnapshotRef struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=snapexp
 // +kubebuilder:printcolumn:name="Snapshot",type=string,JSONPath=`.spec.snapshotRef.name`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="TTL",type=string,JSONPath=`.spec.ttl`,priority=1
 // SnapshotExport orchestrates downloading (exporting) a whole Snapshot hierarchy.
 //
 // It is a namespaced, user-facing resource. The controller walks the bound SnapshotContent
@@ -86,6 +91,15 @@ type SnapshotExportList struct {
 type SnapshotExportSpec struct {
 	// SnapshotRef references the root Snapshot (same namespace) to export.
 	SnapshotRef LocalSnapshotRef `json:"snapshotRef"`
+
+	// TTL is the idle time-to-live for the export's data endpoints, propagated verbatim to each child
+	// DataExport. The countdown is reset by active downloads (enforced in the SVDM pod). Once every
+	// data leaf's DataExport idles out, the export becomes terminal (Ready=False, reason=Expired) and
+	// its heavy children are freed. Required. Format: <h><m><s>, e.g. "2h45m".
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$`
+	TTL string `json:"ttl"`
 
 	// Publish exposes the endpoints outside the cluster (Ingress/Route) when true.
 	// When false (default), endpoints are only reachable in-cluster.

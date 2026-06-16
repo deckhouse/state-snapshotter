@@ -23,6 +23,10 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .spec.ttl
+      name: TTL
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -70,8 +74,18 @@ spec:
                   StorageClassMapping optionally remaps source StorageClass names (from the index) to target
                   StorageClass names. Sources not present in the map are looked up by identity in the cluster.
                 type: object
+              ttl:
+                description: |-
+                  TTL is the idle time-to-live for the import's upload endpoints, propagated verbatim to each child
+                  DataImport. The countdown is reset by active uploads (enforced in the SVDM pod). If a data node's
+                  DataImport idles out before its upload finishes, the import becomes terminal (Ready=False,
+                  reason=Expired) and its heavy children are freed. Required. Format: <h><m><s>, e.g. "2h45m".
+                minLength: 1
+                pattern: ^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$
+                type: string
             required:
             - snapshotName
+            - ttl
             type: object
           status:
             properties:
