@@ -284,6 +284,91 @@ func getStatusString(ctx context.Context, gvr schema.GroupVersionResource, ns, n
 	return s, err
 }
 
+// waitStatusString blocks until a CR's status.<field> is non-empty and returns it.
+func waitStatusString(ctx context.Context, gvr schema.GroupVersionResource, ns, name, field string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		s, err := getStatusString(ctx, gvr, ns, name, field)
+		if err == nil && s != "" {
+			return s, nil
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timeout waiting for %s %s/%s status.%s (last err=%v)", gvr.Resource, ns, name, field, err)
+		}
+		if !sleepCtx(ctx, defaultPoll) {
+			return "", ctx.Err()
+		}
+	}
+}
+
+// waitImportSnapshots blocks until a SnapshotImport publishes a non-empty status.snapshots[] (i.e.
+// after the server has parsed the uploaded index and applied any spec.childSnapshot re-root).
+func waitImportSnapshots(ctx context.Context, ns, name string, timeout time.Duration) ([]map[string]interface{}, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		entries, err := getImportSnapshots(ctx, ns, name)
+		if err == nil && len(entries) > 0 {
+			return entries, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timeout waiting for SnapshotImport %s/%s status.snapshots[] (last err=%v)", ns, name, err)
+		}
+		if !sleepCtx(ctx, defaultPoll) {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// findDomainSnapshotName discovers the name of a capture-generated domain snapshot object (e.g. a
+// DemoVirtualDiskSnapshot) that corresponds to a given source workload name. The capture's naming
+// convention is not assumed: the helper matches an exact name first, then any object whose name or
+// any string value in its spec references sourceName. On no match it errors with the observed names
+// so a live run reveals the real convention.
+func findDomainSnapshotName(ctx context.Context, gvr schema.GroupVersionResource, ns, sourceName string) (string, error) {
+	list, err := suiteDyn.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("list %s in %s: %w", gvr.Resource, ns, err)
+	}
+	var names []string
+	for i := range list.Items {
+		names = append(names, list.Items[i].GetName())
+	}
+	for _, n := range names {
+		if n == sourceName {
+			return n, nil
+		}
+	}
+	for i := range list.Items {
+		obj := &list.Items[i]
+		if spec, ok, _ := unstructured.NestedMap(obj.Object, "spec"); ok && specReferencesName(spec, sourceName) {
+			return obj.GetName(), nil
+		}
+	}
+	for _, n := range names {
+		if strings.Contains(n, sourceName) {
+			return n, nil
+		}
+	}
+	return "", fmt.Errorf("no %s in %s references source %q; observed: %v", gvr.Resource, ns, sourceName, names)
+}
+
+// specReferencesName reports whether any string leaf in spec equals sourceName.
+func specReferencesName(spec map[string]interface{}, sourceName string) bool {
+	for _, v := range spec {
+		switch t := v.(type) {
+		case string:
+			if t == sourceName {
+				return true
+			}
+		case map[string]interface{}:
+			if specReferencesName(t, sourceName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():

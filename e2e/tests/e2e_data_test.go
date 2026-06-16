@@ -32,6 +32,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,6 +47,67 @@ import (
 
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 )
+
+// subresAPIPrefix is the namespaced aggregated-subresource AbsPath prefix. For the server-side /view
+// (consumed by d8 snapshot list) there is no SnapshotExport CR to publish the URL, so the client
+// builds it itself: <prefix>/<ns>/<resource>/<name>/view.
+const subresAPIPrefix = "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces"
+
+// snapshotView mirrors the server's stable SnapshotView projection (usecase/restore/view.go). Unlike
+// the opaque index, the view IS meant to be parsed by clients to render the tree.
+type snapshotView struct {
+	Version string           `json:"version"`
+	Root    snapshotViewNode `json:"root"`
+}
+
+type snapshotViewNode struct {
+	APIVersion string             `json:"apiVersion"`
+	Kind       string             `json:"kind"`
+	Namespace  string             `json:"namespace"`
+	Name       string             `json:"name"`
+	HasData    bool               `json:"hasData"`
+	VolumeMode string             `json:"volumeMode,omitempty"`
+	SizeBytes  int64              `json:"sizeBytes,omitempty"`
+	Children   []snapshotViewNode `json:"children,omitempty"`
+}
+
+func viewAbsPath(ns, resource, name string) string {
+	return fmt.Sprintf("%s/%s/%s/%s/view", subresAPIPrefix, ns, resource, name)
+}
+
+// getSnapshotView GETs and parses the server-side view for a snapshot identified by its plural
+// resource (snapshots for the namespace root, or a domain plural for a subtree).
+func getSnapshotView(ctx context.Context, resource, ns, name string) (*snapshotView, error) {
+	raw, code, err := suiteAPI.get(ctx, viewAbsPath(ns, resource, name))
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("GET view %s/%s/%s: status %d (%s)", ns, resource, name, code, truncate(raw))
+	}
+	v := &snapshotView{}
+	if err := json.Unmarshal(raw, v); err != nil {
+		return nil, fmt.Errorf("parse view %s/%s/%s: %w", ns, resource, name, err)
+	}
+	return v, nil
+}
+
+// countViewNodes returns the total number of nodes in a view tree.
+func countViewNodes(n *snapshotViewNode) int {
+	total := 1
+	for i := range n.Children {
+		total += countViewNodes(&n.Children[i])
+	}
+	return total
+}
+
+func truncate(b []byte) string {
+	const max = 256
+	if len(b) > max {
+		return string(b[:max]) + "..."
+	}
+	return string(b)
+}
 
 const (
 	// dataPodContainer is the single container of the in-cluster data pod.
