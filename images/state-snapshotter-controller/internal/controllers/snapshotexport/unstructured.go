@@ -28,6 +28,9 @@ import (
 var (
 	volumeRestoreRequestGVK = schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "VolumeRestoreRequest"}
 	dataExportGVK           = schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataExport"}
+	// volumeSnapshotContentGVK is the durable CSI VolumeSnapshotContent read (cluster-scoped) only to
+	// surface each data node's restoreSize into status.snapshots[].size.
+	volumeSnapshotContentGVK = schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"}
 )
 
 const (

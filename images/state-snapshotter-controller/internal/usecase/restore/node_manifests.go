@@ -23,6 +23,7 @@ import (
 	"net/http"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 )
@@ -45,10 +46,34 @@ func (s *Service) BuildNodeManifests(ctx context.Context, namespace, snapshotNam
 	if err != nil {
 		return nil, err
 	}
+	return s.nodeManifestsFromRoot(ctx, root, nodeID, fmt.Sprintf("tree %s/%s", namespace, snapshotName))
+}
+
+// BuildNodeManifestsForNode returns the own-manifests JSON array for a single snapshot node within
+// the subtree rooted at the domain snapshot CR identified by gvk (any registered domain snapshot
+// kind). It is the domain-rooted counterpart of BuildNodeManifests (Snapshot-rooted): a subtree
+// export reaches each node's per-node manifests via the domain root's ?node=<id> endpoint, so the
+// import side can recreate a byte-faithful per-node ManifestCheckpoint even when the export was
+// rooted at a child snapshot rather than the namespaced Snapshot.
+func (s *Service) BuildNodeManifestsForNode(ctx context.Context, gvk schema.GroupVersionKind, namespace, snapshotName, nodeID string) ([]byte, error) {
+	if nodeID == "" {
+		return nil, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "node selector is required")
+	}
+	root, err := s.resolver.ResolveRestoreSubtree(ctx, gvk, namespace, snapshotName)
+	if err != nil {
+		return nil, err
+	}
+	return s.nodeManifestsFromRoot(ctx, root, nodeID, fmt.Sprintf("subtree %s/%s (%s)", namespace, snapshotName, gvk.Kind))
+}
+
+// nodeManifestsFromRoot finds nodeID within an already-resolved restore tree and marshals that
+// node's own ManifestCheckpoint objects. where is a human-readable description of the resolved root
+// used only in the not-found error.
+func (s *Service) nodeManifestsFromRoot(ctx context.Context, root *RestoreNode, nodeID, where string) ([]byte, error) {
 	node := findNodeByID(root, nodeID)
 	if node == nil {
 		return nil, usecase.NewAggregatedStatusError(http.StatusNotFound, "NotFound",
-			fmt.Sprintf("snapshot node %q not found in tree %s/%s", nodeID, namespace, snapshotName))
+			fmt.Sprintf("snapshot node %q not found in %s", nodeID, where))
 	}
 	objs, err := s.loader.LoadManifests(ctx, node.ManifestCheckpointName)
 	if err != nil {

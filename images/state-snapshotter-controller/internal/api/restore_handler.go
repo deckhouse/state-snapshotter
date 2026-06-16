@@ -90,6 +90,8 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 				h.HandleGetSnapshotManifestsWithDataRestoration(w, r, namespace, snapshotName)
 			case "index":
 				h.HandleGetSnapshotIndex(w, r, namespace, snapshotName)
+			case "view":
+				h.HandleGetSnapshotView(w, r, namespace, snapshotName)
 			default:
 				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 			}
@@ -111,6 +113,8 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 				h.HandleGenericSnapshotManifestsWithDataRestoration(w, r, namespace, parts[1], name)
 			case "index":
 				h.HandleGenericSnapshotIndex(w, r, namespace, parts[1], name)
+			case "view":
+				h.HandleGenericSnapshotView(w, r, namespace, parts[1], name)
 			default:
 				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 			}
@@ -186,6 +190,47 @@ func (h *RestoreHandler) HandleGetSnapshotIndex(w http.ResponseWriter, r *http.R
 	}
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned snapshot index", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+}
+
+// HandleGetSnapshotView serves the stable SnapshotView projection of a namespaced root Snapshot's
+// hierarchy for `d8 snapshot list`. The view is derived from the same restore resolver as index, so
+// it fails closed on a not-ready/missing node, but exposes only presentation fields (never the
+// internal index wiring).
+func (h *RestoreHandler) HandleGetSnapshotView(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
+	start := time.Now()
+	opts := restore.Options{
+		SnapshotName:      snapshotName,
+		SnapshotNamespace: namespace,
+	}
+	data, err := h.service.BuildView(r.Context(), opts)
+	if err != nil {
+		h.writeRestoreError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned snapshot view", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+}
+
+// HandleGenericSnapshotView is the domain-rooted counterpart of HandleGetSnapshotView: it serves the
+// SnapshotView for the subtree rooted at a domain snapshot CR (e.g. a virtual machine snapshot kind).
+func (h *RestoreHandler) HandleGenericSnapshotView(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
+	start := time.Now()
+	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	opts := restore.Options{
+		SnapshotName:      snapshotName,
+		SnapshotNamespace: namespace,
+	}
+	data, err := h.service.BuildViewForNode(r.Context(), snapshotGVK, opts)
+	if err != nil {
+		h.writeRestoreError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned per-node snapshot view", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
 }
 
 func (h *RestoreHandler) HandleGenericSnapshotIndex(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
@@ -268,6 +313,19 @@ func (h *RestoreHandler) HandleGenericSnapshotAggregatedManifests(w http.Respons
 		h.writeAggregatedError(w, err)
 		return
 	}
+	// Per-node retrieval (?node=<id>): the domain-rooted counterpart of the Snapshot ?node= path.
+	// Returns a single node's own ManifestCheckpoint objects so a subtree export/import can drive
+	// per-node manifests even when rooted at a domain snapshot CR rather than the namespaced Snapshot.
+	if node := r.URL.Query().Get("node"); node != "" {
+		data, err := h.service.BuildNodeManifestsForNode(r.Context(), snapshotGVK, namespace, snapshotName, node)
+		if err != nil {
+			h.writeRestoreError(w, err)
+			return
+		}
+		h.writeJSONResponse(w, r, data)
+		h.logger.Info("Returned generic per-node snapshot manifests", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "node", node, "gvk", snapshotGVK.String(), "duration", time.Since(start))
+		return
+	}
 	data, err := h.nsAggregated.BuildAggregatedJSONFromSnapshot(r.Context(), snapshotGVK, namespace, snapshotName)
 	if err != nil {
 		h.writeAggregatedError(w, err)
@@ -317,6 +375,13 @@ func (h *RestoreHandler) writeAggregatedError(w http.ResponseWriter, err error) 
 }
 
 func (h *RestoreHandler) writeRestoreError(w http.ResponseWriter, err error) {
+	// A typed aggregated-status error (e.g. the per-node BadRequest/NotFound) already carries its
+	// HTTP status; honour it before falling back to the restore sentinel classification.
+	var st *usecase.AggregatedStatusError
+	if errors.As(err, &st) {
+		h.writeKubernetesErrorResponse(w, st.HTTPStatus, st.Reason, st.Message)
+		return
+	}
 	switch {
 	case errors.Is(err, restore.ErrBadRequest):
 		h.writeKubernetesErrorResponse(w, http.StatusBadRequest, "BadRequest", err.Error())

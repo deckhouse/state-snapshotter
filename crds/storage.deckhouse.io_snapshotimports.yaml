@@ -17,8 +17,8 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.snapshotName
-      name: Snapshot
+    - jsonPath: .spec.targetName
+      name: Target
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
@@ -58,15 +58,34 @@ spec:
             type: object
           spec:
             properties:
+              childSnapshot:
+                description: |-
+                  ChildSnapshot optionally selects a single child snapshot from the uploaded bundle to import as
+                  the new root (server-side re-root). Empty (the default) imports the bundle's own root. When set,
+                  apiVersion, kind and name must all match a node present in the uploaded bundle exactly (this is
+                  an exact match, not label selection).
+                properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion of the referenced snapshot (e.g. "storage.deckhouse.io/v1alpha1"). Empty defaults to
+                      the namespaced root Snapshot apiVersion.
+                    type: string
+                  kind:
+                    description: |-
+                      Kind of the referenced snapshot (e.g. "Snapshot", "DemoVirtualMachineSnapshot"). Empty defaults
+                      to "Snapshot".
+                    type: string
+                  name:
+                    description: Name of the referenced snapshot.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               publish:
                 description: Publish exposes upload endpoints outside the cluster
                   (Ingress/Route) when true.
                 type: boolean
-              snapshotName:
-                description: SnapshotName is the desired name of the root Snapshot
-                  to (re)create on import (same namespace).
-                minLength: 1
-                type: string
               storageClassMapping:
                 additionalProperties:
                   type: string
@@ -74,6 +93,13 @@ spec:
                   StorageClassMapping optionally remaps source StorageClass names (from the index) to target
                   StorageClass names. Sources not present in the map are looked up by identity in the cluster.
                 type: object
+              targetName:
+                description: |-
+                  TargetName is the desired name of the recreated root snapshot in this namespace. When
+                  ChildSnapshot is empty it names the recreated root of the uploaded bundle; when ChildSnapshot
+                  selects a child, it names that re-rooted child.
+                minLength: 1
+                type: string
               ttl:
                 description: |-
                   TTL is the idle time-to-live for the import's upload endpoints, propagated verbatim to each child
@@ -84,7 +110,7 @@ spec:
                 pattern: ^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$
                 type: string
             required:
-            - snapshotName
+            - targetName
             - ttl
             type: object
           status:
@@ -147,18 +173,39 @@ spec:
                   - type
                   type: object
                 type: array
-              dataSnapshots:
+              indexUploadURL:
+                description: IndexUploadURL is where the client uploads the hierarchy
+                  index (available immediately).
+                type: string
+              manifestsUploadURL:
+                description: ManifestsUploadURL is where the client uploads the whole-tree
+                  manifests archive.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation last reconciled
+                  into this status.
+                format: int64
+                type: integer
+              snapshots:
                 description: |-
-                  DataSnapshots lists per-data-snapshot upload endpoints, prepared once the index is received
-                  and all target StorageClasses are resolved.
+                  Snapshots is the flat, per-node import view: one entry per snapshot node of the (possibly
+                  re-rooted) bundle, carrying that node's per-node manifests upload URL and, for data nodes, the
+                  volume data upload endpoint and capture progress. It replaces the former data-only dataSnapshots
+                  list. When spec.childSnapshot selects a subtree, only that subtree's nodes appear here.
                 items:
-                  description: SnapshotImportDataEntry is one data snapshot's upload
-                    endpoint and capture progress.
+                  description: |-
+                    SnapshotImportSnapshotEntry is one snapshot node's import view: its per-node manifests upload URL
+                    plus, for a data node, the volume data upload endpoint and capture progress.
                   properties:
                     capturedSnapshotContentName:
                       description: |-
                         CapturedSnapshotContentName is the durable VolumeSnapshotContent captured from the populated
                         PVC (via VolumeCaptureRequest), referenced from the recreated SnapshotContent.dataRefs[].
+                      type: string
+                    manifestsUploadURL:
+                      description: |-
+                        ManifestsUploadURL is where the client uploads this single node's own manifests (the per-node
+                        ?node= upload endpoint). Present for every node, data or not.
                       type: string
                     snapshotID:
                       description: SnapshotID is the stable archive identifier "<kind>--<namespace>--<name>"
@@ -175,13 +222,19 @@ spec:
                         endpoint are ready to receive data.
                       type: boolean
                     uploadURL:
-                      description: UploadURL is the endpoint to upload this snapshot's
-                        volume data (set when UploadReady).
+                      description: |-
+                        UploadURL is the endpoint to upload this snapshot's volume data (data nodes only, set when
+                        UploadReady).
                       type: string
                     uploaded:
                       description: Uploaded indicates the client signalled completion
                         of this data upload.
                       type: boolean
+                    volumeMode:
+                      description: |-
+                        VolumeMode is the data volume mode (Block or Filesystem); it selects the upload endpoint and the
+                        on-disk layout. Empty for dataless nodes.
+                      type: string
                   required:
                   - snapshotID
                   type: object
@@ -189,19 +242,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - snapshotID
                 x-kubernetes-list-type: map
-              indexUploadURL:
-                description: IndexUploadURL is where the client uploads the hierarchy
-                  index (available immediately).
-                type: string
-              manifestsUploadURL:
-                description: ManifestsUploadURL is where the client uploads the whole-tree
-                  manifests archive.
-                type: string
-              observedGeneration:
-                description: ObservedGeneration is the spec generation last reconciled
-                  into this status.
-                format: int64
-                type: integer
             type: object
         type: object
     served: true

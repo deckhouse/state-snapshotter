@@ -62,7 +62,7 @@ func twoNodeIndex() *restore.Index {
 // nodes keep their original index name.
 func TestRecreatedName(t *testing.T) {
 	idx := twoNodeIndex()
-	imp := &storagev1alpha1.SnapshotImport{Spec: storagev1alpha1.SnapshotImportSpec{SnapshotName: "restored-root"}}
+	imp := &storagev1alpha1.SnapshotImport{Spec: storagev1alpha1.SnapshotImportSpec{TargetName: "restored-root"}}
 
 	if got := recreatedName(imp, idx, &idx.Snapshots[0]); got != "restored-root" {
 		t.Fatalf("root name: got %q want restored-root", got)
@@ -197,7 +197,7 @@ func TestSetExpired(t *testing.T) {
 		WithStatusSubresource(&storagev1alpha1.SnapshotImport{}).Build()
 	r := &SnapshotImportReconciler{Client: cl, Direct: cl, Scheme: scheme}
 
-	entries := []storagev1alpha1.SnapshotImportDataEntry{{SnapshotID: "a"}}
+	entries := []storagev1alpha1.SnapshotImportSnapshotEntry{{SnapshotID: "a"}}
 	if err := r.setExpired(ctx, imp, entries); err != nil {
 		t.Fatalf("setExpired: %v", err)
 	}
@@ -212,8 +212,8 @@ func TestSetExpired(t *testing.T) {
 	if up == nil || up.Status != metav1.ConditionFalse || up.Reason != storagev1alpha1.SnapshotImportReasonExpired {
 		t.Fatalf("UploadsPrepared must be False/Expired, got %#v", up)
 	}
-	if len(got.Status.DataSnapshots) != 1 || got.Status.DataSnapshots[0].SnapshotID != "a" {
-		t.Fatalf("entries not recorded: %#v", got.Status.DataSnapshots)
+	if len(got.Status.Snapshots) != 1 || got.Status.Snapshots[0].SnapshotID != "a" {
+		t.Fatalf("entries not recorded: %#v", got.Status.Snapshots)
 	}
 }
 
@@ -226,7 +226,7 @@ func TestEnsureSnapshotContent_BackRef(t *testing.T) {
 	idx := twoNodeIndex()
 	imp := &storagev1alpha1.SnapshotImport{
 		ObjectMeta: metav1.ObjectMeta{Name: "imp", Namespace: "ns"},
-		Spec:       storagev1alpha1.SnapshotImportSpec{SnapshotName: "restored-root"},
+		Spec:       storagev1alpha1.SnapshotImportSpec{TargetName: "restored-root"},
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).Build()

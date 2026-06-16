@@ -221,7 +221,7 @@ func TestSetExpired(t *testing.T) {
 		WithStatusSubresource(&storagev1alpha1.SnapshotExport{}).Build()
 	r := &SnapshotExportReconciler{Client: cl, Scheme: scheme}
 
-	entries := []storagev1alpha1.SnapshotExportDataEntry{{SnapshotID: "a"}}
+	entries := []storagev1alpha1.SnapshotExportSnapshotEntry{{SnapshotID: "a", HasData: true}}
 	if _, err := r.setExpired(ctx, exp, entries); err != nil {
 		t.Fatalf("setExpired: %v", err)
 	}
@@ -236,8 +236,8 @@ func TestSetExpired(t *testing.T) {
 	if dr == nil || dr.Status != metav1.ConditionFalse || dr.Reason != storagev1alpha1.SnapshotExportReasonExpired {
 		t.Fatalf("DataReady must be False/Expired, got %#v", dr)
 	}
-	if len(got.Status.DataSnapshots) != 1 || got.Status.DataSnapshots[0].SnapshotID != "a" {
-		t.Fatalf("entries not recorded: %#v", got.Status.DataSnapshots)
+	if len(got.Status.Snapshots) != 1 || got.Status.Snapshots[0].SnapshotID != "a" {
+		t.Fatalf("entries not recorded: %#v", got.Status.Snapshots)
 	}
 }
 
@@ -252,14 +252,14 @@ func TestPublishStatus(t *testing.T) {
 		allReady   bool
 		anyFailed  bool
 		details    []string
-		entries    []storagev1alpha1.SnapshotExportDataEntry
+		entries    []storagev1alpha1.SnapshotExportSnapshotEntry
 		wantReady  metav1.ConditionStatus
 		wantReason string
 	}{
 		{
 			name:       "published",
 			allReady:   true,
-			entries:    []storagev1alpha1.SnapshotExportDataEntry{{SnapshotID: "a", DataURL: "u", Ready: true}},
+			entries:    []storagev1alpha1.SnapshotExportSnapshotEntry{{SnapshotID: "a", HasData: true, ManifestsURL: "/m?node=a", DataURL: "u", Ready: true}},
 			wantReady:  metav1.ConditionTrue,
 			wantReason: storagev1alpha1.SnapshotExportReasonPublished,
 		},
@@ -267,14 +267,14 @@ func TestPublishStatus(t *testing.T) {
 			name:       "failed",
 			anyFailed:  true,
 			details:    []string{"a: VolumeRestoreRequest not ready (RestoreFailed)"},
-			entries:    []storagev1alpha1.SnapshotExportDataEntry{{SnapshotID: "a"}},
+			entries:    []storagev1alpha1.SnapshotExportSnapshotEntry{{SnapshotID: "a", HasData: true, ManifestsURL: "/m?node=a"}},
 			wantReady:  metav1.ConditionFalse,
 			wantReason: storagev1alpha1.SnapshotExportReasonDataExportFailed,
 		},
 		{
 			name:       "pending",
 			details:    []string{"a: restored PVC not present yet"},
-			entries:    []storagev1alpha1.SnapshotExportDataEntry{{SnapshotID: "a"}},
+			entries:    []storagev1alpha1.SnapshotExportSnapshotEntry{{SnapshotID: "a", HasData: true, ManifestsURL: "/m?node=a"}},
 			wantReady:  metav1.ConditionFalse,
 			wantReason: storagev1alpha1.SnapshotExportReasonDataPending,
 		},
@@ -287,7 +287,7 @@ func TestPublishStatus(t *testing.T) {
 				WithStatusSubresource(&storagev1alpha1.SnapshotExport{}).Build()
 			r := &SnapshotExportReconciler{Client: cl, Scheme: scheme}
 
-			if err := r.publishStatus(ctx, exp, "/index", "/manifests", tc.entries, tc.allReady, tc.anyFailed, tc.details); err != nil {
+			if err := r.publishStatus(ctx, exp, "/index", tc.entries, tc.allReady, tc.anyFailed, tc.details); err != nil {
 				t.Fatalf("publishStatus: %v", err)
 			}
 			got := &storagev1alpha1.SnapshotExport{}
@@ -298,8 +298,11 @@ func TestPublishStatus(t *testing.T) {
 			if cond == nil || cond.Status != tc.wantReady || cond.Reason != tc.wantReason {
 				t.Fatalf("Ready cond: got %#v, want status=%s reason=%s", cond, tc.wantReady, tc.wantReason)
 			}
-			if got.Status.IndexURL != "/index" || got.Status.ManifestsURL != "/manifests" {
-				t.Fatalf("URLs not published: %+v", got.Status)
+			if got.Status.IndexURL != "/index" {
+				t.Fatalf("IndexURL not published: %+v", got.Status)
+			}
+			if len(got.Status.Snapshots) != 1 || got.Status.Snapshots[0].ManifestsURL != "/m?node=a" {
+				t.Fatalf("per-node entries not published: %+v", got.Status.Snapshots)
 			}
 		})
 	}

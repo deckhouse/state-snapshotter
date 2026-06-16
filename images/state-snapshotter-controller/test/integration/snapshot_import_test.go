@@ -163,7 +163,7 @@ var _ = Describe("Integration: SnapshotImport reconciler", func() {
 
 		imp := &storagev1alpha1.SnapshotImport{
 			ObjectMeta: metav1.ObjectMeta{Name: impName, Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotImportSpec{SnapshotName: snapName, TTL: exportTTL},
+			Spec:       storagev1alpha1.SnapshotImportSpec{TargetName: snapName, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
 
@@ -354,7 +354,7 @@ var _ = Describe("Integration: SnapshotImport reconciler", func() {
 
 		imp := &storagev1alpha1.SnapshotImport{
 			ObjectMeta: metav1.ObjectMeta{Name: impName, Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotImportSpec{SnapshotName: snapName, TTL: exportTTL},
+			Spec:       storagev1alpha1.SnapshotImportSpec{TargetName: snapName, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
 

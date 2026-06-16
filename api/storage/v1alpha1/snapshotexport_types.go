@@ -53,9 +53,23 @@ const (
 	SnapshotExportReasonExpired = "Expired"
 )
 
-// LocalSnapshotRef references a root Snapshot in the same namespace as the referrer.
+// SnapshotReference is a typed reference to a snapshot object by GroupVersionKind and name, within
+// the referrer's namespace. APIVersion and Kind are optional on input: an empty apiVersion/kind is
+// interpreted by the controller as the namespaced root Snapshot
+// (storage.deckhouse.io/v1alpha1, kind Snapshot), so a bare {name} keeps exporting a whole Snapshot.
 // +k8s:deepcopy-gen=true
-type LocalSnapshotRef struct {
+type SnapshotReference struct {
+	// APIVersion of the referenced snapshot (e.g. "storage.deckhouse.io/v1alpha1"). Empty defaults to
+	// the namespaced root Snapshot apiVersion.
+	// +optional
+	APIVersion string `json:"apiVersion,omitempty"`
+
+	// Kind of the referenced snapshot (e.g. "Snapshot", "DemoVirtualMachineSnapshot"). Empty defaults
+	// to "Snapshot".
+	// +optional
+	Kind string `json:"kind,omitempty"`
+
+	// Name of the referenced snapshot.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 }
@@ -89,8 +103,11 @@ type SnapshotExportList struct {
 
 // +k8s:deepcopy-gen=true
 type SnapshotExportSpec struct {
-	// SnapshotRef references the root Snapshot (same namespace) to export.
-	SnapshotRef LocalSnapshotRef `json:"snapshotRef"`
+	// SnapshotRef is a typed reference to the snapshot to export (same namespace). It may be the
+	// namespaced root Snapshot (the default when kind/apiVersion are empty) or any domain snapshot CR
+	// (e.g. a DemoVirtualMachineSnapshot / DemoVirtualDiskSnapshot), in which case the export covers
+	// that node and its subtree only.
+	SnapshotRef SnapshotReference `json:"snapshotRef"`
 
 	// TTL is the idle time-to-live for the export's data endpoints, propagated verbatim to each child
 	// DataExport. The countdown is reset by active downloads (enforced in the SVDM pod). Once every
@@ -113,33 +130,64 @@ type SnapshotExportStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// IndexURL serves the hierarchy index (snapshot tree + per-snapshot data metadata).
+	// IndexURL serves the opaque hierarchy index blob. Clients download it verbatim and MUST NOT
+	// parse it: every field a client needs to drive the download is mirrored per node in Snapshots.
 	// +optional
 	IndexURL string `json:"indexURL,omitempty"`
 
-	// ManifestsURL serves the whole-tree manifests archive (proxied aggregated /manifests).
-	// +optional
-	ManifestsURL string `json:"manifestsURL,omitempty"`
-
-	// DataSnapshots lists per-data-snapshot export endpoints.
+	// Snapshots is the flat, per-node export view: one entry per snapshot in the exported (sub)tree,
+	// carrying that node's own manifests URL and, for data nodes, the volume metadata and download
+	// endpoint. It replaces the former data-only dataSnapshots list.
 	// +listType=map
 	// +listMapKey=snapshotID
 	// +optional
-	DataSnapshots []SnapshotExportDataEntry `json:"dataSnapshots,omitempty"`
+	Snapshots []SnapshotExportSnapshotEntry `json:"snapshots,omitempty"`
 
 	// Conditions represent the latest observations (Ready, DataReady).
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// SnapshotExportDataEntry is one data leaf's export endpoint.
+// SnapshotExportSnapshotEntry is one snapshot node's export view: its own manifests URL plus, for a
+// data node, the volume metadata and data download endpoint. A client follows these URLs without
+// parsing the index blob.
 // +k8s:deepcopy-gen=true
-type SnapshotExportDataEntry struct {
+type SnapshotExportSnapshotEntry struct {
 	// SnapshotID is the stable archive identifier "<kind>--<namespace>--<name>".
 	// +kubebuilder:validation:MinLength=1
 	SnapshotID string `json:"snapshotID"`
 
-	// DataURL is the endpoint to download this snapshot's volume data.
+	// ManifestsURL serves this single node's own manifests (the per-node ?node= aggregated endpoint).
+	// +optional
+	ManifestsURL string `json:"manifestsURL,omitempty"`
+
+	// HasData is true when this node carries a data volume (DataURL is then populated once ready).
+	// +optional
+	HasData bool `json:"hasData,omitempty"`
+
+	// VolumeMode is the data volume mode (Block or Filesystem); it selects the data endpoint and the
+	// on-disk layout. Empty for dataless nodes.
+	// +optional
+	VolumeMode string `json:"volumeMode,omitempty"`
+
+	// StorageClassName is the source volume's StorageClass (informational for the client). Empty for
+	// dataless nodes.
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// FsType is the source volume filesystem type, when known. Empty for dataless/Block nodes.
+	// +optional
+	FsType string `json:"fsType,omitempty"`
+
+	// AccessModes are the source volume access modes, when known.
+	// +optional
+	AccessModes []string `json:"accessModes,omitempty"`
+
+	// Size is the data volume size in bytes (source VolumeSnapshotContent restoreSize); 0 if unknown.
+	// +optional
+	Size int64 `json:"size,omitempty"`
+
+	// DataURL is the endpoint to download this node's volume data (data nodes only).
 	// +optional
 	DataURL string `json:"dataURL,omitempty"`
 
@@ -148,7 +196,8 @@ type SnapshotExportDataEntry struct {
 	// +optional
 	DataCA string `json:"dataCA,omitempty"`
 
-	// Ready indicates the data endpoint is serving (restored PVC bound + DataExport ready).
+	// Ready indicates the data endpoint is serving (restored PVC bound + DataExport ready). Dataless
+	// nodes report Ready=false and do not gate the export's overall readiness.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }

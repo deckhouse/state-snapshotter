@@ -206,7 +206,7 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 
 		export := &storagev1alpha1.SnapshotExport{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}, TTL: exportTTL},
+			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.SnapshotReference{Name: snapName}, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, export)).To(Succeed())
 
@@ -262,10 +262,12 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(ready.Reason).To(Equal(storagev1alpha1.SnapshotExportReasonPublished))
 			g.Expect(f.Status.IndexURL).NotTo(BeEmpty())
-			g.Expect(f.Status.ManifestsURL).NotTo(BeEmpty())
-			g.Expect(f.Status.DataSnapshots).To(HaveLen(1))
-			g.Expect(f.Status.DataSnapshots[0].DataURL).To(Equal(dataURL))
-			g.Expect(f.Status.DataSnapshots[0].Ready).To(BeTrue())
+			g.Expect(f.Status.Snapshots).To(HaveLen(1))
+			g.Expect(f.Status.Snapshots[0].ManifestsURL).NotTo(BeEmpty())
+			g.Expect(f.Status.Snapshots[0].HasData).To(BeTrue())
+			g.Expect(f.Status.Snapshots[0].VolumeMode).To(Equal("Block"))
+			g.Expect(f.Status.Snapshots[0].DataURL).To(Equal(dataURL))
+			g.Expect(f.Status.Snapshots[0].Ready).To(BeTrue())
 		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
 
 		// 4. The restored PVC carries the SnapshotExport as a non-controller hold owner (retention +
@@ -294,7 +296,7 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 
 		export := &storagev1alpha1.SnapshotExport{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp-novm", Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}, TTL: exportTTL},
+			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.SnapshotReference{Name: snapName}, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, export)).To(Succeed())
 
@@ -323,7 +325,7 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 
 		export := &storagev1alpha1.SnapshotExport{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp-expired", Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}, TTL: exportTTL},
+			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.SnapshotReference{Name: snapName}, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, export)).To(Succeed())
 

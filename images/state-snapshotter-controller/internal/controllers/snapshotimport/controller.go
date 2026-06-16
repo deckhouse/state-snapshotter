@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"time"
 
@@ -151,8 +152,11 @@ func (r *SnapshotImportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	// Stage 2: read + parse the uploaded index.
-	idx, err := r.readIndex(ctx, imp)
+	// Stage 2: read + parse the uploaded index, then apply the optional server-side re-root. The
+	// client uploads the whole parent bundle's (opaque) index; spec.childSnapshot, when set, selects a
+	// single child node so the rest of the import (status, uploads, reconstruct) operates on that
+	// subtree only. The index blob itself is never rewritten on disk.
+	rawIdx, err := r.readIndex(ctx, imp)
 	if err != nil {
 		// Recoverable (a re-upload or transient read fixes it); requeue since nothing else wakes us.
 		if serr := r.setCondition(ctx, imp, storagev1alpha1.SnapshotImportConditionUploadsPrepared,
@@ -161,15 +165,22 @@ func (r *SnapshotImportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 		return ctrl.Result{RequeueAfter: requeueShort}, nil
 	}
+	idx, rerr := effectiveIndex(rawIdx, imp.Spec.ChildSnapshot)
+	if rerr != nil {
+		// childSnapshot does not match any node in the bundle: fail closed (permanent until the spec
+		// changes, which re-triggers Reconcile via a generation bump).
+		return ctrl.Result{}, r.setCondition(ctx, imp, storagev1alpha1.SnapshotImportConditionReady,
+			metav1.ConditionFalse, storagev1alpha1.SnapshotImportReasonChildNotFound, rerr.Error())
+	}
 
 	// The capture leg latches: once Captured=True, the populating DataImports/PVCs have been deleted
 	// (Stage 8) and MUST NOT be re-created, or the import would regress and leak a PVC every requeue.
 	// Reuse the already-published per-node entries (they carry capturedSnapshotContentName) instead.
 	captured := meta.IsStatusConditionTrue(imp.Status.Conditions, storagev1alpha1.SnapshotImportConditionCaptured)
-	var entries []storagev1alpha1.SnapshotImportDataEntry
+	var entries []storagev1alpha1.SnapshotImportSnapshotEntry
 
 	if captured {
-		entries = imp.Status.DataSnapshots
+		entries = imp.Status.Snapshots
 	} else {
 		// Stage 3: resolve + validate target StorageClasses and volume sizes (fail closed).
 		nodes, missing, rerr := r.resolveDataNodes(ctx, imp, idx)
@@ -197,11 +208,14 @@ func (r *SnapshotImportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 
 		// Stage 4-7: drive per-node DataImport -> upload -> capture.
-		var allUploadReady, allUploaded, allCaptured, expired bool
-		entries, allUploadReady, allUploaded, allCaptured, expired, err = r.reconcileDataNodes(ctx, imp, nodes)
-		if err != nil {
-			return ctrl.Result{}, err
+		dataEntries, allUploadReady, allUploaded, allCaptured, expired, derr := r.reconcileDataNodes(ctx, imp, nodes)
+		if derr != nil {
+			return ctrl.Result{}, derr
 		}
+		// status.snapshots[] carries one entry per node (data or not): every node gets a per-node
+		// manifests upload URL; data nodes additionally carry the volume upload endpoint and capture
+		// progress merged from the data-node reconcile.
+		entries = r.buildSnapshotEntries(imp, idx, dataEntries)
 
 		// A data node's upload endpoint idled out before its upload finished: the data never landed, so
 		// fail the import closed. Free the heavy children (DataImport + populating PVC) and latch the
@@ -218,7 +232,7 @@ func (r *SnapshotImportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, nil
 		}
 
-		if err := r.publishDataSnapshots(ctx, imp, entries); err != nil {
+		if err := r.publishSnapshots(ctx, imp, entries); err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -260,6 +274,19 @@ func (r *SnapshotImportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !meta.IsStatusConditionTrue(imp.Status.Conditions, storagev1alpha1.SnapshotImportConditionManifestsReceived) {
 		logger.V(1).Info("SnapshotImport waiting for manifests upload")
 		return ctrl.Result{RequeueAfter: requeueShort}, nil
+	}
+
+	// Stage 9.5: fail-closed name-collision preflight. If a target object name (spec.targetName for the
+	// re-created root, or a non-root node's original name) already exists and is not owned by this
+	// import, refuse instead of silently binding to a foreign object. This must run before any object
+	// is created (reconstructTree below) so a conflicting import never partially materializes.
+	if conflict, cerr := r.detectNameConflict(ctx, imp, idx); cerr != nil {
+		return ctrl.Result{}, cerr
+	} else if conflict != "" {
+		// Permanent until spec changes (a generation bump re-triggers Reconcile); no requeue.
+		return ctrl.Result{}, r.setCondition(ctx, imp, storagev1alpha1.SnapshotImportConditionReady,
+			metav1.ConditionFalse, storagev1alpha1.SnapshotImportReasonNameConflict,
+			fmt.Sprintf("%s already exists and is not owned by this import; choose a different spec.targetName or a clean namespace", conflict))
 	}
 
 	// Stage 10: reconstruct per-node ManifestCheckpoints and pre-provision the snapshot tree
@@ -367,15 +394,15 @@ func (r *SnapshotImportReconciler) resolveDataNodes(ctx context.Context, imp *st
 // reconcileDataNodes ensures a DataImport (and, once uploaded, a VolumeCaptureRequest) per data node
 // and reports aggregate readiness. It returns one status entry per node plus an expired flag set when
 // any node's upload endpoint idled out (Ready=False/reason=Expired) before its upload finished.
-func (r *SnapshotImportReconciler) reconcileDataNodes(ctx context.Context, imp *storagev1alpha1.SnapshotImport, nodes []dataNode) ([]storagev1alpha1.SnapshotImportDataEntry, bool, bool, bool, bool, error) {
+func (r *SnapshotImportReconciler) reconcileDataNodes(ctx context.Context, imp *storagev1alpha1.SnapshotImport, nodes []dataNode) ([]storagev1alpha1.SnapshotImportSnapshotEntry, bool, bool, bool, bool, error) {
 	owner := r.ownerRef(imp)
-	entries := make([]storagev1alpha1.SnapshotImportDataEntry, 0, len(nodes))
+	entries := make([]storagev1alpha1.SnapshotImportSnapshotEntry, 0, len(nodes))
 	allUploadReady, allUploaded, allCaptured := true, true, true
 	expired := false
 
 	for _, n := range nodes {
 		base := resourceBaseName(imp.Name, n.id)
-		entry := storagev1alpha1.SnapshotImportDataEntry{SnapshotID: n.id}
+		entry := storagev1alpha1.SnapshotImportSnapshotEntry{SnapshotID: n.id, VolumeMode: n.volumeMode}
 
 		di, err := r.ensureUnstructured(ctx, dataImportGVK, imp.Namespace, base, func() *unstructured.Unstructured {
 			return newDataImport(imp.Namespace, base, owner, dataImportSpec{
@@ -446,7 +473,7 @@ func (r *SnapshotImportReconciler) reconcileDataNodes(ctx context.Context, imp *
 }
 
 // captureNode ensures a VolumeCaptureRequest over the populated PVC and records the captured VSC.
-func (r *SnapshotImportReconciler) captureNode(ctx context.Context, imp *storagev1alpha1.SnapshotImport, owner metav1.OwnerReference, base string, entry *storagev1alpha1.SnapshotImportDataEntry) (bool, error) {
+func (r *SnapshotImportReconciler) captureNode(ctx context.Context, imp *storagev1alpha1.SnapshotImport, owner metav1.OwnerReference, base string, entry *storagev1alpha1.SnapshotImportSnapshotEntry) (bool, error) {
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Namespace: imp.Namespace, Name: base}, pvc); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -515,7 +542,7 @@ func (r *SnapshotImportReconciler) cleanupPopulatedPVCs(ctx context.Context, imp
 
 // reconstructTree reconstructs per-node ManifestCheckpoints from the uploaded manifests and
 // pre-provisions the cluster-scoped SnapshotContent tree plus the statically-bound snapshot CRs.
-func (r *SnapshotImportReconciler) reconstructTree(ctx context.Context, imp *storagev1alpha1.SnapshotImport, idx *restore.Index, entries []storagev1alpha1.SnapshotImportDataEntry) error {
+func (r *SnapshotImportReconciler) reconstructTree(ctx context.Context, imp *storagev1alpha1.SnapshotImport, idx *restore.Index, entries []storagev1alpha1.SnapshotImportSnapshotEntry) error {
 	capturedByID := map[string]string{}
 	for _, e := range entries {
 		capturedByID[e.SnapshotID] = e.CapturedSnapshotContentName
@@ -637,9 +664,10 @@ func (r *SnapshotImportReconciler) ensureSnapshotContent(ctx context.Context, na
 	})
 }
 
-// ensureBoundSnapshot recreates a snapshot CR statically bound to its SnapshotContent. The root node
-// becomes the typed Snapshot named spec.snapshotName; other nodes are created as unstructured CRs of
-// their original kind, both carrying spec.source.snapshotContentName.
+// ensureBoundSnapshot recreates a snapshot CR statically bound to its SnapshotContent. A root node of
+// kind Snapshot becomes the typed Snapshot named spec.targetName; any other node (including a domain
+// root from a re-rooted subtree import) is created as an unstructured CR of its original kind, both
+// carrying spec.source.snapshotContentName. No wrapping Snapshot is created for a domain root.
 func (r *SnapshotImportReconciler) ensureBoundSnapshot(ctx context.Context, imp *storagev1alpha1.SnapshotImport, idx *restore.Index, s *restore.IndexSnapshot, contentName string) error {
 	name := recreatedName(imp, idx, s)
 	if isRootNode(idx, s) && s.Kind == "Snapshot" {
@@ -706,6 +734,12 @@ func (r *SnapshotImportReconciler) reconcileDelete(ctx context.Context, imp *sto
 	if raw, err := r.blobs.Read(ctx, indexKey); err == nil {
 		idx := &restore.Index{}
 		if jerr := json.Unmarshal(raw, idx); jerr == nil {
+			// Only the (possibly re-rooted) subtree's per-node manifests blobs were ever uploaded;
+			// re-root best-effort so cleanup targets exactly those. On a re-root error fall back to the
+			// full index (Delete is NotFound-tolerant, so deleting absent blobs is harmless).
+			if eff, eerr := effectiveIndex(idx, imp.Spec.ChildSnapshot); eerr == nil {
+				idx = eff
+			}
 			for i := range idx.Snapshots {
 				mk := usecase.ImportManifestsBlobKey(imp.Namespace, imp.Name, idx.Snapshots[i].ID)
 				if derr := r.blobs.Delete(ctx, mk); derr != nil {
@@ -757,16 +791,140 @@ func (r *SnapshotImportReconciler) ensureUnstructured(ctx context.Context, gvk s
 	return created, nil
 }
 
-func (r *SnapshotImportReconciler) publishDataSnapshots(ctx context.Context, imp *storagev1alpha1.SnapshotImport, entries []storagev1alpha1.SnapshotImportDataEntry) error {
+func (r *SnapshotImportReconciler) publishSnapshots(ctx context.Context, imp *storagev1alpha1.SnapshotImport, entries []storagev1alpha1.SnapshotImportSnapshotEntry) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &storagev1alpha1.SnapshotImport{}
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(imp), cur); err != nil {
 			return err
 		}
-		cur.Status.DataSnapshots = entries
+		cur.Status.Snapshots = entries
 		cur.Status.ObservedGeneration = cur.Generation
 		return r.Client.Status().Update(ctx, cur)
 	})
+}
+
+// buildSnapshotEntries produces one status.snapshots[] entry per node of the (re-rooted) index. Every
+// node gets a per-node manifests upload URL (the ?node= upload endpoint); data nodes additionally
+// carry the volume upload endpoint, mode and capture progress merged from the data-node reconcile.
+func (r *SnapshotImportReconciler) buildSnapshotEntries(imp *storagev1alpha1.SnapshotImport, idx *restore.Index, dataEntries []storagev1alpha1.SnapshotImportSnapshotEntry) []storagev1alpha1.SnapshotImportSnapshotEntry {
+	byID := make(map[string]storagev1alpha1.SnapshotImportSnapshotEntry, len(dataEntries))
+	for _, e := range dataEntries {
+		byID[e.SnapshotID] = e
+	}
+	manifestsBase := importSubresourceURL(imp.Namespace, imp.Name, "manifests")
+	out := make([]storagev1alpha1.SnapshotImportSnapshotEntry, 0, len(idx.Snapshots))
+	for i := range idx.Snapshots {
+		s := &idx.Snapshots[i]
+		entry := storagev1alpha1.SnapshotImportSnapshotEntry{
+			SnapshotID:         s.ID,
+			ManifestsUploadURL: manifestsBase + "?node=" + url.QueryEscape(s.ID),
+		}
+		if d, ok := byID[s.ID]; ok {
+			entry.VolumeMode = d.VolumeMode
+			entry.UploadURL = d.UploadURL
+			entry.UploadCA = d.UploadCA
+			entry.UploadReady = d.UploadReady
+			entry.Uploaded = d.Uploaded
+			entry.CapturedSnapshotContentName = d.CapturedSnapshotContentName
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// detectNameConflict reports the first target object name that already exists in the namespace but is
+// not owned by this import (its spec.source.snapshotContentName does not point at the content this
+// import would (re)create for that node). It is idempotent across re-runs: objects this import already
+// created point at our deterministic content name and are therefore not treated as conflicts.
+func (r *SnapshotImportReconciler) detectNameConflict(ctx context.Context, imp *storagev1alpha1.SnapshotImport, idx *restore.Index) (string, error) {
+	for i := range idx.Snapshots {
+		s := &idx.Snapshots[i]
+		name := recreatedName(imp, idx, s)
+		gv, err := schema.ParseGroupVersion(s.APIVersion)
+		if err != nil {
+			return "", fmt.Errorf("parse apiVersion %q for node %s: %w", s.APIVersion, s.ID, err)
+		}
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(gv.WithKind(s.Kind))
+		gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: imp.Namespace, Name: name}, obj)
+		if apierrors.IsNotFound(gerr) {
+			continue
+		}
+		if gerr != nil {
+			return "", fmt.Errorf("get %s %s/%s: %w", s.Kind, imp.Namespace, name, gerr)
+		}
+		existing, _, _ := unstructured.NestedString(obj.Object, "spec", "source", "snapshotContentName")
+		if existing != r.contentName(imp, s.ID) {
+			return fmt.Sprintf("%s %q", s.Kind, name), nil
+		}
+	}
+	return "", nil
+}
+
+// effectiveIndex returns the index the import operates on. With no child selector it is the uploaded
+// bundle's index unchanged; with spec.childSnapshot it is the subtree re-rooted at the selected child
+// (exact apiVersion/kind/name match), so status, uploads and reconstruction cover that child only.
+func effectiveIndex(idx *restore.Index, child *storagev1alpha1.SnapshotReference) (*restore.Index, error) {
+	if child == nil {
+		return idx, nil
+	}
+	if child.APIVersion == "" || child.Kind == "" || child.Name == "" {
+		return nil, fmt.Errorf("spec.childSnapshot requires apiVersion, kind and name")
+	}
+	byID := make(map[string]*restore.IndexSnapshot, len(idx.Snapshots))
+	var rootID string
+	for i := range idx.Snapshots {
+		s := &idx.Snapshots[i]
+		byID[s.ID] = s
+		if s.APIVersion == child.APIVersion && s.Kind == child.Kind && s.Name == child.Name {
+			rootID = s.ID
+		}
+	}
+	if rootID == "" {
+		return nil, fmt.Errorf("childSnapshot %s (kind %s, apiVersion %s) not found in uploaded bundle", child.Name, child.Kind, child.APIVersion)
+	}
+
+	keep := make(map[string]bool, len(idx.Snapshots))
+	var collect func(id string)
+	collect = func(id string) {
+		if keep[id] {
+			return
+		}
+		s := byID[id]
+		if s == nil {
+			return
+		}
+		keep[id] = true
+		for _, c := range s.Children {
+			collect(c)
+		}
+	}
+	collect(rootID)
+
+	rootNode := byID[rootID]
+	out := &restore.Index{
+		Version: idx.Version,
+		RootSnapshot: restore.IndexSnapshotID{
+			ID:         rootNode.ID,
+			APIVersion: rootNode.APIVersion,
+			Kind:       rootNode.Kind,
+			Namespace:  rootNode.Namespace,
+			Name:       rootNode.Name,
+		},
+	}
+	for i := range idx.Snapshots {
+		s := idx.Snapshots[i]
+		if !keep[s.ID] {
+			continue
+		}
+		if s.ID == rootID {
+			// The selected child becomes the new root: drop its parent link so isRootNode/reconstruct
+			// treat it as the top of the imported (sub)tree.
+			s.ParentID = ""
+		}
+		out.Snapshots = append(out.Snapshots, s)
+	}
+	return out, nil
 }
 
 func (r *SnapshotImportReconciler) setCondition(ctx context.Context, imp *storagev1alpha1.SnapshotImport, condType string, status metav1.ConditionStatus, reason, message string) error {
@@ -790,13 +948,13 @@ func (r *SnapshotImportReconciler) setCondition(ctx context.Context, imp *storag
 // setExpired latches the import into the terminal Expired state: the in-flight UploadsPrepared stage
 // and Ready both go False with reason Expired, recording the (no-longer-serving) entries. Returns no
 // requeue; the import survives as a tombstone for the user/CLI to delete.
-func (r *SnapshotImportReconciler) setExpired(ctx context.Context, imp *storagev1alpha1.SnapshotImport, entries []storagev1alpha1.SnapshotImportDataEntry) error {
+func (r *SnapshotImportReconciler) setExpired(ctx context.Context, imp *storagev1alpha1.SnapshotImport, entries []storagev1alpha1.SnapshotImportSnapshotEntry) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &storagev1alpha1.SnapshotImport{}
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(imp), cur); err != nil {
 			return err
 		}
-		cur.Status.DataSnapshots = entries
+		cur.Status.Snapshots = entries
 		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 			Type:               storagev1alpha1.SnapshotImportConditionUploadsPrepared,
@@ -843,13 +1001,13 @@ func (r *SnapshotImportReconciler) contentName(imp *storagev1alpha1.SnapshotImpo
 
 const csiSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 
-// recreatedName is the recreated CR name. The root node is (re)created under the requested
-// spec.snapshotName; non-root/domain nodes keep their original name from the index. NOTE: non-root
-// names are not import-namespaced, so importing into a namespace that already holds a tree with the
-// same node names will collide — import into a clean namespace.
+// recreatedName is the recreated CR name. The (possibly re-rooted) root node is (re)created under the
+// requested spec.targetName; non-root nodes keep their original name from the index. Non-root names
+// are not import-namespaced, so a collision with an existing object is rejected by the fail-closed
+// detectNameConflict preflight rather than silently adopting it.
 func recreatedName(imp *storagev1alpha1.SnapshotImport, idx *restore.Index, s *restore.IndexSnapshot) string {
-	if isRootNode(idx, s) && imp.Spec.SnapshotName != "" {
-		return imp.Spec.SnapshotName
+	if isRootNode(idx, s) && imp.Spec.TargetName != "" {
+		return imp.Spec.TargetName
 	}
 	return s.Name
 }

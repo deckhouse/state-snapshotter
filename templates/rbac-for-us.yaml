@@ -71,9 +71,20 @@ rules:
   # snapshots/index is the machine-readable hierarchy the export download reads to
   # discover per-node manifests/data (d8 snapshot export download).
   - snapshots/index
+  # snapshots/view is the stable, presentation-oriented projection of the hierarchy
+  # for `d8 snapshot list` (the CLI never parses the internal index.json).
+  - snapshots/view
   - manifestcheckpoints/manifests
   - demovirtualmachinesnapshots/manifests
   - demovirtualdisksnapshots/manifests
+  # Domain-rooted /index for a subtree export download (export rooted at a child
+  # snapshot rather than the namespaced Snapshot) and /view for `d8 snapshot list`
+  # of a subtree. Per-node manifests of a subtree are reached via the existing
+  # <kind>/manifests?node=<id> route above.
+  - demovirtualmachinesnapshots/index
+  - demovirtualdisksnapshots/index
+  - demovirtualmachinesnapshots/view
+  - demovirtualdisksnapshots/view
   verbs:
   - get
 # SnapshotExport / SnapshotImport are user-facing orchestration CRs created and

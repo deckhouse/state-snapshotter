@@ -63,10 +63,24 @@ spec:
                   When false (default), endpoints are only reachable in-cluster.
                 type: boolean
               snapshotRef:
-                description: SnapshotRef references the root Snapshot (same namespace)
-                  to export.
+                description: |-
+                  SnapshotRef is a typed reference to the snapshot to export (same namespace). It may be the
+                  namespaced root Snapshot (the default when kind/apiVersion are empty) or any domain snapshot CR
+                  (e.g. a DemoVirtualMachineSnapshot / DemoVirtualDiskSnapshot), in which case the export covers
+                  that node and its subtree only.
                 properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion of the referenced snapshot (e.g. "storage.deckhouse.io/v1alpha1"). Empty defaults to
+                      the namespaced root Snapshot apiVersion.
+                    type: string
+                  kind:
+                    description: |-
+                      Kind of the referenced snapshot (e.g. "Snapshot", "DemoVirtualMachineSnapshot"). Empty defaults
+                      to "Snapshot".
+                    type: string
                   name:
+                    description: Name of the referenced snapshot.
                     minLength: 1
                     type: string
                 required:
@@ -145,27 +159,77 @@ spec:
                   - type
                   type: object
                 type: array
-              dataSnapshots:
-                description: DataSnapshots lists per-data-snapshot export endpoints.
+              indexURL:
+                description: |-
+                  IndexURL serves the opaque hierarchy index blob. Clients download it verbatim and MUST NOT
+                  parse it: every field a client needs to drive the download is mirrored per node in Snapshots.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation last reconciled
+                  into this status.
+                format: int64
+                type: integer
+              snapshots:
+                description: |-
+                  Snapshots is the flat, per-node export view: one entry per snapshot in the exported (sub)tree,
+                  carrying that node's own manifests URL and, for data nodes, the volume metadata and download
+                  endpoint. It replaces the former data-only dataSnapshots list.
                 items:
-                  description: SnapshotExportDataEntry is one data leaf's export endpoint.
+                  description: |-
+                    SnapshotExportSnapshotEntry is one snapshot node's export view: its own manifests URL plus, for a
+                    data node, the volume metadata and data download endpoint. A client follows these URLs without
+                    parsing the index blob.
                   properties:
+                    accessModes:
+                      description: AccessModes are the source volume access modes,
+                        when known.
+                      items:
+                        type: string
+                      type: array
                     dataCA:
                       description: |-
                         DataCA is the base64-encoded PEM CA bundle to trust when downloading from the internal DataURL.
                         It is empty for a published (externally-trusted) endpoint.
                       type: string
                     dataURL:
-                      description: DataURL is the endpoint to download this snapshot's
-                        volume data.
+                      description: DataURL is the endpoint to download this node's
+                        volume data (data nodes only).
+                      type: string
+                    fsType:
+                      description: FsType is the source volume filesystem type, when
+                        known. Empty for dataless/Block nodes.
+                      type: string
+                    hasData:
+                      description: HasData is true when this node carries a data volume
+                        (DataURL is then populated once ready).
+                      type: boolean
+                    manifestsURL:
+                      description: ManifestsURL serves this single node's own manifests
+                        (the per-node ?node= aggregated endpoint).
                       type: string
                     ready:
-                      description: Ready indicates the data endpoint is serving (restored
-                        PVC bound + DataExport ready).
+                      description: |-
+                        Ready indicates the data endpoint is serving (restored PVC bound + DataExport ready). Dataless
+                        nodes report Ready=false and do not gate the export's overall readiness.
                       type: boolean
+                    size:
+                      description: Size is the data volume size in bytes (source VolumeSnapshotContent
+                        restoreSize); 0 if unknown.
+                      format: int64
+                      type: integer
                     snapshotID:
                       description: SnapshotID is the stable archive identifier "<kind>--<namespace>--<name>".
                       minLength: 1
+                      type: string
+                    storageClassName:
+                      description: |-
+                        StorageClassName is the source volume's StorageClass (informational for the client). Empty for
+                        dataless nodes.
+                      type: string
+                    volumeMode:
+                      description: |-
+                        VolumeMode is the data volume mode (Block or Filesystem); it selects the data endpoint and the
+                        on-disk layout. Empty for dataless nodes.
                       type: string
                   required:
                   - snapshotID
@@ -174,19 +238,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - snapshotID
                 x-kubernetes-list-type: map
-              indexURL:
-                description: IndexURL serves the hierarchy index (snapshot tree +
-                  per-snapshot data metadata).
-                type: string
-              manifestsURL:
-                description: ManifestsURL serves the whole-tree manifests archive
-                  (proxied aggregated /manifests).
-                type: string
-              observedGeneration:
-                description: ObservedGeneration is the spec generation last reconciled
-                  into this status.
-                format: int64
-                type: integer
             type: object
         type: object
     served: true

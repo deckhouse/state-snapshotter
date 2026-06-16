@@ -59,6 +59,14 @@ const (
 	SnapshotImportReasonAllCaptured = "AllCaptured"
 	// SnapshotImportReasonImported marks Ready=True once the snapshot tree is pre-provisioned.
 	SnapshotImportReasonImported = "Imported"
+	// SnapshotImportReasonChildNotFound marks Ready=False when spec.childSnapshot does not match any
+	// node in the uploaded bundle (exact apiVersion/kind/name). It fails closed (no requeue) until the
+	// spec is corrected.
+	SnapshotImportReasonChildNotFound = "ChildSnapshotNotFound"
+	// SnapshotImportReasonNameConflict marks Ready=False when a target object name (spec.targetName for
+	// the new root, or a non-root node's original name) already exists in the namespace and is not
+	// owned by this import. It fails closed instead of silently binding to a foreign object.
+	SnapshotImportReasonNameConflict = "NameConflict"
 	// SnapshotImportReasonExpired marks Ready=False (terminal, latched) when a data node's child
 	// DataImport idled out past spec.ttl before its upload finished: the controller frees the heavy
 	// children (DataImport, populated PVC) and leaves the SnapshotImport as a tombstone to delete.
@@ -68,7 +76,7 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=snapimp
-// +kubebuilder:printcolumn:name="Snapshot",type=string,JSONPath=`.spec.snapshotName`
+// +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetName`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="TTL",type=string,JSONPath=`.spec.ttl`,priority=1
 // SnapshotImport orchestrates uploading (importing) a whole Snapshot hierarchy.
@@ -95,9 +103,18 @@ type SnapshotImportList struct {
 
 // +k8s:deepcopy-gen=true
 type SnapshotImportSpec struct {
-	// SnapshotName is the desired name of the root Snapshot to (re)create on import (same namespace).
+	// TargetName is the desired name of the recreated root snapshot in this namespace. When
+	// ChildSnapshot is empty it names the recreated root of the uploaded bundle; when ChildSnapshot
+	// selects a child, it names that re-rooted child.
 	// +kubebuilder:validation:MinLength=1
-	SnapshotName string `json:"snapshotName"`
+	TargetName string `json:"targetName"`
+
+	// ChildSnapshot optionally selects a single child snapshot from the uploaded bundle to import as
+	// the new root (server-side re-root). Empty (the default) imports the bundle's own root. When set,
+	// apiVersion, kind and name must all match a node present in the uploaded bundle exactly (this is
+	// an exact match, not label selection).
+	// +optional
+	ChildSnapshot *SnapshotReference `json:"childSnapshot,omitempty"`
 
 	// TTL is the idle time-to-live for the import's upload endpoints, propagated verbatim to each child
 	// DataImport. The countdown is reset by active uploads (enforced in the SVDM pod). If a data node's
@@ -132,26 +149,40 @@ type SnapshotImportStatus struct {
 	// +optional
 	ManifestsUploadURL string `json:"manifestsUploadURL,omitempty"`
 
-	// DataSnapshots lists per-data-snapshot upload endpoints, prepared once the index is received
-	// and all target StorageClasses are resolved.
+	// Snapshots is the flat, per-node import view: one entry per snapshot node of the (possibly
+	// re-rooted) bundle, carrying that node's per-node manifests upload URL and, for data nodes, the
+	// volume data upload endpoint and capture progress. It replaces the former data-only dataSnapshots
+	// list. When spec.childSnapshot selects a subtree, only that subtree's nodes appear here.
 	// +listType=map
 	// +listMapKey=snapshotID
 	// +optional
-	DataSnapshots []SnapshotImportDataEntry `json:"dataSnapshots,omitempty"`
+	Snapshots []SnapshotImportSnapshotEntry `json:"snapshots,omitempty"`
 
 	// Conditions represent the latest observations (IndexReceived, UploadsPrepared, Captured, Ready).
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// SnapshotImportDataEntry is one data snapshot's upload endpoint and capture progress.
+// SnapshotImportSnapshotEntry is one snapshot node's import view: its per-node manifests upload URL
+// plus, for a data node, the volume data upload endpoint and capture progress.
 // +k8s:deepcopy-gen=true
-type SnapshotImportDataEntry struct {
+type SnapshotImportSnapshotEntry struct {
 	// SnapshotID is the stable archive identifier "<kind>--<namespace>--<name>" from the index.
 	// +kubebuilder:validation:MinLength=1
 	SnapshotID string `json:"snapshotID"`
 
-	// UploadURL is the endpoint to upload this snapshot's volume data (set when UploadReady).
+	// VolumeMode is the data volume mode (Block or Filesystem); it selects the upload endpoint and the
+	// on-disk layout. Empty for dataless nodes.
+	// +optional
+	VolumeMode string `json:"volumeMode,omitempty"`
+
+	// ManifestsUploadURL is where the client uploads this single node's own manifests (the per-node
+	// ?node= upload endpoint). Present for every node, data or not.
+	// +optional
+	ManifestsUploadURL string `json:"manifestsUploadURL,omitempty"`
+
+	// UploadURL is the endpoint to upload this snapshot's volume data (data nodes only, set when
+	// UploadReady).
 	// +optional
 	UploadURL string `json:"uploadURL,omitempty"`
 
