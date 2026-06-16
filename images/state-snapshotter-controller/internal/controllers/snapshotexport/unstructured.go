@@ -35,6 +35,10 @@ const (
 	conditionTypeReady = "Ready"
 	// reasonCompleted is the VRR success reason (ConditionReasonCompleted upstream).
 	reasonCompleted = "Completed"
+	// reasonExpired is the DataExport Ready=False reason emitted by the SVDM pod once the export's
+	// idle TTL elapses (storage-volume-data-manager common.ReasonExpired). It is the signal that lets
+	// the export controller free the leaf's heavy children instead of re-ensuring them.
+	reasonExpired = "Expired"
 	// kindVolumeSnapshotContent / kindPersistentVolumeClaim are the source/target kinds.
 	kindVolumeSnapshotContent = "VolumeSnapshotContent"
 	kindPersistentVolumeClaim = "PersistentVolumeClaim"

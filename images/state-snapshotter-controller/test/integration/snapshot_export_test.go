@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,6 +45,11 @@ const (
 	// failClosedSettleWindow bounds the negative "no VRR ever created" assertion; it must exceed the
 	// controller's requeueShort (5s) so at least one reconcile would have created a VRR if it intended to.
 	failClosedSettleWindow = 6 * time.Second
+	// exportTTL is the idle TTL stamped on every test SnapshotExport. In envtest there is no SVDM pod,
+	// so the value never actually ticks; the test drives the child DataExport's Ready/Expired status
+	// directly. It only needs to satisfy the CRD's required+pattern validation and be asserted as
+	// propagated verbatim into the child DataExport.
+	exportTTL = "24h"
 )
 
 var (
@@ -88,6 +94,36 @@ func markUnstructuredReady(ctx context.Context, obj *unstructured.Unstructured, 
 		for k, v := range extraStatus {
 			status[k] = v
 		}
+		if err := unstructured.SetNestedMap(cur.Object, status, "status"); err != nil {
+			return err
+		}
+		return k8sClient.Status().Update(ctx, cur)
+	})).To(Succeed())
+}
+
+// markUnstructuredNotReady sets status.conditions[Ready]=False (with reason) on an object that has a
+// status subresource, simulating an external controller reporting a non-ready/terminal state (e.g. a
+// DataExport whose idle TTL elapsed -> reason=Expired). It re-fetches under RetryOnConflict.
+func markUnstructuredNotReady(ctx context.Context, obj *unstructured.Unstructured, reason string) {
+	gvk := obj.GroupVersionKind()
+	key := client.ObjectKeyFromObject(obj)
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &unstructured.Unstructured{}
+		cur.SetGroupVersionKind(gvk)
+		if err := k8sClient.Get(ctx, key, cur); err != nil {
+			return err
+		}
+		cond := map[string]interface{}{
+			"type":               "Ready",
+			"status":             "False",
+			"reason":             reason,
+			"lastTransitionTime": time.Now().UTC().Format(time.RFC3339),
+		}
+		status, _, _ := unstructured.NestedMap(cur.Object, "status")
+		if status == nil {
+			status = map[string]interface{}{}
+		}
+		status["conditions"] = []interface{}{cond}
 		if err := unstructured.SetNestedMap(cur.Object, status, "status"); err != nil {
 			return err
 		}
@@ -170,7 +206,7 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 
 		export := &storagev1alpha1.SnapshotExport{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}},
+			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, export)).To(Succeed())
 
@@ -211,6 +247,9 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 		de := &unstructured.Unstructured{}
 		de.SetGroupVersionKind(dataExportGVK)
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: deName}, de)).To(Succeed())
+		// spec.ttl must be propagated verbatim from the SnapshotExport into the child DataExport.
+		gotTTL, _, _ := unstructured.NestedString(de.Object, "spec", "ttl")
+		Expect(gotTTL).To(Equal(exportTTL))
 		const dataURL = "https://data-pod.svc/api/v1/download"
 		markUnstructuredReady(ctx, de, "Published", map[string]interface{}{"url": dataURL, "ca": "Zm9vYmFy"})
 
@@ -255,7 +294,7 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 
 		export := &storagev1alpha1.SnapshotExport{
 			ObjectMeta: metav1.ObjectMeta{Name: "exp-novm", Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}},
+			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, export)).To(Succeed())
 
@@ -271,6 +310,91 @@ var _ = Describe("Integration: SnapshotExport reconciler", func() {
 		// No VolumeRestoreRequest must be created for a fail-closed leaf.
 		Consistently(func(g Gomega) {
 			g.Expect(listUnstructuredInNamespace(ctx, vrrListGVK, ns)).To(BeEmpty())
+		}).WithTimeout(failClosedSettleWindow).WithPolling(exportImportPoll).Should(Succeed())
+	})
+
+	It("frees children and latches Expired once the only data leaf's DataExport idles out", func() {
+		ctx := context.Background()
+		ns := newExportNamespace(ctx, "ss-export-exp-")
+		const snapName = "exp-snap-expired"
+		const vscName = "exp-src-vsc-expired"
+
+		_ = createReadySnapshotWithDataRef(ctx, ns, snapName, vscName, "Block", "fast")
+
+		export := &storagev1alpha1.SnapshotExport{
+			ObjectMeta: metav1.ObjectMeta{Name: "exp-expired", Namespace: ns},
+			Spec:       storagev1alpha1.SnapshotExportSpec{SnapshotRef: storagev1alpha1.LocalSnapshotRef{Name: snapName}, TTL: exportTTL},
+		}
+		Expect(k8sClient.Create(ctx, export)).To(Succeed())
+
+		// Drive the leaf to a serving DataExport: VRR Completed + restored PVC -> DataExport created.
+		var vrrName string
+		Eventually(func(g Gomega) {
+			items := listUnstructuredInNamespace(ctx, vrrListGVK, ns)
+			g.Expect(items).To(HaveLen(1))
+			vrrName = items[0].GetName()
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+
+		vrr := &unstructured.Unstructured{}
+		vrr.SetGroupVersionKind(vrrGVK)
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: vrrName}, vrr)).To(Succeed())
+		markUnstructuredReady(ctx, vrr, "Completed", nil)
+
+		restoredPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: vrrName, Namespace: ns},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, restoredPVC)).To(Succeed())
+
+		var deName string
+		Eventually(func(g Gomega) {
+			items := listUnstructuredInNamespace(ctx, dataExportListGVK, ns)
+			g.Expect(items).To(HaveLen(1))
+			deName = items[0].GetName()
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+
+		// Simulate the SVDM pod idling out: DataExport flips Ready=False/reason=Expired.
+		de := &unstructured.Unstructured{}
+		de.SetGroupVersionKind(dataExportGVK)
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: deName}, de)).To(Succeed())
+		markUnstructuredNotReady(ctx, de, "Expired")
+
+		// The export latches into terminal Ready=False/reason=Expired.
+		Eventually(func(g Gomega) {
+			f := &storagev1alpha1.SnapshotExport{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: "exp-expired"}, f)).To(Succeed())
+			ready := meta.FindStatusCondition(f.Status.Conditions, storagev1alpha1.SnapshotExportConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(ready.Reason).To(Equal(storagev1alpha1.SnapshotExportReasonExpired))
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+
+		// free_heavy cleanup: the DataExport, the VRR and the restored PVC are deleted (envtest runs no
+		// GC controller, so this asserts the controller's explicit deletes, not owner-GC). The restored
+		// PVC carries the apiserver's kubernetes.io/pvc-protection finalizer (StorageObjectInUseProtection
+		// admission) and no pvc-protection controller runs in envtest, so the Delete leaves it Terminating
+		// rather than gone; the controller's contract is to issue the delete, so accept gone-or-deleting.
+		Eventually(func(g Gomega) {
+			g.Expect(listUnstructuredInNamespace(ctx, dataExportListGVK, ns)).To(BeEmpty())
+			g.Expect(listUnstructuredInNamespace(ctx, vrrListGVK, ns)).To(BeEmpty())
+			pvc := &corev1.PersistentVolumeClaim{}
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: vrrName}, pvc)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(pvc.DeletionTimestamp).NotTo(BeNil(), "restored PVC must be deleted (or marked for deletion)")
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+
+		// Latch: a tombstoned export must NOT resurrect any child on subsequent reconciles.
+		Consistently(func(g Gomega) {
+			g.Expect(listUnstructuredInNamespace(ctx, vrrListGVK, ns)).To(BeEmpty())
+			g.Expect(listUnstructuredInNamespace(ctx, dataExportListGVK, ns)).To(BeEmpty())
 		}).WithTimeout(failClosedSettleWindow).WithPolling(exportImportPoll).Should(Succeed())
 	})
 })

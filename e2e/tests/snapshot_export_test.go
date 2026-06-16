@@ -302,6 +302,9 @@ spec: {}
 }
 
 func snapshotExportManifest(namespace string) string {
+	// ttl is required by the SnapshotExport CRD and is propagated verbatim to each child DataExport.
+	// Use a deliberately large idle TTL: e2e never downloads from the endpoints, so a short TTL would
+	// let the real SVDM DataExport idle out and flip the export to Expired before the Ready check.
 	return fmt.Sprintf(`apiVersion: storage.deckhouse.io/v1alpha1
 kind: SnapshotExport
 metadata:
@@ -310,5 +313,6 @@ metadata:
 spec:
   snapshotRef:
     name: %s
+  ttl: 24h
 `, snapshotExportName, namespace, snapshotName)
 }

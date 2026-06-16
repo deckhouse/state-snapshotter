@@ -175,6 +175,72 @@ func TestNewDataExport(t *testing.T) {
 	}
 }
 
+// TestIsExpiredLatched verifies the terminal-Expired latch predicate: only Ready=False/reason=Expired
+// counts; an absent condition, a True Ready, or a different reason must not latch.
+func TestIsExpiredLatched(t *testing.T) {
+	cases := []struct {
+		name  string
+		conds []metav1.Condition
+		latch bool
+	}{
+		{name: "no conditions", conds: nil, latch: false},
+		{
+			name:  "ready true",
+			conds: []metav1.Condition{{Type: storagev1alpha1.SnapshotExportConditionReady, Status: metav1.ConditionTrue, Reason: storagev1alpha1.SnapshotExportReasonPublished}},
+			latch: false,
+		},
+		{
+			name:  "false but other reason",
+			conds: []metav1.Condition{{Type: storagev1alpha1.SnapshotExportConditionReady, Status: metav1.ConditionFalse, Reason: storagev1alpha1.SnapshotExportReasonDataPending}},
+			latch: false,
+		},
+		{
+			name:  "false expired",
+			conds: []metav1.Condition{{Type: storagev1alpha1.SnapshotExportConditionReady, Status: metav1.ConditionFalse, Reason: storagev1alpha1.SnapshotExportReasonExpired}},
+			latch: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exp := export("e", types.UID("u1"))
+			exp.Status.Conditions = tc.conds
+			if got := isExpiredLatched(exp); got != tc.latch {
+				t.Fatalf("isExpiredLatched = %v, want %v", got, tc.latch)
+			}
+		})
+	}
+}
+
+// TestSetExpired verifies the terminal-Expired writer latches both Ready and DataReady to
+// False/reason=Expired and records the (non-serving) entries.
+func TestSetExpired(t *testing.T) {
+	ctx := context.Background()
+	scheme := exportScheme(t)
+	exp := export("e", types.UID("u1"))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(exp).
+		WithStatusSubresource(&storagev1alpha1.SnapshotExport{}).Build()
+	r := &SnapshotExportReconciler{Client: cl, Scheme: scheme}
+
+	entries := []storagev1alpha1.SnapshotExportDataEntry{{SnapshotID: "a"}}
+	if _, err := r.setExpired(ctx, exp, entries); err != nil {
+		t.Fatalf("setExpired: %v", err)
+	}
+	got := &storagev1alpha1.SnapshotExport{}
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "e"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if !isExpiredLatched(got) {
+		t.Fatalf("export must be latched Expired after setExpired, conditions=%#v", got.Status.Conditions)
+	}
+	dr := meta.FindStatusCondition(got.Status.Conditions, storagev1alpha1.SnapshotExportConditionDataReady)
+	if dr == nil || dr.Status != metav1.ConditionFalse || dr.Reason != storagev1alpha1.SnapshotExportReasonExpired {
+		t.Fatalf("DataReady must be False/Expired, got %#v", dr)
+	}
+	if len(got.Status.DataSnapshots) != 1 || got.Status.DataSnapshots[0].SnapshotID != "a" {
+		t.Fatalf("entries not recorded: %#v", got.Status.DataSnapshots)
+	}
+}
+
 // TestPublishStatus covers review H2: a failing leaf must surface DataReady/Ready=False with the
 // DataExportFailed reason and the detail message, not silently stay generic-pending.
 func TestPublishStatus(t *testing.T) {

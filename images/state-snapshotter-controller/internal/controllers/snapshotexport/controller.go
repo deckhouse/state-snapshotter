@@ -49,8 +49,6 @@ import (
 const (
 	// finalizer guards explicit cleanup; child objects are also owner-GC'd.
 	finalizer = snapshotpkg.FinalizerSnapshotExport
-	// defaultDataExportTTL bounds how long a served export lives after the last request.
-	defaultDataExportTTL = "24h"
 	// requeueShort is the steady-state poll interval while VRR/DataExport converge.
 	requeueShort = 5 * time.Second
 	// requeueFailed backs off when a leaf reports a terminal VRR/DataExport failure, so a stuck
@@ -126,6 +124,19 @@ func (r *SnapshotExportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Terminal Expired latch: once every data leaf's DataExport idled out we set Ready=False/Expired
+	// and freed the heavy children. Any later reconcile must not re-ensure them, so we stop here. We
+	// still re-run the (idempotent) free pass in case a prior cleanup was interrupted before the
+	// latch was observed; remaining children are also owner-GC'd when the export is deleted.
+	if isExpiredLatched(export) {
+		if leaves, lerr := r.collectDataLeaves(ctx, export.Namespace, export.Spec.SnapshotRef.Name); lerr == nil {
+			if cerr := r.freeHeavyChildren(ctx, export, leaves); cerr != nil {
+				return ctrl.Result{}, cerr
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
 	snapName := export.Spec.SnapshotRef.Name
 	if snapName == "" {
 		return r.setReady(ctx, export, metav1.ConditionFalse,
@@ -146,6 +157,8 @@ func (r *SnapshotExportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	entries := make([]storagev1alpha1.SnapshotExportDataEntry, 0, len(leaves))
 	allReady := true
 	anyFailed := false
+	anyConverging := false
+	expiredCount := 0
 	var details []string
 	for _, leaf := range leaves {
 		res, perr := r.reconcileLeaf(ctx, export, owner, leaf)
@@ -153,15 +166,34 @@ func (r *SnapshotExportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, perr
 		}
 		entries = append(entries, res.entry)
-		if !res.ready {
+		if res.detail != "" {
+			details = append(details, res.detail)
+		}
+		switch {
+		case res.expired:
 			allReady = false
-			if res.detail != "" {
-				details = append(details, res.detail)
-			}
+			expiredCount++
+		case !res.ready:
+			allReady = false
 			if res.failed {
 				anyFailed = true
+			} else {
+				anyConverging = true
 			}
 		}
+	}
+
+	// All data leaves idled out: free the heavy children and latch the export into terminal Expired.
+	// The latch is written first so an interrupted free pass cannot resurrect children on requeue.
+	if len(leaves) > 0 && expiredCount == len(leaves) {
+		logger.Info("SnapshotExport idle TTL elapsed for all data leaves; freeing children", "leaves", len(leaves))
+		if _, err := r.setExpired(ctx, export, entries); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.freeHeavyChildren(ctx, export, leaves); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	indexURL := aggregatedSubresourceURL(export.Namespace, snapName, "index")
@@ -177,9 +209,13 @@ func (r *SnapshotExportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	case anyFailed:
 		logger.Info("SnapshotExport has failing data leaves", "details", strings.Join(details, "; "))
 		return ctrl.Result{RequeueAfter: requeueFailed}, nil
-	default:
+	case anyConverging:
 		logger.V(1).Info("SnapshotExport waiting for data endpoints", "leaves", len(leaves))
 		return ctrl.Result{RequeueAfter: requeueShort}, nil
+	default:
+		// Some leaves expired while the rest stay ready: not terminal (live endpoints keep serving),
+		// nothing left to converge. Poll slowly until the remaining leaves also idle out.
+		return ctrl.Result{RequeueAfter: requeueReadyRefresh}, nil
 	}
 }
 
@@ -229,12 +265,15 @@ func (r *SnapshotExportReconciler) collectDataLeaves(ctx context.Context, namesp
 
 // leafResult is the per-leaf reconcile outcome surfaced into status. detail carries a human-readable
 // progress/failure message; failed marks a terminal child (VRR/DataExport) failure so the controller
-// backs off and reports it instead of hot-looping silently.
+// backs off and reports it instead of hot-looping silently; expired marks that the leaf's DataExport
+// idled out past spec.ttl, in which case the controller stops re-ensuring it and lets Reconcile decide
+// whether the whole export is terminal.
 type leafResult struct {
-	entry  storagev1alpha1.SnapshotExportDataEntry
-	ready  bool
-	failed bool
-	detail string
+	entry   storagev1alpha1.SnapshotExportDataEntry
+	ready   bool
+	failed  bool
+	expired bool
+	detail  string
 }
 
 // reconcileLeaf drives VRR(VSC)->PVC->DataExport for a single data leaf and returns its outcome.
@@ -248,6 +287,17 @@ func (r *SnapshotExportReconciler) reconcileLeaf(ctx context.Context, export *st
 	if leaf.volumeMode == "" {
 		res.failed = true
 		res.detail = fmt.Sprintf("%s: volumeMode unknown (capture did not record it)", leaf.snapshotID)
+		return res, nil
+	}
+
+	// If this leaf's DataExport already idled out past spec.ttl, report it as expired without
+	// re-ensuring the VRR/DataExport. Re-ensuring would resurrect the torn-down endpoint and churn a
+	// fresh VRR every reconcile; the existing Expired DataExport is what keeps that from happening.
+	if expired, err := r.dataExportExpired(ctx, export.Namespace, base); err != nil {
+		return res, err
+	} else if expired {
+		res.expired = true
+		res.detail = fmt.Sprintf("%s: DataExport idle TTL elapsed", leaf.snapshotID)
 		return res, nil
 	}
 
@@ -276,15 +326,23 @@ func (r *SnapshotExportReconciler) reconcileLeaf(ctx context.Context, export *st
 		return res, err
 	}
 
-	// 3. Ensure the DataExport serving the PVC.
+	// 3. Ensure the DataExport serving the PVC. spec.ttl is propagated verbatim from the export so the
+	//    SVDM pod owns the idle countdown; a wrong-format value is rejected by the DataExport CRD.
 	de, err := r.ensureUnstructured(ctx, dataExportGVK, export.Namespace, base, func() *unstructured.Unstructured {
-		return newDataExport(export.Namespace, base, owner, pvcName, defaultDataExportTTL, export.Spec.Publish)
+		return newDataExport(export.Namespace, base, owner, pvcName, export.Spec.TTL, export.Spec.Publish)
 	})
 	if err != nil {
 		return res, err
 	}
 	deReady, deReason := readReadyCondition(de)
 	if !deReady {
+		// The DataExport may have idled out between the pre-check above and now; treat Expired as the
+		// idle-TTL signal (handled by Reconcile), everything else as converging/terminal failure.
+		if deReason == reasonExpired {
+			res.expired = true
+			res.detail = fmt.Sprintf("%s: DataExport idle TTL elapsed", leaf.snapshotID)
+			return res, nil
+		}
 		res.failed = isTerminalReason(deReason)
 		res.detail = fmt.Sprintf("%s: DataExport not ready (%s)", leaf.snapshotID, reasonOrUnknown(deReason))
 		return res, nil
@@ -426,6 +484,100 @@ func (r *SnapshotExportReconciler) setReady(ctx context.Context, export *storage
 		return r.Client.Status().Update(ctx, cur)
 	})
 	return ctrl.Result{}, err
+}
+
+// setExpired latches the export into the terminal Expired state: Ready=False and DataReady=False with
+// reason Expired. It records the (no-longer-serving) entries so status reflects what was exported, and
+// returns no requeue. The export survives as a tombstone for the user/CLI to delete.
+func (r *SnapshotExportReconciler) setExpired(ctx context.Context, export *storagev1alpha1.SnapshotExport, entries []storagev1alpha1.SnapshotExportDataEntry) (ctrl.Result, error) {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.SnapshotExport{}
+		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: export.Namespace, Name: export.Name}, cur); gerr != nil {
+			return gerr
+		}
+		cur.Status.ObservedGeneration = cur.Generation
+		cur.Status.DataSnapshots = entries
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.SnapshotExportConditionDataReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.SnapshotExportReasonExpired,
+			Message:            "data endpoints idle TTL elapsed",
+			ObservedGeneration: cur.Generation,
+		})
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.SnapshotExportConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.SnapshotExportReasonExpired,
+			Message:            "export idle TTL elapsed; delete it manually",
+			ObservedGeneration: cur.Generation,
+		})
+		return r.Client.Status().Update(ctx, cur)
+	})
+	return ctrl.Result{}, err
+}
+
+// isExpiredLatched reports whether the export already carries the terminal Ready=False/Expired
+// condition, in which case Reconcile must not re-ensure its children.
+func isExpiredLatched(export *storagev1alpha1.SnapshotExport) bool {
+	c := meta.FindStatusCondition(export.Status.Conditions, storagev1alpha1.SnapshotExportConditionReady)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == storagev1alpha1.SnapshotExportReasonExpired
+}
+
+// dataExportExpired reports whether a DataExport with the given base name exists and has idled out
+// (Ready=False / reason=Expired). A missing DataExport is not expired (NotFound -> false).
+func (r *SnapshotExportReconciler) dataExportExpired(ctx context.Context, namespace, name string) (bool, error) {
+	de := &unstructured.Unstructured{}
+	de.SetGroupVersionKind(dataExportGVK)
+	if err := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, de); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get DataExport %s/%s: %w", namespace, name, err)
+	}
+	ready, reason := readReadyCondition(de)
+	return !ready && reason == reasonExpired, nil
+}
+
+// freeHeavyChildren proactively deletes the resource-heavy children of an idled-out export (per leaf:
+// DataExport, then VolumeRestoreRequest, then the restored PVC) so the underlying storage is reclaimed
+// while the export lingers as a tombstone. Order matters: the DataExport pod mounts the restored PVC,
+// so deleting the DataExport first lets pvc-protection release the PVC. All deletes are idempotent;
+// NotFound is ignored so a re-run after a partial pass is safe.
+func (r *SnapshotExportReconciler) freeHeavyChildren(ctx context.Context, export *storagev1alpha1.SnapshotExport, leaves []dataLeaf) error {
+	for _, leaf := range leaves {
+		base := resourceBaseName(export, leaf.snapshotID+"/"+leaf.artifactName)
+		if err := r.deleteUnstructured(ctx, dataExportGVK, export.Namespace, base); err != nil {
+			return err
+		}
+		if err := r.deleteUnstructured(ctx, volumeRestoreRequestGVK, export.Namespace, base); err != nil {
+			return err
+		}
+		if err := r.deletePVC(ctx, export.Namespace, base); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteUnstructured deletes a named cross-repo object by GVK, ignoring NotFound (idempotent).
+func (r *SnapshotExportReconciler) deleteUnstructured(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	obj.SetNamespace(namespace)
+	obj.SetName(name)
+	if err := r.Client.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete %s %s/%s: %w", gvk.Kind, namespace, name, err)
+	}
+	return nil
+}
+
+// deletePVC deletes the restored PVC by name, ignoring NotFound (idempotent).
+func (r *SnapshotExportReconciler) deletePVC(ctx context.Context, namespace, name string) error {
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+	if err := r.Client.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete PVC %s/%s: %w", namespace, name, err)
+	}
+	return nil
 }
 
 // ownerRef is the controlling owner stamped on objects this reconciler exclusively creates (VRR,
