@@ -33,6 +33,10 @@ const (
 	conditionTypeReady          = "Ready"
 	conditionTypeUploadFinished = "UploadFinished"
 	kindPersistentVolumeClaim   = "PersistentVolumeClaim"
+	// reasonExpired is the DataImport Ready=False reason emitted by the SVDM pod once the import's idle
+	// TTL elapses (storage-volume-data-manager common.ReasonExpired). Before UploadFinished it means the
+	// data never landed and the import must fail closed; after UploadFinished it is harmless.
+	reasonExpired = "Expired"
 )
 
 // dataImportSpec carries the resolved per-node template for a populating DataImport.
@@ -108,6 +112,29 @@ func ownerRefToMap(ref metav1.OwnerReference) map[string]interface{} {
 		m["blockOwnerDeletion"] = *ref.BlockOwnerDeletion
 	}
 	return m
+}
+
+// readReadyReason returns (status==True, reason) for the Ready condition of an unstructured object.
+// It mirrors snapshotexport.readReadyCondition and is used to distinguish a DataImport that idled out
+// (Ready=False / reason=Expired) from one that is merely still converging.
+func readReadyReason(obj *unstructured.Unstructured) (ready bool, reason string) {
+	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil || !found {
+		return false, ""
+	}
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t != conditionTypeReady {
+			continue
+		}
+		st, _ := m["status"].(string)
+		rs, _ := m["reason"].(string)
+		return st == "True", rs
+	}
+	return false, ""
 }
 
 // readConditionTrue reports whether the named condition has status "True" on an unstructured object.

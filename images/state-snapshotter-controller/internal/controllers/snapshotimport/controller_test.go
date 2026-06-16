@@ -23,7 +23,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -112,6 +114,106 @@ func TestUploadsReason(t *testing.T) {
 	}
 	if uploadsReason(false) != storagev1alpha1.SnapshotImportReasonUploadsPending {
 		t.Fatalf("pending reason mismatch")
+	}
+}
+
+// TestReadReadyReason verifies the Ready (status, reason) reader used to detect an idled-out DataImport.
+func TestReadReadyReason(t *testing.T) {
+	mk := func(conds ...map[string]interface{}) *unstructured.Unstructured {
+		list := make([]interface{}, 0, len(conds))
+		for _, c := range conds {
+			list = append(list, c)
+		}
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"status": map[string]interface{}{"conditions": list},
+		}}
+	}
+	cases := []struct {
+		name       string
+		obj        *unstructured.Unstructured
+		wantReady  bool
+		wantReason string
+	}{
+		{"no status", &unstructured.Unstructured{Object: map[string]interface{}{}}, false, ""},
+		{"ready true", mk(map[string]interface{}{"type": "Ready", "status": "True", "reason": "Ready"}), true, "Ready"},
+		{"expired", mk(map[string]interface{}{"type": "Ready", "status": "False", "reason": "Expired"}), false, "Expired"},
+		{"other cond only", mk(map[string]interface{}{"type": "UploadFinished", "status": "True", "reason": "Finished"}), false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ready, reason := readReadyReason(tc.obj)
+			if ready != tc.wantReady || reason != tc.wantReason {
+				t.Fatalf("readReadyReason = (%v, %q), want (%v, %q)", ready, reason, tc.wantReady, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestIsImportExpiredLatched verifies the terminal-Expired latch predicate: only Ready=False/Expired
+// counts as latched.
+func TestIsImportExpiredLatched(t *testing.T) {
+	cases := []struct {
+		name  string
+		conds []metav1.Condition
+		latch bool
+	}{
+		{name: "no conditions", conds: nil, latch: false},
+		{
+			name:  "ready true",
+			conds: []metav1.Condition{{Type: storagev1alpha1.SnapshotImportConditionReady, Status: metav1.ConditionTrue, Reason: storagev1alpha1.SnapshotImportReasonImported}},
+			latch: false,
+		},
+		{
+			name:  "false other reason",
+			conds: []metav1.Condition{{Type: storagev1alpha1.SnapshotImportConditionReady, Status: metav1.ConditionFalse, Reason: storagev1alpha1.SnapshotImportReasonUploadsPending}},
+			latch: false,
+		},
+		{
+			name:  "false expired",
+			conds: []metav1.Condition{{Type: storagev1alpha1.SnapshotImportConditionReady, Status: metav1.ConditionFalse, Reason: storagev1alpha1.SnapshotImportReasonExpired}},
+			latch: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			imp := &storagev1alpha1.SnapshotImport{}
+			imp.Status.Conditions = tc.conds
+			if got := isImportExpiredLatched(imp); got != tc.latch {
+				t.Fatalf("isImportExpiredLatched = %v, want %v", got, tc.latch)
+			}
+		})
+	}
+}
+
+// TestSetExpired verifies the terminal-Expired writer latches both UploadsPrepared and Ready to
+// False/reason=Expired and records the entries.
+func TestSetExpired(t *testing.T) {
+	ctx := context.Background()
+	scheme := importScheme(t)
+	imp := &storagev1alpha1.SnapshotImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp", Namespace: "ns", UID: types.UID("u1")},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(imp).
+		WithStatusSubresource(&storagev1alpha1.SnapshotImport{}).Build()
+	r := &SnapshotImportReconciler{Client: cl, Direct: cl, Scheme: scheme}
+
+	entries := []storagev1alpha1.SnapshotImportDataEntry{{SnapshotID: "a"}}
+	if err := r.setExpired(ctx, imp, entries); err != nil {
+		t.Fatalf("setExpired: %v", err)
+	}
+	got := &storagev1alpha1.SnapshotImport{}
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "imp"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if !isImportExpiredLatched(got) {
+		t.Fatalf("import must be latched Expired after setExpired, conditions=%#v", got.Status.Conditions)
+	}
+	up := meta.FindStatusCondition(got.Status.Conditions, storagev1alpha1.SnapshotImportConditionUploadsPrepared)
+	if up == nil || up.Status != metav1.ConditionFalse || up.Reason != storagev1alpha1.SnapshotImportReasonExpired {
+		t.Fatalf("UploadsPrepared must be False/Expired, got %#v", up)
+	}
+	if len(got.Status.DataSnapshots) != 1 || got.Status.DataSnapshots[0].SnapshotID != "a" {
+		t.Fatalf("entries not recorded: %#v", got.Status.DataSnapshots)
 	}
 }
 

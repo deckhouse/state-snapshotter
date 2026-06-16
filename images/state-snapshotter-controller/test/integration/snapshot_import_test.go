@@ -163,7 +163,7 @@ var _ = Describe("Integration: SnapshotImport reconciler", func() {
 
 		imp := &storagev1alpha1.SnapshotImport{
 			ObjectMeta: metav1.ObjectMeta{Name: impName, Namespace: ns},
-			Spec:       storagev1alpha1.SnapshotImportSpec{SnapshotName: snapName},
+			Spec:       storagev1alpha1.SnapshotImportSpec{SnapshotName: snapName, TTL: exportTTL},
 		}
 		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
 
@@ -212,6 +212,9 @@ var _ = Describe("Integration: SnapshotImport reconciler", func() {
 		di := &unstructured.Unstructured{}
 		di.SetGroupVersionKind(dataImportGVK)
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: diName}, di)).To(Succeed())
+		// spec.ttl must be propagated verbatim from the SnapshotImport into the child DataImport.
+		gotTTL, _, _ := unstructured.NestedString(di.Object, "spec", "ttl")
+		Expect(gotTTL).To(Equal(exportTTL))
 		setUnstructuredStatus(ctx, di, []condSpec{
 			{"Ready", "True", "Ready"},
 			{"UploadFinished", "True", "Finished"},
@@ -304,5 +307,116 @@ var _ = Describe("Integration: SnapshotImport reconciler", func() {
 			derr := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: diName}, gone)
 			g.Expect(apierrors.IsNotFound(derr)).To(BeTrue(), "populating DataImport should be deleted after capture")
 		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+	})
+
+	It("latches Expired and frees children when a node's upload endpoint idles out before upload finishes", func() {
+		ctx := context.Background()
+		ns := newExportNamespace(ctx, "ss-import-exp-")
+		const impName = "imp-expired"
+		const snapName = "imported-snap-expired"
+		srcSC := "imp-exp-sc-" + ns
+
+		sc := &storagev1.StorageClass{
+			ObjectMeta:  metav1.ObjectMeta{Name: srcSC},
+			Provisioner: "kubernetes.io/no-provisioner",
+		}
+		Expect(k8sClient.Create(ctx, sc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: srcSC}}) })
+
+		rootID := "Snapshot--" + ns + "--orig"
+		idx := restore.Index{
+			Version: restore.IndexVersion,
+			RootSnapshot: restore.IndexSnapshotID{
+				ID: rootID, APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Namespace: ns, Name: "orig",
+			},
+			Snapshots: []restore.IndexSnapshot{{
+				ID: rootID, APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Namespace: ns, Name: "orig",
+				HasData: true,
+				Data: &restore.IndexData{
+					StorageClassName: srcSC,
+					VolumeMode:       "Block",
+					AccessModes:      []string{"ReadWriteOnce"},
+					Size:             1 << 20,
+					ArtifactName:     "orig-vsc",
+				},
+			}},
+		}
+		idxJSON, err := json.Marshal(&idx)
+		Expect(err).NotTo(HaveOccurred())
+
+		blobLog, err := logger.NewLogger("error")
+		Expect(err).NotTo(HaveOccurred())
+		directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+		Expect(err).NotTo(HaveOccurred())
+		store := usecase.NewImportBlobStore(directClient, blobLog)
+		_, err = store.Append(ctx, usecase.ImportBlobKey(ns, impName, usecase.ImportBlobKindIndex), 0, idxJSON)
+		Expect(err).NotTo(HaveOccurred())
+
+		imp := &storagev1alpha1.SnapshotImport{
+			ObjectMeta: metav1.ObjectMeta{Name: impName, Namespace: ns},
+			Spec:       storagev1alpha1.SnapshotImportSpec{SnapshotName: snapName, TTL: exportTTL},
+		}
+		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			f := &storagev1alpha1.SnapshotImport{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: impName}, f)).To(Succeed())
+			g.Expect(f.Status.IndexUploadURL).NotTo(BeEmpty())
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+		setImportCondition(ctx, ns, impName, storagev1alpha1.SnapshotImportConditionIndexReceived, "True", "Simulated")
+
+		// The controller creates one DataImport; simulate SVDM having provisioned the populating PVC.
+		var diName string
+		Eventually(func(g Gomega) {
+			items := listUnstructuredInNamespace(ctx, dataImportListGVK, ns)
+			g.Expect(items).To(HaveLen(1))
+			diName = items[0].GetName()
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+
+		populatedPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: diName, Namespace: ns},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Mi")},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, populatedPVC)).To(Succeed())
+
+		// Simulate the upload endpoint idling out BEFORE the upload finished: Ready=False/reason=Expired
+		// and no UploadFinished condition. The data never landed, so the import must fail closed.
+		di := &unstructured.Unstructured{}
+		di.SetGroupVersionKind(dataImportGVK)
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: diName}, di)).To(Succeed())
+		setUnstructuredStatus(ctx, di, []condSpec{{"Ready", "False", "Expired"}}, nil)
+
+		// The import latches into terminal Ready=False/reason=Expired.
+		Eventually(func(g Gomega) {
+			f := &storagev1alpha1.SnapshotImport{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: impName}, f)).To(Succeed())
+			ready := meta.FindStatusCondition(f.Status.Conditions, storagev1alpha1.SnapshotImportConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(ready.Reason).To(Equal(storagev1alpha1.SnapshotImportReasonExpired))
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+
+		// free_heavy cleanup: the DataImport is deleted; the populated PVC is deleted (or Terminating in
+		// envtest due to the pvc-protection finalizer).
+		Eventually(func(g Gomega) {
+			g.Expect(listUnstructuredInNamespace(ctx, dataImportListGVK, ns)).To(BeEmpty())
+			pvc := &corev1.PersistentVolumeClaim{}
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: diName}, pvc)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(pvc.DeletionTimestamp).NotTo(BeNil(), "populated PVC must be deleted (or marked for deletion)")
+		}).WithTimeout(exportImportReadyTimeout).WithPolling(exportImportPoll).Should(Succeed())
+
+		// Latch: a tombstoned import must NOT resurrect the DataImport on subsequent reconciles.
+		Consistently(func(g Gomega) {
+			g.Expect(listUnstructuredInNamespace(ctx, dataImportListGVK, ns)).To(BeEmpty())
+		}).WithTimeout(failClosedSettleWindow).WithPolling(exportImportPoll).Should(Succeed())
 	})
 })

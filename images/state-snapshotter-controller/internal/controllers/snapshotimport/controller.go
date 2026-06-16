@@ -60,8 +60,7 @@ import (
 )
 
 const (
-	finalizer            = snapshotpkg.FinalizerSnapshotImport
-	defaultDataImportTTL = "24h"
+	finalizer = snapshotpkg.FinalizerSnapshotImport
 	// requeueShort is the steady-state poll interval while DataImport/capture converge and the
 	// recovery interval for fail-closed validation branches (no StorageClass watch).
 	requeueShort = 5 * time.Second
@@ -134,6 +133,14 @@ func (r *SnapshotImportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Terminal Expired latch: a data node's upload endpoint idled out before its upload finished, so we
+	// freed the heavy children (DataImport + populating PVC) and recorded a tombstone. Any later
+	// reconcile must not re-enter reconcileDataNodes and resurrect them; remaining children are
+	// owner-GC'd when the import is deleted. Mirrors the post-Captured latch below.
+	if isImportExpiredLatched(imp) {
+		return ctrl.Result{}, nil
+	}
+
 	// Stage 0: always publish the index/manifests upload endpoints.
 	if err := r.publishUploadURLs(ctx, imp); err != nil {
 		return ctrl.Result{}, err
@@ -190,11 +197,27 @@ func (r *SnapshotImportReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 
 		// Stage 4-7: drive per-node DataImport -> upload -> capture.
-		var allUploadReady, allUploaded, allCaptured bool
-		entries, allUploadReady, allUploaded, allCaptured, err = r.reconcileDataNodes(ctx, imp, nodes)
+		var allUploadReady, allUploaded, allCaptured, expired bool
+		entries, allUploadReady, allUploaded, allCaptured, expired, err = r.reconcileDataNodes(ctx, imp, nodes)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+
+		// A data node's upload endpoint idled out before its upload finished: the data never landed, so
+		// fail the import closed. Free the heavy children (DataImport + populating PVC) and latch the
+		// terminal Expired state; the latch is written before the free pass so an interrupted cleanup
+		// cannot resurrect children on requeue. The import survives as a tombstone for manual deletion.
+		if expired {
+			logger.Info("SnapshotImport idle TTL elapsed before upload finished; freeing children")
+			if err := r.setExpired(ctx, imp, entries); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.cleanupPopulatedPVCs(ctx, imp, nodes); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+
 		if err := r.publishDataSnapshots(ctx, imp, entries); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -342,11 +365,13 @@ func (r *SnapshotImportReconciler) resolveDataNodes(ctx context.Context, imp *st
 }
 
 // reconcileDataNodes ensures a DataImport (and, once uploaded, a VolumeCaptureRequest) per data node
-// and reports aggregate readiness. It returns one status entry per node.
-func (r *SnapshotImportReconciler) reconcileDataNodes(ctx context.Context, imp *storagev1alpha1.SnapshotImport, nodes []dataNode) ([]storagev1alpha1.SnapshotImportDataEntry, bool, bool, bool, error) {
+// and reports aggregate readiness. It returns one status entry per node plus an expired flag set when
+// any node's upload endpoint idled out (Ready=False/reason=Expired) before its upload finished.
+func (r *SnapshotImportReconciler) reconcileDataNodes(ctx context.Context, imp *storagev1alpha1.SnapshotImport, nodes []dataNode) ([]storagev1alpha1.SnapshotImportDataEntry, bool, bool, bool, bool, error) {
 	owner := r.ownerRef(imp)
 	entries := make([]storagev1alpha1.SnapshotImportDataEntry, 0, len(nodes))
 	allUploadReady, allUploaded, allCaptured := true, true, true
+	expired := false
 
 	for _, n := range nodes {
 		base := resourceBaseName(imp.Name, n.id)
@@ -359,12 +384,12 @@ func (r *SnapshotImportReconciler) reconcileDataNodes(ctx context.Context, imp *
 				volumeMode:       n.volumeMode,
 				accessModes:      n.accessModes,
 				sizeQuantity:     sizeToQuantity(n.size),
-				ttl:              defaultDataImportTTL,
+				ttl:              imp.Spec.TTL,
 				publish:          imp.Spec.Publish,
 			})
 		})
 		if err != nil {
-			return nil, false, false, false, err
+			return nil, false, false, false, false, err
 		}
 		// Prefer a published (externally-trusted) endpoint; otherwise use the internal URL and surface
 		// its CA so the client can trust it over TLS.
@@ -375,33 +400,49 @@ func (r *SnapshotImportReconciler) reconcileDataNodes(ctx context.Context, imp *
 			entry.UploadURL = nestedStr(di, "status", "url")
 			entry.UploadCA = nestedStr(di, "status", "ca")
 		}
-		entry.UploadReady = readConditionTrue(di, conditionTypeReady) && entry.UploadURL != ""
-		if !entry.UploadReady {
-			allUploadReady = false
-			entries = append(entries, entry)
-			allUploaded, allCaptured = false, false
-			continue
-		}
 
+		ready, reason := readReadyReason(di)
 		entry.Uploaded = readConditionTrue(di, conditionTypeUploadFinished)
+
 		if !entry.Uploaded {
+			// The upload endpoint idled out (spec.ttl) before the client finished uploading: the data
+			// never landed on the PVC and the SVDM importer pod is gone. This is terminal for the whole
+			// import; the caller frees children and latches Expired.
+			if !ready && reason == reasonExpired {
+				expired = true
+				entry.UploadReady = false
+				allUploadReady, allUploaded, allCaptured = false, false, false
+				entries = append(entries, entry)
+				continue
+			}
+			entry.UploadReady = ready && entry.UploadURL != ""
+			if !entry.UploadReady {
+				allUploadReady = false
+				allUploaded, allCaptured = false, false
+				entries = append(entries, entry)
+				continue
+			}
+			// Endpoint ready but the upload is not finished yet.
 			allUploaded = false
-			entries = append(entries, entry)
 			allCaptured = false
+			entries = append(entries, entry)
 			continue
 		}
 
-		// Capture the populated PVC into a durable VolumeSnapshotContent.
+		// UploadFinished=True: the data is durable on the PVC, so a now-expired DataImport is harmless
+		// (SVDM tears down only the importer pod; the PVC persists). The endpoint was ready at least long
+		// enough to receive the upload, so proceed to capture regardless of the current Ready state.
+		entry.UploadReady = true
 		captured, cerr := r.captureNode(ctx, imp, owner, base, &entry)
 		if cerr != nil {
-			return nil, false, false, false, cerr
+			return nil, false, false, false, false, cerr
 		}
 		if !captured {
 			allCaptured = false
 		}
 		entries = append(entries, entry)
 	}
-	return entries, allUploadReady, allUploaded, allCaptured, nil
+	return entries, allUploadReady, allUploaded, allCaptured, expired, nil
 }
 
 // captureNode ensures a VolumeCaptureRequest over the populated PVC and records the captured VSC.
@@ -744,6 +785,42 @@ func (r *SnapshotImportReconciler) setCondition(ctx context.Context, imp *storag
 		cur.Status.ObservedGeneration = cur.Generation
 		return r.Client.Status().Update(ctx, cur)
 	})
+}
+
+// setExpired latches the import into the terminal Expired state: the in-flight UploadsPrepared stage
+// and Ready both go False with reason Expired, recording the (no-longer-serving) entries. Returns no
+// requeue; the import survives as a tombstone for the user/CLI to delete.
+func (r *SnapshotImportReconciler) setExpired(ctx context.Context, imp *storagev1alpha1.SnapshotImport, entries []storagev1alpha1.SnapshotImportDataEntry) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.SnapshotImport{}
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(imp), cur); err != nil {
+			return err
+		}
+		cur.Status.DataSnapshots = entries
+		cur.Status.ObservedGeneration = cur.Generation
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.SnapshotImportConditionUploadsPrepared,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.SnapshotImportReasonExpired,
+			Message:            "upload endpoints idle TTL elapsed",
+			ObservedGeneration: cur.Generation,
+		})
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.SnapshotImportConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             storagev1alpha1.SnapshotImportReasonExpired,
+			Message:            "import idle TTL elapsed before upload finished; delete it manually",
+			ObservedGeneration: cur.Generation,
+		})
+		return r.Client.Status().Update(ctx, cur)
+	})
+}
+
+// isImportExpiredLatched reports whether the import already carries the terminal Ready=False/Expired
+// condition, in which case Reconcile must not re-enter the data-node stages and resurrect children.
+func isImportExpiredLatched(imp *storagev1alpha1.SnapshotImport) bool {
+	c := meta.FindStatusCondition(imp.Status.Conditions, storagev1alpha1.SnapshotImportConditionReady)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == storagev1alpha1.SnapshotImportReasonExpired
 }
 
 func (r *SnapshotImportReconciler) ownerRef(imp *storagev1alpha1.SnapshotImport) metav1.OwnerReference {
