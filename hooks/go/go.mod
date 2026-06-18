@@ -1,6 +1,6 @@
 module github.com/deckhouse/state-snapshotter/hooks/go
 
-go 1.25.10
+go 1.25.11
 require github.com/deckhouse/module-sdk v0.5.0
 
 require (
