@@ -126,6 +126,10 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 	}
 
 	bindings := volumecapturectrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
+	bindings, err = snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.directReader(), bindings)
+	if err != nil {
+		return requeueVolumeCaptureIf(allowRequeue, fmt.Sprintf("enrich volume metadata: %v", err))
+	}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -20,6 +20,13 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
+// DedicatedControllerActivator registers a dedicated snapshot controller (one that reconciles a
+// specific snapshot kind outside GenericSnapshotBinderController, e.g. the demo domain controllers)
+// on an already-running manager. It is invoked at most once per kind, only after the kind's CSD is
+// watch-eligible (Accepted=True && RBACReady=True), so the controller's informers start with the
+// domain RBAC already granted by the Deckhouse hook — never at boot, which would deadlock cache sync.
+type DedicatedControllerActivator func(ctrl.Manager) error
+
 // Syncer recomputes layered GVK state (see LayeredGVKState) and registers additive watches on the manager.
 type Syncer struct {
 	mu        sync.Mutex
@@ -30,6 +37,12 @@ type Syncer struct {
 	snap      *controllers.GenericSnapshotBinderController
 	content   *controllers.SnapshotContentController
 
+	// dedicatedActivators is keyed by snapshot Kind. When a dedicated kind enters the eligible
+	// resolved set, the matching activator is called once to register its controller at runtime.
+	// A nil/absent entry preserves the legacy behavior of marking the kind active without registering
+	// anything here (used by focused tests that wire the controllers themselves).
+	dedicatedActivators map[string]DedicatedControllerActivator
+
 	lastState LayeredGVKState
 	// activeSnapshotGVKKeys: snapshot GVK String() for which the required runtime watches
 	// were successfully registered at least once in this process (monotonic; not cleared when resolved drops).
@@ -39,6 +52,10 @@ type Syncer struct {
 // NewSyncer builds a syncer. bootstrap must be the static unified-runtime list
 // (same as DefaultUnifiedRuntimeBootstrapPairs / legacy DefaultDesiredUnifiedSnapshotPairs);
 // eligible CSD pairs are merged on each Sync.
+//
+// dedicatedActivators maps a snapshot Kind (e.g. "DemoVirtualDiskSnapshot") to a function that
+// registers its dedicated controller at runtime. It may be nil/empty: then dedicated kinds are only
+// marked active (legacy behavior) and the caller is responsible for registering their controllers.
 func NewSyncer(
 	mgr ctrl.Manager,
 	log logr.Logger,
@@ -46,6 +63,7 @@ func NewSyncer(
 	reader client.Reader,
 	snap *controllers.GenericSnapshotBinderController,
 	content *controllers.SnapshotContentController,
+	dedicatedActivators map[string]DedicatedControllerActivator,
 ) *Syncer {
 	registerUnifiedRuntimeMetrics()
 	return &Syncer{
@@ -55,6 +73,7 @@ func NewSyncer(
 		reader:                reader,
 		snap:                  snap,
 		content:               content,
+		dedicatedActivators:   dedicatedActivators,
 		activeSnapshotGVKKeys: make(map[string]struct{}),
 	}
 }
@@ -111,6 +130,11 @@ func (s *Syncer) Sync(ctx context.Context) error {
 	}
 	s.lastState = state
 
+	// Register dedicated controllers for newly-eligible kinds first, in a deterministic order, so a
+	// child kind's typed informer + field index exists before a parent controller's Watches starts it
+	// (see activateDedicatedControllersLocked). Generic watches are wired in the loop below.
+	s.activateDedicatedControllersLocked(state.ResolvedSnapshotGVKs)
+
 	for i := range state.ResolvedSnapshotGVKs {
 		snapGVK, contentGVK := state.ResolvedSnapshotGVKs[i], state.ResolvedContentGVKs[i]
 		if err := s.content.AddSnapshotStatusWatch(s.mgr, snapGVK); err != nil {
@@ -118,7 +142,12 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			continue
 		}
 		if unifiedbootstrap.IsDedicatedSnapshotControllerKind(snapGVK.Kind) {
-			s.activeSnapshotGVKKeys[snapGVK.String()] = struct{}{}
+			// Generic watches (AddWatchForPair / AddWatchForContent) are never wired for dedicated
+			// kinds. Activation + marking happen in activateDedicatedControllersLocked. When no
+			// activator is wired for this kind, preserve the legacy behavior of marking it active here.
+			if _, hasActivator := s.dedicatedActivators[snapGVK.Kind]; !hasActivator {
+				s.activeSnapshotGVKKeys[snapGVK.String()] = struct{}{}
+			}
 			continue
 		}
 		if err := s.snap.AddWatchForPair(s.mgr, snapGVK, contentGVK); err != nil {
@@ -159,4 +188,49 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			"activeMonotonicCount", activeN)
 	}
 	return nil
+}
+
+// activateDedicatedControllersLocked registers dedicated snapshot controllers for the kinds that are
+// present in the eligible resolved set and have a wired activator, iterating in
+// unifiedbootstrap.DedicatedSnapshotControllerKinds order.
+//
+// That order is dependency order (children before parents): a parent controller (e.g. the demo VM
+// snapshot controller) Watches a child kind (DemoVirtualDiskSnapshot), and starting that Watch starts
+// the child's typed informer. The child's controller registers a typed field index, which
+// controller-runtime rejects once the informer has already started ("indexer conflict"). Activating
+// the child first guarantees its field index is registered before any parent Watch can start the
+// child informer.
+//
+// Each kind is activated at most once (guarded by activeSnapshotGVKKeys). On activation failure the key
+// is left unset so the next Sync retries. The caller must hold s.mu.
+func (s *Syncer) activateDedicatedControllersLocked(resolved []schema.GroupVersionKind) {
+	if len(s.dedicatedActivators) == 0 {
+		return
+	}
+	resolvedByKind := make(map[string]schema.GroupVersionKind, len(resolved))
+	for _, gvk := range resolved {
+		if _, exists := resolvedByKind[gvk.Kind]; !exists {
+			resolvedByKind[gvk.Kind] = gvk
+		}
+	}
+	for _, kind := range unifiedbootstrap.DedicatedSnapshotControllerKinds {
+		activator := s.dedicatedActivators[kind]
+		if activator == nil {
+			continue
+		}
+		gvk, inResolved := resolvedByKind[kind]
+		if !inResolved {
+			continue
+		}
+		if _, already := s.activeSnapshotGVKKeys[gvk.String()]; already {
+			continue
+		}
+		if err := activator(s.mgr); err != nil {
+			s.log.Error(err, "activate dedicated snapshot controller failed; will retry on next sync",
+				"snapshot", gvk.String())
+			continue
+		}
+		s.log.Info("activated dedicated snapshot controller", "snapshot", gvk.String())
+		s.activeSnapshotGVKKeys[gvk.String()] = struct{}{}
+	}
 }

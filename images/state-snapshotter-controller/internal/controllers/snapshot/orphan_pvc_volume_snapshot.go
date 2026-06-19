@@ -508,6 +508,10 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 		bindings = append(bindings, *res.binding)
 	}
 
+	bindings, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.directReader(), bindings)
+	if enrichErr != nil {
+		return requeueVolumeCaptureIf(allowRequeue, fmt.Sprintf("enrich volume metadata: %v", enrichErr))
+	}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
 		return ctrl.Result{}, err
 	}

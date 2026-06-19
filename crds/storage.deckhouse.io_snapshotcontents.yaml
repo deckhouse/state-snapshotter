@@ -71,6 +71,33 @@ spec:
                 - Retain
                 - Delete
                 type: string
+              snapshotRef:
+                description: |-
+                  SnapshotRef is an immutable back-reference to the owning Snapshot, mirroring
+                  VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time (in particular
+                  by the import path for pre-provisioned content) and enables the static-binding handshake:
+                  a Snapshot with spec.source.snapshotContentName binds only when this ref points back at it.
+                  The whole spec is immutable, so this ref cannot change after creation.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
             type: object
             x-kubernetes-validations:
             - message: SnapshotContent spec is immutable
@@ -154,6 +181,12 @@ spec:
                   description: SnapshotDataBinding associates a PVC target with its
                     captured data artifact on one SnapshotContent.
                   properties:
+                    accessModes:
+                      description: AccessModes records the source PVC access modes
+                        (e.g. ReadWriteOnce, ReadWriteMany).
+                      items:
+                        type: string
+                      type: array
                     artifact:
                       description: Artifact references the cluster-scoped durable
                         data artifact (for example VolumeSnapshotContent).
@@ -172,6 +205,15 @@ spec:
                       - kind
                       - name
                       type: object
+                    fsType:
+                      description: FsType records the source filesystem type (Filesystem
+                        volumes only).
+                      type: string
+                    storageClassName:
+                      description: |-
+                        StorageClassName records the source StorageClass of the captured volume. Used by the
+                        aggregated /index and by import StorageClass mapping.
+                      type: string
                     target:
                       description: Target identifies the PVC (and related metadata)
                         captured in MCP for this binding.
@@ -199,6 +241,16 @@ spec:
                       description: TargetUID is the map key for status.dataRefs (PersistentVolumeClaim
                         UID).
                       minLength: 1
+                      type: string
+                    volumeMode:
+                      description: |-
+                        VolumeMode records the source volume mode (Block or Filesystem). CSI snapshots are
+                        mode-agnostic, so this is persisted here to drive the unified export (VolumeRestoreRequest)
+                        and to recreate the PVC on import. Typed as a string to keep the api module dependency-free;
+                        controllers convert it to corev1.PersistentVolumeMode.
+                      enum:
+                      - Block
+                      - Filesystem
                       type: string
                   required:
                   - artifact

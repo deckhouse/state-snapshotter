@@ -39,4 +39,20 @@ const (
 
 	// WebhookSecretName is the name of the Kubernetes Secret containing webhook TLS certificates
 	WebhookSecretName = "webhooks-https-certs"
+
+	// ControllerSAName is the ServiceAccount name of the state-snapshotter controller.
+	ControllerSAName = "controller"
+
+	// DomainClusterRoleName is the single aggregated ClusterRole managed by the 030-domain-rbac hook
+	DomainClusterRoleName = "d8:state-snapshotter:controller:domain"
+
+	// CSD condition types referenced by the domain-RBAC hook.
+	// Accepted is owned by the CSD reconciler; RBACReady is owned exclusively by this hook.
+	CSDConditionAccepted  = "Accepted"
+	CSDConditionRBACReady = "RBACReady"
+
+	// RBACReady condition reasons per ADR snapshot-rework/2026-01-23-unified-snapshots-registry.md §2.
+	RBACReadyReasonPending     = "Pending"     // snapshot GVR not yet resolvable via discovery
+	RBACReadyReasonApplyFailed = "ApplyFailed" // ClusterRole/Binding creation or update failed
+	RBACReadyReasonApplied     = "Applied"     // RBAC successfully applied for all snapshot GVRs
 )

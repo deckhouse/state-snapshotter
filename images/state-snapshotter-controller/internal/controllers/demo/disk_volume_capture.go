@@ -124,6 +124,10 @@ func (r *DemoVirtualDiskSnapshotReconciler) reconcileDemoVirtualDiskDataLeg(
 	}
 
 	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
+	bindings, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, demoReconcilerReader(r.APIReader, r.Client), bindings)
+	if enrichErr != nil {
+		return false, "", "", enrichErr
+	}
 	if getErr := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); getErr != nil {
 		return false, "", "", getErr
 	}

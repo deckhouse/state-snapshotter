@@ -71,11 +71,19 @@ func PairsExcludingSnapshotKinds(pairs []UnifiedGVKPair, skipKinds ...string) []
 
 // DedicatedSnapshotControllerKinds lists Snapshot root kinds reconciled outside the generic
 // GenericSnapshotBinderController. Unified runtime sync must not call AddWatchForPair for these.
+//
+// Order is significant: it is the deferred-activation dependency order (children before parents)
+// consumed by unifiedruntime.Syncer.activateDedicatedControllersLocked. A child kind must precede any
+// parent kind whose controller Watches it, so the child's typed informer + field index are registered
+// before the parent Watch starts that informer (controller-runtime rejects IndexField after an informer
+// has started). DemoVirtualDiskSnapshot therefore must stay before DemoVirtualMachineSnapshot (the VM
+// controller Watches the disk snapshot type). Do not reorder without preserving children-before-parents.
 var DedicatedSnapshotControllerKinds = []string{
 	"Snapshot",
 	// PR5a demo domain: reconciled by DemoVirtualDiskSnapshotReconciler, not GenericSnapshotBinderController.
 	"DemoVirtualDiskSnapshot",
 	// PR5b demo domain: reconciled by DemoVirtualMachineSnapshotReconciler, not GenericSnapshotBinderController.
+	// Activated after DemoVirtualDiskSnapshot because its controller Watches DemoVirtualDiskSnapshot.
 	"DemoVirtualMachineSnapshot",
 }
 

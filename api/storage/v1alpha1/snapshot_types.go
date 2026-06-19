@@ -47,6 +47,27 @@ type SnapshotList struct {
 type SnapshotSpec struct {
 	// SnapshotClassName optionally selects class/policy (aligned with unified snapshot model; resolution is N2+).
 	SnapshotClassName string `json:"snapshotClassName,omitempty"`
+
+	// Source optionally binds this Snapshot to pre-provisioned content (CSI-like static binding).
+	// When omitted, the controller performs dynamic namespace capture (default behaviour).
+	// When set, the controller takes the static-bind path: it does not create MCR/VCR and
+	// validates that the referenced SnapshotContent points back at this Snapshot via spec.snapshotRef.
+	// +optional
+	Source *SnapshotSource `json:"source,omitempty"`
+}
+
+// SnapshotSource selects an existing data source for pre-provisioning, mirroring
+// VolumeSnapshot.spec.source. Currently only static binding to an existing
+// SnapshotContent is supported.
+// +k8s:deepcopy-gen=true
+type SnapshotSource struct {
+	// SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
+	// (static pre-provisioning, analogous to volumeSnapshotContentName). It is required when
+	// source is set: presence of spec.source is the signal to take the static-bind path, so an
+	// empty content name would flip the snapshot into static mode with nothing to bind to.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	SnapshotContentName string `json:"snapshotContentName"`
 }
 
 // +k8s:deepcopy-gen=true

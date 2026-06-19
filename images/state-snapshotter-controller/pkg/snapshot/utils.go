@@ -539,6 +539,22 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 		if artifactRaw, ok := entry["artifact"].(map[string]interface{}); ok {
 			binding.Artifact = objectRefFromMap(artifactRaw)
 		}
+		if volumeMode, ok := entry["volumeMode"].(string); ok {
+			binding.VolumeMode = volumeMode
+		}
+		if fsType, ok := entry["fsType"].(string); ok {
+			binding.FsType = fsType
+		}
+		if storageClassName, ok := entry["storageClassName"].(string); ok {
+			binding.StorageClassName = storageClassName
+		}
+		if accessModesRaw, ok := entry["accessModes"].([]interface{}); ok {
+			for _, am := range accessModesRaw {
+				if s, ok := am.(string); ok {
+					binding.AccessModes = append(binding.AccessModes, s)
+				}
+			}
+		}
 		refs = append(refs, binding)
 	}
 	return refs

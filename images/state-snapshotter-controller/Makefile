@@ -64,7 +64,10 @@ test-integration: ## Run integration tests (requires envtest)
 				chmod +x $$KUBEBUILDER_ASSETS/etcd $$KUBEBUILDER_ASSETS/kube-apiserver $$KUBEBUILDER_ASSETS/kubectl 2>/dev/null || true; \
 			fi; \
 		fi && \
-		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v
+		echo "$(BLUE)Pass 1/2: shared-manager suite (label-filter !isolated)...$(NC)" && \
+		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -count=1 -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v -ginkgo.label-filter='!isolated' && \
+		echo "$(BLUE)Pass 2/2: isolation-sensitive specs in a fresh env (label-filter isolated)...$(NC)" && \
+		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -count=1 -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v -ginkgo.label-filter='isolated'
 	@echo "$(GREEN)Integration tests completed!$(NC)"
 
 test-e2e: ## Run e2e tests (automatically sets up envtest)

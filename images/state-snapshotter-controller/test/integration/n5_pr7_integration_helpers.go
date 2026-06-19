@@ -22,6 +22,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -177,11 +178,13 @@ func pr7InstallPendingVCR(ctx context.Context, namespace string, content *storag
 
 func pr7WaitSnapshotBound(ctx context.Context, key types.NamespacedName) *storagev1alpha1.Snapshot {
 	var snap storagev1alpha1.Snapshot
+	// Explicit timeout: Gomega's 1s default is too tight for binding latency once the shared test manager
+	// runs the full controller set (the manifest-only Serial spec borderline-missed the 1s window).
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, key, &snap)).To(Succeed())
 		g.Expect(snap.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 		g.Expect(snap.UID).NotTo(BeEmpty())
-	}).Should(Succeed())
+	}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
 	Expect(k8sClient.Get(ctx, key, &snap)).To(Succeed())
 	return &snap
 }

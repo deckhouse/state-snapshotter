@@ -58,6 +58,24 @@ spec:
                 description: SnapshotClassName optionally selects class/policy (aligned
                   with unified snapshot model; resolution is N2+).
                 type: string
+              source:
+                description: |-
+                  Source optionally binds this Snapshot to pre-provisioned content (CSI-like static binding).
+                  When omitted, the controller performs dynamic namespace capture (default behaviour).
+                  When set, the controller takes the static-bind path: it does not create MCR/VCR and
+                  validates that the referenced SnapshotContent points back at this Snapshot via spec.snapshotRef.
+                properties:
+                  snapshotContentName:
+                    description: |-
+                      SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
+                      (static pre-provisioning, analogous to volumeSnapshotContentName). It is required when
+                      source is set: presence of spec.source is the signal to take the static-bind path, so an
+                      empty content name would flip the snapshot into static mode with nothing to bind to.
+                    minLength: 1
+                    type: string
+                required:
+                - snapshotContentName
+                type: object
             type: object
           status:
             properties:

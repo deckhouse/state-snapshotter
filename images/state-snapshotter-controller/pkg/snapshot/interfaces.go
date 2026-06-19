@@ -35,6 +35,13 @@ type DataBindingRef struct {
 	TargetUID string
 	Target    ObjectRef
 	Artifact  ObjectRef
+	// VolumeMode/FsType/AccessModes/StorageClassName mirror SnapshotContent.status.dataRefs[]
+	// volume metadata. They are persisted on the binding because CSI snapshots are mode-agnostic;
+	// the export/index path needs them to recreate the volume faithfully. All optional.
+	VolumeMode       string
+	FsType           string
+	AccessModes      []string
+	StorageClassName string
 }
 
 // SnapshotLike is a typed interface for any XxxxSnapshot resource.

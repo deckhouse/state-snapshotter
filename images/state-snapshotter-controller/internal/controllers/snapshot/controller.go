@@ -183,6 +183,17 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	_ = ns
 
+	// CSI-like static (pre-provisioning) bind: when spec.source.snapshotContentName is set the
+	// Snapshot binds to existing pre-provisioned content (created by the import path) instead of
+	// running dynamic capture. This MUST be handled before the deterministic expectedName logic below,
+	// which would otherwise reset the bind (the static bind points at the import-chosen content name).
+	// The root ObjectKeeper ensured above is intentionally kept for static-bind Snapshots too: it
+	// TTL-cleans the Snapshot record itself (its cascade to retained content is simply a no-op here,
+	// since the pre-provisioned content is owned via the import path, not re-owned on this path).
+	if nsSnap.Spec.Source != nil && nsSnap.Spec.Source.SnapshotContentName != "" {
+		return r.reconcileStaticBind(ctx, nsSnap)
+	}
+
 	expectedName := snapshotContentName(nsSnap)
 
 	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
