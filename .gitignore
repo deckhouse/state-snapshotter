@@ -36,3 +36,5 @@ __pycache__/
 # CSI backup and vendor folders
 images/csi/_old-csi/
 images/csi/_new-csi/
+
+base_images.yml
