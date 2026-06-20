@@ -97,6 +97,29 @@ func IsDedicatedSnapshotControllerKind(kind string) bool {
 	return false
 }
 
+// DomainCaptureSnapshotKinds lists dedicated Snapshot kinds whose domain controller plans capture
+// out-of-band (creates MCR/VCR/children, publishes demo.status, owns ChildrenSnapshotReady) but whose
+// cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController (content-ownership
+// commit 2, D1). They are a strict subset of DedicatedSnapshotControllerKinds: the dedicated planning
+// controller is still activated for them, AND the generic binder additionally watches them (gated by
+// MarkDomainCaptureKind) to create/project/mirror their SnapshotContent. A fully-dedicated kind that
+// also owns its own content (the namespace-root "Snapshot") is NOT in this set.
+var DomainCaptureSnapshotKinds = []string{
+	"DemoVirtualDiskSnapshot",
+	"DemoVirtualMachineSnapshot",
+}
+
+// IsDomainCaptureSnapshotKind reports whether kind is dedicated for planning but uses the generic binder
+// for SnapshotContent ownership.
+func IsDomainCaptureSnapshotKind(kind string) bool {
+	for _, k := range DomainCaptureSnapshotKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // FilterGenericSnapshotGVKPairs returns parallel slices with dedicated snapshot kinds removed.
 func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKind) (snapOut, contentOut []schema.GroupVersionKind) {
 	if len(snapGVKs) != len(contentGVKs) {

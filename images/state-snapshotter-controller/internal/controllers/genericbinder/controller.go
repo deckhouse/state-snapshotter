@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -67,6 +68,14 @@ type GenericSnapshotBinderController struct {
 
 	watchMu                sync.RWMutex
 	activeSnapshotWatchSet map[string]struct{} // snapshot GVK String() -> watch registered with manager
+
+	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
+	// (creates MCR/VCR/children, publishes demo.status, owns ChildrenSnapshotReady) while this binder owns
+	// all SnapshotContent work for them: children/dataRefs projection, VSC ownership handoff, MCR/VCR
+	// cleanup and the domain-only capture markers (status.manifestCaptured / status.dataCaptured). Generic
+	// (non-domain) kinds keep the MCP-only projection and are never in this set. Guarded by domainCaptureMu.
+	domainCaptureMu   sync.RWMutex
+	domainCaptureGVKs map[string]struct{}
 }
 
 // NewGenericSnapshotBinderController creates a new GenericSnapshotBinderController with validated dependencies
@@ -116,7 +125,27 @@ func NewGenericSnapshotBinderController(
 		GVKRegistry:            registry,
 		SnapshotGVKs:           snapshotGVKs,
 		activeSnapshotWatchSet: make(map[string]struct{}),
+		domainCaptureGVKs:      make(map[string]struct{}),
 	}, nil
+}
+
+// MarkDomainCaptureKind records that snapshot GVK is reconciled by a dedicated domain controller for
+// planning (MCR/VCR/children + ChildrenSnapshotReady), while this binder owns all SnapshotContent work
+// for it (children/dataRefs projection, VSC handoff, MCR/VCR cleanup, capture markers). Idempotent.
+func (r *GenericSnapshotBinderController) MarkDomainCaptureKind(gvk schema.GroupVersionKind) {
+	r.domainCaptureMu.Lock()
+	defer r.domainCaptureMu.Unlock()
+	if r.domainCaptureGVKs == nil {
+		r.domainCaptureGVKs = make(map[string]struct{})
+	}
+	r.domainCaptureGVKs[gvk.String()] = struct{}{}
+}
+
+func (r *GenericSnapshotBinderController) isDomainCaptureKind(gvk schema.GroupVersionKind) bool {
+	r.domainCaptureMu.RLock()
+	defer r.domainCaptureMu.RUnlock()
+	_, ok := r.domainCaptureGVKs[gvk.String()]
+	return ok
 }
 
 // isDomainPlanningComplete reports whether the domain controller finished planning for the snapshot's
@@ -265,52 +294,12 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		contentObj.SetName(contentName)
 		// SnapshotContent is cluster-scoped, no namespace
 
-		// Get BackupClass to extract backupRepositoryName and deletionPolicy
-		// Snapshot.spec.backupClassName is required and links to BackupClass
-		// BackupClass.spec.backupRepositoryName provides the repository
-		// BackupClass.spec.deletionPolicy provides the deletion policy (or default to "Retain")
-		var backupRepositoryName string
-		deletionPolicy := "Retain" // Default deletion policy
-		var backupClassName string
-
-		specObj, ok := obj.Object["spec"].(map[string]interface{})
-		if ok {
-			if backupClassNameRaw, ok := specObj["backupClassName"].(string); ok && backupClassNameRaw != "" {
-				backupClassName = backupClassNameRaw
-				// Get BackupClass to extract backupRepositoryName and deletionPolicy
-				backupClassObj := &unstructured.Unstructured{}
-				backupClassObj.SetGroupVersionKind(schema.GroupVersionKind{
-					Group:   "storage.deckhouse.io",
-					Version: "v1alpha1",
-					Kind:    "BackupClass",
-				})
-				if err := r.Get(ctx, client.ObjectKey{Name: backupClassNameRaw}, backupClassObj); err == nil {
-					// Extract backupRepositoryName and deletionPolicy from BackupClass
-					if backupClassSpec, ok := backupClassObj.Object["spec"].(map[string]interface{}); ok {
-						if repoName, ok := backupClassSpec["backupRepositoryName"].(string); ok && repoName != "" {
-							backupRepositoryName = repoName
-						}
-						if policy, ok := backupClassSpec["deletionPolicy"].(string); ok && policy != "" {
-							deletionPolicy = policy
-						}
-					}
-				} else {
-					logger.V(1).Info("BackupClass not found, using defaults", "backupClassName", backupClassNameRaw, "error", err)
-				}
-			}
+		// Minimal spec: durable by default (deletionPolicy=Retain), same as the namespace path
+		// (snapshot/controller.go). The spec is immutable; all data/result wiring is published
+		// into content.status by the owning controller, never carried in spec.
+		contentObj.Object["spec"] = map[string]interface{}{
+			"deletionPolicy": "Retain",
 		}
-
-		spec := map[string]interface{}{}
-
-		// Add required fields from BackupClass
-		if backupRepositoryName == "" {
-			logger.Error(nil, "BackupClass does not have backupRepositoryName, cannot create SnapshotContent", "backupClassName", backupClassName)
-			return ctrl.Result{}, fmt.Errorf("BackupClass '%s' does not specify backupRepositoryName", backupClassName)
-		}
-		spec["backupRepositoryName"] = backupRepositoryName
-		spec["deletionPolicy"] = deletionPolicy
-
-		contentObj.Object["spec"] = spec
 
 		if contentOwnerRef == nil {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -334,10 +323,19 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 
 	// Step 4: Populate SnapshotContent links from MCR/VCR (if present and Ready)
 	if contentName != "" {
-		requeue, err := r.ensureSnapshotContentLinks(ctx, snapshotLike, obj, contentName)
+		requeue, terminalReason, terminalMessage, err := r.ensureSnapshotContentLinks(ctx, snapshotLike, obj, contentName)
 		if err != nil {
 			logger.Error(err, "Failed to ensure SnapshotContent links")
 			return ctrl.Result{}, err
+		}
+		if terminalReason != "" {
+			// Actionable capture failure (e.g. data-leg VolumeCaptureRequest failed) surfaced as a
+			// Ready=False on the snapshot. The bound SnapshotContent stays pending (no dataRefs), so the
+			// pure content mirror could not express this terminal reason; the binder co-writes it directly.
+			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, terminalReason, terminalMessage); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{}, nil
 		}
 		if requeue {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -366,33 +364,47 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 // ensureSnapshotContentLinks publishes generic result refs into the bound SnapshotContent.
 // SnapshotContentController must not read live Snapshot or MCR objects; it only validates
 // refs already persisted on SnapshotContent.status.
+//
+// For generic kinds it publishes only the manifest checkpoint from the snapshot's MCR. For domain
+// capture kinds (see MarkDomainCaptureKind) it additionally projects children + dataRefs, performs the
+// VolumeSnapshotContent ownership handoff, cleans up the domain MCR/VCR after a durable handoff, and
+// stamps the domain-only capture markers (status.manifestCaptured / status.dataCaptured) the domain
+// controller reads to stop re-creating its requests. A non-empty terminalReason is an actionable
+// capture failure to surface as Ready=False.
 func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
 	ctx context.Context,
 	_ snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
 	contentName string,
-) (bool, error) {
+) (requeue bool, terminalReason string, terminalMessage string, err error) {
 	mcrName, _, err := unstructured.NestedString(obj.Object, "status", "manifestCaptureRequestName")
 	if err != nil {
-		return false, err
+		return false, "", "", err
 	}
-	if mcrName == "" {
-		return false, nil
-	}
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: mcrName}, mcr); err != nil {
-		if errors.IsNotFound(err) {
-			return true, nil
+	if mcrName != "" {
+		mcr := &ssv1alpha1.ManifestCaptureRequest{}
+		if getErr := r.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: mcrName}, mcr); getErr != nil {
+			if errors.IsNotFound(getErr) {
+				requeue = true
+			} else {
+				return false, "", "", getErr
+			}
+		} else if mcr.Status.CheckpointName == "" {
+			requeue = true
+		} else if pubErr := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcr.Status.CheckpointName); pubErr != nil {
+			return false, "", "", pubErr
 		}
-		return false, err
 	}
-	if mcr.Status.CheckpointName == "" {
-		return true, nil
+
+	if !r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
+		return requeue, "", "", nil
 	}
-	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcr.Status.CheckpointName); err != nil {
-		return false, err
+
+	domainRequeue, treason, tmsg, derr := r.ensureDomainContentLinks(ctx, obj, contentName, mcrName)
+	if derr != nil {
+		return false, "", "", derr
 	}
-	return false, nil
+	return requeue || domainRequeue, treason, tmsg, nil
 }
 
 func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
@@ -646,26 +658,53 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 	reason string,
 	message string,
 ) error {
-	gen := obj.GetGeneration()
-	cur := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
-	if cur != nil && cur.Status == status && cur.Reason == reason && cur.Message == message && cur.ObservedGeneration == gen {
+	// Fast path: nothing to do if the in-memory view already matches the desired Ready.
+	if cur := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady); cur != nil &&
+		cur.Status == status && cur.Reason == reason && cur.Message == message &&
+		cur.ObservedGeneration == obj.GetGeneration() {
 		return nil
 	}
-	snapshot.SetCondition(snapshotLike, snapshot.ConditionReady, status, reason, message)
-	// Stamp observedGeneration so the mirrored Ready matches demo/root mirror semantics (INV-DOMAIN-GEN /
-	// gen-gated readers): a verbatim mirror without observedGeneration would otherwise look stale/non-current.
-	conds := snapshotLike.GetStatusConditions()
-	for i := range conds {
-		if conds[i].Type == snapshot.ConditionReady {
-			conds[i].ObservedGeneration = gen
+
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+
+	// D4a: read-modify-write only the Ready condition under an optimistic-lock merge patch. The demo
+	// domain controller co-writes ChildrenSnapshotReady (and an early validation Ready=False) into the
+	// same conditions array; a bare Status().Update / MergeFrom would replace the whole list and could
+	// silently drop the other writer's entry. MergeFromWithOptimisticLock turns a concurrent write into
+	// a 409 so RetryOnConflict re-reads the fresh object (already carrying the other condition) and
+	// re-applies only Ready, stamping observedGeneration for gen-gated readers (INV-DOMAIN-GEN).
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(gvk)
+		if err := r.Get(ctx, key, fresh); err != nil {
+			return err
 		}
-	}
-	snapshotLike.SetStatusConditions(conds)
-	snapshot.SyncConditionsToUnstructured(obj, snapshotLike.GetStatusConditions())
-	if err := r.Status().Update(ctx, obj); err != nil {
-		return fmt.Errorf("failed to mirror SnapshotContent Ready: %w", err)
-	}
-	return nil
+		freshLike, err := snapshot.ExtractSnapshotLike(fresh)
+		if err != nil {
+			return err
+		}
+		gen := fresh.GetGeneration()
+		if cur := snapshot.GetCondition(freshLike, snapshot.ConditionReady); cur != nil &&
+			cur.Status == status && cur.Reason == reason && cur.Message == message &&
+			cur.ObservedGeneration == gen {
+			return nil
+		}
+		base := fresh.DeepCopy()
+		snapshot.SetCondition(freshLike, snapshot.ConditionReady, status, reason, message)
+		conds := freshLike.GetStatusConditions()
+		for i := range conds {
+			if conds[i].Type == snapshot.ConditionReady {
+				conds[i].ObservedGeneration = gen
+			}
+		}
+		freshLike.SetStatusConditions(conds)
+		snapshot.SyncConditionsToUnstructured(fresh, freshLike.GetStatusConditions())
+		if err := r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return fmt.Errorf("failed to mirror SnapshotContent Ready: %w", err)
+		}
+		return nil
+	})
 }
 
 // checkChildSnapshotExists checks if a child Snapshot exists

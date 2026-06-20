@@ -43,9 +43,9 @@ func enrichScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func fsMode() *corev1.PersistentVolumeMode { m := corev1.PersistentVolumeFilesystem; return &m }
+func fsMode() *corev1.PersistentVolumeMode    { m := corev1.PersistentVolumeFilesystem; return &m }
 func blockMode() *corev1.PersistentVolumeMode { m := corev1.PersistentVolumeBlock; return &m }
-func scPtr(s string) *string { return &s }
+func scPtr(s string) *string                  { return &s }
 
 func pvcTargetBinding(ns, name string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{

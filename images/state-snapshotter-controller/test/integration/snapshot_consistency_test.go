@@ -80,9 +80,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-missing-content")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -210,9 +208,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-missing-content-never-ready")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -286,9 +282,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-wrong-name")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -378,9 +372,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-consistency-terminal-ready")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())

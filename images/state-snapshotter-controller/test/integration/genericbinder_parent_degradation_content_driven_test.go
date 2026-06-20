@@ -86,7 +86,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		parent.SetGroupVersionKind(snapshotGVK)
 		parent.SetName("gen-parent-degrade")
 		parent.SetNamespace("default")
-		parent.Object["spec"] = map[string]interface{}{"backupClassName": "test-backup-class"}
+		parent.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
 		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, parent)) })
 		setSnapshotChildrenSnapshotReadyCurrent(ctx, parent)

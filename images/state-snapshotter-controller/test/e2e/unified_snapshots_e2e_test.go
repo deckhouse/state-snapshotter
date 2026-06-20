@@ -182,9 +182,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName(snapshotName)
 			snapshotObj.SetNamespace(namespace)
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -421,9 +419,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName(snapshotName)
 			snapshotObj.SetNamespace(namespace)
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -687,9 +683,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName(snapshotName)
 			snapshotObj.SetNamespace(namespace)
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred(), "Should be able to create Snapshot (no RBAC errors)")

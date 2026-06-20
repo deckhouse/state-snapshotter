@@ -24,8 +24,8 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -33,10 +33,9 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
-	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
+	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
 const defaultDemoSnapshotRequeueAfter = 500 * time.Millisecond
@@ -46,6 +45,11 @@ func demoSnapshotManifestCaptureRequestName(kind, namespace, name string) string
 	return "demo-mcr-" + hex.EncodeToString(sum[:10])
 }
 
+// ensureDemoSnapshotManifestCaptureRequest ensures the per-snapshot ManifestCaptureRequest (owned by the
+// demo snapshot). Manifest targets are computed once at creation from the domain's own data-leg VCR (D3),
+// never from SnapshotContent, so the domain controller stays content-free. The MCR is immutable after
+// creation (dev clusters are recreated; no migration), so a later reconcile that no longer sees the VCR
+// (deleted by the common controller after handoff) does not strip the captured PVC manifest target.
 func ensureDemoSnapshotManifestCaptureRequest(
 	ctx context.Context,
 	c client.Client,
@@ -56,48 +60,24 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	targetKind string,
 	targetName string,
 	ownerRef metav1.OwnerReference,
-	contentName string,
+	vcrName string,
 ) (*ssv1alpha1.ManifestCaptureRequest, error) {
-	handoffComplete, err := demoSnapshotContentManifestHandoffComplete(ctx, c, contentName)
-	if err != nil {
-		return nil, err
-	}
-	if handoffComplete {
-		mcrName := demoSnapshotManifestCaptureRequestName(kind, namespace, name)
-		key := types.NamespacedName{Namespace: namespace, Name: mcrName}
-		existing := &ssv1alpha1.ManifestCaptureRequest{}
-		if err := c.Get(ctx, key, existing); err == nil {
-			return existing, nil
-		}
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
 	mcrName := demoSnapshotManifestCaptureRequestName(kind, namespace, name)
 	key := types.NamespacedName{Namespace: namespace, Name: mcrName}
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
-	desiredTargets, err := demoManifestCaptureTargets(ctx, c, namespace, contentName, []ssv1alpha1.ManifestTarget{{
+	err := c.Get(ctx, key, existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	desiredTargets, err := demoManifestCaptureTargetsFromVCR(ctx, c, namespace, vcrName, []ssv1alpha1.ManifestTarget{{
 		APIVersion: targetAPIVersion,
 		Kind:       targetKind,
 		Name:       targetName,
 	}})
 	if err != nil {
-		return nil, err
-	}
-	err = c.Get(ctx, key, existing)
-	if err == nil {
-		if !controllercommon.ManifestTargetsEqual(existing.Spec.Targets, desiredTargets) {
-			base := existing.DeepCopy()
-			existing.Spec.Targets = desiredTargets
-			if err := c.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
-				return nil, err
-			}
-		}
-		return existing, nil
-	}
-	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
 	mcr := &ssv1alpha1.ManifestCaptureRequest{
@@ -112,33 +92,22 @@ func ensureDemoSnapshotManifestCaptureRequest(
 	}
 	if err := c.Create(ctx, mcr); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, targetAPIVersion, targetKind, targetName, ownerRef, contentName)
+			return ensureDemoSnapshotManifestCaptureRequest(ctx, c, namespace, name, kind, targetAPIVersion, targetKind, targetName, ownerRef, vcrName)
 		}
 		return nil, err
 	}
 	return mcr, nil
 }
 
-func cleanupDemoSnapshotManifestCaptureRequest(ctx context.Context, c client.Client, mcr *ssv1alpha1.ManifestCaptureRequest) error {
-	if mcr == nil {
-		return nil
-	}
-	err := c.Delete(ctx, mcr)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-func demoSnapshotManifestCaptureRequestReadyForCleanup(ctx context.Context, c client.Reader, key types.NamespacedName, contentName string) (bool, error) {
-	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, c, key, contentName)
-}
-
-func demoManifestCaptureTargets(
+// demoManifestCaptureTargetsFromVCR appends the owned-PVC manifest targets derived from the domain's own
+// data-leg VCR spec.targets to base. This replaces deriving owned PVC targets from
+// SnapshotContent.status.dataRefs (D3): the result is identical (the covered PVC manifest is included),
+// but it relies only on the domain's own VCR, never on SnapshotContent.
+func demoManifestCaptureTargetsFromVCR(
 	ctx context.Context,
 	c client.Reader,
 	namespace string,
-	contentName string,
+	vcrName string,
 	base []ssv1alpha1.ManifestTarget,
 ) ([]ssv1alpha1.ManifestTarget, error) {
 	nmBase := make([]namespacemanifest.ManifestTarget, 0, len(base))
@@ -149,15 +118,23 @@ func demoManifestCaptureTargets(
 			Name:       t.Name,
 		})
 	}
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		return nil, fmt.Errorf("get SnapshotContent %q: %w", contentName, err)
+	merged := nmBase
+	if vcrName != "" {
+		vcr := &unstructured.Unstructured{}
+		vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
+		getErr := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vcrName}, vcr)
+		if getErr != nil && !apierrors.IsNotFound(getErr) {
+			return nil, getErr
+		}
+		if getErr == nil {
+			targets, parseErr := vcctrl.ParseVolumeCaptureTargets(vcr)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			owned := namespacemanifest.ManifestTargetsFromVolumeTargets(targets)
+			merged = namespacemanifest.AppendOwnedPVCManifestTargets(nmBase, owned, nil, namespace)
+		}
 	}
-	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshotContent(ctx, c, namespace, content)
-	if err != nil {
-		return nil, err
-	}
-	merged := namespacemanifest.AppendOwnedPVCManifestTargets(nmBase, ownedPVC, nil, namespace)
 	out := make([]ssv1alpha1.ManifestTarget, 0, len(merged))
 	for _, t := range merged {
 		out = append(out, ssv1alpha1.ManifestTarget{
@@ -167,45 +144,6 @@ func demoManifestCaptureTargets(
 		})
 	}
 	return out, nil
-}
-
-func ensureDemoSnapshotContent(ctx context.Context, c client.Client, contentName string, ownerRef metav1.OwnerReference) error {
-	existing := &storagev1alpha1.SnapshotContent{}
-	err := c.Get(ctx, client.ObjectKey{Name: contentName}, existing)
-	if err == nil {
-		_, err := controllercommon.EnsureLifecycleOwnerRef(ctx, c, existing, ownerRef)
-		return err
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	content := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            contentName,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-		},
-		Spec: storagev1alpha1.SnapshotContentSpec{},
-	}
-	return c.Create(ctx, content)
-}
-
-func commonSnapshotContentReadyForSnapshot(ctx context.Context, c client.Reader, contentName string) (bool, string, string, error) {
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %q not found", contentName), nil
-		}
-		return false, "", "", err
-	}
-	ready := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil {
-		return false, snapshot.ReasonContentBindingPending, fmt.Sprintf("SnapshotContent %q has no Ready condition yet", contentName), nil
-	}
-	if ready.Status == metav1.ConditionTrue {
-		return true, ready.Reason, ready.Message, nil
-	}
-	return false, ready.Reason, ready.Message, nil
 }
 
 func demoSnapshotOwnerReference(apiVersion, kind, name string, uid types.UID) metav1.OwnerReference {

@@ -55,11 +55,10 @@ func TestGenericSnapshotBinderControllerGinkgo(t *testing.T) {
 }
 
 // contentCaptureClient wraps a client.Client to capture SnapshotContent objects created via Create
-// and mocks Get for BackupClass and Snapshot
+// and mocks Get for Snapshot
 type contentCaptureClient struct {
 	client.Client
 	capturedContent **unstructured.Unstructured
-	backupClass     *unstructured.Unstructured
 	snapshotObj     *unstructured.Unstructured
 }
 
@@ -82,19 +81,8 @@ func (c *contentCaptureClient) Create(ctx context.Context, obj client.Object, op
 }
 
 func (c *contentCaptureClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	// Mock Get for BackupClass
-	if backupClass, ok := obj.(*unstructured.Unstructured); ok {
-		if backupClass.GetKind() == "BackupClass" && key.Name == c.backupClass.GetName() {
-			// Return mocked BackupClass - copy object manually
-			backupClass.Object = make(map[string]interface{})
-			for k, v := range c.backupClass.Object {
-				backupClass.Object[k] = v
-			}
-			backupClass.SetName(c.backupClass.GetName())
-			backupClass.SetGroupVersionKind(c.backupClass.GroupVersionKind())
-			return nil
-		}
-		// Mock Get for Snapshot
+	// Mock Get for Snapshot
+	if _, ok := obj.(*unstructured.Unstructured); ok {
 		if c.snapshotObj != nil {
 			if key.Name == c.snapshotObj.GetName() && key.Namespace == c.snapshotObj.GetNamespace() {
 				// Return mocked Snapshot - copy object manually
@@ -161,22 +149,6 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			// Since fake client doesn't fully support CRD operations for unstructured objects,
 			// we use a wrapper client to capture the Create call and verify the spec.
 
-			// PRECONDITION: Create BackupClass
-			backupClass := &unstructured.Unstructured{}
-			backupClass.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "storage.deckhouse.io",
-				Version: "v1alpha1",
-				Kind:    "BackupClass",
-			})
-			backupClass.SetName("test-backup-class")
-			backupClass.Object = make(map[string]interface{})
-			backupClass.Object["spec"] = map[string]interface{}{
-				"backupRepositoryName": "test-repository",
-				"deletionPolicy":       "Retain",
-			}
-			// Note: We don't actually create BackupClass in fake client to avoid CRD issues
-			// Instead, we'll mock the Get call
-
 			// PRECONDITION: Create Snapshot with ChildrenSnapshotReady=True
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -184,17 +156,14 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			snapshotObj.SetNamespace("default")
 			snapshotObj.SetUID(types.UID("test-uid-12345"))
 			snapshotObj.Object = make(map[string]interface{})
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			// Track created SnapshotContent to verify its spec
 			var createdContent *unstructured.Unstructured
-			// Use a wrapper client that captures Create calls and mocks Get for BackupClass and Snapshot
+			// Use a wrapper client that captures Create calls and mocks Get for Snapshot
 			wrapperClient := &contentCaptureClient{
 				Client:          k8sClient,
 				capturedContent: &createdContent,
-				backupClass:     backupClass,
 				snapshotObj:     snapshotObj,
 			}
 

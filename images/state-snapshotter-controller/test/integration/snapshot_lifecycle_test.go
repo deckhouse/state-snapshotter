@@ -140,9 +140,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-lifecycle-snapshot")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -274,9 +272,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-lifecycle-stale-domainready")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 			Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
 			Expect(snapshotObj.GetGeneration()).To(BeNumerically(">", int64(0)))
 
@@ -382,9 +378,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-ready-propagation-snapshot")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())

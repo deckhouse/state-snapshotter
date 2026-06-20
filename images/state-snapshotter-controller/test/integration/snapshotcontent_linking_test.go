@@ -58,9 +58,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 		snapshotObj.SetGroupVersionKind(snapshotGVK)
 		snapshotObj.SetName("test-linking-snapshot")
 		snapshotObj.SetNamespace("default")
-		snapshotObj.Object["spec"] = map[string]interface{}{
-			"backupClassName": "test-backup-class",
-		}
+		snapshotObj.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
 
 		linkCM := &corev1.ConfigMap{

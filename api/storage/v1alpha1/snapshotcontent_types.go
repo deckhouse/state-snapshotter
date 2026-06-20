@@ -55,9 +55,6 @@ type SnapshotContentList struct {
 
 // +k8s:deepcopy-gen=true
 type SnapshotContentSpec struct {
-	// BackupRepositoryName optional; used when snapshot class resolves to a backup repository.
-	BackupRepositoryName string `json:"backupRepositoryName,omitempty"`
-
 	// DeletionPolicy controls whether the controller may delete this SnapshotContent when the root snapshot is removed.
 	// +kubebuilder:validation:Enum=Retain;Delete
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`

@@ -29,42 +29,39 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// reconcileDemoVirtualDiskDataLeg owns the disk PVC data leg. When the disk declares
-// spec.persistentVolumeClaimName it creates a VolumeCaptureRequest for that PVC (owned by the disk
-// snapshot, mirroring the domain VCR path), hands off the bound VolumeSnapshotContent into the disk
-// SnapshotContent.status.dataRefs[], and deletes the VCR after a durable handoff. The PVC then becomes
-// a subtree-covered volume (via dataRefs / pending VCR) so the namespace root MUST NOT treat it as an
-// orphan PVC (no root VolumeSnapshot). A disk without spec.persistentVolumeClaimName is manifest-only.
+// ensureDemoVirtualDiskDataLeg owns the DOMAIN side of the disk PVC data leg only. When the disk declares
+// spec.persistentVolumeClaimName it ensures a VolumeCaptureRequest for that PVC (owned by the disk
+// snapshot, named by the disk snapshot UID per D3) and returns the VCR name to publish into
+// demo.status.volumeCaptureRequestName. It does NOT read/enrich/publish SnapshotContent or delete the VCR:
+// the common controller (GenericSnapshotBinderController) reads the VCR result, performs the
+// VolumeSnapshotContent ownership handoff, publishes dataRefs, then deletes the VCR and sets
+// status.dataCaptured. A disk without spec.persistentVolumeClaimName is manifest-only (empty vcrName).
 //
-// Returns dataComplete=true when there is no data leg or the bound VSC has been published into the
-// disk content dataRefs[]. A non-empty terminalReason signals an actionable, surfaced failure
-// (Ready=False) instead of an endless raw requeue.
-func (r *DemoVirtualDiskSnapshotReconciler) reconcileDemoVirtualDiskDataLeg(
+// A non-empty terminalReason signals an actionable, surfaced failure (PVC missing) instead of an endless
+// raw requeue; volume-capture failures are surfaced by the common controller from the VCR result.
+func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoVirtualDiskDataLeg(
 	ctx context.Context,
 	s *demov1alpha1.DemoVirtualDiskSnapshot,
 	source *demov1alpha1.DemoVirtualDisk,
-	contentName string,
-) (dataComplete bool, terminalReason string, terminalMessage string, err error) {
+) (vcrName string, terminalReason string, terminalMessage string, err error) {
 	pvcName := source.Spec.PersistentVolumeClaimName
 	if pvcName == "" {
-		return true, "", "", nil
+		return "", "", "", nil
 	}
 
 	reader := demoReconcilerReader(r.APIReader, r.Client)
 	pvc := &corev1.PersistentVolumeClaim{}
 	if getErr := reader.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: pvcName}, pvc); getErr != nil {
 		if apierrors.IsNotFound(getErr) {
-			return false, snapshot.ReasonArtifactMissing, fmt.Sprintf("PersistentVolumeClaim %q not found for disk data leg", pvcName), nil
+			return "", snapshot.ReasonArtifactMissing, fmt.Sprintf("PersistentVolumeClaim %q not found for disk data leg", pvcName), nil
 		}
-		return false, "", "", getErr
+		return "", "", "", getErr
 	}
 
 	targets := []vcpkg.Target{{
@@ -75,70 +72,13 @@ func (r *DemoVirtualDiskSnapshotReconciler) reconcileDemoVirtualDiskDataLeg(
 		Namespace:  pvc.Namespace,
 	}}
 
-	content := &storagev1alpha1.SnapshotContent{}
-	if getErr := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); getErr != nil {
-		return false, "", "", getErr
-	}
-
-	vcrKey := types.NamespacedName{Namespace: s.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}
-
-	// Steady state: dataRefs already cover the PVC. Drop the VCR once the handoff is durable.
-	if vcctrl.ContentDataRefsCoverExpectedTargets(content.Status.DataRefs, targets) {
-		safe, safeErr := vcctrl.VolumeCaptureRequestSafeToDeleteWithHandoff(ctx, r.Client, vcrKey, content.Name)
-		if safeErr != nil {
-			return false, "", "", safeErr
-		}
-		if safe {
-			if delErr := r.deleteDemoDiskVolumeCaptureRequest(ctx, vcrKey); delErr != nil {
-				return false, "", "", delErr
-			}
-		}
-		return true, "", "", nil
-	}
-
+	vcrName = vcpkg.SnapshotOwnedVCRName(s.UID)
+	vcrKey := types.NamespacedName{Namespace: s.Namespace, Name: vcrName}
 	ownerRef := demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualDiskSnapshot, s.Name, s.UID)
-	vcr, ensureErr := r.ensureDemoDiskVolumeCaptureRequest(ctx, vcrKey, ownerRef, targets)
-	if ensureErr != nil {
-		return false, "", "", ensureErr
+	if _, ensureErr := r.ensureDemoDiskVolumeCaptureRequest(ctx, vcrKey, ownerRef, targets); ensureErr != nil {
+		return "", "", "", ensureErr
 	}
-
-	if failed, reason, msg := vcctrl.VolumeCaptureRequestFailed(vcr); failed {
-		detail := msg
-		if reason != "" {
-			detail = fmt.Sprintf("%s: %s", reason, msg)
-		}
-		return false, snapshot.ReasonVolumeCaptureFailed, fmt.Sprintf("disk PVC %q volume capture failed: %s", pvcName, detail), nil
-	}
-	if !vcctrl.VolumeCaptureRequestReady(vcr) {
-		// Pending: rely on the caller's requeue/content watch. Coverage already holds via the pending VCR.
-		return false, "", "", nil
-	}
-
-	vcrRefs, parseErr := vcctrl.ParseVolumeCaptureDataRefs(vcr)
-	if parseErr != nil {
-		return false, "", "", parseErr
-	}
-	if validateErr := vcctrl.ValidateDataRefsForPublish(targets, vcrRefs); validateErr != nil {
-		// Ready VCR with not-yet-consistent dataRefs: retry without surfacing a terminal condition.
-		return false, "", "", nil
-	}
-
-	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
-	bindings, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, demoReconcilerReader(r.APIReader, r.Client), bindings)
-	if enrichErr != nil {
-		return false, "", "", enrichErr
-	}
-	if getErr := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); getErr != nil {
-		return false, "", "", getErr
-	}
-	if handoffErr := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); handoffErr != nil {
-		// Retryable handoff; coverage still holds via the pending VCR.
-		return false, "", "", nil
-	}
-	if pubErr := snapshotcontent.PublishSnapshotContentDataRefs(ctx, r.Client, content.Name, bindings); pubErr != nil {
-		return false, "", "", pubErr
-	}
-	return true, "", "", nil
+	return vcrName, "", "", nil
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) ensureDemoDiskVolumeCaptureRequest(
@@ -188,19 +128,4 @@ func demoDiskVCRHasOwnerRef(refs []metav1.OwnerReference, desired metav1.OwnerRe
 		}
 	}
 	return false
-}
-
-func (r *DemoVirtualDiskSnapshotReconciler) deleteDemoDiskVolumeCaptureRequest(ctx context.Context, key types.NamespacedName) error {
-	vcr := &unstructured.Unstructured{}
-	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if err := r.Client.Get(ctx, key, vcr); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("get VolumeCaptureRequest %s: %w", key, err)
-	}
-	if err := r.Client.Delete(ctx, vcr); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete VolumeCaptureRequest %s: %w", key, err)
-	}
-	return nil
 }

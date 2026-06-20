@@ -7,13 +7,8 @@
 #   ./test-smoke.sh [namespace] [snapshot-kind] [backup-class-name]
 #
 # Example:
-#   ./test-smoke.sh default Snapshot my-local-class
-#   ./test-smoke.sh d8-backup Snapshot my-local-class
-#   ./test-smoke.sh default Snapshot  # Uses default: my-local-class
-#
-# Note: backupClassName is required and must reference an existing BackupClass
-#       BackupClass binds Snapshot to a BackupRepository
-#       Check available BackupClasses: kubectl get backupclass.storage.deckhouse.io
+#   ./test-smoke.sh default Snapshot
+#   ./test-smoke.sh d8-backup Snapshot
 
 set -euo pipefail
 
@@ -32,7 +27,6 @@ SNAPSHOT_API_GROUP="storage.deckhouse.io"
 SNAPSHOT_API_VERSION="v1alpha1"
 CONTENT_KIND="${SNAPSHOT_KIND}Content"
 CONTROLLER_NAMESPACE="d8-state-snapshotter"
-BACKUP_CLASS_NAME="${3:-my-local-class}"  # Optional: backupClassName (default: "my-local-class")
 
 # Short names for kubectl (from api-resources)
 SNAPSHOT_SHORT="snap"
@@ -221,7 +215,6 @@ main() {
     echo "  Snapshot Kind: $SNAPSHOT_KIND"
     echo "  Snapshot Name: $SNAPSHOT_NAME"
     echo "  API Group: $SNAPSHOT_API_GROUP"
-    echo "  BackupClass Name: $BACKUP_CLASS_NAME"
     echo ""
     
     # Pre-flight checks
@@ -315,27 +308,6 @@ main() {
         log_success "CRD $snapshot_crd has 'conditions' field in status schema"
     fi
     
-    # Check BackupClass exists (if BackupClass CRD exists)
-    if kubectl get crd backupclasses.storage.deckhouse.io &>/dev/null; then
-        if ! kubectl get backupclass.storage.deckhouse.io "$BACKUP_CLASS_NAME" &>/dev/null; then
-            log_error "BackupClass '$BACKUP_CLASS_NAME' not found"
-            log_info "Available BackupClasses:"
-            kubectl get backupclass.storage.deckhouse.io 2>/dev/null | head -10 || log_warn "Could not list BackupClasses"
-            log_error "Snapshot creation will fail - BackupClass does not exist"
-            log_info "Usage: $0 $NAMESPACE $SNAPSHOT_KIND <backup-class-name>"
-            exit 1
-        else
-            log_success "BackupClass '$BACKUP_CLASS_NAME' found"
-            # Show BackupClass details
-            local repo_name=$(kubectl get backupclass.storage.deckhouse.io "$BACKUP_CLASS_NAME" -o jsonpath='{.spec.backupRepositoryName}' 2>/dev/null || echo "")
-            if [[ -n "$repo_name" ]]; then
-                log_info "  BackupRepository: $repo_name"
-            fi
-        fi
-    else
-        log_warn "BackupClass CRD not found (may be OK if not using BackupClass)"
-    fi
-    
     if ! kubectl get pods -n $CONTROLLER_NAMESPACE &>/dev/null; then
         log_warn "Controller namespace $CONTROLLER_NAMESPACE not found (may be OK)"
     fi
@@ -349,16 +321,13 @@ main() {
     log_info "═══════════════════════════════════════════════════════════════"
     
     # Create Snapshot using short name or full resource name
-    # backupClassName: Name of the BackupClass to use (binds us to a BackupRepository)
-    # Required field - must reference an existing BackupClass
     cat <<EOF | kubectl apply -f -
 apiVersion: $SNAPSHOT_API_GROUP/$SNAPSHOT_API_VERSION
 kind: $SNAPSHOT_KIND
 metadata:
   name: $SNAPSHOT_NAME
   namespace: $NAMESPACE
-spec:
-  backupClassName: $BACKUP_CLASS_NAME
+spec: {}
 EOF
     
     # Alternative: using short name

@@ -51,6 +51,23 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
 	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
 
+	// VolumeCaptureRequestName is the temporary VCR owned by this disk snapshot while data-leg capture runs.
+	// The common controller reads this VCR's result to enrich and publish SnapshotContent.status.dataRefs;
+	// the domain controller never touches SnapshotContent itself.
+	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
+
+	// ManifestCaptured is set by the common controller once this snapshot's manifest capture has been
+	// durably handed off to SnapshotContent (manifestCheckpointName published and the ManifestCheckpoint
+	// owned by the content). It is a domain-only suppression signal: the domain controller reads it to
+	// stop re-creating the MCR after the common controller deletes it, without ever reading SnapshotContent.
+	ManifestCaptured bool `json:"manifestCaptured,omitempty"`
+
+	// DataCaptured is set by the common controller once this disk snapshot's data leg has been durably
+	// handed off to SnapshotContent (dataRefs published and the VolumeSnapshotContent owned by the content).
+	// Domain-only suppression signal: the domain controller reads it to stop re-creating the VCR after the
+	// common controller deletes it. Always considered captured for a manifest-only disk (no data leg).
+	DataCaptured bool `json:"dataCaptured,omitempty"`
+
 	// Conditions report readiness (e.g. Ready=True for generic parent children-readiness aggregation).
 	// +optional
 	// +listType=map

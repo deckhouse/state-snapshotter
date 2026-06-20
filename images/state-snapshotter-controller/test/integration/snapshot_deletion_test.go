@@ -100,9 +100,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-deletion-snapshot")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
@@ -280,9 +278,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-deletion-snapshot-missing-content-name")
 			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{
-				"backupClassName": "test-backup-class",
-			}
+			snapshotObj.Object["spec"] = map[string]interface{}{}
 
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())

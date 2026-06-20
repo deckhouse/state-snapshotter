@@ -26,3 +26,10 @@ import (
 func SnapshotContentVCRName(contentUID types.UID) string {
 	return fmt.Sprintf("snap-vcr-%s", contentUID)
 }
+
+// SnapshotOwnedVCRName returns the deterministic data-leg VolumeCaptureRequest name owned by a domain
+// snapshot, keyed by the snapshot UID. Used by domain (demo) controllers so the request name is derivable
+// from the snapshot alone, without reading SnapshotContent (commit 2 content-ownership decoupling, D3).
+func SnapshotOwnedVCRName(snapshotUID types.UID) string {
+	return fmt.Sprintf("snap-owned-vcr-%s", snapshotUID)
+}

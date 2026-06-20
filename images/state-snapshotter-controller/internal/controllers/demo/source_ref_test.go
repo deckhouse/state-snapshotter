@@ -18,15 +18,12 @@ package demo
 
 import (
 	"context"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,9 +34,16 @@ import (
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
+
+// Demo reconcilers are content-free (commit 2 content-ownership, D1/D3): they validate the source, plan
+// the manifest-capture request (MCR), the data-leg volume-capture request (VCR) and the owned-disk child
+// graph, and publish results into demo.status (manifestCaptureRequestName, volumeCaptureRequestName,
+// childrenSnapshotRefs, ChildrenSnapshotReady). They never create/own/bind/mirror SnapshotContent;
+// GenericSnapshotBinderController owns all SnapshotContent work for demo kinds. These unit tests therefore
+// assert only the domain planning side; content creation/projection/Ready mirror is covered by the binder.
 
 func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) {
 	tests := []struct {
@@ -66,7 +70,7 @@ func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) 
 					SourceRef: tt.sourceRef,
 				},
 			})
-			reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl}
+			reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 			if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}); err != nil {
 				t.Fatalf("reconcile failed: %v", err)
 			}
@@ -93,7 +97,7 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 			},
 		},
 	})
-	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl}
+	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}); err != nil {
 		t.Fatalf("reconcile failed: %v", err)
 	}
@@ -107,7 +111,9 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 	assertNoDemoMCRs(t, cl)
 }
 
-func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testing.T) {
+// A manifest-only disk snapshot plans its MCR (manifest target = the source disk), publishes the MCR name,
+// reaches ChildrenSnapshotReady=True (leaf planning barrier), and never creates SnapshotContent.
+func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t,
 		&demov1alpha1.DemoVirtualDisk{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
@@ -123,18 +129,13 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 			},
 		},
 	)
-	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl}
+	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}
 
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("first reconcile failed: %v", err)
+		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	contentName := demoVirtualDiskSnapshotContentName("ns1", "snap")
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
-		t.Fatalf("expected content %q: %v", contentName, err)
-	}
 	mcrName := demoSnapshotManifestCaptureRequestName(controllercommon.KindDemoVirtualDiskSnapshot, "ns1", "snap")
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
@@ -149,98 +150,25 @@ func TestDemoVirtualDiskSnapshot_HappyPathCreatesContentMCRAndCompletes(t *testi
 		t.Fatalf("unexpected MCR targets: %#v", mcr.Spec.Targets)
 	}
 
-	baseMCR := mcr.DeepCopy()
-	mcr.Status.CheckpointName = "mcp-disk"
-	if err := cl.Status().Patch(context.Background(), mcr, client.MergeFrom(baseMCR)); err != nil {
-		t.Fatalf("patch MCR status: %v", err)
-	}
-	mcp := &ssv1alpha1.ManifestCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-disk"},
-		Spec: ssv1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: "ns1",
-			ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{
-				Name:      mcrName,
-				Namespace: "ns1",
-				UID:       string(mcr.UID),
-			},
-		},
-		Status: ssv1alpha1.ManifestCheckpointStatus{
-			Conditions: []metav1.Condition{{
-				Type:   ssv1alpha1.ManifestCheckpointConditionTypeReady,
-				Status: metav1.ConditionTrue,
-				Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
-			}},
-		},
-	}
-	if err := cl.Create(context.Background(), mcp); err != nil {
-		t.Fatalf("create MCP: %v", err)
-	}
-
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("second reconcile failed: %v", err)
-	}
-	reconcileCommonSnapshotContentStatusForTest(t, cl, contentName)
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("third reconcile failed: %v", err)
-	}
-
 	snap := getDemoDiskSnapshot(t, cl)
-	if snap.Status.BoundSnapshotContentName != contentName {
-		t.Fatalf("expected bound content %q, got %q", contentName, snap.Status.BoundSnapshotContentName)
-	}
-	assertDemoSnapshotNotOwnedBy(t, snap, controllercommon.DeckhouseAPIVersion, controllercommon.KindObjectKeeper, controllercommon.RootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualDiskSnapshot, "snap"))
-	ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
-		t.Fatalf("expected Ready=True Completed, got %#v", ready)
+	if snap.Status.ManifestCaptureRequestName != mcrName {
+		t.Fatalf("expected published manifestCaptureRequestName %q, got %q", mcrName, snap.Status.ManifestCaptureRequestName)
 	}
 	domainReady := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionChildrenSnapshotReady)
 	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
 		t.Fatalf("expected ChildrenSnapshotReady=True for leaf disk snapshot, got %#v", domainReady)
 	}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
-		t.Fatalf("get content after ready: %v", err)
-	}
-	assertDemoOwnerRef(t, content.OwnerReferences, controllercommon.DeckhouseAPIVersion, controllercommon.KindObjectKeeper, controllercommon.RootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualDiskSnapshot, "snap"), true)
-	assertNoSnapshotContentOwnerRefToSnapshot(t, content)
-	if content.Status.ManifestCheckpointName != "mcp-disk" {
-		t.Fatalf("expected content MCP link %q, got %q", "mcp-disk", content.Status.ManifestCheckpointName)
-	}
-	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
-	if contentReady == nil || contentReady.Status != metav1.ConditionTrue || contentReady.Reason != snapshot.ReasonCompleted {
-		t.Fatalf("expected content Ready=True Completed, got %#v", contentReady)
-	}
-	if len(content.Status.DataRefs) != 0 {
-		t.Fatalf("state-only snapshot content must not require or set dataRefs, got %#v", content.Status.DataRefs)
-	}
-
-	mcpBefore := content.Status.ManifestCheckpointName
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("fourth reconcile (steady state) failed: %v", err)
-	}
-	assertNoDemoMCRs(t, cl)
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
-		t.Fatalf("get content after steady reconcile: %v", err)
-	}
-	if content.Status.ManifestCheckpointName != mcpBefore {
-		t.Fatalf("steady reconcile must not change manifestCheckpointName: was %q, got %q", mcpBefore, content.Status.ManifestCheckpointName)
-	}
-	snap = getDemoDiskSnapshot(t, cl)
-	if snap.Status.ManifestCaptureRequestName != "" {
-		t.Fatalf("expected empty manifestCaptureRequestName after steady reconcile, got %q", snap.Status.ManifestCaptureRequestName)
-	}
-	ready = meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue {
-		t.Fatalf("expected snapshot to stay Ready=True after steady reconcile, got %#v", ready)
+	// Content ownership is the binder's job; the demo reconciler never creates SnapshotContent.
+	assertNoDemoDiskContents(t, cl)
+	if snap.Status.BoundSnapshotContentName != "" {
+		t.Fatalf("demo reconciler must not bind content, got %q", snap.Status.BoundSnapshotContentName)
 	}
 }
 
-// TestDemoVirtualDiskSnapshot_FailedHandedOffMCPDoesNotRecapture mirrors live tree-demo Stage 06.
-// Once the demo disk snapshot has published its ManifestCheckpoint and the MCP is handed off (owned)
-// by the SnapshotContent, patching that MCP Ready=False/Failed is a durable post-publish degradation:
-// SnapshotContentController must degrade the content (ManifestsReady=False/ManifestCheckpointFailed),
-// the demo snapshot must mirror Ready=False, and the demo reconciler must NOT create a fresh MCR/MCP
-// (no re-capture that would silently mask the failure).
-func TestDemoVirtualDiskSnapshot_FailedHandedOffMCPDoesNotRecapture(t *testing.T) {
+// Once the common controller stamps status.manifestCaptured (durable handoff) and deletes the MCR, the
+// demo reconciler must NOT re-create it. This is the domain-only suppression contract (no SnapshotContent
+// read on the demo side).
+func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t,
 		&demov1alpha1.DemoVirtualDisk{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
@@ -256,115 +184,33 @@ func TestDemoVirtualDiskSnapshot_FailedHandedOffMCPDoesNotRecapture(t *testing.T
 			},
 		},
 	)
-	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl}
+	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}
-	contentName := demoVirtualDiskSnapshotContentName("ns1", "snap")
-	mcrName := demoSnapshotManifestCaptureRequestName(controllercommon.KindDemoVirtualDiskSnapshot, "ns1", "snap")
 
-	// Drive capture to publication: create MCR, complete its MCP.
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("first reconcile failed: %v", err)
 	}
+	mcrName := demoSnapshotManifestCaptureRequestName(controllercommon.KindDemoVirtualDiskSnapshot, "ns1", "snap")
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
-		t.Fatalf("expected MCR %q: %v", mcrName, err)
-	}
-	baseMCR := mcr.DeepCopy()
-	mcr.Status.CheckpointName = "mcp-disk"
-	if err := cl.Status().Patch(context.Background(), mcr, client.MergeFrom(baseMCR)); err != nil {
-		t.Fatalf("patch MCR status: %v", err)
-	}
-	mcp := &ssv1alpha1.ManifestCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-disk"},
-		Spec: ssv1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: "ns1",
-			ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{
-				Name:      mcrName,
-				Namespace: "ns1",
-				UID:       string(mcr.UID),
-			},
-		},
-		Status: ssv1alpha1.ManifestCheckpointStatus{
-			Conditions: []metav1.Condition{{
-				Type:   ssv1alpha1.ManifestCheckpointConditionTypeReady,
-				Status: metav1.ConditionTrue,
-				Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
-			}},
-		},
-	}
-	if err := cl.Create(context.Background(), mcp); err != nil {
-		t.Fatalf("create MCP: %v", err)
+		t.Fatalf("expected MCR %q after first reconcile: %v", mcrName, err)
 	}
 
-	// Reconcile so the content controller (run below) sees the published MCP and hands off ownership.
+	// Common controller marks the leg captured and deletes the request.
+	snap := getDemoDiskSnapshot(t, cl)
+	base := snap.DeepCopy()
+	snap.Status.ManifestCaptured = true
+	if err := cl.Status().Patch(context.Background(), snap, client.MergeFrom(base)); err != nil {
+		t.Fatalf("patch manifestCaptured: %v", err)
+	}
+	if err := cl.Delete(context.Background(), mcr); err != nil {
+		t.Fatalf("delete MCR: %v", err)
+	}
+
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second reconcile failed: %v", err)
 	}
-	reconcileCommonSnapshotContentStatusForTest(t, cl, contentName)
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("third reconcile failed: %v", err)
-	}
-
-	// Precondition: MCP handed off to content, snapshot Ready=True, no live MCR.
-	snap := getDemoDiskSnapshot(t, cl)
-	if ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady); ready == nil || ready.Status != metav1.ConditionTrue {
-		t.Fatalf("precondition: expected disk snapshot Ready=True, got %#v", ready)
-	}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: "mcp-disk"}, mcp); err != nil {
-		t.Fatalf("get MCP: %v", err)
-	}
-	if !manifestCheckpointHandedOffToContent(mcp, contentName) {
-		t.Fatalf("precondition: expected MCP handed off (owned) by content %q, ownerRefs=%#v", contentName, mcp.OwnerReferences)
-	}
 	assertNoDemoMCRs(t, cl)
-
-	// Inject durable post-publish failure on the handed-off MCP.
-	baseMCP := mcp.DeepCopy()
-	meta.SetStatusCondition(&mcp.Status.Conditions, metav1.Condition{
-		Type:    ssv1alpha1.ManifestCheckpointConditionTypeReady,
-		Status:  metav1.ConditionFalse,
-		Reason:  ssv1alpha1.ManifestCheckpointConditionReasonFailed,
-		Message: "tree-demo injected MCP failure",
-	})
-	if err := cl.Status().Patch(context.Background(), mcp, client.MergeFrom(baseMCP)); err != nil {
-		t.Fatalf("patch MCP Ready=False/Failed: %v", err)
-	}
-
-	// SnapshotContentController observes the failed MCP and degrades the content.
-	reconcileCommonSnapshotContentStatusForTest(t, cl, contentName)
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
-		t.Fatalf("get content after MCP failure: %v", err)
-	}
-	if rr := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionManifestsReady); rr == nil || rr.Status != metav1.ConditionFalse || rr.Reason != snapshot.ReasonManifestCheckpointFailed {
-		t.Fatalf("expected content ManifestsReady=False/ManifestCheckpointFailed, got %#v", rr)
-	}
-	if cr := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady); cr == nil || cr.Status != metav1.ConditionFalse {
-		t.Fatalf("expected content Ready=False after MCP failure, got %#v", cr)
-	}
-
-	// Demo reconcile after failure: mirror Ready=False, NO re-capture.
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("reconcile after MCP failure: %v", err)
-	}
-	assertNoDemoMCRs(t, cl)
-	mcps := &ssv1alpha1.ManifestCheckpointList{}
-	if err := cl.List(context.Background(), mcps); err != nil {
-		t.Fatalf("list MCPs: %v", err)
-	}
-	if len(mcps.Items) != 1 || mcps.Items[0].Name != "mcp-disk" {
-		t.Fatalf("expected exactly the original MCP (no re-capture), got %d MCPs", len(mcps.Items))
-	}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
-		t.Fatalf("get content after demo reconcile: %v", err)
-	}
-	if content.Status.ManifestCheckpointName != "mcp-disk" {
-		t.Fatalf("content must keep its published MCP (no rebind), got %q", content.Status.ManifestCheckpointName)
-	}
-	snap = getDemoDiskSnapshot(t, cl)
-	if ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonManifestCheckpointFailed {
-		t.Fatalf("expected demo disk snapshot Ready=False/ManifestCheckpointFailed mirror after MCP failure, got %#v", ready)
-	}
 }
 
 func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChildren(t *testing.T) {
@@ -392,7 +238,7 @@ func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChi
 					SourceRef: tt.sourceRef,
 				},
 			})
-			reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl}
+			reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl, APIReader: cl}
 			if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}); err != nil {
 				t.Fatalf("reconcile failed: %v", err)
 			}
@@ -420,15 +266,12 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 			},
 		},
 	})
-	reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl}
+	reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl, APIReader: cl}
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}); err != nil {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	snap := &demov1alpha1.DemoVirtualMachineSnapshot{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: "snap"}, snap); err != nil {
-		t.Fatalf("get snapshot: %v", err)
-	}
+	snap := getDemoVMSnapshot(t, cl)
 	ready := meta.FindStatusCondition(snap.Status.Conditions, snapshot.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "SourceNotFound" {
 		t.Fatalf("expected Ready=False SourceNotFound, got %#v", ready)
@@ -438,7 +281,9 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 	assertNoDemoDiskSnapshots(t, cl)
 }
 
-func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndCompletes(t *testing.T) {
+// A VM snapshot plans its owned-disk child graph (only disks owned by the VM), publishes
+// childrenSnapshotRefs, plans the VM MCR, reaches ChildrenSnapshotReady=True, and never creates content.
+func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 	vmUID := types.UID("vm-uid")
 	cl := newDemoSourceRefFakeClient(t,
 		&demov1alpha1.DemoVirtualMachine{
@@ -468,18 +313,13 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 			},
 		},
 	)
-	reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl}
+	reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl, APIReader: cl}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}
 
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("first reconcile failed: %v", err)
+		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	vmContentName := demoVirtualMachineSnapshotContentName("ns1", "snap")
-	vmContent := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {
-		t.Fatalf("expected VM content %q: %v", vmContentName, err)
-	}
 	mcrName := demoSnapshotManifestCaptureRequestName(controllercommon.KindDemoVirtualMachineSnapshot, "ns1", "snap")
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
@@ -492,38 +332,6 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	}}
 	if !equality.Semantic.DeepEqual(mcr.Spec.Targets, expectedTargets) {
 		t.Fatalf("unexpected VM MCR targets: %#v", mcr.Spec.Targets)
-	}
-	assertDemoDiskSnapshotsCount(t, cl, 1)
-
-	baseMCR := mcr.DeepCopy()
-	mcr.Status.CheckpointName = "mcp-vm"
-	if err := cl.Status().Patch(context.Background(), mcr, client.MergeFrom(baseMCR)); err != nil {
-		t.Fatalf("patch VM MCR status: %v", err)
-	}
-	mcp := &ssv1alpha1.ManifestCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-vm"},
-		Spec: ssv1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: "ns1",
-			ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{
-				Name:      mcrName,
-				Namespace: "ns1",
-				UID:       string(mcr.UID),
-			},
-		},
-		Status: ssv1alpha1.ManifestCheckpointStatus{
-			Conditions: []metav1.Condition{{
-				Type:   ssv1alpha1.ManifestCheckpointConditionTypeReady,
-				Status: metav1.ConditionTrue,
-				Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
-			}},
-		},
-	}
-	if err := cl.Create(context.Background(), mcp); err != nil {
-		t.Fatalf("create VM MCP: %v", err)
-	}
-
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("second reconcile failed: %v", err)
 	}
 
 	childName := demoVirtualMachineDiskSnapshotName("ns1", "snap", "disk-owned")
@@ -539,13 +347,8 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 		t.Fatalf("unexpected child sourceRef: %#v", child.Spec.SourceRef)
 	}
 	assertDemoSnapshotOwnedBy(t, child, demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualMachineSnapshot, "snap")
-	diskSnapshots := &demov1alpha1.DemoVirtualDiskSnapshotList{}
-	if err := cl.List(context.Background(), diskSnapshots, client.InNamespace("ns1")); err != nil {
-		t.Fatalf("list disk snapshots: %v", err)
-	}
-	if len(diskSnapshots.Items) != 1 {
-		t.Fatalf("expected only owned disk child snapshot, got %d", len(diskSnapshots.Items))
-	}
+	assertDemoDiskSnapshotsCount(t, cl, 1)
+
 	vmSnap := getDemoVMSnapshot(t, cl)
 	if !controllercommon.SnapshotChildRefsEqualIgnoreOrder(vmSnap.Status.ChildrenSnapshotRefs, []storagev1alpha1.SnapshotChildRef{{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
@@ -558,89 +361,9 @@ func TestDemoVirtualMachineSnapshot_HappyPathCreatesOwnedDiskChildrenAndComplete
 	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
 		t.Fatalf("expected VM ChildrenSnapshotReady=True after writing child refs, got %#v", domainReady)
 	}
-	// A1 (Slice 3): after bind the VM mirrors the bound SnapshotContent.Ready reason instead of writing a
-	// local ChildrenPending. No SnapshotContentController runs in this direct-reconcile unit test, so the
-	// content has no Ready condition yet and the mirror falls back to ContentBindingPending.
-	ready := meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != snapshot.ReasonContentBindingPending {
-		t.Fatalf("expected Ready=False mirrored from bound content (ContentBindingPending) before child content ready, got %#v", ready)
-	}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {
-		t.Fatalf("get VM content while child pending: %v", err)
-	}
-	if vmContent.Status.ManifestCheckpointName != "" {
-		t.Fatalf("parent content must not publish manifest ref before child content graph is complete, got %q", vmContent.Status.ManifestCheckpointName)
-	}
-	if len(vmContent.Status.ChildrenSnapshotContentRefs) != 0 {
-		t.Fatalf("parent content must not publish incomplete child content refs, got %#v", vmContent.Status.ChildrenSnapshotContentRefs)
-	}
-
-	diskContentName := "disk-content"
-	if err := cl.Create(context.Background(), &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: diskContentName},
-		Spec:       storagev1alpha1.SnapshotContentSpec{},
-	}); err != nil {
-		t.Fatalf("create disk content: %v", err)
-	}
-	diskContent := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: diskContentName}, diskContent); err != nil {
-		t.Fatalf("get disk content: %v", err)
-	}
-	baseDiskContent := diskContent.DeepCopy()
-	meta.SetStatusCondition(&diskContent.Status.Conditions, metav1.Condition{
-		Type:   snapshot.ConditionReady,
-		Status: metav1.ConditionTrue,
-		Reason: snapshot.ReasonCompleted,
-	})
-	if err := cl.Status().Patch(context.Background(), diskContent, client.MergeFrom(baseDiskContent)); err != nil {
-		t.Fatalf("patch disk content Ready: %v", err)
-	}
-	baseChild := child.DeepCopy()
-	child.Status.BoundSnapshotContentName = diskContentName
-	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
-		Type:   snapshot.ConditionReady,
-		Status: metav1.ConditionTrue,
-		Reason: snapshot.ReasonCompleted,
-	})
-	if err := cl.Status().Patch(context.Background(), child, client.MergeFrom(baseChild)); err != nil {
-		t.Fatalf("patch child status: %v", err)
-	}
-
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("third reconcile failed: %v", err)
-	}
-	reconcileCommonSnapshotContentStatusForTest(t, cl, vmContentName)
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("fourth reconcile failed: %v", err)
-	}
-
-	vmSnap = getDemoVMSnapshot(t, cl)
-	if vmSnap.Status.BoundSnapshotContentName != vmContentName {
-		t.Fatalf("expected VM bound content %q, got %q", vmContentName, vmSnap.Status.BoundSnapshotContentName)
-	}
-	assertDemoSnapshotNotOwnedBy(t, vmSnap, controllercommon.DeckhouseAPIVersion, controllercommon.KindObjectKeeper, controllercommon.RootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualMachineSnapshot, "snap"))
-	ready = meta.FindStatusCondition(vmSnap.Status.Conditions, snapshot.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != snapshot.ReasonCompleted {
-		t.Fatalf("expected VM Ready=True Completed, got %#v", ready)
-	}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: vmContentName}, vmContent); err != nil {
-		t.Fatalf("get VM content after ready: %v", err)
-	}
-	if vmContent.Status.ManifestCheckpointName != "mcp-vm" {
-		t.Fatalf("expected VM content MCP link %q, got %q", "mcp-vm", vmContent.Status.ManifestCheckpointName)
-	}
-	assertDemoOwnerRef(t, vmContent.OwnerReferences, controllercommon.DeckhouseAPIVersion, controllercommon.KindObjectKeeper, controllercommon.RootObjectKeeperName("ns1", demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualMachineSnapshot, "snap"), true)
-	assertNoSnapshotContentOwnerRefToSnapshot(t, vmContent)
-	if !controllercommon.SnapshotContentChildRefsEqualIgnoreOrder(vmContent.Status.ChildrenSnapshotContentRefs, []storagev1alpha1.SnapshotContentChildRef{{Name: diskContentName}}) {
-		t.Fatalf("unexpected VM content child refs: %#v", vmContent.Status.ChildrenSnapshotContentRefs)
-	}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: diskContentName}, diskContent); err != nil {
-		t.Fatalf("get disk content after parent publish: %v", err)
-	}
-	assertDemoOwnerRef(t, diskContent.OwnerReferences, storagev1alpha1.SchemeGroupVersion.String(), "SnapshotContent", vmContentName, true)
-	assertNoSnapshotContentOwnerRefToSnapshot(t, diskContent)
-	if len(vmContent.Status.DataRefs) != 0 {
-		t.Fatalf("state-only VM content must not require or set dataRefs, got %#v", vmContent.Status.DataRefs)
+	assertNoDemoVMContents(t, cl)
+	if vmSnap.Status.BoundSnapshotContentName != "" {
+		t.Fatalf("demo reconciler must not bind content, got %q", vmSnap.Status.BoundSnapshotContentName)
 	}
 }
 
@@ -692,7 +415,7 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 			},
 		},
 	)
-	reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl}
+	reconciler := &DemoVirtualMachineSnapshotReconciler{Client: cl, APIReader: cl}
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}})
 	if err == nil {
 		t.Fatalf("expected conflicting child ownerRef to fail closed")
@@ -746,24 +469,6 @@ func TestEnsureDemoSnapshotOwnerRefIsIdempotent(t *testing.T) {
 	}
 }
 
-func reconcileCommonSnapshotContentStatusForTest(t *testing.T, cl client.Client, contentName string) {
-	t.Helper()
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: contentName}, content); err != nil {
-		t.Fatalf("get content %q: %v", contentName, err)
-	}
-	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(content)
-	if err != nil {
-		t.Fatalf("convert content %q to unstructured: %v", contentName, err)
-	}
-	obj := &unstructured.Unstructured{Object: raw}
-	obj.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
-	reconciler := &snapshotcontent.SnapshotContentController{Client: cl, APIReader: cl}
-	if _, err := reconciler.ReconcileCommonSnapshotContentStatus(context.Background(), obj); err != nil {
-		t.Fatalf("reconcile common SnapshotContent status %q: %v", contentName, err)
-	}
-}
-
 func newDemoSourceRefFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -786,7 +491,6 @@ func newDemoSourceRefFakeClient(t *testing.T, initObjs ...client.Object) client.
 		&demov1alpha1.DemoVirtualDiskSnapshot{},
 		&storagev1alpha1.SnapshotContent{},
 		&demov1alpha1.DemoVirtualMachineSnapshot{},
-		&storagev1alpha1.SnapshotContent{},
 		&ssv1alpha1.ManifestCaptureRequest{},
 		&ssv1alpha1.ManifestCheckpoint{},
 	}
@@ -874,15 +578,6 @@ func assertDemoSnapshotOwnedBy(t *testing.T, obj client.Object, apiVersion, kind
 	t.Fatalf("expected %s/%s to be owned by %s %s/%s, got %#v", obj.GetNamespace(), obj.GetName(), apiVersion, kind, name, obj.GetOwnerReferences())
 }
 
-func assertDemoSnapshotNotOwnedBy(t *testing.T, obj client.Object, apiVersion, kind, name string) {
-	t.Helper()
-	for _, ref := range obj.GetOwnerReferences() {
-		if ref.APIVersion == apiVersion && ref.Kind == kind && ref.Name == name {
-			t.Fatalf("expected %s/%s not to be owned by %s %s/%s, got %#v", obj.GetNamespace(), obj.GetName(), apiVersion, kind, name, obj.GetOwnerReferences())
-		}
-	}
-}
-
 func assertOwnerRefPresent(t *testing.T, refs []metav1.OwnerReference, apiVersion, kind, name string) {
 	t.Helper()
 	for _, ref := range refs {
@@ -891,28 +586,4 @@ func assertOwnerRefPresent(t *testing.T, refs []metav1.OwnerReference, apiVersio
 		}
 	}
 	t.Fatalf("expected ownerRef %s/%s/%s in %#v", apiVersion, kind, name, refs)
-}
-
-func assertDemoOwnerRef(t *testing.T, refs []metav1.OwnerReference, apiVersion, kind, name string, controller bool) {
-	t.Helper()
-	for _, ref := range refs {
-		if ref.APIVersion != apiVersion || ref.Kind != kind || ref.Name != name {
-			continue
-		}
-		gotController := ref.Controller != nil && *ref.Controller
-		if gotController != controller {
-			t.Fatalf("ownerRef %s/%s/%s controller=%v, want %v", apiVersion, kind, name, gotController, controller)
-		}
-		return
-	}
-	t.Fatalf("expected ownerRef %s/%s/%s in %#v", apiVersion, kind, name, refs)
-}
-
-func assertNoSnapshotContentOwnerRefToSnapshot(t *testing.T, content *storagev1alpha1.SnapshotContent) {
-	t.Helper()
-	for _, ref := range content.OwnerReferences {
-		if ref.Kind == controllercommon.KindSnapshot || ref.Kind == controllercommon.KindDemoVirtualDiskSnapshot || ref.Kind == controllercommon.KindDemoVirtualMachineSnapshot {
-			t.Fatalf("SnapshotContent %s must not be owned by Snapshot %s/%s", content.Name, ref.Kind, ref.Name)
-		}
-	}
 }

@@ -60,10 +60,6 @@ spec:
             type: object
           spec:
             properties:
-              backupRepositoryName:
-                description: BackupRepositoryName optional; used when snapshot class
-                  resolves to a backup repository.
-                type: string
               deletionPolicy:
                 description: DeletionPolicy controls whether the controller may delete
                   this SnapshotContent when the root snapshot is removed.

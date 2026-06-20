@@ -86,7 +86,7 @@ func ReconstructManifestCheckpoint(
 			OwnerReferences: ownerRefs,
 			Labels: map[string]string{
 				"state-snapshotter.deckhouse.io/source-namespace": sourceNamespace,
-				"state-snapshotter.deckhouse.io/reconstructed":     "true",
+				"state-snapshotter.deckhouse.io/reconstructed":    "true",
 			},
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{

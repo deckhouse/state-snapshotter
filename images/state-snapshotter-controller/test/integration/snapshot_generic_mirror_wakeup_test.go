@@ -82,7 +82,7 @@ var _ = Describe("Integration: generic Snapshot mirrors bound SnapshotContent Re
 		snap.SetGroupVersionKind(snapshotGVK)
 		snap.SetName("gen-mirror-wakeup")
 		snap.SetNamespace("default")
-		snap.Object["spec"] = map[string]interface{}{"backupClassName": "test-backup-class"}
+		snap.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 		DeferCleanup(func() {
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, snap))

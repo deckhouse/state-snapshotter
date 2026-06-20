@@ -21,8 +21,7 @@ var _ = Describe("Integration: SnapshotContent spec immutability", func() {
 		content := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: "spec-immutable-content-"},
 			Spec: storagev1alpha1.SnapshotContentSpec{
-				BackupRepositoryName: "repo-a",
-				DeletionPolicy:       storagev1alpha1.SnapshotContentDeletionPolicyRetain,
+				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
 			},
 		}
 		DeferCleanup(func() {
@@ -40,11 +39,6 @@ var _ = Describe("Integration: SnapshotContent spec immutability", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: content.Name}, content)).To(Succeed())
 		specPatch := content.DeepCopy()
 		specPatch.Spec.DeletionPolicy = storagev1alpha1.SnapshotContentDeletionPolicyDelete
-		Expect(k8sClient.Update(ctx, specPatch)).NotTo(Succeed())
-
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: content.Name}, content)).To(Succeed())
-		specPatch = content.DeepCopy()
-		specPatch.Spec.BackupRepositoryName = "repo-b"
 		Expect(k8sClient.Update(ctx, specPatch)).NotTo(Succeed())
 	})
 })
