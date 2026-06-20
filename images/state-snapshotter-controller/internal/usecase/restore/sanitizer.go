@@ -53,6 +53,15 @@ func isControlPlaneKind(kind string) bool {
 	return strings.HasSuffix(kind, "Snapshot") || strings.HasSuffix(kind, "SnapshotContent")
 }
 
+// SanitizeForRestore is the exported entry point for the read-path restore sanitizer. It is reused by
+// the domain controller's aggregated API server, which fetches base manifests from core and must
+// produce the same apply-ready output as this restore compiler. Callers must pass objects that carry a
+// non-empty metadata.namespace (namespace-relative base from /manifests must re-attach the namespace
+// first), otherwise the object is dropped as cluster-scoped.
+func SanitizeForRestore(obj unstructured.Unstructured, targetNamespace string) (unstructured.Unstructured, bool) {
+	return sanitizeForRestore(obj, targetNamespace)
+}
+
 // sanitizeForRestore returns a restore-safe copy of obj and whether it should be emitted.
 //
 // keep=false when the object must be dropped from restore output:
