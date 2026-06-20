@@ -1,0 +1,66 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            Неизменяемый чекпоинт состояния манифестов, созданный по ManifestCaptureRequest.
+          properties:
+            spec:
+              properties:
+                manifestCaptureRequestRef:
+                  description: |
+                    Ссылка на ManifestCaptureRequest, по которому создан этот чекпоинт.
+                  properties:
+                    name:
+                      description: Имя связанного объекта.
+                    namespace:
+                      description: Namespace связанного объекта (пусто для cluster-scoped объектов).
+                    uid:
+                      description: UID связанного объекта.
+                sourceNamespace:
+                  description: Namespace исходного ManifestCaptureRequest.
+            status:
+              properties:
+                chunks:
+                  description: Сведения обо всех чанках чекпоинта.
+                  items:
+                    properties:
+                      checksum:
+                        description: |
+                          SHA256-хеш сжатых данных чанка (в кодировке base64).
+                          Используется для проверки целостности и отладки.
+                      index:
+                        description: Индекс чанка (с нуля).
+                      name:
+                        description: Имя чанка.
+                      objectsCount:
+                        description: Количество объектов в этом чанке.
+                      sizeBytes:
+                        description: Размер чанка в байтах (сжатые данные).
+                conditions:
+                  description: |
+                    Условия, отражающие текущее состояние чекпоинта.
+                    Ожидаемый тип: Ready.
+                  items:
+                    properties:
+                      lastTransitionTime:
+                        description: |
+                          Время последнего перехода условия из одного статуса в другой.
+                      message:
+                        description: |
+                          Человекочитаемое сообщение с подробностями о переходе статуса.
+                      observedGeneration:
+                        description: |
+                          Значение `.metadata.generation`, на основе которого было установлено условие.
+                      reason:
+                        description: |
+                          Программный идентификатор причины последнего перехода условия.
+                      status:
+                        description: Статус условия — True, False или Unknown.
+                      type:
+                        description: Тип условия в формате CamelCase или foo.example.com/CamelCase.
+                totalObjects:
+                  description: Общее количество захваченных объектов.
+                totalSizeBytes:
+                  description: Суммарный размер всех чанков в байтах (сжатые данные).

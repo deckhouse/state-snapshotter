@@ -1,0 +1,24 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            Фрагмент (чанк) данных чекпоинта манифестов ManifestCheckpoint.
+          properties:
+            spec:
+              properties:
+                checkpointName:
+                  description: Имя ManifestCheckpoint, к которому относится этот чанк.
+                checksum:
+                  description: |
+                    SHA256-хеш сжатых данных чанка (в кодировке base64).
+                    Используется для проверки целостности и отладки.
+                data:
+                  description: |
+                    Gzip-сжатый JSON-массив объектов в кодировке base64.
+                    Формат: base64(gzip(json[])).
+                index:
+                  description: Индекс чанка (с нуля).
+                objectsCount:
+                  description: Количество объектов в этом чанке.

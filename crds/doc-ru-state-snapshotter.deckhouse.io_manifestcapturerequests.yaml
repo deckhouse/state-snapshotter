@@ -1,0 +1,57 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            Запрос на захват состояния указанных объектов Kubernetes в чекпоинт манифестов.
+          properties:
+            spec:
+              properties:
+                targets:
+                  description: |
+                    Список объектов для захвата.
+                    Все цели должны быть namespaced-объектами в том же namespace, что и ManifestCaptureRequest.
+                  items:
+                    properties:
+                      apiVersion:
+                        description: APIVersion целевого объекта.
+                      kind:
+                        description: |
+                          Kind целевого объекта.
+                          Cluster-scoped ресурсы (Namespace, Node, PersistentVolume, ClusterRole и т. п.) не допускаются.
+                      name:
+                        description: Имя целевого объекта.
+            status:
+              properties:
+                checkpointName:
+                  description: Имя cluster-scoped ресурса ManifestCheckpoint, созданного по этому запросу.
+                completionTimestamp:
+                  description: Время завершения обработки запроса.
+                conditions:
+                  description: |
+                    Условия, отражающие текущее состояние запроса.
+                    Ожидаемые типы:
+                    - Ready — запрос готов (True) или нет (False);
+                    - Failed — запрос завершился с ошибкой (True) или нет (False);
+                    - Processing — запрос обрабатывается (True) или нет (False).
+                  items:
+                    properties:
+                      lastTransitionTime:
+                        description: |
+                          Время последнего перехода условия из одного статуса в другой.
+                          Обычно соответствует моменту изменения базового условия.
+                      message:
+                        description: |
+                          Человекочитаемое сообщение с подробностями о переходе статуса.
+                          Может быть пустой строкой.
+                      observedGeneration:
+                        description: |
+                          Значение `.metadata.generation`, на основе которого было установлено условие.
+                      reason:
+                        description: |
+                          Программный идентификатор причины последнего перехода условия.
+                      status:
+                        description: Статус условия — True, False или Unknown.
+                      type:
+                        description: Тип условия в формате CamelCase или foo.example.com/CamelCase.
