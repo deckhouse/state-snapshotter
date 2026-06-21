@@ -17,8 +17,9 @@ limitations under the License.
 package restore
 
 import (
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func cloneDataBindings(refs []snapshot.DataBindingRef) []snapshot.DataBindingRef {

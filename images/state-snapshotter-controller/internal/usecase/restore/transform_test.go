@@ -20,8 +20,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func dataSourceRefName(pvc unstructured.Unstructured) string {

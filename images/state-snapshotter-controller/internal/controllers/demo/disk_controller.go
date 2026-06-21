@@ -20,8 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +32,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -89,7 +88,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 
 	resolution := resolveDemoSnapshotSource(s.GetAnnotations(), s.Namespace, controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		if patchErr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, resolution.Reason, resolution.Message); patchErr != nil {
+		if patchErr := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, resolution.Reason, resolution.Message); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, nil
@@ -106,13 +105,13 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, demoReasonSourceNotFound, fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
+		if err := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, demoReasonSourceNotFound, fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
 	if sourceUID != "" && string(source.UID) != sourceUID {
-		if err := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, demoReasonSourceUIDMismatch, fmt.Sprintf("%s %q UID mismatch", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
+		if err := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, demoReasonSourceUIDMismatch, fmt.Sprintf("%s %q UID mismatch", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -147,7 +146,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 			return ctrl.Result{}, err
 		}
 		if terminalReason != "" {
-			if perr := patchDemoVirtualDiskSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, terminalReason, terminalMessage); perr != nil {
+			if perr := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, terminalReason, terminalMessage); perr != nil {
 				return ctrl.Result{}, perr
 			}
 			// PVC may still appear (creation race); keep polling.
@@ -289,11 +288,10 @@ func patchDemoVirtualDiskSnapshotVolumeCaptureRequestName(
 	})
 }
 
-func patchDemoVirtualDiskSnapshotReady(
+func patchDemoVirtualDiskSnapshotNotReady(
 	ctx context.Context,
 	c client.Client,
 	diskKey types.NamespacedName,
-	status metav1.ConditionStatus,
 	reason string,
 	message string,
 ) error {
@@ -303,13 +301,13 @@ func patchDemoVirtualDiskSnapshotReady(
 			return err
 		}
 		if rc := meta.FindStatusCondition(o.Status.Conditions, snapshot.ConditionReady); rc != nil &&
-			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
+			rc.Status == metav1.ConditionFalse && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
 			return nil
 		}
 		base := o.DeepCopy()
 		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionReady,
-			Status:             status,
+			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            message,
 			ObservedGeneration: o.Generation,
