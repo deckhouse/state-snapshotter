@@ -51,8 +51,10 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 	var rules []rbacv1.PolicyRule
 	for _, g := range groupOrder {
 		entry := byGroup[g]
-		sort.Strings(entry.sources)
-		sort.Strings(entry.snapshots)
+		// Two CSDs can map to the same GVR; dedup so the rule's Resources slice is deterministic and
+		// minimal (consistent with buildCoreReadRules / the subresource builders).
+		entry.sources = sortedUnique(entry.sources)
+		entry.snapshots = sortedUnique(entry.snapshots)
 
 		if len(entry.sources) > 0 {
 			// PERMANENT: the general controller lists source resources (e.g. DemoVirtualDisk,
@@ -96,30 +98,145 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 	return rules
 }
 
-// applyDomainClusterRole creates or updates the domain ClusterRole and its binding.
-func applyDomainClusterRole(ctx context.Context, cl ctrlclient.Client, rules []rbacv1.PolicyRule) error {
-	if err := applyClusterRole(ctx, cl, rules); err != nil {
-		return err
+// buildCoreReadRules builds rules for the CORE SA on the dynamic demo snapshot GVRs: read (the snapshot
+// status tells core which MCR/VCR results to consume) and status-write (binding BoundSnapshotContentName +
+// volume-metadata projection, co-owned via D4a). It deliberately grants NO source GVR, NO create/delete and
+// NO /finalizers — those belong to the domain SA. These resource names are domain-specific (from CSD), so
+// they cannot live in the static, domain-agnostic core RBAC and must be generated here.
+func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(snapshotGVRs) == 0 {
+		return nil
 	}
-	return applyClusterRoleBinding(ctx, cl)
+	byGroup := make(map[string][]string)
+	var groupOrder []string
+	for _, gvr := range snapshotGVRs {
+		if _, ok := byGroup[gvr.Group]; !ok {
+			groupOrder = append(groupOrder, gvr.Group)
+		}
+		byGroup[gvr.Group] = append(byGroup[gvr.Group], gvr.Resource)
+	}
+	sort.Strings(groupOrder)
+
+	var rules []rbacv1.PolicyRule
+	for _, g := range groupOrder {
+		resources := sortedUnique(byGroup[g])
+		statusResources := make([]string, len(resources))
+		for i, r := range resources {
+			statusResources[i] = r + "/status"
+		}
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{g},
+			Resources: resources,
+			Verbs:     []string{"get", "list", "watch"},
+		})
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{g},
+			Resources: statusResources,
+			Verbs:     []string{"get", "update", "patch"},
+		})
+	}
+	return rules
 }
 
-func applyClusterRole(ctx context.Context, cl ctrlclient.Client, rules []rbacv1.PolicyRule) error {
+// coreManifestsSubresourceRules grants the DOMAIN SA get on core's aggregated /manifests subresource for
+// each demo snapshot resource, so the domain apiserver can fetch BASE manifests from the core apiserver
+// (over the kube-apiserver aggregation layer).
+func coreManifestsSubresourceRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(snapshotGVRs) == 0 {
+		return nil
+	}
+	resources := make([]string, 0, len(snapshotGVRs))
+	for _, gvr := range snapshotGVRs {
+		resources = append(resources, gvr.Resource+"/manifests")
+	}
+	return []rbacv1.PolicyRule{{
+		APIGroups: []string{consts.CoreSubresourcesGroup},
+		Resources: sortedUnique(resources),
+		Verbs:     []string{"get"},
+	}}
+}
+
+// domainRestoreSubresourceRules grants the CORE SA get on the domain apiserver's
+// /manifests-with-data-restoration subresource for each demo snapshot resource, so core can delegate the
+// domain subtree restore. The subresource group is "subresources." + the snapshot's own API group.
+func domainRestoreSubresourceRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(snapshotGVRs) == 0 {
+		return nil
+	}
+	byGroup := make(map[string][]string)
+	var groupOrder []string
+	for _, gvr := range snapshotGVRs {
+		subGroup := consts.DomainSubresourcesGroupPrefix + gvr.Group
+		if _, ok := byGroup[subGroup]; !ok {
+			groupOrder = append(groupOrder, subGroup)
+		}
+		byGroup[subGroup] = append(byGroup[subGroup], gvr.Resource+"/manifests-with-data-restoration")
+	}
+	sort.Strings(groupOrder)
+
+	var rules []rbacv1.PolicyRule
+	for _, g := range groupOrder {
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{g},
+			Resources: sortedUnique(byGroup[g]),
+			Verbs:     []string{"get"},
+		})
+	}
+	return rules
+}
+
+func sortedUnique(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// applyDomainRBAC reconciles the two managed ClusterRoles + bindings of the split model:
+//   - DomainClusterRoleName        bound to the DOMAIN SA  (domainRules)
+//   - DomainCoreReadClusterRoleName bound to the CORE SA   (coreReadRules)
+func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, domainRules, coreReadRules []rbacv1.PolicyRule) error {
+	if err := applyManagedClusterRole(ctx, cl, consts.DomainClusterRoleName, domainRules, consts.DomainSAName); err != nil {
+		return err
+	}
+	return applyManagedClusterRole(ctx, cl, consts.DomainCoreReadClusterRoleName, coreReadRules, consts.ControllerSAName)
+}
+
+// applyManagedClusterRole creates or updates a named ClusterRole and binds it to the given SA in the
+// module namespace.
+func applyManagedClusterRole(ctx context.Context, cl ctrlclient.Client, name string, rules []rbacv1.PolicyRule, saName string) error {
+	if err := applyClusterRole(ctx, cl, name, rules); err != nil {
+		return err
+	}
+	return applyClusterRoleBinding(ctx, cl, name, saName)
+}
+
+func applyClusterRole(ctx context.Context, cl ctrlclient.Client, name string, rules []rbacv1.PolicyRule) error {
 	existing := new(rbacv1.ClusterRole)
-	err := cl.Get(ctx, ctrlclient.ObjectKey{Name: consts.DomainClusterRoleName}, existing)
+	err := cl.Get(ctx, ctrlclient.ObjectKey{Name: name}, existing)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get ClusterRole %q: %w", consts.DomainClusterRoleName, err)
+			return fmt.Errorf("get ClusterRole %q: %w", name, err)
 		}
 		desired := &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:   consts.DomainClusterRoleName,
+				Name:   name,
 				Labels: moduleLabels(),
 			},
 			Rules: rules,
 		}
 		if createErr := cl.Create(ctx, desired); createErr != nil {
-			return fmt.Errorf("create ClusterRole %q: %w", consts.DomainClusterRoleName, createErr)
+			return fmt.Errorf("create ClusterRole %q: %w", name, createErr)
 		}
 		return nil
 	}
@@ -127,54 +244,54 @@ func applyClusterRole(ctx context.Context, cl ctrlclient.Client, rules []rbacv1.
 	existing.Rules = rules
 	existing.Labels = moduleLabels()
 	if patchErr := cl.Patch(ctx, existing, ctrlclient.MergeFrom(base)); patchErr != nil {
-		return fmt.Errorf("patch ClusterRole %q: %w", consts.DomainClusterRoleName, patchErr)
+		return fmt.Errorf("patch ClusterRole %q: %w", name, patchErr)
 	}
 	return nil
 }
 
-func applyClusterRoleBinding(ctx context.Context, cl ctrlclient.Client) error {
+func applyClusterRoleBinding(ctx context.Context, cl ctrlclient.Client, name, saName string) error {
 	existing := new(rbacv1.ClusterRoleBinding)
-	err := cl.Get(ctx, ctrlclient.ObjectKey{Name: consts.DomainClusterRoleName}, existing)
+	err := cl.Get(ctx, ctrlclient.ObjectKey{Name: name}, existing)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get ClusterRoleBinding %q: %w", consts.DomainClusterRoleName, err)
+			return fmt.Errorf("get ClusterRoleBinding %q: %w", name, err)
 		}
-		desired := desiredClusterRoleBinding()
+		desired := desiredClusterRoleBinding(name, saName)
 		if createErr := cl.Create(ctx, desired); createErr != nil {
-			return fmt.Errorf("create ClusterRoleBinding %q: %w", consts.DomainClusterRoleName, createErr)
+			return fmt.Errorf("create ClusterRoleBinding %q: %w", name, createErr)
 		}
 		return nil
 	}
 	// roleRef is immutable; only subjects and labels can drift.
 	base := existing.DeepCopy()
-	existing.Subjects = desiredSubjects()
+	existing.Subjects = subjectForSA(saName)
 	existing.Labels = moduleLabels()
 	if patchErr := cl.Patch(ctx, existing, ctrlclient.MergeFrom(base)); patchErr != nil {
-		return fmt.Errorf("patch ClusterRoleBinding %q: %w", consts.DomainClusterRoleName, patchErr)
+		return fmt.Errorf("patch ClusterRoleBinding %q: %w", name, patchErr)
 	}
 
 	return nil
 }
 
-func desiredClusterRoleBinding() *rbacv1.ClusterRoleBinding {
+func desiredClusterRoleBinding(name, saName string) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   consts.DomainClusterRoleName,
+			Name:   name,
 			Labels: moduleLabels(),
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "ClusterRole",
-			Name:     consts.DomainClusterRoleName,
+			Name:     name,
 		},
-		Subjects: desiredSubjects(),
+		Subjects: subjectForSA(saName),
 	}
 }
 
-func desiredSubjects() []rbacv1.Subject {
+func subjectForSA(saName string) []rbacv1.Subject {
 	return []rbacv1.Subject{{
 		Kind:      "ServiceAccount",
-		Name:      consts.ControllerSAName,
+		Name:      saName,
 		Namespace: consts.ModuleNamespace,
 	}}
 }

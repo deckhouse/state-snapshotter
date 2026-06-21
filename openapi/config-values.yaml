@@ -10,6 +10,13 @@ properties:
       - TRACE
     description: Module log level.
     default: DEBUG
+  enableDemoDomain:
+    type: boolean
+    default: false
+    description: |
+      Deploy the reference demo domain controller (separate pod + aggregated apiserver) and its demo
+      CustomSnapshotDefinition. Enables the demo.state-snapshotter.deckhouse.io snapshot kinds end to end.
+      Disabled by default; intended for demo/e2e and as a template for real domain controllers.
   unifiedBootstrapPairs:
     type: string
     default: ""

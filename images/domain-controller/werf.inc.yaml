@@ -1,0 +1,66 @@
+---
+# The domain-controller binary lives in the shared Go module under images/state-snapshotter-controller
+# (cmd/domain-controller). This image reuses that source tree and only differs in the built command, so
+# core and domain ship from one module with no code duplication.
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+fromImage: builder/src
+final: false
+
+git:
+  - add: {{ .ModuleDir }}
+    to: /src
+    includePaths:
+      - api
+      - images/state-snapshotter-controller
+      - lib/go
+    stageDependencies:
+      install:
+        - '**/*'
+
+shell:
+  install:
+    - echo "src artifact"
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+fromImage: {{ eq .SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
+final: false
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+    add: /src
+    to: /src
+    before: install
+
+mount:
+{{ include "mount points for golang builds" . }}
+
+secrets:
+- id: GOPROXY
+  value: {{ .GOPROXY }}
+
+shell:
+  setup:
+    - cd /src/images/state-snapshotter-controller
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+    - |
+      {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -o /%s ./cmd/domain-controller` $.ImageName)) | nindent 6 }}
+    - chmod +x /{{ $.ImageName }}
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}
+fromImage: base/distroless
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+    add: /{{ $.ImageName }}
+    to: /{{ $.ImageName }}
+    before: setup
+
+git:
+{{- include "image mount points" . }}
+
+imageSpec:
+  config:
+    entrypoint: ["/{{ $.ImageName }}"]

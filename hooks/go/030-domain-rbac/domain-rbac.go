@@ -46,7 +46,9 @@ var _ = registry.RegisterFunc(
 // reconcileDomainRBAC is the main reconcile function. On every CSD change it:
 //  1. Lists all CSDs and selects those with Accepted=True at current generation.
 //  2. Resolves source and snapshot GVKs → GVRs for each eligible CSD.
-//  3. Creates/updates the single aggregated ClusterRole + ClusterRoleBinding.
+//  3. Creates/updates the split ClusterRoles + bindings: the DOMAIN SA gets source/snapshot GVR rights
+//     (incl. /status, /finalizers) + get on core's /manifests; the CORE SA gets read + status-write on
+//     the snapshot GVRs + get on the domain /manifests-with-data-restoration subresource.
 //  4. Writes RBACReady (True / Pending / ApplyFailed) on each eligible CSD.
 func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	cl := input.DC.MustGetK8sClient(sdkk8s.WithSchemeBuilder(v1alpha1.SchemeBuilder))
@@ -62,9 +64,17 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 
 	resolver := restMapperResolver(cl.RESTMapper())
 	sourceGVRs, snapshotGVRs, pendingByName := resolveEligibleGVRs(eligible, resolver)
-	rules := buildRules(sourceGVRs, snapshotGVRs)
 
-	applyErr := applyDomainClusterRole(ctx, cl, rules)
+	// DOMAIN SA: dynamic source/snapshot GVR rights + get on core's aggregated /manifests subresource.
+	domainRules := buildRules(sourceGVRs, snapshotGVRs)
+	domainRules = append(domainRules, coreManifestsSubresourceRules(snapshotGVRs)...)
+
+	// CORE SA: read + status-write on the dynamic demo snapshot GVRs + get on the domain
+	// /manifests-with-data-restoration subresource (restore delegation).
+	coreReadRules := buildCoreReadRules(snapshotGVRs)
+	coreReadRules = append(coreReadRules, domainRestoreSubresourceRules(snapshotGVRs)...)
+
+	applyErr := applyDomainRBAC(ctx, cl, domainRules, coreReadRules)
 
 	for i := range eligible {
 		csd := &eligible[i]

@@ -32,6 +32,14 @@ const (
 	// This can be different from APIServerCertCN for better naming clarity
 	APIServerSecretName = "state-snapshotter-tls-certs"
 
+	// DomainAPIServerCertCN is the Common Name (and Service name) of the domain controller's aggregated
+	// API server serving certificate. Must match the Service name in templates/domain-controller/service.yaml.
+	DomainAPIServerCertCN = "domain-controller"
+
+	// DomainAPIServerSecretName is the Secret holding the domain aggregated API server's serving cert.
+	// Distinct from APIServerSecretName so the core and domain pods each mount only their own key.
+	DomainAPIServerSecretName = "state-snapshotter-domain-tls-certs"
+
 	ModulePluralName = "state-snapshotter"
 
 	// WebhookCertCN is the Common Name for webhook certificate
@@ -40,11 +48,33 @@ const (
 	// WebhookSecretName is the name of the Kubernetes Secret containing webhook TLS certificates
 	WebhookSecretName = "webhooks-https-certs"
 
-	// ControllerSAName is the ServiceAccount name of the state-snapshotter controller.
+	// ControllerSAName is the ServiceAccount name of the state-snapshotter (core) controller.
 	ControllerSAName = "controller"
 
-	// DomainClusterRoleName is the single aggregated ClusterRole managed by the 030-domain-rbac hook
+	// DomainSAName is the ServiceAccount name of the domain (demo) controller pod. The 030-domain-rbac
+	// hook binds the dynamic domain GVR rights (source + snapshot kinds) to this SA, not the core SA.
+	DomainSAName = "domain-controller"
+
+	// DomainClusterRoleName is the aggregated ClusterRole the 030-domain-rbac hook binds to the DOMAIN SA:
+	// dynamic source/snapshot GVR rights (incl. /status, /finalizers) plus get on core's /manifests
+	// aggregated subresource (so the domain pod can fetch base manifests from the core apiserver).
 	DomainClusterRoleName = "d8:state-snapshotter:controller:domain"
+
+	// DomainCoreReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the CORE SA for
+	// the dynamic demo snapshot GVRs: read + status-write (binding/projection) plus get on the domain
+	// /manifests-with-data-restoration aggregated subresource (so core can delegate restore). These names
+	// are domain-specific (from CSD), so they cannot live in the static, domain-agnostic core RBAC.
+	DomainCoreReadClusterRoleName = "d8:state-snapshotter:controller:domain-read"
+
+	// CoreSubresourcesGroup is the core controller's aggregated subresources API group. The domain pod
+	// fetches base manifests from "<snapshotResource>/manifests" in this group.
+	CoreSubresourcesGroup = "subresources.state-snapshotter.deckhouse.io"
+
+	// DomainSubresourcesGroupPrefix is prepended to a domain snapshot's API group to address its
+	// aggregated subresources group (e.g. "demo.state-snapshotter.deckhouse.io" ->
+	// "subresources.demo.state-snapshotter.deckhouse.io"). Keep in sync with internal/api and
+	// internal/domainapi.
+	DomainSubresourcesGroupPrefix = "subresources."
 
 	// CSD condition types referenced by the domain-RBAC hook.
 	// Accepted is owned by the CSD reconciler; RBACReady is owned exclusively by this hook.
