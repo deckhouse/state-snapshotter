@@ -30,7 +30,6 @@ import (
 	"os/signal"
 	goruntime "runtime"
 	"runtime/debug"
-	"strings"
 	"syscall"
 
 	v1 "k8s.io/api/core/v1"
@@ -38,9 +37,7 @@ import (
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -52,6 +49,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/domainapi"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/domainsdk"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -197,7 +195,7 @@ func main() {
 
 	var caCert []byte
 	if apiTLSCertFile != "" && apiTLSKeyFile != "" {
-		caCert, err = loadFrontProxyCA(ctx, kConfig, scheme)
+		caCert, err = domainsdk.LoadFrontProxyCA(ctx, kConfig, scheme)
 		if err != nil {
 			log.Error(err, "[domain-main] failed to load front-proxy CA, mTLS is required when TLS is enabled")
 			cancel()
@@ -205,7 +203,7 @@ func main() {
 		}
 	}
 
-	apiServer := domainapi.NewServer(apiAddr, restoreSvc, log, apiTLSCertFile, apiTLSKeyFile, caCert, parseAllowedCNs(apiAllowedClientCNs))
+	apiServer := domainapi.NewServer(apiAddr, restoreSvc, log, apiTLSCertFile, apiTLSKeyFile, caCert, domainsdk.ParseAllowedCNs(apiAllowedClientCNs))
 	if apiServer == nil {
 		log.Error(nil, "[domain-main] failed to create domain API server (mTLS configuration failed)")
 		cancel()
@@ -227,32 +225,4 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
-}
-
-// loadFrontProxyCA reads the k8s-managed front-proxy CA from the extension-apiserver-authentication
-// ConfigMap; it is used to verify client certificates presented to the domain API server.
-func loadFrontProxyCA(ctx context.Context, kConfig *rest.Config, scheme *runtime.Scheme) ([]byte, error) {
-	directClient, err := client.New(kConfig, client.Options{Scheme: scheme})
-	if err != nil {
-		return nil, fmt.Errorf("create client for front-proxy CA: %w", err)
-	}
-	cm := &v1.ConfigMap{}
-	if err := directClient.Get(ctx, client.ObjectKey{Namespace: "kube-system", Name: "extension-apiserver-authentication"}, cm); err != nil {
-		return nil, fmt.Errorf("read extension-apiserver-authentication ConfigMap: %w", err)
-	}
-	caData, ok := cm.Data["requestheader-client-ca-file"]
-	if !ok || caData == "" {
-		return nil, fmt.Errorf("requestheader-client-ca-file not found in extension-apiserver-authentication ConfigMap")
-	}
-	return []byte(caData), nil
-}
-
-func parseAllowedCNs(raw string) []string {
-	out := []string{}
-	for _, cn := range strings.Split(raw, ",") {
-		if cn = strings.TrimSpace(cn); cn != "" {
-			out = append(out, cn)
-		}
-	}
-	return out
 }

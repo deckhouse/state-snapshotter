@@ -23,7 +23,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/domainsdk"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -50,7 +50,7 @@ func TestRestoreTransformer_CoveredPVCNames(t *testing.T) {
 
 func TestRestoreTransformer_SetsDiskDataSourceUnderDiskSnapshotNode(t *testing.T) {
 	disk := demoDisk("disk-a", "disk-a-pvc")
-	node := &restore.RestoreNode{SnapshotRef: snapshot.ObjectRef{
+	node := &domainsdk.RestoreNode{SnapshotRef: snapshot.ObjectRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       controllercommon.KindDemoVirtualDiskSnapshot,
 		Name:       "disk-a-snap",
@@ -80,14 +80,14 @@ func TestRestoreTransformer_IgnoresNonDiskAndNonDiskSnapshotNodes(t *testing.T) 
 		"apiVersion": "v1", "kind": "ConfigMap",
 		"metadata": map[string]interface{}{"name": "cfg", "namespace": "source-ns"},
 	}}
-	node := &restore.RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: controllercommon.KindDemoVirtualDiskSnapshot, Name: "s"}}
+	node := &domainsdk.RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: controllercommon.KindDemoVirtualDiskSnapshot, Name: "s"}}
 	if handled, _ := (RestoreTransformer{}).TransformObject(node, &cm, nil); handled {
 		t.Fatal("ConfigMap must not be handled by the demo transformer")
 	}
 
 	// Disk under a non-disk-snapshot node is left untouched (no restore source to point at).
 	disk := demoDisk("disk-a", "disk-a-pvc")
-	vmNode := &restore.RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: controllercommon.KindDemoVirtualMachineSnapshot, Name: "vm-snap"}}
+	vmNode := &domainsdk.RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: controllercommon.KindDemoVirtualMachineSnapshot, Name: "vm-snap"}}
 	handled, err := RestoreTransformer{}.TransformObject(vmNode, &disk, nil)
 	if err != nil {
 		t.Fatalf("TransformObject: %v", err)

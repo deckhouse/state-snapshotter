@@ -32,6 +32,7 @@ import (
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/demo"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/domainsdk"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -60,7 +61,7 @@ func IsDomainSnapshotResource(resource string) bool {
 type RestoreService struct {
 	reader      client.Reader
 	core        CoreBaseManifestsFetcher
-	transformer restore.DomainRestoreTransformer
+	transformer domainsdk.Transformer
 	log         logger.LoggerInterface
 }
 
@@ -275,7 +276,7 @@ func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namesp
 					s.log.Warning("[domainapi] DemoVirtualDisk has no PVC data leg and no owning disk snapshot; restored without a data source", "namespace", effectiveNS, "disk", sanitized.GetName())
 				}
 			} else {
-				node := &restore.RestoreNode{
+				node := &domainsdk.RestoreNode{
 					SnapshotRef: snapshot.ObjectRef{
 						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 						Kind:       controllercommon.KindDemoVirtualDiskSnapshot,

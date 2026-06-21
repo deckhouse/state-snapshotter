@@ -23,10 +23,10 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/domainsdk"
 )
 
-// RestoreTransformer is the demo domain implementation of restore.DomainRestoreTransformer
+// RestoreTransformer is the demo domain implementation of domainsdk.Transformer
 // (ADR 2026-06-10). It keeps demo-specific restore knowledge next to the demo types, so the generic
 // restore compiler in internal/usecase/restore stays domain-free.
 //
@@ -41,9 +41,9 @@ type RestoreTransformer struct{}
 // NewRestoreTransformer returns the demo domain restore transformer.
 func NewRestoreTransformer() *RestoreTransformer { return &RestoreTransformer{} }
 
-var _ restore.DomainRestoreTransformer = (*RestoreTransformer)(nil)
+var _ domainsdk.Transformer = (*RestoreTransformer)(nil)
 
-func (RestoreTransformer) CoveredPVCNames(_ *restore.RestoreNode, objects []unstructured.Unstructured) map[string]struct{} {
+func (RestoreTransformer) CoveredPVCNames(_ *domainsdk.RestoreNode, objects []unstructured.Unstructured) map[string]struct{} {
 	covered := map[string]struct{}{}
 	for i := range objects {
 		if !isDemoVirtualDisk(objects[i]) {
@@ -57,7 +57,7 @@ func (RestoreTransformer) CoveredPVCNames(_ *restore.RestoreNode, objects []unst
 	return covered
 }
 
-func (RestoreTransformer) TransformObject(node *restore.RestoreNode, obj *unstructured.Unstructured, _ []restore.NodeResult) (bool, error) {
+func (RestoreTransformer) TransformObject(node *domainsdk.RestoreNode, obj *unstructured.Unstructured, _ []domainsdk.NodeResult) (bool, error) {
 	if !isDemoVirtualDisk(*obj) {
 		return false, nil
 	}

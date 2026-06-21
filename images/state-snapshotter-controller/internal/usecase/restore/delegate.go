@@ -29,8 +29,9 @@ import (
 // (manifests-with-data-restoration) through the kube-apiserver aggregation layer and splices the
 // returned apply-ready manifests into the result.
 //
-// This replaces the in-process DomainRestoreTransformer registration in core: core stays domain-free
-// and owns no domain restore logic; the domain controller owns the mutation of its own kinds.
+// This replaces the in-process domain restore transformer registration in core: core stays domain-free
+// and owns no domain restore logic; the domain controller owns the mutation of its own kinds (the
+// transformer contract now lives in the importable pkg/domainsdk, used inside the domain pod).
 type DomainSubtreeRestorer interface {
 	// RestoreDomainSubtree returns the apply-ready manifests for the whole subtree rooted at the
 	// domain snapshot identified by (gvk, namespace, name). targetNamespace is the namespace the
