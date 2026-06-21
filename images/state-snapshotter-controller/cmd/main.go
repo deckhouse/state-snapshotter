@@ -45,7 +45,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
@@ -63,7 +62,6 @@ var (
 	resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
 		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (Snapshot, SnapshotContent, ...)
-		demov1alpha1.AddToScheme,      // demo.state-snapshotter.deckhouse.io (PR5a demo domain)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
 		extv1.AddToScheme,
@@ -161,7 +159,6 @@ func main() {
 	_ = clientgoscheme.AddToScheme(fullScheme)
 	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
 	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (Snapshot, SnapshotContent)
-	_ = demov1alpha1.AddToScheme(fullScheme)      // demo.state-snapshotter.deckhouse.io (PR5a)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
 	// Create controller manager with full scheme (for informers)

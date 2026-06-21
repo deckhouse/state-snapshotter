@@ -56,3 +56,16 @@ type SnapshotSourceRef struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 }
+
+// ObjectRef is a minimal, non-CRD reference to a Kubernetes object
+// ({apiVersion,kind,name,namespace,uid}). It is a plain helper type (no JSON tags, not a registered
+// Kubernetes object) used across the snapshot graph contract — e.g. restore-graph nodes and PVC data
+// targets. It is the canonical definition shared across modules: core pkg/snapshot aliases it, so the
+// core controller and the domain controller reference one type via api/.
+type ObjectRef struct {
+	APIVersion string
+	Kind       string
+	Name       string
+	Namespace  string // Only for namespaced resources
+	UID        string // Optional; set for PVC targets in dataRefs
+}

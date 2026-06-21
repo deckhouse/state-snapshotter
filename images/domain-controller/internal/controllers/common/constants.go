@@ -16,21 +16,13 @@ limitations under the License.
 
 package common
 
+// Kind constants used by the demo domain controllers. KindSnapshot is the generic core snapshot kind
+// (referenced when resolving parent ownerRefs); the rest are demo-domain kinds. This package is
+// self-contained so images/domain-controller depends only on api/ and k8s.
 const (
-	KindSnapshot = "Snapshot"
-)
-
-// API constants for ObjectKeeper.
-const (
-	// DeckhouseAPIVersion is the API version for deckhouse.io resources (ObjectKeeper).
-	// Note: This is group/version, not just group, despite the name.
-	DeckhouseAPIVersion                 = "deckhouse.io/v1alpha1"
-	KindObjectKeeper                    = "ObjectKeeper"
-	ObjectKeeperModeFollowObject        = "FollowObject"
-	ObjectKeeperModeFollowObjectWithTTL = "FollowObjectWithTTL"
-)
-
-// Annotation key constants.
-const (
-	AnnotationKeyTTL = "state-snapshotter.deckhouse.io/ttl"
+	KindSnapshot                   = "Snapshot"
+	KindDemoVirtualDiskSnapshot    = "DemoVirtualDiskSnapshot"
+	KindDemoVirtualMachineSnapshot = "DemoVirtualMachineSnapshot"
+	KindDemoVirtualDisk            = "DemoVirtualDisk"
+	KindDemoVirtualMachine         = "DemoVirtualMachine"
 )

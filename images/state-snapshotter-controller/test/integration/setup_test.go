@@ -41,14 +41,11 @@ import (
 	crconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -65,7 +62,6 @@ var (
 	ctx                         context.Context
 	cancel                      context.CancelFunc
 	mgr                         ctrl.Manager
-	domainMgr                   ctrl.Manager
 	scheme                      *runtime.Scheme
 	testCfg                     *config.Options
 	unifiedSyncer               *unifiedruntime.Syncer
@@ -118,7 +114,7 @@ func snapshotContentDataRefsSchema() apiextensionsv1.JSONSchemaProps {
 }
 
 // integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
-// from graph built-ins and eligible CSD rows. Demo domain pairs are intentionally CSD-gated here.
+// from graph built-ins and eligible CSD rows. Non-built-in domain pairs are intentionally CSD-gated here.
 func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
 	csdPairs, derr := csdregistry.EligibleUnifiedGVKPairs(ctx, mgr.GetAPIReader())
 	if derr != nil {
@@ -212,9 +208,6 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = storagev1alpha1.AddToScheme(scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = demov1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// Install ObjectKeeper CRD manually
@@ -589,6 +582,74 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// GraphRegistryTestSnapshot is a dedicated, CSD-gated generic snapshot kind used ONLY by the
+	// snapshot graph registry CSD-driven refresh spec. It is intentionally not referenced by any other
+	// spec so the registry spec can assert exact presence/absence of this kind in the global registry
+	// without cross-spec CSD pollution. It carries the snapshot status contract so the CSD reconciler
+	// accepts mappings onto it.
+	graphRegistrySnapshotCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "graphregistrytestsnapshots.test.deckhouse.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "test.deckhouse.io",
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensionsv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+								},
+								"status": {
+									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										"manifestCaptureRequestName": {Type: "string"},
+										"volumeCaptureRequestName":   {Type: "string"},
+										"boundSnapshotContentName":   {Type: "string"},
+										"conditions": {
+											Type: "array",
+											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
+												Schema: &apiextensionsv1.JSONSchemaProps{
+													Type: "object",
+													Properties: map[string]apiextensionsv1.JSONSchemaProps{
+														"type":               {Type: "string"},
+														"status":             {Type: "string"},
+														"reason":             {Type: "string"},
+														"message":            {Type: "string"},
+														"lastTransitionTime": {Type: "string", Format: "date-time"},
+														"observedGeneration": {Type: "integer"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+				},
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "graphregistrytestsnapshots",
+				Singular: "graphregistrytestsnapshot",
+				Kind:     "GraphRegistryTestSnapshot",
+			},
+		},
+	}
+	_, err = crdClient.CustomResourceDefinitions().Create(testCtx, graphRegistrySnapshotCRD, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+
 	// Minimal CSI VolumeSnapshot CRD so the namespace-root orphan-PVC data leg can Get/Create it instead
 	// of aborting the reconcile on a no-match (N5 PR-7 specs). VolumeSnapshotContent/Class are
 	// intentionally NOT installed (see integrationInstallCSISnapshotCRDs).
@@ -612,13 +673,10 @@ var _ = BeforeSuite(func() {
 		"registrationtestsnapshots.test.deckhouse.io",
 		"registrationtestsnapshotcontents.test.deckhouse.io",
 		"namespacedtestsnapshotcontents.test.deckhouse.io",
+		"graphregistrytestsnapshots.test.deckhouse.io",
 		"snapshots.storage.deckhouse.io",
 		"snapshotcontents.storage.deckhouse.io",
 		"volumesnapshots.snapshot.storage.k8s.io",
-		"demovirtualdisks.demo.state-snapshotter.deckhouse.io",
-		"demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io",
-		"demovirtualmachines.demo.state-snapshotter.deckhouse.io",
-		"demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io",
 	}
 	Eventually(func() bool {
 		for _, n := range crdNamesWaitEstablished {
@@ -691,13 +749,9 @@ var _ = BeforeSuite(func() {
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
 	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
-	// Two-pod split: the core manager wires NO dedicated demo activators (mirrors cmd/main.go, which
-	// passes nil). The demo dedicated planning controllers run in the separate domain manager
-	// (domainMgr) below — exactly as in the domain-controller pod. With nil activators the core Syncer
-	// still owns the demo SnapshotContent directly (the generic binder watches the domain-capture demo
-	// kinds for content ownership; see unifiedruntime.Syncer.Sync), so SnapshotContent has exactly one
-	// owner and the demo CR is reconciled solely by the out-of-process domain manager — the cutover
-	// no-double-reconcile invariant.
+	// Core is demo-free: no dedicated domain-controller activators are wired here. Domain (demo) controller
+	// behavior is covered by the domain module's fake-client unit tests and by e2e; the unified runtime
+	// Syncer is exercised with generic CSD-gated pairs only.
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
@@ -748,69 +802,9 @@ var _ = BeforeSuite(func() {
 	Eventually(func() error {
 		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"})
 	}).Should(Succeed(), "RESTMapper should discover RegistrationTestSnapshot")
-
-	// Domain set: a SECOND manager that runs ONLY the demo dedicated planning controllers (MCR/VCR +
-	// child snapshots + demo snapshot.status, never SnapshotContent), modelling the separate
-	// domain-controller pod. It shares the same envtest apiserver but has its own cache and client, so
-	// the D4a co-write of demo.status (core: binding/projection; domain: capture fields) and the
-	// single-SnapshotContent-owner invariant are exercised across two real managers, exactly like the
-	// two-pod production split — not folded into the core manager. The controllers are registered eagerly
-	// (mirrors cmd/domain-controller/main.go); the disk controller must precede the VM controller, whose
-	// Watches start the disk snapshot informer (typed field index must exist first). Started here, after
-	// every demo/storage/VCR/CSI CRD is established, so its cache syncs cleanly.
-	domainMgr, err = ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
-		HealthProbeBindAddress: "0",
-		// Disable the metrics listener: the core manager already binds the default :8080 in this
-		// shared process, so a second default listener would fail with EADDRINUSE.
-		Metrics:        metricsserver.Options{BindAddress: "0"},
-		LeaderElection: false,
-		// controller-runtime tracks controller-name uniqueness in a PROCESS-global set, and this test
-		// binary runs both managers in one process. The demo controller names are globally unique today,
-		// but skip validation defensively (mirrors the core manager) so domainMgr can never trip the
-		// shared registry as the core wiring evolves.
-		Controller: crconfig.Controller{SkipNameValidation: ptrBool(true)},
-	})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(domainMgr).NotTo(BeNil())
-	Expect(controllers.AddDemoVirtualDiskSnapshotControllerToManager(domainMgr, testCfg)).To(Succeed())
-	Expect(controllers.AddDemoVirtualMachineSnapshotControllerToManager(domainMgr, testCfg)).To(Succeed())
-	go func() {
-		defer GinkgoRecover()
-		Expect(domainMgr.Start(ctx)).To(Succeed())
-	}()
-	Eventually(func() bool {
-		return domainMgr.GetCache().WaitForCacheSync(ctx)
-	}).Should(BeTrue())
-
-	// Establish the CORE binder's demo SnapshotContent ownership for the whole suite: create a temporary
-	// eligible CSD (disk+VM) so the core Syncer marks the demo domain-capture kinds and starts the
-	// generic binder's content watch, then delete it and refresh the graph registry. activeSnapshotGVKKeys
-	// and the in-process content watch are monotonic (never removed), so core keeps owning demo
-	// SnapshotContent for the rest of the suite — while the snapshot graph registry is left empty of demo
-	// kinds at suite start, so CSD-gated discovery specs still observe "no demo without CSD". The demo
-	// dedicated planning controllers are NOT activated here (core has nil activators); they run in
-	// domainMgr above. The demo keys still appear in ActiveSnapshotGVKKeys because the binder's
-	// domain-capture content watch (not a dedicated activator) registers them.
-	const suiteDemoBootstrapCSD = "integration-suite-bootstrap-demo"
-	createEligibleDemoVMAndDiskCSD(testCtx, suiteDemoBootstrapCSD)
-	demoDiskSnapshotKey := demov1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindDemoVirtualDiskSnapshot).String()
-	demoVMSnapshotKey := demov1alpha1.SchemeGroupVersion.WithKind(controllercommon.KindDemoVirtualMachineSnapshot).String()
-	Eventually(func(g Gomega) {
-		keys := unifiedSyncer.ActiveSnapshotGVKKeys()
-		g.Expect(keys).To(HaveKey(demoDiskSnapshotKey))
-		g.Expect(keys).To(HaveKey(demoVMSnapshotKey))
-	}).WithTimeout(60*time.Second).WithPolling(200*time.Millisecond).Should(Succeed(),
-		"core Syncer should start the generic binder's demo SnapshotContent watch once the CSD is watch-eligible")
-	Expect(client.IgnoreNotFound(k8sClient.Delete(testCtx, &ssv1alpha1.CustomSnapshotDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: suiteDemoBootstrapCSD},
-	}))).To(Succeed())
-	Eventually(func() bool {
-		err := k8sClient.Get(testCtx, client.ObjectKey{Name: suiteDemoBootstrapCSD}, &ssv1alpha1.CustomSnapshotDefinition{})
-		return errors.IsNotFound(err)
-	}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
-	Expect(integrationSnapshotGraphRegistryRefresh(testCtx)).To(Succeed())
-
+	Eventually(func() error {
+		return waitForMapping(schema.GroupVersionKind{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "GraphRegistryTestSnapshot"})
+	}).Should(Succeed(), "RESTMapper should discover GraphRegistryTestSnapshot")
 })
 
 var _ = AfterSuite(func() {

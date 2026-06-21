@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/csd"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/demo"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/genericbinder"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	snapshotcontroller "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshot"
@@ -84,14 +83,6 @@ func NewCustomSnapshotDefinitionReconciler(
 
 func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
 	return snapshotcontroller.AddSnapshotControllerToManager(mgr, cfg, snapshotGraphRegistry)
-}
-
-func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
-	return demo.AddDemoVirtualDiskSnapshotControllerToManager(mgr, cfg)
-}
-
-func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
-	return demo.AddDemoVirtualMachineSnapshotControllerToManager(mgr, cfg)
 }
 
 // AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager

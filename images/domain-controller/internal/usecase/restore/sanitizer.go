@@ -27,6 +27,12 @@ import (
 // The restore compiler emits apply-ready manifests, so it MUST strip runtime/server-managed
 // fields that block `kubectl apply` and rewrite the namespace to the restore target. Sanitization
 // happens on the read path (independent of capture-time EnableFiltering).
+//
+// This is the domain controller's own copy: its aggregated API server fetches base manifests from
+// core and must produce the same apply-ready output as the core restore compiler, without importing
+// core internals.
+
+const pvcKind = "PersistentVolumeClaim"
 
 // controlPlaneExactKinds are control-plane / snapshot-machinery kinds that MUST NOT appear in
 // restore output. VS/VSC and snapshot tree nodes are transferred separately (data + tree); the
@@ -53,6 +59,13 @@ func isControlPlaneKind(kind string) bool {
 	return strings.HasSuffix(kind, "Snapshot") || strings.HasSuffix(kind, "SnapshotContent")
 }
 
+// SanitizeForRestore is the exported entry point for the read-path restore sanitizer. Callers must
+// pass objects that carry a non-empty metadata.namespace (namespace-relative base from /manifests must
+// re-attach the namespace first), otherwise the object is dropped as cluster-scoped.
+func SanitizeForRestore(obj unstructured.Unstructured, targetNamespace string) (unstructured.Unstructured, bool) {
+	return sanitizeForRestore(obj, targetNamespace)
+}
+
 // sanitizeForRestore returns a restore-safe copy of obj and whether it should be emitted.
 //
 // keep=false when the object must be dropped from restore output:
@@ -65,8 +78,6 @@ func sanitizeForRestore(obj unstructured.Unstructured, targetNamespace string) (
 	if isControlPlaneKind(obj.GetKind()) {
 		return unstructured.Unstructured{}, false
 	}
-	// Cluster-scoped objects carry no namespace in the captured manifest (MCP keeps the original
-	// namespace for namespaced objects). MVP: drop them, like /manifests.
 	if obj.GetNamespace() == "" {
 		return unstructured.Unstructured{}, false
 	}

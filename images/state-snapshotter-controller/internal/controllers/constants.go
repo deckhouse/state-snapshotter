@@ -22,11 +22,7 @@ import (
 )
 
 const (
-	KindSnapshot                   = common.KindSnapshot
-	KindDemoVirtualDiskSnapshot    = common.KindDemoVirtualDiskSnapshot
-	KindDemoVirtualMachineSnapshot = common.KindDemoVirtualMachineSnapshot
-	KindDemoVirtualDisk            = common.KindDemoVirtualDisk
-	KindDemoVirtualMachine         = common.KindDemoVirtualMachine
+	KindSnapshot = common.KindSnapshot
 )
 
 // API constants for ObjectKeeper

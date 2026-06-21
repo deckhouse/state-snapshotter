@@ -19,16 +19,26 @@ package snapshot
 import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+)
+
+// Contract conditions/reasons are defined canonically in api/storage and aliased here so core code
+// keeps using snapshot.ConditionReady etc. unchanged, while the domain controller shares the same
+// definitions via api/. Core-internal leg conditions and the rest of the reason taxonomy stay below.
+const (
+	ConditionReady                 = storagev1alpha1.ConditionReady
+	ConditionChildrenSnapshotReady = storagev1alpha1.ConditionChildrenSnapshotReady
+
+	ReasonArtifactMissing     = storagev1alpha1.ReasonArtifactMissing
+	ReasonCompleted           = storagev1alpha1.ReasonCompleted
+	ReasonCreateChildFailed   = storagev1alpha1.ReasonCreateChildFailed
+	ReasonGraphPlanningFailed = storagev1alpha1.ReasonGraphPlanningFailed
 )
 
 // Condition types: the public condition model
 // (ChildrenSnapshotReady, ManifestsReady, VolumesReady, ChildrenReady, Ready).
 const (
-	// ConditionReady indicates the object is ready for use.
-	// On SnapshotContent it is the single aggregate: Ready = ManifestsReady && VolumesReady && ChildrenReady.
-	// On Snapshot it mirrors the bound SnapshotContent.Ready, except for terminal child-Snapshot capture failures.
-	ConditionReady = "Ready"
-
 	// ConditionManifestsReady reports this node's own manifest leg readiness: the manifest
 	// capture checkpoint (status.manifestCheckpointName) is published and Ready (empty archive counts).
 	// It does not consider the volume leg or children.
@@ -42,18 +52,12 @@ const (
 	// ConditionChildrenReady reports that all child SnapshotContents are Ready=True
 	// (a leaf with no children is ChildrenReady=True vacuously).
 	ConditionChildrenReady = "ChildrenReady"
-
-	// ConditionChildrenSnapshotReady indicates that the domain controller finished planning.
-	// It is a gate/barrier (not part of the Ready formula); readers must require
-	// observedGeneration == generation.
-	ConditionChildrenSnapshotReady = "ChildrenSnapshotReady"
 )
 
 // Reasons for Ready=False
 const (
 	ReasonContentMissing       = "ContentMissing"
 	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
-	ReasonArtifactMissing      = "ArtifactMissing"
 	// ReasonArtifactNotReady is an internal/compat reason for "artifact exists but not ready yet".
 	// The data leg surfaces this state on VolumesReady/Ready as ReasonDataCapturePending (progress-aware);
 	// ReasonArtifactNotReady is retained for internal classification and backward compatibility.
@@ -109,7 +113,6 @@ const (
 const (
 	ReasonChildGraphPending = "ChildGraphPending"
 	ReasonListFailed        = "ListFailed"
-	ReasonCreateChildFailed = "CreateChildFailed"
 	// ReasonPriorityLayerPending is set on a parent Snapshot while a higher-priority child snapshot
 	// layer has not yet published a current ChildrenSnapshotReady=True. This is NOT a failure and has no deadline:
 	// a child snapshot (e.g. a large-storage capture) may legitimately stay pending for hours. The
@@ -117,7 +120,6 @@ const (
 	// message) and never starts capture until the layer is ready. Waiting is woken primarily by child
 	// watches; a RequeueAfter polling fallback covers a missed watch event.
 	ReasonPriorityLayerPending = "PriorityLayerPending"
-	ReasonGraphPlanningFailed  = "GraphPlanningFailed"
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
 	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
 	// DSC RBACReady); the planner must not treat a Forbidden source list as "no objects" (that would
@@ -128,8 +130,7 @@ const (
 
 // Reasons for Ready=True
 const (
-	ReasonReady     = "Ready"
-	ReasonCompleted = "Completed"
+	ReasonReady = "Ready"
 )
 
 // SetCondition sets a condition on a SnapshotLike or SnapshotContentLike object.

@@ -362,7 +362,7 @@ var _ = Describe("Integration: terminal child-Snapshot failure bridge sets paren
 	})
 
 	// Regression (INV-FAIL-PROP): a child whose VOLUME capture fails terminally
-	// (Ready=False/VolumeCaptureFailed — the domain DemoVirtualDiskSnapshot path) must propagate to the
+	// (Ready=False/VolumeCaptureFailed — a domain snapshot path) must propagate to the
 	// parent Snapshot.Ready=False/ChildrenFailed. The child's bound SnapshotContent cannot represent this
 	// (its data leg reads from an empty dataRefs[] and reports ready), so the child-Snapshot terminal
 	// failure bridge is the only path — and VolumeCaptureFailed was previously missing from its terminal

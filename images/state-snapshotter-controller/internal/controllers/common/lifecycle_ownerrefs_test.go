@@ -47,8 +47,8 @@ func TestRootObjectKeeperNameIsDNS1123Safe(t *testing.T) {
 		{
 			name:       "apiVersion slash is hashed out",
 			namespace:  "ns1",
-			apiVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
-			kind:       KindDemoVirtualDiskSnapshot,
+			apiVersion: "example.deckhouse.io/v1alpha1",
+			kind:       "WidgetSnapshot",
 			snapshot:   "snap",
 		},
 	}

@@ -19,16 +19,13 @@ package snapshot
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// ObjectRef represents a reference to a Kubernetes object
-type ObjectRef struct {
-	APIVersion string
-	Kind       string
-	Name       string
-	Namespace  string // Only for namespaced resources
-	UID        string // Optional; set for PVC targets in dataRefs
-}
+// ObjectRef aliases the canonical contract type in api/storage so core and the domain controller
+// share one definition via api/.
+type ObjectRef = storagev1alpha1.ObjectRef
 
 // DataBindingRef is one PVC target to durable data artifact binding on SnapshotContent.
 type DataBindingRef struct {
