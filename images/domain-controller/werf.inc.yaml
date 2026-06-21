@@ -1,7 +1,7 @@
 ---
-# The domain-controller binary lives in the shared Go module under images/state-snapshotter-controller
-# (cmd/domain-controller). This image reuses that source tree and only differs in the built command, so
-# core and domain ship from one module with no code duplication.
+# The domain-controller is its own self-contained Go module (images/domain-controller) that depends only
+# on the shared api/ module (replace => ../../api) plus k8s; it does NOT pull in the core module or
+# lib/go. The folder is copyable as-is, so the src artifact ships only api + images/domain-controller.
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
 fromImage: builder/src
 final: false
@@ -11,11 +11,12 @@ git:
     to: /src
     includePaths:
       - api
-      - images/state-snapshotter-controller
-      - lib/go
+      - images/{{ $.ImageName }}
     stageDependencies:
       install:
         - '**/*'
+    excludePaths:
+      - images/{{ $.ImageName }}/werf.yaml
 
 shell:
   install:
@@ -41,7 +42,7 @@ secrets:
 
 shell:
   setup:
-    - cd /src/images/state-snapshotter-controller
+    - cd /src/images/{{ $.ImageName }}
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
     - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
     - |
