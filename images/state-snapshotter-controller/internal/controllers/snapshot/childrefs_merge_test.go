@@ -25,6 +25,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -186,7 +188,7 @@ func demoSnapshotChildReadyTerminal(name string, generation, observedGeneration 
 	}
 }
 
-func TestSnapshotCoverageCheckerUsesSourceAnnotationUID(t *testing.T) {
+func TestSnapshotCoverageCheckerUsesSpecSourceRef(t *testing.T) {
 	ctx := context.Background()
 	source := demoSourceObject("vm-1", "uid-a")
 	identity := controllercommon.SnapshotSourceIdentity{
@@ -194,7 +196,6 @@ func TestSnapshotCoverageCheckerUsesSourceAnnotationUID(t *testing.T) {
 		Kind:       "DemoSource",
 		Namespace:  "ns1",
 		Name:       "vm-1",
-		UID:        "uid-a",
 	}
 	child := demoSnapshotChildWithSource("covered", identity)
 	checker := newSnapshotCoverageChecker(
@@ -207,30 +208,84 @@ func TestSnapshotCoverageCheckerUsesSourceAnnotationUID(t *testing.T) {
 		t.Fatalf("IsCovered returned error: %v", err)
 	}
 	if !covered {
-		t.Fatalf("expected source UID uid-a to be covered")
+		t.Fatalf("expected source vm-1 to be covered")
 	}
 
+	// Coverage is name-only (spec.sourceRef carries no UID): a source recreated with the same name
+	// but a different UID is still considered covered by the existing child snapshot.
 	recreated := demoSourceObject("vm-1", "uid-b")
 	covered, err = checker.IsCovered(ctx, recreated)
 	if err != nil {
 		t.Fatalf("IsCovered for recreated source returned error: %v", err)
 	}
-	if covered {
-		t.Fatalf("source recreated with same name and different UID must not be covered")
+	if !covered {
+		t.Fatalf("source recreated with the same name must remain covered (name-only coverage)")
 	}
 }
 
-func TestSnapshotCoverageCheckerFailsClosedWithoutSourceAnnotation(t *testing.T) {
+// TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef pins the WRITE side of the source-of-truth
+// flip: the planner must persist spec.sourceRef {apiVersion,kind,name} (derived from the live source)
+// on the child it creates, and that written value must round-trip back through the coverage checker so
+// the same source reads as covered. Without this, a regression that drops/mis-maps the spec block would
+// still pass every coverage test (which fabricate the field independently).
+func TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef(t *testing.T) {
 	ctx := context.Background()
-	child := demoSnapshotChild("missing-annotation", nil)
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	r := &SnapshotReconciler{Client: cl}
+
+	nsSnap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "root", UID: "root-uid"},
+	}
+	gvk := schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "DemoSnapshot"}
+	source := demoSourceObject("vm-1", "uid-a")
+
+	const childName = "nss-child-vm-1"
+	if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, gvk, source); err != nil {
+		t.Fatalf("ensureParentOwnedChildSnapshot: %v", err)
+	}
+
+	created := &unstructured.Unstructured{}
+	created.SetGroupVersionKind(gvk)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: "ns1", Name: childName}, created); err != nil {
+		t.Fatalf("get created child: %v", err)
+	}
+	srcRef, found, err := unstructured.NestedStringMap(created.Object, "spec", "sourceRef")
+	if err != nil || !found {
+		t.Fatalf("created child must carry spec.sourceRef (found=%v err=%v)", found, err)
+	}
+	if srcRef["apiVersion"] != "demo.test/v1" || srcRef["kind"] != "DemoSource" || srcRef["name"] != "vm-1" {
+		t.Fatalf("spec.sourceRef mismatch: %+v", srcRef)
+	}
+
+	// Round-trip: the coverage checker reading the just-created child must consider the source covered.
+	checker := newSnapshotCoverageChecker(cl, "ns1", []storagev1alpha1.SnapshotChildRef{{
+		APIVersion: "demo.test/v1",
+		Kind:       "DemoSnapshot",
+		Name:       childName,
+	}})
+	covered, err := checker.IsCovered(ctx, source)
+	if err != nil {
+		t.Fatalf("IsCovered: %v", err)
+	}
+	if !covered {
+		t.Fatalf("source must be covered by the child the planner just created (write->read round-trip)")
+	}
+}
+
+func TestSnapshotCoverageCheckerSkipsChildWithoutSourceRef(t *testing.T) {
+	ctx := context.Background()
+	child := demoSnapshotChild("missing-source-ref", nil)
 	checker := newSnapshotCoverageChecker(
 		fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build(),
 		"ns1",
-		[]storagev1alpha1.SnapshotChildRef{childRef("missing-annotation")},
+		[]storagev1alpha1.SnapshotChildRef{childRef("missing-source-ref")},
 	)
-	_, err := checker.IsCovered(ctx, demoSourceObject("vm-1", "uid-a"))
-	if err == nil || !strings.Contains(err.Error(), controllercommon.AnnotationKeySourceRef) {
-		t.Fatalf("expected missing source annotation error, got %v", err)
+	covered, err := checker.IsCovered(ctx, demoSourceObject("vm-1", "uid-a"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if covered {
+		t.Fatalf("a child without spec.sourceRef must not contribute coverage")
 	}
 }
 
@@ -256,7 +311,7 @@ func TestCoverageRootsForNextWaveExcludesParentStatus(t *testing.T) {
 // while the fixed next-wave seed never includes status refs and therefore does not skip it.
 func TestParentStatusSeedWouldSelfCoverStandalone(t *testing.T) {
 	ctx := context.Background()
-	diskStandaloneIdentity := demoSourceIdentity("disk-standalone", "uid-disk-standalone")
+	diskStandaloneIdentity := demoSourceIdentity("disk-standalone")
 	diskStandaloneSource := demoSourceObject("disk-standalone", "uid-disk-standalone")
 	diskStandaloneChild := demoSnapshotChildWithSource("nss-child-disk-standalone", diskStandaloneIdentity)
 	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(diskStandaloneChild).Build()
@@ -288,9 +343,9 @@ func TestParentStatusSeedWouldSelfCoverStandalone(t *testing.T) {
 func TestRecomputeChildGraphKeepsLowerPriorityStandalone(t *testing.T) {
 	ctx := context.Background()
 
-	vmIdentity := demoSourceIdentity("vm", "uid-vm")
-	diskVMIdentity := demoSourceIdentity("disk-vm", "uid-disk-vm")
-	diskStandaloneIdentity := demoSourceIdentity("disk-standalone", "uid-disk-standalone")
+	vmIdentity := demoSourceIdentity("vm")
+	diskVMIdentity := demoSourceIdentity("disk-vm")
+	diskStandaloneIdentity := demoSourceIdentity("disk-standalone")
 
 	diskVMSource := demoSourceObject("disk-vm", "uid-disk-vm")
 	diskStandaloneSource := demoSourceObject("disk-standalone", "uid-disk-standalone")
@@ -459,16 +514,18 @@ func demoSnapshotChildRawConditions(name string, generation int64, conditions []
 
 func demoSnapshotChildWithSource(name string, identity controllercommon.SnapshotSourceIdentity) *unstructured.Unstructured {
 	child := demoSnapshotChild(name, nil)
-	encoded, err := controllercommon.EncodeSnapshotSourceIdentity(identity)
-	if err != nil {
+	if err := unstructured.SetNestedStringMap(child.Object, map[string]string{
+		"apiVersion": identity.APIVersion,
+		"kind":       identity.Kind,
+		"name":       identity.Name,
+	}, "spec", "sourceRef"); err != nil {
 		panic(err)
 	}
-	child.SetAnnotations(map[string]string{controllercommon.AnnotationKeySourceRef: encoded})
 	return child
 }
 
-// demoSnapshotChildWithSourceAndChildren builds a generated child snapshot carrying both its source
-// identity annotation and a status.childrenSnapshotRefs list, so coverage-recompute scenarios can
+// demoSnapshotChildWithSourceAndChildren builds a generated child snapshot carrying both its
+// spec.sourceRef and a status.childrenSnapshotRefs list, so coverage-recompute scenarios can
 // model a higher-priority subtree (e.g. VM snapshot owning the disk-vm snapshot).
 func demoSnapshotChildWithSourceAndChildren(name string, identity controllercommon.SnapshotSourceIdentity, childRefs ...storagev1alpha1.SnapshotChildRef) *unstructured.Unstructured {
 	child := demoSnapshotChildWithSource(name, identity)
@@ -489,13 +546,12 @@ func demoSnapshotChildWithSourceAndChildren(name string, identity controllercomm
 	return child
 }
 
-func demoSourceIdentity(name, uid string) controllercommon.SnapshotSourceIdentity {
+func demoSourceIdentity(name string) controllercommon.SnapshotSourceIdentity {
 	return controllercommon.SnapshotSourceIdentity{
 		APIVersion: "demo.test/v1",
 		Kind:       "DemoSource",
 		Namespace:  "ns1",
 		Name:       name,
-		UID:        uid,
 	}
 }
 

@@ -208,15 +208,9 @@ func (s *RestoreService) resolveVMDiskOwners(ctx context.Context, namespace, nam
 	return diskOwnerResolver{byDiskName: owners}, nil
 }
 
-// diskSnapshotSourceName returns the captured DemoVirtualDisk name for a disk snapshot, preferring the
-// generic source-identity annotation (source-of-truth for root-planned snapshots) and falling back to
-// spec.sourceRef (manual API-compat).
+// diskSnapshotSourceName returns the captured DemoVirtualDisk name for a disk snapshot, read from
+// spec.sourceRef (the single source-of-truth).
 func diskSnapshotSourceName(disk *demov1alpha1.DemoVirtualDiskSnapshot) string {
-	if identity, err := controllercommon.DecodeSnapshotSourceIdentityAnnotations(disk.Annotations); err == nil {
-		if identity.Kind == controllercommon.KindDemoVirtualDisk && identity.Name != "" {
-			return identity.Name
-		}
-	}
 	if disk.Spec.SourceRef.Kind == controllercommon.KindDemoVirtualDisk && disk.Spec.SourceRef.Name != "" {
 		return disk.Spec.SourceRef.Name
 	}

@@ -37,11 +37,12 @@ type DemoVirtualMachineSnapshot struct {
 // DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot.
 // +k8s:deepcopy-gen=true
 type DemoVirtualMachineSnapshotSpec struct {
-	// SourceRef identifies the DemoVirtualMachine captured by this snapshot for manually-created
-	// demo snapshots. Root-planned snapshots carry generic source identity in annotation
-	// state-snapshotter.deckhouse.io/source-ref instead.
-	// +optional
-	SourceRef SnapshotSourceRef `json:"sourceRef,omitempty"`
+	// SourceRef identifies the DemoVirtualMachine captured by this snapshot. It is the single
+	// source-of-truth for what the snapshot captures (both manually-created and root-planned
+	// snapshots) and is immutable once set.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
+	SourceRef SnapshotSourceRef `json:"sourceRef"`
 }
 
 // DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.

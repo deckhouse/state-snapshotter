@@ -86,32 +86,20 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
-	resolution := resolveDemoSnapshotSource(s.GetAnnotations(), s.Namespace, controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
+	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
 	if resolution.Reason != "" {
 		if patchErr := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, resolution.Reason, resolution.Message); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, nil
 	}
-	if resolution.DeriveRef != nil {
-		if err := patchDemoVirtualDiskSnapshotSourceRef(ctx, r.Client, req.NamespacedName, *resolution.DeriveRef); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-	sourceName, sourceUID := resolution.Name, resolution.UID
+	sourceName := resolution.Name
 	source := &demov1alpha1.DemoVirtualDisk{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
 		if err := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, demoReasonSourceNotFound, fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-	if sourceUID != "" && string(source.UID) != sourceUID {
-		if err := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, demoReasonSourceUIDMismatch, fmt.Sprintf("%s %q UID mismatch", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -219,32 +207,6 @@ func patchDemoVirtualDiskSnapshotChildrenSnapshotReady(
 		// D4a: optimistic-lock merge patch so co-writing conditions (core writes Ready) never
 		// silently clobbers this owner's entry — a concurrent write yields 409 → RetryOnConflict re-reads.
 		return c.Status().Patch(ctx, o, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
-}
-
-// patchDemoVirtualDiskSnapshotSourceRef one-shot fills spec.sourceRef derived from the
-// generic source identity annotation. spec.sourceRef is demo/manual API-compat only;
-// generic tree coverage uses AnnotationKeySourceRef, never this field.
-func patchDemoVirtualDiskSnapshotSourceRef(
-	ctx context.Context,
-	c client.Client,
-	diskKey types.NamespacedName,
-	ref demov1alpha1.SnapshotSourceRef,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := c.Get(ctx, diskKey, o); err != nil {
-			return err
-		}
-		if o.Spec.SourceRef == ref {
-			return nil
-		}
-		if !demoSourceRefEmpty(o.Spec.SourceRef) {
-			return nil
-		}
-		base := o.DeepCopy()
-		o.Spec.SourceRef = ref
-		return c.Patch(ctx, o, client.MergeFrom(base))
 	})
 }
 

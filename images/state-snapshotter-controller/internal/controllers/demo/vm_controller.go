@@ -104,32 +104,20 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
-	resolution := resolveDemoSnapshotSource(s.GetAnnotations(), s.Namespace, controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)
+	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)
 	if resolution.Reason != "" {
 		if patchErr := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, resolution.Reason, resolution.Message); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, nil
 	}
-	if resolution.DeriveRef != nil {
-		if err := patchDemoVirtualMachineSnapshotSourceRef(ctx, r.Client, req.NamespacedName, *resolution.DeriveRef); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-	sourceName, sourceUID := resolution.Name, resolution.UID
+	sourceName := resolution.Name
 	source := &demov1alpha1.DemoVirtualMachine{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
 		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, demoReasonSourceNotFound, fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualMachine, sourceName)); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-	if sourceUID != "" && string(source.UID) != sourceUID {
-		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, demoReasonSourceUIDMismatch, fmt.Sprintf("%s %q UID mismatch", controllercommon.KindDemoVirtualMachine, sourceName)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -228,28 +216,19 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(
 func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, disk *demov1alpha1.DemoVirtualDisk, childName string) error {
 	key := types.NamespacedName{Namespace: vm.Namespace, Name: childName}
 	child := &demov1alpha1.DemoVirtualDiskSnapshot{}
-	sourceIdentity := controllercommon.SnapshotSourceIdentity{
+	// spec.sourceRef is the single source-of-truth for what the child disk snapshot captures; the CRD
+	// enforces its immutability, so it is set once at creation and never rewritten.
+	desiredSourceRef := demov1alpha1.SnapshotSourceRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       controllercommon.KindDemoVirtualDisk,
-		Namespace:  disk.Namespace,
 		Name:       disk.Name,
-		UID:        string(disk.UID),
 	}
-	sourceAnnotation, err := controllercommon.EncodeSnapshotSourceIdentity(sourceIdentity)
-	if err != nil {
-		return fmt.Errorf("disk child source identity: %w", err)
-	}
-	err = r.Client.Get(ctx, key, child)
+	err := r.Client.Get(ctx, key, child)
 	if apierrors.IsNotFound(err) {
-		// AnnotationKeySourceRef is the generic source-of-truth identity. spec.sourceRef
-		// below is demo/manual API-compat only and is never read by generic tree coverage.
 		child = &demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      childName,
 				Namespace: vm.Namespace,
-				Annotations: map[string]string{
-					controllercommon.AnnotationKeySourceRef: sourceAnnotation,
-				},
 				OwnerReferences: []metav1.OwnerReference{demoSnapshotOwnerReference(
 					demov1alpha1.SchemeGroupVersion.String(),
 					controllercommon.KindDemoVirtualMachineSnapshot,
@@ -258,11 +237,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 				)},
 			},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				SourceRef: demov1alpha1.SnapshotSourceRef{
-					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-					Kind:       controllercommon.KindDemoVirtualDisk,
-					Name:       disk.Name,
-				},
+				SourceRef: desiredSourceRef,
 			},
 		}
 		if err := r.Client.Create(ctx, child); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -272,11 +247,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 	}
 	if err != nil {
 		return err
-	}
-	desiredSourceRef := demov1alpha1.SnapshotSourceRef{
-		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       controllercommon.KindDemoVirtualDisk,
-		Name:       disk.Name,
 	}
 	desiredOwnerRefs := []metav1.OwnerReference{demoSnapshotOwnerReference(
 		demov1alpha1.SchemeGroupVersion.String(),
@@ -288,21 +258,9 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 	if err := ensureDemoSnapshotOwnerRef(child, desiredOwnerRefs[0]); err != nil {
 		return err
 	}
-	annotationChanged := false
-	if child.Annotations == nil {
-		child.Annotations = map[string]string{}
-		annotationChanged = true
-	}
-	if child.Annotations[controllercommon.AnnotationKeySourceRef] != sourceAnnotation {
-		child.Annotations[controllercommon.AnnotationKeySourceRef] = sourceAnnotation
-		annotationChanged = true
-	}
-	if child.Spec.SourceRef == desiredSourceRef &&
-		!annotationChanged &&
-		controllercommon.OwnerReferencesEqual(child.GetOwnerReferences(), desiredOwnerRefs) {
+	if controllercommon.OwnerReferencesEqual(child.GetOwnerReferences(), desiredOwnerRefs) {
 		return nil
 	}
-	child.Spec.SourceRef = desiredSourceRef
 	return r.Client.Patch(ctx, child, client.MergeFrom(base))
 }
 
@@ -361,32 +319,6 @@ func patchDemoVirtualMachineSnapshotChildrenRefs(
 		base := o.DeepCopy()
 		o.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), desired...)
 		return c.Status().Patch(ctx, o, client.MergeFrom(base))
-	})
-}
-
-// patchDemoVirtualMachineSnapshotSourceRef one-shot fills spec.sourceRef derived from the
-// generic source identity annotation. spec.sourceRef is demo/manual API-compat only;
-// generic tree coverage uses AnnotationKeySourceRef, never this field.
-func patchDemoVirtualMachineSnapshotSourceRef(
-	ctx context.Context,
-	c client.Client,
-	vmKey types.NamespacedName,
-	ref demov1alpha1.SnapshotSourceRef,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := c.Get(ctx, vmKey, o); err != nil {
-			return err
-		}
-		if o.Spec.SourceRef == ref {
-			return nil
-		}
-		if !demoSourceRefEmpty(o.Spec.SourceRef) {
-			return nil
-		}
-		base := o.DeepCopy()
-		o.Spec.SourceRef = ref
-		return c.Patch(ctx, o, client.MergeFrom(base))
 	})
 }
 

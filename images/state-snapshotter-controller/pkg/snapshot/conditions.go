@@ -124,10 +124,6 @@ const (
 	// silently drop coverage). Instead it degrades the graph (ChildrenSnapshotReady=False) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"
-	// ReasonSourceIdentityAnnotationMismatch is set when an existing child snapshot's generic source
-	// identity annotation drifted from the value the planner manages. The planner fails closed (no
-	// silent rewrite) so external corruption/races surface instead of being masked.
-	ReasonSourceIdentityAnnotationMismatch = "SourceIdentityAnnotationMismatch"
 )
 
 // Reasons for Ready=True

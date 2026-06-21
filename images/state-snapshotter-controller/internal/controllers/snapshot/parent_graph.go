@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
@@ -67,12 +68,6 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		for _, mapping := range mappings[layerStart:layerEnd] {
 			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
 			if err != nil {
-				var mismatch *sourceIdentityAnnotationMismatchError
-				if stderrors.As(err, &mismatch) {
-					sortSnapshotChildRefs(desiredRefs)
-					changed, perr := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonSourceIdentityAnnotationMismatch, mismatch.Error())
-					return changed, false, perr
-				}
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
 					sortSnapshotChildRefs(desiredRefs)
@@ -193,10 +188,6 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 	if err != nil {
 		return fmt.Errorf("source identity for %s/%s: %w", source.GroupVersionKind().String(), source.GetName(), err)
 	}
-	sourceAnnotation, err := controllercommon.EncodeSnapshotSourceIdentity(sourceIdentity)
-	if err != nil {
-		return err
-	}
 	key := client.ObjectKey{Namespace: nsSnap.Namespace, Name: name}
 	child := &unstructured.Unstructured{}
 	child.SetGroupVersionKind(gvk)
@@ -204,6 +195,9 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 		if !errors.IsNotFound(err) {
 			return err
 		}
+		// spec.sourceRef is the single source-of-truth for what this child snapshot captures; the CRD
+		// enforces its immutability (CEL self == oldSelf), so the planner sets it once at creation and
+		// never rewrites it.
 		child = &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"apiVersion": gvk.GroupVersion().String(),
@@ -211,8 +205,12 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 				"metadata": map[string]interface{}{
 					"name":      name,
 					"namespace": nsSnap.Namespace,
-					"annotations": map[string]interface{}{
-						controllercommon.AnnotationKeySourceRef: sourceAnnotation,
+				},
+				"spec": map[string]interface{}{
+					"sourceRef": map[string]interface{}{
+						"apiVersion": sourceIdentity.APIVersion,
+						"kind":       sourceIdentity.Kind,
+						"name":       sourceIdentity.Name,
 					},
 				},
 			},
@@ -222,31 +220,14 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 		return r.Client.Create(ctx, child)
 	}
 	base := child.DeepCopy()
-	changed := false
 	if err := controllercommon.EnsureSnapshotOwnerRef(child, controllercommon.SnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)); err != nil {
 		return err
 	}
-	if !controllercommon.OwnerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
-		changed = true
+	if controllercommon.OwnerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
+		return nil
 	}
-	if err := ensureSourceIdentityAnnotation(child, sourceIdentity, sourceAnnotation); err != nil {
-		return fmt.Errorf("existing child snapshot %s/%s: %w", gvk.String(), name, err)
-	}
-	if changed {
-		return r.Client.Patch(ctx, child, client.MergeFrom(base))
-	}
-	return nil
+	return r.Client.Patch(ctx, child, client.MergeFrom(base))
 }
-
-// sourceIdentityAnnotationMismatchError signals that an existing child snapshot's source identity
-// annotation drifted from the planner-managed value. It is fail-closed (no self-heal): the planner
-// surfaces a terminal ChildrenSnapshotReady=False/SourceIdentityAnnotationMismatch condition instead of an
-// endlessly requeued error or a silent rewrite that could mask external corruption/races.
-type sourceIdentityAnnotationMismatchError struct {
-	msg string
-}
-
-func (e *sourceIdentityAnnotationMismatchError) Error() string { return e.msg }
 
 // sourceListForbiddenError signals that listing a mapped source kind was rejected with Forbidden.
 // RBAC for domain/custom sources is granted externally (DSC RBACReady), so the planner degrades the
@@ -258,17 +239,6 @@ type sourceListForbiddenError struct {
 }
 
 func (e *sourceListForbiddenError) Error() string { return e.msg }
-
-func ensureSourceIdentityAnnotation(snapshot *unstructured.Unstructured, want controllercommon.SnapshotSourceIdentity, wantAnnotation string) error {
-	got, err := controllercommon.DecodeSnapshotSourceIdentityAnnotation(snapshot)
-	if err != nil {
-		return &sourceIdentityAnnotationMismatchError{msg: fmt.Sprintf("%s: %v", controllercommon.AnnotationKeySourceRef, err)}
-	}
-	if got == want {
-		return nil
-	}
-	return &sourceIdentityAnnotationMismatchError{msg: fmt.Sprintf("%s must remain %s", controllercommon.AnnotationKeySourceRef, wantAnnotation)}
-}
 
 type snapshotCoverageChecker interface {
 	IsCovered(ctx context.Context, obj *unstructured.Unstructured) (bool, error)
@@ -343,10 +313,33 @@ func (c *refBasedSnapshotCoverageChecker) visitSnapshotRef(ctx context.Context, 
 		}
 		return err
 	}
-	if source, err := controllercommon.DecodeSnapshotSourceIdentityAnnotation(child); err != nil {
+	// spec.sourceRef is the source-of-truth for what an existing child snapshot captures. Namespace is
+	// implicit (the run tree is namespace-local to the root Snapshot). A child without a valid
+	// spec.sourceRef contributes no coverage and is skipped rather than failing the whole run
+	// (one malformed sibling must not wedge planning); the skip is logged so the migration/corruption
+	// edge is observable instead of silent. Framework-created children always carry a valid ref, so a
+	// false "not covered" only re-plans to the same deterministic child name (idempotent).
+	srcRef, found, err := unstructured.NestedStringMap(child.Object, "spec", "sourceRef")
+	if err != nil {
 		return err
-	} else {
-		c.covered[coverageObjectKey(source)] = struct{}{}
+	}
+	switch {
+	case !found:
+		ctrllog.FromContext(ctx).V(1).Info("child snapshot has no spec.sourceRef; skipping for coverage",
+			"gvk", gvk.String(), "namespace", c.namespace, "name", ref.Name)
+	default:
+		identity := controllercommon.SnapshotSourceIdentity{
+			APIVersion: srcRef["apiVersion"],
+			Kind:       srcRef["kind"],
+			Namespace:  c.namespace,
+			Name:       srcRef["name"],
+		}
+		if verr := identity.Validate(); verr != nil {
+			ctrllog.FromContext(ctx).V(1).Info("child snapshot spec.sourceRef is invalid; skipping for coverage",
+				"gvk", gvk.String(), "namespace", c.namespace, "name", ref.Name, "error", verr.Error())
+		} else {
+			c.covered[coverageObjectKey(identity)] = struct{}{}
+		}
 	}
 	children, _, err := unstructured.NestedSlice(child.Object, "status", "childrenSnapshotRefs")
 	if err != nil {
@@ -373,7 +366,7 @@ func (c *refBasedSnapshotCoverageChecker) visitSnapshotRef(ctx context.Context, 
 }
 
 func coverageObjectKey(identity controllercommon.SnapshotSourceIdentity) string {
-	return identity.APIVersion + "|" + identity.Kind + "|" + identity.Namespace + "|" + identity.Name + "|" + identity.UID
+	return identity.APIVersion + "|" + identity.Kind + "|" + identity.Namespace + "|" + identity.Name
 }
 
 // priorityLayerChildrenSnapshotReady reports whether every child snapshot in a priority layer has published a
@@ -637,8 +630,8 @@ func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 // status.childrenSnapshotRefs.
 //
 // Seeding from parent status is the self-coverage idempotency bug: a generated lower-priority child
-// carried in status would be visited by the coverage checker, which decodes its own source-ref
-// annotation and marks that source covered. The same source is then skipped this pass, omitted from
+// carried in status would be visited by the coverage checker, which reads its own spec.sourceRef
+// and marks that source covered. The same source is then skipped this pass, omitted from
 // desiredRefs, and finally stripped by mergeSnapshotManagedChildRefs — so the standalone child ref
 // silently disappears from the root on every subsequent reconcile. Planning must be a full recompute:
 // coverage between waves flows only from higher-priority subtrees planned in this pass.

@@ -182,20 +182,8 @@ func TestApplyTransform_UnownedDiskWithoutPVCEmitted(t *testing.T) {
 	}
 }
 
-func TestResolveVMDiskOwners_AnnotationAndSpecRef(t *testing.T) {
+func TestResolveVMDiskOwners_SpecRef(t *testing.T) {
 	scheme := domainScheme(t)
-
-	identity := controllercommon.SnapshotSourceIdentity{
-		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       controllercommon.KindDemoVirtualDisk,
-		Namespace:  "ns1",
-		Name:       "disk-a",
-		UID:        "disk-a-uid",
-	}
-	identityJSON, err := json.Marshal(identity)
-	if err != nil {
-		t.Fatalf("marshal identity: %v", err)
-	}
 
 	vm := &demov1alpha1.DemoVirtualMachineSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "vm-snap", Namespace: "ns1"},
@@ -206,15 +194,17 @@ func TestResolveVMDiskOwners_AnnotationAndSpecRef(t *testing.T) {
 			},
 		},
 	}
-	// dsnap-a carries the generic source-identity annotation (root-planned path).
+	// Both children resolve their captured disk from spec.sourceRef (the single source-of-truth).
 	dsnapA := &demov1alpha1.DemoVirtualDiskSnapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "dsnap-a",
-			Namespace:   "ns1",
-			Annotations: map[string]string{controllercommon.AnnotationKeySourceRef: string(identityJSON)},
+		ObjectMeta: metav1.ObjectMeta{Name: "dsnap-a", Namespace: "ns1"},
+		Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
+			SourceRef: demov1alpha1.SnapshotSourceRef{
+				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+				Kind:       controllercommon.KindDemoVirtualDisk,
+				Name:       "disk-a",
+			},
 		},
 	}
-	// dsnap-b carries only spec.sourceRef (manual path).
 	dsnapB := &demov1alpha1.DemoVirtualDiskSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "dsnap-b", Namespace: "ns1"},
 		Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{

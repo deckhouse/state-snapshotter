@@ -35,11 +35,12 @@ type DemoVirtualDiskSnapshot struct {
 // DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot.
 // +k8s:deepcopy-gen=true
 type DemoVirtualDiskSnapshotSpec struct {
-	// SourceRef identifies the DemoVirtualDisk captured by this snapshot for manually-created
-	// demo snapshots. Root-planned snapshots carry generic source identity in annotation
-	// state-snapshotter.deckhouse.io/source-ref instead.
-	// +optional
-	SourceRef SnapshotSourceRef `json:"sourceRef,omitempty"`
+	// SourceRef identifies the DemoVirtualDisk captured by this snapshot. It is the single
+	// source-of-truth for what the snapshot captures (both manually-created and root-planned
+	// snapshots) and is immutable once set.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
+	SourceRef SnapshotSourceRef `json:"sourceRef"`
 }
 
 // DemoVirtualDiskSnapshotStatus defines the observed state of DemoVirtualDiskSnapshot.
