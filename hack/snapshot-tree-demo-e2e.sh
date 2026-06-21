@@ -122,6 +122,10 @@ WAIT_LOG_EVERY_SEC="${TREE_DEMO_WAIT_LOG_EVERY_SEC:-30}"
 BIND_IMAGE="${TREE_DEMO_BIND_IMAGE:-registry.k8s.io/pause:3.9}"
 PVC_SIZE="${TREE_DEMO_PVC_SIZE:-1Mi}"
 CONTROLLER_SA="${TREE_DEMO_CONTROLLER_SA:-system:serviceaccount:${MOD_NS}:controller}"
+# Two-pod split: the demo dedicated reconcilers (MCR/VCR + child snapshots) and the demo restore
+# mutation run in the separate domain-controller pod (own SA + own aggregated apiserver), not in core.
+DOMAIN_SA="${TREE_DEMO_DOMAIN_SA:-system:serviceaccount:${MOD_NS}:domain-controller}"
+DOMAIN_APISERVICE="${TREE_DEMO_DOMAIN_APISERVICE:-v1alpha1.subresources.demo.state-snapshotter.deckhouse.io}"
 
 # ---- test group selection ---------------------------------------------------
 # The full linear suite is ~15 min and does not survive a flaky tunnel. Split it into logical,
@@ -282,6 +286,9 @@ kubectl_ctrl() { kubectl --as="${CONTROLLER_SA}" "$@"; }
 dump_controller_logs_hint() {
 	log "HINT: controller logs — kubectl logs -n ${MOD_NS} -l app=controller --tail=300"
 	command kubectl logs -n "${MOD_NS}" -l app=controller --tail=60 2>/dev/null | tail -30 >&2 || true
+	# Demo reconcile (MCR/VCR/children) and restore mutation live in the domain-controller pod now.
+	log "HINT: domain-controller logs — kubectl logs -n ${MOD_NS} -l app=domain-controller --tail=300"
+	command kubectl logs -n "${MOD_NS}" -l app=domain-controller --tail=60 2>/dev/null | tail -30 >&2 || true
 }
 
 stage_dir() { printf '%s/%s' "${RUN_ARTIFACT_DIR}" "$1"; }
@@ -955,12 +962,41 @@ if kubectl get crd objectkeepers.deckhouse.io >/dev/null 2>&1; then HAS_OBJECTKE
 fi
 kubectl get pods -n "${MOD_NS}" -l app=controller >"$(stage_dir 00-preflight)/controller-pods.txt" 2>/dev/null \
 	|| note "could not list controller pods in ${MOD_NS}"
+# Two-pod split: the demo dedicated reconcilers run in the domain-controller pod, and the demo restore
+# subtree is delegated by core to the domain aggregated apiserver over the kube-apiserver aggregation
+# layer. Without a Ready domain-controller pod nothing would create demo MCR/VCR/children (the tree
+# would stall) and restore stages 20-25 could not be served — so this is a hard precondition.
+kubectl get pods -n "${MOD_NS}" -l app=domain-controller >"$(stage_dir 00-preflight)/domain-controller-pods.txt" 2>/dev/null \
+	|| note "could not list domain-controller pods in ${MOD_NS}"
+if ! kubectl get deploy -n "${MOD_NS}" domain-controller >/dev/null 2>&1; then
+	require "domain-controller Deployment not found in ${MOD_NS}; deploy the module with stateSnapshotter.enableDemoDomain=true (the demo tree + restore delegation run in the domain pod)"
+fi
+# Pass MOD_NS as a positional arg (not interpolated into the bash -c body) so an operator-overridden
+# namespace can never corrupt/inject the inner script. The inner kubectl is the raw binary, not the
+# resilient kubectl() wrapper (shell functions are not exported to the child shell); that is fine because
+# wait_until polls for up to WAIT_SEC and rides out transient apiserver/tunnel drops on its own.
+wait_until "domain-controller Deployment Available" \
+	bash -c 'kubectl get deploy -n "$1" domain-controller -o json 2>/dev/null | jq -e "[.status.conditions[]?|select(.type==\"Available\")][0].status==\"True\"" >/dev/null' _ "${MOD_NS}" \
+	|| require "domain-controller Deployment never became Available; demo reconcile + restore delegation cannot run"
+# The domain aggregated apiserver must be registered AND healthy for core->domain restore delegation
+# (GET .../manifests-with-data-restoration on a demo subtree routes here via kube-apiserver).
+if ! kubectl get apiservice "${DOMAIN_APISERVICE}" >/dev/null 2>&1; then
+	require "domain APIService ${DOMAIN_APISERVICE} not found; restore delegation to the domain apiserver cannot work (enableDemoDomain + serving-cert)"
+fi
+wait_until "domain APIService ${DOMAIN_APISERVICE} Available" \
+	bash -c 'kubectl get apiservice "$1" -o json 2>/dev/null | jq -e "[.status.conditions[]?|select(.type==\"Available\")][0].status==\"True\"" >/dev/null' _ "${DOMAIN_APISERVICE}" \
+	|| require "domain APIService ${DOMAIN_APISERVICE} not Available; core cannot delegate demo restore subtrees to the domain apiserver"
 # External demo-domain RBAC (granted by Deckhouse RBAC controller in production).
 if [[ "$(kubectl auth can-i get "${VM_RES}" --as="system:serviceaccount:${MOD_NS}:webhooks" -n "${NS}" 2>/dev/null || echo no)" != "yes" ]]; then
 	require "webhook SA cannot get demo inventory (${VM_RES}); tree would fail with SubtreeManifestCapturePending — grant external demo-domain RBAC + redeploy"
 fi
+# Demo capture artifacts (MCR/VCR + child snapshots) are created by the DOMAIN SA after the split.
+if [[ "$(kubectl auth can-i create "${MCR_RES}" --as="${DOMAIN_SA}" -n "${NS}" 2>/dev/null || echo no)" != "yes" ]]; then
+	require "domain SA (${DOMAIN_SA}) cannot create ${MCR_RES} in target ns; demo capture would stall (RBAC split / 030-domain-rbac hook)"
+fi
+# Core still creates MCR for the namespace-root (generic) capture leg.
 if [[ "$(kubectl auth can-i create "${MCR_RES}" --as="${CONTROLLER_SA}" -n "${NS}" 2>/dev/null || echo no)" != "yes" ]]; then
-	require "controller SA cannot create ${MCR_RES} in target ns; capture would stall"
+	require "controller SA cannot create ${MCR_RES} in target ns; root capture would stall"
 fi
 # Pre-existing CSD claiming the demo snapshot kinds => guaranteed KindConflict for THIS run's CSD,
 # which would only surface as a 600s "never Accepted" timeout much later. CSDs are cluster-scoped, so
@@ -1201,6 +1237,43 @@ for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}
 	[[ "$(cond_field "${cj}" VolumesReady status)" == "True" ]] || die "content ${c} VolumesReady != True while Ready=True (inconsistent aggregation)"
 	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || die "content ${c} ChildrenReady != True while Ready=True (inconsistent aggregation)"
 done
+
+# --- no-double-reconcile contract (two-pod split) --------------------------
+# Cutover invariant: a demo CR is reconciled by exactly ONE controller (the domain pod) and its
+# SnapshotContent is created by exactly ONE controller (the core common binder). The strong guarantee is
+# STRUCTURAL — the domain-controller binary registers only the demo dedicated planning controllers, which
+# never construct a SnapshotContent (commits 3-4) — so this stage's job is to confirm the tree actually
+# converged on durable single-owner state, not to re-prove the binary wiring. Verified at Ready:
+#  (a) every demo snapshot in the tree (root Snapshot + DemoVirtual{Machine,Disk}Snapshot) has a non-empty
+#      boundSnapshotContentName AND that SnapshotContent object exists — asserted by counting bound refs
+#      against the demo-snapshot population (an unbound snapshot fails) and resolving each content object.
+#      Any of those failing means the core binder never took ownership of a demo content.
+#  (b) no two demo snapshots share a content name — a clean 1:1 snapshot->content mapping (the tree-shape
+#      assertions above already pin the kind/count of each child).
+#  (c) the demo planning output exists on the domain-owned snapshots: VM snapshot has the domain
+#      ChildrenSnapshotReady barrier condition (only the domain reconciler sets it). The well-formed
+#      VM->disk subtree resolved above is itself proof the single domain reconciler ran.
+# Note: a same-snapshot duplicate content is impossible by construction — the binder mints a deterministic
+# name (snapshotContentName: "ns-<uid>") and create-or-adopts on AlreadyExists — so (a)+(b) cannot be
+# defeated by a second binder racing the same snapshot.
+NDR_SNAPS_JSON="$(kubectl -n "${NS}" get "${SNAP_RES},${VMSNAP_RES},${DISKSNAP_RES}" -o json 2>/dev/null)"
+[[ -n "${NDR_SNAPS_JSON}" ]] || die "no-double-reconcile: could not list demo snapshots in ${NS}"
+NDR_SNAP_COUNT="$(printf '%s' "${NDR_SNAPS_JSON}" | jq '[.items[]?] | length')"
+NDR_BOUND="$(printf '%s' "${NDR_SNAPS_JSON}" | jq -r '.items[]? | .status.boundSnapshotContentName // empty' | sed '/^$/d' | sort)"
+NDR_TOTAL="$(printf '%s\n' "${NDR_BOUND}" | sed '/^$/d' | wc -l | tr -d ' ')"
+NDR_DISTINCT="$(printf '%s\n' "${NDR_BOUND}" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
+[[ "${NDR_SNAP_COUNT}" -ge 1 ]] || die "no-double-reconcile: no demo snapshots found in ${NS} (tree did not materialize)"
+[[ "${NDR_TOTAL}" -eq "${NDR_SNAP_COUNT}" ]] || die "no-double-reconcile: ${NDR_SNAP_COUNT} demo snapshots but ${NDR_TOTAL} bound a SnapshotContent — an unbound demo snapshot (core binder did not take ownership of its content)"
+[[ "${NDR_TOTAL}" -eq "${NDR_DISTINCT}" ]] || die "no-double-reconcile: ${NDR_TOTAL} bound SnapshotContent refs but only ${NDR_DISTINCT} distinct — a content is shared between snapshots"
+# Each bound content must resolve to a real cluster object (cluster-scoped; no namespace).
+while read -r ndr_c; do
+	[[ -n "${ndr_c}" ]] || continue
+	kubectl get "${CONTENT_RES}" "${ndr_c}" >/dev/null 2>&1 \
+		|| die "no-double-reconcile: bound SnapshotContent ${ndr_c} does not exist (dangling binding / content not owned by the core binder)"
+done <<<"${NDR_BOUND}"
+VM_CSR="$(cond_field "$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")" ChildrenSnapshotReady status)"
+[[ -n "${VM_CSR}" ]] || die "no-double-reconcile: VM snapshot ${VM_SNAP} has no ChildrenSnapshotReady condition (domain reconciler did not handle it)"
+note "no-double-reconcile: ${NDR_DISTINCT} distinct SnapshotContent, all present (single common owner); VM snapshot ChildrenSnapshotReady=${VM_CSR} (domain reconciler)"
 
 # --- two-PVC capture paths -------------------------------------------------
 # demo-pvc       : orphan/standalone at root  -> CSI VolumeSnapshot visibility leaf + VSC in ROOT content dataRefs.
