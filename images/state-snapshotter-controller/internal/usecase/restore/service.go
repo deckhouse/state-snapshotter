@@ -13,20 +13,27 @@ import (
 )
 
 type Service struct {
-	resolver     *Resolver
-	loader       *Loader
-	kubeClient   client.Client
-	transformers []DomainRestoreTransformer
+	resolver   *Resolver
+	loader     *Loader
+	kubeClient client.Client
+	// domainRestorer delegates the restore of domain snapshot subtrees to the domain controller's
+	// aggregated apiserver. Nil means no domain delegation is configured: encountering a domain node
+	// then fails closed (a domain subtree would otherwise be silently dropped). Core stays domain-free.
+	domainRestorer DomainSubtreeRestorer
 }
 
-// NewService builds the restore compiler. Domain restore transformers (e.g. the demo controllers'
-// transformer) are registered here so the generic pipeline stays domain-free.
-func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService, transformers ...DomainRestoreTransformer) *Service {
+// NewService builds the restore compiler. domainRestorer delegates domain snapshot subtrees to the
+// domain controller's aggregated apiserver (nil disables delegation); isDomainKind reports which
+// snapshot kinds are domain-owned so the resolver stops at them and compileNode delegates (nil treats
+// every kind as generic). Both are nil in focused tests and the generic-only path.
+func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService, domainRestorer DomainSubtreeRestorer, isDomainKind func(kind string) bool) *Service {
+	resolver := NewResolver(kubeClient)
+	resolver.isDomainKind = isDomainKind
 	return &Service{
-		resolver:     NewResolver(kubeClient),
-		loader:       NewLoader(kubeClient, archiveService),
-		kubeClient:   kubeClient,
-		transformers: transformers,
+		resolver:       resolver,
+		loader:         NewLoader(kubeClient, archiveService),
+		kubeClient:     kubeClient,
+		domainRestorer: domainRestorer,
 	}
 }
 
@@ -68,17 +75,20 @@ func (s *Service) buildRestore(ctx context.Context, opts Options, resolveRoot fu
 	return marshalObjects(result.Objects)
 }
 
-// compileNode compiles a RestoreNode in post-order: children are compiled first so their results are
-// available to the parent transform, then this node's manifests are loaded and transformed.
+// compileNode compiles a RestoreNode in post-order: children are compiled first so their objects are
+// emitted before the parent, then this node's manifests are loaded and compiled. A domain node is not
+// compiled in-process: its whole subtree is delegated to the domain controller's aggregated apiserver.
 func (s *Service) compileNode(ctx context.Context, node *RestoreNode, targetNamespace string) (NodeResult, error) {
-	childResults := make([]NodeResult, 0, len(node.Children))
+	if node.Domain {
+		return s.compileDomainNode(ctx, node, targetNamespace)
+	}
+
 	childObjects := make([]unstructured.Unstructured, 0)
 	for _, child := range node.Children {
 		childResult, err := s.compileNode(ctx, child, targetNamespace)
 		if err != nil {
 			return NodeResult{}, err
 		}
-		childResults = append(childResults, childResult)
 		childObjects = append(childObjects, childResult.Objects...)
 	}
 
@@ -86,9 +96,7 @@ func (s *Service) compileNode(ctx context.Context, node *RestoreNode, targetName
 	if err != nil {
 		return NodeResult{}, err
 	}
-	// Pass the compiled children so a parent domain transform can reference its restored children
-	// (post-order, bottom-up).
-	nodeObjects, err := transformNodeObjects(node, raw, s.transformers, childResults, targetNamespace)
+	nodeObjects, err := transformNodeObjects(node, raw, targetNamespace)
 	if err != nil {
 		return NodeResult{}, err
 	}
@@ -98,6 +106,28 @@ func (s *Service) compileNode(ctx context.Context, node *RestoreNode, targetName
 	objects := make([]unstructured.Unstructured, 0, len(nodeObjects)+len(childObjects))
 	objects = append(objects, childObjects...)
 	objects = append(objects, nodeObjects...)
+	return NodeResult{Node: node, Objects: objects}, nil
+}
+
+// compileDomainNode delegates a domain snapshot subtree to the domain controller's aggregated
+// apiserver (it resolves and compiles its own subtree, fetching base manifests from core). The
+// returned objects are already apply-ready; they are spliced as this node's result. It fails closed
+// when no delegate is configured rather than silently dropping the subtree.
+func (s *Service) compileDomainNode(ctx context.Context, node *RestoreNode, targetNamespace string) (NodeResult, error) {
+	if s.domainRestorer == nil {
+		return NodeResult{}, fmt.Errorf(
+			"%w: domain snapshot %s %s/%s requires the domain restore delegate, which is not configured",
+			ErrContractViolation, node.SnapshotRef.Kind, node.SnapshotRef.Namespace, node.SnapshotRef.Name,
+		)
+	}
+	gvk := schema.FromAPIVersionAndKind(node.SnapshotRef.APIVersion, node.SnapshotRef.Kind)
+	objects, err := s.domainRestorer.RestoreDomainSubtree(ctx, gvk, node.SnapshotRef.Namespace, node.SnapshotRef.Name, targetNamespace)
+	if err != nil {
+		return NodeResult{}, fmt.Errorf(
+			"delegate domain restore for %s %s/%s: %w",
+			node.SnapshotRef.Kind, node.SnapshotRef.Namespace, node.SnapshotRef.Name, err,
+		)
+	}
 	return NodeResult{Node: node, Objects: objects}, nil
 }
 

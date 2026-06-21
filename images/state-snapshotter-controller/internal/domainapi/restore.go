@@ -22,6 +22,8 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -90,6 +92,14 @@ func (s *RestoreService) BaseManifests(ctx context.Context, resource, namespace,
 // DemoVirtualDiskSnapshot via spec.dataSource). targetNamespace defaults to the source namespace when
 // empty.
 func (s *RestoreService) ManifestsWithDataRestoration(ctx context.Context, resource, namespace, name, targetNamespace string) ([]byte, error) {
+	// Readiness gate (fail closed). Core delegates the whole subtree here and no longer checks the
+	// domain snapshot's Ready before delegating, so the gate lives here. The snapshot's Ready mirrors
+	// its bound SnapshotContent.Ready (ManifestsReady && VolumesReady && ChildrenReady), so requiring
+	// the addressed snapshot Ready=True transitively guarantees the whole subtree is restorable and
+	// prevents restoring stale data from a snapshot that is mid-recapture.
+	if err := s.ensureSnapshotReady(ctx, resource, namespace, name); err != nil {
+		return nil, err
+	}
 	base, err := s.core.BaseManifests(ctx, resource, namespace, name)
 	if err != nil {
 		return nil, err
@@ -123,6 +133,33 @@ func (r diskOwnerResolver) ownerFor(diskName string) string {
 		}
 	}
 	return r.defaultOwner
+}
+
+// ensureSnapshotReady fails closed unless the addressed domain snapshot has Ready=True. A missing Ready
+// condition (e.g. mid-reconcile) is treated as not ready: the restore path must never compile from an
+// unfinished snapshot. This mirrors the core resolver's ensureSnapshotReady on a generic node.
+func (s *RestoreService) ensureSnapshotReady(ctx context.Context, resource, namespace, name string) error {
+	var conditions []metav1.Condition
+	switch resource {
+	case ResourceDemoVirtualDiskSnapshot:
+		obj := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		if err := s.reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
+			return fmt.Errorf("get DemoVirtualDiskSnapshot %s/%s: %w", namespace, name, err)
+		}
+		conditions = obj.Status.Conditions
+	case ResourceDemoVirtualMachineSnapshot:
+		obj := &demov1alpha1.DemoVirtualMachineSnapshot{}
+		if err := s.reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
+			return fmt.Errorf("get DemoVirtualMachineSnapshot %s/%s: %w", namespace, name, err)
+		}
+		conditions = obj.Status.Conditions
+	default:
+		return fmt.Errorf("unsupported domain snapshot resource %q", resource)
+	}
+	if !meta.IsStatusConditionTrue(conditions, snapshot.ConditionReady) {
+		return fmt.Errorf("domain snapshot %s %s/%s is not Ready", resource, namespace, name)
+	}
+	return nil
 }
 
 func (s *RestoreService) resolveDiskOwners(ctx context.Context, resource, namespace, name string) (diskOwnerResolver, error) {
@@ -217,16 +254,25 @@ func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namesp
 			// A PVC not covered by a domain disk has no data leg here (the sanitizer stripped any
 			// dataSource/dataSourceRef and the domain path does not do generic orphan-PVC -> VolumeSnapshot
 			// binding). It would restore empty. This is unreachable in the current demo model (every demo
-			// PVC is disk-covered); warn rather than emit a silent data-less PVC.
-			if s.log != nil {
-				s.log.Warning("[domainapi] emitting uncovered PVC with no data binding; it will be restored empty", "namespace", effectiveNS, "pvc", sanitized.GetName())
-			}
+			// PVC is disk-covered). Fail closed rather than emit a silent data-less PVC, matching the core
+			// compiler's contract so the guarantee "restore never emits a data-less PVC" holds uniformly
+			// across the delegation boundary.
+			return nil, fmt.Errorf("uncovered PVC %s/%s has no data binding; refusing to emit a data-less PVC", effectiveNS, sanitized.GetName())
 		}
 		if isDemoVirtualDisk(sanitized) {
 			owner := owners.ownerFor(sanitized.GetName())
 			if owner == "" {
+				// The disk's PVC (if any) was dropped above as "covered", so emitting the disk without a
+				// spec.dataSource would silently restore it as an empty volume. Fail closed when the disk
+				// carries a data leg (a covered PVC), matching the core compiler's contract that restore
+				// never emits a data-less object — even though the owning DemoVirtualDiskSnapshot could not
+				// be resolved (e.g. a child snapshot CR GC'd while its content survives via TTL). A disk
+				// with no PVC has no data leg and is safe to emit untouched.
+				if pvcName, _, _ := unstructured.NestedString(sanitized.Object, "spec", "persistentVolumeClaimName"); pvcName != "" {
+					return nil, fmt.Errorf("DemoVirtualDisk %s/%s has a data leg (PVC %q) but no resolvable owning DemoVirtualDiskSnapshot; refusing to emit a data-less disk", effectiveNS, sanitized.GetName(), pvcName)
+				}
 				if s.log != nil {
-					s.log.Warning("[domainapi] DemoVirtualDisk has no owning disk snapshot; restored without a data source", "namespace", effectiveNS, "disk", sanitized.GetName())
+					s.log.Warning("[domainapi] DemoVirtualDisk has no PVC data leg and no owning disk snapshot; restored without a data source", "namespace", effectiveNS, "disk", sanitized.GetName())
 				}
 			} else {
 				node := &restore.RestoreNode{

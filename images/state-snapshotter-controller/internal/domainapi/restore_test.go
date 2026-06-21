@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,7 +31,23 @@ import (
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
+
+// diskSnapWithReady builds the test DemoVirtualDiskSnapshot CR (ns1/dsnap-a) carrying a Ready condition
+// of the given status, used to satisfy (or deliberately fail) the readiness gate in
+// ManifestsWithDataRestoration.
+func diskSnapWithReady(ready bool) *demov1alpha1.DemoVirtualDiskSnapshot {
+	status := metav1.ConditionFalse
+	if ready {
+		status = metav1.ConditionTrue
+	}
+	d := &demov1alpha1.DemoVirtualDiskSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "dsnap-a", Namespace: "ns1"},
+	}
+	meta.SetStatusCondition(&d.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: status, Reason: "Test"})
+	return d
+}
 
 func domainScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -141,6 +158,30 @@ func TestApplyTransform_VMCorrelatesDisksToOwningSnapshots(t *testing.T) {
 	}
 }
 
+func TestApplyTransform_UnownedDiskWithPVCFailsClosed(t *testing.T) {
+	svc := NewRestoreService(nil, nil, nil)
+	// disk-x has a PVC data leg (pvc-x, dropped as covered) but no resolvable owning disk snapshot
+	// (empty owners map → ownerFor returns the empty default). Emitting it would silently restore an
+	// empty volume, so the transform must fail closed.
+	base := []unstructured.Unstructured{demoDiskObj("disk-x", "pvc-x"), pvcObj("pvc-x")}
+	if _, err := svc.applyTransform(base, "ns1", "", diskOwnerResolver{byDiskName: map[string]string{}}); err == nil {
+		t.Fatalf("expected fail-closed error for an unowned disk with a PVC data leg")
+	}
+}
+
+func TestApplyTransform_UnownedDiskWithoutPVCEmitted(t *testing.T) {
+	svc := NewRestoreService(nil, nil, nil)
+	// A disk with no PVC has no data leg, so it is safe to emit untouched even without an owner.
+	base := []unstructured.Unstructured{demoDiskObj("disk-x", "")}
+	out, err := svc.applyTransform(base, "ns1", "", diskOwnerResolver{byDiskName: map[string]string{}})
+	if err != nil {
+		t.Fatalf("unexpected error for a data-less disk: %v", err)
+	}
+	if _, ok := findByName(out, controllercommon.KindDemoVirtualDisk, "disk-x"); !ok {
+		t.Fatalf("expected data-less disk-x to be emitted")
+	}
+}
+
 func TestResolveVMDiskOwners_AnnotationAndSpecRef(t *testing.T) {
 	scheme := domainScheme(t)
 
@@ -216,7 +257,8 @@ func TestManifestsWithDataRestoration_DiskLeaf_SanitizesAndSetsDataSource(t *tes
 	_ = unstructured.SetNestedField(disk.Object, "Ready", "status", "phase")
 	base := []unstructured.Unstructured{disk, pvcObj("pvc-a")}
 
-	svc := NewRestoreService(nil, stubFetcher{objs: base}, nil)
+	reader := fake.NewClientBuilder().WithScheme(domainScheme(t)).WithObjects(diskSnapWithReady(true)).Build()
+	svc := NewRestoreService(reader, stubFetcher{objs: base}, nil)
 	data, err := svc.ManifestsWithDataRestoration(context.Background(), ResourceDemoVirtualDiskSnapshot, "ns1", "dsnap-a", "")
 	if err != nil {
 		t.Fatalf("ManifestsWithDataRestoration: %v", err)
@@ -249,9 +291,27 @@ func TestManifestsWithDataRestoration_DiskLeaf_SanitizesAndSetsDataSource(t *tes
 }
 
 func TestManifestsWithDataRestoration_FetchError(t *testing.T) {
-	svc := NewRestoreService(nil, stubFetcher{err: context.DeadlineExceeded}, nil)
+	reader := fake.NewClientBuilder().WithScheme(domainScheme(t)).WithObjects(diskSnapWithReady(true)).Build()
+	svc := NewRestoreService(reader, stubFetcher{err: context.DeadlineExceeded}, nil)
 	if _, err := svc.ManifestsWithDataRestoration(context.Background(), ResourceDemoVirtualDiskSnapshot, "ns1", "dsnap-a", ""); err == nil {
 		t.Fatalf("expected error from fetch failure")
+	}
+}
+
+func TestManifestsWithDataRestoration_NotReadyFailsClosed(t *testing.T) {
+	reader := fake.NewClientBuilder().WithScheme(domainScheme(t)).WithObjects(diskSnapWithReady(false)).Build()
+	// A fetcher that would succeed if reached; the readiness gate must short-circuit before it.
+	svc := NewRestoreService(reader, stubFetcher{objs: []unstructured.Unstructured{demoDiskObj("disk-a", "pvc-a")}}, nil)
+	if _, err := svc.ManifestsWithDataRestoration(context.Background(), ResourceDemoVirtualDiskSnapshot, "ns1", "dsnap-a", ""); err == nil {
+		t.Fatalf("expected fail-closed error when the domain snapshot is not Ready")
+	}
+}
+
+func TestManifestsWithDataRestoration_MissingSnapshotFailsClosed(t *testing.T) {
+	reader := fake.NewClientBuilder().WithScheme(domainScheme(t)).Build()
+	svc := NewRestoreService(reader, stubFetcher{objs: []unstructured.Unstructured{demoDiskObj("disk-a", "pvc-a")}}, nil)
+	if _, err := svc.ManifestsWithDataRestoration(context.Background(), ResourceDemoVirtualDiskSnapshot, "ns1", "missing", ""); err == nil {
+		t.Fatalf("expected fail-closed error when the domain snapshot is missing")
 	}
 }
 

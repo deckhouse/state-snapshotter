@@ -83,6 +83,31 @@ func rootSnapshotObj(name, contentName string, children []storagev1alpha1.Snapsh
 	return s
 }
 
+// domainSnapshotObj builds a domain snapshot CR (e.g. DemoVirtualDiskSnapshot) with a bound content,
+// optional child refs and a Ready condition. The generic resolver (NewResolver without a domain-kind
+// predicate) treats such kinds as ordinary child snapshot nodes, so these helpers exercise the
+// resolver's readiness/cycle/childrenSnapshotRefs handling at arbitrary depth.
+func domainSnapshotObj(kind, name, contentName string, childRefs []storagev1alpha1.SnapshotChildRef, ready bool) *unstructured.Unstructured {
+	refs := make([]interface{}, 0, len(childRefs))
+	for _, r := range childRefs {
+		refs = append(refs, map[string]interface{}{"apiVersion": r.APIVersion, "kind": r.Kind, "name": r.Name})
+	}
+	readyStatus := "True"
+	if !ready {
+		readyStatus = "False"
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"kind":       kind,
+		"metadata":   map[string]interface{}{"name": name, "namespace": "source-ns"},
+		"status": map[string]interface{}{
+			"boundSnapshotContentName": contentName,
+			"conditions":               []interface{}{map[string]interface{}{"type": "Ready", "status": readyStatus}},
+			"childrenSnapshotRefs":     refs,
+		},
+	}}
+}
+
 func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 	scheme := restoreTreeScheme()
 

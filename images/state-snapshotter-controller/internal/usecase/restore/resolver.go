@@ -18,6 +18,11 @@ import (
 
 type Resolver struct {
 	client client.Client
+	// isDomainKind reports whether a snapshot kind is owned by an out-of-process domain controller.
+	// When it returns true for a node, the resolver marks that node as a domain boundary and does NOT
+	// descend into it (the domain apiserver resolves the subtree). Nil means "no domain kinds": every
+	// node is resolved generically (the default for focused tests and the per-resource view).
+	isDomainKind func(kind string) bool
 }
 
 func NewResolver(client client.Client) *Resolver {
@@ -130,6 +135,12 @@ func (r *Resolver) ResolveRestoreTree(ctx context.Context, snapshotNamespace, sn
 // snapshot). It compiles that node and everything below it, so the restore endpoint can return
 // apply-ready manifests for a single subtree, not only the whole namespace.
 func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
+	// Domain boundary at the root: a kind owned by an out-of-process domain controller is restored by
+	// the domain's aggregated apiserver, not here. Short-circuit BEFORE the Get so core never reads the
+	// domain CR (it keeps core domain-free: no demo RBAC, no extra round-trip). compileNode delegates it.
+	if r.isDomainKind != nil && r.isDomainKind(gvk.Kind) {
+		return domainRestoreNode(gvk.GroupVersion().String(), gvk.Kind, snapshotName, snapshotNamespace), nil
+	}
 	rootObj := &unstructured.Unstructured{}
 	rootObj.SetGroupVersionKind(gvk)
 	if err := r.client.Get(ctx, client.ObjectKey{Namespace: snapshotNamespace, Name: snapshotName}, rootObj); err != nil {
@@ -139,6 +150,21 @@ func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVe
 		return nil, fmt.Errorf("failed to get snapshot %s/%s: %w", snapshotNamespace, snapshotName, err)
 	}
 	return r.buildRestoreNode(ctx, rootObj, snapshotNamespace, map[string]struct{}{})
+}
+
+// domainRestoreNode builds the marker node for a domain snapshot boundary. It carries only the
+// identity (GVK/namespace/name) compileDomainNode needs to address the delegated restore; the domain
+// apiserver resolves the subtree, fetches its base from core, and enforces readiness.
+func domainRestoreNode(apiVersion, kind, name, namespace string) *RestoreNode {
+	return &RestoreNode{
+		SnapshotRef: snapshot.ObjectRef{
+			APIVersion: apiVersion,
+			Kind:       kind,
+			Name:       name,
+			Namespace:  namespace,
+		},
+		Domain: true,
+	}
 }
 
 func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructured.Unstructured, namespace string, visited map[string]struct{}) (*RestoreNode, error) {
@@ -205,6 +231,13 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 	})
 	for _, ref := range children {
 		if ref.Name == "" {
+			continue
+		}
+		// Domain boundary: a child owned by an out-of-process domain controller is delegated. Mark it
+		// and do NOT Get it — core stays domain-free (no demo RBAC, no extra round-trip) and does not
+		// descend; the domain apiserver resolves and restores the whole subtree. compileNode delegates.
+		if r.isDomainKind != nil && r.isDomainKind(ref.Kind) {
+			node.Children = append(node.Children, domainRestoreNode(ref.APIVersion, ref.Kind, ref.Name, namespace))
 			continue
 		}
 		if isVolumeSnapshotLeaf(ref) {

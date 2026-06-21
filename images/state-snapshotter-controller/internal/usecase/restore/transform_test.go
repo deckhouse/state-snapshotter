@@ -29,33 +29,6 @@ func dataSourceRefName(pvc unstructured.Unstructured) string {
 	return name
 }
 
-// stubTransformer is a domain transformer test double without any real domain kind. It covers the
-// named PVCs and, when handleKind is set, claims (handled=true) every object of that kind, recording
-// the children it was handed so tests can assert bottom-up threading.
-type stubTransformer struct {
-	covered      map[string]struct{}
-	handleKind   string
-	gotChildren  *[]NodeResult
-	gotChildKind *string
-}
-
-func (s stubTransformer) CoveredPVCNames(_ *RestoreNode, _ []unstructured.Unstructured) map[string]struct{} {
-	return s.covered
-}
-
-func (s stubTransformer) TransformObject(_ *RestoreNode, obj *unstructured.Unstructured, children []NodeResult) (bool, error) {
-	if s.handleKind == "" || obj.GetKind() != s.handleKind {
-		return false, nil
-	}
-	if s.gotChildren != nil {
-		*s.gotChildren = children
-	}
-	if s.gotChildKind != nil && len(children) > 0 && len(children[0].Objects) > 0 {
-		*s.gotChildKind = children[0].Objects[0].GetKind()
-	}
-	return true, nil
-}
-
 func TestTransformNode_OrphanPVCGetsDataSourceRef(t *testing.T) {
 	pvc := pvcManifest("data-pvc", "source-ns", "uid-a")
 	node := &RestoreNode{
@@ -64,7 +37,7 @@ func TestTransformNode_OrphanPVCGetsDataSourceRef(t *testing.T) {
 		VSCToVS:      map[string]string{"vsc-a": "vs-a"},
 	}
 
-	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, nil, nil, "restore-ns")
+	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
 	if err != nil {
 		t.Fatalf("transformNodeObjects: %v", err)
 	}
@@ -90,32 +63,12 @@ func TestTransformNode_OrphanPVCMissingVSLeafFailsClosed(t *testing.T) {
 		DataBindings: []snapshot.DataBindingRef{dataBindingRef("uid-a", "data-pvc", "vsc-a")},
 		VSCToVS:      map[string]string{}, // VS leaf not resolved
 	}
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, nil, nil, "restore-ns")
+	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
 	if err == nil {
 		t.Fatal("expected contract violation when VS leaf is missing")
 	}
 	if !errors.Is(err, ErrContractViolation) {
 		t.Fatalf("expected ErrContractViolation, got %v", err)
-	}
-}
-
-func TestTransformNode_CoveredPVCSuppressed(t *testing.T) {
-	// A domain transformer covers "disk-pvc"; the node still carries a dataRef for it, but the PVC
-	// must be suppressed and must NOT require a VolumeSnapshot leaf (covered PVCs are not orphans).
-	pvc := pvcManifest("disk-pvc", "source-ns", "uid-disk")
-	node := &RestoreNode{
-		SnapshotRef:  snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"},
-		DataBindings: []snapshot.DataBindingRef{dataBindingRef("uid-disk", "disk-pvc", "vsc-disk")},
-		VSCToVS:      map[string]string{}, // intentionally empty: covered PVCs are skipped
-	}
-	transformers := []DomainRestoreTransformer{stubTransformer{covered: map[string]struct{}{"disk-pvc": {}}}}
-
-	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, transformers, nil, "restore-ns")
-	if err != nil {
-		t.Fatalf("transformNodeObjects: %v", err)
-	}
-	if len(out) != 0 {
-		t.Fatalf("expected covered PVC to be suppressed, got %d objects", len(out))
 	}
 }
 
@@ -128,7 +81,7 @@ func TestTransformNode_GenericPassThrough(t *testing.T) {
 	}}
 	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}}
 
-	out, err := transformNodeObjects(node, []unstructured.Unstructured{cm}, nil, nil, "restore-ns")
+	out, err := transformNodeObjects(node, []unstructured.Unstructured{cm}, "restore-ns")
 	if err != nil {
 		t.Fatalf("transformNodeObjects: %v", err)
 	}
@@ -144,56 +97,9 @@ func TestTransformNode_PVCWithoutDataRefFailsClosed(t *testing.T) {
 	pvc := pvcManifest("plain-pvc", "source-ns", "uid-plain")
 	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}, VSCToVS: map[string]string{}}
 
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, nil, nil, "restore-ns")
+	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
 	if err == nil {
 		t.Fatal("expected error: a PVC without a data binding must not be emitted data-less")
-	}
-	if !errors.Is(err, ErrContractViolation) {
-		t.Fatalf("expected ErrContractViolation, got %v", err)
-	}
-}
-
-func TestTransformNode_DomainTransformerReceivesChildren(t *testing.T) {
-	vm := unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.deckhouse.io/v1alpha1",
-		"kind":       "DemoVirtualMachine",
-		"metadata":   map[string]interface{}{"name": "vm", "namespace": "source-ns"},
-	}}
-	restoredDisk := unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.deckhouse.io/v1alpha1",
-		"kind":       "DemoVirtualDisk",
-		"metadata":   map[string]interface{}{"name": "disk", "namespace": "restore-ns"},
-	}}
-	children := []NodeResult{{Objects: []unstructured.Unstructured{restoredDisk}}}
-
-	var gotChildKind string
-	transformers := []DomainRestoreTransformer{stubTransformer{handleKind: "DemoVirtualMachine", gotChildKind: &gotChildKind}}
-	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}}
-
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{vm}, transformers, children, "restore-ns")
-	if err != nil {
-		t.Fatalf("transformNodeObjects: %v", err)
-	}
-	if gotChildKind != "DemoVirtualDisk" {
-		t.Fatalf("domain transformer did not receive restored child; gotChildKind = %q", gotChildKind)
-	}
-}
-
-func TestTransformNode_TwoTransformersHandleSameObjectFailsClosed(t *testing.T) {
-	vm := unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.deckhouse.io/v1alpha1",
-		"kind":       "DemoVirtualMachine",
-		"metadata":   map[string]interface{}{"name": "vm", "namespace": "source-ns"},
-	}}
-	transformers := []DomainRestoreTransformer{
-		stubTransformer{handleKind: "DemoVirtualMachine"},
-		stubTransformer{handleKind: "DemoVirtualMachine"},
-	}
-	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}}
-
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{vm}, transformers, nil, "restore-ns")
-	if err == nil {
-		t.Fatal("expected contract violation when two transformers handle the same object")
 	}
 	if !errors.Is(err, ErrContractViolation) {
 		t.Fatalf("expected ErrContractViolation, got %v", err)
@@ -210,7 +116,7 @@ func TestTransformNode_OrphanPVCNonVSCArtifactFailsClosed(t *testing.T) {
 		VSCToVS:      map[string]string{},
 	}
 
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, nil, nil, "restore-ns")
+	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
 	if err == nil {
 		t.Fatal("expected contract violation when orphan-PVC artifact is not a VolumeSnapshotContent")
 	}

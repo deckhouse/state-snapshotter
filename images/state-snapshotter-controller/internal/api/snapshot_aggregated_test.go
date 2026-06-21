@@ -104,7 +104,7 @@ func TestSnapshotAggregatedManifests_HTTP_OK(t *testing.T) {
 	_ = cl.Create(context.Background(), ns)
 
 	ah := NewArchiveHandler(cl, arch, log)
-	rs := restore.NewService(cl, arch)
+	rs := restore.NewService(cl, arch, nil, nil)
 	rh := NewRestoreHandler(cl, rs, log, agg)
 	mux := http.NewServeMux()
 	ah.SetupRoutes(mux)
@@ -187,7 +187,7 @@ func TestSnapshotAggregatedManifests_HTTP_Gzip(t *testing.T) {
 	_ = cl.Create(context.Background(), ns)
 
 	ah := NewArchiveHandler(cl, arch, log)
-	rs := restore.NewService(cl, arch)
+	rs := restore.NewService(cl, arch, nil, nil)
 	rh := NewRestoreHandler(cl, rs, log, agg)
 	mux := http.NewServeMux()
 	ah.SetupRoutes(mux)
@@ -374,7 +374,7 @@ func newGenericAggregatedTestServerWithRESTMapper(t *testing.T, cl client.Client
 		t.Fatal(err)
 	}
 	agg := usecase.NewAggregatedNamespaceManifests(cl, arch, snapshotgraphregistry.NewStatic(reg))
-	rs := restore.NewService(cl, arch)
+	rs := restore.NewService(cl, arch, nil, nil)
 	rh := NewRestoreHandler(cl, rs, log, agg, mapper)
 	mux := http.NewServeMux()
 	rh.SetupRoutes(mux)

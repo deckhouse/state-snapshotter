@@ -1,7 +1,7 @@
 # ADR: Direction for domain restore-transform contract
 
 - **Дата:** 2026-06-13
-- **Статус:** Proposed — фиксируем **направление** (форму будущего контракта), а не детальную API-схему.
+- **Статус:** Superseded (commit `core-remove-demo`, 2026-06) — реализован out-of-process вариант: core делегирует domain-поддерево доменному **aggregated apiserver** (`manifests-with-data-restoration`) через kube-apiserver aggregation layer (интерфейс `restore.DomainSubtreeRestorer`, клиент `internal/api/domain_restore_client.go`), а доменная мутация живёт в `internal/domainapi` отдельного бинаря. PoC HTTP-transport (`RESTORE_TRANSFORM_ENDPOINT`, `demo.RestoreTransformHandler`, `restore.RESTTransformer`, `pkg/restoretransform`) удалён. Документ оставлен как историческая фиксация направления.
 - **Связано с:** `snapshot-rework/2026-06-10-restore-manifests-compiler.md` (restore compiler), `docs/state-snapshotter-rework/spec/system-spec.md`.
 
 ## Контекст

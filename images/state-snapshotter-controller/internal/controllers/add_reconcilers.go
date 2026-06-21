@@ -94,13 +94,6 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 	return demo.AddDemoVirtualMachineSnapshotControllerToManager(mgr, cfg)
 }
 
-// AddDemoRestoreTransformServerToManager registers the demo domain's restore-transform HTTP endpoint
-// (PoC transport, ADR 2026-06-13). The endpoint is owned by the demo domain, not generic core; it is a
-// no-op unless RESTORE_TRANSFORM_ENDPOINT is set.
-func AddDemoRestoreTransformServerToManager(mgr ctrl.Manager, log logger.LoggerInterface) error {
-	return demo.AddRestoreTransformServerToManager(mgr, log)
-}
-
 // AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager
 // and starts TTL scanner as a leader-only runnable.
 //

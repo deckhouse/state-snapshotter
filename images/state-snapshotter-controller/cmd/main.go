@@ -50,7 +50,6 @@ import (
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
@@ -211,21 +210,11 @@ func main() {
 	}
 	log.Info("NamespaceGenericSnapshotBinderController added to manager")
 
-	// Demo dedicated controllers (DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot) are NOT
-	// registered at boot. Their informers require cluster-scoped RBAC on demo.* that the Deckhouse
-	// hook grants only after the CSD becomes Accepted=True; registering them here would block the
-	// manager's cache sync on forbidden list/watch and deadlock CSD reconciliation. They are activated
-	// lazily by the unified runtime Syncer once the CSD is watch-eligible (Accepted+RBACReady).
-
-	// PoC transport (ADR 2026-06-13): the demo domain serves its own restore-transform endpoint. It is
-	// owned by the demo domain, not generic core, and is a no-op unless RESTORE_TRANSFORM_ENDPOINT is
-	// set. No Kubernetes objects (Service/APIService) are introduced; production domains serve this
-	// from their own module/binary.
-	if err := controllers.AddDemoRestoreTransformServerToManager(mgr, log); err != nil {
-		log.Error(err, "Failed to add demo restore-transform endpoint to manager")
-		cancel()
-		os.Exit(1)
-	}
+	// Demo dedicated controllers (DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot) run in the
+	// separate domain-controller pod/binary, not in core (commit "core-remove-demo"). Core no longer
+	// reconciles demo CRs nor serves an in-process restore transform: it owns SnapshotContent for the
+	// demo kinds (see the unified runtime Syncer wiring below) and delegates demo restore subtrees to
+	// the domain aggregated apiserver (see the domain restore client passed to api.NewServer).
 
 	contentController, err := controllers.NewSnapshotContentController(
 		mgr.GetClient(),
@@ -309,20 +298,11 @@ func main() {
 	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
-	// Activators for the demo dedicated controllers. The Syncer invokes each one at most once, only
-	// after the matching CSD is watch-eligible (Accepted+RBACReady) so the demo.* RBAC granted by the
-	// hook is already in place. DemoVirtualDiskSnapshot must be registered before DemoVirtualMachineSnapshot
-	// (the VM controller Watches the disk snapshot type); the Syncer enforces that order via
-	// unifiedbootstrap.DedicatedSnapshotControllerKinds.
-	demoActivators := map[string]unifiedruntime.DedicatedControllerActivator{
-		controllercommon.KindDemoVirtualDiskSnapshot: func(m ctrl.Manager) error {
-			return controllers.AddDemoVirtualDiskSnapshotControllerToManager(m, cfgParams)
-		},
-		controllercommon.KindDemoVirtualMachineSnapshot: func(m ctrl.Manager) error {
-			return controllers.AddDemoVirtualMachineSnapshotControllerToManager(m, cfgParams)
-		},
-	}
-
+	// No dedicated controller activators in core: the demo dedicated planning controllers run in the
+	// domain-controller pod. The Syncer still drives generic Snapshot/SnapshotContent watches AND the
+	// generic binder's ownership of domain-capture SnapshotContent (demo kinds): with no local
+	// activator wired, the binder owns that content directly (its unstructured informer needs no field
+	// index, so there is no informer-ordering hazard). See unifiedruntime.Syncer.Sync.
 	unifiedSync := unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
@@ -330,7 +310,7 @@ func main() {
 		mgr.GetAPIReader(),
 		snapshotController,
 		contentController,
-		demoActivators,
+		nil,
 	)
 
 	if err := controllers.AddCustomSnapshotDefinitionControllerToManager(mgr, log, cfgParams, unifiedSync.Sync, graphRegProvider.Refresh); err != nil {
@@ -442,7 +422,19 @@ func main() {
 		}
 	}
 
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList, mapper)
+	// Domain restore delegation: core orchestrates restore over the run tree and, on a domain snapshot
+	// subtree, calls the domain controller's aggregated apiserver
+	// (manifests-with-data-restoration) through the kube-apiserver aggregation layer (SA token). Until
+	// the domain APIService is registered (deploy commit), this path simply errors for domain subtrees;
+	// pure-generic restores are unaffected.
+	domainRestoreClient, err := api.NewDomainRestoreClient(kConfig, mapper, log)
+	if err != nil {
+		log.Error(err, "[main] unable to create domain restore delegation client")
+		cancel()
+		os.Exit(1)
+	}
+
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsDomainCaptureSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList, mapper)
 	if apiServer == nil {
 		log.Error(nil, "[main] Failed to create API server (mTLS configuration failed)")
 		cancel() // Ensure cleanup before exit

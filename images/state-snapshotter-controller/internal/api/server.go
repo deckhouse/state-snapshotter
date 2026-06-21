@@ -21,17 +21,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net/http"
-	"net/url"
-	"os"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/demo"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/restoretransform"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -45,35 +41,16 @@ type Server struct {
 	tlsKeyFile     string
 }
 
-// selectDomainRestoreTransformer returns the REST transform client when restoretransform.EnvEndpoint
-// is set, otherwise the in-process demo transformer. The REST client is domain-free; the matching
-// endpoint is owned and served by the domain controller (demo, co-located loopback for the PoC).
-func selectDomainRestoreTransformer(logger logger.LoggerInterface) restore.DomainRestoreTransformer {
-	endpoint := os.Getenv(restoretransform.EnvEndpoint)
-	if endpoint == "" {
-		return demo.NewRestoreTransformer()
-	}
-	// Validate the endpoint at startup so a misconfiguration is obvious in the logs. We deliberately do
-	// NOT fall back to the in-process transformer on a bad URL: silently changing behaviour would hide
-	// the misconfiguration. The REST client is returned regardless, so every transform call fails
-	// loudly (fail-whole / fail-closed) instead of producing a partial restore.
-	if u, err := url.Parse(endpoint); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		logger.Error(err, "[api] RESTORE_TRANSFORM_ENDPOINT is not a valid http(s) URL; restore transform calls will fail", "endpoint", endpoint)
-	} else {
-		logger.Info("[api] restore transform delegated to REST endpoint (PoC transport)", "endpoint", endpoint)
-	}
-	return restore.NewRESTTransformer(endpoint).WithErrorSink(func(err error) {
-		logger.Error(err, "[api] restore transform REST suppress call failed (fail-closed)")
-	})
-}
-
 // NewServer creates a new HTTP API server
 // directClient: used for all CRD operations (ManifestCheckpoint and chunks) without cache
 // No informer cache needed - archive-api-service only does GET requests
+// domainRestorer: delegates domain snapshot subtrees to the domain controller's aggregated apiserver
+// (nil disables delegation; encountering a domain node then fails closed)
+// isDomainKind: reports which snapshot kinds are domain-owned so the restore compiler delegates them
 // caCert: optional CA certificate bytes for mTLS (if provided, mTLS is mandatory - no fallback)
 // allowedClientCNs: list of allowed client certificate CNs for mTLS (comma-separated)
 // Returns nil if caCert is specified but cannot be parsed
-func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string, restMappers ...meta.RESTMapper) *Server {
+func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, domainRestorer restore.DomainSubtreeRestorer, isDomainKind func(kind string) bool, tlsCertFile, tlsKeyFile string, caCert []byte, allowedClientCNs []string, restMappers ...meta.RESTMapper) *Server {
 	var restMapper meta.RESTMapper
 	if len(restMappers) > 0 {
 		restMapper = restMappers[0]
@@ -84,7 +61,10 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 
 	// Create archive handler with directClient for ManifestCheckpoint
 	archiveHandler := NewArchiveHandler(directClient, archiveService, logger)
-	restoreService := restore.NewService(directClient, archiveService, selectDomainRestoreTransformer(logger))
+	// The restore compiler stays domain-free: domain snapshot subtrees are delegated to the domain
+	// controller's aggregated apiserver (manifests-with-data-restoration) over the kube-apiserver
+	// aggregation layer; generic nodes are compiled from core's own SnapshotContent.
+	restoreService := restore.NewService(directClient, archiveService, domainRestorer, isDomainKind)
 	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
 	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper)
 

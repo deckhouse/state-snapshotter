@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestCNAllowed(t *testing.T) {
@@ -46,7 +48,10 @@ func TestCNAllowed(t *testing.T) {
 
 func newTestHandlerMux(t *testing.T, fetcher CoreBaseManifestsFetcher) *http.ServeMux {
 	t.Helper()
-	svc := NewRestoreService(nil, fetcher, nil)
+	// Seed a Ready dsnap-a so the restore subresource passes the readiness gate and the routing
+	// assertions exercise the handler, not the gate.
+	reader := fake.NewClientBuilder().WithScheme(domainScheme(t)).WithObjects(diskSnapWithReady(true)).Build()
+	svc := NewRestoreService(reader, fetcher, nil)
 	mux := http.NewServeMux()
 	NewHandler(svc, nil).SetupRoutes(mux)
 	return mux

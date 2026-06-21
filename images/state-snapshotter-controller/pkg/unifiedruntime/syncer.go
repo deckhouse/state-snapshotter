@@ -47,10 +47,6 @@ type Syncer struct {
 	// activeSnapshotGVKKeys: snapshot GVK String() for which the required runtime watches
 	// were successfully registered at least once in this process (monotonic; not cleared when resolved drops).
 	activeSnapshotGVKKeys map[string]struct{}
-	// warnedDomainCaptureNoActivator deduplicates the one-time warning emitted when a domain-capture kind
-	// is resolved but has no dedicated activator wired (misconfiguration: it would get neither planning nor
-	// binder-owned content and stall silently). Keyed by snapshot GVK String().
-	warnedDomainCaptureNoActivator map[string]struct{}
 }
 
 // NewSyncer builds a syncer. bootstrap must be the static unified-runtime list
@@ -71,15 +67,14 @@ func NewSyncer(
 ) *Syncer {
 	registerUnifiedRuntimeMetrics()
 	return &Syncer{
-		mgr:                            mgr,
-		log:                            log.WithName("unified-runtime"),
-		bootstrap:                      bootstrap,
-		reader:                         reader,
-		snap:                           snap,
-		content:                        content,
-		dedicatedActivators:            dedicatedActivators,
-		activeSnapshotGVKKeys:          make(map[string]struct{}),
-		warnedDomainCaptureNoActivator: make(map[string]struct{}),
+		mgr:                   mgr,
+		log:                   log.WithName("unified-runtime"),
+		bootstrap:             bootstrap,
+		reader:                reader,
+		snap:                  snap,
+		content:               content,
+		dedicatedActivators:   dedicatedActivators,
+		activeSnapshotGVKKeys: make(map[string]struct{}),
 	}
 }
 
@@ -157,26 +152,22 @@ func (s *Syncer) Sync(ctx context.Context) error {
 				}
 				continue
 			}
-			// Domain-capture kind (demo): the dedicated planning controller (activated above) owns
-			// MCR/VCR/children + ChildrenSnapshotReady, while the generic binder owns its
-			// SnapshotContent. Wait until the dedicated planning controller has been activated this (or
-			// an earlier) Sync so its typed informer + field index are registered first; the binder uses
-			// a separate unstructured informer and registers no field index, so wiring it afterwards is
-			// safe. Then mark the kind domain-capture and fall through to the generic binder/content
-			// wiring below (both AddWatch* calls are idempotent and retry on failure).
-			if _, planningActive := s.activeSnapshotGVKKeys[snapGVK.String()]; !planningActive {
-				// If no activator is wired for a domain-capture kind it never gets a planning controller,
-				// so this gate never opens and the binder never owns its content — the demo CR stalls
-				// silently. Warn once so the misconfiguration is diagnosable (focused tests that wire the
-				// controllers themselves are expected to pass an activator).
-				if _, hasActivator := s.dedicatedActivators[snapGVK.Kind]; !hasActivator {
-					if _, warned := s.warnedDomainCaptureNoActivator[snapGVK.String()]; !warned {
-						s.warnedDomainCaptureNoActivator[snapGVK.String()] = struct{}{}
-						s.log.Info("domain-capture snapshot kind resolved but has no dedicated activator wired; it will get neither planning nor binder-owned SnapshotContent until an activator is provided",
-							"snapshot", snapGVK.String())
-					}
+			// Domain-capture kind (demo): the dedicated planning controller owns MCR/VCR/children +
+			// ChildrenSnapshotReady, while the generic binder owns its SnapshotContent. The binder uses
+			// its own unstructured informer and registers no field index, so it can be wired
+			// independently of the planning controller — EXCEPT in a single manager that runs both: there
+			// the planning controller's typed informer + field index must be registered first to avoid an
+			// indexer conflict on the shared informer. So the gate only applies when this manager owns the
+			// planning controller (an activator is wired for the kind).
+			//
+			// Two-pod split (core): the planning controller runs in the domain-controller pod, so no
+			// activator is wired here. Core then owns the SnapshotContent directly with no ordering
+			// hazard. This keeps the cutover invariant (exactly one SnapshotContent owner — the generic
+			// binder) while the demo CR is reconciled solely by the out-of-process domain controller.
+			if _, hasActivator := s.dedicatedActivators[snapGVK.Kind]; hasActivator {
+				if _, planningActive := s.activeSnapshotGVKKeys[snapGVK.String()]; !planningActive {
+					continue
 				}
-				continue
 			}
 			s.snap.MarkDomainCaptureKind(snapGVK)
 		}

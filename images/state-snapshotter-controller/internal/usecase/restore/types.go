@@ -33,6 +33,14 @@ type RestoreNode struct {
 	// PVC.spec.dataSourceRef VolumeSnapshot; the compiler never reads the VS from MCP manifests.
 	VSCToVS  map[string]string
 	Children []*RestoreNode
+
+	// Domain marks a node whose kind is owned by an out-of-process domain controller. Core does not
+	// compile it in-process (it reads no SnapshotContent/MCP for it and does not descend): the whole
+	// subtree rooted here is restored by the domain's aggregated apiserver (manifests-with-data-
+	// restoration), and the compiler splices the returned manifests. SnapshotRef carries the GVK/
+	// namespace/name needed to address that call. Only the boundary node is marked; its descendants
+	// are resolved by the domain apiserver, not by this resolver.
+	Domain bool
 }
 
 // NodeResult carries the apply-ready objects compiled for one RestoreNode, passed up to the parent

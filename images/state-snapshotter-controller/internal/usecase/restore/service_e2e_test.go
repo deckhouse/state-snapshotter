@@ -123,7 +123,7 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(chunk, mcp, content, snap, vs).Build()
 	arch := usecase.NewArchiveService(cl, cl, log)
-	svc := NewService(cl, arch)
+	svc := NewService(cl, arch, nil, nil)
 
 	out, err := svc.BuildManifestsWithDataRestoration(ctx, Options{
 		SnapshotName: "snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",

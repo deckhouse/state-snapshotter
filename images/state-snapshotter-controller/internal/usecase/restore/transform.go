@@ -24,9 +24,10 @@ import (
 
 // Restore node transform (ADR 2026-06-10 D4/D5). Each RestoreNode's captured manifests are sanitized
 // for restore output, then turned into apply-ready objects. This layer is domain-free: it only knows
-// generic Kubernetes/CSI restore (PVC -> VolumeSnapshot dataSourceRef) and delegates any
-// domain-specific rewrite (e.g. a disk object pointing at its own snapshot) to registered
-// DomainRestoreTransformer implementations living in their domain packages.
+// generic Kubernetes/CSI restore (PVC -> VolumeSnapshot dataSourceRef). Any domain-specific rewrite
+// (e.g. a disk object pointing at its own snapshot) is owned by the out-of-process domain controller's
+// aggregated apiserver, which the compiler delegates whole domain subtrees to (see DomainSubtreeRestorer
+// and Service.compileNode); generic nodes processed here never contain domain-owned objects.
 
 const (
 	pvcKind                   = "PersistentVolumeClaim"
@@ -36,17 +37,14 @@ const (
 	kindVolumeSnapshotContent = "VolumeSnapshotContent"
 )
 
-// transformNodeObjects compiles one node's captured manifests into apply-ready objects. children are
-// the already-compiled restore-ready objects of this node's child snapshots (post-order), passed to
-// domain transformers so a parent can reference its restored children.
-func transformNodeObjects(node *RestoreNode, raw []unstructured.Unstructured, transformers []DomainRestoreTransformer, children []NodeResult, targetNamespace string) ([]unstructured.Unstructured, error) {
-	// PVCs that a domain object will recreate on restore (e.g. a disk's data leg). They must not be
-	// emitted as standalone PVCs and must not be treated as orphan PVCs (no VolumeSnapshot leaf).
-	covered := coveredPVCNames(node, raw, transformers)
-
+// transformNodeObjects compiles one generic node's captured manifests into apply-ready objects:
+// sanitize for restore, then bind every namespaced PVC to its orphan-PVC VolumeSnapshot
+// (spec.dataSourceRef) or fail closed. Domain-owned objects never reach here — their subtree is
+// delegated to the domain apiserver before this is called.
+func transformNodeObjects(node *RestoreNode, raw []unstructured.Unstructured, targetNamespace string) ([]unstructured.Unstructured, error) {
 	// Resolve orphan PVC -> VolumeSnapshot on the raw objects (uid and source namespace still intact)
 	// so binding lookup is reliable before sanitization strips those fields.
-	orphanVS, err := resolveOrphanPVCVolumeSnapshots(node, raw, covered)
+	orphanVS, err := resolveOrphanPVCVolumeSnapshots(node, raw, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -60,18 +58,15 @@ func transformNodeObjects(node *RestoreNode, raw []unstructured.Unstructured, tr
 
 		if isCorePVC(sanitized) {
 			name := sanitized.GetName()
-			if _, c := covered[name]; c {
-				continue
-			}
 			vs, ok := orphanVS[name]
 			if !ok {
 				// Fail closed: emitting a namespaced PVC without a dataSourceRef would restore it
-				// empty (silent data loss). A PVC in a namespace snapshot must be either covered by a
-				// domain object or backed by a dataRefs -> VolumeSnapshot binding.
+				// empty (silent data loss). A PVC in a generic namespace snapshot must be backed by a
+				// dataRefs -> VolumeSnapshot binding (domain-owned PVCs live in delegated subtrees).
 				// TODO(restore): add an explicit "stateless/empty PVC" annotation or policy to allow
 				// a deliberate data-less passthrough; until then any emitted PVC must have data.
 				return nil, fmt.Errorf(
-					"%w: PVC %s/%s has no data binding and is not covered by a domain object; refusing to emit a data-less PVC",
+					"%w: PVC %s/%s has no data binding; refusing to emit a data-less PVC",
 					ErrContractViolation, sanitized.GetNamespace(), name,
 				)
 			}
@@ -80,38 +75,9 @@ func transformNodeObjects(node *RestoreNode, raw []unstructured.Unstructured, tr
 			continue
 		}
 
-		handledBy := -1
-		for ti, t := range transformers {
-			handled, terr := t.TransformObject(node, &sanitized, children)
-			if terr != nil {
-				return nil, terr
-			}
-			if !handled {
-				continue
-			}
-			// A single object must be owned by at most one domain transformer; two handlers racing on
-			// the same object is an ambiguous restore contract.
-			if handledBy >= 0 {
-				return nil, fmt.Errorf(
-					"%w: object %s/%s %s handled by more than one domain restore transformer",
-					ErrContractViolation, sanitized.GetNamespace(), sanitized.GetName(), sanitized.GetKind(),
-				)
-			}
-			handledBy = ti
-		}
 		out = append(out, sanitized)
 	}
 	return out, nil
-}
-
-func coveredPVCNames(node *RestoreNode, raw []unstructured.Unstructured, transformers []DomainRestoreTransformer) map[string]struct{} {
-	covered := map[string]struct{}{}
-	for _, t := range transformers {
-		for name := range t.CoveredPVCNames(node, raw) {
-			covered[name] = struct{}{}
-		}
-	}
-	return covered
 }
 
 func resolveOrphanPVCVolumeSnapshots(node *RestoreNode, raw []unstructured.Unstructured, covered map[string]struct{}) (map[string]string, error) {
