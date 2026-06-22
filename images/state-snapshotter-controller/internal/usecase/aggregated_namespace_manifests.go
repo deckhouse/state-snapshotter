@@ -37,7 +37,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
-// AggregatedStatusError carries HTTP status for Snapshot aggregated manifests (see spec doc linked on BuildAggregatedJSON).
+// AggregatedStatusError carries an HTTP status for the manifest subresources (per-CR manifests-download
+// and the snapshot/content resolution they share).
 type AggregatedStatusError struct {
 	HTTPStatus int
 	Reason     string
@@ -51,25 +52,21 @@ func NewAggregatedStatusError(httpStatus int, reason, message string) *Aggregate
 	return &AggregatedStatusError{HTTPStatus: httpStatus, Reason: reason, Message: message}
 }
 
-// AggregatedNamespaceManifests builds a single JSON array of manifest objects for a Snapshot subtree.
+// AggregatedNamespaceManifests resolves a snapshot/SnapshotContent to its ManifestCheckpoint and decodes
+// a single node's own manifests as a JSON array. It backs the per-CR manifests-download subresources
+// (core Snapshot, generic snapshot kinds, and cluster-scoped SnapshotContent). The whole-subtree
+// aggregation was removed in C9: restore now recurses per-CR (each node fetches its own base), so there
+// is no server-side subtree walk here.
 type AggregatedNamespaceManifests struct {
 	client    client.Client
 	archive   *ArchiveService
 	graphLive snapshotgraphregistry.LiveReader
 }
 
-// NewAggregatedNamespaceManifests creates an aggregated-manifests service for the manifests subresource.
+// NewAggregatedNamespaceManifests creates the per-CR manifests service backing the manifests-download
+// subresources and the snapshot-kind registry check.
 func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphLive snapshotgraphregistry.LiveReader) *AggregatedNamespaceManifests {
 	return &AggregatedNamespaceManifests{client: c, archive: a, graphLive: graphLive}
-}
-
-// BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../snapshot-aggregated-manifests-pr4.md
-func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
-	rootContent, err := s.resolveRootContentName(ctx, namespace, snapshotName)
-	if err != nil {
-		return nil, err
-	}
-	return s.marshalAggregatedFromRootContent(ctx, rootContent)
 }
 
 // resolveRootContentName resolves a core Snapshot to its root SnapshotContent name. It first reads the
@@ -144,55 +141,9 @@ func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx contex
 	}
 }
 
-func (s *AggregatedNamespaceManifests) marshalAggregatedFromRootContent(ctx context.Context, rootContent string) ([]byte, error) {
-	visited := make(map[string]struct{})
-	seenKeys := make(map[string]struct{})
-	objects := make([]map[string]interface{}, 0)
-	if err := s.walkContent(ctx, rootContent, visited, &objects, seenKeys); err != nil {
-		return nil, err
-	}
-	out, err := json.Marshal(objects)
-	if err != nil {
-		return nil, NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("marshal aggregated manifests: %v", err))
-	}
-	return out, nil
-}
-
-// BuildAggregatedJSONFromContent returns aggregated manifests starting from any registered content node.
-func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromContent(ctx context.Context, contentGVK schema.GroupVersionKind, contentName string) ([]byte, error) {
-	if contentName == "" || contentGVK.Empty() {
-		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "content GVK and name are required")
-	}
-	if contentGVK != SnapshotContentGVK() {
-		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", fmt.Sprintf("unsupported content resource %s", contentGVK.String()))
-	}
-
-	visited := make(map[string]struct{})
-	seenKeys := make(map[string]struct{})
-	objects := make([]map[string]interface{}, 0)
-	if err := s.walkContent(ctx, contentName, visited, &objects, seenKeys); err != nil {
-		return nil, err
-	}
-	out, err := json.Marshal(objects)
-	if err != nil {
-		return nil, NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("marshal aggregated manifests: %v", err))
-	}
-	return out, nil
-}
-
-// BuildAggregatedJSONFromSnapshot resolves a namespaced Snapshot-like object to its
-// registered SnapshotContent and returns aggregated manifests for that content subtree.
-func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) ([]byte, error) {
-	contentName, err := s.resolveContentNameFromSnapshot(ctx, snapshotGVK, namespace, snapshotName)
-	if err != nil {
-		return nil, err
-	}
-	return s.BuildAggregatedJSONFromContent(ctx, SnapshotContentGVK(), contentName)
-}
-
 // resolveContentNameFromSnapshot resolves any namespaced snapshot-like CR (by GVK) to its bound
-// SnapshotContent name via status.boundSnapshotContentName. Shared by aggregated (whole-subtree) and
-// per-CR (single-node) manifest reads for non-core snapshot kinds.
+// SnapshotContent name via status.boundSnapshotContentName. Used by the per-CR (single-node) manifest
+// reads for non-core snapshot kinds.
 func (s *AggregatedNamespaceManifests) resolveContentNameFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) (string, error) {
 	if snapshotName == "" || namespace == "" || snapshotGVK.Empty() {
 		return "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
@@ -242,40 +193,6 @@ func (s *AggregatedNamespaceManifests) currentAggregatedRegistry(ctx context.Con
 		return nil, NewAggregatedStatusError(http.StatusServiceUnavailable, "RegistryNotReady", snapshotgraphregistry.ErrGraphRegistryNotReady.Error())
 	}
 	return reg, nil
-}
-
-// walkContent visits SnapshotContent nodes for aggregated manifests.
-// Traversal uses only status.childrenSnapshotContentRefs on each node (see
-// docs/state-snapshotter-rework/spec/snapshot-aggregated-manifests-pr4.md §2.2).
-// It does not list SnapshotContent or Snapshot to discover children,
-// and does not follow status.childrenSnapshotRefs on Snapshot — consistent with
-// system-spec §3.4 (INV-REF-C1): empty or absent content refs mean no further descent from that node.
-//
-// Graph DFS is shared with WalkSnapshotContentSubtree so domain code and aggregation use the same ref-only walk.
-func (s *AggregatedNamespaceManifests) walkContent(ctx context.Context, contentName string, _ map[string]struct{}, objects *[]map[string]interface{}, seenKeys map[string]struct{}) error {
-	visit := func(ctx context.Context, content *storagev1alpha1.SnapshotContent) error {
-		mcpName := content.Status.ManifestCheckpointName
-		if mcpName == "" {
-			return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
-				fmt.Sprintf("manifestCheckpointName is empty for SnapshotContent %q", content.Name))
-		}
-		return s.appendObjectsFromManifestCheckpoint(ctx, mcpName, objects, seenKeys)
-	}
-	err := WalkSnapshotContentSubtree(ctx, s.client, contentName, visit)
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, ErrSnapshotContentCycle) {
-		return NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
-	}
-	if apierrors.IsNotFound(err) {
-		return NewAggregatedStatusError(http.StatusNotFound, "NotFound", err.Error())
-	}
-	var st *AggregatedStatusError
-	if errors.As(err, &st) {
-		return err
-	}
-	return err
 }
 
 func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(

@@ -1,7 +1,7 @@
 ---
 # Admin-kubeconfig ClusterRole: manual kubectl / demo-e2e (NOT controller SA).
 # - Create/read/delete Snapshots; patch Snapshot/SnapshotContent status for demo graph wiring (merge_child_graph_into_root).
-# - Read aggregated manifests subresources.
+# - Read per-CR manifest subresources (manifests-download / manifests-with-data-restoration).
 # - Read-only MCR/MCP/ObjectKeeper for diagnostics.
 # - Do NOT grant objectkeepers patch/update (forced TTL uses demo-e2e temp RBAC or cluster-admin).
 apiVersion: rbac.authorization.k8s.io/v1
@@ -19,8 +19,8 @@ rules:
   - get
   - list
   - watch
-# Chunk payloads are controller-internal only: admin/manual paths MUST download via the aggregated
-# /manifests subresources below, never by reading the raw chunk objects directly.
+# Chunk payloads are controller-internal only: admin/manual paths MUST download via the per-CR
+# /manifests-download subresources below, never by reading the raw chunk objects directly.
 - apiGroups:
   - storage.deckhouse.io
   resources:
@@ -59,18 +59,19 @@ rules:
   - get
   - patch
   - update
-# Aggregated manifest read subresources. Includes per-domain-snapshot routes so a
-# subtree can be downloaded by a domain snapshot name (e.g. demovirtualmachinesnapshots/<vm>/manifests
-# returns the VM node + its whole subtree). These demo domain subresources belong here
-# (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
+# Per-CR manifest read subresources. The whole-subtree /manifests aggregation was removed in C9: export
+# now walks the tree client-side and downloads each node's own manifests via /manifests-download.
+# Includes the per-domain-snapshot routes (demo domain export by a domain snapshot name); these demo
+# subresources belong here (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
+# manifestcheckpoints/manifests is the raw single-checkpoint read served directly by the archive handler.
 - apiGroups:
   - subresources.state-snapshotter.deckhouse.io
   resources:
-  - snapshots/manifests
+  - snapshots/manifests-download
   - snapshots/manifests-with-data-restoration
   - manifestcheckpoints/manifests
-  - demovirtualmachinesnapshots/manifests
-  - demovirtualdisksnapshots/manifests
+  - demovirtualmachinesnapshots/manifests-download
+  - demovirtualdisksnapshots/manifests-download
   verbs:
   - get
 # C8 connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):

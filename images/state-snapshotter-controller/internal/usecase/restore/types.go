@@ -6,20 +6,11 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-type SnapshotContentNode struct {
-	Content *unstructured.Unstructured
-	// ManifestCheckpointName is required for /manifests.
-	ManifestCheckpointName string
-	// DataBindings are this node's status.dataRefs[] only (not inherited from parent/child).
-	DataBindings []snapshot.DataBindingRef
-	Children     []*SnapshotContentNode
-}
-
 // RestoreNode is one node of the snapshot run tree used by the restore compiler
-// (manifests-with-data-restoration, ADR 2026-06-10). Unlike SnapshotContentNode it walks the
-// Snapshot run tree (Snapshot -> status.childrenSnapshotRefs) so it carries the owning snapshot CR
-// identity (needed by domain restore transforms to point a restored object at its own snapshot) and
-// the orphan-PVC VolumeSnapshot visibility leaves.
+// (manifests-with-data-restoration, ADR 2026-06-10). It walks the Snapshot run tree
+// (Snapshot -> status.childrenSnapshotRefs) so it carries the owning snapshot CR identity (needed by
+// domain restore transforms to point a restored object at its own snapshot) and the orphan-PVC
+// VolumeSnapshot visibility leaves.
 type RestoreNode struct {
 	// SnapshotRef is the snapshot CR that owns this node (generic Snapshot at the root, domain
 	// snapshot CRs below). Namespace is the run-tree namespace.

@@ -320,16 +320,18 @@ func TestHandleAPIResourceListDiscovery_SubresourcesOnly(t *testing.T) {
 	if _, exists := resources["manifestcheckpoints/manifests"]; !exists {
 		t.Fatalf("manifestcheckpoints/manifests missing in discovery")
 	}
-	if _, exists := resources["snapshots/manifests"]; !exists {
-		t.Fatalf("snapshots/manifests missing in discovery")
+	// The aggregated whole-subtree snapshots/manifests subresource was removed in C9 (restore is per-CR);
+	// only manifests-with-data-restoration and the per-CR manifests-download remain.
+	if _, exists := resources["snapshots/manifests"]; exists {
+		t.Fatalf("snapshots/manifests must not be in discovery after C9")
 	}
 	if _, exists := resources["snapshots/manifests-with-data-restoration"]; !exists {
 		t.Fatalf("snapshots/manifests-with-data-restoration missing in discovery")
 	}
-	if ns, exists := resources["snapshots/manifests"]; !exists {
-		t.Fatalf("snapshots/manifests missing in discovery")
+	if ns, exists := resources["snapshots/manifests-download"]; !exists {
+		t.Fatalf("snapshots/manifests-download missing in discovery")
 	} else if !ns.Namespaced || ns.Kind != "Snapshot" {
-		t.Fatalf("snapshots/manifests has wrong discovery: %+v", ns)
+		t.Fatalf("snapshots/manifests-download has wrong discovery: %+v", ns)
 	}
 }
 

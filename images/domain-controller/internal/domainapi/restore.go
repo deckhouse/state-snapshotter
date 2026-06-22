@@ -20,8 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -55,9 +55,12 @@ func IsDomainSnapshotResource(resource string) bool {
 }
 
 // RestoreService compiles manifests-with-data-restoration for demo snapshot kinds. It NEVER reads
-// SnapshotContent / ManifestCheckpoint: the un-transformed BASE manifests come from the core aggregated
-// API server (CoreBaseManifestsFetcher), and the domain-specific restore mutation is applied
-// in-process via the demo restore transformer (equivalent to demo.TransformObject / CoveredPVCNames).
+// SnapshotContent / ManifestCheckpoint: each node's un-transformed own (single-node) BASE manifests come
+// from the core aggregated API server's per-CR manifests-download (CoreBaseManifestsFetcher), and the
+// domain-specific restore mutation is applied in-process via the demo restore transformer (equivalent to
+// demo.TransformObject / CoveredPVCNames). Restore is per-CR (C9): the service recurses the domain run
+// tree (status.childrenSnapshotRefs) itself, compiling one node at a time, rather than transforming a
+// single whole-subtree dump.
 type RestoreService struct {
 	reader      client.Reader
 	core        CoreBaseManifestsFetcher
@@ -65,9 +68,9 @@ type RestoreService struct {
 	log         logger.LoggerInterface
 }
 
-// NewRestoreService builds the domain restore service. reader reads demo snapshot CRs (to resolve the
-// disk -> disk-snapshot ownership for VM subtrees); core fetches base manifests; the transformer is the
-// in-process demo restore transformer.
+// NewRestoreService builds the domain restore service. reader reads demo snapshot CRs (readiness gate +
+// children recursion); core fetches each node's own base manifests; the transformer is the in-process
+// demo restore transformer.
 func NewRestoreService(reader client.Reader, core CoreBaseManifestsFetcher, log logger.LoggerInterface) *RestoreService {
 	return &RestoreService{
 		reader:      reader,
@@ -77,39 +80,14 @@ func NewRestoreService(reader client.Reader, core CoreBaseManifestsFetcher, log 
 	}
 }
 
-// BaseManifests returns the (un-transformed) aggregated base manifests for a demo snapshot, proxied
-// from the core API server. It backs the plain /manifests subresource.
-func (s *RestoreService) BaseManifests(ctx context.Context, resource, namespace, name string) ([]byte, error) {
-	base, err := s.core.BaseManifests(ctx, resource, namespace, name)
-	if err != nil {
-		return nil, err
-	}
-	return marshalObjects(base)
-}
-
-// ManifestsWithDataRestoration returns the restore-ready manifests for a demo snapshot: the core base
-// manifests, sanitized for restore (same shared sanitizer the core compiler uses) with the demo restore
-// mutation applied in-process (cover domain-owned PVCs, point restored DemoVirtualDisks at their owning
-// DemoVirtualDiskSnapshot via spec.dataSource). targetNamespace defaults to the source namespace when
-// empty.
+// ManifestsWithDataRestoration returns the restore-ready manifests for a demo snapshot subtree, compiled
+// per-CR (C9): it recurses the domain run tree from the addressed node, fetching each node's own base
+// from core's per-CR manifests-download, sanitizing for restore (same shared sanitizer the core compiler
+// uses) and applying the demo restore mutation in-process (cover domain-owned PVCs, point each restored
+// DemoVirtualDisk at its own owning DemoVirtualDiskSnapshot via spec.dataSource). targetNamespace
+// defaults to the source namespace when empty.
 func (s *RestoreService) ManifestsWithDataRestoration(ctx context.Context, resource, namespace, name, targetNamespace string) ([]byte, error) {
-	// Readiness gate (fail closed). Core delegates the whole subtree here and no longer checks the
-	// domain snapshot's Ready before delegating, so the gate lives here. The snapshot's Ready mirrors
-	// its bound SnapshotContent.Ready (ManifestsReady && VolumesReady && ChildrenReady), so requiring
-	// the addressed snapshot Ready=True transitively guarantees the whole subtree is restorable and
-	// prevents restoring stale data from a snapshot that is mid-recapture.
-	if err := s.ensureSnapshotReady(ctx, resource, namespace, name); err != nil {
-		return nil, err
-	}
-	base, err := s.core.BaseManifests(ctx, resource, namespace, name)
-	if err != nil {
-		return nil, err
-	}
-	owners, err := s.resolveDiskOwners(ctx, resource, namespace, name)
-	if err != nil {
-		return nil, err
-	}
-	out, err := s.applyTransform(base, namespace, targetNamespace, owners)
+	out, err := s.restoreNode(ctx, resource, namespace, name, targetNamespace, map[string]struct{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -119,109 +97,123 @@ func (s *RestoreService) ManifestsWithDataRestoration(ctx context.Context, resou
 	return marshalObjects(out)
 }
 
-// diskOwnerResolver maps a captured DemoVirtualDisk name to the DemoVirtualDiskSnapshot that owns it.
-// For a leaf disk snapshot the captured disk's name is not needed up front, so defaultOwner is set to
-// the disk snapshot itself; for a VM subtree the mapping is resolved per child disk snapshot.
-type diskOwnerResolver struct {
-	byDiskName   map[string]string
-	defaultOwner string
-}
-
-func (r diskOwnerResolver) ownerFor(diskName string) string {
-	if r.byDiskName != nil {
-		if owner, ok := r.byDiskName[diskName]; ok {
-			return owner
-		}
+// restoreNode compiles ONE domain snapshot node per-CR (Variant B): it enforces the readiness gate, then
+// recurses into the node's domain children (status.childrenSnapshotRefs), then fetches the node's OWN
+// base manifests from core's per-CR manifests-download and applies the demo restore transform. Output is
+// post-order (children before parent), so leaf disks precede the VM that depends on them — friendlier for
+// a straight apply. visited guards against a run-tree cycle.
+//
+// The readiness gate is fail-closed per node: a snapshot's Ready mirrors its bound SnapshotContent.Ready
+// (ManifestsReady && VolumesReady && ChildrenReady), so requiring each visited node Ready=True prevents
+// restoring stale data from a node that is mid-recapture.
+func (s *RestoreService) restoreNode(ctx context.Context, resource, namespace, name, targetNamespace string, visited map[string]struct{}) ([]unstructured.Unstructured, error) {
+	key := resource + "/" + name
+	if _, ok := visited[key]; ok {
+		return nil, fmt.Errorf("domain snapshot run-tree cycle at %s/%s", resource, name)
 	}
-	return r.defaultOwner
+	visited[key] = struct{}{}
+
+	children, err := s.loadDomainNode(ctx, resource, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	// Deterministic sibling order (Kind, Name) so the compiled output is reproducible across runs,
+	// matching the core resolver which sorts children before recursing.
+	sort.Slice(children, func(i, j int) bool {
+		if children[i].Kind != children[j].Kind {
+			return children[i].Kind < children[j].Kind
+		}
+		return children[i].Name < children[j].Name
+	})
+
+	out := make([]unstructured.Unstructured, 0)
+	for i := range children {
+		ref := children[i]
+		childResource, ok := domainResourceForKind(ref.Kind)
+		if !ok {
+			// The domain apiserver recurses only its own domain children. A non-domain child under a
+			// domain node is not part of the demo model; fail closed rather than silently dropping its
+			// subtree (core owns generic/own kinds and never descends into a domain boundary).
+			return nil, fmt.Errorf("domain snapshot %s %s/%s has unsupported child kind %q", resource, namespace, name, ref.Kind)
+		}
+		childObjs, err := s.restoreNode(ctx, childResource, namespace, ref.Name, targetNamespace, visited)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, childObjs...)
+	}
+
+	base, err := s.core.NodeBaseManifests(ctx, resource, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	// A disk snapshot node owns the DemoVirtualDisk in its OWN base and points it at itself
+	// (spec.dataSource -> this disk snapshot). A VM node carries no disk in its own base, so the owner is
+	// unused there.
+	ownerSnapshotName := ""
+	if resource == ResourceDemoVirtualDiskSnapshot {
+		ownerSnapshotName = name
+	}
+	own, err := s.applyTransform(base, namespace, targetNamespace, ownerSnapshotName)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, own...)
+	return out, nil
 }
 
-// ensureSnapshotReady fails closed unless the addressed domain snapshot has Ready=True. A missing Ready
-// condition (e.g. mid-reconcile) is treated as not ready: the restore path must never compile from an
-// unfinished snapshot. This mirrors the core resolver's ensureSnapshotReady on a generic node.
-func (s *RestoreService) ensureSnapshotReady(ctx context.Context, resource, namespace, name string) error {
-	var conditions []metav1.Condition
+// domainResourceForKind maps a snapshot Kind (as carried in status.childrenSnapshotRefs) to its
+// lowercase plural domain resource. ok is false for any non-domain kind.
+func domainResourceForKind(kind string) (resource string, ok bool) {
+	switch kind {
+	case controllercommon.KindDemoVirtualMachineSnapshot:
+		return ResourceDemoVirtualMachineSnapshot, true
+	case controllercommon.KindDemoVirtualDiskSnapshot:
+		return ResourceDemoVirtualDiskSnapshot, true
+	default:
+		return "", false
+	}
+}
+
+// loadDomainNode reads the addressed domain snapshot CR once, enforces the fail-closed readiness gate,
+// and returns its direct domain children (status.childrenSnapshotRefs) for the per-CR recursion. A
+// missing Ready condition (e.g. mid-reconcile) counts as not ready: restore must never compile from an
+// unfinished node. A disk snapshot is a leaf and has no children.
+func (s *RestoreService) loadDomainNode(ctx context.Context, resource, namespace, name string) ([]storagev1alpha1.SnapshotChildRef, error) {
+	var (
+		conditions []metav1.Condition
+		children   []storagev1alpha1.SnapshotChildRef
+	)
 	switch resource {
 	case ResourceDemoVirtualDiskSnapshot:
 		obj := &demov1alpha1.DemoVirtualDiskSnapshot{}
 		if err := s.reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
-			return fmt.Errorf("get DemoVirtualDiskSnapshot %s/%s: %w", namespace, name, err)
+			return nil, fmt.Errorf("get DemoVirtualDiskSnapshot %s/%s: %w", namespace, name, err)
 		}
 		conditions = obj.Status.Conditions
 	case ResourceDemoVirtualMachineSnapshot:
 		obj := &demov1alpha1.DemoVirtualMachineSnapshot{}
 		if err := s.reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, obj); err != nil {
-			return fmt.Errorf("get DemoVirtualMachineSnapshot %s/%s: %w", namespace, name, err)
+			return nil, fmt.Errorf("get DemoVirtualMachineSnapshot %s/%s: %w", namespace, name, err)
 		}
 		conditions = obj.Status.Conditions
+		children = obj.Status.ChildrenSnapshotRefs
 	default:
-		return fmt.Errorf("unsupported domain snapshot resource %q", resource)
+		return nil, fmt.Errorf("unsupported domain snapshot resource %q", resource)
 	}
 	if !meta.IsStatusConditionTrue(conditions, storagev1alpha1.ConditionReady) {
-		return fmt.Errorf("domain snapshot %s %s/%s is not Ready", resource, namespace, name)
+		return nil, fmt.Errorf("domain snapshot %s %s/%s is not Ready", resource, namespace, name)
 	}
-	return nil
+	return children, nil
 }
 
-func (s *RestoreService) resolveDiskOwners(ctx context.Context, resource, namespace, name string) (diskOwnerResolver, error) {
-	switch resource {
-	case ResourceDemoVirtualDiskSnapshot:
-		// A leaf disk snapshot owns whichever DemoVirtualDisk it captured.
-		return diskOwnerResolver{defaultOwner: name}, nil
-	case ResourceDemoVirtualMachineSnapshot:
-		return s.resolveVMDiskOwners(ctx, namespace, name)
-	default:
-		return diskOwnerResolver{}, fmt.Errorf("unsupported domain snapshot resource %q", resource)
-	}
-}
-
-func (s *RestoreService) resolveVMDiskOwners(ctx context.Context, namespace, name string) (diskOwnerResolver, error) {
-	vm := &demov1alpha1.DemoVirtualMachineSnapshot{}
-	if err := s.reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, vm); err != nil {
-		return diskOwnerResolver{}, fmt.Errorf("get DemoVirtualMachineSnapshot %s/%s: %w", namespace, name, err)
-	}
-	owners := map[string]string{}
-	for i := range vm.Status.ChildrenSnapshotRefs {
-		ref := vm.Status.ChildrenSnapshotRefs[i]
-		if ref.Kind != controllercommon.KindDemoVirtualDiskSnapshot {
-			continue
-		}
-		disk := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := s.reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, disk); err != nil {
-			if apierrors.IsNotFound(err) {
-				if s.log != nil {
-					s.log.Warning("[domainapi] child DemoVirtualDiskSnapshot not found; its disk will be restored without a data source", "namespace", namespace, "diskSnapshot", ref.Name, "vmSnapshot", name)
-				}
-				continue
-			}
-			return diskOwnerResolver{}, fmt.Errorf("get child DemoVirtualDiskSnapshot %s/%s: %w", namespace, ref.Name, err)
-		}
-		diskName := diskSnapshotSourceName(disk)
-		if diskName == "" {
-			if s.log != nil {
-				s.log.Warning("[domainapi] child DemoVirtualDiskSnapshot has no resolvable source disk; restored disk will have no data source", "namespace", namespace, "diskSnapshot", ref.Name, "vmSnapshot", name)
-			}
-			continue
-		}
-		owners[diskName] = ref.Name
-	}
-	return diskOwnerResolver{byDiskName: owners}, nil
-}
-
-// diskSnapshotSourceName returns the captured DemoVirtualDisk name for a disk snapshot, read from
-// spec.sourceRef (the single source-of-truth).
-func diskSnapshotSourceName(disk *demov1alpha1.DemoVirtualDiskSnapshot) string {
-	if disk.Spec.SourceRef.Kind == controllercommon.KindDemoVirtualDisk && disk.Spec.SourceRef.Name != "" {
-		return disk.Spec.SourceRef.Name
-	}
-	return ""
-}
-
-// applyTransform turns the core base manifests into apply-ready restore manifests: it re-attaches the
-// effective namespace (core's /manifests is namespace-relative), runs the shared restore sanitizer
-// (strip server fields/status/control-plane kinds, same as the core compiler), drops domain-covered
-// PVCs, and applies the demo restore mutation to each DemoVirtualDisk under its owning disk snapshot.
-func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namespace, targetNamespace string, owners diskOwnerResolver) ([]unstructured.Unstructured, error) {
+// applyTransform turns one node's own base manifests into apply-ready restore manifests: it re-attaches
+// the effective namespace (core's manifests-download is namespace-relative), runs the shared restore
+// sanitizer (strip server fields/status/control-plane kinds, same as the core compiler), drops
+// domain-covered PVCs, and points each DemoVirtualDisk in this node's base at ownerSnapshotName via
+// spec.dataSource. ownerSnapshotName is this node's own disk snapshot name for a disk node, and "" for a
+// VM node (whose own base carries no disk).
+func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namespace, targetNamespace, ownerSnapshotName string) ([]unstructured.Unstructured, error) {
 	effectiveNS := targetNamespace
 	if effectiveNS == "" {
 		effectiveNS = namespace
@@ -233,7 +225,7 @@ func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namesp
 	out := make([]unstructured.Unstructured, 0, len(base))
 	for i := range base {
 		obj := base[i]
-		// Core's /manifests strips metadata.namespace (namespace-relative). All base objects were
+		// Core's manifests-download strips metadata.namespace (namespace-relative). All base objects were
 		// namespaced (cluster-scoped objects are dropped upstream), so re-attach the effective namespace
 		// before sanitizing — the shared sanitizer drops namespace-less objects as cluster-scoped.
 		obj.SetNamespace(effectiveNS)
@@ -255,14 +247,15 @@ func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namesp
 			return nil, fmt.Errorf("uncovered PVC %s/%s has no data binding; refusing to emit a data-less PVC", effectiveNS, sanitized.GetName())
 		}
 		if isDemoVirtualDisk(sanitized) {
-			owner := owners.ownerFor(sanitized.GetName())
+			owner := ownerSnapshotName
 			if owner == "" {
-				// The disk's PVC (if any) was dropped above as "covered", so emitting the disk without a
-				// spec.dataSource would silently restore it as an empty volume. Fail closed when the disk
-				// carries a data leg (a covered PVC), matching the core compiler's contract that restore
-				// never emits a data-less object — even though the owning DemoVirtualDiskSnapshot could not
-				// be resolved (e.g. a child snapshot CR GC'd while its content survives via TTL). A disk
-				// with no PVC has no data leg and is safe to emit untouched.
+				// Defensive: in the per-CR model a disk node always passes its own snapshot name as
+				// ownerSnapshotName, so owner == "" only happens if a VM node's own base unexpectedly
+				// carries a disk. The disk's PVC (if any) was dropped above as "covered", so emitting the
+				// disk without a spec.dataSource would silently restore it as an empty volume. Fail closed
+				// when the disk carries a data leg (a covered PVC), matching the core compiler's contract
+				// that restore never emits a data-less object. A disk with no PVC has no data leg and is
+				// safe to emit untouched.
 				if pvcName, _, _ := unstructured.NestedString(sanitized.Object, "spec", "persistentVolumeClaimName"); pvcName != "" {
 					return nil, fmt.Errorf("DemoVirtualDisk %s/%s has a data leg (PVC %q) but no resolvable owning DemoVirtualDiskSnapshot; refusing to emit a data-less disk", effectiveNS, sanitized.GetName(), pvcName)
 				}
@@ -297,23 +290,27 @@ func isDemoVirtualDisk(obj unstructured.Unstructured) bool {
 		obj.GetAPIVersion() == demov1alpha1.SchemeGroupVersion.String()
 }
 
-// marshalObjects deduplicates by GVK/namespace/name and marshals the objects as a JSON array. The core
-// /manifests base is already deduped upstream (it fails closed on duplicates), so this is a defensive
-// last-writer-wins guard rather than a primary dedup.
+// marshalObjects marshals the per-CR recursion output as a JSON array, failing closed on a duplicate
+// object identity (apiVersion/kind/namespace/name). Each node's own base from core's manifests-download
+// is already deduped intra-node upstream; across nodes the per-CR model accumulates disjoint objects, so
+// a collision means two nodes captured the same identity (possibly with different content). It is
+// treated as a contract violation rather than silently collapsed — mirroring the core restore compiler's
+// fail-closed dedup so the "restore never silently picks one of two same-identity objects" guarantee
+// holds uniformly across the core↔domain delegation boundary.
 func marshalObjects(objs []unstructured.Unstructured) ([]byte, error) {
 	seen := make(map[string]struct{}, len(objs))
-	deduped := make([]unstructured.Unstructured, 0, len(objs))
+	out := make([]unstructured.Unstructured, 0, len(objs))
 	for i := range objs {
 		o := objs[i]
 		key := o.GetAPIVersion() + "/" + o.GetKind() + "/" + o.GetNamespace() + "/" + o.GetName()
 		if _, ok := seen[key]; ok {
-			continue
+			return nil, fmt.Errorf("duplicate object in domain restore output: %s", key)
 		}
 		seen[key] = struct{}{}
-		deduped = append(deduped, o)
+		out = append(out, o)
 	}
-	if len(deduped) == 0 {
+	if len(out) == 0 {
 		return []byte("[]"), nil
 	}
-	return json.Marshal(deduped)
+	return json.Marshal(out)
 }

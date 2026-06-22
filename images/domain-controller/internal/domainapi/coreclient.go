@@ -28,8 +28,8 @@ import (
 )
 
 // coreSubresourceGroupVersion is the core controller's aggregated subresources API group/version. The
-// domain controller fetches BASE manifests from core over the kube-apiserver aggregation layer (SA
-// token, k8s-managed front-proxy). The restore path therefore never reads SnapshotContent /
+// domain controller fetches a node's own BASE manifests from core over the kube-apiserver aggregation
+// layer (SA token, k8s-managed front-proxy). The restore path therefore never reads SnapshotContent /
 // ManifestCheckpoint, so it needs no RBAC on those resources for restore. (Note: the demo reconcilers
 // the domain manager runs still keep a SnapshotContent informer for change notifications, which does
 // require get/list/watch on snapshotcontents — see the deploy RBAC.)
@@ -38,13 +38,15 @@ var coreSubresourceGroupVersion = schema.GroupVersion{
 	Version: "v1alpha1",
 }
 
-// CoreBaseManifestsFetcher fetches the aggregated BASE manifests for a snapshot subtree from the core
-// aggregated API server. The result is the un-transformed, namespace-relative content tree that the
-// domain controller then mutates in-process (demo restore transform).
+// CoreBaseManifestsFetcher fetches a single snapshot node's own (single-node) BASE manifests from the
+// core aggregated API server. The result is the un-transformed, namespace-relative set of objects in
+// that node's ManifestCheckpoint, which the domain controller then sanitizes + mutates in-process (demo
+// restore transform) and recurses per-CR over the node's children (C9). It is NOT a whole-subtree dump.
 type CoreBaseManifestsFetcher interface {
-	// BaseManifests returns the aggregated base manifests for the snapshot identified by
-	// (resource, namespace, name). resource is the lowercase plural (e.g. demovirtualdisksnapshots).
-	BaseManifests(ctx context.Context, resource, namespace, name string) ([]unstructured.Unstructured, error)
+	// NodeBaseManifests returns the own-node base manifests for the snapshot identified by
+	// (resource, namespace, name) via core's per-CR manifests-download. resource is the lowercase plural
+	// (e.g. demovirtualdisksnapshots).
+	NodeBaseManifests(ctx context.Context, resource, namespace, name string) ([]unstructured.Unstructured, error)
 }
 
 // CoreManifestsClient is a CoreBaseManifestsFetcher backed by the in-cluster REST client. All calls go
@@ -57,7 +59,7 @@ type CoreManifestsClient struct {
 func NewCoreManifestsClient(cfg *rest.Config) (*CoreManifestsClient, error) {
 	cfgCopy := rest.CopyConfig(cfg)
 	// APIPath/GroupVersion/NegotiatedSerializer only satisfy rest.RESTClientFor; the actual request
-	// uses AbsPath with a fixed group/version path (see BaseManifests), so these are not used to build
+	// uses AbsPath with a fixed group/version path (see NodeBaseManifests), so these are not used to build
 	// the URL.
 	cfgCopy.APIPath = "/apis"
 	gv := coreSubresourceGroupVersion
@@ -71,21 +73,22 @@ func NewCoreManifestsClient(cfg *rest.Config) (*CoreManifestsClient, error) {
 	return &CoreManifestsClient{rc: rc}, nil
 }
 
-// BaseManifests fetches GET
-// /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/<ns>/<resource>/<name>/manifests
-// from the core API service and decodes the returned JSON array of objects.
-func (c *CoreManifestsClient) BaseManifests(ctx context.Context, resource, namespace, name string) ([]unstructured.Unstructured, error) {
+// NodeBaseManifests fetches GET
+// /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/<ns>/<resource>/<name>/manifests-download
+// from the core API service (the per-CR, single-node manifests) and decodes the returned JSON array of
+// objects.
+func (c *CoreManifestsClient) NodeBaseManifests(ctx context.Context, resource, namespace, name string) ([]unstructured.Unstructured, error) {
 	if c == nil || c.rc == nil {
 		return nil, fmt.Errorf("core manifests client is not configured")
 	}
 	raw, err := c.rc.Get().
 		AbsPath(
 			"/apis", coreSubresourceGroupVersion.Group, coreSubresourceGroupVersion.Version,
-			"namespaces", namespace, resource, name, "manifests",
+			"namespaces", namespace, resource, name, "manifests-download",
 		).
 		DoRaw(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("fetch base manifests from core (%s/%s/%s): %w", namespace, resource, name, err)
+		return nil, fmt.Errorf("fetch node base manifests from core (%s/%s/%s): %w", namespace, resource, name, err)
 	}
 	return decodeManifestArray(raw)
 }

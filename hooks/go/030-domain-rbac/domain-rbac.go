@@ -47,8 +47,8 @@ var _ = registry.RegisterFunc(
 //  1. Lists all CSDs and selects those with Accepted=True at current generation.
 //  2. Resolves source and snapshot GVKs → GVRs for each eligible CSD.
 //  3. Creates/updates the split ClusterRoles + bindings: the DOMAIN SA gets source/snapshot GVR rights
-//     (incl. /status, /finalizers) + get on core's /manifests; the CORE SA gets read + status-write on
-//     the snapshot GVRs + get on the domain /manifests-with-data-restoration subresource.
+//     (incl. /status, /finalizers) + get on core's per-CR /manifests-download; the CORE SA gets read +
+//     status-write on the snapshot GVRs + get on the domain /manifests-with-data-restoration subresource.
 //  4. Writes RBACReady (True / Pending / ApplyFailed) on each eligible CSD.
 func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	cl := input.DC.MustGetK8sClient(sdkk8s.WithSchemeBuilder(v1alpha1.SchemeBuilder))
@@ -65,7 +65,7 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	resolver := restMapperResolver(cl.RESTMapper())
 	sourceGVRs, snapshotGVRs, pendingByName := resolveEligibleGVRs(eligible, resolver)
 
-	// DOMAIN SA: dynamic source/snapshot GVR rights + get on core's aggregated /manifests subresource.
+	// DOMAIN SA: dynamic source/snapshot GVR rights + get on core's per-CR /manifests-download subresource.
 	domainRules := buildRules(sourceGVRs, snapshotGVRs)
 	domainRules = append(domainRules, coreManifestsSubresourceRules(snapshotGVRs)...)
 

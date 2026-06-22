@@ -144,38 +144,6 @@ func (s *Service) compileDomainNode(ctx context.Context, node *RestoreNode, targ
 	return NodeResult{Node: node, Objects: objects}, nil
 }
 
-func (s *Service) BuildManifests(ctx context.Context, opts Options) ([]byte, error) {
-	if opts.TargetNamespace != "" && opts.TargetNamespace != opts.SnapshotNamespace {
-		return nil, fmt.Errorf("%w: targetNamespace differs from snapshot namespace (MVP limitation)", ErrBadRequest)
-	}
-	root, err := s.resolver.ResolveSnapshotTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
-	if err != nil {
-		return nil, err
-	}
-
-	objects, err := s.collectRawManifests(ctx, root)
-	if err != nil {
-		return nil, err
-	}
-	return marshalObjects(objects)
-}
-
-func (s *Service) collectRawManifests(ctx context.Context, node *SnapshotContentNode) ([]unstructured.Unstructured, error) {
-	raw, err := s.loader.LoadManifests(ctx, node.ManifestCheckpointName)
-	if err != nil {
-		return nil, err
-	}
-	objects := raw
-	for _, child := range node.Children {
-		childObjects, err := s.collectRawManifests(ctx, child)
-		if err != nil {
-			return nil, err
-		}
-		objects = append(objects, childObjects...)
-	}
-	return objects, nil
-}
-
 func marshalObjects(objects []unstructured.Unstructured) ([]byte, error) {
 	seen := make(map[string]struct{})
 	raw := make([]map[string]interface{}, 0, len(objects))

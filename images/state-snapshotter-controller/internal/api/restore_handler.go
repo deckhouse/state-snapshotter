@@ -119,11 +119,6 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 // routeCoreSnapshotSubresource dispatches subresources of the core Snapshot kind by method.
 func (h *RestoreHandler) routeCoreSnapshotSubresource(w http.ResponseWriter, r *http.Request, namespace, snapshotName, subresource string) {
 	switch subresource {
-	case "manifests":
-		if !h.requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		h.HandleSnapshotAggregatedManifests(w, r, namespace, snapshotName)
 	case "manifests-with-data-restoration":
 		if !h.requireMethod(w, r, http.MethodGet) {
 			return
@@ -147,11 +142,6 @@ func (h *RestoreHandler) routeCoreSnapshotSubresource(w http.ResponseWriter, r *
 // routeGenericSnapshotSubresource dispatches subresources of any registered (non-core) snapshot kind.
 func (h *RestoreHandler) routeGenericSnapshotSubresource(w http.ResponseWriter, r *http.Request, namespace, resource, name, subresource string) {
 	switch subresource {
-	case "manifests":
-		if !h.requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		h.HandleGenericSnapshotAggregatedManifests(w, r, namespace, resource, name)
 	case "manifests-with-data-restoration":
 		if !h.requireMethod(w, r, http.MethodGet) {
 			return
@@ -198,24 +188,6 @@ func (h *RestoreHandler) HandleListSnapshots(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(listResponse)
 }
 
-func (h *RestoreHandler) HandleGetSnapshotManifests(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
-	start := time.Now()
-	opts := restore.Options{
-		SnapshotName:      snapshotName,
-		SnapshotNamespace: namespace,
-		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
-	}
-
-	data, err := h.service.BuildManifests(r.Context(), opts)
-	if err != nil {
-		h.writeRestoreError(w, err)
-		return
-	}
-
-	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned snapshot manifests", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
-}
-
 func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
 	start := time.Now()
 	opts := restore.Options{
@@ -232,21 +204,6 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned manifests-with-data-restoration", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
-}
-
-func (h *RestoreHandler) HandleSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
-	start := time.Now()
-	if h.nsAggregated == nil {
-		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "aggregated manifests handler not configured")
-		return
-	}
-	data, err := h.nsAggregated.BuildAggregatedJSON(r.Context(), namespace, snapshotName)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
-	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned Snapshot aggregated manifests", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
 }
 
 func (h *RestoreHandler) HandleGenericSnapshotManifestsWithDataRestoration(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
@@ -268,26 +225,6 @@ func (h *RestoreHandler) HandleGenericSnapshotManifestsWithDataRestoration(w htt
 	}
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned per-node manifests-with-data-restoration", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
-}
-
-func (h *RestoreHandler) HandleGenericSnapshotAggregatedManifests(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
-	start := time.Now()
-	if h.nsAggregated == nil {
-		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "aggregated manifests handler not configured")
-		return
-	}
-	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
-	data, err := h.nsAggregated.BuildAggregatedJSONFromSnapshot(r.Context(), snapshotGVK, namespace, snapshotName)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
-	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned generic aggregated snapshot manifests", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
 }
 
 // HandleCoreSnapshotManifestsDownload returns the own-node (single-node) manifests of a core Snapshot

@@ -56,8 +56,9 @@ const (
 	DomainSAName = "domain-controller"
 
 	// DomainClusterRoleName is the aggregated ClusterRole the 030-domain-rbac hook binds to the DOMAIN SA:
-	// dynamic source/snapshot GVR rights (incl. /status, /finalizers) plus get on core's /manifests
-	// aggregated subresource (so the domain pod can fetch base manifests from the core apiserver).
+	// dynamic source/snapshot GVR rights (incl. /status, /finalizers) plus get on core's per-CR
+	// /manifests-download subresource (so the domain pod can fetch each node's own base manifests from the
+	// core apiserver).
 	DomainClusterRoleName = "d8:state-snapshotter:controller:domain"
 
 	// DomainCoreReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the CORE SA for
@@ -67,7 +68,7 @@ const (
 	DomainCoreReadClusterRoleName = "d8:state-snapshotter:controller:domain-read"
 
 	// CoreSubresourcesGroup is the core controller's aggregated subresources API group. The domain pod
-	// fetches base manifests from "<snapshotResource>/manifests" in this group.
+	// fetches each node's own base manifests from "<snapshotResource>/manifests-download" in this group.
 	CoreSubresourcesGroup = "subresources.state-snapshotter.deckhouse.io"
 
 	// DomainSubresourcesGroupPrefix is prepended to a domain snapshot's API group to address its

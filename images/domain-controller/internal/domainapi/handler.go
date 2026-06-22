@@ -42,7 +42,6 @@ const (
 	groupSubtreePath   = groupPath + "/"
 	namespacedRelative = domainVersion + "/namespaces/"
 
-	subresourceManifests        = "manifests"
 	subresourceManifestsRestore = "manifests-with-data-restoration"
 )
 
@@ -131,13 +130,6 @@ func (h *Handler) handleSubtree(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch subresource {
-	case subresourceManifests:
-		data, err := h.service.BaseManifests(r.Context(), resource, namespace, name)
-		if err != nil {
-			h.writeServiceError(w, err)
-			return
-		}
-		h.writeManifests(w, r, data)
 	case subresourceManifestsRestore:
 		data, err := h.service.ManifestsWithDataRestoration(r.Context(), resource, namespace, name, r.URL.Query().Get("targetNamespace"))
 		if err != nil {
@@ -168,9 +160,7 @@ func (h *Handler) handleResourceListDiscovery(w http.ResponseWriter, r *http.Req
 		"apiVersion":   "v1",
 		"groupVersion": domainGroupVersion,
 		"resources": []map[string]interface{}{
-			resource(ResourceDemoVirtualDiskSnapshot+"/"+subresourceManifests, "DemoVirtualDiskSnapshot"),
 			resource(ResourceDemoVirtualDiskSnapshot+"/"+subresourceManifestsRestore, "DemoVirtualDiskSnapshot"),
-			resource(ResourceDemoVirtualMachineSnapshot+"/"+subresourceManifests, "DemoVirtualMachineSnapshot"),
 			resource(ResourceDemoVirtualMachineSnapshot+"/"+subresourceManifestsRestore, "DemoVirtualMachineSnapshot"),
 		},
 	}

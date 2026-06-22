@@ -138,16 +138,18 @@ func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.Pol
 	return rules
 }
 
-// coreManifestsSubresourceRules grants the DOMAIN SA get on core's aggregated /manifests subresource for
-// each demo snapshot resource, so the domain apiserver can fetch BASE manifests from the core apiserver
-// (over the kube-apiserver aggregation layer).
+// coreManifestsSubresourceRules grants the DOMAIN SA get on core's per-CR /manifests-download subresource
+// for each demo snapshot resource, so the domain apiserver can fetch each node's own (single-node) BASE
+// manifests from the core apiserver (over the kube-apiserver aggregation layer). C9 made restore per-CR:
+// the domain recurses children itself, fetching one node's base at a time, so it no longer reads core's
+// (removed) whole-subtree /manifests.
 func coreManifestsSubresourceRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
 	if len(snapshotGVRs) == 0 {
 		return nil
 	}
 	resources := make([]string, 0, len(snapshotGVRs))
 	for _, gvr := range snapshotGVRs {
-		resources = append(resources, gvr.Resource+"/manifests")
+		resources = append(resources, gvr.Resource+"/manifests-download")
 	}
 	return []rbacv1.PolicyRule{{
 		APIGroups: []string{consts.CoreSubresourcesGroup},

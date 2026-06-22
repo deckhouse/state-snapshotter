@@ -30,16 +30,14 @@ import (
 )
 
 // BuildSingleNodeJSON returns the manifests of EXACTLY ONE snapshot node — the objects in its own
-// ManifestCheckpoint — as a JSON array, WITHOUT walking children. This backs the per-CR
-// manifests-download subresource (C3), the symmetric counterpart of the per-CR import upload: export
-// walks the tree client-side and fetches each node's own manifests, DataImport fetches the original
-// PVC manifest (storageClass/volumeMode/status.capacity) of a single leaf, and the recursive per-CR
-// restore (C9) uses it as each node's base. It is distinct from BuildAggregatedJSON*, which recursively
-// dumps the whole subtree via childrenSnapshotContentRefs.
+// ManifestCheckpoint — as a JSON array, WITHOUT walking children. This is the single manifest-read
+// primitive after C9: per-CR manifests-download (C3) is its only consumer pattern — export walks the
+// tree client-side and fetches each node's own manifests, DataImport fetches the original PVC manifest
+// (storageClass/volumeMode/status.capacity) of a single leaf, and the recursive per-CR restore (C9)
+// uses it as each node's base. There is no whole-subtree server-side aggregation anymore.
 //
-// It reuses appendObjectsFromManifestCheckpoint, so a node's manifests are decoded identically to the
-// aggregated path (raw objects with status preserved, namespace made relative, intra-node dedup) — only
-// the subtree recursion is dropped.
+// It decodes a node's manifests as raw objects with status preserved, namespace made relative, and
+// intra-node dedup.
 func (s *AggregatedNamespaceManifests) BuildSingleNodeJSON(ctx context.Context, contentName string) ([]byte, error) {
 	if contentName == "" {
 		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "content name is required")
@@ -70,7 +68,7 @@ func (s *AggregatedNamespaceManifests) BuildSingleNodeJSON(ctx context.Context, 
 }
 
 // BuildSingleNodeJSONForRootSnapshot returns the own-node manifests of a core Snapshot root (no subtree),
-// resolving its SnapshotContent the same way as the aggregated path (live status, then retained content).
+// resolving its SnapshotContent from live status, then from retained content via the root ObjectKeeper.
 func (s *AggregatedNamespaceManifests) BuildSingleNodeJSONForRootSnapshot(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
 	rootContent, err := s.resolveRootContentName(ctx, namespace, snapshotName)
 	if err != nil {

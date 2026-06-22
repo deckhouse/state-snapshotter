@@ -46,12 +46,12 @@ func TestHandleSubtree_Routing(t *testing.T) {
 	}{
 		{"group discovery", http.MethodGet, "/apis/" + domainGroup, http.StatusOK},
 		{"version discovery", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1", http.StatusOK},
-		{"disk manifests", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/dsnap-a/manifests", http.StatusOK},
+		{"removed aggregated manifests subresource", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/dsnap-a/manifests", http.StatusNotFound},
 		{"restore subresource", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/dsnap-a/manifests-with-data-restoration", http.StatusOK},
-		{"method not allowed", http.MethodPost, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/dsnap-a/manifests", http.StatusMethodNotAllowed},
-		{"unsupported resource", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/configmaps/x/manifests", http.StatusNotFound},
+		{"method not allowed", http.MethodPost, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/dsnap-a/manifests-with-data-restoration", http.StatusMethodNotAllowed},
+		{"unsupported resource", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/configmaps/x/manifests-with-data-restoration", http.StatusNotFound},
 		{"unknown subresource", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/demovirtualdisksnapshots/dsnap-a/whatever", http.StatusNotFound},
-		{"invalid namespace", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/Bad_NS/demovirtualdisksnapshots/dsnap-a/manifests", http.StatusBadRequest},
+		{"invalid namespace", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/Bad_NS/demovirtualdisksnapshots/dsnap-a/manifests-with-data-restoration", http.StatusBadRequest},
 		{"too few segments", http.MethodGet, "/apis/" + domainGroup + "/v1alpha1/namespaces/ns1/demovirtualdisksnapshots", http.StatusNotFound},
 	}
 	for _, tc := range cases {
