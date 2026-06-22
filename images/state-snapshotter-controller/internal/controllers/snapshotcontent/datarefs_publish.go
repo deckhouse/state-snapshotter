@@ -139,9 +139,27 @@ func readArtifactRestoreSize(ctx context.Context, c client.Client, artifact stor
 	return resource.NewQuantity(bytes, resource.BinarySI).String(), nil
 }
 
-// PublishSnapshotContentDataRefs copies durable data bindings onto logical SnapshotContent (N5 PR-4).
+// PublishSnapshotContentDataRefs copies the durable data binding onto a logical SnapshotContent (N5 PR-4).
+//
+// Variant A (cardinality ≤1): a SnapshotContent holds at most one dataRef. Domain leaves own exactly one
+// PVC, so refs carries exactly one binding here; multi-PVC scopes (root residual/orphan) fan out into
+// child volume nodes upstream and never publish more than one binding onto a single content. As a
+// defensive guard against a foundation VCR returning >1 dataRef for a single logical content, len>1 is a
+// terminal programming error rather than a silently-truncated publish.
 func PublishSnapshotContentDataRefs(ctx context.Context, c client.Client, contentName string, refs []storagev1alpha1.SnapshotDataBinding) error {
 	if contentName == "" || len(refs) == 0 {
+		return nil
+	}
+	if len(refs) > 1 {
+		return fmt.Errorf("SnapshotContent %s: cannot publish %d dataRefs onto one content (Variant A cardinality ≤1; multiple volumes must be modeled as child volume nodes)", contentName, len(refs))
+	}
+	return PublishSnapshotContentDataRef(ctx, c, contentName, &refs[0])
+}
+
+// PublishSnapshotContentDataRef writes the single durable data binding onto a logical SnapshotContent.
+// A nil binding clears status.dataRef. The write is idempotent under optimistic retry.
+func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, contentName string, ref *storagev1alpha1.SnapshotDataBinding) error {
+	if contentName == "" {
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -149,11 +167,16 @@ func PublishSnapshotContentDataRefs(ctx context.Context, c client.Client, conten
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}
-		if snapshotDataRefsEqual(content.Status.DataRefs, refs) {
+		if snapshotDataRefEqual(content.Status.DataRef, ref) {
 			return nil
 		}
 		base := content.DeepCopy()
-		content.Status.DataRefs = append([]storagev1alpha1.SnapshotDataBinding(nil), refs...)
+		if ref == nil {
+			content.Status.DataRef = nil
+		} else {
+			cp := *ref
+			content.Status.DataRef = &cp
+		}
 		return c.Status().Patch(ctx, content, client.MergeFrom(base))
 	})
 }
@@ -239,35 +262,30 @@ func ensureVolumeSnapshotContentOwnedByContent(
 	})
 }
 
-func snapshotDataRefsEqual(a, b []storagev1alpha1.SnapshotDataBinding) bool {
-	if len(a) != len(b) {
+// snapshotDataRefEqual compares two optional singular dataRef bindings (Variant A).
+func snapshotDataRefEqual(a, b *storagev1alpha1.SnapshotDataBinding) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return dataBindingEqual(*a, *b)
+}
+
+func dataBindingEqual(x, y storagev1alpha1.SnapshotDataBinding) bool {
+	if x.TargetUID != y.TargetUID {
 		return false
 	}
-	byUID := make(map[string]storagev1alpha1.SnapshotDataBinding, len(a))
-	for _, x := range a {
-		byUID[x.TargetUID] = x
+	if x.Target.APIVersion != y.Target.APIVersion || x.Target.Kind != y.Target.Kind ||
+		x.Target.Name != y.Target.Name || x.Target.Namespace != y.Target.Namespace ||
+		string(x.Target.UID) != string(y.Target.UID) {
+		return false
 	}
-	for _, y := range b {
-		x, ok := byUID[y.TargetUID]
-		if !ok {
-			return false
-		}
-		if x.Target.APIVersion != y.Target.APIVersion || x.Target.Kind != y.Target.Kind ||
-			x.Target.Name != y.Target.Name || x.Target.Namespace != y.Target.Namespace ||
-			string(x.Target.UID) != string(y.Target.UID) {
-			return false
-		}
-		if x.Artifact != y.Artifact {
-			return false
-		}
-		if x.VolumeMode != y.VolumeMode || x.FsType != y.FsType || x.StorageClassName != y.StorageClassName || x.Size != y.Size {
-			return false
-		}
-		if !stringSlicesEqual(x.AccessModes, y.AccessModes) {
-			return false
-		}
+	if x.Artifact != y.Artifact {
+		return false
 	}
-	return true
+	if x.VolumeMode != y.VolumeMode || x.FsType != y.FsType || x.StorageClassName != y.StorageClassName || x.Size != y.Size {
+		return false
+	}
+	return stringSlicesEqual(x.AccessModes, y.AccessModes)
 }
 
 func stringSlicesEqual(a, b []string) bool {

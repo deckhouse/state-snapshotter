@@ -148,7 +148,7 @@ func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
-	if vcctrl.ContentDataRefsCoverExpectedTargets(content.Status.DataRefs, expectedTargets) {
+	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataRefList(), expectedTargets) {
 		return true, "", "", nil
 	}
 
@@ -173,6 +173,15 @@ func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
 	}
 
 	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
+	// Variant A: a domain volume leaf owns exactly one PVC, so its content holds ≤1 dataRef. A ready VCR
+	// that returned >1 data artifact for this single logical content cannot be represented (status.dataRef
+	// is singular) and is a domain decomposition fault — fail terminally instead of silently publishing
+	// dataRefs[0] (which would drop the others) or looping forever. Real multi-volume scopes must fan out
+	// into child volume nodes upstream, never a list on one content.
+	if len(bindings) > 1 {
+		return false, snapshot.ReasonVolumeCaptureFailed,
+			fmt.Sprintf("data-leg volume capture returned %d data artifacts for a single SnapshotContent %q; Variant A allows at most one PVC per domain volume node (decompose multiple volumes into child volume nodes)", len(bindings), contentName), nil
+	}
 	bindings, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, bindings)
 	if enrichErr != nil {
 		return false, "", "", enrichErr

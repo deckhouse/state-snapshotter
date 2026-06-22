@@ -83,21 +83,19 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 			ChildrenSnapshotContentRefs: []SnapshotContentChildRef{
 				{Name: "child-content-1"},
 			},
-			DataRefs: []SnapshotDataBinding{
-				{
-					TargetUID: pvcUID,
-					Target: SnapshotSubjectRef{
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Name:       "data",
-						Namespace:  "demo",
-						UID:        types.UID(pvcUID),
-					},
-					Artifact: SnapshotDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       "vsc-1",
-					},
+			DataRef: &SnapshotDataBinding{
+				TargetUID: pvcUID,
+				Target: SnapshotSubjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Name:       "data",
+					Namespace:  "demo",
+					UID:        types.UID(pvcUID),
+				},
+				Artifact: SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       "vsc-1",
 				},
 			},
 		},
@@ -119,12 +117,12 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	if got := out.Status.ChildrenSnapshotContentRefs; len(got) != 1 || got[0].Name != "child-content-1" {
 		t.Fatalf("ChildrenSnapshotContentRefs: got %#v", got)
 	}
-	if len(out.Status.DataRefs) != 1 {
-		t.Fatalf("DataRefs len: got %d want 1", len(out.Status.DataRefs))
+	if out.Status.DataRef == nil {
+		t.Fatalf("DataRef: got nil want a binding")
 	}
-	ref := out.Status.DataRefs[0]
+	ref := *out.Status.DataRef
 	if ref.TargetUID != pvcUID || ref.Target.Name != "data" || ref.Artifact.Name != "vsc-1" {
-		t.Fatalf("DataRefs[0]: got %#v", ref)
+		t.Fatalf("DataRef: got %#v", ref)
 	}
 	if ref.Artifact.Kind == "VolumeCaptureRequest" {
 		t.Fatalf("artifact must reference a durable artifact, not an execution request: %#v", ref.Artifact)
@@ -146,13 +144,9 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	if _, ok := item["namespace"]; ok {
 		t.Fatalf("did not expect namespace key in child content ref JSON: %#v", item)
 	}
-	dataRefs := status["dataRefs"].([]interface{})
-	if len(dataRefs) != 1 {
-		t.Fatalf("expected dataRefs array len 1, got %#v", dataRefs)
-	}
-	entry := dataRefs[0].(map[string]interface{})
+	entry := status["dataRef"].(map[string]interface{})
 	if entry["targetUID"] != pvcUID {
-		t.Fatalf("expected targetUID map key, got %#v", entry)
+		t.Fatalf("expected targetUID on singular dataRef, got %#v", entry)
 	}
 	artifact := entry["artifact"].(map[string]interface{})
 	if artifact["apiVersion"] != "snapshot.storage.k8s.io/v1" ||
@@ -163,8 +157,8 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	if _, ok := artifact["namespace"]; ok {
 		t.Fatalf("did not expect namespace key in cluster artifact JSON: %#v", artifact)
 	}
-	if _, ok := status["dataRef"]; ok {
-		t.Fatal("singular dataRef must not be present in JSON")
+	if _, ok := status["dataRefs"]; ok {
+		t.Fatal("plural dataRefs must not be present in JSON (Variant A: singular dataRef)")
 	}
 }
 

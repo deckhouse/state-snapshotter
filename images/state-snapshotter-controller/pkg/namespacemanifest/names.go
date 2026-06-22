@@ -32,6 +32,16 @@ func SnapshotMCRName(uid types.UID) string {
 	return fmt.Sprintf("snap-%s", uid)
 }
 
+// SnapshotVolumeMCRName returns the deterministic per-orphan-PVC ManifestCaptureRequest name for a child
+// volume node (Variant A): each loose/orphan PVC becomes its own snapshot node whose PVC manifest is
+// captured in its own ManifestCheckpoint (co-ownership: PVC manifest + its dataRef live on one content),
+// rather than being folded into the root MCR. Keyed by the Snapshot UID and the captured PVC UID so it is
+// stable across reconciles and distinct from the root MCR (snap-<uid>).
+func SnapshotVolumeMCRName(snapshotUID types.UID, targetUID string) string {
+	hash := sha256.Sum256([]byte(string(snapshotUID) + "|" + targetUID))
+	return "snap-vol-" + hex.EncodeToString(hash[:8])
+}
+
 // SnapshotRootObjectKeeperName is the cluster-scoped ObjectKeeper name for root retention (FollowObjectWithTTL on Snapshot; see controller config).
 // Root ObjectKeeper name intentionally stays stable for one retained root run. Execution request ObjectKeepers are UID-aware
 // to avoid stale request-name reuse conflicts.

@@ -58,10 +58,10 @@ func VolumeCaptureRequestSafeToDeleteWithHandoff(
 	if err != nil {
 		return false, err
 	}
-	if !isPublishedDataRefsComplete(vcrRefs, content.Status.DataRefs) {
+	if !isPublishedDataRefsComplete(vcrRefs, content.DataRefList()) {
 		return false, nil
 	}
-	for _, b := range content.Status.DataRefs {
+	for _, b := range content.DataRefList() {
 		if b.Artifact.Kind != "VolumeSnapshotContent" || b.Artifact.Name == "" {
 			continue
 		}

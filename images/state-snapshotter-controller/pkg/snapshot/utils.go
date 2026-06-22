@@ -518,46 +518,39 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 	if !ok {
 		return nil
 	}
-	dataRefsRaw, ok := status["dataRefs"].([]interface{})
+	// Variant A: status.dataRef is a single object (cardinality <=1), not a list. Return it as a
+	// 0/1-length slice so slice-based readiness/coverage helpers stay generic.
+	entry, ok := status["dataRef"].(map[string]interface{})
 	if !ok {
 		return nil
 	}
-
-	var refs []DataBindingRef
-	for _, item := range dataRefsRaw {
-		entry, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		binding := DataBindingRef{}
-		if uid, ok := entry["targetUID"].(string); ok {
-			binding.TargetUID = uid
-		}
-		if targetRaw, ok := entry["target"].(map[string]interface{}); ok {
-			binding.Target = objectRefFromMap(targetRaw)
-		}
-		if artifactRaw, ok := entry["artifact"].(map[string]interface{}); ok {
-			binding.Artifact = objectRefFromMap(artifactRaw)
-		}
-		if volumeMode, ok := entry["volumeMode"].(string); ok {
-			binding.VolumeMode = volumeMode
-		}
-		if fsType, ok := entry["fsType"].(string); ok {
-			binding.FsType = fsType
-		}
-		if storageClassName, ok := entry["storageClassName"].(string); ok {
-			binding.StorageClassName = storageClassName
-		}
-		if accessModesRaw, ok := entry["accessModes"].([]interface{}); ok {
-			for _, am := range accessModesRaw {
-				if s, ok := am.(string); ok {
-					binding.AccessModes = append(binding.AccessModes, s)
-				}
+	binding := DataBindingRef{}
+	if uid, ok := entry["targetUID"].(string); ok {
+		binding.TargetUID = uid
+	}
+	if targetRaw, ok := entry["target"].(map[string]interface{}); ok {
+		binding.Target = objectRefFromMap(targetRaw)
+	}
+	if artifactRaw, ok := entry["artifact"].(map[string]interface{}); ok {
+		binding.Artifact = objectRefFromMap(artifactRaw)
+	}
+	if volumeMode, ok := entry["volumeMode"].(string); ok {
+		binding.VolumeMode = volumeMode
+	}
+	if fsType, ok := entry["fsType"].(string); ok {
+		binding.FsType = fsType
+	}
+	if storageClassName, ok := entry["storageClassName"].(string); ok {
+		binding.StorageClassName = storageClassName
+	}
+	if accessModesRaw, ok := entry["accessModes"].([]interface{}); ok {
+		for _, am := range accessModesRaw {
+			if s, ok := am.(string); ok {
+				binding.AccessModes = append(binding.AccessModes, s)
 			}
 		}
-		refs = append(refs, binding)
 	}
-	return refs
+	return []DataBindingRef{binding}
 }
 
 func objectRefFromMap(m map[string]interface{}) ObjectRef {

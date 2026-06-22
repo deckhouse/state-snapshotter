@@ -6,7 +6,7 @@
 
 **Техдизайн R2 2b / R3 (runtime registry, diff, additive watch):** [`r2-phase-2b-r3-runtime-registry.md`](r2-phase-2b-r3-runtime-registry.md).
 
-**Logical SnapshotContent + `dataRefs[]` (N5 data-layer):** design — [`volume-node-dual-capture.md`](volume-node-dual-capture.md); spec **§3.9** (symmetric bulk MCR/VCR); **PR roadmap PR-0…PR-9 + PR-F** — **§2.4.5**. **PR-1** (`SnapshotContent.dataRefs[]`) in code; **PR-F** (bulk VCR in storage-foundation) blocks real data capture.
+**Logical SnapshotContent + singular `dataRef` (N5 data-layer, Variant A):** design — [`volume-node-dual-capture.md`](volume-node-dual-capture.md); spec **§3.9**; **PR roadmap** — **§2.4.5**. `SnapshotContent.status.dataRef` is singular (≤1); multi-PVC → child volume nodes; orphan PVC → own child volume node (C2 / Variant A).
 
 **Сверка с удалённым указателем `snapshot-rework/plan/dorabotki-i-testy.md`:** таблица § → файлы — в [`snapshot-rework/README.md`](../../../snapshot-rework/README.md).
 
@@ -73,7 +73,7 @@
 | N2 | **Manifests-only snapshot path** (без data-layer), в два подэтапа — **§2.4.1:** **N2a** — первый рабочий снимок манифестов одного root (OK + MCR→ManifestCheckpoint + статус на SnapshotContent + download одного снимка); **N2b** — дерево манифест-only снимков (дети, refs на graph, агрегированный Ready, aggregated download). | [`snapshot-controller.md`](snapshot-controller.md) + §2.4.1 | ⬜ |
 | N3 | **Интеграция / hardening:** envtest — recovery после **рестарта** контроллера; доп. негативные кейсы; политика по §15. Базовые mismatch/recovery/status уже в N1 (`snapshot_n1_boundary_test.go`). | design §15 | ⬜ |
 | N4 | **После закрытого N2 (N2a+N2b):** углублённые лимиты большого namespace, политики таймаутов list/apiserver (пересечение с §8.6 design, M2). | design §8.6, §16 | ⬜ |
-| N5 | **За пределами manifests-only дерева:** data-layer (VSC/VCR, **`dataRefs[]`**, restore matching), CSD priority traversal, экспорт/импорт/restore с данными — по [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md) без изменения ТЗ из `docs/`. **Целевая модель:** `SnapshotContent` = **logical node** (MCP + **`dataRefs[]`** + real children); multi-PVC = **несколько `dataRefs[]`**, не synthetic PVC child nodes — [`volume-node-dual-capture.md`](volume-node-dual-capture.md), spec **§3.9**, **§2.4.5** (PR-0…PR-9). VCR/Ceph/sidecar — **storage-foundation**. | бэклог | ⬜ |
+| N5 | **За пределами manifests-only дерева:** data-layer (VSC/VCR, singular **`dataRef`**, restore matching), CSD priority traversal, экспорт/импорт/restore с данными — по [`snapshot-rework/2026-01-25-snapshot.md`](../../../snapshot-rework/2026-01-25-snapshot.md) без изменения ТЗ из `docs/`. **Целевая модель (Variant A):** `SnapshotContent` = **logical node** (MCP + singular **`dataRef`** ≤1 + children = domain decomposition **и** дочерние volume-узлы); multi-PVC = **дочерние volume-узлы**, не список — [`volume-node-dual-capture.md`](volume-node-dual-capture.md), spec **§3.9**, **§2.4.5**. VCR/Ceph/sidecar — **storage-foundation**. | бэклог | ⬜ |
 
 Трек **N*** и **M1–M2** не смешивать в одном PR без необходимости.
 
@@ -84,7 +84,7 @@
 **Зафиксированные договорённости для N2:**
 
 - **ObjectKeeper** нужен уже в **первом рабочем** проходе (**N2a**), как **retention anchor** для корневого content/артефакта; OK **не** заменяет bind (**`status.boundSnapshotContentName`**).
-- Рабочий scope до data-layer — **manifests-only**; **VolumeCaptureRequest**, **VolumeSnapshotContent** и прочие data-ветки — **не реализуются** в N2. Request names живут на snapshot status (future `status.volumeCaptureRequestName`); `SnapshotContent.status.dataRefs[]` (N5) — единственный контракт durable data refs (`VolumeSnapshotContent` и т.д.); в N2 поле не реализуется. Текущий singular `dataRef` в CRD — к удалению/deprecated в **PR-1**, без bridge.
+- Рабочий scope до data-layer — **manifests-only**; **VolumeCaptureRequest**, **VolumeSnapshotContent** и прочие data-ветки — **не реализуются** в N2. Request names живут на snapshot status (future `status.volumeCaptureRequestName`); `SnapshotContent.status.dataRef` (N5, Variant A) — singular контракт durable data ref (`VolumeSnapshotContent`); в N2 поле не реализуется.
 - **Внутренний** путь исполнения manifest capture — **ManifestCaptureRequest → ManifestCheckpoint** (+ существующие **ManifestCheckpointContentChunk** в коде модуля); публичный lifecycle и статусы — **`Snapshot` / `SnapshotContent`** (+ при необходимости те же поля связи, что у unified content с MCP, по аналогии со `SnapshotContent`).
 - **Дерево snapshot-ов и child composition** — **целевая ось продукта**, закрывается в **N2b** (manifests-only), а не откладывается как «дальний optional».
 
@@ -203,53 +203,55 @@
 
 #### 2.4.5 N5 data-layer — `dataRefs[]` roadmap (PR-0 … PR-9)
 
-**Status:** docs stabilized (**PR-0** ✅, symmetric bulk MCR/VCR); **PR-1** ✅; **PR-2** ✅; **PR-3** ✅; **PR-F** ✅ (bulk VCR in storage-foundation); **PR-4** ✅ (VCR publish); **PR-5** ✅ (scoped PVC manifests); **PR-6** ✅ (subtree PVC ownership resolver). **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**. **PR-F task:** `storage-foundation/docs/pr-f-bulk-volumecapturerequest.md`.
+**Status:** docs stabilized (**PR-0** ✅); **PR-1…PR-8** ✅. **C2 / Variant A** ✅ — `dataRefs[] → singular dataRef`; orphan PVC → child volume node. **SSOT design:** [`volume-node-dual-capture.md`](volume-node-dual-capture.md). **Normative:** [`spec/system-spec.md`](../spec/system-spec.md) **§3.9**.
 
-**Target architecture (fixed — do not re-litigate per PR):**
+> **Variant A correction (C2, supersedes the `dataRefs[]` target below).** The PR-0…PR-9 roadmap and checkboxes in this section are the **historical delivery log** of the `dataRefs[] 0..N` iteration. The team has since moved to **Variant A** (cardinality ≤1): `SnapshotContent.status.dataRef` is a **singular object**, and a multi-PVC scope is modeled as **child volume nodes** (one content per PVC). An orphan/loose PVC becomes its own child volume node (own MCP + `dataRef` + CSI-VS handle via `status.boundSnapshotContentName`, INV-ORPHAN4 inverted). Read [`volume-node-dual-capture.md`](volume-node-dual-capture.md) and spec **§3.9** for the current contract; the entries below are kept for provenance only.
 
-- **`SnapshotContent`** = logical snapshot node: **`manifestCheckpointName`** → MCP (many manifests); **`dataRefs[]`** → 0..N PVC↔VSC bindings; **`childrenSnapshotContentRefs[]`** → real domain decomposition only.
-- **`status.dataRefs[]`** = **единственный** data artifact contract. Singular **`dataRef`** — след промежуточного single-artifact design; **не** развивать, **не** legacy bridge (см. **PR-1 correction** ниже).
-- **No** one-volume-per-content; **no** synthetic PVC child snapshot nodes as default multi-PVC shape.
-- **storage-foundation** owns VCR→VSC/CSI; state-snapshotter does not.
+**Target architecture (Variant A):**
 
-**Symmetric bulk requests (fixed):**
+- **`SnapshotContent`** = logical snapshot node: **`manifestCheckpointName`** → MCP (many manifests); **`status.dataRef`** → **≤1** PVC↔VSC binding (singular object); **`childrenSnapshotContentRefs[]`** → real domain decomposition **and** child volume nodes.
+- **`status.dataRef`** = **единственный** data artifact contract (singular). Multi-PVC → child volume nodes, не список. ≥2-на-одном-content невыразимо структурно (CRD `type: object`, не массив; CEL не нужен).
+- **Yes** one-volume-per-content (every captured volume is a leaf content node); a domain leaf owns one PVC, an orphan PVC gets its own child volume node.
+- **storage-foundation** owns VCR→VSC/CSI and the extended-VS fork; state-snapshotter does not.
+
+**Requests (Variant A):**
 
 ```text
 MCR: spec.targets[] → status.checkpointName → SnapshotContent.manifestCheckpointName
-VCR: spec.targets[] → status.dataRefs[]     → SnapshotContent.dataRefs[]
+VCR (domain leaf, 1 PVC): spec.targets[] → status.dataRefs[0] → SnapshotContent.dataRef
+orphan PVC: per-orphan MCR/MCP + CSI VolumeSnapshot → VSC → child SnapshotContent.dataRef
 ```
 
-- At most **one active MCR** and **one active VCR** per logical `SnapshotContent`.
-- **Not target:** N VCR per PVC; cleanup/handoff **per VCR** in a loop across many requests.
+- At most **one active MCR** + (domain) **one active VCR** per logical `SnapshotContent`; child volume node has its own per-orphan MCR.
+- Domain VCR `status.dataRefs[]` len>1 for one content → **terminal** `VolumeCaptureFailed`.
 
 **Gate:** do not mix N5 PRs into N2 manifests-only work without explicit stage gate.
 
-##### Target API (`status.dataRefs[]`) — PR-1
+##### Target API (`status.dataRef`, Variant A)
 
 ```yaml
 status:
-  dataRefs:
-    - target:
-        apiVersion: v1
-        kind: PersistentVolumeClaim
-        namespace: demo
-        name: data
-        uid: "<pvc-uid>"
-      artifact:
-        apiVersion: snapshot.storage.k8s.io/v1
-        kind: VolumeSnapshotContent
-        name: snapcontent-123
+  manifestCheckpointName: mcp-...
+  dataRef:                       # singular object; omitted on aggregator/manifest-only nodes
+    targetUID: "<pvc-uid>"
+    target:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      namespace: demo
+      name: data
+      uid: "<pvc-uid>"
+    artifact:
+      apiVersion: snapshot.storage.k8s.io/v1
+      kind: VolumeSnapshotContent
+      name: snapcontent-123
 ```
 
 | Requirement | Rule |
 |-------------|------|
-| OpenAPI | **`listType=map`** |
-| Map key | **`listMapKey=target.uid`** if kubebuilder nested key is clean; else flat **`targetUID`** on entry + **`listMapKey=targetUID`** |
-| Uniqueness | One entry per **`pvcUID`** per content; unique **`artifact.name`** per content |
-| Readers / writers | **`dataRefs[]` only** — no `dataRef` fallback, no dual-write |
-| Old `dataRef` field | Remove from CRD if lifecycle allows; else **deprecated**, unused in code |
-
-**PR-1 correction (обязательно):** не реализовать legacy bridge для `status.dataRef`. Рабочей версии с singular `dataRef` не было — backward compatibility не нужна. Чистый первый контракт: только **`dataRefs[]`**.
+| Type | `status.dataRef` is an **object** (`*SnapshotDataBinding`), not an array |
+| Required sub-field | `targetUID` required, `MinLength=1` when present |
+| Cardinality | ≤1; multi-PVC → `childrenSnapshotContentRefs[]` child volume nodes |
+| Readers / writers | **`dataRef` only**; `DataRefList()` bridges it to a 0/1 slice for generic helpers |
 
 **Root aggregator MCP (all PRs that touch readiness):** even empty root publishes **`manifestCheckpointName`** → **Ready MCP** (0 objects); SCC validates it; **no** “root without MCP” branch.
 

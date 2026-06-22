@@ -42,33 +42,3 @@ func ManifestTargetsFromVolumeTargets(targets []vcpkg.Target) []ManifestTarget {
 	sortManifestTargets(out)
 	return out
 }
-
-// AppendOwnedPVCManifestTargets adds owned PVC targets not already present and not in subtree exclude (E5).
-func AppendOwnedPVCManifestTargets(
-	base []ManifestTarget,
-	owned []ManifestTarget,
-	exclude map[string]struct{},
-	snapshotNamespace string,
-) []ManifestTarget {
-	if len(owned) == 0 {
-		return base
-	}
-	seen := make(map[string]struct{}, len(base)+len(owned))
-	for _, t := range base {
-		seen[ManifestTargetDedupKey(snapshotNamespace, t)] = struct{}{}
-	}
-	out := append([]ManifestTarget(nil), base...)
-	for _, t := range owned {
-		k := ManifestTargetDedupKey(snapshotNamespace, t)
-		if _, skip := exclude[k]; skip {
-			continue
-		}
-		if _, dup := seen[k]; dup {
-			continue
-		}
-		seen[k] = struct{}{}
-		out = append(out, t)
-	}
-	sortManifestTargets(out)
-	return out
-}

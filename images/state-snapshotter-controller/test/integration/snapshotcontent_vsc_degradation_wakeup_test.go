@@ -135,7 +135,7 @@ var _ = Describe("Integration: VSC degradation wakes owning SnapshotContent", Se
 				return err
 			}
 			c.Status.ManifestCheckpointName = mcpName
-			c.Status.DataRefs = []storagev1alpha1.SnapshotDataBinding{{
+			c.Status.DataRef = &storagev1alpha1.SnapshotDataBinding{
 				TargetUID: "pvc-uid-" + contentName,
 				Target: storagev1alpha1.SnapshotSubjectRef{
 					APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-1", Namespace: "default",
@@ -144,7 +144,7 @@ var _ = Describe("Integration: VSC degradation wakes owning SnapshotContent", Se
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: vscName,
 				},
-			}}
+			}
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 

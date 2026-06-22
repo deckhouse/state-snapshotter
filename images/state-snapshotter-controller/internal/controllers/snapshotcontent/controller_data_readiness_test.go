@@ -95,43 +95,9 @@ func TestResolveDataReadinessOneVSCReady(t *testing.T) {
 	}
 }
 
-func TestResolveDataReadinessTwoVSCOnePending(t *testing.T) {
-	r, content := dataReadinessFixture(t,
-		dataBinding("pvc-1", "vsc-ready", true),
-		dataBinding("pvc-2", "vsc-pending", true),
-		withVSC("vsc-ready", true),
-		withVSC("vsc-pending", false),
-	)
-	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
-	if err != nil {
-		t.Fatalf("resolveDataReadiness: %v", err)
-	}
-	if ready || reason != snapshot.ReasonDataCapturePending {
-		t.Fatalf("expected DataCapturePending, got ready=%v reason=%q msg=%q", ready, reason, msg)
-	}
-	if !strings.Contains(msg, "1/2 ready") {
-		t.Fatalf("expected progress count in message, got %q", msg)
-	}
-	if !strings.Contains(msg, "vsc-pending") {
-		t.Fatalf("expected pending VSC name in message, got %q", msg)
-	}
-}
-
-func TestResolveDataReadinessTwoVSCBothReady(t *testing.T) {
-	r, content := dataReadinessFixture(t,
-		dataBinding("pvc-1", "vsc-a", true),
-		dataBinding("pvc-2", "vsc-b", true),
-		withVSC("vsc-a", true),
-		withVSC("vsc-b", true),
-	)
-	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
-	if err != nil {
-		t.Fatalf("resolveDataReadiness: %v", err)
-	}
-	if !ready || reason != "" || msg != "" {
-		t.Fatalf("expected ready, got ready=%v reason=%q msg=%q", ready, reason, msg)
-	}
-}
+// Variant A: a SnapshotContent carries ≤1 dataRef, so the multi-dataRef-on-one-content readiness cases
+// (former TestResolveDataReadinessTwoVSC*) are no longer representable — multi-volume aggregation is
+// covered by ChildrenReady over child volume content nodes, exercised in the content aggregation tests.
 
 // A VSC that is being deleted (deletionTimestamp set) must not keep the parent Ready=True even though
 // it still exists and reports readyToUse=true. Classified terminal ArtifactMissing (INV-FAIL-PROP).
@@ -269,14 +235,18 @@ func dataReadinessFixture(t *testing.T, opts ...interface{}) (*SnapshotContentCo
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonSnapshotContentWithDataRefs(state.bindings)
+	content := commonSnapshotContentWithDataRef(state.bindings)
 	return r, content
 }
 
-func commonSnapshotContentWithDataRefs(bindings []snapshot.DataBindingRef) *unstructured.Unstructured {
-	dataRefs := make([]interface{}, 0, len(bindings))
-	for _, b := range bindings {
-		entry := map[string]interface{}{
+// commonSnapshotContentWithDataRef builds a SnapshotContent carrying at most one status.dataRef
+// (Variant A: a node has ≤1 data artifact; multi-volume aggregation is via child content nodes, not a
+// dataRefs[] list). A second binding cannot be represented on one content, so only the first is written.
+func commonSnapshotContentWithDataRef(bindings []snapshot.DataBindingRef) *unstructured.Unstructured {
+	status := map[string]interface{}{}
+	if len(bindings) > 0 {
+		b := bindings[0]
+		status["dataRef"] = map[string]interface{}{
 			"targetUID": b.TargetUID,
 			"target": map[string]interface{}{
 				"apiVersion": "v1",
@@ -290,7 +260,6 @@ func commonSnapshotContentWithDataRefs(bindings []snapshot.DataBindingRef) *unst
 				"name":       b.Artifact.Name,
 			},
 		}
-		dataRefs = append(dataRefs, entry)
 	}
 
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -299,9 +268,7 @@ func commonSnapshotContentWithDataRefs(bindings []snapshot.DataBindingRef) *unst
 		"metadata": map[string]interface{}{
 			"name": "content-data-readiness",
 		},
-		"status": map[string]interface{}{
-			"dataRefs": dataRefs,
-		},
+		"status": status,
 	}}
 	obj.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
 	return obj

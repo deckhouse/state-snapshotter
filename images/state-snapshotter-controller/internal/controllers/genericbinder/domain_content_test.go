@@ -195,10 +195,10 @@ func TestEnsureDomainContentLinks_DataLegHandoff(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 1 {
-		t.Fatalf("expected 1 published dataRef, got %d", len(got.Status.DataRefs))
+	if got.Status.DataRef == nil {
+		t.Fatalf("expected 1 published dataRef, got none")
 	}
-	ref := got.Status.DataRefs[0]
+	ref := *got.Status.DataRef
 	if ref.TargetUID != domainTestPVCUID || ref.Artifact.Name != domainTestVSCName {
 		t.Fatalf("unexpected dataRef: %#v", ref)
 	}
@@ -270,8 +270,8 @@ func TestEnsureDomainContentLinks_DataLegPendingRequeues(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 0 {
-		t.Fatalf("pending VCR must not publish dataRefs, got %#v", got.Status.DataRefs)
+	if got.Status.DataRef != nil {
+		t.Fatalf("pending VCR must not publish dataRefs, got %#v", got.Status.DataRef)
 	}
 	fresh := &unstructured.Unstructured{}
 	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)

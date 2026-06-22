@@ -72,44 +72,35 @@ func ptrInt64(v int64) *int64 {
 	return &v
 }
 
-func ptrString(v string) *string {
-	return &v
-}
-
-func snapshotContentDataRefsSchema() apiextensionsv1.JSONSchemaProps {
+// snapshotContentDataRefSchema is the Variant A singular status.dataRef schema (cardinality ≤1): a
+// SnapshotContent carries at most one data binding as an object, not a dataRefs[] list.
+func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
 	return apiextensionsv1.JSONSchemaProps{
-		Type: "array",
-		Items: &apiextensionsv1.JSONSchemaPropsOrArray{
-			Schema: &apiextensionsv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{
+			"targetUID": {Type: "string", MinLength: ptrInt64(1)},
+			"target": {
 				Type: "object",
 				Properties: map[string]apiextensionsv1.JSONSchemaProps{
-					"targetUID": {Type: "string", MinLength: ptrInt64(1)},
-					"target": {
-						Type: "object",
-						Properties: map[string]apiextensionsv1.JSONSchemaProps{
-							"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
-							"kind":       {Type: "string", MinLength: ptrInt64(1)},
-							"name":       {Type: "string", MinLength: ptrInt64(1)},
-							"namespace":  {Type: "string"},
-							"uid":        {Type: "string"},
-						},
-						Required: []string{"apiVersion", "kind", "name"},
-					},
-					"artifact": {
-						Type: "object",
-						Properties: map[string]apiextensionsv1.JSONSchemaProps{
-							"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
-							"kind":       {Type: "string", MinLength: ptrInt64(1)},
-							"name":       {Type: "string", MinLength: ptrInt64(1)},
-						},
-						Required: []string{"apiVersion", "kind", "name"},
-					},
+					"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
+					"kind":       {Type: "string", MinLength: ptrInt64(1)},
+					"name":       {Type: "string", MinLength: ptrInt64(1)},
+					"namespace":  {Type: "string"},
+					"uid":        {Type: "string"},
 				},
-				Required: []string{"targetUID", "target", "artifact"},
+				Required: []string{"apiVersion", "kind", "name"},
+			},
+			"artifact": {
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
+					"kind":       {Type: "string", MinLength: ptrInt64(1)},
+					"name":       {Type: "string", MinLength: ptrInt64(1)},
+				},
+				Required: []string{"apiVersion", "kind", "name"},
 			},
 		},
-		XListType:    ptrString("map"),
-		XListMapKeys: []string{"targetUID"},
+		Required: []string{"targetUID", "target", "artifact"},
 	}
 }
 
@@ -354,7 +345,7 @@ var _ = BeforeSuite(func() {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"manifestCheckpointName": {Type: "string"},
-										"dataRefs":               snapshotContentDataRefsSchema(),
+										"dataRef":                snapshotContentDataRefSchema(),
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -484,7 +475,7 @@ var _ = BeforeSuite(func() {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"manifestCheckpointName": {Type: "string"},
-										"dataRefs":               snapshotContentDataRefsSchema(),
+										"dataRef":                snapshotContentDataRefSchema(),
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{

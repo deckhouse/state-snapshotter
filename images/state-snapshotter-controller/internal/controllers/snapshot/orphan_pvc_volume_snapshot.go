@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,8 +36,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
-	volumecapturectrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -477,6 +480,11 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotChildLeaves(
 	})
 }
 
+// reconcileOrphanPVCVolumeSnapshotPublish materializes one standalone child volume node per loose/orphan
+// PVC (Variant A): instead of publishing a dataRefs[] list onto the root content, each ready orphan PVC
+// becomes its own child SnapshotContent (own dataRef + own ManifestCheckpoint holding that PVC's
+// manifest), linked under the root. The root aggregator keeps dataRef=nil. Returns done (stale-VCR
+// cleared) only once every orphan child node's data + manifest legs are observable.
 func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -489,11 +497,12 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 		// left behind by a previous (VCR-based) run or migration.
 		return r.clearOrphanPVCStaleVCR(ctx, nsSnap, content)
 	}
-	if snapshotcontentDataRefsCoverTargets(content.Status.DataRefs, targets) {
-		return r.clearOrphanPVCStaleVCR(ctx, nsSnap, content)
+	// Re-read the root content so childrenSnapshotContentRefs / UID are fresh for child linking and ownerRefs.
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	bindings := make([]storagev1alpha1.SnapshotDataBinding, 0, len(targets))
+	allReady := true
 	for _, target := range targets {
 		res, err := r.orphanPVCVolumeSnapshotBinding(ctx, nsSnap, target)
 		if err != nil {
@@ -503,25 +512,218 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 			return r.failCapture(ctx, nsSnap, content, res.reason, res.message)
 		}
 		if !res.ready {
-			return requeueVolumeCaptureIf(allowRequeue, "waiting for orphan PVC VolumeSnapshot ready")
+			allReady = false
+			continue
 		}
-		bindings = append(bindings, *res.binding)
+		ready, terr := r.ensureOrphanVolumeChildNode(ctx, nsSnap, content, target, res.binding)
+		if terr != nil {
+			return ctrl.Result{}, terr
+		}
+		if !ready {
+			allReady = false
+		}
 	}
-
-	bindings, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.directReader(), bindings)
-	if enrichErr != nil {
-		return requeueVolumeCaptureIf(allowRequeue, fmt.Sprintf("enrich volume metadata: %v", enrichErr))
-	}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); err != nil {
-		return requeueVolumeCaptureIf(allowRequeue, fmt.Sprintf("VolumeSnapshotContent handoff: %v", err))
-	}
-	if err := snapshotcontent.PublishSnapshotContentDataRefs(ctx, r.Client, content.Name, bindings); err != nil {
-		return ctrl.Result{}, err
+	if !allReady {
+		return requeueVolumeCaptureIf(allowRequeue, "waiting for orphan PVC child volume nodes")
 	}
 	return r.clearOrphanPVCStaleVCR(ctx, nsSnap, content)
+}
+
+// ensureOrphanVolumeChildNode materializes the standalone child volume node for one loose/orphan PVC
+// (Variant A): a dedicated child SnapshotContent that owns this PVC's dataRef (its bound VSC) and its own
+// ManifestCheckpoint (the PVC manifest), linked under the root content; the namespaced CSI VolumeSnapshot
+// becomes the handle (status.boundSnapshotContentName -> child, INV-ORPHAN4). The PVC manifest and its
+// dataRef therefore live on one content (co-ownership invariant), and the dataRef is NOT published on the
+// root aggregator. Returns ready=true once the child node's data and manifest legs are both observable.
+func (r *SnapshotReconciler) ensureOrphanVolumeChildNode(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	root *storagev1alpha1.SnapshotContent,
+	target vcpkg.Target,
+	binding *storagev1alpha1.SnapshotDataBinding,
+) (ready bool, err error) {
+	enriched, eerr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.directReader(), []storagev1alpha1.SnapshotDataBinding{*binding})
+	if eerr != nil {
+		return false, eerr
+	}
+	child, err := snapshotcontent.EnsureVolumeChildContent(ctx, r.Client, root, target.UID)
+	if err != nil {
+		return false, err
+	}
+	// Hand off the bound VSC to the CHILD content (ownerRef + Retain), then publish the single dataRef.
+	if err := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, child, enriched); err != nil {
+		return false, err
+	}
+	if err := snapshotcontent.PublishSnapshotContentDataRef(ctx, r.Client, child.Name, &enriched[0]); err != nil {
+		return false, err
+	}
+	mcpReady, err := r.ensureOrphanVolumeChildManifestCheckpoint(ctx, nsSnap, child, target)
+	if err != nil {
+		return false, err
+	}
+	if err := snapshotcontent.LinkChildVolumeContentRef(ctx, r.Client, root.Name, child.Name); err != nil {
+		return false, err
+	}
+	if err := r.bindOrphanVSToChildContent(ctx, nsSnap, target, child.Name); err != nil {
+		return false, err
+	}
+	return mcpReady, nil
+}
+
+// ensureOrphanVolumeChildManifestCheckpoint ensures the per-orphan ManifestCaptureRequest that captures
+// just this PVC's manifest into the child volume node's own ManifestCheckpoint, and publishes its name
+// onto the child content. Returns ready=true once that MCP is Ready (the common SnapshotContent
+// controller re-parents the MCP ownerRef to the child content). Idempotent: once the child's manifest is
+// persisted it does not recreate the MCR (a fresh MCR UID would derive a different MCP name).
+func (r *SnapshotReconciler) ensureOrphanVolumeChildManifestCheckpoint(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	child *storagev1alpha1.SnapshotContent,
+	target vcpkg.Target,
+) (ready bool, err error) {
+	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotVolumeMCRName(nsSnap.UID, target.UID)}
+
+	// Already persisted: MCP Ready under the child's published name. Do not recreate the per-orphan MCR.
+	cur := &storagev1alpha1.SnapshotContent{}
+	if gErr := r.Client.Get(ctx, client.ObjectKey{Name: child.Name}, cur); gErr != nil {
+		return false, gErr
+	}
+	if cur.Status.ManifestCheckpointName != "" {
+		if mcpReady, mErr := r.orphanVolumeChildManifestCheckpointReady(ctx, cur.Status.ManifestCheckpointName); mErr != nil {
+			return false, mErr
+		} else if mcpReady {
+			if safe, sErr := manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.Client, mcrKey, child.Name); sErr == nil && safe {
+				if dErr := r.deleteOrphanVolumeMCR(ctx, mcrKey); dErr != nil {
+					return false, dErr
+				}
+			}
+			return true, nil
+		}
+	}
+
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	gErr := r.Client.Get(ctx, mcrKey, mcr)
+	if apierrors.IsNotFound(gErr) {
+		if cur.Status.ManifestCheckpointName != "" {
+			// The child already published its manifestCheckpointName and the per-orphan MCR was deleted
+			// after a successful capture (above). Reaching here means that published MCP is now NOT Ready —
+			// a post-success degradation (Phase 2a), not a first capture. Do NOT recreate the MCR with a
+			// fresh UID: that would derive a different MCP name, abandon the published one, and re-target a
+			// PVC that may no longer exist. Leave the published name in place and let the child content's
+			// ManifestsReady aggregation surface the degraded MCP. Mirrors the root path's
+			// reconcileIfRootManifestCheckpointAlreadyReady guard.
+			return false, nil
+		}
+		apiVersion := target.APIVersion
+		if apiVersion == "" {
+			apiVersion = corev1.SchemeGroupVersion.String()
+		}
+		mcr = &ssv1alpha1.ManifestCaptureRequest{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            mcrKey.Name,
+				Namespace:       mcrKey.Namespace,
+				OwnerReferences: []metav1.OwnerReference{snapshotOwnerReferenceForMCR(nsSnap)},
+				Labels:          map[string]string{labelSnapshotUID: string(nsSnap.UID)},
+			},
+			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
+				Targets: []ssv1alpha1.ManifestTarget{{
+					APIVersion: apiVersion,
+					Kind:       "PersistentVolumeClaim",
+					Name:       target.Name,
+				}},
+			},
+		}
+		if cErr := r.Client.Create(ctx, mcr); cErr != nil && !apierrors.IsAlreadyExists(cErr) {
+			return false, cErr
+		}
+		if rErr := r.Client.Get(ctx, mcrKey, mcr); rErr != nil {
+			// Created but not yet readable; the MCP is not ready this round.
+			return false, nil
+		}
+	} else if gErr != nil {
+		return false, gErr
+	}
+
+	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+	if mcpName == "" {
+		return false, nil
+	}
+	if pErr := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, child.Name, mcpName); pErr != nil {
+		return false, pErr
+	}
+	return r.orphanVolumeChildManifestCheckpointReady(ctx, mcpName)
+}
+
+func (r *SnapshotReconciler) orphanVolumeChildManifestCheckpointReady(ctx context.Context, mcpName string) (bool, error) {
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	cond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+	return cond != nil && cond.Status == metav1.ConditionTrue, nil
+}
+
+func (r *SnapshotReconciler) deleteOrphanVolumeMCR(ctx context.Context, key types.NamespacedName) error {
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := r.Client.Get(ctx, key, mcr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if err := r.Client.Delete(ctx, mcr); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// bindOrphanVSToChildContent writes the orphan CSI VolumeSnapshot's status.boundSnapshotContentName to
+// its child volume content (INV-ORPHAN4 handle), using an optimistic-lock merge patch (D4a): the VS
+// status is co-owned with the external snapshot-controller, so a concurrent writer yields a 409 and the
+// read-modify-write retries instead of racing on a stale resourceVersion.
+func (r *SnapshotReconciler) bindOrphanVSToChildContent(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	target vcpkg.Target,
+	childContentName string,
+) error {
+	vsName := orphanPVCVolumeSnapshotName(nsSnap.UID, target)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vs := &unstructured.Unstructured{}
+		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: vsName}, vs); err != nil {
+			return err
+		}
+		cur, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
+		if cur == childContentName {
+			return nil
+		}
+		base := vs.DeepCopy()
+		if err := unstructured.SetNestedField(vs.Object, childContentName, "status", "boundSnapshotContentName"); err != nil {
+			return err
+		}
+		if err := r.Client.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		// Verify the field actually persisted. status.boundSnapshotContentName is a Deckhouse extended-VS
+		// fork field (storage-foundation); on a cluster running the upstream VolumeSnapshot CRD the API
+		// server silently prunes this unknown status field, so the patch "succeeds" but the handle is lost
+		// and restore can never resolve this orphan child volume node (terminal ErrNotReady with no clear
+		// cause). controller-runtime decodes the server response back into vs, so re-read it and fail loudly
+		// with an actionable diagnostic instead of leaving a Ready-looking but unrestorable snapshot.
+		persisted, _, perr := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
+		if perr != nil {
+			return fmt.Errorf("read back VolumeSnapshot %s/%s boundSnapshotContentName: %w", nsSnap.Namespace, vsName, perr)
+		}
+		if persisted != childContentName {
+			return fmt.Errorf("VolumeSnapshot %s/%s status.boundSnapshotContentName did not persist (got %q, want %q): the extended VolumeSnapshot CRD is missing this field — install the storage-foundation extended-VS fork (status.boundSnapshotContentName)",
+				nsSnap.Namespace, vsName, persisted, childContentName)
+		}
+		return nil
+	})
 }
 
 // clearOrphanPVCStaleVCR removes any leftover root VCR (the orphan path never creates one) and clears
@@ -678,8 +880,4 @@ func volumeSnapshotStatusErrorMessage(obj *unstructured.Unstructured) (string, b
 		return "", false
 	}
 	return msg, true
-}
-
-func snapshotcontentDataRefsCoverTargets(refs []storagev1alpha1.SnapshotDataBinding, targets []vcpkg.Target) bool {
-	return len(targets) > 0 && volumecapturectrl.ContentDataRefsCoverExpectedTargets(refs, targets)
 }

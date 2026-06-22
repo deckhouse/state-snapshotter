@@ -96,31 +96,14 @@ func pvcManifestRaw(name, uid string) map[string]interface{} {
 	}
 }
 
-// materializeRoot builds the GENERIC root: MCP + chunk + SnapshotContent + root Snapshot whose
-// childrenSnapshotRefs point at orphan-PVC VolumeSnapshot leaves and the given top-level domain
-// snapshots. It deliberately does NOT seed the domain snapshot CRs: the resolver short-circuits
-// domain kinds at the ref level before any Get, so core must restore the subtree without reading them
-// (no demo RBAC). A regression to a post-Get short-circuit would fail these tests with NotFound.
-func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans []orphanLeaf, children []domainChild, rootNotReady bool) []client.Object {
-	t.Helper()
-	const rootName = "app"
-	content := rootName + "-content"
-	mcp := "mcp-" + rootName
-
+// materializeMCP builds a Ready ManifestCheckpoint + its single content chunk for the given manifests.
+func materializeMCP(mcpName string, manifests []map[string]interface{}) []client.Object {
 	data, checksum := encodeChunk(manifests)
-	objs := []client.Object{
-		&ssv1alpha1.ManifestCheckpointContentChunk{
-			ObjectMeta: metav1.ObjectMeta{Name: mcp + "-chunk-0"},
-			Spec: ssv1alpha1.ManifestCheckpointContentChunkSpec{
-				CheckpointName: mcp, Index: 0, Data: data, Checksum: checksum, ObjectsCount: len(manifests),
-			},
-		},
-	}
 	mcpObj := &ssv1alpha1.ManifestCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: mcp, UID: types.UID("uid-" + mcp)},
+		ObjectMeta: metav1.ObjectMeta{Name: mcpName, UID: types.UID("uid-" + mcpName)},
 		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "source-ns"},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
-			Chunks:       []ssv1alpha1.ChunkInfo{{Name: mcp + "-chunk-0", Index: 0, Checksum: checksum}},
+			Chunks:       []ssv1alpha1.ChunkInfo{{Name: mcpName + "-chunk-0", Index: 0, Checksum: checksum}},
 			TotalObjects: len(manifests),
 		},
 	}
@@ -128,17 +111,34 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 		Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
 		Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
 	})
-	objs = append(objs, mcpObj)
-
-	var dataRefs []storagev1alpha1.SnapshotDataBinding
-	for _, o := range orphans {
-		dataRefs = append(dataRefs, storagev1alpha1.SnapshotDataBinding{
-			TargetUID: o.pvcUID,
-			Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: o.pvcName, Namespace: "source-ns", UID: types.UID(o.pvcUID)},
-			Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: o.vscName},
-		})
+	return []client.Object{
+		&ssv1alpha1.ManifestCheckpointContentChunk{
+			ObjectMeta: metav1.ObjectMeta{Name: mcpName + "-chunk-0"},
+			Spec: ssv1alpha1.ManifestCheckpointContentChunkSpec{
+				CheckpointName: mcpName, Index: 0, Data: data, Checksum: checksum, ObjectsCount: len(manifests),
+			},
+		},
+		mcpObj,
 	}
-	contentObj := readySnapshotContent(content, mcp, dataRefs)
+}
+
+// materializeRoot builds the GENERIC root: MCP + chunk + SnapshotContent + root Snapshot whose
+// childrenSnapshotRefs point at orphan-PVC VolumeSnapshot handles and the given top-level domain
+// snapshots. Variant A: the root content is an aggregator (no dataRef); each orphan PVC is its own
+// standalone child volume node (own MCP holding that PVC's manifest + a single dataRef), reachable via
+// the VolumeSnapshot handle's status.boundSnapshotContentName. The root MCP therefore holds only the
+// non-orphan manifests. It deliberately does NOT seed the domain snapshot CRs: the resolver
+// short-circuits domain kinds at the ref level before any Get, so core must restore the subtree
+// without reading them (no demo RBAC). A regression to a post-Get short-circuit would fail with NotFound.
+func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans []orphanLeaf, children []domainChild, rootNotReady bool) []client.Object {
+	t.Helper()
+	const rootName = "app"
+	content := rootName + "-content"
+	mcp := "mcp-" + rootName
+
+	objs := materializeMCP(mcp, manifests)
+
+	contentObj := readySnapshotContent(content, mcp, nil)
 	if rootNotReady {
 		meta.SetStatusCondition(&contentObj.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Pending"})
 	}
@@ -146,7 +146,16 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 
 	var childRefs []storagev1alpha1.SnapshotChildRef
 	for _, o := range orphans {
-		objs = append(objs, volumeSnapshotObj(o.vsName, o.vscName))
+		// Standalone child volume node: own MCP carrying this orphan PVC's manifest + a single dataRef.
+		childContentName := content + "-vol-" + o.vsName
+		childMCP := "mcp-vol-" + o.vsName
+		objs = append(objs, materializeMCP(childMCP, []map[string]interface{}{pvcManifestRaw(o.pvcName, o.pvcUID)})...)
+		objs = append(objs, readySnapshotContent(childContentName, childMCP, &storagev1alpha1.SnapshotDataBinding{
+			TargetUID: o.pvcUID,
+			Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: o.pvcName, Namespace: "source-ns", UID: types.UID(o.pvcUID)},
+			Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: o.vscName},
+		}))
+		objs = append(objs, volumeSnapshotObj(o.vsName, o.vscName, childContentName))
 		childRefs = append(childRefs, storagev1alpha1.SnapshotChildRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: o.vsName})
 	}
 	for _, c := range children {
@@ -226,8 +235,10 @@ func hasObj(objs []map[string]interface{}, kind, name string) bool {
 // compiles the root in-process and delegates each domain subtree; the spliced output is apply-ready,
 // post-order, and in the target namespace.
 func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T) {
+	// Variant A: the orphan PVC manifest now lives on its own child volume node's MCP (materializeRoot
+	// seeds it from the orphanLeaf), so the root MCP carries only the ConfigMap.
 	objs := materializeRoot(t,
-		[]map[string]interface{}{cmManifest("config"), pvcManifestRaw("shared-pvc", "uid-shared")},
+		[]map[string]interface{}{cmManifest("config")},
 		[]orphanLeaf{{pvcName: "shared-pvc", pvcUID: "uid-shared", vsName: "vs-shared", vscName: "vsc-shared"}},
 		[]domainChild{
 			{kind: "DemoVirtualMachineSnapshot", name: "vm-a-snap"},

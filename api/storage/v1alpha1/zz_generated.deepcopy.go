@@ -169,12 +169,10 @@ func (in *SnapshotContentStatus) DeepCopyInto(out *SnapshotContentStatus) {
 		*out = make([]SnapshotContentChildRef, len(*in))
 		copy(*out, *in)
 	}
-	if in.DataRefs != nil {
-		in, out := &in.DataRefs, &out.DataRefs
-		*out = make([]SnapshotDataBinding, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
+	if in.DataRef != nil {
+		in, out := &in.DataRef, &out.DataRef
+		*out = new(SnapshotDataBinding)
+		(*in).DeepCopyInto(*out)
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions

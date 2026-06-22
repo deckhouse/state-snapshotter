@@ -309,15 +309,15 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 		Size:             "10Gi",
 		AccessModes:      []string{"ReadWriteOnce"},
 	}
-	mut := func(f func(b *storagev1alpha1.SnapshotDataBinding)) []storagev1alpha1.SnapshotDataBinding {
+	mut := func(f func(b *storagev1alpha1.SnapshotDataBinding)) storagev1alpha1.SnapshotDataBinding {
 		c := base
 		c.AccessModes = append([]string(nil), base.AccessModes...)
 		f(&c)
-		return []storagev1alpha1.SnapshotDataBinding{c}
+		return c
 	}
-	a := []storagev1alpha1.SnapshotDataBinding{base}
 
-	if !snapshotDataRefsEqual(a, mut(func(b *storagev1alpha1.SnapshotDataBinding) {})) {
+	// Variant A: a content holds a single dataRef, so equality is per-binding (dataBindingEqual).
+	if !dataBindingEqual(base, mut(func(b *storagev1alpha1.SnapshotDataBinding) {})) {
 		t.Error("identical bindings must compare equal")
 	}
 	for name, f := range map[string]func(b *storagev1alpha1.SnapshotDataBinding){
@@ -327,7 +327,7 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 		"size":             func(b *storagev1alpha1.SnapshotDataBinding) { b.Size = "20Gi" },
 		"accessModes":      func(b *storagev1alpha1.SnapshotDataBinding) { b.AccessModes = []string{"ReadWriteMany"} },
 	} {
-		if snapshotDataRefsEqual(a, mut(f)) {
+		if dataBindingEqual(base, mut(f)) {
 			t.Errorf("bindings differing by %s must compare unequal", name)
 		}
 	}

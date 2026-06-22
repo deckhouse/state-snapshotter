@@ -86,16 +86,33 @@ func BuildRootNamespaceManifestCaptureTargets(
 	if err != nil {
 		return nil, err
 	}
-	if !hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) {
-		// Only VS visibility leaves (or none): no real subtree to exclude; capture own scope directly.
-		return namespacemanifest.AppendOwnedPVCManifestTargets(base, ownedPVC, nil, targetNamespace), nil
+	// Variant A: a residual/orphan root PVC is captured as a standalone child volume node (its own
+	// SnapshotContent + its own ManifestCheckpoint holding that PVC's manifest + its own dataRef). The root
+	// is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So the residual root-owned
+	// PVCs (ownedPVC) are excluded from the root MCR UP FRONT — independent of whether their child volume
+	// nodes / per-orphan MCPs already exist — because CSI binding of the orphan VolumeSnapshot is async and
+	// would otherwise race the (near-instant) root manifest leg into double-capturing the PVC manifest on
+	// both the root and the child (co-ownership violation, spec §3.9.2). Every residual root PVC goes
+	// through ensureOrphanPVCVolumeSnapshots → child volume node, so dropping them here never loses a
+	// manifest.
+	exclude := make(map[string]struct{}, len(ownedPVC))
+	for _, t := range ownedPVC {
+		exclude[namespacemanifest.ManifestTargetDedupKey(targetNamespace, t)] = struct{}{}
 	}
-	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
-	if err != nil {
-		return nil, err
+	// When the root has a real subtree (domain children or linked child volume nodes), also subtract the
+	// manifest objects already captured in descendant content-node ManifestCheckpoints (E5 / INV-S0). This
+	// covers domain-owned PVC manifests (which never appear in the root residual set) and is the durable
+	// dedup once children publish their MCPs.
+	if hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0 {
+		subtreeExcl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
+		if err != nil {
+			return nil, err
+		}
+		for k := range subtreeExcl {
+			exclude[k] = struct{}{}
+		}
 	}
-	filtered := namespacemanifest.FilterManifestTargets(base, excl, targetNamespace)
-	return namespacemanifest.AppendOwnedPVCManifestTargets(filtered, ownedPVC, excl, targetNamespace), nil
+	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), nil
 }
 
 // hasNonVisibilityChildSnapshotRefs reports whether any child ref is a real domain/subtree child.

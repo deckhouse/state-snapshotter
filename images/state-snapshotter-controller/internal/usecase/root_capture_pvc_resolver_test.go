@@ -21,14 +21,12 @@ import (
 	"errors"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
 func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
@@ -47,11 +45,11 @@ func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
 	}
 	c1 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
-		Status:     storagev1alpha1.SnapshotContentStatus{DataRefs: []storagev1alpha1.SnapshotDataBinding{{TargetUID: "dup"}}},
+		Status:     storagev1alpha1.SnapshotContentStatus{DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "dup"}},
 	}
 	c2 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c2"},
-		Status:     storagev1alpha1.SnapshotContentStatus{DataRefs: []storagev1alpha1.SnapshotDataBinding{{TargetUID: "dup"}}},
+		Status:     storagev1alpha1.SnapshotContentStatus{DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "dup"}},
 	}
 	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(rootNS, rootContent, c1, c2).Build()
 
@@ -61,21 +59,5 @@ func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
 	}
 	if !errors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
 		t.Fatalf("expected ErrDuplicateCoveredPVCUID, got %v", err)
-	}
-}
-
-func TestAppendOwnedPVCManifestTargets_skipsCoveredByUIDExcludeKey(t *testing.T) {
-	t.Parallel()
-	owned := []namespacemanifest.ManifestTarget{{
-		APIVersion: corev1.SchemeGroupVersion.String(),
-		Kind:       "PersistentVolumeClaim",
-		Name:       "child-data",
-	}}
-	excl := map[string]struct{}{
-		namespacemanifest.ManifestTargetDedupKey("ns", owned[0]): {},
-	}
-	out := namespacemanifest.AppendOwnedPVCManifestTargets(nil, owned, excl, "ns")
-	if len(out) != 0 {
-		t.Fatalf("expected no owned PVC targets when E5 key excludes child MCP object, got %#v", out)
 	}
 }

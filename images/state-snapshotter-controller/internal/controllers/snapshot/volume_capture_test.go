@@ -36,7 +36,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	snapshotcontentctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	volumecapturectrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -108,8 +111,8 @@ func TestReconcileVolumeCapturePublish_missingVolumeSnapshotNoPublish(t *testing
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 0 {
-		t.Fatalf("expected no published dataRefs, got %v", got.Status.DataRefs)
+	if got.Status.DataRef != nil {
+		t.Fatalf("expected no published dataRef on the root aggregator, got %v", got.Status.DataRef)
 	}
 }
 
@@ -128,7 +131,7 @@ func TestReconcileVolumeCapturePublish_incompleteVolumeSnapshotsNoPublish(t *tes
 	vsA := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, vcpkg.Target{UID: "uid-a", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: ns}), "pvc-a", "vsc-a", snap)
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvcA, pvcB, snap, content, vsA, vscA).
-		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).Build()
+		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}, csiVolumeSnapshotStatusStub()).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
 	res, err := r.reconcileVolumeCapturePublish(ctx, snap, content, true)
@@ -142,32 +145,39 @@ func TestReconcileVolumeCapturePublish_incompleteVolumeSnapshotsNoPublish(t *tes
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 0 {
-		t.Fatalf("expected no published dataRefs, got %v", got.Status.DataRefs)
+	if got.Status.DataRef != nil {
+		t.Fatalf("expected no published dataRef on the root aggregator, got %v", got.Status.DataRef)
 	}
 }
 
+// TestReconcileVolumeCapturePublish_orphanVolumeSnapshotHandoffBeforePublish verifies the Variant A
+// orphan handoff: the bound VSC is re-owned by the standalone CHILD volume node (not the root), the
+// child carries the single dataRef, the orphan VolumeSnapshot becomes a handle to that child
+// (status.boundSnapshotContentName), and the root aggregator stays dataRef-less.
 func TestReconcileVolumeCapturePublish_orphanVolumeSnapshotHandoffBeforePublish(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	scheme := testVolumeCaptureScheme(t)
 	ns := "default"
+	target := pvcTarget(ns, "pvc-a", "uid-a")
 	pvc := newPVC(ns, "pvc-a", "uid-a")
 	snap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vsc := volumeSnapshotContent("vsc-a", true)
-	vsName := orphanPVCVolumeSnapshotName(snap.UID, vcpkg.Target{UID: "uid-a", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: ns})
+	vsName := orphanPVCVolumeSnapshotName(snap.UID, target)
 	vs := readyVolumeSnapshot(ns, vsName, "pvc-a", "vsc-a", snap)
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc, snap, content, vs, vsc).
-		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}).Build()
+	objs := append(seedOrphanChildManifest(ns, snap.UID, target), pvc, snap, content, vs, vsc)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}, csiVolumeSnapshotStatusStub()).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
 	if _, err := r.reconcileVolumeCapturePublish(ctx, snap, content, false); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
+	childName := orphanChildContentName(content.Name, target)
 	vscObj := &unstructured.Unstructured{}
 	vscObj.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
 	if err := cl.Get(ctx, client.ObjectKey{Name: "vsc-a"}, vscObj); err != nil {
@@ -175,19 +185,35 @@ func TestReconcileVolumeCapturePublish_orphanVolumeSnapshotHandoffBeforePublish(
 	}
 	owned := false
 	for _, ref := range vscObj.GetOwnerReferences() {
-		if ref.Kind == "SnapshotContent" && ref.Name == content.Name {
+		if ref.Kind == "SnapshotContent" && ref.Name == childName {
 			owned = true
 		}
 	}
 	if !owned {
-		t.Fatal("VSC must be owned by SnapshotContent before publish completes")
+		t.Fatalf("VSC must be owned by the child volume node %q, got %#v", childName, vscObj.GetOwnerReferences())
 	}
-	got := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
+
+	// The root aggregator carries no dataRef; the single dataRef lives on the child volume node.
+	root := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, root); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 1 {
-		t.Fatalf("expected published dataRefs after handoff, got %v", got.Status.DataRefs)
+	if root.Status.DataRef != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", root.Status.DataRef)
+	}
+	childRef := orphanChildDataRef(t, cl, content.Name, target)
+	if childRef == nil || childRef.Artifact.Name != "vsc-a" {
+		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", childRef)
+	}
+
+	// The orphan VolumeSnapshot is now a handle to the child content (INV-ORPHAN4).
+	gotVS := &unstructured.Unstructured{}
+	gotVS.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: vsName}, gotVS); err != nil {
+		t.Fatalf("get vs: %v", err)
+	}
+	if bound, _, _ := unstructured.NestedString(gotVS.Object, "status", "boundSnapshotContentName"); bound != childName {
+		t.Fatalf("orphan VS boundSnapshotContentName = %q, want %q", bound, childName)
 	}
 }
 
@@ -203,10 +229,10 @@ func TestReconcileVolumeCaptureSteadyState_staleTargetUIDNotComplete(t *testing.
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRefs: []storagev1alpha1.SnapshotDataBinding{{
+			DataRef: &storagev1alpha1.SnapshotDataBinding{
 				TargetUID: "wrong-uid",
 				Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
-			}},
+			},
 		},
 	}
 	targets := []vcpkg.Target{{UID: "uid-a", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: ns}}
@@ -228,11 +254,17 @@ func TestReconcileVolumeCaptureSteadyState_staleTargetUIDNotComplete(t *testing.
 	}
 }
 
+// TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup verifies that two loose/orphan PVCs each
+// become their own standalone child volume node (Variant A: one dataRef per content), the root
+// aggregator stays dataRef-less, both children are linked under the root, and the stale root VCR /
+// status.volumeCaptureRequestName left by a prior VCR-based run is cleared once every child node is ready.
 func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	scheme := testVolumeCaptureScheme(t)
 	ns := "default"
+	targetA := pvcTarget(ns, "pvc-a", "uid-a")
+	targetB := pvcTarget(ns, "pvc-b", "uid-b")
 	pvcA := newPVC(ns, "pvc-a", "uid-a")
 	pvcB := newPVC(ns, "pvc-b", "uid-b")
 	snap := &storagev1alpha1.Snapshot{
@@ -244,12 +276,15 @@ func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	vscB := volumeSnapshotContent("vsc-b", true)
 	vcrName := vcpkg.SnapshotContentVCRName(content.UID)
 	staleVCR := readyVCR(ns, vcrName, nil, nil)
-	vsA := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, vcpkg.Target{UID: "uid-a", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: ns}), "pvc-a", "vsc-a", snap)
-	vsB := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, vcpkg.Target{UID: "uid-b", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-b", Namespace: ns}), "pvc-b", "vsc-b", snap)
+	vsA := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, targetA), "pvc-a", "vsc-a", snap)
+	vsB := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, targetB), "pvc-b", "vsc-b", snap)
 
+	objs := []client.Object{pvcA, pvcB, snap, content, staleVCR, vsA, vsB, vscA, vscB}
+	objs = append(objs, seedOrphanChildManifest(ns, snap.UID, targetA)...)
+	objs = append(objs, seedOrphanChildManifest(ns, snap.UID, targetB)...)
 	cl := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(pvcA, pvcB, snap, content, staleVCR, vsA, vsB, vscA, vscB).
-		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}).Build()
+		WithObjects(objs...).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}, csiVolumeSnapshotStatusStub()).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
 	if err := r.ensureVolumeCaptureLeg(ctx, snap, content); err != nil {
@@ -263,8 +298,17 @@ func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 2 {
-		t.Fatalf("dataRefs len=%d want 2", len(got.Status.DataRefs))
+	if got.Status.DataRef != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
+	}
+	if len(got.Status.ChildrenSnapshotContentRefs) != 2 {
+		t.Fatalf("expected 2 child volume nodes linked under root, got %#v", got.Status.ChildrenSnapshotContentRefs)
+	}
+	for _, target := range []vcpkg.Target{targetA, targetB} {
+		ref := orphanChildDataRef(t, cl, content.Name, target)
+		if ref == nil || ref.TargetUID != target.UID {
+			t.Fatalf("child volume node for %s missing its dataRef, got %#v", target.Name, ref)
+		}
 	}
 	gone := &unstructured.Unstructured{}
 	gone.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
@@ -291,13 +335,15 @@ func TestReconcileVolumeCapture_RootIgnoresAndDeletesStaleVCR(t *testing.T) {
 		Status:     storagev1alpha1.SnapshotStatus{VolumeCaptureRequestName: vcpkg.SnapshotContentVCRName("content-uid")},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
+	target := pvcTarget(ns, "pvc-a", "uid-a")
 	vcrName := vcpkg.SnapshotContentVCRName(content.UID)
-	vcr := failedVCR(ns, vcrName, []vcpkg.Target{{UID: "uid-a", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: ns}})
+	vcr := failedVCR(ns, vcrName, []vcpkg.Target{target})
 	vsc := volumeSnapshotContent("vsc-a", true)
-	vs := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, vcpkg.Target{UID: "uid-a", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: ns}), "pvc-a", "vsc-a", snap)
+	vs := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, target), "pvc-a", "vsc-a", snap)
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc, snap, content, vcr, vs, vsc).
-		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}).Build()
+	objs := append(seedOrphanChildManifest(ns, snap.UID, target), pvc, snap, content, vcr, vs, vsc)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}, csiVolumeSnapshotStatusStub()).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 	if err := r.ensureVolumeCaptureLeg(ctx, snap, content); err != nil {
 		t.Fatalf("ensure: %v", err)
@@ -319,8 +365,11 @@ func TestReconcileVolumeCapture_RootIgnoresAndDeletesStaleVCR(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 1 {
-		t.Fatalf("expected dataRefs from CSI VolumeSnapshot, got %v", got.Status.DataRefs)
+	if got.Status.DataRef != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
+	}
+	if ref := orphanChildDataRef(t, cl, content.Name, target); ref == nil || ref.Artifact.Name != "vsc-a" {
+		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", ref)
 	}
 }
 
@@ -574,14 +623,16 @@ func TestReconcileVolumeCapturePublish_DeletePolicyPatchedToRetain(t *testing.T)
 	ctx := context.Background()
 	scheme := testVolumeCaptureScheme(t)
 	ns := "default"
+	target := pvcTarget(ns, "pvc-a", "uid-a")
 	pvc := newPVC(ns, "pvc-a", "uid-a")
 	snap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"}}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vsc := volumeSnapshotContentWithPolicy("vsc-a", true, "Delete")
-	vs := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, pvcTarget(ns, "pvc-a", "uid-a")), "pvc-a", "vsc-a", snap)
+	vs := readyVolumeSnapshot(ns, orphanPVCVolumeSnapshotName(snap.UID, target), "pvc-a", "vsc-a", snap)
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc, snap, content, vs, vsc).
-		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}).Build()
+	objs := append(seedOrphanChildManifest(ns, snap.UID, target), pvc, snap, content, vs, vsc)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}, csiVolumeSnapshotStatusStub()).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
 	res, err := r.reconcileVolumeCapturePublish(ctx, snap, content, true)
@@ -604,8 +655,11 @@ func TestReconcileVolumeCapturePublish_DeletePolicyPatchedToRetain(t *testing.T)
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 1 {
-		t.Fatalf("expected dataRefs from CSI VolumeSnapshot, got %v", got.Status.DataRefs)
+	if got.Status.DataRef != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
+	}
+	if ref := orphanChildDataRef(t, cl, content.Name, target); ref == nil || ref.Artifact.Name != "vsc-a" {
+		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", ref)
 	}
 }
 
@@ -651,8 +705,8 @@ func TestReconcileVolumeCapturePublish_RetainPatchImpossibleIsTerminal(t *testin
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if len(got.Status.DataRefs) != 0 {
-		t.Fatalf("no dataRefs must be published on terminal failure, got %v", got.Status.DataRefs)
+	if got.Status.DataRef != nil {
+		t.Fatalf("no dataRef must be published on terminal failure, got %v", got.Status.DataRef)
 	}
 }
 
@@ -974,5 +1028,56 @@ func testVolumeCaptureScheme(t *testing.T) *runtime.Scheme {
 	_ = corev1.AddToScheme(s)
 	_ = storagev1.AddToScheme(s)
 	_ = storagev1alpha1.AddToScheme(s)
+	// Variant A orphan capture fans each loose PVC out into a child volume node with its own per-orphan
+	// ManifestCaptureRequest + ManifestCheckpoint, so the typed state-snapshotter API must be registered.
+	_ = ssv1alpha1.AddToScheme(s)
 	return s
+}
+
+// orphanChildContentName is the deterministic child volume-node SnapshotContent name for a captured PVC.
+func orphanChildContentName(rootContentName string, target vcpkg.Target) string {
+	return snapshotcontentctrl.ChildVolumeContentName(rootContentName, target.UID)
+}
+
+// csiVolumeSnapshotStatusStub registers the CSI VolumeSnapshot as a status-subresource type on the fake
+// client so the Variant A orphan handoff (bindOrphanVSToChildContent writes status.boundSnapshotContentName
+// via Status().Patch) can persist.
+func csiVolumeSnapshotStatusStub() client.Object {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	return u
+}
+
+// seedOrphanChildManifest pre-creates the per-orphan ManifestCaptureRequest (with a fixed UID so the
+// derived ManifestCheckpoint name is deterministic) and a Ready ManifestCheckpoint for a captured PVC,
+// standing in for the manifest-capture controllers that do not run in these unit tests. With these in
+// place, ensureOrphanVolumeChildManifestCheckpoint finds the MCR, publishes the MCP name onto the child
+// volume node, and observes it Ready — letting the orphan publish path reach completion.
+func seedOrphanChildManifest(ns string, snapUID types.UID, target vcpkg.Target) []client.Object {
+	mcrName := namespacemanifest.SnapshotVolumeMCRName(snapUID, target.UID)
+	mcrUID := types.UID("mcr-uid-" + target.UID)
+	mcr := &ssv1alpha1.ManifestCaptureRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: mcrName, Namespace: ns, UID: mcrUID},
+		Spec: ssv1alpha1.ManifestCaptureRequestSpec{
+			Targets: []ssv1alpha1.ManifestTarget{{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: target.Name}},
+		},
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)},
+	}
+	meta.SetStatusCondition(&mcp.Status.Conditions, metav1.Condition{
+		Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
+		Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+	})
+	return []client.Object{mcr, mcp}
+}
+
+// orphanChildDataRef reads the single published dataRef of the child volume node for a captured PVC.
+func orphanChildDataRef(t *testing.T, cl client.Client, rootContentName string, target vcpkg.Target) *storagev1alpha1.SnapshotDataBinding {
+	t.Helper()
+	child := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: orphanChildContentName(rootContentName, target)}, child); err != nil {
+		t.Fatalf("get orphan child content for %s: %v", target.Name, err)
+	}
+	return child.Status.DataRef
 }

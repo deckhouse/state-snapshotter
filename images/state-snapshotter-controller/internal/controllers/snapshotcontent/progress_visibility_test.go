@@ -25,17 +25,15 @@ func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstru
 		"metadata":   map[string]interface{}{"name": name},
 		"status": map[string]interface{}{
 			"manifestCheckpointName": mcpName,
-			"dataRefs": []interface{}{
-				map[string]interface{}{
-					"targetUID": "pvc-1",
-					"target": map[string]interface{}{
-						"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default",
-					},
-					"artifact": map[string]interface{}{
-						"apiVersion": volumeSnapshotContentAPIVersion,
-						"kind":       kindVolumeSnapshotContent,
-						"name":       vscName,
-					},
+			"dataRef": map[string]interface{}{
+				"targetUID": "pvc-1",
+				"target": map[string]interface{}{
+					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default",
+				},
+				"artifact": map[string]interface{}{
+					"apiVersion": volumeSnapshotContentAPIVersion,
+					"kind":       kindVolumeSnapshotContent,
+					"name":       vscName,
 				},
 			},
 			"conditions": []interface{}{
@@ -78,14 +76,15 @@ func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
 	}
 }
 
-// Data leg surfaces DataCapturePending with a "<ready>/<total> ready" progress count.
+// Data leg surfaces DataCapturePending with a "<ready>/<total> ready" progress count. Variant A
+// (cardinality ≤1): a SnapshotContent carries a single dataRef, so a pending artifact yields "0/1 ready"
+// (a multi-PVC scope is modeled as separate child volume nodes, each its own content).
 func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	vscReady := volumeSnapshotContentObject("vsc-ready", true)
 	vscPending := volumeSnapshotContentObject("vsc-pending", false)
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, vscReady, vscPending).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, vscPending).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -94,10 +93,7 @@ func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 		"metadata":   map[string]interface{}{"name": "c"},
 		"status": map[string]interface{}{
 			"manifestCheckpointName": "mcp-ok",
-			"dataRefs": []interface{}{
-				dataRefEntry("pvc-1", "vsc-ready"),
-				dataRefEntry("pvc-2", "vsc-pending"),
-			},
+			"dataRef":                dataRefEntry("pvc-1", "vsc-pending"),
 		},
 	}}
 	content.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
@@ -115,7 +111,7 @@ func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonDataCapturePending {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonDataCapturePending)
 	}
-	if !strings.Contains(plan.readyMessage, "1/2 ready") {
+	if !strings.Contains(plan.readyMessage, "0/1 ready") {
 		t.Fatalf("ready message %q must carry progress count", plan.readyMessage)
 	}
 }

@@ -90,10 +90,12 @@ type SnapshotDataArtifactRef struct {
 	Name string `json:"name"`
 }
 
-// SnapshotDataBinding associates a PVC target with its captured data artifact on one SnapshotContent.
+// SnapshotDataBinding associates the single PVC target of a logical snapshot node with its captured
+// data artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE dataRef; multiple
+// volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
 // +k8s:deepcopy-gen=true
 type SnapshotDataBinding struct {
-	// TargetUID is the map key for status.dataRefs (PersistentVolumeClaim UID).
+	// TargetUID identifies the captured PersistentVolumeClaim (its UID) backing this node's data.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	TargetUID string `json:"targetUID"`
@@ -144,11 +146,21 @@ type SnapshotContentStatus struct {
 	// +optional
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
-	// DataRefs lists PVC target to data artifact bindings for this logical snapshot node.
-	// +listType=map
-	// +listMapKey=targetUID
+	// DataRef is the single PVC-target-to-data-artifact binding for this logical snapshot node.
+	// Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
+	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
 	// +optional
-	DataRefs []SnapshotDataBinding `json:"dataRefs,omitempty"`
+	DataRef *SnapshotDataBinding `json:"dataRef,omitempty"`
 
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// DataRefList returns status.dataRef as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a
+// node, but the coverage/dedup/publish helpers stay generic over a slice; this bridge lets them iterate
+// the single binding without each call site special-casing the nil pointer.
+func (c *SnapshotContent) DataRefList() []SnapshotDataBinding {
+	if c == nil || c.Status.DataRef == nil {
+		return nil
+	}
+	return []SnapshotDataBinding{*c.Status.DataRef}
 }

@@ -71,7 +71,8 @@ func contentWithDataRefs(name, mcp string, dataRefs, children []interface{}) *un
 		},
 	}
 	if len(dataRefs) > 0 {
-		status["dataRefs"] = dataRefs
+		// Variant A: a SnapshotContent carries at most one dataRef (singular object, not a list).
+		status["dataRef"] = dataRefs[0]
 	}
 	if len(children) > 0 {
 		status["childrenSnapshotContentRefs"] = children

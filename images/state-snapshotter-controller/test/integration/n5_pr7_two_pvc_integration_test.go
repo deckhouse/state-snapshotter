@@ -46,7 +46,7 @@ import (
 // in their own `go test` pass (fresh envtest + manager, no accumulated churn) via the `isolated` label
 // filter wired in the Makefile. Keep Serial too: even within their own pass they must not interleave.
 var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, Label("isolated"), func() {
-	It("two PVC vertical slice: child covers pvc-a, root MCR captures only residual pvc-b", func() {
+	It("two PVC vertical slice: child covers pvc-a, residual pvc-b becomes its own child volume node (root MCR carries no PVC)", func() {
 		ctx := context.Background()
 		ns := pr7CreateNamespace(ctx, "n5-pr7-two-pvc")
 		nsName := ns.Name
@@ -86,29 +86,27 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		Eventually(func(g Gomega) {
 			mcr, err := pr7GetMCR(ctx, nsName, rootSnap)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeTrue(), "root MCR must include residual pvc-b")
+			// Variant A: the root is a pure aggregator and never carries a PVC manifest. pvc-a is covered by
+			// the domain child subtree (E5 exclude); residual pvc-b is captured as its own standalone child
+			// volume node (own SnapshotContent + own MCP holding pvc-b's manifest + own dataRef), so it is
+			// excluded from the root MCR up front rather than appended to it.
+			g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeFalse(), "Variant A: residual pvc-b is captured as its own child volume node, not in the root MCR")
 			g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "root MCR must not include child-covered pvc-a")
 			for _, t := range mcr.Spec.Targets {
-				if t.Kind == "PersistentVolumeClaim" {
-					g.Expect(t.APIVersion).To(Equal(corev1.SchemeGroupVersion.String()))
-					g.Expect(t.Name).NotTo(Equal(pvcA.Name))
-				}
+				g.Expect(t.Kind).NotTo(Equal("PersistentVolumeClaim"), "root MCR must not carry any PVC manifest under Variant A")
 			}
 		}, 180*time.Second, 250*time.Millisecond).Should(Succeed())
 
 		childContent := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: childContentName}, childContent)).To(Succeed())
-		var found bool
-		for _, ref := range childContent.Status.DataRefs {
-			if ref.TargetUID == string(pvcA.UID) {
-				found = true
-				Expect(ref.Target.Kind).To(Equal("PersistentVolumeClaim"))
-				Expect(ref.Target.APIVersion).To(Equal(corev1.SchemeGroupVersion.String()))
-				Expect(ref.Target.Name).To(Equal("pvc-a"))
-				Expect(ref.Target.Namespace).To(Equal(nsName))
-			}
-		}
-		Expect(found).To(BeTrue(), "child SnapshotContent must publish dataRef for pvc-a UID")
+		// Variant A: the child volume node carries a single dataRef (cardinality ≤1), not a list.
+		ref := childContent.Status.DataRef
+		Expect(ref).NotTo(BeNil(), "child SnapshotContent must publish its single dataRef")
+		Expect(ref.TargetUID).To(Equal(string(pvcA.UID)), "child SnapshotContent must publish dataRef for pvc-a UID")
+		Expect(ref.Target.Kind).To(Equal("PersistentVolumeClaim"))
+		Expect(ref.Target.APIVersion).To(Equal(corev1.SchemeGroupVersion.String()))
+		Expect(ref.Target.Name).To(Equal("pvc-a"))
+		Expect(ref.Target.Namespace).To(Equal(nsName))
 	})
 
 	It("pending VCR spec.targets count as subtree coverage before dataRefs publish", func() {
@@ -137,7 +135,7 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		pr7InstallPendingVCR(ctx, nsName, childContent, pvcA)
 		freshChildContent := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: childContent.Name}, freshChildContent)).To(Succeed())
-		Expect(freshChildContent.Status.DataRefs).To(BeEmpty())
+		Expect(freshChildContent.Status.DataRef).To(BeNil())
 
 		rootName := "pr7-pending-root"
 		Expect(k8sClient.Create(ctx, &storagev1alpha1.Snapshot{
@@ -154,8 +152,11 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		Eventually(func(g Gomega) {
 			mcr, err := pr7GetMCR(ctx, nsName, rootSnap)
 			g.Expect(err).NotTo(HaveOccurred())
+			// A pending VCR on the child counts as subtree coverage for pvc-a, so it does not stall the root
+			// MCR with ErrSubtreeManifestCapturePending. Under Variant A the residual pvc-b is also kept off
+			// the root MCR (it becomes its own child volume node), so the root MCR carries no PVC manifest.
 			g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "pending VCR on child must cover pvc-a")
-			g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeTrue(), "residual pvc-b must remain on root MCR")
+			g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeFalse(), "Variant A: residual pvc-b becomes its own child volume node, not in the root MCR")
 		}, 180*time.Second, 250*time.Millisecond).Should(Succeed())
 	})
 
@@ -211,7 +212,7 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		}, 180*time.Second, 250*time.Millisecond).Should(Succeed())
 	})
 
-	It("manifest-only child does not block root residual PVC planning", func() {
+	It("manifest-only child does not block root MCR creation (residual PVCs become their own child volume nodes)", func() {
 		ctx := context.Background()
 		ns := pr7CreateNamespace(ctx, "n5-pr7-manifest-only")
 		nsName := ns.Name
@@ -246,8 +247,12 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		Eventually(func(g Gomega) {
 			mcr, err := pr7GetMCR(ctx, nsName, rootSnap)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeTrue())
-			g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeTrue())
+			// The manifest-only child has a Ready MCP with no PVC objects, so it does not stall the root MCR
+			// with ErrSubtreeManifestCapturePending: the root MCR is still created. Under Variant A both
+			// residual pvc-a and pvc-b become their own standalone child volume nodes, so neither appears in
+			// the root MCR (the root never carries a PVC manifest).
+			g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "Variant A: residual pvc-a becomes its own child volume node, not in the root MCR")
+			g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeFalse(), "Variant A: residual pvc-b becomes its own child volume node, not in the root MCR")
 		}, 180*time.Second, 250*time.Millisecond).Should(Succeed())
 	})
 })

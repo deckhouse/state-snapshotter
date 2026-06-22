@@ -29,6 +29,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
@@ -57,6 +58,15 @@ func CollectSubtreeCoveredPVCUIDs(
 
 	visit := func(_ context.Context, content *storagev1alpha1.SnapshotContent) error {
 		if content.Name == rootContent.Name {
+			return nil
+		}
+		// Variant A: a child volume node materialized for a root-residual/orphan PVC IS the orphan capture
+		// itself, not a separate subtree owner. Counting it as covered would drop its PVC from the root
+		// residual target set and prune the PVC's CSI VolumeSnapshot handle on the next reconcile, so it
+		// must keep the PVC in scope here. The PVC manifest is still excluded from the root
+		// ManifestCheckpoint via the separate MCP subtree-exclude path (root_capture_run_exclude.go).
+		// Detected by the explicit LabelChildVolumeNode marker (a name-prefix heuristic would be fragile).
+		if snapshotpkg.IsChildVolumeNodeContent(content) {
 			return nil
 		}
 		uids, err := coveredPVCUIDsForContent(ctx, c, namespace, content)
@@ -160,18 +170,19 @@ func coveredPVCUIDsForContent(
 }
 
 func pvcUIDsFromSnapshotContentDataRefs(content *storagev1alpha1.SnapshotContent) ([]string, error) {
-	if content == nil || len(content.Status.DataRefs) == 0 {
+	refs := content.DataRefList()
+	if len(refs) == 0 {
 		return nil, nil
 	}
-	out := make([]string, 0, len(content.Status.DataRefs))
-	for i := range content.Status.DataRefs {
-		b := content.Status.DataRefs[i]
+	out := make([]string, 0, len(refs))
+	for i := range refs {
+		b := refs[i]
 		uid := b.TargetUID
 		if uid == "" {
 			uid = string(b.Target.UID)
 		}
 		if uid == "" {
-			return nil, fmt.Errorf("SnapshotContent %q dataRefs[%d]: empty targetUID", content.Name, i)
+			return nil, fmt.Errorf("SnapshotContent %q dataRef: empty targetUID", content.Name)
 		}
 		out = append(out, uid)
 	}

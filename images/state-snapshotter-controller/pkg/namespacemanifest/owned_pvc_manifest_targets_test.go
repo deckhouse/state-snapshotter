@@ -24,26 +24,6 @@ import (
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-func TestAppendOwnedPVCManifestTargets_SkipsSubtreeExclude(t *testing.T) {
-	base := []ManifestTarget{{APIVersion: "apps/v1", Kind: "Deployment", Name: "app"}}
-	owned := []ManifestTarget{{APIVersion: corev1.SchemeGroupVersion.String(), Kind: "PersistentVolumeClaim", Name: "data"}}
-	excl := map[string]struct{}{
-		ManifestTargetDedupKey("ns", owned[0]): {},
-	}
-	out := AppendOwnedPVCManifestTargets(base, owned, excl, "ns")
-	if len(out) != 1 || out[0].Name != "app" {
-		t.Fatalf("child-owned PVC must not appear on root targets: %#v", out)
-	}
-}
-
-func TestAppendOwnedPVCManifestTargets_AppendsResidualPVC(t *testing.T) {
-	owned := []ManifestTarget{{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "root-data"}}
-	out := AppendOwnedPVCManifestTargets(nil, owned, nil, "ns")
-	if len(out) != 1 || out[0].Name != "root-data" {
-		t.Fatalf("expected owned PVC target, got %#v", out)
-	}
-}
-
 func TestManifestTargetsFromVolumeTargets(t *testing.T) {
 	out := ManifestTargetsFromVolumeTargets([]vcpkg.Target{{
 		APIVersion: corev1.SchemeGroupVersion.String(),

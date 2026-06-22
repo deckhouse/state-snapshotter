@@ -66,25 +66,48 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 	log, _ := logger.NewLogger("error")
 	ctx := context.Background()
 
-	data, checksum := encodeChunk([]map[string]interface{}{
+	// Variant A: the root MCP holds only the ConfigMap; the orphan PVC manifest lives on its own child
+	// volume node's MCP (mcp-orphan), reachable via the VolumeSnapshot handle's boundSnapshotContentName.
+	rootData, rootChecksum := encodeChunk([]map[string]interface{}{
 		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "cfg", "namespace": "source-ns"}, "data": map[string]interface{}{"k": "v"}},
-		{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]interface{}{"name": "orphan", "namespace": "source-ns", "uid": "uid-orphan"}, "spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}, "volumeName": "pv-x"}},
 	})
-	chunk := &ssv1alpha1.ManifestCheckpointContentChunk{
-		ObjectMeta: metav1.ObjectMeta{Name: "chunk-0"},
+	rootChunk := &ssv1alpha1.ManifestCheckpointContentChunk{
+		ObjectMeta: metav1.ObjectMeta{Name: "chunk-root-0"},
 		Spec: ssv1alpha1.ManifestCheckpointContentChunkSpec{
-			CheckpointName: "mcp-root", Index: 0, Data: data, Checksum: checksum, ObjectsCount: 2,
+			CheckpointName: "mcp-root", Index: 0, Data: rootData, Checksum: rootChecksum, ObjectsCount: 1,
 		},
 	}
-	mcp := &ssv1alpha1.ManifestCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: "mcp-root", UID: types.UID("uid-mcp")},
+	rootMCP := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-root", UID: types.UID("uid-mcp-root")},
 		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "source-ns"},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
-			Chunks:       []ssv1alpha1.ChunkInfo{{Name: "chunk-0", Index: 0, Checksum: checksum}},
-			TotalObjects: 2,
+			Chunks:       []ssv1alpha1.ChunkInfo{{Name: "chunk-root-0", Index: 0, Checksum: rootChecksum}},
+			TotalObjects: 1,
 		},
 	}
-	meta.SetStatusCondition(&mcp.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&rootMCP.Status.Conditions, metav1.Condition{
+		Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
+		Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+	})
+
+	orphanData, orphanChecksum := encodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]interface{}{"name": "orphan", "namespace": "source-ns", "uid": "uid-orphan"}, "spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}, "volumeName": "pv-x"}},
+	})
+	orphanChunk := &ssv1alpha1.ManifestCheckpointContentChunk{
+		ObjectMeta: metav1.ObjectMeta{Name: "chunk-orphan-0"},
+		Spec: ssv1alpha1.ManifestCheckpointContentChunkSpec{
+			CheckpointName: "mcp-orphan", Index: 0, Data: orphanData, Checksum: orphanChecksum, ObjectsCount: 1,
+		},
+	}
+	orphanMCP := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-orphan", UID: types.UID("uid-mcp-orphan")},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "source-ns"},
+		Status: ssv1alpha1.ManifestCheckpointStatus{
+			Chunks:       []ssv1alpha1.ChunkInfo{{Name: "chunk-orphan-0", Index: 0, Checksum: orphanChecksum}},
+			TotalObjects: 1,
+		},
+	}
+	meta.SetStatusCondition(&orphanMCP.Status.Conditions, metav1.Condition{
 		Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
 		Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
 	})
@@ -93,14 +116,22 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-root",
-			DataRefs: []storagev1alpha1.SnapshotDataBinding{{
-				TargetUID: "uid-orphan",
-				Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan", Namespace: "source-ns", UID: "uid-orphan"},
-				Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
-			}},
 		},
 	}
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
+
+	orphanContent := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content-vol-orphan"},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			ManifestCheckpointName: "mcp-orphan",
+			DataRef: &storagev1alpha1.SnapshotDataBinding{
+				TargetUID: "uid-orphan",
+				Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan", Namespace: "source-ns", UID: "uid-orphan"},
+				Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
+			},
+		},
+	}
+	meta.SetStatusCondition(&orphanContent.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
 
 	snap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "source-ns"},
@@ -117,11 +148,11 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 		"apiVersion": "snapshot.storage.k8s.io/v1",
 		"kind":       "VolumeSnapshot",
 		"metadata":   map[string]interface{}{"name": "vs-orphan", "namespace": "source-ns"},
-		"status":     map[string]interface{}{"boundVolumeSnapshotContentName": "vsc-orphan", "readyToUse": true},
+		"status":     map[string]interface{}{"boundVolumeSnapshotContentName": "vsc-orphan", "boundSnapshotContentName": "root-content-vol-orphan", "readyToUse": true},
 	}}
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(chunk, mcp, content, snap, vs).Build()
+		WithObjects(rootChunk, rootMCP, orphanChunk, orphanMCP, content, orphanContent, snap, vs).Build()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	svc := NewService(cl, arch, nil, nil)
 

@@ -69,14 +69,14 @@ func TestVolumeCaptureRequestSafeToDelete_emptyOwnerUIDNotSafe(t *testing.T) {
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "content-1", UID: contentUID},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRefs: []storagev1alpha1.SnapshotDataBinding{{
+			DataRef: &storagev1alpha1.SnapshotDataBinding{
 				TargetUID: "uid-a",
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
 					Name:       "vsc-a",
 				},
-			}},
+			},
 		},
 	}
 	vcr := &unstructured.Unstructured{}

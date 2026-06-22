@@ -32,18 +32,18 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-var _ = Describe("SnapshotContent dataRefs[] CRD validation", func() {
-	const duplicateUID = "pvc-uid-dup"
+var _ = Describe("SnapshotContent dataRef CRD validation", func() {
+	const targetUID = "pvc-uid-a"
 
 	binding := func(name string) storagev1alpha1.SnapshotDataBinding {
 		return storagev1alpha1.SnapshotDataBinding{
-			TargetUID: duplicateUID,
+			TargetUID: targetUID,
 			Target: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: "v1",
 				Kind:       "PersistentVolumeClaim",
 				Name:       name,
 				Namespace:  "default",
-				UID:        types.UID(duplicateUID),
+				UID:        types.UID(targetUID),
 			},
 			Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 				APIVersion: "snapshot.storage.k8s.io/v1",
@@ -53,8 +53,12 @@ var _ = Describe("SnapshotContent dataRefs[] CRD validation", func() {
 		}
 	}
 
-	It("rejects status.dataRefs[] with duplicate targetUID on Status().Update", func() {
-		name := "dup-datarefs-" + randomSuffix()
+	// Variant A (cardinality ≤1): a SnapshotContent carries at most one dataRef (a singular object, not a
+	// list). The duplicate-targetUID-in-a-list validation no longer applies — it is structurally
+	// impossible — so the surviving CRD constraint is that the singular dataRef, when present, must carry a
+	// non-empty targetUID.
+	It("accepts a single status.dataRef on Status().Update", func() {
+		name := "single-dataref-" + randomSuffix()
 		sc := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: storagev1alpha1.SnapshotContentSpec{
@@ -66,23 +70,12 @@ var _ = Describe("SnapshotContent dataRefs[] CRD validation", func() {
 			_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}})
 		})
 
-		sc.Status = storagev1alpha1.SnapshotContentStatus{
-			DataRefs: []storagev1alpha1.SnapshotDataBinding{
-				binding("pvc-a"),
-				binding("pvc-b"),
-			},
-		}
-		err := k8sClient.Status().Update(ctx, sc)
-		Expect(err).To(HaveOccurred())
-		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
-		Expect(err.Error()).To(Or(
-			ContainSubstring("duplicate"),
-			ContainSubstring("unique"),
-			ContainSubstring("targetUID"),
-		))
+		b := binding("pvc-a")
+		sc.Status = storagev1alpha1.SnapshotContentStatus{DataRef: &b}
+		Expect(k8sClient.Status().Update(ctx, sc)).To(Succeed())
 	})
 
-	It("rejects empty targetUID in dataRefs[]", func() {
+	It("rejects empty targetUID in dataRef", func() {
 		name := "empty-targetuid-" + randomSuffix()
 		sc := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -97,7 +90,7 @@ var _ = Describe("SnapshotContent dataRefs[] CRD validation", func() {
 
 		b := binding("pvc-only")
 		b.TargetUID = ""
-		sc.Status = storagev1alpha1.SnapshotContentStatus{DataRefs: []storagev1alpha1.SnapshotDataBinding{b}}
+		sc.Status = storagev1alpha1.SnapshotContentStatus{DataRef: &b}
 		err := k8sClient.Status().Update(ctx, sc)
 		Expect(err).To(HaveOccurred())
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)

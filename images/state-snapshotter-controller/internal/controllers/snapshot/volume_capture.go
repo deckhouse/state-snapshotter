@@ -191,7 +191,7 @@ func (r *SnapshotReconciler) reconcileVolumeCaptureSteadyState(
 	vcrKey types.NamespacedName,
 	targets []vcpkg.Target,
 ) (done bool, res ctrl.Result, err error) {
-	if !volumecapturectrl.ContentDataRefsCoverExpectedTargets(content.Status.DataRefs, targets) {
+	if !volumecapturectrl.ContentDataRefsCoverExpectedTargets(content.DataRefList(), targets) {
 		return false, ctrl.Result{}, nil
 	}
 
@@ -228,7 +228,7 @@ func (r *SnapshotReconciler) reconcileVolumeCaptureSteadyState(
 }
 
 func allVSCsOwnedByContent(ctx context.Context, c client.Reader, content *storagev1alpha1.SnapshotContent) bool {
-	for _, b := range content.Status.DataRefs {
+	for _, b := range content.DataRefList() {
 		if b.Artifact.Kind != "VolumeSnapshotContent" || b.Artifact.Name == "" {
 			continue
 		}

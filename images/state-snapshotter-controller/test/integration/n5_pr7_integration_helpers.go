@@ -146,8 +146,12 @@ func pr7PatchSnapshotContent(
 		if mcpName != "" {
 			sc.Status.ManifestCheckpointName = mcpName
 		}
-		if dataRefs != nil {
-			sc.Status.DataRefs = append([]storagev1alpha1.SnapshotDataBinding(nil), dataRefs...)
+		// Variant A (cardinality ≤1): publish the single dataRef on the child volume node. Callers pass at
+		// most one binding (a domain/child leaf owns exactly one PVC); >1 would be a fixture bug.
+		if len(dataRefs) > 0 {
+			Expect(dataRefs).To(HaveLen(1), "Variant A: a SnapshotContent carries at most one dataRef")
+			cp := dataRefs[0]
+			sc.Status.DataRef = &cp
 		}
 		// Do not mark SnapshotContent Ready here: SCC would validate VolumeSnapshotContent objects that envtest does not install.
 		return k8sClient.Status().Patch(ctx, sc, client.MergeFrom(base))

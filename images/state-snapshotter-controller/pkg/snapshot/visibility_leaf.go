@@ -36,6 +36,20 @@ const (
 	// VolumeSnapshotClass to use for volumes provisioned by that StorageClass. The orphan-PVC data leg
 	// resolves the class through this annotation (PVC -> StorageClass -> annotation), mirroring the VCR path.
 	AnnotationStorageClassVolumeSnapshotClass = "storage.deckhouse.io/volumesnapshotclass"
+
+	// ChildVolumeContentInfix is the deterministic infix in a child volume-node SnapshotContent name
+	// (<rootContentName>-vol-<hash>, Variant A). It only affects naming determinism; child-volume-node
+	// detection uses the LabelChildVolumeNode marker (see IsChildVolumeNodeContent), not this infix.
+	ChildVolumeContentInfix = "-vol-"
+
+	// LabelChildVolumeNode marks a SnapshotContent created as a standalone child volume node for a
+	// root-residual/orphan PVC (Variant A). It is the authoritative signal that distinguishes the orphan
+	// capture itself from a real domain subtree child: subtree PVC-coverage must skip these nodes (the
+	// orphan PVC must stay in the root residual scope so its CSI VolumeSnapshot handle is not pruned),
+	// while the manifest-checkpoint subtree exclude still removes the PVC manifest from the root MCP. A
+	// name-prefix heuristic on ChildVolumeContentInfix is fragile (a coincidentally named content would
+	// be misclassified); this explicit label is set at creation by EnsureVolumeChildContent.
+	LabelChildVolumeNode = "state-snapshotter.deckhouse.io/child-volume-node"
 )
 
 // IsVolumeSnapshotVisibilityLeaf reports whether a Snapshot-level child ref is a CSI VolumeSnapshot
@@ -44,4 +58,13 @@ const (
 // child-Snapshot failure scans.
 func IsVolumeSnapshotVisibilityLeaf(ref storagev1alpha1.SnapshotChildRef) bool {
 	return ref.APIVersion == CSISnapshotAPIVersion && ref.Kind == KindVolumeSnapshot
+}
+
+// IsChildVolumeNodeContent reports whether a SnapshotContent is a standalone child volume node created
+// for a root-residual/orphan PVC (Variant A), identified by the LabelChildVolumeNode marker.
+func IsChildVolumeNodeContent(content *storagev1alpha1.SnapshotContent) bool {
+	if content == nil {
+		return false
+	}
+	return content.Labels[LabelChildVolumeNode] == "true"
 }

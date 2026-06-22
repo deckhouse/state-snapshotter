@@ -44,10 +44,12 @@ func restoreTreeScheme() *runtime.Scheme {
 	return scheme
 }
 
-func readySnapshotContent(name, mcp string, dataRefs []storagev1alpha1.SnapshotDataBinding) *storagev1alpha1.SnapshotContent {
+// readySnapshotContent builds a Ready SnapshotContent carrying at most one dataRef (Variant A: the
+// data leg is a singular object, not a list). Pass nil for an aggregator/manifests-only node.
+func readySnapshotContent(name, mcp string, dataRef *storagev1alpha1.SnapshotDataBinding) *storagev1alpha1.SnapshotContent {
 	c := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: mcp, DataRefs: dataRefs},
+		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: mcp, DataRef: dataRef},
 	}
 	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
 	return c
@@ -65,12 +67,19 @@ func demoDiskSnapshotObj(name, contentName string) *unstructured.Unstructured {
 	}}
 }
 
-func volumeSnapshotObj(name, boundVSC string) *unstructured.Unstructured {
+// volumeSnapshotObj builds an orphan-PVC CSI VolumeSnapshot handle (Variant A INV-ORPHAN4):
+// boundVSC is the durable data artifact, and boundContent is status.boundSnapshotContentName, the
+// namespaced handle to the standalone child volume SnapshotContent that owns the PVC manifest + dataRef.
+func volumeSnapshotObj(name, boundVSC, boundContent string) *unstructured.Unstructured {
+	status := map[string]interface{}{"boundVolumeSnapshotContentName": boundVSC, "readyToUse": true}
+	if boundContent != "" {
+		status["boundSnapshotContentName"] = boundContent
+	}
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
 		"kind":       "VolumeSnapshot",
 		"metadata":   map[string]interface{}{"name": name, "namespace": "source-ns"},
-		"status":     map[string]interface{}{"boundVolumeSnapshotContentName": boundVSC, "readyToUse": true},
+		"status":     status,
 	}}
 }
 
@@ -111,21 +120,25 @@ func domainSnapshotObj(kind, name, contentName string, childRefs []storagev1alph
 func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 	scheme := restoreTreeScheme()
 
+	// Variant A: the orphan-PVC VolumeSnapshot is a namespaced handle to a standalone child volume
+	// node. Its PVC manifest + single dataRef live on that child SnapshotContent (its own MCP), not on
+	// the root, so the resolver must materialize it as a child RestoreNode (not a root VSCToVS entry).
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
 		{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", []storagev1alpha1.SnapshotDataBinding{{
+	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	orphanContent := readySnapshotContent("root-content-vol-orphan", "mcp-orphan", &storagev1alpha1.SnapshotDataBinding{
 		TargetUID: "uid-orphan",
 		Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
 		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
-	}})
+	})
 	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
 	diskContent := readySnapshotContent("disk-content", "mcp-disk", nil)
-	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan")
+	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-orphan")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(root, rootContent, diskSnap, diskContent, vs).Build()
+		WithObjects(root, rootContent, orphanContent, diskSnap, diskContent, vs).Build()
 
 	node, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
 	if err != nil {
@@ -134,18 +147,47 @@ func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 	if node.ManifestCheckpointName != "mcp-root" {
 		t.Fatalf("root MCP = %q", node.ManifestCheckpointName)
 	}
-	if got := node.VSCToVS["vsc-orphan"]; got != "vs-orphan" {
-		t.Fatalf("VSCToVS[vsc-orphan] = %q, want vs-orphan", got)
+	// Root no longer carries the orphan's dataRef nor a VSC->VS mapping.
+	if len(node.DataBindings) != 0 {
+		t.Fatalf("root DataBindings = %#v, want none", node.DataBindings)
 	}
-	if len(node.Children) != 1 {
-		t.Fatalf("expected 1 child snapshot, got %d", len(node.Children))
+	if len(node.VSCToVS) != 0 {
+		t.Fatalf("root VSCToVS = %#v, want none", node.VSCToVS)
 	}
-	child := node.Children[0]
-	if child.SnapshotRef.Kind != "DemoVirtualDiskSnapshot" || child.SnapshotRef.Name != "disk-snap" {
-		t.Fatalf("child snapshotRef = %+v", child.SnapshotRef)
+	if len(node.Children) != 2 {
+		t.Fatalf("expected 2 children (orphan volume node + disk snapshot), got %d", len(node.Children))
 	}
-	if child.ManifestCheckpointName != "mcp-disk" {
-		t.Fatalf("child MCP = %q", child.ManifestCheckpointName)
+
+	var orphanNode, diskNode *RestoreNode
+	for _, c := range node.Children {
+		switch c.SnapshotRef.Kind {
+		case "VolumeSnapshot":
+			orphanNode = c
+		case "DemoVirtualDiskSnapshot":
+			diskNode = c
+		}
+	}
+	if orphanNode == nil {
+		t.Fatal("expected an orphan VolumeSnapshot child volume node")
+	}
+	if orphanNode.SnapshotRef.Name != "vs-orphan" {
+		t.Fatalf("orphan node snapshotRef = %+v", orphanNode.SnapshotRef)
+	}
+	if orphanNode.ManifestCheckpointName != "mcp-orphan" {
+		t.Fatalf("orphan node MCP = %q, want mcp-orphan", orphanNode.ManifestCheckpointName)
+	}
+	if len(orphanNode.DataBindings) != 1 || orphanNode.DataBindings[0].Artifact.Name != "vsc-orphan" {
+		t.Fatalf("orphan node DataBindings = %#v", orphanNode.DataBindings)
+	}
+	if got := orphanNode.VSCToVS["vsc-orphan"]; got != "vs-orphan" {
+		t.Fatalf("orphan node VSCToVS[vsc-orphan] = %q, want vs-orphan", got)
+	}
+
+	if diskNode == nil {
+		t.Fatal("expected a disk child snapshot")
+	}
+	if diskNode.SnapshotRef.Name != "disk-snap" || diskNode.ManifestCheckpointName != "mcp-disk" {
+		t.Fatalf("disk node = %+v mcp=%q", diskNode.SnapshotRef, diskNode.ManifestCheckpointName)
 	}
 }
 
@@ -245,25 +287,49 @@ func TestResolveRestoreTree_VSLeafDeletingFailsClosed(t *testing.T) {
 	}
 }
 
-func TestResolveRestoreTree_DuplicateVSForSameVSCFailsClosed(t *testing.T) {
+// TestResolveRestoreTree_OrphanVSMissingChildContentFailsClosed proves the Variant A orphan handle
+// fails closed when its status.boundSnapshotContentName references a child volume SnapshotContent that
+// does not exist: emitting the PVC without its manifest+dataRef node would silently lose data.
+func TestResolveRestoreTree_OrphanVSMissingChildContentFailsClosed(t *testing.T) {
 	scheme := restoreTreeScheme()
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
-		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-a"},
-		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-b"},
+		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
 	})
 	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
-	// Both leaves bound to the same VSC -> contract violation.
-	vsA := volumeSnapshotObj("vs-a", "vsc-shared")
-	vsB := volumeSnapshotObj("vs-b", "vsc-shared")
+	// Handle points at a child content that was never materialized.
+	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-missing")
 
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, vsA, vsB).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, vs).Build()
 
 	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
 	if err == nil {
-		t.Fatal("expected error when two VolumeSnapshot leaves bind the same VSC")
+		t.Fatal("expected error when the orphan child SnapshotContent is missing")
 	}
 	if !errors.Is(err, ErrContractViolation) {
 		t.Fatalf("expected ErrContractViolation, got %v", err)
+	}
+}
+
+// TestResolveRestoreTree_OrphanVSEmptyBoundContentFailsClosed proves an orphan VS handle that has not
+// yet had status.boundSnapshotContentName published (child volume node not yet linked) is treated as
+// not-ready rather than emitting a data-less PVC.
+func TestResolveRestoreTree_OrphanVSEmptyBoundContentFailsClosed(t *testing.T) {
+	scheme := restoreTreeScheme()
+	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
+		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
+	})
+	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	// readyToUse + boundVSC set, but boundSnapshotContentName empty.
+	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "")
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, vs).Build()
+
+	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
+	if err == nil {
+		t.Fatal("expected error when the orphan handle has empty boundSnapshotContentName")
+	}
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("expected ErrNotReady, got %v", err)
 	}
 }
 
