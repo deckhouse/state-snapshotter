@@ -65,14 +65,15 @@ type Options struct {
 	HealthProbeBindAddress              string
 	ControllerNamespace                 string
 	// Manifest capture config (TZ section 7)
-	MaxChunkSizeBytes  int64
-	DefaultTTL         time.Duration
-	DefaultTTLStr      string // String representation for annotation (e.g., "168h", "7d")
-	ExcludeKinds       []string
-	ExcludeAnnotations []string
-	// EnableFiltering controls whether filtering and cleaning should be applied
-	// If false, all objects are included as-is (no filtering, no cleaning)
-	// Default: false (filtering disabled by default)
+	MaxChunkSizeBytes int64
+	DefaultTTL        time.Duration
+	DefaultTTLStr     string // String representation for annotation (e.g., "168h", "7d")
+	ExcludeKinds      []string
+	// EnableFiltering controls whether object SELECTION (skipping ephemeral/owner-managed/excluded
+	// kinds) is applied on capture. It does NOT clean object fields: snapshot-capture stores raw
+	// manifests AS-IS (status included); field sanitization happens on the restore read-path.
+	// If false, all selected objects are captured (Secret bytes are still secured by default).
+	// Default: false (selection disabled by default).
 	EnableFiltering bool
 
 	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible CSD (R5).
@@ -124,14 +125,7 @@ func NewConfig() *Options {
 		"Pod", "Event", "Endpoints", "EndpointSlice", "Lease", "Node", "ControllerRevision",
 		"VolumeSnapshot", "VolumeSnapshotContent", "*Snapshot", "*SnapshotContent",
 	}
-	opts.ExcludeAnnotations = []string{
-		"kubectl.kubernetes.io/last-applied-configuration",
-		"deployment.kubernetes.io/*",
-		"autoscaling.alpha.kubernetes.io/*",
-		"checksum/*",
-		"helm.sh/*",
-	}
-	// Filtering disabled by default - all objects included as-is
+	// Selection disabled by default - all targeted objects captured as-is
 	opts.EnableFiltering = false
 
 	mode, pairs, perr := ParseUnifiedBootstrapPairsEnv(os.Getenv(EnvUnifiedBootstrapPairs))
@@ -179,8 +173,7 @@ func positiveDurationFromEnv(key string) (time.Duration, bool) {
 //   - maxChunkSizeBytes: maximum chunk size in bytes (e.g., "800000")
 //   - defaultTTL: default TTL duration (e.g., "10m", "1h", "168h")
 //   - excludeKinds: comma-separated list of kinds to exclude (e.g., "Pod,Event")
-//   - excludeAnnotations: comma-separated list of annotation patterns to exclude
-//   - enableFiltering: enable object filtering/cleaning ("true"/"false"/"1"/"yes")
+//   - enableFiltering: enable object selection on capture ("true"/"false"/"1"/"yes")
 func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 	// maxChunkSizeBytes
 	if val, ok := configMapData["maxChunkSizeBytes"]; ok {
@@ -205,18 +198,6 @@ func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 			kind = strings.TrimSpace(kind)
 			if kind != "" {
 				opts.ExcludeKinds = append(opts.ExcludeKinds, kind)
-			}
-		}
-	}
-
-	// excludeAnnotations
-	if val, ok := configMapData["excludeAnnotations"]; ok && val != "" {
-		anns := strings.Split(val, ",")
-		opts.ExcludeAnnotations = make([]string, 0, len(anns))
-		for _, ann := range anns {
-			ann = strings.TrimSpace(ann)
-			if ann != "" {
-				opts.ExcludeAnnotations = append(opts.ExcludeAnnotations, ann)
 			}
 		}
 	}

@@ -575,12 +575,11 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	var objects []unstructured.Unstructured
 	collected := make(map[string]bool) // Track collected objects to avoid duplicates
 
-	// Helper to add object if not already collected
-	// CRITICAL: Filtering and cleaning must happen BEFORE adding (TZ requirement)
-	// But only if enableFiltering is true (default: false - include everything as-is)
+	// Helper to add object if not already collected.
+	// Object SELECTION (when EnableFiltering is on) and the Secret security contract are applied here,
+	// BEFORE adding. Capture stores RAW manifests (no field cleaning); the Secret bytes opt-in is the
+	// only field-level exception, and it is enforced regardless of EnableFiltering.
 	addObject := func(obj *unstructured.Unstructured, filterCtx common.CaptureFilterContext) {
-		var finalObj *unstructured.Unstructured
-
 		// Secret filtering is a security invariant for ManifestCheckpoint and is
 		// enforced even when general backup filtering is disabled.
 		if common.ShouldSkipSecretObject(obj) {
@@ -588,35 +587,28 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			return
 		}
 
-		// Apply filtering only if enabled
+		// Object SELECTION (skip ephemeral/owner-managed/excluded kinds) is applied when filtering is
+		// enabled, but is deliberately kept SEPARATE from field-level cleaning: snapshot-capture stores
+		// RAW manifests AS-IS (status included) so that the MCP is the source of truth for import/export
+		// (e.g. DataImport reads status.capacity, storageClass, volumeMode from the original manifest).
+		// All field-level sanitization happens on the restore read-path (internal/usecase/restore,
+		// independent of capture). See the unified snapshot plan §1/§2 (C1b raw-capture).
 		if r.Config.EnableFiltering {
-			// Step 3: Apply filtering (TZ section 5, step 3) - BEFORE adding
-			// Pass excludeKinds from ConfigMap to support runtime configuration
 			if common.ShouldSkipObjectWithContext(obj, r.Config.ExcludeKinds, filterCtx) {
 				r.Logger.Info("Skipping object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
 				return
 			}
-
-			// Apply cleaning (remove metadata, status, annotations)
-			// Pass excludeAnnotations from ConfigMap to support runtime configuration
-			cleaned := common.CleanObjectForSnapshot(obj, r.Config.ExcludeAnnotations)
-			if cleaned == nil {
-				r.Logger.Info("Object excluded after cleaning", "kind", obj.GetKind(), "name", obj.GetName())
-				return
-			}
-			finalObj = cleaned
-		} else {
-			// If filtering disabled, use object as-is (no filtering, no cleaning)
-			finalObj = obj
 		}
-		finalObj = common.SanitizeObjectForManifestCheckpoint(finalObj)
+
+		// The ONLY field-level exception on capture is Secret bytes: secure-by-default opt-in. Everything
+		// else is stored raw. SanitizeObjectForManifestCheckpoint deep-copies, so obj is never mutated.
+		finalObj := common.SanitizeObjectForManifestCheckpoint(obj)
 		if finalObj == nil {
 			return
 		}
 
-		// FIX: Restore apiVersion/kind because JSON round-trip in CleanObjectForSnapshot
-		// or normalizeObjectForJSON may drop TypeMeta fields
-		// These fields are stored separately in unstructured.Unstructured and must be preserved
+		// Preserve apiVersion/kind: TypeMeta is tracked separately on unstructured.Unstructured and a
+		// DeepCopy/normalize round-trip elsewhere may drop it.
 		finalObj.SetAPIVersion(obj.GetAPIVersion())
 		finalObj.SetKind(obj.GetKind())
 
@@ -678,7 +670,8 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 }
 
 // collectRelatedObjects recursively collects ConfigMaps, Secrets, and volumeClaimTemplates (TZ section 5, step 2)
-// CRITICAL: Uses addObject callback to ensure filtering and cleaning are applied immediately
+// CRITICAL: Uses addObject callback so object selection + secret enforcement are applied immediately
+// (capture stores raw manifests; no field cleaning here).
 func (r *ManifestCheckpointController) collectRelatedObjects(ctx context.Context, obj *unstructured.Unstructured, namespace string, addObject func(*unstructured.Unstructured)) {
 	// Collect ConfigMaps referenced in volumes
 	if volumes, found, _ := unstructured.NestedSlice(obj.Object, "spec", "volumes"); found {
@@ -703,7 +696,7 @@ func (r *ManifestCheckpointController) collectRelatedObjects(ctx context.Context
 						cmObj.SetName(nameStr)
 						cmObj.SetNamespace(namespace)
 						if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nameStr}, cmObj); err == nil {
-							// addObject applies filtering and cleaning
+							// addObject applies object selection + secret enforcement (no field cleaning)
 							addObject(cmObj)
 						}
 					}
@@ -735,8 +728,8 @@ func (r *ManifestCheckpointController) collectRelatedObjects(ctx context.Context
 						secretObj.SetName(nameStr)
 						secretObj.SetNamespace(namespace)
 						if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nameStr}, secretObj); err == nil {
-							// addObject applies filtering and cleaning (including ShouldSkipObject for Secrets)
-							// No need for manual filtering here - ShouldSkipObject handles all non-Opaque secrets
+							// addObject enforces the Secret security contract (ShouldSkipSecretObject) unconditionally,
+							// so non-Opaque / unannotated Opaque secrets are skipped here without manual filtering.
 							addObject(secretObj)
 						}
 					}
@@ -1146,8 +1139,7 @@ func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData str
 //   - maxChunkSizeBytes: maximum chunk size for checkpoint content (default: 800000)
 //   - defaultTTL: default TTL for ManifestCaptureRequest (default: 168h, see config.DefaultTTL)
 //   - excludeKinds: comma-separated list of kinds to exclude from snapshots
-//   - excludeAnnotations: comma-separated list of annotations to exclude
-//   - enableFiltering: enable object filtering/cleaning (default: false)
+//   - enableFiltering: enable object selection on capture (default: false)
 //
 // See templates/controller/configmap.yaml for ConfigMap structure
 func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Context) error {
@@ -1185,7 +1177,6 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
 		"defaultTTL", r.Config.DefaultTTL,
 		"excludeKinds", len(r.Config.ExcludeKinds),
-		"excludeAnnotations", len(r.Config.ExcludeAnnotations),
 		"enableFiltering", r.Config.EnableFiltering)
 
 	return nil

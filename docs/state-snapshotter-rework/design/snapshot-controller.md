@@ -166,14 +166,22 @@
 
 Профиль должен быть **один** в коде (или генерироваться из одного источника); ad-hoc «снять всё» запрещён (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
 
+#### 4.5.0 Raw capture policy (источник истины — MCP)
+
+Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **including `status`** and runtime fields. MCP is the source of truth for import/export: `DataImport`/`DataExport` read original fields (e.g. `status.capacity`, `spec.storageClassName`, `spec.volumeMode`) directly from the stored manifest.
+
+- **Object selection** (skipping ephemeral/owner-managed/excluded kinds) is a **separate** layer applied on capture; it does **not** mutate object fields.
+- **Field-level sanitization** (stripping `status`, `metadata.managedFields`, `resourceVersion`, `uid`, `creationTimestamp`, etc.) happens **only on the restore read-path** (`internal/usecase/restore`), independent of capture.
+- The **only** field-level exception on capture is `Secret` bytes — see below.
+
 #### 4.5.1 Secret handling in ManifestCheckpoint
 
-`Secret` objects are sensitive and are not stored in `ManifestCheckpoint` by default.
+`Secret` objects are sensitive and are **secure-by-default**: their bytes are not stored in `ManifestCheckpoint` unless explicitly opted in. This is the single field-level exception to the raw-capture policy above, because the snapshot store has no at-rest encryption.
 
 - Non-`Opaque` secrets are always skipped (`kubernetes.io/tls`, `kubernetes.io/dockerconfigjson`, `kubernetes.io/service-account-token`, and any other `type != Opaque`).
 - `Opaque` secrets without explicit annotations are skipped.
-- `Opaque` secrets annotated with `backup.deckhouse.io/include-secret: "true"` are stored with `.data` and `.stringData` removed; other fields are preserved as-is after normal object cleaning.
-- `Opaque` secrets annotated with `backup.deckhouse.io/include-secret-data: "true"` are stored with `.data` and `.stringData`. This annotation is a standalone opt-in, not an addition to `backup.deckhouse.io/include-secret`. It is dangerous because sensitive values are persisted in `ManifestCheckpoint`; use it only intentionally.
+- `Opaque` secrets annotated with `state-snapshotter.deckhouse.io/include-secret: "true"` are stored with `.data` and `.stringData` removed; other fields are preserved as-is.
+- `Opaque` secrets annotated with `state-snapshotter.deckhouse.io/include-secret-data: "true"` are stored with `.data` and `.stringData`. This annotation is a standalone opt-in, not an addition to `state-snapshotter.deckhouse.io/include-secret`. It is dangerous because sensitive values are persisted in `ManifestCheckpoint`; use it only intentionally.
 
 ```yaml
 apiVersion: v1
@@ -181,7 +189,7 @@ kind: Secret
 metadata:
   name: example
   annotations:
-    backup.deckhouse.io/include-secret: "true"
+    state-snapshotter.deckhouse.io/include-secret: "true"
 type: Opaque
 data:
   password: ...
@@ -195,7 +203,7 @@ kind: Secret
 metadata:
   name: example-with-data
   annotations:
-    backup.deckhouse.io/include-secret-data: "true"
+    state-snapshotter.deckhouse.io/include-secret-data: "true"
 type: Opaque
 data:
   password: ...

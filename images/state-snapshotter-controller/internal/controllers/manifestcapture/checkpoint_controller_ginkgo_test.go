@@ -207,6 +207,76 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(found).To(BeTrue())
 			Expect(stringData).To(HaveKeyWithValue("token", "plain"))
 		})
+
+		It("should store RAW manifests (status + non-domain annotations) while selection still drops owned objects", func() {
+			ctx := context.Background()
+			// Filtering ON exercises the SELECTION layer; field-level cleaning (status / non-domain
+			// annotation stripping) must NOT happen on capture anymore — the MCP is the source of truth
+			// for import/export. Selection and field-cleaning are now decoupled.
+			cfg.EnableFiltering = true
+
+			// Service is NOT registered via WithStatusSubresource above, so the fake client round-trips
+			// its typed status on Create/Get (a status-subresource registration would drop it).
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "svc1",
+					Namespace:   "ns1",
+					Annotations: map[string]string{"example.com/keep-me": "raw"},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Port: 80}},
+				},
+				Status: corev1.ServiceStatus{
+					LoadBalancer: corev1.LoadBalancerStatus{
+						Ingress: []corev1.LoadBalancerIngress{{IP: "1.2.3.4"}},
+					},
+				},
+			}
+			Expect(baseClient.Create(ctx, svc)).To(Succeed())
+
+			// An owner-managed ConfigMap must be dropped by selection even though capture no longer cleans.
+			ownedCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "owned-cm",
+					Namespace: "ns1",
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: "apps/v1",
+						Kind:       "Deployment",
+						Name:       "some-deploy",
+						UID:        "00000000-0000-0000-0000-000000000001",
+					}},
+				},
+				Data: map[string]string{"k": "v"},
+			}
+			Expect(baseClient.Create(ctx, ownedCM)).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-raw", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "Service", Name: "svc1"},
+						{APIVersion: "v1", Kind: "ConfigMap", Name: "owned-cm"},
+					},
+				},
+			}
+
+			objects, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+
+			captured := objectsByKindName(objects)
+			Expect(captured).NotTo(HaveKey("ConfigMap/owned-cm"), "selection must drop owner-managed objects")
+			Expect(captured).To(HaveKey("Service/svc1"))
+
+			svcCaptured := captured["Service/svc1"]
+			ingress, found, err := unstructured.NestedSlice(svcCaptured.Object, "status", "loadBalancer", "ingress")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue(), "raw capture must preserve object status")
+			Expect(ingress).To(HaveLen(1))
+			Expect(ingress[0]).To(HaveKeyWithValue("ip", "1.2.3.4"))
+			// A non-domain annotation that the legacy cleaner would have stripped must survive raw capture.
+			Expect(svcCaptured.GetAnnotations()).To(HaveKeyWithValue("example.com/keep-me", "raw"))
+		})
 	})
 
 	// ============================================================================

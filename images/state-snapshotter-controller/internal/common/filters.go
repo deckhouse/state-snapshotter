@@ -25,10 +25,13 @@ import (
 )
 
 const (
-	// AnnotationIncludeSecret allows an Opaque Secret to be stored without data.
-	AnnotationIncludeSecret = "backup.deckhouse.io/include-secret"
-	// AnnotationIncludeSecretData allows an Opaque Secret to be stored with data.
-	AnnotationIncludeSecretData = "backup.deckhouse.io/include-secret-data"
+	// AnnotationIncludeSecret allows an Opaque Secret to be stored without data (opt-in).
+	AnnotationIncludeSecret = "state-snapshotter.deckhouse.io/include-secret"
+	// AnnotationIncludeSecretData allows an Opaque Secret to be stored WITH its data/stringData bytes.
+	// Secrets are secure-by-default: without this annotation the bytes are stripped. This is the SINGLE
+	// field-level exception to raw-capture (the snapshot store has no at-rest encryption), so it is opt-in
+	// and must be used intentionally. See the unified snapshot plan §7 / module docs (C1b).
+	AnnotationIncludeSecretData = "state-snapshotter.deckhouse.io/include-secret-data"
 )
 
 // Constants for resource type filtering
