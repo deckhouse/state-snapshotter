@@ -19,10 +19,15 @@
 #                           (storage-e2e's generic <MODULE>_MODULE_PULL_OVERRIDE
 #                           convention; in-YAML ${VAR} is rejected).
 #
-# Phase 3 backends (storage-foundation for VCR/VRR/VSC, and sds-node-configurator
-# + sds-local-volume for the thin snapshot-capable StorageClass) are NOT listed
-# here: they are enabled at runtime by the phase-3 setup only when E2E_VOLUME_DATA
-# is set, so phases 1-2 do not pay for them.
+# Phase 3 data leg:
+#   - storage-foundation : ships the VolumeCaptureRequest / VolumeRestoreRequest /
+#                          VolumeSnapshotClass machinery the data leg captures and
+#                          restores through. Listed here (always on) because it is
+#                          just the CRDs + controllers and is cheap for phases 1-2.
+# The thin snapshot-capable StorageClass backends (sds-node-configurator +
+# sds-local-volume) are NOT listed here: they are enabled at runtime by the phase-3
+# setup (testkit.EnsureDefaultStorageClass) only when E2E_VOLUME_DATA is set, so
+# phases 1-2 do not pay for them.
 clusterDefinition:
   masters:
     - hostname: "master-1"
@@ -70,5 +75,11 @@ clusterDefinition:
         modulePullOverride: "main"
         settings:
           enableDemoDomain: true
+        dependencies:
+          - "snapshot-controller"
+      - name: "storage-foundation"
+        version: 1
+        enabled: true
+        modulePullOverride: "main"
         dependencies:
           - "snapshot-controller"

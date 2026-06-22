@@ -132,6 +132,14 @@ var (
 	objectKeeperGVR = schema.GroupVersionResource{
 		Group: "deckhouse.io", Version: "v1alpha1", Resource: "objectkeepers",
 	}
+	// Phase-3 (volume-data) GVRs: the real CSI VolumeSnapshot (resolved by the VS connector) and the
+	// storage-foundation VolumeRestoreRequest used to materialize restored PVCs from data artifacts.
+	volumeSnapshotGVR = schema.GroupVersionResource{
+		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots",
+	}
+	volumeRestoreRequestGVR = schema.GroupVersionResource{
+		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests",
+	}
 )
 
 const pollInterval = 5 * time.Second
