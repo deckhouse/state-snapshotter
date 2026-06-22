@@ -73,14 +73,18 @@ func buildAggregatedAPIServer(name, addr, certFile, keyFile string, delegate htt
 	config := genericapiserver.NewConfig(codecs)
 	config.EffectiveVersion = utilversion.DefaultBuildEffectiveVersion()
 
-	secure := genericoptions.NewSecureServingOptions()
+	// WithLoopback is required: genericapiserver.New() rejects a config whose LoopbackClientConfig is nil
+	// ("Genericapiserver.New() called with config.LoopbackClientConfig == nil"). Only the loopback variant's
+	// ApplyTo generates the self-signed loopback cert and populates config.LoopbackClientConfig; the plain
+	// SecureServingOptions.ApplyTo leaves it nil even when our own serving cert/key are provided.
+	secure := genericoptions.NewSecureServingOptions().WithLoopback()
 	secure.BindPort = port
 	if host != "" {
 		secure.BindAddress = net.ParseIP(host)
 	}
 	secure.ServerCert.CertKey.CertFile = certFile
 	secure.ServerCert.CertKey.KeyFile = keyFile
-	if err := secure.ApplyTo(&config.SecureServing); err != nil {
+	if err := secure.ApplyTo(&config.SecureServing, &config.LoopbackClientConfig); err != nil {
 		return nil, fmt.Errorf("apply secure serving: %w", err)
 	}
 
