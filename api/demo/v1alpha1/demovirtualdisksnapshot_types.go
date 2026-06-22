@@ -37,10 +37,32 @@ type DemoVirtualDiskSnapshot struct {
 type DemoVirtualDiskSnapshotSpec struct {
 	// SourceRef identifies the DemoVirtualDisk captured by this snapshot. It is the single
 	// source-of-truth for what the snapshot captures (both manually-created and root-planned
-	// snapshots) and is immutable once set.
+	// snapshots) and is immutable once set. On import it still carries the original disk identity
+	// (the live disk may be absent); spec.dataSource is what switches the node into import mode.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
 	SourceRef SnapshotSourceRef `json:"sourceRef"`
+
+	// DataSource, when set, switches this disk snapshot into IMPORT mode: instead of capturing the live
+	// DemoVirtualDisk (no MCR/VCR planning), the data leg is materialized by the common controller from
+	// the referenced DataImport's produced artifact (DataImport.status.dataArtifactRef). The domain
+	// controller skips capture planning for import-mode snapshots; manifests + children arrive via the
+	// per-CR manifests-and-children-refs-upload payload. Immutable once set (C5; demo-domain reference
+	// for the domain leaf spec.dataSource->DataImport import trigger).
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.dataSource is immutable"
+	DataSource *SnapshotDataImportRef `json:"dataSource,omitempty"`
+}
+
+// SnapshotDataImportRef references the namespace-local DataImport (storage.deckhouse.io DataImport)
+// whose status.dataArtifactRef provides this snapshot node's data artifact on import. The DataImport is
+// resolved in the snapshot's own namespace; apiGroup/kind are fixed (storage.deckhouse.io / DataImport).
+// +k8s:deepcopy-gen=true
+type SnapshotDataImportRef struct {
+	// Name is the DataImport object name in the same namespace as this snapshot.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // DemoVirtualDiskSnapshotStatus defines the observed state of DemoVirtualDiskSnapshot.

@@ -85,6 +85,15 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
+	// Import mode (C5): spec.dataSource switches this disk snapshot off capture. The domain controller
+	// does NO capture planning (no source-disk lookup, no MCR/VCR) — the live DemoVirtualDisk may be
+	// absent on import. The common controller (GenericSnapshotBinderController) materializes the backing
+	// SnapshotContent from the uploaded manifests (reconstructed ManifestCheckpoint) and the data leg from
+	// DataImport.status.dataArtifactRef. Domain planning is trivially complete for an import leaf.
+	if s.Spec.DataSource != nil {
+		return ctrl.Result{}, nil
+	}
+
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
 	if resolution.Reason != "" {
 		if patchErr := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, resolution.Reason, resolution.Message); patchErr != nil {

@@ -38,6 +38,7 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -205,6 +206,14 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	// (direct Status().Update walk onto ancestor Snapshots) was a pre-conditions-model remnant and has been
 	// removed; the snapshot side never recomputes its own Ready/reason.
 	if !obj.GetDeletionTimestamp().IsZero() {
+		// Import leaf deleted before its content was bound: best-effort delete the ownerless reconstructed
+		// ManifestCheckpoint (the per-CR upload creates it ownerless; once content is bound it is adopted +
+		// GC'd with the content). Mirrors the namespace Snapshot orchestrator's pre-bind cleanup.
+		if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" && snapshotLike.GetStatusContentName() == "" {
+			if err := usecase.DeleteReconstructedManifestCheckpoint(ctx, r.Client, obj.GetUID()); err != nil {
+				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import leaf")
+			}
+		}
 		// Remove finalizer from SnapshotContent on parent deletion (watch-driven, no reverse content ref).
 		if err := r.removeSnapshotContentFinalizer(ctx, snapshotLike, obj); err != nil {
 			logger.Error(err, "Failed to remove SnapshotContent finalizer on snapshot deletion")
@@ -212,6 +221,14 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 		// Snapshot is being deleted - no need to continue create-path
 		return ctrl.Result{}, nil
+	}
+
+	// Import branch (C5): an import-mode leaf (spec.dataSource -> DataImport) has no live capture and no
+	// domain planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
+	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint, data leg from the
+	// DataImport's produced artifact) — there is no second content creator.
+	if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" {
+		return r.reconcileGenericImport(ctx, obj, snapshotLike, dataImportName)
 	}
 
 	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot

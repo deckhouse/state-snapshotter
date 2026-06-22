@@ -195,12 +195,12 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// Import-mode Snapshots (spec.source.import) are materialized from an uploaded payload
-	// (manifests-and-children-refs-upload) plus, for data leaves, DataImport — the controller MUST NOT
-	// capture the live namespace. The full import orchestration (reconstruct SnapshotContent from the
-	// uploaded MCP, resolve data artifacts, bind) is owned by the import orchestrator; this guard keeps
-	// an import Snapshot from accidentally running dynamic capture until then.
+	// (manifests-and-children-refs-upload) — the controller MUST NOT capture the live namespace. The
+	// import orchestrator reconstructs the SnapshotContent from the uploaded ManifestCheckpoint + child
+	// refs and binds it (the root structural node carries no data leg); it falls back to a non-terminal
+	// pending hold until the upload arrives.
 	if nsSnap.IsImportMode() {
-		return r.reconcileImportPending(ctx, nsSnap)
+		return r.reconcileImport(ctx, nsSnap, rootOK)
 	}
 
 	expectedName := snapshotContentName(nsSnap)

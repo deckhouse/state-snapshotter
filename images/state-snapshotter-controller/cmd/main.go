@@ -49,6 +49,7 @@ import (
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumesnapshotimport"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
@@ -294,6 +295,17 @@ func main() {
 		}
 	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
+
+	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.dataImportName -> DataImport).
+	// The forked snapshot-controller skips these; this common controller materializes their SnapshotContent
+	// and writes the binding (extended boundSnapshotContentName + legacy boundVolumeSnapshotContentName/readyToUse).
+	// Self-guards by RESTMapping: a not-yet-installed VolumeSnapshot CRD degrades to "no controller".
+	if err := volumesnapshotimport.AddToManager(mgr); err != nil {
+		log.Error(err, "Failed to add VolumeSnapshot import binder to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("VolumeSnapshot import binder added to manager")
 
 	// No dedicated controller activators in core: the demo dedicated planning controllers run in the
 	// domain-controller pod. The Syncer still drives generic Snapshot/SnapshotContent watches AND the

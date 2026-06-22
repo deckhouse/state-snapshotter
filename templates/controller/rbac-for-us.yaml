@@ -121,16 +121,31 @@ rules:
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
-# VolumeSnapshotContent handoff after VCR publish (ownerRef -> SnapshotContent)
+# DataImport (storage-volume-data-manager, SVDM): the import binder (C5) reads a leaf's DataImport
+# status.dataArtifactRef to populate SnapshotContent.dataRef on import. Read-only (the controller never
+# writes DataImport); the import-safe RBAC gate for *creating* DataImports lives on d8/user roles.
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["dataimports"]
+  verbs: ["get", "list", "watch"]
+
+# VolumeSnapshotContent handoff after VCR publish (ownerRef -> SnapshotContent).
+# "delete" is required by the C5 teardown physical reclaim: an import VSC carries a second
+# (DataImport-keeper) ownerRef, so deleting the SnapshotContent does NOT GC it — the controller must
+# flip deletionPolicy Retain->Delete (patch) and then explicitly delete the VSC so CSI reclaims the data.
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshotcontents"]
-  verbs: ["get", "list", "watch", "update", "patch"]
+  verbs: ["get", "list", "watch", "update", "patch", "delete"]
 
-# VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves.
-# No "update": the controller only creates, adopts via ownerRef patch, and deletes stale leaves.
+# VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
+# binder (C5) binds extended VS with spec.source.dataImportName.
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]
+# VolumeSnapshot status: capture writes the extended status.boundSnapshotContentName on orphan VS leaves;
+# the import binder additionally writes legacy status.boundVolumeSnapshotContentName/readyToUse.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots/status"]
+  verbs: ["get", "update", "patch"]
 
 # VolumeSnapshotClass (CSI): orphan PVC data leg resolves the class via the PVC StorageClass
 # annotation and validates its driver. Read-only, fetched directly (APIReader), so "get" is enough.

@@ -43,11 +43,32 @@ spec:
             description: DemoVirtualDiskSnapshotSpec defines the desired state of
               DemoVirtualDiskSnapshot.
             properties:
+              dataSource:
+                description: |-
+                  DataSource, when set, switches this disk snapshot into IMPORT mode: instead of capturing the live
+                  DemoVirtualDisk (no MCR/VCR planning), the data leg is materialized by the common controller from
+                  the referenced DataImport's produced artifact (DataImport.status.dataArtifactRef). The domain
+                  controller skips capture planning for import-mode snapshots; manifests + children arrive via the
+                  per-CR manifests-and-children-refs-upload payload. Immutable once set (C5; demo-domain reference
+                  for the domain leaf spec.dataSource->DataImport import trigger).
+                properties:
+                  name:
+                    description: Name is the DataImport object name in the same namespace
+                      as this snapshot.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: spec.dataSource is immutable
+                  rule: self == oldSelf
               sourceRef:
                 description: |-
                   SourceRef identifies the DemoVirtualDisk captured by this snapshot. It is the single
                   source-of-truth for what the snapshot captures (both manually-created and root-planned
-                  snapshots) and is immutable once set.
+                  snapshots) and is immutable once set. On import it still carries the original disk identity
+                  (the live disk may be absent); spec.dataSource is what switches the node into import mode.
                 properties:
                   apiVersion:
                     minLength: 1

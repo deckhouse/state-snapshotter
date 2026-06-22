@@ -253,8 +253,11 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		// This unlocks GC for children, but does NOT initiate Delete(child-content)
 		// GC will handle deletion through ownerRef
 		if err := r.cascadeRemoveFinalizersFromChildren(ctx, contentLike, obj); err != nil {
-			logger.Error(err, "Failed to cascade remove finalizers from children")
-			// Non-fatal: continue with finalizer removal
+			// A child whose physical reclaim failed keeps its parent-protect finalizer; requeue and KEEP
+			// this parent's finalizer too, so the parent is not GC'd (and the subtree not orphaned) until
+			// every child's data artifact is reclaimed (C5 teardown: no orphaned physical CSI snapshots).
+			logger.Error(err, "Cascade child reclaim/finalizer removal incomplete; keeping finalizer and requeueing")
+			return ctrl.Result{}, err
 		}
 
 		// Step 2.1.1: Remove finalizers from linked artifacts (MCP/VSC)
@@ -262,6 +265,17 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			if err := r.removeArtifactFinalizer(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1"); err != nil {
 				logger.Error(err, "Failed to remove ManifestCheckpoint finalizer", "mcp", mcpName)
 			}
+		}
+		// Physical data reclaim (C5, unified import + capture teardown): the VSC was pinned to Retain for
+		// its whole life; now that the owning SnapshotContent is going away, flip it Retain->Delete and
+		// delete it so the CSI external-snapshotter reclaims the physical snapshot instead of orphaning it.
+		// This is a HARD GATE: an import VSC carries a second (DataImport-keeper) ownerRef, so removing the
+		// parent-protect/artifact-protect finalizers does NOT GC it — the explicit reclaim below is the only
+		// deterministic path. On any reclaim error, requeue and KEEP the finalizers so the physical snapshot
+		// is never orphaned; finalizer removal only proceeds once reclaim has succeeded.
+		if err := r.reclaimDataArtifactsFromContentObj(ctx, obj); err != nil {
+			logger.Error(err, "Failed to reclaim data artifacts on SnapshotContent teardown; keeping finalizer and requeueing")
+			return ctrl.Result{}, err
 		}
 		for _, binding := range contentLike.GetStatusDataRefs() {
 			if binding.Artifact.Kind != "VolumeSnapshotContent" || binding.Artifact.Name == "" {
@@ -914,6 +928,18 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 			// Other error - log but continue
 			logger.Error(childGetErr, "Failed to get child SnapshotContent", "child", childRef.Name)
 			childErrors = append(childErrors, fmt.Errorf("failed to get child %s: %w", childRef.Name, childGetErr))
+			continue
+		}
+
+		// Reclaim the child's physical data artifacts BEFORE removing its finalizer: stripping a direct
+		// child's parent-protect finalizer here lets GC delete it WITHOUT running its own deletion handler
+		// (and thus without its own reclaim). So reclaim is a gate: if it fails, DO NOT remove this child's
+		// finalizer — leave parent-protect in place so the child's own deletion handler runs as the backstop
+		// reclaim, and record the error so the parent cascade requeues. This keeps the unified teardown
+		// reclaim complete for every node (no orphaned physical CSI snapshot). Idempotent across retries.
+		if err := r.reclaimDataArtifactsFromContentObj(ctx, childObj); err != nil {
+			logger.Error(err, "Failed to reclaim child data artifacts during cascade; keeping child finalizer", "child", childRef.Name)
+			childErrors = append(childErrors, fmt.Errorf("reclaim child %s data artifacts: %w", childRef.Name, err))
 			continue
 		}
 
