@@ -20,8 +20,7 @@ functions in dependency order:
    `aggregatedApiSpecs`, `restoreSpecs`): apply a PVC-free demo source, create a
    root `Snapshot`, assert the `Snapshot` / `SnapshotContent` and demo child
    snapshots reach Ready, read the aggregated APIs, and restore the manifests
-   into a fresh namespace. Needs only `state-snapshotter` + `snapshot-controller`
-   (no CSI snapshot support).
+   into a fresh namespace. Needs only `state-snapshotter` (no volume-data leg).
 2. **Phase 2 - export -> import + GC/TTL** (`importSpecs`, `gcSpecs`): walk the
    captured tree, export each node's manifests, reconstruct it through the import
    upload path, then exercise the root TTL/GC cascade.
@@ -67,10 +66,23 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `SSH_JUMP_HOST`, `SSH_JUMP_USER`, `SSH_JUMP_KEY_PATH`: jump-host settings for
   `alwaysUseExisting`.
 - `DKP_LICENSE_KEY`, `REGISTRY_DOCKER_CFG`
-- `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE`: overrides `modulePullOverride` for
-  `state-snapshotter` from `tests/cluster_config.yml` (which keeps a literal
-  `main` default). Set to `prN` / `mrN` / `main`. This is storage-e2e's generic
-  per-module convention `<MODULE>_MODULE_PULL_OVERRIDE`.
+- `<MODULE>_MODULE_PULL_OVERRIDE`: per-module override of the `modulePullOverride`
+  tag declared in `tests/cluster_config.yml` (storage-e2e's
+  `ApplyModulePullOverrideEnv`; module name upper-cased, `-`/`.` → `_`). Each
+  config module that pins a literal `main` default can be independently pointed
+  at a `prN` / `mrN` / `main` image **without editing the committed YAML**:
+  - `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` — the module under test; this is the
+    one you normally set (to your PR/MR tag).
+  - `STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE` — only when co-developing
+    `storage-volume-data-manager` (the volume data-transport engine, `DataImport`/
+    `DataExport`).
+  - `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` — only when co-developing
+    `storage-foundation` (the extended-VS fork + phase-3 data-leg backend).
+
+  Unset modules keep the literal `main` from the YAML. The phase-3 storage
+  backends (`sds-node-configurator` + `sds-local-volume`) are enabled at runtime
+  by `testkit.EnsureDefaultStorageClass` from the release channel and carry **no**
+  `modulePullOverride`, so they are not pinned by these vars.
 
 ### state-snapshotter suite knobs
 
@@ -106,7 +118,10 @@ export SSH_VM_USER=cloud
 
 export DKP_LICENSE_KEY=<license>
 export REGISTRY_DOCKER_CFG=<base64-docker-config>
-export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=main   # or prN / mrN
+export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=main   # module under test; or prN / mrN
+# Optional — only when co-developing these dependency modules (default main):
+# export STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE=prN
+# export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE=prN
 
 # Phases 1-2 only:
 cd e2e
