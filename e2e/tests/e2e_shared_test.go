@@ -25,6 +25,7 @@ import (
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -127,6 +128,9 @@ var (
 	}
 	configMapGVR = schema.GroupVersionResource{
 		Group: "", Version: "v1", Resource: "configmaps",
+	}
+	objectKeeperGVR = schema.GroupVersionResource{
+		Group: "deckhouse.io", Version: "v1alpha1", Resource: "objectkeepers",
 	}
 )
 
@@ -575,4 +579,20 @@ func walkSnapshotTree(ctx context.Context, ns, rootSnapshot string) ([]childRef,
 // errIsNotFound reports whether err is a Kubernetes NotFound (used by GC assertions).
 func errIsNotFound(err error) bool {
 	return apierrors.IsNotFound(err)
+}
+
+// assertResourceGone blocks until the (possibly cluster-scoped) resource is NotFound, failing the spec
+// if it is still present at the deadline.
+func assertResourceGone(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) {
+	GinkgoHelper()
+	Eventually(func() error {
+		_, err := getResource(ctx, gvr, ns, name)
+		if err == nil {
+			return fmt.Errorf("%s %s still exists", gvr.Resource, name)
+		}
+		if errIsNotFound(err) {
+			return nil
+		}
+		return err
+	}).WithContext(ctx).WithTimeout(timeout).WithPolling(5*time.Second).Should(Succeed(), "%s %s should be GC'd", gvr.Resource, name)
 }
