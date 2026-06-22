@@ -269,6 +269,28 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 	return node, nil
 }
 
+// ResolveVolumeSnapshotRestoreNode resolves a generic-PVC extended VolumeSnapshot leaf — the entrypoint
+// of the subresources.snapshot.storage.k8s.io connector (C8) — into the standalone child volume
+// RestoreNode behind it (PVC manifest + dataRef + VSC->VS mapping). It reuses the orphan-PVC volume-leaf
+// resolution: the VolumeSnapshot is itself the leaf and carries no snapshot children, so there is no
+// recursion. The compile path then emits the PVC bound to its VolumeSnapshot dataSourceRef.
+//
+// Unlike resolveOrphanVolumeChildNode (reached from a trusted childrenSnapshotRefs tree-walk, where a
+// missing leaf is a contract violation), this is a top-level user-addressed entrypoint: a missing
+// VolumeSnapshot is a plain NotFound (404), matching the manifests-download sibling. The existence
+// precheck maps that case to ErrNotFound before delegating to the shared (409-on-missing) resolver.
+func (r *Resolver) ResolveVolumeSnapshotRestoreNode(ctx context.Context, namespace, vsName string) (*RestoreNode, error) {
+	vs := &unstructured.Unstructured{}
+	vs.SetGroupVersionKind(schema.GroupVersionKind{Group: snapshot.CSISnapshotGroup, Version: snapshot.CSISnapshotVersion, Kind: snapshot.KindVolumeSnapshot})
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vsName}, vs); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: VolumeSnapshot %s/%s", ErrNotFound, namespace, vsName)
+		}
+		return nil, fmt.Errorf("failed to get VolumeSnapshot %s/%s: %w", namespace, vsName, err)
+	}
+	return r.resolveOrphanVolumeChildNode(ctx, namespace, vsName)
+}
+
 // resolveOrphanVolumeChildNode builds the child RestoreNode behind an orphan-PVC CSI VolumeSnapshot
 // leaf (Variant A INV-ORPHAN4). The VS is a namespaced handle whose status.boundSnapshotContentName
 // points at a standalone child SnapshotContent that owns the orphan PVC's manifest (its own

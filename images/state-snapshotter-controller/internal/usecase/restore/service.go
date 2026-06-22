@@ -56,6 +56,19 @@ func (s *Service) BuildManifestsWithDataRestorationForNode(ctx context.Context, 
 	})
 }
 
+// BuildManifestsWithDataRestorationForVolumeSnapshot compiles the restore output for a single
+// generic-PVC extended VolumeSnapshot leaf addressed by namespace/name — the
+// subresources.snapshot.storage.k8s.io connector (C8). The VolumeSnapshot is a namespaced handle to a
+// standalone child volume SnapshotContent (its own PVC manifest + dataRef); the result is the apply-ready
+// PVC bound to the VolumeSnapshot dataSourceRef. A VolumeSnapshot leaf has no snapshot children, so there
+// is no recursion. opts.SnapshotName is unused (the VS name is passed explicitly); opts carries only the
+// namespace and targetNamespace.
+func (s *Service) BuildManifestsWithDataRestorationForVolumeSnapshot(ctx context.Context, namespace, vsName string, opts Options) ([]byte, error) {
+	return s.buildRestore(ctx, opts, func() (*RestoreNode, error) {
+		return s.resolver.ResolveVolumeSnapshotRestoreNode(ctx, namespace, vsName)
+	})
+}
+
 func (s *Service) buildRestore(ctx context.Context, opts Options, resolveRoot func() (*RestoreNode, error)) ([]byte, error) {
 	targetNamespace := opts.TargetNamespace
 	if targetNamespace == "" {

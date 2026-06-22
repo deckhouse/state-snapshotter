@@ -79,6 +79,8 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	mux := http.NewServeMux()
 	archiveHandler.SetupRoutes(mux)
 	restoreHandler.SetupRoutes(mux)
+	// subresources.snapshot.storage.k8s.io connector over the generic-PVC extended VolumeSnapshot (C8).
+	restoreHandler.SetupVolumeSnapshotConnectorRoutes(mux)
 
 	return &Server{
 		addr:           addr,

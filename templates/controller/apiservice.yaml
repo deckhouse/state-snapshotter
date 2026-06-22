@@ -27,5 +27,28 @@ spec:
     port: 443
   version: v1alpha1
   versionPriority: 15
+---
+# C8: connector group for the generic-PVC extended VolumeSnapshot. This is a SEPARATE aggregated
+# group (subresources.snapshot.storage.k8s.io) from the CSI CRD group (snapshot.storage.k8s.io), so it
+# does NOT intercept the real VolumeSnapshot/VolumeSnapshotContent CRDs. It only serves the virtual
+# volumesnapshots connector subresources (manifests-download / -with-data-restoration /
+# -and-children-refs-upload), backed by the same controller Service as the other subresources group.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1.subresources.snapshot.storage.k8s.io
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+spec:
+  caBundle: {{ .Values.stateSnapshotter.internal.apiServerCert.ca | b64enc | quote }}
+  group: subresources.snapshot.storage.k8s.io
+  # 999 is the inherited module default; there is no homonymous CRD group to lose to here (the real CSI
+  # group snapshot.storage.k8s.io is a different group), so the exact value is not load-bearing.
+  groupPriorityMinimum: 999
+  service:
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+    port: 443
+  version: v1
+  versionPriority: 15
 {{- end }}
 

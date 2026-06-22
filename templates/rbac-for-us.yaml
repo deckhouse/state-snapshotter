@@ -73,6 +73,22 @@ rules:
   - demovirtualdisksnapshots/manifests
   verbs:
   - get
+# C8 connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
+# user-facing capability to export (manifests-download), restore (manifests-with-data-restoration), and
+# import (manifests-and-children-refs-upload) a single volume snapshot by namespaced VS name.
+- apiGroups:
+  - subresources.snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots/manifests-download
+  - volumesnapshots/manifests-with-data-restoration
+  verbs:
+  - get
+- apiGroups:
+  - subresources.snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots/manifests-and-children-refs-upload
+  verbs:
+  - create
 - apiGroups:
   - deckhouse.io
   resources:
