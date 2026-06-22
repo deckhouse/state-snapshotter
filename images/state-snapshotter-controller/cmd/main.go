@@ -18,17 +18,13 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	goruntime "runtime"
 	"runtime/debug"
-	"strings"
 	"syscall"
-	"time"
 
 	v1 "k8s.io/api/core/v1"
 	sv1 "k8s.io/api/storage/v1"
@@ -71,17 +67,15 @@ var (
 	}
 
 	// API server flags
-	apiAddr             string
-	apiTLSCertFile      string
-	apiTLSKeyFile       string
-	apiAllowedClientCNs string
+	apiAddr        string
+	apiTLSCertFile string
+	apiTLSKeyFile  string
 )
 
 func init() {
 	flag.StringVar(&apiAddr, "api-addr", ":8443", "Address for API server to listen on")
 	flag.StringVar(&apiTLSCertFile, "api-tls-cert-file", "", "Path to TLS certificate file for API server")
 	flag.StringVar(&apiTLSKeyFile, "api-tls-private-key-file", "", "Path to TLS private key file for API server")
-	flag.StringVar(&apiAllowedClientCNs, "api-allowed-client-cns", "system:kube-apiserver,kubernetes,front-proxy-client", "Comma-separated list of allowed client certificate CNs for mTLS")
 }
 
 func main() {
@@ -372,64 +366,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read front-proxy CA from extension-apiserver-authentication ConfigMap
-	// This CA is used to verify client certificates from kube-apiserver
-	// mTLS is mandatory - server will not start if CA cannot be loaded
-	var mTLSCACert []byte
-	cm := &v1.ConfigMap{}
-	err = directClient.Get(ctx, client.ObjectKey{
-		Namespace: "kube-system",
-		Name:      "extension-apiserver-authentication",
-	}, cm)
-	if err != nil {
-		log.Error(err, "[main] Failed to read extension-apiserver-authentication ConfigMap, mTLS is required - server cannot start")
-		cancel() // Ensure cleanup before exit
-		os.Exit(1)
-	}
-
-	caData, ok := cm.Data["requestheader-client-ca-file"]
-	if !ok || caData == "" {
-		log.Error(nil, "[main] requestheader-client-ca-file not found in ConfigMap, mTLS is required - server cannot start")
-		cancel() // Ensure cleanup before exit
-		os.Exit(1)
-	}
-
-	mTLSCACert = []byte(caData)
-
-	// Parse and log CA certificate details for debugging
-	block, _ := pem.Decode(mTLSCACert)
-	if block != nil && block.Type == "CERTIFICATE" {
-		caCert, err := x509.ParseCertificate(block.Bytes)
-		if err == nil {
-			log.Info("[main] Successfully loaded front-proxy CA from extension-apiserver-authentication ConfigMap",
-				"ca_subject", caCert.Subject.String(),
-				"ca_issuer", caCert.Issuer.String(),
-				"ca_serial", caCert.SerialNumber.String(),
-				"ca_not_before", caCert.NotBefore.Format(time.RFC3339),
-				"ca_not_after", caCert.NotAfter.Format(time.RFC3339),
-				"ca_is_ca", caCert.IsCA,
-				"ca_key_usage", fmt.Sprintf("%d", caCert.KeyUsage),
-			)
-		} else {
-			log.Info("[main] Successfully loaded front-proxy CA (failed to parse for logging)", "error", err)
-		}
-	} else {
-		log.Info("[main] Successfully loaded front-proxy CA (failed to decode PEM for logging)")
-	}
-
-	// Create API server with direct client (no informer cache)
-	// ArchiveService will use directClient for all CRD operations
-	// Parse allowed client CNs
-	allowedCNsList := []string{}
-	if apiAllowedClientCNs != "" {
-		allowedCNs := strings.Split(apiAllowedClientCNs, ",")
-		for _, cn := range allowedCNs {
-			cn = strings.TrimSpace(cn)
-			if cn != "" {
-				allowedCNsList = append(allowedCNsList, cn)
-			}
-		}
-	}
+	// The aggregated apiserver's authentication (front-proxy requestheader + TokenReview) and
+	// authorization (SubjectAccessReview) are delegated to genericapiserver: it reads the front-proxy CA
+	// + allowed-names from the extension-apiserver-authentication ConfigMap itself (via the
+	// extension-apiserver-authentication-reader Role) and validates the kube-apiserver proxy client cert.
+	// No manual ConfigMap read or CN allowlist is needed here anymore.
 
 	// Domain restore delegation: core orchestrates restore over the run tree and, on a domain snapshot
 	// subtree, calls the domain controller's aggregated apiserver
@@ -443,12 +384,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsDomainCaptureSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList, mapper)
-	if apiServer == nil {
-		log.Error(nil, "[main] Failed to create API server (mTLS configuration failed)")
-		cancel() // Ensure cleanup before exit
-		os.Exit(1)
-	}
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsDomainCaptureSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
 
 	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
 

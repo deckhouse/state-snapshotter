@@ -24,28 +24,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestCNAllowed(t *testing.T) {
-	allowed := []string{"system:kube-apiserver", "front-proxy-client"}
-	cases := []struct {
-		name string
-		cn   string
-		sans []string
-		want bool
-	}{
-		{"allowed cn", "system:kube-apiserver", nil, true},
-		{"allowed via san", "other", []string{"front-proxy-client"}, true},
-		{"disallowed", "evil", []string{"also-evil"}, false},
-		{"empty", "", nil, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := cnAllowed(tc.cn, tc.sans, allowed); got != tc.want {
-				t.Fatalf("cnAllowed(%q,%v)=%v want %v", tc.cn, tc.sans, got, tc.want)
-			}
-		})
-	}
-}
-
 func newTestHandlerMux(t *testing.T, fetcher CoreBaseManifestsFetcher) *http.ServeMux {
 	t.Helper()
 	// Seed a Ready dsnap-a so the restore subresource passes the readiness gate and the routing

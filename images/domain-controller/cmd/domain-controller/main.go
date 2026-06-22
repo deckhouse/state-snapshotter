@@ -50,7 +50,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/domainapi"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/logger"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/domainsdk"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/kubutils"
 )
 
@@ -70,17 +69,15 @@ var resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 }
 
 var (
-	apiAddr             string
-	apiTLSCertFile      string
-	apiTLSKeyFile       string
-	apiAllowedClientCNs string
+	apiAddr        string
+	apiTLSCertFile string
+	apiTLSKeyFile  string
 )
 
 func init() {
 	flag.StringVar(&apiAddr, "api-addr", ":8443", "Address for the domain API server to listen on")
 	flag.StringVar(&apiTLSCertFile, "api-tls-cert-file", "", "Path to TLS certificate file for the domain API server")
 	flag.StringVar(&apiTLSKeyFile, "api-tls-private-key-file", "", "Path to TLS private key file for the domain API server")
-	flag.StringVar(&apiAllowedClientCNs, "api-allowed-client-cns", "system:kube-apiserver,kubernetes,front-proxy-client", "Comma-separated list of allowed client certificate CNs for mTLS")
 }
 
 func main() {
@@ -193,22 +190,11 @@ func main() {
 	}
 	restoreSvc := domainapi.NewRestoreService(mgr.GetAPIReader(), coreClient, log)
 
-	var caCert []byte
-	if apiTLSCertFile != "" && apiTLSKeyFile != "" {
-		caCert, err = domainsdk.LoadFrontProxyCA(ctx, kConfig, scheme)
-		if err != nil {
-			log.Error(err, "[domain-main] failed to load front-proxy CA, mTLS is required when TLS is enabled")
-			cancel()
-			os.Exit(1)
-		}
-	}
-
-	apiServer := domainapi.NewServer(apiAddr, restoreSvc, log, apiTLSCertFile, apiTLSKeyFile, caCert, domainsdk.ParseAllowedCNs(apiAllowedClientCNs))
-	if apiServer == nil {
-		log.Error(nil, "[domain-main] failed to create domain API server (mTLS configuration failed)")
-		cancel()
-		os.Exit(1)
-	}
+	// Authentication (front-proxy requestheader + TokenReview) and authorization (SubjectAccessReview)
+	// are delegated to genericapiserver, which reads the front-proxy CA + allowed-names from the
+	// extension-apiserver-authentication ConfigMap itself (via the extension-apiserver-authentication-reader
+	// Role). No manual front-proxy CA load or CN allowlist is needed here anymore.
+	apiServer := domainapi.NewServer(apiAddr, restoreSvc, log, apiTLSCertFile, apiTLSKeyFile)
 
 	log.Info("[domain-main] starting domain-controller", "api-addr", apiAddr)
 

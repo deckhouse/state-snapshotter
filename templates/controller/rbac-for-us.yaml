@@ -215,3 +215,41 @@ subjects:
   - kind: ServiceAccount
     name: controller
     namespace: d8-{{ .Chart.Name }}
+
+---
+# Aggregation layer (C7): the core aggregated apiserver delegates authentication to genericapiserver,
+# which reads the k8s-managed front-proxy requestheader CA + allowed-names from
+# kube-system/extension-apiserver-authentication. Bind to the built-in auth-reader Role so the controller
+# SA can read that ConfigMap (canonical aggregated-apiserver pattern, least privilege).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Chart.Name }}-controller-auth-reader
+  namespace: kube-system
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+# Aggregation layer (C7): delegated authentication (TokenReview) and authorization (SubjectAccessReview)
+# require the system:auth-delegator ClusterRole. genericapiserver uses it to validate bearer tokens and to
+# authorize each request against the kube-apiserver.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:controller:auth-delegator
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}

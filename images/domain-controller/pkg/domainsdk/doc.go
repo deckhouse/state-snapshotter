@@ -30,8 +30,10 @@ limitations under the License.
 //     so the generic core compiler stays domain-free. RestoreNode/NodeResult are the minimal,
 //     domain-facing view (just the owning snapshot identity + already-compiled child objects) — the
 //     core compiler's richer internal node type is deliberately NOT exposed.
-//   - Bootstrap helpers (bootstrap.go): LoadFrontProxyCA / ParseAllowedCNs for the domain aggregated API
-//     server's mTLS (k8s-managed front-proxy requestheader CA); no bespoke PKI.
+//
+// The domain aggregated API server's authentication (front-proxy requestheader + TokenReview) and
+// authorization (SubjectAccessReview) are delegated to k8s.io/apiserver genericapiserver (see
+// internal/domainapi), so no bespoke front-proxy CA loading or CN allowlist lives in this SDK anymore.
 //
 // The snapshot-CR status/condition/identity contract lives in the already-public sibling package
 // pkg/snapshot. See internal/controllers/demo + internal/domainapi for a full reference wiring of a

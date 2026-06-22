@@ -75,7 +75,6 @@ spec:
             - --api-addr=:8443
             - --api-tls-cert-file=/certs/tls.crt
             - --api-tls-private-key-file=/certs/tls.key
-            - --api-allowed-client-cns=system:kube-apiserver,kubernetes,front-proxy-client
           ports:
             - containerPort: 8443
               name: https
