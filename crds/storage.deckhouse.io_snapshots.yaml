@@ -53,6 +53,13 @@ spec:
           metadata:
             type: object
           spec:
+            description: |-
+              SnapshotSpec is the capture/import mode selector. spec.source is fully immutable: a field-level
+              transition rule (self == oldSelf) freezes its contents while present, and this spec-level rule
+              forbids adding or removing it after creation. Without the spec-level rule the optional-field
+              transition would only run when source is present in BOTH old and new, so a dynamic↔import↔static
+              mode switch (add/remove source) would otherwise slip through and could orphan already-captured
+              content or kick off an unintended capture.
             properties:
               snapshotClassName:
                 description: SnapshotClassName optionally selects class/policy (aligned
@@ -60,23 +67,39 @@ spec:
                 type: string
               source:
                 description: |-
-                  Source optionally binds this Snapshot to pre-provisioned content (CSI-like static binding).
+                  Source optionally selects how this Snapshot obtains its content instead of dynamic capture.
                   When omitted, the controller performs dynamic namespace capture (default behaviour).
-                  When set, the controller takes the static-bind path: it does not create MCR/VCR and
-                  validates that the referenced SnapshotContent points back at this Snapshot via spec.snapshotRef.
+                  When set, exactly one member selects the mode (CEL one-of) and the whole source is immutable:
+                    - import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
+                      plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
+                    - snapshotContentName: CSI-like static binding to existing pre-provisioned content; the controller
+                      does not create MCR/VCR and validates that the referenced SnapshotContent points back at this
+                      Snapshot via spec.snapshotRef.
                 properties:
+                  import:
+                    description: |-
+                      Import, when present, marks this Snapshot as an import target. It is an empty marker object —
+                      its mere presence selects import mode (content is materialized from an uploaded payload, not
+                      captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
+                      source members and to allow future import options without another union rewrite.
+                    type: object
                   snapshotContentName:
                     description: |-
                       SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-                      (static pre-provisioning, analogous to volumeSnapshotContentName). It is required when
-                      source is set: presence of spec.source is the signal to take the static-bind path, so an
-                      empty content name would flip the snapshot into static mode with nothing to bind to.
+                      (static pre-provisioning, analogous to volumeSnapshotContentName).
                     minLength: 1
                     type: string
-                required:
-                - snapshotContentName
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one of spec.source.import or spec.source.snapshotContentName
+                    must be set
+                  rule: has(self.import) != has(self.snapshotContentName)
+                - message: spec.source is immutable
+                  rule: self == oldSelf
             type: object
+            x-kubernetes-validations:
+            - message: spec.source cannot be added or removed after creation
+              rule: has(self.source) == has(oldSelf.source)
           status:
             properties:
               boundSnapshotContentName:

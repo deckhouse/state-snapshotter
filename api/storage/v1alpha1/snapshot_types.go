@@ -44,30 +44,63 @@ type SnapshotList struct {
 }
 
 // +k8s:deepcopy-gen=true
+// SnapshotSpec is the capture/import mode selector. spec.source is fully immutable: a field-level
+// transition rule (self == oldSelf) freezes its contents while present, and this spec-level rule
+// forbids adding or removing it after creation. Without the spec-level rule the optional-field
+// transition would only run when source is present in BOTH old and new, so a dynamic↔import↔static
+// mode switch (add/remove source) would otherwise slip through and could orphan already-captured
+// content or kick off an unintended capture.
+// +kubebuilder:validation:XValidation:rule="has(self.source) == has(oldSelf.source)",message="spec.source cannot be added or removed after creation"
 type SnapshotSpec struct {
 	// SnapshotClassName optionally selects class/policy (aligned with unified snapshot model; resolution is N2+).
 	SnapshotClassName string `json:"snapshotClassName,omitempty"`
 
-	// Source optionally binds this Snapshot to pre-provisioned content (CSI-like static binding).
+	// Source optionally selects how this Snapshot obtains its content instead of dynamic capture.
 	// When omitted, the controller performs dynamic namespace capture (default behaviour).
-	// When set, the controller takes the static-bind path: it does not create MCR/VCR and
-	// validates that the referenced SnapshotContent points back at this Snapshot via spec.snapshotRef.
+	// When set, exactly one member selects the mode (CEL one-of) and the whole source is immutable:
+	//   - import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
+	//     plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
+	//   - snapshotContentName: CSI-like static binding to existing pre-provisioned content; the controller
+	//     does not create MCR/VCR and validates that the referenced SnapshotContent points back at this
+	//     Snapshot via spec.snapshotRef.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="has(self.import) != has(self.snapshotContentName)",message="exactly one of spec.source.import or spec.source.snapshotContentName must be set"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.source is immutable"
 	Source *SnapshotSource `json:"source,omitempty"`
 }
 
-// SnapshotSource selects an existing data source for pre-provisioning, mirroring
-// VolumeSnapshot.spec.source. Currently only static binding to an existing
-// SnapshotContent is supported.
+// SnapshotSource selects how a Snapshot obtains its content, mirroring VolumeSnapshot.spec.source.
+// It is a CEL one-of: exactly one of Import or SnapshotContentName is set (enforced on SnapshotSpec.Source).
 // +k8s:deepcopy-gen=true
 type SnapshotSource struct {
+	// Import, when present, marks this Snapshot as an import target. It is an empty marker object —
+	// its mere presence selects import mode (content is materialized from an uploaded payload, not
+	// captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
+	// source members and to allow future import options without another union rewrite.
+	// +optional
+	Import *SnapshotImportSource `json:"import,omitempty"`
+
 	// SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-	// (static pre-provisioning, analogous to volumeSnapshotContentName). It is required when
-	// source is set: presence of spec.source is the signal to take the static-bind path, so an
-	// empty content name would flip the snapshot into static mode with nothing to bind to.
-	// +kubebuilder:validation:Required
+	// (static pre-provisioning, analogous to volumeSnapshotContentName).
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	SnapshotContentName string `json:"snapshotContentName"`
+	SnapshotContentName string `json:"snapshotContentName,omitempty"`
+}
+
+// SnapshotImportSource is an empty marker: its presence in spec.source selects import mode.
+// +k8s:deepcopy-gen=true
+type SnapshotImportSource struct{}
+
+// IsImportMode reports whether this Snapshot is an import target (spec.source.import set). Import-mode
+// snapshots are materialized from an uploaded payload and MUST NOT trigger dynamic namespace capture.
+func (s *Snapshot) IsImportMode() bool {
+	return s != nil && s.Spec.Source != nil && s.Spec.Source.Import != nil
+}
+
+// IsStaticBind reports whether this Snapshot statically binds to pre-provisioned content
+// (spec.source.snapshotContentName set).
+func (s *Snapshot) IsStaticBind() bool {
+	return s != nil && s.Spec.Source != nil && s.Spec.Source.SnapshotContentName != ""
 }
 
 // +k8s:deepcopy-gen=true

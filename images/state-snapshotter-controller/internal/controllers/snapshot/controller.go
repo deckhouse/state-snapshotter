@@ -190,8 +190,17 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// The root ObjectKeeper ensured above is intentionally kept for static-bind Snapshots too: it
 	// TTL-cleans the Snapshot record itself (its cascade to retained content is simply a no-op here,
 	// since the pre-provisioned content is owned via the import path, not re-owned on this path).
-	if nsSnap.Spec.Source != nil && nsSnap.Spec.Source.SnapshotContentName != "" {
+	if nsSnap.IsStaticBind() {
 		return r.reconcileStaticBind(ctx, nsSnap)
+	}
+
+	// Import-mode Snapshots (spec.source.import) are materialized from an uploaded payload
+	// (manifests-and-children-refs-upload) plus, for data leaves, DataImport — the controller MUST NOT
+	// capture the live namespace. The full import orchestration (reconstruct SnapshotContent from the
+	// uploaded MCP, resolve data artifacts, bind) is owned by the import orchestrator; this guard keeps
+	// an import Snapshot from accidentally running dynamic capture until then.
+	if nsSnap.IsImportMode() {
+		return r.reconcileImportPending(ctx, nsSnap)
 	}
 
 	expectedName := snapshotContentName(nsSnap)
@@ -324,6 +333,15 @@ func (r *SnapshotReconciler) reconcileDelete(ctx context.Context, nsSnap *storag
 	}
 
 	if fresh.Status.BoundSnapshotContentName == "" {
+		// An import Snapshot deleted before the import orchestrator (C5) materializes/binds its
+		// SnapshotContent may still own a reconstructed (ownerless, cluster-scoped) ManifestCheckpoint
+		// from manifests-and-children-refs-upload. Nothing else GCs it in this window, so clean it up
+		// here before dropping the finalizer. Non import-mode snapshots have no such artifact.
+		if fresh.IsImportMode() {
+			if err := usecase.DeleteReconstructedManifestCheckpoint(ctx, r.Client, fresh.UID); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if err := r.updateSnapshotRemoveFinalizer(ctx, key); err != nil {
 			return ctrl.Result{}, err
 		}

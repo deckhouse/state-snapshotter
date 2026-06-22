@@ -65,24 +65,36 @@ func NewAggregatedNamespaceManifests(c client.Client, a *ArchiveService, graphLi
 
 // BuildAggregatedJSON returns a JSON array of objects (fail-whole). SSOT: docs/.../snapshot-aggregated-manifests-pr4.md
 func (s *AggregatedNamespaceManifests) BuildAggregatedJSON(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
+	rootContent, err := s.resolveRootContentName(ctx, namespace, snapshotName)
+	if err != nil {
+		return nil, err
+	}
+	return s.marshalAggregatedFromRootContent(ctx, rootContent)
+}
+
+// resolveRootContentName resolves a core Snapshot to its root SnapshotContent name. It first reads the
+// live Snapshot's status.boundSnapshotContentName, then falls back to the retained content reachable via
+// the Snapshot's root ObjectKeeper (so manifests stay downloadable after the Snapshot CR is gone but
+// content is retained). Shared by aggregated (whole-subtree) and per-CR (single-node) manifest reads.
+func (s *AggregatedNamespaceManifests) resolveRootContentName(ctx context.Context, namespace, snapshotName string) (string, error) {
 	nsSnap := &storagev1alpha1.Snapshot{}
 	err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, nsSnap)
 	if err == nil {
 		bound := nsSnap.Status.BoundSnapshotContentName
 		if bound == "" {
-			return nil, NewAggregatedStatusError(http.StatusConflict, "Conflict", "boundSnapshotContentName is empty")
+			return "", NewAggregatedStatusError(http.StatusConflict, "Conflict", "boundSnapshotContentName is empty")
 		}
-		return s.marshalAggregatedFromRootContent(ctx, bound)
+		return bound, nil
 	}
 	if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("get Snapshot: %w", err)
+		return "", fmt.Errorf("get Snapshot: %w", err)
 	}
 	if bound, retainedErr := s.retainedRootContentForSnapshot(ctx, namespace, snapshotName); retainedErr == nil {
-		return s.marshalAggregatedFromRootContent(ctx, bound)
+		return bound, nil
 	} else if !apierrors.IsNotFound(retainedErr) {
-		return nil, retainedErr
+		return "", retainedErr
 	}
-	return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound",
+	return "", NewAggregatedStatusError(http.StatusNotFound, "NotFound",
 		fmt.Sprintf("Snapshot %s/%s not found", namespace, snapshotName))
 }
 
@@ -171,25 +183,36 @@ func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromContent(ctx contex
 // BuildAggregatedJSONFromSnapshot resolves a namespaced Snapshot-like object to its
 // registered SnapshotContent and returns aggregated manifests for that content subtree.
 func (s *AggregatedNamespaceManifests) BuildAggregatedJSONFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) ([]byte, error) {
+	contentName, err := s.resolveContentNameFromSnapshot(ctx, snapshotGVK, namespace, snapshotName)
+	if err != nil {
+		return nil, err
+	}
+	return s.BuildAggregatedJSONFromContent(ctx, SnapshotContentGVK(), contentName)
+}
+
+// resolveContentNameFromSnapshot resolves any namespaced snapshot-like CR (by GVK) to its bound
+// SnapshotContent name via status.boundSnapshotContentName. Shared by aggregated (whole-subtree) and
+// per-CR (single-node) manifest reads for non-core snapshot kinds.
+func (s *AggregatedNamespaceManifests) resolveContentNameFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) (string, error) {
 	if snapshotName == "" || namespace == "" || snapshotGVK.Empty() {
-		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
+		return "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
 	}
 	snap := &unstructured.Unstructured{}
 	snap.SetGroupVersionKind(snapshotGVK)
 	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, snap); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("%s %s/%s not found", snapshotGVK.String(), namespace, snapshotName))
+			return "", NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("%s %s/%s not found", snapshotGVK.String(), namespace, snapshotName))
 		}
-		return nil, fmt.Errorf("get %s %s/%s: %w", snapshotGVK.String(), namespace, snapshotName, err)
+		return "", fmt.Errorf("get %s %s/%s: %w", snapshotGVK.String(), namespace, snapshotName, err)
 	}
 	contentName, _, err := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
 	if err != nil {
-		return nil, NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("%s %s/%s has invalid status.boundSnapshotContentName: %v", snapshotGVK.String(), namespace, snapshotName, err))
+		return "", NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("%s %s/%s has invalid status.boundSnapshotContentName: %v", snapshotGVK.String(), namespace, snapshotName, err))
 	}
 	if contentName == "" {
-		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "boundSnapshotContentName is empty")
+		return "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "boundSnapshotContentName is empty")
 	}
-	return s.BuildAggregatedJSONFromContent(ctx, SnapshotContentGVK(), contentName)
+	return contentName, nil
 }
 
 // IsRegisteredSnapshotGVK checks the live graph registry for an exact Snapshot GVK match.

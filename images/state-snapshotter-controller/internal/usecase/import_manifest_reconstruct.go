@@ -50,6 +50,25 @@ func ReconstructedManifestCheckpointName(importUID types.UID, nodeID string) str
 	return namespacemanifest.CheckpointNamePrefix + hex.EncodeToString(h[:8])
 }
 
+// DeleteReconstructedManifestCheckpoint best-effort deletes the deterministically-named per-node
+// ManifestCheckpoint that manifests-and-children-refs-upload reconstructed for the import snapshot
+// identified by importUID (its chunks cascade via ownerRef). The reconstructed checkpoint is created
+// ownerless (a cluster-scoped object cannot be owned by the namespaced snapshot CR); the import
+// orchestrator (C5) adopts it onto the SnapshotContent it materializes, after which SnapshotContent
+// lifecycle GCs it. This call covers the window before that adoption: if the import snapshot is deleted
+// while still pending (no bound content), the orphan is removed here. NotFound is treated as success.
+func DeleteReconstructedManifestCheckpoint(ctx context.Context, c client.Client, importUID types.UID) error {
+	if importUID == "" {
+		return nil
+	}
+	name := ReconstructedManifestCheckpointName(importUID, "")
+	cp := &storagev1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if err := c.Delete(ctx, cp); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete reconstructed ManifestCheckpoint %s: %w", name, err)
+	}
+	return nil
+}
+
 // ReconstructManifestCheckpoint builds a canonical, Ready ManifestCheckpoint (plus its chunks) named
 // checkpointName from rawManifests (a JSON array of objects, the per-node manifests uploaded on
 // import). The produced object is byte-for-byte readable by the restore loader / ArchiveService, so a

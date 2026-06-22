@@ -66,7 +66,8 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	// aggregation layer; generic nodes are compiled from core's own SnapshotContent.
 	restoreService := restore.NewService(directClient, archiveService, domainRestorer, isDomainKind)
 	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
-	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, restMapper)
+	importUpload := usecase.NewImportUploadService(directClient)
+	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, importUpload, restMapper)
 
 	// Setup routes
 	mux := http.NewServeMux()
