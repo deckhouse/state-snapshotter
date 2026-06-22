@@ -75,7 +75,26 @@ spec:
                 type: string
             type: object
           status:
+            properties:
+              capacity:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: |-
+                  Capacity reports the REAL allocated size of the disk's backing volume, mirroring
+                  PersistentVolumeClaim.status.capacity (a ResourceList keyed by resource name such as "storage").
+                  The snapshot import path reads this from the captured raw manifest in MCP to size the scratch PVC /
+                  restored volume, so every domain data resource MUST publish its real allocated size here (not the
+                  requested size). The map is typed with apimachinery's resource.Quantity (string key) to keep the
+                  api module dependency-free while staying wire-compatible with corev1.ResourceList. See unified
+                  snapshot plan §2 (volume metadata / status.capacity contract).
+                type: object
             type: object
         type: object
     served: true
     storage: true
+    subresources:
+      status: {}

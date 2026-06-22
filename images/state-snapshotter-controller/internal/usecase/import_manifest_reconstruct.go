@@ -42,7 +42,7 @@ import (
 const reconstructMaxChunkBytes = 800 * 1000
 
 // ReconstructedManifestCheckpointName derives the deterministic cluster-scoped ManifestCheckpoint name
-// for one snapshot node of a SnapshotImport. It is stable across reconciles (idempotency) and unique
+// for one snapshot node on the import path. It is stable across reconciles (idempotency) and unique
 // per (import UID, node) pair. The name uses the same prefix as captured checkpoints so the chunk
 // naming convention (prefix-stripped id) the archive service relies on holds.
 func ReconstructedManifestCheckpointName(importUID types.UID, nodeID string) string {
@@ -56,8 +56,8 @@ func ReconstructedManifestCheckpointName(importUID types.UID, nodeID string) str
 // pre-provisioned SnapshotContent that references it restores exactly like a captured one.
 //
 // It is idempotent: an already-Ready checkpoint is left untouched; chunk creation tolerates
-// AlreadyExists. captureRef is the synthetic source request reference (the SnapshotImport) required by
-// ManifestCheckpointSpec; ownerRefs anchor the checkpoint for GC (the SnapshotImport).
+// AlreadyExists. captureRef is the synthetic source request reference required by
+// ManifestCheckpointSpec; ownerRefs anchor the checkpoint for GC (the owning import snapshot CR).
 func ReconstructManifestCheckpoint(
 	ctx context.Context,
 	c client.Client,

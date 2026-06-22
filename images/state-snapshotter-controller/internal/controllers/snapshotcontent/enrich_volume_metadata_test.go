@@ -20,10 +20,13 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -184,6 +187,117 @@ func TestEnrich_NonPVCTargetSkipped(t *testing.T) {
 	}
 }
 
+// vscWithRestoreSize builds a VolumeSnapshotContent carrying status.restoreSize (bytes, int64), the
+// durable source of SnapshotDataBinding.Size. When deleting is true it is marked for deletion (a
+// finalizer is required so the fake client keeps it present with a non-zero deletionTimestamp).
+func vscWithRestoreSize(name string, bytes int64, deleting bool) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
+	obj.SetName(name)
+	if bytes > 0 {
+		_ = unstructured.SetNestedField(obj.Object, bytes, "status", "restoreSize")
+	}
+	if deleting {
+		obj.SetFinalizers([]string{"keep/for-test"})
+		now := metav1.NewTime(time.Now())
+		obj.SetDeletionTimestamp(&now)
+	}
+	return obj
+}
+
+func vscArtifact(name string) storagev1alpha1.SnapshotDataArtifactRef {
+	return storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: name}
+}
+
+// Size is read from the durable VolumeSnapshotContent.status.restoreSize (10 GiB here), for both a PVC
+// target and a domain (non-PVC) data leaf, since the artifact-derived size outlives the source PVC.
+func TestEnrich_PopulatesSizeFromVSCRestoreSize(t *testing.T) {
+	ctx := context.Background()
+	scheme := enrichScheme(t)
+	const tenGiB = int64(10) * 1024 * 1024 * 1024
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data"},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: blockMode(), VolumeName: "pv-data"},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(pvc, vscWithRestoreSize("vsc-pvc", tenGiB, false), vscWithRestoreSize("vsc-disk", tenGiB, false)).
+		Build()
+
+	pvcBinding := pvcTargetBinding("ns1", "data")
+	pvcBinding.Artifact = vscArtifact("vsc-pvc")
+	domainBinding := storagev1alpha1.SnapshotDataBinding{
+		TargetUID: "uid-disk",
+		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		Artifact:  vscArtifact("vsc-disk"),
+	}
+
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcBinding, domainBinding})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if out[0].Size != "10Gi" {
+		t.Errorf("PVC binding size: want 10Gi, got %q", out[0].Size)
+	}
+	if out[1].Size != "10Gi" {
+		t.Errorf("domain (non-PVC) binding size: want 10Gi, got %q", out[1].Size)
+	}
+}
+
+func TestReadArtifactRestoreSize_Branches(t *testing.T) {
+	ctx := context.Background()
+	scheme := enrichScheme(t)
+	const eightGiB = int64(8) * 1024 * 1024 * 1024
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(
+			vscWithRestoreSize("vsc-ok", eightGiB, false),
+			vscWithRestoreSize("vsc-zero", 0, false),
+			vscWithRestoreSize("vsc-deleting", eightGiB, true),
+		).Build()
+
+	cases := []struct {
+		name     string
+		artifact storagev1alpha1.SnapshotDataArtifactRef
+		want     string
+	}{
+		{"valid restoreSize", vscArtifact("vsc-ok"), "8Gi"},
+		{"non-VSC artifact", storagev1alpha1.SnapshotDataArtifactRef{Kind: "PersistentVolume", Name: "pv-x"}, ""},
+		{"empty name", vscArtifact(""), ""},
+		{"not found", vscArtifact("vsc-gone"), ""},
+		{"missing/zero restoreSize", vscArtifact("vsc-zero"), ""},
+		{"deleting VSC", vscArtifact("vsc-deleting"), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readArtifactRestoreSize(ctx, cl, tc.artifact)
+			if err != nil {
+				t.Fatalf("readArtifactRestoreSize: unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("size = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A transient (non-NotFound) read error must propagate so the caller requeues instead of publishing a
+// binding with an empty Size.
+func TestReadArtifactRestoreSize_TransientErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	scheme := enrichScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if u, ok := obj.(*unstructured.Unstructured); ok && u.GetObjectKind().GroupVersionKind().Kind == "VolumeSnapshotContent" {
+				return fmt.Errorf("etcdserver: request timed out")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+
+	if _, err := readArtifactRestoreSize(ctx, cl, vscArtifact("vsc-any")); err == nil {
+		t.Fatal("expected a transient VSC read error to be returned, not swallowed")
+	}
+}
+
 func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 	base := storagev1alpha1.SnapshotDataBinding{
 		TargetUID:        "u1",
@@ -192,6 +306,7 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 		VolumeMode:       "Filesystem",
 		FsType:           "ext4",
 		StorageClassName: "sc",
+		Size:             "10Gi",
 		AccessModes:      []string{"ReadWriteOnce"},
 	}
 	mut := func(f func(b *storagev1alpha1.SnapshotDataBinding)) []storagev1alpha1.SnapshotDataBinding {
@@ -209,6 +324,7 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 		"volumeMode":       func(b *storagev1alpha1.SnapshotDataBinding) { b.VolumeMode = "Block" },
 		"fsType":           func(b *storagev1alpha1.SnapshotDataBinding) { b.FsType = "xfs" },
 		"storageClassName": func(b *storagev1alpha1.SnapshotDataBinding) { b.StorageClassName = "other" },
+		"size":             func(b *storagev1alpha1.SnapshotDataBinding) { b.Size = "20Gi" },
 		"accessModes":      func(b *storagev1alpha1.SnapshotDataBinding) { b.AccessModes = []string{"ReadWriteMany"} },
 	} {
 		if snapshotDataRefsEqual(a, mut(f)) {

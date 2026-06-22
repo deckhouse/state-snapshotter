@@ -126,7 +126,6 @@ func (h *RestoreHandler) HandleGetSnapshotManifests(w http.ResponseWriter, r *ht
 		SnapshotName:      snapshotName,
 		SnapshotNamespace: namespace,
 		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
-		RestoreStrategy:   r.URL.Query().Get("restoreStrategy"),
 	}
 
 	data, err := h.service.BuildManifests(r.Context(), opts)
@@ -145,7 +144,6 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 		SnapshotName:      snapshotName,
 		SnapshotNamespace: namespace,
 		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
-		RestoreStrategy:   r.URL.Query().Get("restoreStrategy"),
 	}
 
 	data, err := h.service.BuildManifestsWithDataRestoration(r.Context(), opts)
@@ -184,7 +182,6 @@ func (h *RestoreHandler) HandleGenericSnapshotManifestsWithDataRestoration(w htt
 		SnapshotName:      snapshotName,
 		SnapshotNamespace: namespace,
 		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
-		RestoreStrategy:   r.URL.Query().Get("restoreStrategy"),
 	}
 	data, err := h.service.BuildManifestsWithDataRestorationForNode(r.Context(), snapshotGVK, opts)
 	if err != nil {

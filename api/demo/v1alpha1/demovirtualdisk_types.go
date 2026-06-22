@@ -17,10 +17,12 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovd
 // DemoVirtualDisk is a minimal placeholder "resource" side for CSD mapping (PR5a); not used by reconcile logic yet.
 type DemoVirtualDisk struct {
@@ -65,7 +67,18 @@ type DemoVirtualDiskDataSource struct {
 	Name string `json:"name"`
 }
 
-type DemoVirtualDiskStatus struct{}
+// +k8s:deepcopy-gen=true
+type DemoVirtualDiskStatus struct {
+	// Capacity reports the REAL allocated size of the disk's backing volume, mirroring
+	// PersistentVolumeClaim.status.capacity (a ResourceList keyed by resource name such as "storage").
+	// The snapshot import path reads this from the captured raw manifest in MCP to size the scratch PVC /
+	// restored volume, so every domain data resource MUST publish its real allocated size here (not the
+	// requested size). The map is typed with apimachinery's resource.Quantity (string key) to keep the
+	// api module dependency-free while staying wire-compatible with corev1.ResourceList. See unified
+	// snapshot plan §2 (volume metadata / status.capacity contract).
+	// +optional
+	Capacity map[string]resource.Quantity `json:"capacity,omitempty"`
+}
 
 // +kubebuilder:object:root=true
 type DemoVirtualDiskList struct {

@@ -63,7 +63,7 @@ func TestReconstructManifestCheckpoint_BuildsReadyCheckpoint(t *testing.T) {
 	cl := newReconstructClient(t)
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--snap")
 	captureRef := &ssv1alpha1.ObjectReference{Name: "imp", Namespace: "ns1", UID: "import-uid"}
-	ownerRefs := []metav1.OwnerReference{{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "SnapshotImport", Name: "imp", UID: "import-uid"}}
+	ownerRefs := []metav1.OwnerReference{{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "imp", UID: "import-uid"}}
 
 	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", captureRef, ownerRefs, sampleManifests(t)); err != nil {
 		t.Fatalf("reconstruct: %v", err)
@@ -82,8 +82,8 @@ func TestReconstructManifestCheckpoint_BuildsReadyCheckpoint(t *testing.T) {
 	if len(cp.Status.Chunks) == 0 {
 		t.Fatal("expected at least one chunk in status")
 	}
-	if cp.OwnerReferences[0].Kind != "SnapshotImport" {
-		t.Fatalf("expected SnapshotImport owner, got %v", cp.OwnerReferences)
+	if cp.OwnerReferences[0].Kind != "Snapshot" {
+		t.Fatalf("expected Snapshot owner, got %v", cp.OwnerReferences)
 	}
 	if !strings.HasPrefix(name, namespacemanifest.CheckpointNamePrefix) {
 		t.Fatalf("checkpoint name %q must use the capture prefix %q", name, namespacemanifest.CheckpointNamePrefix)

@@ -124,6 +124,14 @@ type SnapshotDataBinding struct {
 	// aggregated /index and by import StorageClass mapping.
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// Size records the real allocated size of the captured volume, taken from the data artifact
+	// (VolumeSnapshotContent.status.restoreSize). The snapshot outlives the source PVC, so the size MUST
+	// be persisted here to recreate the volume on restore/export (the export VolumeRestoreRequest sizes
+	// the target PVC from it). Stored as a resource.Quantity string (e.g. "10Gi") to keep the api module
+	// dependency-free; controllers parse it via resource.ParseQuantity.
+	// +optional
+	Size string `json:"size,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true

@@ -47,9 +47,6 @@ type CustomSnapshotDefinitionSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	SnapshotResourceMapping []SnapshotResourceMappingEntry `json:"snapshotResourceMapping"`
-
-	// ManifestTransformation optional webhook for manifest transforms for this CSD.
-	ManifestTransformation *ManifestTransformation `json:"manifestTransformation,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -74,20 +71,6 @@ type SnapshotGVKRef struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
-}
-
-// +k8s:deepcopy-gen=true
-type ManifestTransformation struct {
-	// +kubebuilder:validation:Required
-	ServiceRef ManifestTransformationServiceRef `json:"serviceRef"`
-}
-
-// +k8s:deepcopy-gen=true
-type ManifestTransformationServiceRef struct {
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-	// +kubebuilder:validation:Required
-	Namespace string `json:"namespace"`
 }
 
 // +k8s:deepcopy-gen=true

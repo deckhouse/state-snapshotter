@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -53,6 +54,15 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 	log := logf.FromContext(ctx)
 	for i := range bindings {
 		b := &bindings[i]
+		// Size lives on the durable data artifact (VolumeSnapshotContent.status.restoreSize, bytes), not
+		// on the source PVC: it is the real allocated size the snapshot can be restored to and outlives
+		// the PVC. Read it for every artifact-bearing binding (domain data leaves too, which have no PVC
+		// target). A not-yet-populated restoreSize is left empty (best-effort) rather than blocking.
+		if size, serr := readArtifactRestoreSize(ctx, c, b.Artifact); serr != nil {
+			return bindings, serr
+		} else if size != "" {
+			b.Size = size
+		}
 		if b.Target.Kind != "PersistentVolumeClaim" || b.Target.Name == "" {
 			continue
 		}
@@ -94,6 +104,39 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 		}
 	}
 	return bindings, nil
+}
+
+// readArtifactRestoreSize returns the binding's data artifact size as a resource.Quantity string,
+// read from VolumeSnapshotContent.status.restoreSize (an int64 byte count). It returns an empty string
+// (no error) when the artifact is not a VSC, is unnamed, is being deleted, or has not published its
+// restoreSize yet; a transient read error is returned so the caller can requeue.
+func readArtifactRestoreSize(ctx context.Context, c client.Client, artifact storagev1alpha1.SnapshotDataArtifactRef) (string, error) {
+	if artifact.Kind != "VolumeSnapshotContent" || artifact.Name == "" {
+		return "", nil
+	}
+	vsc := &unstructured.Unstructured{}
+	vsc.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
+	if err := c.Get(ctx, client.ObjectKey{Name: artifact.Name}, vsc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read VolumeSnapshotContent %s for restoreSize: %w", artifact.Name, err)
+	}
+	if !vsc.GetDeletionTimestamp().IsZero() {
+		return "", nil
+	}
+	bytes, found, err := unstructured.NestedInt64(vsc.Object, "status", "restoreSize")
+	if err != nil {
+		// restoreSize present but not an int64 (decoder/schema drift). Leave Size empty (best-effort) but
+		// surface it at debug so an unexpected type is observable instead of silently swallowed.
+		logf.FromContext(ctx).V(1).Info("VolumeSnapshotContent status.restoreSize is present but not int64; leaving Size empty",
+			"vsc", artifact.Name, "error", err.Error())
+		return "", nil
+	}
+	if !found || bytes <= 0 {
+		return "", nil
+	}
+	return resource.NewQuantity(bytes, resource.BinarySI).String(), nil
 }
 
 // PublishSnapshotContentDataRefs copies durable data bindings onto logical SnapshotContent (N5 PR-4).
@@ -217,7 +260,7 @@ func snapshotDataRefsEqual(a, b []storagev1alpha1.SnapshotDataBinding) bool {
 		if x.Artifact != y.Artifact {
 			return false
 		}
-		if x.VolumeMode != y.VolumeMode || x.FsType != y.FsType || x.StorageClassName != y.StorageClassName {
+		if x.VolumeMode != y.VolumeMode || x.FsType != y.FsType || x.StorageClassName != y.StorageClassName || x.Size != y.Size {
 			return false
 		}
 		if !stringSlicesEqual(x.AccessModes, y.AccessModes) {

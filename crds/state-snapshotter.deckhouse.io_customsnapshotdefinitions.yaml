@@ -46,23 +46,6 @@ spec:
             type: object
           spec:
             properties:
-              manifestTransformation:
-                description: ManifestTransformation optional webhook for manifest
-                  transforms for this CSD.
-                properties:
-                  serviceRef:
-                    properties:
-                      name:
-                        type: string
-                      namespace:
-                        type: string
-                    required:
-                    - name
-                    - namespace
-                    type: object
-                required:
-                - serviceRef
-                type: object
               snapshotResourceMapping:
                 description: SnapshotResourceMapping declares source resource CRD
                   -> snapshot CRD mappings.

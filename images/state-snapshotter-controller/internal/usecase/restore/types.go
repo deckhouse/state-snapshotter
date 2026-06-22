@@ -55,7 +55,6 @@ type Options struct {
 	SnapshotName      string
 	SnapshotNamespace string
 	TargetNamespace   string
-	RestoreStrategy   string
 }
 
 type TransformResult struct {
