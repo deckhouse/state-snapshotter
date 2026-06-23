@@ -55,15 +55,15 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on CSD.
-	if err := registerDemoVMBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
-		return err
-	}
+	// Content-free: NO SnapshotContent watch/informer (the domain SA holds, and needs, ZERO rights on
+	// snapshotcontents). The core GenericSnapshotBinderController owns all SnapshotContent work for this
+	// DomainCaptureSnapshotKind and provides the SnapshotContent -> demo Snapshot wake-up + Ready mirror.
+	// The capture marker this controller gates on (status.manifestCaptured) is written by core onto this
+	// snapshot's OWN status, observed by the For() watch. The child DemoVirtualDiskSnapshot watch stays so
+	// the parent re-plans when a child changes.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualMachineSnapshot{}).
 		Watches(&demov1alpha1.DemoVirtualDiskSnapshot{}, handler.EnqueueRequestsFromMapFunc(mapDemoDiskSnapshotToParentVM)).
-		// SnapshotContent -> bound demo Snapshot wake-up so a content Ready change re-mirrors onto the
-		// demo Snapshot (INV-MIRROR); enqueue-only.
-		Watches(&storagev1alpha1.SnapshotContent{}, handler.EnqueueRequestsFromMapFunc(mapContentToBoundDemoVMSnapshots(mgr.GetClient()))).
 		Complete(&DemoVirtualMachineSnapshotReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),

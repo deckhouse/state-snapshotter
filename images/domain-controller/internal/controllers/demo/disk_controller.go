@@ -27,7 +27,6 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
@@ -53,14 +52,16 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on CSD.
-	if err := registerDemoDiskBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
-		return err
-	}
+	//
+	// Content-free: NO SnapshotContent watch/informer here, so the domain SA needs (and is granted) zero
+	// rights on snapshotcontents. The core GenericSnapshotBinderController owns all SnapshotContent work
+	// for this DomainCaptureSnapshotKind (creation/projection/Ready mirror) and provides the
+	// SnapshotContent -> demo Snapshot wake-up itself. The capture markers this controller gates on
+	// (status.manifestCaptured / status.dataCaptured) are written by core onto the demo snapshot's OWN
+	// status, which the For() watch below already observes — so this controller wakes on its own resource
+	// alone and never reads content.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
-		// SnapshotContent -> bound demo Snapshot wake-up so the common controller's projection/marker
-		// writes re-trigger domain reconcile promptly; enqueue-only.
-		Watches(&storagev1alpha1.SnapshotContent{}, handler.EnqueueRequestsFromMapFunc(mapContentToBoundDemoDiskSnapshots(mgr.GetClient()))).
 		Complete(&DemoVirtualDiskSnapshotReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),

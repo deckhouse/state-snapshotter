@@ -19,13 +19,24 @@ func ManifestCaptureRequestSafeToDelete(
 	key client.ObjectKey,
 	contentName string,
 ) (bool, error) {
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := reader.Get(ctx, key, mcr); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
+	// Both the manifestCaptured marker AND the MCR delete are gated on the DURABLE manifest invariant (a
+	// Ready ManifestCheckpoint published into and owned by the SnapshotContent) — NEVER on the MCR's mere
+	// absence. An MCR that was deleted or TTL-reaped WITHOUT a successful handoff (e.g. a capture that
+	// terminated Failed) must not be mistaken for a completed capture: stamping manifestCaptured=true then
+	// makes the domain controller stop recreating the MCR while the content never receives a checkpoint,
+	// wedging the snapshot in ManifestCapturePending forever. So a missing MCR is NOT automatically "safe":
+	// it is only safe if the content already holds the durable checkpoint.
+	var mcr *ssv1alpha1.ManifestCaptureRequest
+	fetched := &ssv1alpha1.ManifestCaptureRequest{}
+	switch err := reader.Get(ctx, key, fetched); {
+	case err == nil:
+		mcr = fetched
+	case apierrors.IsNotFound(err):
+		mcr = nil
+	default:
 		return false, err
 	}
+
 	if contentName == "" {
 		return false, nil
 	}
@@ -46,7 +57,13 @@ func ManifestCaptureRequestSafeToDelete(
 		}
 		return false, err
 	}
-	return isMCRSafeToDelete(mcr, content, mcp), nil
+	if mcr != nil {
+		return isMCRSafeToDelete(mcr, content, mcp), nil
+	}
+	// MCR already gone: the mcr.Status.CheckpointName -> MCP link can no longer be re-verified, but a Ready
+	// ManifestCheckpoint published into and owned by the content is sufficient proof the capture completed
+	// durably before the MCR was cleaned up.
+	return isManifestCheckpointDurable(content, mcp), nil
 }
 
 func ManifestCheckpointNameFromRequest(mcr *ssv1alpha1.ManifestCaptureRequest) string {
@@ -59,21 +76,34 @@ func ManifestCheckpointNameFromRequest(mcr *ssv1alpha1.ManifestCaptureRequest) s
 	return ""
 }
 
-// isMCRSafeToDelete encodes the handoff invariant:
-// SnapshotContent.status.manifestCheckpointName must point at an existing Ready MCP,
-// and that MCP must already be owned by the same SnapshotContent.
+// isMCRSafeToDelete encodes the full handoff invariant: the SnapshotContent has durably taken over the
+// manifest (see isManifestCheckpointDurable) AND the MCR references that same MCP.
 func isMCRSafeToDelete(
 	mcr *ssv1alpha1.ManifestCaptureRequest,
 	content *storagev1alpha1.SnapshotContent,
 	mcp *ssv1alpha1.ManifestCheckpoint,
 ) bool {
-	if mcr == nil || content == nil || mcp == nil {
+	if !isManifestCheckpointDurable(content, mcp) {
+		return false
+	}
+	if mcr == nil {
+		return false
+	}
+	return mcr.Status.CheckpointName != "" && mcr.Status.CheckpointName == mcp.Name
+}
+
+// isManifestCheckpointDurable reports whether the SnapshotContent has durably taken over the manifest:
+// status.manifestCheckpointName must point at an existing Ready MCP that is owned by that same
+// SnapshotContent. This is the MCR-independent half of the handoff invariant, so it also gates the
+// manifestCaptured marker when the MCR is already gone.
+func isManifestCheckpointDurable(
+	content *storagev1alpha1.SnapshotContent,
+	mcp *ssv1alpha1.ManifestCheckpoint,
+) bool {
+	if content == nil || mcp == nil {
 		return false
 	}
 	if content.Status.ManifestCheckpointName == "" || content.Status.ManifestCheckpointName != mcp.Name {
-		return false
-	}
-	if mcr.Status.CheckpointName == "" || mcr.Status.CheckpointName != mcp.Name {
 		return false
 	}
 	ready := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)

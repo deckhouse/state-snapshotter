@@ -44,3 +44,8 @@ images/csi/_new-csi/
 
 # demo-e2e run artifacts (hack/demo-e2e.sh)
 artifacts/
+
+
+# dev
+**/Dockerfile-dev
+.secret

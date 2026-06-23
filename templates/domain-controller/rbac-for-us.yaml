@@ -28,12 +28,11 @@ rules:
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "patch"]
 
-# SnapshotContent (storage.deckhouse.io): READ-ONLY informer wake-up only. The dedicated controllers watch
-# SnapshotContent (and index it by bound snapshot) to re-reconcile when the common controller projects
-# markers/Ready, but they never create/own/mutate it — that is core's job (content-ownership-to-common).
-- apiGroups: ["storage.deckhouse.io"]
-  resources: ["snapshotcontents"]
-  verbs: ["get", "list", "watch"]
+# SnapshotContent: intentionally NOT granted. The domain controller is content-free — it never reads,
+# watches or mutates SnapshotContent. The core GenericSnapshotBinderController owns all SnapshotContent
+# work for the demo kinds (creation/projection/Ready mirror) and the SnapshotContent -> demo Snapshot
+# wake-up. The domain reconcilers gate purely on their own status markers (manifestCaptured/dataCaptured),
+# which core writes on the demo snapshot's own status and the For() watch observes.
 
 # PersistentVolumeClaim: the disk data-leg reads the PVC to build the VCR target. Read-only.
 - apiGroups: [""]

@@ -1,7 +1,19 @@
-.PHONY: help test test-unit test-integration test-e2e build clean deps setup-envtest
+SHELL := /bin/bash
+.PHONY: help test test-unit test-integration test-e2e build clean deps setup-envtest run fox_build_and_push redeploy switch_to_local_dev switch_from_local_dev
 
 # Default target
 .DEFAULT_GOAL := help
+
+# Local cluster dev build/deploy
+repo_local := localhost:5000
+repo_fox := registry.flant.com/deckhouse/storage
+image_name := localbuild
+deployment_name := controller
+namespace := d8-state-snapshotter
+system_namespace := d8-system
+pull_secret_name := fox-registry
+USER := $(shell whoami)
+image_tag := $(USER)-state-snapshotter-controller
 
 # Variables
 GO := go
@@ -145,4 +157,31 @@ verify: fmt lint test-unit ## Verify code (format, lint, test)
 e2e: test-e2e ## Alias for test-e2e (convenience target - recommended)
 
 .PHONY: e2e
+
+run: ## Run controller locally
+	$(GO) run -race ./cmd/main.go
+
+fox_build_and_push: ## Build dev image and push to fox registry
+	DOCKER_BUILDKIT=1 docker build -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
+	docker push $(repo_fox)/$(image_name):$(image_tag)
+
+redeploy: ## Restart controller deployment in the cluster
+	kubectl -n $(namespace) rollout restart deployment $(deployment_name)
+
+switch_to_local_dev: ## Scale down deckhouse and patch deployment to use local dev image
+	kubectl -n $(system_namespace) scale deployment deckhouse --replicas=0
+	kubectl -n $(namespace) patch deployment $(deployment_name) -p \
+		'{"spec": {"template": {"spec": {"containers": [{"name": "$(deployment_name)", "image": "$(repo_fox)/$(image_name):$(image_tag)"}]}}}}'
+	kubectl -n $(namespace) patch deployment $(deployment_name) -p \
+		'{"spec": {"template": {"spec": {"containers": [{"name": "$(deployment_name)", "imagePullPolicy": "Always"}]}}}}'
+	kubectl -n $(namespace) patch deployment $(deployment_name) --type='json' \
+		-p='[{"op": "add", "path": "/spec/template/spec/imagePullSecrets", "value": [{"name": "$(pull_secret_name)"}]}]'
+
+switch_from_local_dev: ## Restore deckhouse and let it recreate controller with module image
+	kubectl -n $(system_namespace) scale deployment deckhouse --replicas=1
+	kubectl -n $(system_namespace) rollout status deployment deckhouse
+	kubectl -n $(namespace) delete deployment $(deployment_name) --ignore-not-found
+	kubectl -n $(system_namespace) exec deploy/deckhouse -c deckhouse -- \
+		deckhouse-controller module ensure state-snapshotter
+	kubectl -n $(namespace) rollout status deployment $(deployment_name)
 

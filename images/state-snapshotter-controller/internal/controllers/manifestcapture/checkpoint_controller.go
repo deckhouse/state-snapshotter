@@ -202,13 +202,24 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	// which silently ignores NotFound errors (checks err == nil). So if we get NotFound here, it's a target.
 	objects, err := r.collectTargetObjects(ctx, mcr)
 	if err != nil {
-		// Simple and clean: NotFound → Ready=False immediately
-		// Kubernetes is declarative: if object appears later, user must delete and recreate MCR
-		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to collect objects: %v", err)); err != nil {
-			if errors.IsNotFound(err) {
+		// Only a genuinely absent target (NotFound) is terminal: Kubernetes is declarative, so if the
+		// source object does not exist the capture fails fast (Ready=False) and the user recreates the MCR
+		// once the object appears. EVERY other error is transient and is requeued WITHOUT marking the MCR
+		// terminal — most importantly Forbidden, which happens routinely during module rollout while the
+		// dynamic per-domain RBAC (030-domain-rbac) is still propagating to the controller SA. Bricking the
+		// MCR on a transient Forbidden would silently wedge the whole snapshot (ManifestCapturePending) and
+		// require a manual delete/recreate after every deploy. This mirrors the parent-graph planner, which
+		// soft-degrades source-list Forbidden and requeues instead of failing (see sourceListForbiddenError).
+		if !errors.IsNotFound(err) {
+			r.Logger.Info("Manifest capture collection failed with a transient error; requeueing without marking the request terminal",
+				"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name), "error", err.Error())
+			return ctrl.Result{}, err
+		}
+		if ferr := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to collect objects: %v", err)); ferr != nil {
+			if errors.IsNotFound(ferr) {
 				return ctrl.Result{}, nil
 			}
-			return ctrl.Result{}, err
+			return ctrl.Result{}, ferr
 		}
 		return ctrl.Result{}, nil
 	}

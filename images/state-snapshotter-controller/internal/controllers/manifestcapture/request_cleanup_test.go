@@ -133,3 +133,84 @@ func TestManifestCaptureRequestSafeToDeleteReadsExplicitArtifactChain(t *testing
 		t.Fatal("expected MCR to be safe to delete after explicit MCP handoff")
 	}
 }
+
+// A missing MCR must NOT be treated as "capture done" unless the content already holds the durable
+// checkpoint. Otherwise a Failed-then-TTL-reaped MCR would make the binder stamp manifestCaptured=true
+// with no checkpoint, the domain controller would stop recreating the MCR, and the snapshot would wedge
+// in ManifestCapturePending forever.
+func TestManifestCaptureRequestSafeToDeleteMissingMCRRequiresDurableCheckpoint(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add storage scheme: %v", err)
+	}
+	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add snapshotter scheme: %v", err)
+	}
+
+	contentUID := types.UID("content-uid")
+	durableMCP := func() *ssv1alpha1.ManifestCheckpoint {
+		return &ssv1alpha1.ManifestCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "mcp",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "SnapshotContent",
+					Name:       "content",
+					UID:        contentUID,
+				}},
+			},
+			Status: ssv1alpha1.ManifestCheckpointStatus{Conditions: []metav1.Condition{{
+				Type:   ssv1alpha1.ManifestCheckpointConditionTypeReady,
+				Status: metav1.ConditionTrue,
+			}}},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		objects []client.Object
+		want    bool
+	}{
+		{
+			name: "not safe: MCR gone and content has no published checkpoint",
+			objects: []client.Object{
+				&storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "content", UID: contentUID}},
+			},
+			want: false,
+		},
+		{
+			name: "not safe: MCR gone, content links checkpoint, but MCP is missing",
+			objects: []client.Object{
+				&storagev1alpha1.SnapshotContent{
+					ObjectMeta: metav1.ObjectMeta{Name: "content", UID: contentUID},
+					Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "safe: MCR gone but content already holds a durable Ready owned MCP",
+			objects: []client.Object{
+				&storagev1alpha1.SnapshotContent{
+					ObjectMeta: metav1.ObjectMeta{Name: "content", UID: contentUID},
+					Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp"},
+				},
+				durableMCP(),
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			got, err := ManifestCaptureRequestSafeToDelete(context.Background(), cl, client.ObjectKey{Namespace: "ns", Name: "mcr"}, "content")
+			if err != nil {
+				t.Fatalf("ManifestCaptureRequestSafeToDelete() error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ManifestCaptureRequestSafeToDelete() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
