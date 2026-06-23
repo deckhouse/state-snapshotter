@@ -99,11 +99,19 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 	return rules
 }
 
-// buildCoreReadRules builds rules for the CORE SA on the dynamic demo snapshot GVRs: read (the snapshot
-// status tells core which MCR/VCR results to consume) and status-write (binding BoundSnapshotContentName +
-// volume-metadata projection, co-owned via D4a). It deliberately grants NO source GVR, NO create/delete and
-// NO /finalizers — those belong to the domain SA. These resource names are domain-specific (from CSD), so
-// they cannot live in the static, domain-agnostic core RBAC and must be generated here.
+// buildCoreReadRules builds rules for the CORE SA on the dynamic demo snapshot GVRs:
+//   - get/list/watch + create + patch on the snapshot resource. The core SnapshotReconciler is the
+//     parent-graph planner: it CREATES one parent-owned child snapshot per source object
+//     (parent_graph.go:ensureParentOwnedChildSnapshot → r.Client.Create) and PATCHes it to maintain the
+//     ownerRef back to the root Snapshot. Without create the planner fails with
+//     ChildrenSnapshotReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
+//     The ownerRef does not set blockOwnerDeletion, so no /finalizers permission is required on the owner.
+//   - status-write (get/update/patch on /status): binding BoundSnapshotContentName + volume-metadata
+//     projection, co-owned via D4a.
+//
+// It still grants NO delete on the snapshot GVRs (child cleanup is ownerRef GC, not an explicit core
+// delete) and NO /finalizers — those remain the domain SA's. These resource names are domain-specific
+// (from CSD), so they cannot live in the static, domain-agnostic core RBAC and must be generated here.
 func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
 	if len(snapshotGVRs) == 0 {
 		return nil
@@ -128,7 +136,7 @@ func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.Pol
 		rules = append(rules, rbacv1.PolicyRule{
 			APIGroups: []string{g},
 			Resources: resources,
-			Verbs:     []string{"get", "list", "watch"},
+			Verbs:     []string{"get", "list", "watch", "create", "patch"},
 		})
 		rules = append(rules, rbacv1.PolicyRule{
 			APIGroups: []string{g},
