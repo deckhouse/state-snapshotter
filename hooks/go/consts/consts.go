@@ -71,6 +71,21 @@ const (
 	// domain-agnostic core RBAC.
 	DomainCoreReadClusterRoleName = "d8:state-snapshotter:controller:domain-read"
 
+	// DataExportModuleNamespace is the namespace of the storage-volume-data-manager module, whose
+	// DataExport controller resolves snapshot exports generically (no domain types compiled in).
+	DataExportModuleNamespace = "d8-storage-volume-data-manager"
+
+	// DataExportControllerSAName is the ServiceAccount name of the storage-volume-data-manager controller
+	// (the DataExport/DataImport reconciler). It runs in DataExportModuleNamespace.
+	DataExportControllerSAName = "controller"
+
+	// DomainDataExportReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the
+	// storage-volume-data-manager DataExport controller SA: read on the dynamic demo snapshot GVRs. The
+	// DataExport controller resolves a snapshot export by GETting the snapshot leaf to read
+	// status.boundSnapshotContentName (then follows it to the cluster-scoped SnapshotContent). These names
+	// are domain-specific (from CSD), so they cannot live in that module's static, domain-agnostic RBAC.
+	DomainDataExportReadClusterRoleName = "d8:state-snapshotter:data-export:domain-read"
+
 	// CoreSubresourcesGroup is the core controller's aggregated subresources API group. The domain pod
 	// fetches each node's own base manifests from "<snapshotResource>/manifests-download" in this group.
 	CoreSubresourcesGroup = "subresources.state-snapshotter.deckhouse.io"

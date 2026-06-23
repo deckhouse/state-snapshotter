@@ -55,3 +55,28 @@ func TestBuildRulesIncludesSourceStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildDataExportReadRulesIsReadOnlyOnSnapshotGVRs(t *testing.T) {
+	diskSnapGVR := schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
+	vmSnapGVR := schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
+
+	rules := buildDataExportReadRules([]schema.GroupVersionResource{vmSnapGVR, diskSnapGVR})
+
+	want := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{"demo.state-snapshotter.deckhouse.io"},
+			Resources: []string{"demovirtualdisksnapshots", "demovirtualmachinesnapshots"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
+	}
+
+	if !reflect.DeepEqual(rules, want) {
+		t.Fatalf("rules = %#v, want %#v", rules, want)
+	}
+}
+
+func TestBuildDataExportReadRulesEmpty(t *testing.T) {
+	if rules := buildDataExportReadRules(nil); rules != nil {
+		t.Fatalf("expected nil rules for no snapshot GVRs, got %#v", rules)
+	}
+}

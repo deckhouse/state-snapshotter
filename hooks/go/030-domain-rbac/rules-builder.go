@@ -250,6 +250,39 @@ func domainRestoreSubresourceRules(snapshotGVRs []schema.GroupVersionResource) [
 	return rules
 }
 
+// buildDataExportReadRules grants the storage-volume-data-manager DataExport controller SA read access to
+// the dynamic demo SNAPSHOT leaf GVRs. The DataExport controller resolves a snapshot export generically
+// (no domain types compiled in): it GETs the snapshot leaf to read status.boundSnapshotContentName before
+// following it to the cluster-scoped SnapshotContent (snapshot_resolver.go:resolveSnapshotDataArtifact).
+// Without this it fails reconcile with "cannot get demovirtualdisksnapshots ... forbidden". Read-only:
+// the snapshot lifecycle (create/update/delete/status/finalizers) stays owned by the domain and core SAs.
+// These resource names are domain-specific (from CSD), so they cannot live in the storage-volume-data-
+// manager module's static, domain-agnostic controller RBAC.
+func buildDataExportReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(snapshotGVRs) == 0 {
+		return nil
+	}
+	byGroup := make(map[string][]string)
+	var groupOrder []string
+	for _, gvr := range snapshotGVRs {
+		if _, ok := byGroup[gvr.Group]; !ok {
+			groupOrder = append(groupOrder, gvr.Group)
+		}
+		byGroup[gvr.Group] = append(byGroup[gvr.Group], gvr.Resource)
+	}
+	sort.Strings(groupOrder)
+
+	var rules []rbacv1.PolicyRule
+	for _, g := range groupOrder {
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{g},
+			Resources: sortedUnique(byGroup[g]),
+			Verbs:     []string{"get", "list", "watch"},
+		})
+	}
+	return rules
+}
+
 func sortedUnique(in []string) []string {
 	if len(in) == 0 {
 		return in
@@ -267,23 +300,28 @@ func sortedUnique(in []string) []string {
 	return out
 }
 
-// applyDomainRBAC reconciles the two managed ClusterRoles + bindings of the split model:
-//   - DomainClusterRoleName        bound to the DOMAIN SA  (domainRules)
-//   - DomainCoreReadClusterRoleName bound to the CORE SA   (coreReadRules)
-func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, domainRules, coreReadRules []rbacv1.PolicyRule) error {
-	if err := applyManagedClusterRole(ctx, cl, consts.DomainClusterRoleName, domainRules, consts.DomainSAName); err != nil {
+// applyDomainRBAC reconciles the three managed ClusterRoles + bindings of the split model:
+//   - DomainClusterRoleName               bound to the DOMAIN SA              (domainRules)
+//   - DomainCoreReadClusterRoleName       bound to the CORE SA               (coreReadRules)
+//   - DomainDataExportReadClusterRoleName bound to the DataExport (SVDM) SA  (dataExportReadRules)
+func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, domainRules, coreReadRules, dataExportReadRules []rbacv1.PolicyRule) error {
+	if err := applyManagedClusterRole(ctx, cl, consts.DomainClusterRoleName, domainRules, consts.DomainSAName, consts.ModuleNamespace); err != nil {
 		return err
 	}
-	return applyManagedClusterRole(ctx, cl, consts.DomainCoreReadClusterRoleName, coreReadRules, consts.ControllerSAName)
+	if err := applyManagedClusterRole(ctx, cl, consts.DomainCoreReadClusterRoleName, coreReadRules, consts.ControllerSAName, consts.ModuleNamespace); err != nil {
+		return err
+	}
+	// The DataExport controller SA lives in the storage-volume-data-manager namespace, not this module's.
+	return applyManagedClusterRole(ctx, cl, consts.DomainDataExportReadClusterRoleName, dataExportReadRules, consts.DataExportControllerSAName, consts.DataExportModuleNamespace)
 }
 
 // applyManagedClusterRole creates or updates a named ClusterRole and binds it to the given SA in the
-// module namespace.
-func applyManagedClusterRole(ctx context.Context, cl ctrlclient.Client, name string, rules []rbacv1.PolicyRule, saName string) error {
+// given namespace.
+func applyManagedClusterRole(ctx context.Context, cl ctrlclient.Client, name string, rules []rbacv1.PolicyRule, saName, saNamespace string) error {
 	if err := applyClusterRole(ctx, cl, name, rules); err != nil {
 		return err
 	}
-	return applyClusterRoleBinding(ctx, cl, name, saName)
+	return applyClusterRoleBinding(ctx, cl, name, saName, saNamespace)
 }
 
 func applyClusterRole(ctx context.Context, cl ctrlclient.Client, name string, rules []rbacv1.PolicyRule) error {
@@ -314,14 +352,14 @@ func applyClusterRole(ctx context.Context, cl ctrlclient.Client, name string, ru
 	return nil
 }
 
-func applyClusterRoleBinding(ctx context.Context, cl ctrlclient.Client, name, saName string) error {
+func applyClusterRoleBinding(ctx context.Context, cl ctrlclient.Client, name, saName, saNamespace string) error {
 	existing := new(rbacv1.ClusterRoleBinding)
 	err := cl.Get(ctx, ctrlclient.ObjectKey{Name: name}, existing)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get ClusterRoleBinding %q: %w", name, err)
 		}
-		desired := desiredClusterRoleBinding(name, saName)
+		desired := desiredClusterRoleBinding(name, saName, saNamespace)
 		if createErr := cl.Create(ctx, desired); createErr != nil {
 			return fmt.Errorf("create ClusterRoleBinding %q: %w", name, createErr)
 		}
@@ -329,7 +367,7 @@ func applyClusterRoleBinding(ctx context.Context, cl ctrlclient.Client, name, sa
 	}
 	// roleRef is immutable; only subjects and labels can drift.
 	base := existing.DeepCopy()
-	existing.Subjects = subjectForSA(saName)
+	existing.Subjects = subjectForSA(saName, saNamespace)
 	existing.Labels = moduleLabels()
 	if patchErr := cl.Patch(ctx, existing, ctrlclient.MergeFrom(base)); patchErr != nil {
 		return fmt.Errorf("patch ClusterRoleBinding %q: %w", name, patchErr)
@@ -338,7 +376,7 @@ func applyClusterRoleBinding(ctx context.Context, cl ctrlclient.Client, name, sa
 	return nil
 }
 
-func desiredClusterRoleBinding(name, saName string) *rbacv1.ClusterRoleBinding {
+func desiredClusterRoleBinding(name, saName, saNamespace string) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
@@ -349,15 +387,15 @@ func desiredClusterRoleBinding(name, saName string) *rbacv1.ClusterRoleBinding {
 			Kind:     "ClusterRole",
 			Name:     name,
 		},
-		Subjects: subjectForSA(saName),
+		Subjects: subjectForSA(saName, saNamespace),
 	}
 }
 
-func subjectForSA(saName string) []rbacv1.Subject {
+func subjectForSA(saName, saNamespace string) []rbacv1.Subject {
 	return []rbacv1.Subject{{
 		Kind:      "ServiceAccount",
 		Name:      saName,
-		Namespace: consts.ModuleNamespace,
+		Namespace: saNamespace,
 	}}
 }
 

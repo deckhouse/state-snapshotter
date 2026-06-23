@@ -81,7 +81,11 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	coreReadRules = append(coreReadRules, buildCoreSourceReadRules(sourceGVRs)...)
 	coreReadRules = append(coreReadRules, domainRestoreSubresourceRules(snapshotGVRs)...)
 
-	applyErr := applyDomainRBAC(ctx, cl, domainRules, coreReadRules)
+	// DataExport (storage-volume-data-manager) SA: read-only on the dynamic demo snapshot GVRs so the
+	// DataExport controller can GET the snapshot leaf (status.boundSnapshotContentName) when exporting.
+	dataExportReadRules := buildDataExportReadRules(snapshotGVRs)
+
+	applyErr := applyDomainRBAC(ctx, cl, domainRules, coreReadRules, dataExportReadRules)
 
 	for i := range eligible {
 		csd := &eligible[i]
