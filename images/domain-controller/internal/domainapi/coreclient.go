@@ -30,9 +30,9 @@ import (
 // coreSubresourceGroupVersion is the core controller's aggregated subresources API group/version. The
 // domain controller fetches a node's own BASE manifests from core over the kube-apiserver aggregation
 // layer (SA token, k8s-managed front-proxy). The restore path therefore never reads SnapshotContent /
-// ManifestCheckpoint, so it needs no RBAC on those resources for restore. The demo reconcilers the domain
-// manager runs are likewise content-free (no SnapshotContent watch/informer), so the domain SA holds no
-// rights on snapshotcontents at all — core owns the SnapshotContent -> demo Snapshot wake-up + mirror.
+// ManifestCheckpoint for manifest fetch. Snapshot reconcilers are content-free (no SnapshotContent
+// watch/informer). DemoVirtualDisk restore reads SnapshotContent.status.dataRef via uncached APIReader
+// (get-only RBAC, no informer) to build a VolumeRestoreRequest.
 var coreSubresourceGroupVersion = schema.GroupVersion{
 	Group:   "subresources.state-snapshotter.deckhouse.io",
 	Version: "v1alpha1",

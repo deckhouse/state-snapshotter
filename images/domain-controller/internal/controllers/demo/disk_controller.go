@@ -39,8 +39,10 @@ import (
 // per-snapshot manifest-capture request (MCR), the data-leg volume-capture request (VCR), and the
 // ChildrenSnapshotReady planning barrier. It publishes results into demo.status and never touches the
 // cluster-scoped SnapshotContent (created/owned/projected/mirrored by GenericSnapshotBinderController).
-// It is content-free: re-creation of MCR/VCR is suppressed by the common controller's domain-only markers
-// (status.manifestCaptured / status.dataCaptured), so this controller never reads SnapshotContent.
+	// Content-free for SNAPSHOT reconcilers: re-creation of MCR/VCR is suppressed by the common controller's
+	// domain-only markers (status.manifestCaptured / status.dataCaptured), so this controller never reads
+	// SnapshotContent. DemoVirtualDisk resource materialization (virtualdisk_controller.go) is the sole
+	// domain path that reads SnapshotContent.status.dataRef via uncached APIReader for restore.
 type DemoVirtualDiskSnapshotReconciler struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -53,13 +55,10 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on CSD.
 	//
-	// Content-free: NO SnapshotContent watch/informer here, so the domain SA needs (and is granted) zero
-	// rights on snapshotcontents. The core GenericSnapshotBinderController owns all SnapshotContent work
-	// for this DomainCaptureSnapshotKind (creation/projection/Ready mirror) and provides the
-	// SnapshotContent -> demo Snapshot wake-up itself. The capture markers this controller gates on
-	// (status.manifestCaptured / status.dataCaptured) are written by core onto the demo snapshot's OWN
-	// status, which the For() watch below already observes — so this controller wakes on its own resource
-	// alone and never reads content.
+	// Content-free for SNAPSHOT reconcilers: NO SnapshotContent watch/informer here. The core
+	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind
+	// (creation/projection/Ready mirror) and provides the SnapshotContent -> demo Snapshot wake-up itself.
+	// DemoVirtualDisk resource restore reads SnapshotContent via APIReader only (get RBAC, no informer).
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
 		Complete(&DemoVirtualDiskSnapshotReconciler{

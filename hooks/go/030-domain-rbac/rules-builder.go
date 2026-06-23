@@ -60,12 +60,23 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 			// The domain snapshot controllers read each source object (referenced by the child
 			// snapshot's spec.sourceRef, e.g. DemoVirtualDisk/DemoVirtualMachine) to capture it.
 			// Read-only here; creation/ownership of the snapshot CRs is the snapshot-GVR rule below.
+			// The resource reconcilers (DemoVirtualDisk/DemoVirtualMachine materialization) patch
+			// source /status (phase/conditions/pvcRef/podRef), granted by the /status rule below.
 			// The CORE SA also needs source read for parent-graph planning — granted separately in
 			// buildCoreSourceReadRules.
+			sourceStatusResources := make([]string, len(entry.sources))
+			for i, r := range entry.sources {
+				sourceStatusResources[i] = r + "/status"
+			}
 			rules = append(rules, rbacv1.PolicyRule{
 				APIGroups: []string{g},
 				Resources: entry.sources,
 				Verbs:     []string{"get", "list", "watch"},
+			})
+			rules = append(rules, rbacv1.PolicyRule{
+				APIGroups: []string{g},
+				Resources: sourceStatusResources,
+				Verbs:     []string{"get", "update", "patch"},
 			})
 		}
 

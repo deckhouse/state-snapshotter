@@ -26,6 +26,8 @@ import (
 const (
 	LogLevelEnvName                      = "LOG_LEVEL"
 	ControllerNamespaceEnv               = "CONTROLLER_NAMESPACE"
+	DemoPodImageEnvName                  = "DEMO_POD_IMAGE"
+	DefaultDemoPodImage                  = "busybox:1.36"
 	HardcodedControllerNS                = "d8-state-snapshotter"
 	DefaultHealthProbeBindAddressEnvName = "HEALTH_PROBE_BIND_ADDRESS"
 	DefaultHealthProbeBindAddress        = ":8081"
@@ -37,6 +39,7 @@ type Options struct {
 	Loglevel               logger.Verbosity
 	HealthProbeBindAddress string
 	ControllerNamespace    string
+	DemoPodImage           string
 }
 
 func NewConfig() *Options {
@@ -65,6 +68,11 @@ func NewConfig() *Options {
 			log.Printf("Got namespace from filesystem: %s", string(namespace))
 			opts.ControllerNamespace = string(namespace)
 		}
+	}
+
+	opts.DemoPodImage = os.Getenv(DemoPodImageEnvName)
+	if opts.DemoPodImage == "" {
+		opts.DemoPodImage = DefaultDemoPodImage
 	}
 
 	return &opts

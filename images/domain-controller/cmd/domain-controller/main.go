@@ -145,14 +145,10 @@ func main() {
 	}
 	log.Info("[domain-main] successfully created kubernetes manager")
 
-	// Register ONLY the demo dedicated reconcilers. They own MCR/VCR, child snapshots and demo
-	// snapshot.status, and never touch SnapshotContent (the common controller in core owns that). No
-	// generic/content controllers run here. The disk controller must be registered before the VM
-	// controller (the VM controller watches the disk snapshot type).
-	//
-	// Unlike the core binary, these are registered eagerly: the domain pod runs nothing else, so if its
-	// demo.* RBAC is not yet granted the manager simply crash-loops on the forbidden list/watch until
-	// the CSD-driven hook grants it — there is no other workload to deadlock.
+	// Register demo dedicated reconcilers: snapshot controllers (content-free) and resource controllers
+	// (DemoVirtualDisk/DemoVirtualMachine materialization). The disk snapshot controller must be registered
+	// before the VM snapshot controller (the VM snapshot controller watches the disk snapshot type). The
+	// disk resource controller must be registered before the VM resource controller (the VM watches disks).
 	if err := demo.AddDemoVirtualDiskSnapshotControllerToManager(mgr, cfgParams); err != nil {
 		log.Error(err, "[domain-main] Failed to add DemoVirtualDiskSnapshot controller to manager")
 		cancel()
@@ -166,6 +162,20 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("[domain-main] DemoVirtualMachineSnapshot controller added to manager")
+
+	if err := demo.AddDemoVirtualDiskControllerToManager(mgr, cfgParams); err != nil {
+		log.Error(err, "[domain-main] Failed to add DemoVirtualDisk controller to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("[domain-main] DemoVirtualDisk controller added to manager")
+
+	if err := demo.AddDemoVirtualMachineControllerToManager(mgr, cfgParams); err != nil {
+		log.Error(err, "[domain-main] Failed to add DemoVirtualMachine controller to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("[domain-main] DemoVirtualMachine controller added to manager")
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error(err, "[domain-main] unable to mgr.AddHealthzCheck")

@@ -28,16 +28,29 @@ rules:
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "patch"]
 
-# SnapshotContent: intentionally NOT granted. The domain controller is content-free — it never reads,
-# watches or mutates SnapshotContent. The core GenericSnapshotBinderController owns all SnapshotContent
-# work for the demo kinds (creation/projection/Ready mirror) and the SnapshotContent -> demo Snapshot
-# wake-up. The domain reconcilers gate purely on their own status markers (manifestCaptured/dataCaptured),
-# which core writes on the demo snapshot's own status and the For() watch observes.
+# SnapshotContent: get-only via uncached APIReader for DemoVirtualDisk restore (reverses the f297d01
+# content-free stance for SNAPSHOT reconcilers only). The domain resource reconciler reads
+# SnapshotContent.status.dataRef to build a VolumeRestoreRequest; it never list/watch/mutates content.
+# Snapshot reconcilers remain content-free (zero snapshotcontents rights would suffice for them alone).
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["snapshotcontents"]
+  verbs: ["get"]
 
-# PersistentVolumeClaim: the disk data-leg reads the PVC to build the VCR target. Read-only.
+# VolumeRestoreRequest: DemoVirtualDisk restore materialization (create + lifecycle cleanup after PVC adoption).
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumerestorerequests"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+
+# PersistentVolumeClaim: disk snapshot data-leg reads PVCs for VCR; disk/VM resource reconcilers create,
+# patch and delete backing PVCs (scratch + restore adoption).
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["get", "list", "watch", "create", "patch", "delete"]
+
+# Pods: DemoVirtualMachine resource reconciler materializes the demo workload Pod.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "delete"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

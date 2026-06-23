@@ -8,3 +8,5 @@ properties:
     description: |
       Опциональная длительность TTL для корневого ObjectKeeper (FollowObjectWithTTL) у Snapshot и unified XxxxSnapshot.
       Пусто — в Pod не передаётся env, в контроллере действует встроенный дефолт (сейчас 1m для отладки цепочки TTL; для прода задайте значение явно, например 168h). Иначе строка длительности Go.
+  demoPodImage:
+    description: Образ контейнера для Pod'ов, материализуемых DemoVirtualMachine (env DEMO_POD_IMAGE).

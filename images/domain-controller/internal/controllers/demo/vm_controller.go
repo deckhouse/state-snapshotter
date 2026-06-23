@@ -55,9 +55,9 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on CSD.
-	// Content-free: NO SnapshotContent watch/informer (the domain SA holds, and needs, ZERO rights on
-	// snapshotcontents). The core GenericSnapshotBinderController owns all SnapshotContent work for this
-	// DomainCaptureSnapshotKind and provides the SnapshotContent -> demo Snapshot wake-up + Ready mirror.
+	// Content-free for SNAPSHOT reconcilers: NO SnapshotContent watch/informer here. DemoVirtualDisk
+	// resource restore reads SnapshotContent via APIReader only (get RBAC). The core
+	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind
 	// The capture marker this controller gates on (status.manifestCaptured) is written by core onto this
 	// snapshot's OWN status, observed by the For() watch. The child DemoVirtualDiskSnapshot watch stays so
 	// the parent re-plans when a child changes.

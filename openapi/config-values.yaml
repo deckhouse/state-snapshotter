@@ -17,6 +17,12 @@ properties:
       Deploy the reference demo domain controller (separate pod + aggregated apiserver) and its demo
       CustomSnapshotDefinition. Enables the demo.state-snapshotter.deckhouse.io snapshot kinds end to end.
       Disabled by default; intended for demo/e2e and as a template for real domain controllers.
+  demoPodImage:
+    type: string
+    default: busybox:1.36
+    description: |
+      Container image for DemoVirtualMachine materialization Pods (busybox workload mounting the disk PVC).
+      Maps to env DEMO_POD_IMAGE on the domain-controller Deployment.
   unifiedBootstrapPairs:
     type: string
     default: ""
