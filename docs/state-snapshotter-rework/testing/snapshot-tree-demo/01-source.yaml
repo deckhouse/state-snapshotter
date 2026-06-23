@@ -1,15 +1,19 @@
 # Source objects for the snapshot-tree demo.
-# Namespace + ConfigMap (manifest leg) + two PVCs that exercise BOTH data-capture paths:
+# Namespace + ConfigMap (manifest leg) + PVCs that exercise BOTH data-capture paths:
 #   - demo-pvc        : standalone/orphan PVC at the namespace root -> captured via a CSI
 #                       VolumeSnapshot (VS) visibility leaf (root orphan-PVC path).
-#   - demo-pvc-disk   : nested under DemoVirtualDisk/disk-vm (spec.persistentVolumeClaimName)
-#                       -> captured via the domain VolumeCaptureRequest (VCR) path, published
-#                          into the disk SnapshotContent.status.dataRefs[]; the root must NOT
-#                          treat it as an orphan (no root VS for it).
-# demo-domain inventory: one VM (owns disk-vm), one disk linked from the VM (owns demo-pvc-disk),
-# one standalone Disk. The hierarchy references point DOWN: VM.spec.virtualDiskName -> Disk,
+#   - disk-vm         : nested under DemoVirtualMachine/vm-1 (spec.virtualDiskName)
+#                       -> domain-controller materializes demo-pvc-disk (scratch) from
+#                          DemoVirtualDisk.spec.{size,storageClassName,volumeMode};
+#                       capture uses the domain VolumeCaptureRequest (VCR) path.
+# demo-domain inventory: one VM (owns disk-vm), one disk linked from the VM, one standalone Disk.
+# The hierarchy references point DOWN: VM.spec.virtualDiskName -> Disk,
 # Disk.spec.persistentVolumeClaimName -> PVC. ownerReferences are lifecycle metadata only and are
 # not used as snapshot-tree topology.
+#
+# Restore-from-snapshot disks: create a DemoVirtualDisk with spec.dataSource -> DemoVirtualDiskSnapshot
+# (same namespace). The domain-controller resolves bound SnapshotContent.status.dataRef and creates a
+# VolumeRestoreRequest directly (demo path); PVC adoption + VRR cleanup are automatic.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -36,18 +40,6 @@ spec:
       storage: 1Gi
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: demo-pvc-disk
-  namespace: snapshot-demo-tree
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-thin
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: v1
 kind: Pod
 metadata:
   name: bind-demo-pvc
@@ -60,15 +52,10 @@ spec:
       volumeMounts:
         - name: data
           mountPath: /data
-        - name: data-disk
-          mountPath: /data-disk
   volumes:
     - name: data
       persistentVolumeClaim:
         claimName: demo-pvc
-    - name: data-disk
-      persistentVolumeClaim:
-        claimName: demo-pvc-disk
 ---
 apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
 kind: DemoVirtualMachine
@@ -85,8 +72,11 @@ metadata:
   name: disk-vm
   namespace: snapshot-demo-tree
 spec:
-  # Nested PVC -> captured via the domain VCR path (not a root orphan VS).
+  # Nested PVC -> materialized by domain-controller (scratch), then captured via VCR.
   persistentVolumeClaimName: demo-pvc-disk
+  size: 1Gi
+  storageClassName: local-thin
+  volumeMode: Filesystem
 ---
 apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
 kind: DemoVirtualDisk

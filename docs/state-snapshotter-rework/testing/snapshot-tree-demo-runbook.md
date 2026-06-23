@@ -62,13 +62,39 @@ kubectl auth can-i get manifestcheckpointcontentchunks.state-snapshotter.deckhou
 ## 2. Подготовить source namespace
 
 ```bash
-# ns + CM + 2 PVC + bind Pod + VM + VM-linked disk + standalone disk
+# ns + CM + orphan PVC + bind Pod + VM + VM-linked disk (scratch materialization) + standalone disk
 # Hierarchy refs point DOWN: VM.spec.virtualDiskName -> Disk,
-# Disk.spec.persistentVolumeClaimName -> PVC (not ownerReferences).
+# Disk.spec.{persistentVolumeClaimName,size,storageClassName} -> PVC (created by domain-controller).
+# DemoVirtualMachine vm-1 materializes a busybox Pod mounting the disk PVC automatically.
 kubectl apply -f "$MANIFEST_DIR/01-source.yaml"
 
-# gate: PVC Bound до Snapshot (local-thin = WaitForFirstConsumer; bind Pod уже в source)
+# gate: orphan PVC Bound (local-thin = WaitForFirstConsumer; bind Pod holds demo-pvc)
 kubectl -n "$DEMO_NS" get pvc demo-pvc -w     # Ctrl+C на Bound
+
+# gate: domain materialization — disk PVC + VM Pod (domain-controller)
+kubectl -n "$DEMO_NS" get demovirtualdisk disk-vm -o json | jq '{phase:.status.phase, pvc:.status.persistentVolumeClaimRef, ready:(.status.conditions[]|select(.type=="Ready"))}'
+kubectl -n "$DEMO_NS" get demovirtualmachine vm-1 -o json | jq '{phase:.status.phase, pod:.status.podRef, ready:(.status.conditions[]|select(.type=="Ready"))}'
+kubectl -n "$DEMO_NS" get pvc demo-pvc-disk
+kubectl -n "$DEMO_NS" get pod -l demo.state-snapshotter.deckhouse.io/vm=vm-1
+```
+
+Restore из снимка (после §3, когда есть `DemoVirtualDiskSnapshot`): создайте новый
+`DemoVirtualDisk` с `spec.dataSource.kind=DemoVirtualDiskSnapshot` (тот же namespace).
+Domain-controller сам прочитает `boundSnapshotContentName → SnapshotContent.status.dataRef`
+и создаст `VolumeRestoreRequest`; PVC усыновляется диском, VRR удаляется после adoption.
+Пример:
+
+```yaml
+apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+kind: DemoVirtualDisk
+metadata:
+  name: disk-restored
+  namespace: snapshot-demo-tree
+spec:
+  persistentVolumeClaimName: demo-pvc-restored
+  dataSource:
+    kind: DemoVirtualDiskSnapshot
+    name: <disk-snapshot-name-from-tree>
 ```
 
 Зарегистрировать CSD и сделать eligible:
