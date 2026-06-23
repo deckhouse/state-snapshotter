@@ -121,7 +121,13 @@ func buildVolumeSource(ns, sc string) []*unstructured.Unstructured {
 			"name":      vdDiskVM,
 			"namespace": ns,
 		},
-		"spec": map[string]interface{}{"persistentVolumeClaimName": vdPVCDisk},
+		// size + storageClassName satisfy the scratch-provisioning guards (the disk adopts the
+		// pre-created PVC vdPVCDisk; the values mirror that PVC).
+		"spec": map[string]interface{}{
+			"persistentVolumeClaimName": vdPVCDisk,
+			"size":                      "1Gi",
+			"storageClassName":          sc,
+		},
 	}}
 	diskStandalone := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": demoGroupVersion,
@@ -130,7 +136,8 @@ func buildVolumeSource(ns, sc string) []*unstructured.Unstructured {
 			"name":      vdDiskStandalone,
 			"namespace": ns,
 		},
-		"spec": map[string]interface{}{},
+		// Manifest-only disk (no persistentVolumeClaimName); size is required by the CEL rule.
+		"spec": map[string]interface{}{"size": "1Gi"},
 	}}
 	return []*unstructured.Unstructured{configMap, pvc(vdPVCRoot), pvc(vdPVCDisk), vm, diskVM, diskStandalone}
 }
@@ -259,6 +266,45 @@ func walkContentDataRefs(ctx context.Context, rootContent string) ([]volBinding,
 		queue = append(queue, childContentNames(obj)...)
 	}
 	return out, nil
+}
+
+// waitContentDataRefs polls the SnapshotContent tree until every wantPVC has a published dataRef
+// binding. The orphan-PVC child volume node's dataRef is published asynchronously by the controller
+// after its CSI VolumeSnapshot leaf becomes readyToUse, so walking the tree immediately after the
+// snapshot children report Ready can race (the orphan binding is not yet linked under the root content).
+func waitContentDataRefs(ctx context.Context, rootContent string, wantPVCs []string, timeout time.Duration) ([]volBinding, error) {
+	deadline := time.Now().Add(timeout)
+	var last []volBinding
+	var lastErr error
+	for {
+		bindings, err := walkContentDataRefs(ctx, rootContent)
+		if err != nil {
+			lastErr = err
+		} else {
+			last = bindings
+			have := map[string]bool{}
+			for _, b := range bindings {
+				have[b.pvc] = true
+			}
+			missing := ""
+			for _, p := range wantPVCs {
+				if !have[p] {
+					missing = p
+					break
+				}
+			}
+			if missing == "" {
+				return bindings, nil
+			}
+			lastErr = fmt.Errorf("no data binding yet for captured PVC %q", missing)
+		}
+		if time.Now().After(deadline) {
+			return last, fmt.Errorf("timeout waiting for content dataRefs covering %v: %w", wantPVCs, lastErr)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return last, ctx.Err()
+		}
+	}
 }
 
 // createVolumeRestoreRequest creates a storage-foundation VRR that materializes targetPVC from a

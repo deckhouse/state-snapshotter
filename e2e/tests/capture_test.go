@@ -47,8 +47,9 @@ type capturedTree struct {
 var captured capturedTree
 
 // buildManifestOnlySource returns the PVC-free demo source: a ConfigMap (manifest leg) plus the demo
-// inventory (one VM owning a disk, plus a standalone disk), all with empty disk specs so there is no
-// data leg. This yields a pure manifest tree where VolumesReady is vacuously true.
+// inventory (one VM owning a disk, plus a standalone disk). The disks set spec.size (required by the CEL
+// scratch-provisioning rule) but leave spec.persistentVolumeClaimName empty, so the disk controller keeps
+// them manifest-only (no PVC). This yields a pure manifest tree where VolumesReady is vacuously true.
 func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 	configMap := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "v1",
@@ -75,7 +76,7 @@ func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 			"name":      srcDiskVMName,
 			"namespace": ns,
 		},
-		"spec": map[string]interface{}{},
+		"spec": map[string]interface{}{"size": "1Gi"},
 	}}
 	diskStandalone := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": demoGroupVersion,
@@ -84,7 +85,7 @@ func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 			"name":      srcDiskStandalone,
 			"namespace": ns,
 		},
-		"spec": map[string]interface{}{},
+		"spec": map[string]interface{}{"size": "1Gi"},
 	}}
 	return []*unstructured.Unstructured{configMap, vm, diskVM, diskStandalone}
 }

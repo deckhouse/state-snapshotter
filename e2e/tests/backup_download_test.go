@@ -252,6 +252,10 @@ func manifestDownloadPath(ns string, ref childRef) string {
 		return coreGenericSubPath(ns, resDemoVMSnapshots, ref.name, subManifestsDownload)
 	case "DemoVirtualDiskSnapshot":
 		return coreGenericSubPath(ns, resDemoDiskSnapshots, ref.name, subManifestsDownload)
+	case "VolumeSnapshot":
+		// Orphan-PVC visibility leaf: its captured PVC manifest is served by the generic-PVC extended
+		// VolumeSnapshot connector (subresources.snapshot.storage.k8s.io), not the core/demo subresource.
+		return vsConnectorSubPath(ns, ref.name, subManifestsDownload)
 	default:
 		return ""
 	}
@@ -348,7 +352,9 @@ func anyBoundSnapshotContent(ctx context.Context, ns string) (bool, error) {
 }
 
 func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]dataExportTarget, error) {
-	bindings, err := walkContentDataRefs(ctx, rootContent)
+	// Wait for the asynchronously-published orphan-PVC dataRef so we never miss a binding (see
+	// waitContentDataRefs); reading once can race right after the snapshot children report Ready.
+	bindings, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO)
 	if err != nil {
 		return nil, err
 	}
@@ -580,11 +586,12 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 		return fmt.Errorf("expected disk-a snapshot nested under VM snapshot %s", vmSnap.name)
 	}
 
-	bindings, err := walkContentDataRefs(ctx, rootContent)
-	if err != nil {
+	// The orphan-PVC child volume node's dataRef is published asynchronously after its VolumeSnapshot
+	// leaf becomes readyToUse, so poll the content tree until all three PVC bindings are linked under
+	// the root content rather than reading once (which races right after waitChildrenReady).
+	if _, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO); err != nil {
 		return err
 	}
-	pvcSet := map[string]bool{bkPVCName: true, bkPVCDiskA: true, bkPVCDiskB: true}
 	var orphanVS string
 	list, lerr := suiteDyn.Resource(volumeSnapshotGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 	if lerr != nil {
@@ -614,18 +621,6 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 		diskASnap:      bkPVCDiskA,
 		diskBSnap.name: bkPVCDiskB,
 		orphanVS:       bkPVCName,
-	}
-	for pvc := range pvcSet {
-		found := false
-		for _, b := range bindings {
-			if b.pvc == pvc {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("no data binding for captured PVC %q", pvc)
-		}
 	}
 
 	backup.vmSnapName = vmSnap.name

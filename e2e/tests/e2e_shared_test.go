@@ -388,6 +388,25 @@ func conditionStatus(obj *unstructured.Unstructured, condType string) (status, r
 	return "", "", false
 }
 
+// snapshotNodeReady reports whether a snapshot tree node is ready. Demo/core snapshot kinds expose a
+// Ready=True status condition; a CSI VolumeSnapshot visibility leaf (the namespace-root orphan-PVC data
+// leg) has no Ready condition and signals readiness via status.readyToUse instead. detail is a
+// human-readable reason when not ready.
+func snapshotNodeReady(obj *unstructured.Unstructured, kind string) (ready bool, detail string) {
+	if kind == "VolumeSnapshot" {
+		rtu, found, _ := unstructured.NestedBool(obj.Object, "status", "readyToUse")
+		if found && rtu {
+			return true, ""
+		}
+		return false, fmt.Sprintf("readyToUse found=%v value=%v", found, rtu)
+	}
+	st, reason, found := conditionStatus(obj, condReady)
+	if found && st == "True" {
+		return true, ""
+	}
+	return false, fmt.Sprintf("Ready found=%v status=%q reason=%q", found, st, reason)
+}
+
 // getResource fetches a (possibly namespaced) dynamic resource. ns="" addresses cluster-scoped kinds.
 func getResource(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) (*unstructured.Unstructured, error) {
 	if ns == "" {
@@ -487,8 +506,8 @@ func waitChildrenReady(ctx context.Context, ns string, nodes []childRef, timeout
 				pending = fmt.Sprintf("%s/%s get err=%v", n.kind, n.name, err)
 				break
 			}
-			if st, reason, found := conditionStatus(obj, condReady); !found || st != "True" {
-				pending = fmt.Sprintf("%s/%s Ready found=%v status=%q reason=%q", n.kind, n.name, found, st, reason)
+			if ready, detail := snapshotNodeReady(obj, n.kind); !ready {
+				pending = fmt.Sprintf("%s/%s %s", n.kind, n.name, detail)
 				break
 			}
 		}
@@ -568,9 +587,10 @@ func childSnapshotRefs(obj *unstructured.Unstructured) []childRef {
 	return out
 }
 
-// gvrForSnapshotKind maps a snapshot child ref kind to its GVR. The run tree only contains the core
-// Snapshot kind and the demo snapshot kinds, so an explicit map is clearer (and safer) than guessing a
-// plural from the kind.
+// gvrForSnapshotKind maps a snapshot child ref kind to its GVR. The run tree contains the core Snapshot
+// kind, the demo snapshot kinds, and the CSI VolumeSnapshot visibility leaves created by the
+// namespace-root orphan-PVC data leg, so an explicit map is clearer (and safer) than guessing a plural
+// from the kind.
 func gvrForSnapshotKind(kind string) (schema.GroupVersionResource, bool) {
 	switch kind {
 	case "Snapshot":
@@ -579,6 +599,8 @@ func gvrForSnapshotKind(kind string) (schema.GroupVersionResource, bool) {
 		return demoVMSnapshotGVR, true
 	case "DemoVirtualDiskSnapshot":
 		return demoDiskSnapshotGVR, true
+	case "VolumeSnapshot":
+		return volumeSnapshotGVR, true
 	default:
 		return schema.GroupVersionResource{}, false
 	}
