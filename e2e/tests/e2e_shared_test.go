@@ -145,7 +145,30 @@ var (
 	dataExportGVR = schema.GroupVersionResource{
 		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataexports",
 	}
+	dataImportGVR = schema.GroupVersionResource{
+		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataimports",
+	}
 )
+
+// backupFixture holds phase-4 capture/download state shared with phase-5 restore/import.
+// Populated incrementally by backupDownloadSpecs(); phase 5 skips when ready is false.
+type backupFixture struct {
+	ready       bool
+	srcNS       string
+	sc          string
+	rootSnap    string
+	rootContent string
+	checksums   map[string]string // source PVC name -> sha256
+	dataDir     string            // in-cluster path on the backup-client pod (emptyDir mount)
+
+	vmSnapName    string
+	diskASnapName string
+	diskBSnapName string
+	orphanVSName  string
+	leafToPVC     map[string]string // snapshot leaf name -> source PVC name
+}
+
+var backup backupFixture
 
 const pollInterval = 5 * time.Second
 

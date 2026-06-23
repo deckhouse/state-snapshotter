@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -52,6 +53,7 @@ const (
 	bkBlockWriterCont  = "writer"
 	bkBlockMiB         = 8
 	bkBlockBytes       = bkBlockMiB * 1024 * 1024
+	bkBackupDataDir    = "/backup"
 )
 
 type dataExportTarget struct {
@@ -516,6 +518,7 @@ func ensureBackupClientRBAC(ctx context.Context, ns string) error {
 }
 
 func backupClientPodSpec(ns string) *corev1.Pod {
+	sizeLimit := resource.MustParse("64Mi")
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: bkBackupClientPod, Namespace: ns},
 		Spec: corev1.PodSpec{
@@ -525,12 +528,115 @@ func backupClientPodSpec(ns string) *corev1.Pod {
 				Name:    bkBackupClientCont,
 				Image:   suiteCfg.backupClientImage,
 				Command: []string{"sh", "-c", "sleep 360000"},
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      "backup",
+					MountPath: bkBackupDataDir,
+				}},
+			}},
+			Volumes: []corev1.Volume{{
+				Name: "backup",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &sizeLimit},
+				},
 			}},
 		},
 	}
 }
 
-func downloadBlockChecksum(ctx context.Context, ns, exportURL string) (string, error) {
+// resolveBackupSnapRefs discovers snapshot leaf names and PVC bindings from the captured tree.
+func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string) error {
+	root, err := getResource(ctx, snapshotGVR, ns, rootSnap)
+	if err != nil {
+		return fmt.Errorf("get root Snapshot: %w", err)
+	}
+	rootChildren := childSnapshotRefs(root)
+
+	var vmSnap childRef
+	var diskBSnap childRef
+	for _, c := range rootChildren {
+		switch c.kind {
+		case "DemoVirtualMachineSnapshot":
+			vmSnap = c
+		case "DemoVirtualDiskSnapshot":
+			diskBSnap = c
+		}
+	}
+	if vmSnap.name == "" || diskBSnap.name == "" {
+		return fmt.Errorf("expected VM snapshot and standalone disk snapshot among root children")
+	}
+
+	vmObj, err := getResource(ctx, demoVMSnapshotGVR, ns, vmSnap.name)
+	if err != nil {
+		return fmt.Errorf("get VM snapshot %s: %w", vmSnap.name, err)
+	}
+	var diskASnap string
+	for _, c := range childSnapshotRefs(vmObj) {
+		if c.kind == "DemoVirtualDiskSnapshot" {
+			diskASnap = c.name
+			break
+		}
+	}
+	if diskASnap == "" {
+		return fmt.Errorf("expected disk-a snapshot nested under VM snapshot %s", vmSnap.name)
+	}
+
+	bindings, err := walkContentDataRefs(ctx, rootContent)
+	if err != nil {
+		return err
+	}
+	pvcSet := map[string]bool{bkPVCName: true, bkPVCDiskA: true, bkPVCDiskB: true}
+	var orphanVS string
+	list, lerr := suiteDyn.Resource(volumeSnapshotGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
+	if lerr != nil {
+		return fmt.Errorf("list VolumeSnapshots: %w", lerr)
+	}
+	for i := range list.Items {
+		vs := &list.Items[i]
+		contentName, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
+		if contentName == "" {
+			continue
+		}
+		content, gerr := getResource(ctx, snapshotContentGVR, "", contentName)
+		if gerr != nil {
+			continue
+		}
+		targetName, _, _ := unstructured.NestedString(content.Object, "status", "dataRef", "target", "name")
+		if targetName == bkPVCName {
+			orphanVS = vs.GetName()
+			break
+		}
+	}
+	if orphanVS == "" {
+		return fmt.Errorf("no VolumeSnapshot leaf found for orphan PVC %q", bkPVCName)
+	}
+
+	leafToPVC := map[string]string{
+		diskASnap:      bkPVCDiskA,
+		diskBSnap.name: bkPVCDiskB,
+		orphanVS:       bkPVCName,
+	}
+	for pvc := range pvcSet {
+		found := false
+		for _, b := range bindings {
+			if b.pvc == pvc {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("no data binding for captured PVC %q", pvc)
+		}
+	}
+
+	backup.vmSnapName = vmSnap.name
+	backup.diskASnapName = diskASnap
+	backup.diskBSnapName = diskBSnap.name
+	backup.orphanVSName = orphanVS
+	backup.leafToPVC = leafToPVC
+	return nil
+}
+
+func downloadAndPersistBlock(ctx context.Context, ns, exportURL, destFile string) (string, error) {
 	// status.url carries a trailing slash; trim it so we never emit "//api/v1/block" (Go's ServeMux would
 	// 301-redirect the non-canonical path and curl, without -L, would hash the redirect body instead of
 	// the device). sha256sum is the busybox/Alpine applet shipped by the default curlimages/curl image
@@ -540,12 +646,12 @@ func downloadBlockChecksum(ctx context.Context, ns, exportURL string) (string, e
 	// if it were device bytes. We intentionally do NOT set pipefail: head closes the pipe after N bytes,
 	// which SIGPIPEs curl by design; the pipeline's exit is sha256sum's (matching the source dd|sha256sum).
 	dlCmd := fmt.Sprintf(
-		`TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -fksS -H "Authorization: Bearer $TOKEN" %q | head -c %d | sha256sum | awk '{print $1}'`,
-		blockURL, bkBlockBytes,
+		`TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -fksS -H "Authorization: Bearer $TOKEN" %q | head -c %d > %q && sha256sum %q | awk '{print $1}'`,
+		blockURL, bkBlockBytes, destFile, destFile,
 	)
 	stdout, stderr, err := storagekube.ExecInPod(ctx, suiteRestCfg, ns, bkBackupClientPod, bkBackupClientCont, []string{"sh", "-c", dlCmd})
 	if err != nil {
-		return "", fmt.Errorf("download block checksum: %w (stderr=%q)", err, stderr)
+		return "", fmt.Errorf("download+persist block data: %w (stderr=%q)", err, stderr)
 	}
 	sum := strings.TrimSpace(stdout)
 	if len(sum) != 64 {
@@ -559,27 +665,23 @@ func downloadBlockChecksum(ctx context.Context, ns, exportURL string) (string, e
 // SVDM DataExport from an in-cluster backup pod, then verify against live cluster state.
 func backupDownloadSpecs() {
 	Context("Phase 4: backup-system HTTP download", func() {
-		var (
-			srcNS       string
-			sc          string
-			rootContent string
-			checksums   = map[string]string{}
-			targets     []dataExportTarget
-		)
+		var targets []dataExportTarget
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
 				Skip("E2E_VOLUME_DATA not set: skipping the phase-4 backup download flow")
 			}
-			sc = suiteCfg.storageClass
-			srcNS = uniqueNS("bk")
+			backup.sc = suiteCfg.storageClass
+			backup.srcNS = uniqueNS("bk")
+			backup.checksums = map[string]string{}
+			backup.dataDir = bkBackupDataDir
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + sc + ")")
+			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + backup.sc + ")")
 			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     sc,
+				StorageClassName:     backup.sc,
 				LVMType:              "Thin",
 				ThinPoolName:         "thinpool",
 				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
@@ -589,17 +691,13 @@ func backupDownloadSpecs() {
 			Expect(err).NotTo(HaveOccurred(), "provision default StorageClass")
 
 			By("Wiring the StorageClass to a VolumeSnapshotClass for the local CSI driver")
-			Expect(ensureStorageClassVolumeSnapshotClass(ctx, sc)).To(Succeed())
+			Expect(ensureStorageClassVolumeSnapshotClass(ctx, backup.sc)).To(Succeed())
 
 			By("Creating the source namespace and applying the Block-volume demo source")
-			Expect(ensureNamespace(ctx, srcNS)).To(Succeed())
-			Expect(applyObjects(ctx, buildBackupSource(srcNS, sc), srcNS)).To(Succeed())
+			Expect(ensureNamespace(ctx, backup.srcNS)).To(Succeed())
+			Expect(applyObjects(ctx, buildBackupSource(backup.srcNS, backup.sc), backup.srcNS)).To(Succeed())
 
-			DeferCleanup(func() {
-				cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				defer ccancel()
-				deleteNamespace(cctx, srcNS)
-			})
+			// srcNS teardown is deferred to phase 5 (backup pod + persisted bytes must survive).
 
 			// The provisioned StorageClass (sds-local-volume) is WaitForFirstConsumer: the demo scratch
 			// PVCs and the orphan PVC only bind once a consumer Pod is scheduled. We therefore do NOT gate
@@ -610,19 +708,19 @@ func backupDownloadSpecs() {
 			for i, pvc := range pvcs {
 				podName := fmt.Sprintf("block-writer-%d", i)
 				By("Writing Block data and recording checksum for PVC " + pvc)
-				_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, blockWriterPodSpec(srcNS, podName, pvc), metav1.CreateOptions{})
+				_, err = suiteClientset.CoreV1().Pods(backup.srcNS).Create(ctx, blockWriterPodSpec(backup.srcNS, podName, pvc), metav1.CreateOptions{})
 				Expect(err).NotTo(HaveOccurred(), "create block writer pod for %s", pvc)
-				Expect(waitPodRunning(ctx, srcNS, podName, 10*time.Minute)).To(Succeed())
-				sum, werr := writeBlockAndChecksum(ctx, srcNS, podName, pvc)
+				Expect(waitPodRunning(ctx, backup.srcNS, podName, 10*time.Minute)).To(Succeed())
+				sum, werr := writeBlockAndChecksum(ctx, backup.srcNS, podName, pvc)
 				Expect(werr).NotTo(HaveOccurred(), "write+checksum PVC %s", pvc)
-				checksums[pvc] = sum
+				backup.checksums[pvc] = sum
 				GinkgoWriter.Printf("  source checksum pvc=%s sha256=%s\n", pvc, sum)
-				deletePod(ctx, srcNS, podName)
-				Expect(waitPodDeleted(ctx, srcNS, podName, 2*time.Minute)).To(Succeed())
+				deletePod(ctx, backup.srcNS, podName)
+				Expect(waitPodDeleted(ctx, backup.srcNS, podName, 2*time.Minute)).To(Succeed())
 			}
 
 			By("Creating DemoVirtualMachine " + bkVMName + " attached to " + bkDiskAName)
-			Expect(applyObjects(ctx, []*unstructured.Unstructured{buildBackupVM(srcNS)}, srcNS)).To(Succeed())
+			Expect(applyObjects(ctx, []*unstructured.Unstructured{buildBackupVM(backup.srcNS)}, backup.srcNS)).To(Succeed())
 		})
 
 		It("captures the Block-volume snapshot tree (Ready + expected topology)", func() {
@@ -630,37 +728,41 @@ func backupDownloadSpecs() {
 			defer cancel()
 
 			By("Creating the root Snapshot over the Block-volume tree")
-			Expect(createRootSnapshot(ctx, srcNS, bkRootSnapshotName)).To(Succeed())
+			Expect(createRootSnapshot(ctx, backup.srcNS, bkRootSnapshotName)).To(Succeed())
 
 			By("Waiting for the Snapshot + bound SnapshotContent to become Ready")
-			content, err := waitSnapshotReady(ctx, srcNS, bkRootSnapshotName, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, backup.srcNS, bkRootSnapshotName, suiteCfg.snapshotReadyTO)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
-			rootContent = content
+			backup.rootContent = content
+			backup.rootSnap = bkRootSnapshotName
 
 			By("Waiting for all child snapshots to reach Ready=True")
-			nodes, err := walkSnapshotTree(ctx, srcNS, bkRootSnapshotName)
+			nodes, err := walkSnapshotTree(ctx, backup.srcNS, bkRootSnapshotName)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(nodes).NotTo(BeEmpty())
-			Expect(waitChildrenReady(ctx, srcNS, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitChildrenReady(ctx, backup.srcNS, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
+
+			By("Resolving snapshot leaf names for the phase-5 import tree")
+			Expect(resolveBackupSnapRefs(ctx, backup.srcNS, bkRootSnapshotName, content)).To(Succeed())
 
 			By("Asserting disk-a is nested under the VM snapshot and disk-b is a standalone root child")
-			Expect(assertBackupTopology(ctx, srcNS, bkRootSnapshotName)).To(Succeed())
+			Expect(assertBackupTopology(ctx, backup.srcNS, bkRootSnapshotName)).To(Succeed())
 		})
 
 		It("downloads manifests via the aggregated API and matches live cluster objects", func() {
-			Expect(rootContent).NotTo(BeEmpty(), "capture spec must have populated rootContent")
+			Expect(backup.rootContent).NotTo(BeEmpty(), "capture spec must have populated rootContent")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 
 			rootSnap := bkRootSnapshotName
-			nodes, err := walkSnapshotTree(ctx, srcNS, rootSnap)
+			nodes, err := walkSnapshotTree(ctx, backup.srcNS, rootSnap)
 			Expect(err).NotTo(HaveOccurred())
 
 			allRefs := append([]childRef{{kind: "Snapshot", name: rootSnap}}, nodes...)
 			for _, ref := range allRefs {
-				path := manifestDownloadPath(srcNS, ref)
+				path := manifestDownloadPath(backup.srcNS, ref)
 				if path == "" {
 					continue
 				}
@@ -670,60 +772,60 @@ func backupDownloadSpecs() {
 				objs, derr := decodeManifestArray(body)
 				Expect(derr).NotTo(HaveOccurred())
 				Expect(objs).NotTo(BeEmpty(), "manifests-download for %s/%s", ref.kind, ref.name)
-				Expect(assertManifestsMatchLive(ctx, srcNS, objs)).To(Succeed())
+				Expect(assertManifestsMatchLive(ctx, backup.srcNS, objs)).To(Succeed())
 			}
 		})
 
 		It("downloads volume bytes via DataExport and matches source checksums", func() {
-			Expect(rootContent).NotTo(BeEmpty(), "capture spec must have populated rootContent")
+			Expect(backup.rootContent).NotTo(BeEmpty(), "capture spec must have populated rootContent")
 
 			// Budget: 3 legs x (15m DataExport Ready + download) + 5m backup-pod start, with headroom.
 			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Minute)
 			defer cancel()
 
 			By("Checking the extended-VS data surface is available (skip if the fork is absent)")
-			hasLeaf, err := anyBoundSnapshotContent(ctx, srcNS)
+			hasLeaf, err := anyBoundSnapshotContent(ctx, backup.srcNS)
 			Expect(err).NotTo(HaveOccurred())
 			if !hasLeaf {
 				Skip("no snapshot leaf exposes status.boundSnapshotContentName: extended-VS data surface unavailable")
 			}
 
 			By("Collecting DataExport targets from the captured content tree")
-			targets, err = collectDataExportTargets(ctx, srcNS, rootContent)
+			targets, err = collectDataExportTargets(ctx, backup.srcNS, backup.rootContent)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(targets).To(HaveLen(3), "expected data exports for orphan PVC + two demo disks")
 
 			By("Creating backup-client RBAC and pod")
-			Expect(ensureBackupClientRBAC(ctx, srcNS)).To(Succeed())
-			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, backupClientPodSpec(srcNS), metav1.CreateOptions{})
+			Expect(ensureBackupClientRBAC(ctx, backup.srcNS)).To(Succeed())
+			_, err = suiteClientset.CoreV1().Pods(backup.srcNS).Create(ctx, backupClientPodSpec(backup.srcNS), metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "create backup-client pod")
-			Expect(waitPodRunning(ctx, srcNS, bkBackupClientPod, 5*time.Minute)).To(Succeed())
+			Expect(waitPodRunning(ctx, backup.srcNS, bkBackupClientPod, 5*time.Minute)).To(Succeed())
 
 			for _, target := range targets {
 				By(fmt.Sprintf("Exporting PVC %s via DataExport %s (target %s/%s)", target.pvcName, target.exportName, target.resource, target.snapshotName))
-				Expect(createDataExport(ctx, srcNS, target)).To(Succeed())
+				Expect(createDataExport(ctx, backup.srcNS, target)).To(Succeed())
 				DeferCleanup(func(t dataExportTarget) func() {
 					return func() {
 						cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
 						defer ccancel()
-						deleteDataExport(cctx, srcNS, t.exportName)
+						deleteDataExport(cctx, backup.srcNS, t.exportName)
 					}
 				}(target))
 
-				url, _, werr := waitDataExportReady(ctx, srcNS, target.exportName, 15*time.Minute)
+				url, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, 15*time.Minute)
 				Expect(werr).NotTo(HaveOccurred(), "DataExport %s Ready", target.exportName)
 				GinkgoWriter.Printf("  DataExport %s url=%s\n", target.exportName, url)
 
-				got, derr := downloadBlockChecksum(ctx, srcNS, url)
-				Expect(derr).NotTo(HaveOccurred(), "download block data for PVC %s", target.pvcName)
-				want := checksums[target.pvcName]
+				destFile := fmt.Sprintf("%s/%s.bin", backup.dataDir, target.pvcName)
+				got, derr := downloadAndPersistBlock(ctx, backup.srcNS, url, destFile)
+				Expect(derr).NotTo(HaveOccurred(), "download+persist block data for PVC %s", target.pvcName)
+				want := backup.checksums[target.pvcName]
 				Expect(want).NotTo(BeEmpty(), "source checksum for PVC %s", target.pvcName)
 				Expect(got).To(Equal(want), "downloaded bytes for PVC %s must match source checksum", target.pvcName)
 
-				// Release each exporter (VRR + export PVC + exporter pod) before the next leg to keep peak
-				// resource pressure low (plan step 7); the DeferCleanup above remains a safety net.
-				deleteDataExport(ctx, srcNS, target.exportName)
+				deleteDataExport(ctx, backup.srcNS, target.exportName)
 			}
+			backup.ready = true
 		})
 	})
 }

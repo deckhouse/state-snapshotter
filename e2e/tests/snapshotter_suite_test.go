@@ -83,6 +83,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	gcSpecs()             // import_gc_test.go: TTL/GC cascade (phase 2)
 	volumeDataSpecs()     // volumedata_test.go: full volume-data flow (phase 3, env-gated)
 	backupDownloadSpecs() // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
+	backupRestoreSpecs()  // backup_restore_test.go: backup-system restore import (phase 5, env-gated)
 })
 
 func prepareSuite() {
