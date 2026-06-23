@@ -56,7 +56,7 @@ func TestDemoVirtualMachineCreatesPod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "vm-1", UID: types.UID("vm-1-uid")},
 		Spec:       demov1alpha1.DemoVirtualMachineSpec{VirtualDiskName: "disk-vm"},
 	}
-	cl := newMaterializationFakeClient(t, disk, vm)
+	cl := newMaterializationFakeClient(t, disk, vm, demoTestPVC("data-pvc", corev1.PersistentVolumeFilesystem))
 	r := &DemoVirtualMachineReconciler{Client: cl, APIReader: cl, Config: &config.Options{DemoPodImage: "busybox:1.36"}}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}); err != nil {
@@ -78,6 +78,67 @@ func TestDemoVirtualMachineCreatesPod(t *testing.T) {
 	if sc.RunAsUser == nil || *sc.RunAsUser == 0 {
 		t.Fatal("expected explicit non-zero runAsUser on container (kubelet cannot verify non-root for busybox otherwise)")
 	}
+	// A Filesystem PVC must be attached as a mount, never as a raw block device.
+	mounts := pod.Spec.Containers[0].VolumeMounts
+	if len(mounts) != 1 || mounts[0].Name != "data" || mounts[0].MountPath != "/data" {
+		t.Fatalf("expected single /data volumeMount, got %#v", mounts)
+	}
+	if len(pod.Spec.Containers[0].VolumeDevices) != 0 {
+		t.Fatalf("Filesystem PVC must not use volumeDevices, got %#v", pod.Spec.Containers[0].VolumeDevices)
+	}
+}
+
+func TestDemoVirtualMachineCreatesPodForBlockPVC(t *testing.T) {
+	size := resource.MustParse("1Gi")
+	disk := &demov1alpha1.DemoVirtualDisk{
+		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "disk-vm", UID: types.UID("disk-vm-blk-uid")},
+		Spec: demov1alpha1.DemoVirtualDiskSpec{
+			PersistentVolumeClaimName: "data-pvc",
+			Size:                      &size,
+			StorageClassName:          "local-thin",
+			VolumeMode:                string(corev1.PersistentVolumeBlock),
+		},
+		Status: demov1alpha1.DemoVirtualDiskStatus{
+			Phase: demoPhaseReady,
+			Conditions: []metav1.Condition{{
+				Type:   storagev1alpha1.ConditionReady,
+				Status: metav1.ConditionTrue,
+				Reason: storagev1alpha1.ReasonCompleted,
+			}},
+			PersistentVolumeClaimRef: &demov1alpha1.DemoObjectRef{Name: "data-pvc"},
+		},
+	}
+	vm := &demov1alpha1.DemoVirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "vm-1", UID: types.UID("vm-1-blk-uid")},
+		Spec:       demov1alpha1.DemoVirtualMachineSpec{VirtualDiskName: "disk-vm"},
+	}
+	cl := newMaterializationFakeClient(t, disk, vm, demoTestPVC("data-pvc", corev1.PersistentVolumeBlock))
+	r := &DemoVirtualMachineReconciler{Client: cl, APIReader: cl, Config: &config.Options{DemoPodImage: "busybox:1.36"}}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	pod := &corev1.Pod{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: matNS, Name: demoVMPodName(vm.UID)}, pod); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	// A Block PVC must be attached as a raw block device, never as a mount, otherwise the kubelet
+	// rejects the Pod ("volume has volumeMode Block, but is specified in volumeMounts").
+	devices := pod.Spec.Containers[0].VolumeDevices
+	if len(devices) != 1 || devices[0].Name != "data" || devices[0].DevicePath != demoVMBlockDevicePath {
+		t.Fatalf("expected single %s volumeDevice, got %#v", demoVMBlockDevicePath, devices)
+	}
+	if len(pod.Spec.Containers[0].VolumeMounts) != 0 {
+		t.Fatalf("Block PVC must not use volumeMounts, got %#v", pod.Spec.Containers[0].VolumeMounts)
+	}
+}
+
+func demoTestPVC(name string, mode corev1.PersistentVolumeMode) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: name},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: &mode},
+	}
 }
 
 func TestDemoVirtualMachineReconcileIsIdempotent(t *testing.T) {
@@ -97,7 +158,7 @@ func TestDemoVirtualMachineReconcileIsIdempotent(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "vm-1", UID: types.UID("vm-idem-uid")},
 		Spec:       demov1alpha1.DemoVirtualMachineSpec{VirtualDiskName: "disk-vm"},
 	}
-	pod := buildDemoVMPod(vm, disk, demoVMPodName(vm.UID), "data-pvc", "busybox:1.36")
+	pod := buildDemoVMPod(vm, disk, demoVMPodName(vm.UID), "data-pvc", "busybox:1.36", false)
 	pod.Status.Phase = corev1.PodRunning
 	cl := newMaterializationFakeClient(t, disk, vm, pod)
 	r := &DemoVirtualMachineReconciler{Client: cl, APIReader: cl, Config: &config.Options{}}

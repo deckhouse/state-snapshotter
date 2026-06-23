@@ -145,7 +145,24 @@ func (r *DemoVirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		pod = buildDemoVMPod(vm, disk, podName, pvcName, r.Config.DemoPodImage)
+		// The container must attach the backing PVC with the API that matches its volumeMode: a Block
+		// PVC is a raw block device (volumeDevices), a Filesystem PVC is a mount (volumeMounts). Mixing
+		// them makes the kubelet refuse the Pod ("volume has volumeMode Block, but is specified in
+		// volumeMounts"). Read the real PVC mode (authoritative for both scratch and restored disks)
+		// instead of assuming Filesystem.
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: vm.Namespace, Name: pvcName}, pvc); err != nil {
+			if apierrors.IsNotFound(err) {
+				if patchErr := patchDemoVirtualMachineStatus(ctx, r.Client, req.NamespacedName, demoPhasePending, metav1.ConditionFalse, demoReasonPVCNotReady, fmt.Sprintf("waiting for PVC %q to exist", pvcName), nil); patchErr != nil {
+					return ctrl.Result{}, patchErr
+				}
+				return ctrl.Result{RequeueAfter: defaultDemoResourceRequeueAfter}, nil
+			}
+			return ctrl.Result{}, err
+		}
+		blockMode := pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode == corev1.PersistentVolumeBlock
+
+		pod = buildDemoVMPod(vm, disk, podName, pvcName, r.Config.DemoPodImage, blockMode)
 		if createErr := r.Client.Create(ctx, pod); createErr != nil {
 			return ctrl.Result{}, createErr
 		}
@@ -168,7 +185,11 @@ func (r *DemoVirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{}, nil
 }
 
-func buildDemoVMPod(vm *demov1alpha1.DemoVirtualMachine, disk *demov1alpha1.DemoVirtualDisk, podName, pvcName, image string) *corev1.Pod {
+// demoVMBlockDevicePath is where a Block-mode disk is exposed inside the demo Pod. It matches the
+// device path the e2e block-data probes use so the same volume is addressable consistently.
+const demoVMBlockDevicePath = "/dev/xvda"
+
+func buildDemoVMPod(vm *demov1alpha1.DemoVirtualMachine, disk *demov1alpha1.DemoVirtualDisk, podName, pvcName, image string, block bool) *corev1.Pod {
 	if image == "" {
 		image = "busybox:1.36"
 	}
@@ -179,6 +200,32 @@ func buildDemoVMPod(vm *demov1alpha1.DemoVirtualMachine, disk *demov1alpha1.Demo
 	runAsUser := int64(1000)
 	allowPrivilegeEscalation := false
 	seccompProfile := &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
+	container := corev1.Container{
+		Name:    "demo",
+		Image:   image,
+		Command: []string{"sleep"},
+		Args:    []string{"infinity"},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             &runAsNonRoot,
+			RunAsUser:                &runAsUser,
+			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: seccompProfile,
+		},
+	}
+	// A Block PVC is attached as a raw block device (volumeDevices); a Filesystem PVC is attached as a
+	// mount (volumeMounts). Using the wrong one makes the kubelet refuse the Pod.
+	if block {
+		container.VolumeDevices = []corev1.VolumeDevice{
+			{Name: "data", DevicePath: demoVMBlockDevicePath},
+		}
+	} else {
+		container.VolumeMounts = []corev1.VolumeMount{
+			{Name: "data", MountPath: "/data"},
+		}
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -199,26 +246,7 @@ func buildDemoVMPod(vm *demov1alpha1.DemoVirtualMachine, disk *demov1alpha1.Demo
 				RunAsUser:      &runAsUser,
 				SeccompProfile: seccompProfile,
 			},
-			Containers: []corev1.Container{
-				{
-					Name:    "demo",
-					Image:   image,
-					Command: []string{"sleep"},
-					Args:    []string{"infinity"},
-					SecurityContext: &corev1.SecurityContext{
-						RunAsNonRoot:             &runAsNonRoot,
-						RunAsUser:                &runAsUser,
-						AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-						Capabilities: &corev1.Capabilities{
-							Drop: []corev1.Capability{"ALL"},
-						},
-						SeccompProfile: seccompProfile,
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "data", MountPath: "/data"},
-					},
-				},
-			},
+			Containers: []corev1.Container{container},
 			Volumes: []corev1.Volume{
 				{
 					Name: "data",
