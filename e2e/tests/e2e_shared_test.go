@@ -51,16 +51,18 @@ const (
 	envVolumeData           = "E2E_VOLUME_DATA"
 	envStorageClass         = "E2E_STORAGE_CLASS"
 	envProbeImage           = "E2E_PROBE_IMAGE"
+	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
 	envKeepClusterOnFailure = "E2E_KEEP_CLUSTER_ON_FAILURE"
 )
 
 const (
-	defaultNSPrefix     = "snap-e2e"
-	defaultSnapshotTO   = 10 * time.Minute
-	defaultModuleTO     = 15 * time.Minute
-	defaultGCTTL        = "60s"
-	defaultStorageClass = "e2e-thin"
-	defaultProbeImage   = "busybox:1.36"
+	defaultNSPrefix          = "snap-e2e"
+	defaultSnapshotTO        = 10 * time.Minute
+	defaultModuleTO          = 15 * time.Minute
+	defaultGCTTL             = "60s"
+	defaultStorageClass      = "e2e-thin"
+	defaultProbeImage        = "busybox:1.36"
+	defaultBackupClientImage = "curlimages/curl:8.11.1"
 
 	moduleName  = "state-snapshotter"
 	demoCSDName = "demo-virtual-machine-disk"
@@ -140,19 +142,23 @@ var (
 	volumeRestoreRequestGVR = schema.GroupVersionResource{
 		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests",
 	}
+	dataExportGVR = schema.GroupVersionResource{
+		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataexports",
+	}
 )
 
 const pollInterval = 5 * time.Second
 
 type e2eConfig struct {
-	nsPrefix        string
-	snapshotReadyTO time.Duration
-	moduleReadyTO   time.Duration
-	gcTTL           string
-	volumeData      bool
-	storageClass    string
-	probeImage      string
-	keepOnFailure   bool
+	nsPrefix          string
+	snapshotReadyTO   time.Duration
+	moduleReadyTO     time.Duration
+	gcTTL             string
+	volumeData        bool
+	storageClass      string
+	probeImage        string
+	backupClientImage string
+	keepOnFailure     bool
 
 	// vmNamespace / baseStorageClass drive the phase-3 runtime VirtualDisk attach on the base cluster.
 	vmNamespace      string
@@ -169,14 +175,15 @@ var (
 
 func loadConfig() e2eConfig {
 	cfg := e2eConfig{
-		nsPrefix:         strings.TrimSpace(os.Getenv(envNSPrefix)),
-		gcTTL:            strings.TrimSpace(os.Getenv(envGCTTL)),
-		storageClass:     strings.TrimSpace(os.Getenv(envStorageClass)),
-		probeImage:       strings.TrimSpace(os.Getenv(envProbeImage)),
-		volumeData:       envBool(os.Getenv(envVolumeData)),
-		keepOnFailure:    envBool(os.Getenv(envKeepClusterOnFailure)),
-		vmNamespace:      strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
-		baseStorageClass: strings.TrimSpace(os.Getenv("TEST_CLUSTER_STORAGE_CLASS")),
+		nsPrefix:          strings.TrimSpace(os.Getenv(envNSPrefix)),
+		gcTTL:             strings.TrimSpace(os.Getenv(envGCTTL)),
+		storageClass:      strings.TrimSpace(os.Getenv(envStorageClass)),
+		probeImage:        strings.TrimSpace(os.Getenv(envProbeImage)),
+		backupClientImage: strings.TrimSpace(os.Getenv(envBackupClientImage)),
+		volumeData:        envBool(os.Getenv(envVolumeData)),
+		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
+		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
+		baseStorageClass:  strings.TrimSpace(os.Getenv("TEST_CLUSTER_STORAGE_CLASS")),
 	}
 	if cfg.nsPrefix == "" {
 		cfg.nsPrefix = defaultNSPrefix
@@ -189,6 +196,9 @@ func loadConfig() e2eConfig {
 	}
 	if cfg.probeImage == "" {
 		cfg.probeImage = defaultProbeImage
+	}
+	if cfg.backupClientImage == "" {
+		cfg.backupClientImage = defaultBackupClientImage
 	}
 	cfg.snapshotReadyTO = parseDuration(os.Getenv(envSnapshotReadyTO), defaultSnapshotTO)
 	cfg.moduleReadyTO = parseDuration(os.Getenv(envModuleReadyTO), defaultModuleTO)

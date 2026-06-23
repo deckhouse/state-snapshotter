@@ -76,12 +76,13 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		dumpFailedSpecDiagnostics(ctx)
 	})
 
-	captureSpecs()       // capture_test.go: apply demo source + root Snapshot, assert Ready tree (phase 1)
-	aggregatedApiSpecs() // aggregated_api_test.go: --raw manifests-download / -with-data-restoration (phase 1)
-	restoreSpecs()       // restore_test.go: manifest-level restore into a fresh namespace (phase 1)
-	importSpecs()        // import_gc_test.go: export -> import round-trip (phase 2)
-	gcSpecs()            // import_gc_test.go: TTL/GC cascade (phase 2)
-	volumeDataSpecs()    // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	captureSpecs()        // capture_test.go: apply demo source + root Snapshot, assert Ready tree (phase 1)
+	aggregatedApiSpecs()  // aggregated_api_test.go: --raw manifests-download / -with-data-restoration (phase 1)
+	restoreSpecs()        // restore_test.go: manifest-level restore into a fresh namespace (phase 1)
+	importSpecs()         // import_gc_test.go: export -> import round-trip (phase 2)
+	gcSpecs()             // import_gc_test.go: TTL/GC cascade (phase 2)
+	volumeDataSpecs()     // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	backupDownloadSpecs() // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
 })
 
 func prepareSuite() {
@@ -96,6 +97,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  volume-data phase enabled:  %v\n", suiteCfg.volumeData)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
+	GinkgoWriter.Printf("  backup client image:        %q\n", suiteCfg.backupClientImage)
 	GinkgoWriter.Printf("  keep cluster on failure:    %v\n", suiteCfg.keepOnFailure)
 
 	ensureNestedTestCluster()

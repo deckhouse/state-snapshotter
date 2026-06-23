@@ -4,7 +4,9 @@ Real-cluster end-to-end coverage for the unified snapshot flows: capture of a
 demo VM/disk snapshot tree, the aggregated subresource APIs
 (`manifests-download` / `manifests-with-data-restoration` /
 `manifests-and-children-refs-upload`), manifest-level restore, the export ->
-import round-trip, TTL/GC cascade, and (phase 3) the full volume-data flow.
+import round-trip, TTL/GC cascade, the full volume-data flow (phase 3), and
+(phase 4) backup-system HTTP download via aggregated manifests + SVDM
+`DataExport` (no d8-cli).
 
 The suite installs the `state-snapshotter` module with `enableDemoDomain: true`
 on a nested Deckhouse cluster brought up by
@@ -30,6 +32,15 @@ functions in dependency order:
    `sds-node-configurator` + `sds-local-volume`), capture PVC data, restore via
    `VolumeRestoreRequest`, and assert the marker bytes survive. Needs
    `storage-foundation` (enabled in `tests/cluster_config.yml`).
+4. **Phase 4 - backup-system HTTP download** (`backupDownloadSpecs`, env-gated by
+   `E2E_VOLUME_DATA`): provision Block volumes (orphan PVC + two
+   `DemoVirtualDisk` scratch PVCs), write data via dedicated block-writer pods,
+   attach `DemoVirtualMachine` to one disk while the other stays standalone,
+   capture a snapshot, download manifests via the aggregated `manifests-download`
+   API (compared to live cluster objects), and download volume bytes via SVDM
+   `DataExport` from an in-cluster backup-client pod (Bearer auth +
+   `GET /api/v1/block`, sha256 compared to source). Needs
+   `storage-volume-data-manager` (enabled in `tests/cluster_config.yml`).
 
 ## Module dependency note
 
@@ -93,12 +104,15 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `E2E_MODULE_READY_TIMEOUT`: Go duration bounding module + demo CSD readiness.
   Defaults to `15m`.
 - `E2E_GC_TTL`: `snapshotRootOkTtl` applied for the GC spec. Defaults to `60s`.
-- `E2E_VOLUME_DATA`: when truthy (`true`/`1`/`yes`), runs phase 3 (full
-  volume-data flow). Off by default (phases 1-2 only).
+- `E2E_VOLUME_DATA`: when truthy (`true`/`1`/`yes`), runs phases 3-4 (full
+  volume-data flow + backup-system HTTP download). Off by default (phases 1-2 only).
 - `E2E_STORAGE_CLASS`: the thin, snapshot-capable StorageClass the suite
   provisions/uses for phase 3. Defaults to `e2e-thin`.
 - `E2E_PROBE_IMAGE`: container image (must ship `sh` + `cat`) for the PVC
   round-trip probe Pods. Defaults to `busybox:1.36`.
+- `E2E_BACKUP_CLIENT_IMAGE`: container image for the in-cluster backup-client pod
+  (must ship `sh`, `curl`, `head`, and `sha256sum`). Defaults to
+  `curlimages/curl:8.11.1` (Alpine/busybox, which provides all four).
 - `E2E_KEEP_CLUSTER_ON_FAILURE`: when truthy, and at least one spec failed, skip
   nested-cluster teardown so the live cluster can be inspected. Off by default.
 
@@ -128,7 +142,7 @@ cd e2e
 make deps
 make test
 
-# Phase 3 (full volume-data flow) as well:
+# Phases 3-4 (volume-data + backup download) as well:
 E2E_VOLUME_DATA=true make test
 ```
 
