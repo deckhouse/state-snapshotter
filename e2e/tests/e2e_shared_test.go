@@ -321,11 +321,18 @@ func aggGet(ctx context.Context, path string, params map[string]string) ([]byte,
 
 // aggPost performs an aggregated-apiserver POST (JSON body) against an absolute API path.
 func aggPost(ctx context.Context, path string, body []byte) ([]byte, error) {
-	return suiteClientset.Discovery().RESTClient().Post().
+	resp, err := suiteClientset.Discovery().RESTClient().Post().
 		AbsPath(path).
 		SetHeader("Content-Type", "application/json").
 		Body(body).
 		DoRaw(ctx)
+	if err != nil {
+		// DoRaw collapses any non-2xx into a generic error (e.g. POST+409 -> "the server reported a
+		// conflict" with reason AlreadyExists) and does not decode the body, which hides the aggregated
+		// apiserver's real Status message. Append the raw response body so failures are actionable.
+		return resp, fmt.Errorf("%w (response body: %s)", err, truncate(resp, 1024))
+	}
+	return resp, nil
 }
 
 func coreSnapshotSubPath(ns, name, sub string) string {

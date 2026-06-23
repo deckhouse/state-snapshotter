@@ -19,14 +19,19 @@ package usecase
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -160,4 +165,43 @@ func TestImportUpload_NotFound(t *testing.T) {
 	svc := NewImportUploadService(cl)
 	_, err := svc.Upload(ctx, storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"), "ns1", "missing", uploadPayload(t))
 	assertAggStatus(t, err, http.StatusNotFound)
+}
+
+// TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict pins the phase-5 regression: a leaf upload
+// (no child refs) must not write status.childrenSnapshotRefs, so it never races whoever owns the CR's
+// status. The concrete failure was the import VolumeSnapshot leaf — its forked status schema has no
+// childrenSnapshotRefs field and the state-snapshotter binder reconciles its status continuously, so a
+// blind Status().Update lost the conflict race for the whole retry budget and the upload returned 409.
+// A non-leaf upload still needs the write, so the conflict must surface (no silent loss of child edges).
+func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
+	ctx := context.Background()
+	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	scheme := aggManifestTestScheme(t)
+	// Fail every Snapshot status update (the competing status owner always wins). The reconstructed
+	// ManifestCheckpoint status update is typed (*ManifestCheckpoint) and passes through untouched.
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&ssv1alpha1.ManifestCheckpoint{}, &storagev1alpha1.Snapshot{}).
+		WithObjects(snap).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "Snapshot" {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: "storage.deckhouse.io", Resource: "snapshots"},
+						u.GetName(), fmt.Errorf("status writer race"))
+				}
+				return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	svc := NewImportUploadService(cl)
+
+	gvk := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+	if _, err := svc.Upload(ctx, gvk, "ns1", "snap", uploadPayload(t)); err != nil {
+		t.Fatalf("leaf upload must succeed despite a status-write conflict: %v", err)
+	}
+
+	child := UploadChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
+	_, err := svc.Upload(ctx, gvk, "ns1", "snap", uploadPayload(t, child))
+	assertAggStatus(t, err, http.StatusConflict)
 }

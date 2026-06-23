@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -143,6 +144,21 @@ func (s *ImportUploadService) writeChildrenSnapshotRefs(ctx context.Context, sna
 		if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, fresh); err != nil {
 			return err
 		}
+		// Skip the status write when the children are already recorded as desired. This makes the upload
+		// a true no-op on retries and, for a leaf (childRefs empty), avoids touching status at all: a leaf
+		// has no children to record, so a blind Status().Update only races whoever owns the CR's status.
+		// The CSI VolumeSnapshot leaf is the concrete case — its forked status schema has no
+		// childrenSnapshotRefs field (the write is pruned anyway), while the state-snapshotter binder
+		// actively reconciles the import VolumeSnapshot's status; a blind write lost the conflict race for
+		// the whole retry budget and the upload returned 409 (see genericbinder/import.go). The graph
+		// consumers treat an absent list as "no children", so skipping the empty write is behavior-neutral.
+		current, _, err := unstructured.NestedSlice(fresh.Object, "status", "childrenSnapshotRefs")
+		if err != nil {
+			return err
+		}
+		if childRefSlicesEqual(current, refs) {
+			return nil
+		}
 		if err := unstructured.SetNestedSlice(fresh.Object, refs, "status", "childrenSnapshotRefs"); err != nil {
 			return err
 		}
@@ -159,6 +175,16 @@ func (s *ImportUploadService) writeChildrenSnapshotRefs(ctx context.Context, sna
 		return fmt.Errorf("write status.childrenSnapshotRefs on %s %s/%s: %w", snapshotGVK.String(), namespace, name, err)
 	}
 	return nil
+}
+
+// childRefSlicesEqual reports whether the recorded status.childrenSnapshotRefs already match the desired
+// refs. An absent field (nil) and an empty list are treated as equal (both mean "no children"), so a leaf
+// upload neither writes nor races the CR's status owner when there is nothing to record.
+func childRefSlicesEqual(current, desired []interface{}) bool {
+	if len(current) == 0 && len(desired) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(current, desired)
 }
 
 // uploadTargetIsImportMode reports whether a snapshot CR is an import target. It accepts any of the
