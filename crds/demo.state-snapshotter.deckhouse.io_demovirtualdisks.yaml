@@ -96,6 +96,16 @@ spec:
                 - Filesystem
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: dataSource must reference DemoVirtualDiskSnapshot (cloning
+                from another DemoVirtualDisk is not supported)
+              rule: '!has(self.dataSource) || self.dataSource.kind == ''DemoVirtualDiskSnapshot'''
+            - message: dataSource apiGroup must be demo.state-snapshotter.deckhouse.io
+                or empty
+              rule: '!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup)
+                == 0 || self.dataSource.apiGroup == ''demo.state-snapshotter.deckhouse.io'''
+            - message: size is required when dataSource is not set (scratch disk provisioning)
+              rule: has(self.dataSource) || has(self.size)
           status:
             properties:
               capacity:
@@ -191,16 +201,6 @@ spec:
                 type: string
             type: object
         type: object
-        x-kubernetes-validations:
-        - message: dataSource must reference DemoVirtualDiskSnapshot (cloning from
-            another DemoVirtualDisk is not supported)
-          rule: '!has(self.dataSource) || self.dataSource.kind == ''DemoVirtualDiskSnapshot'''
-        - message: dataSource apiGroup must be demo.state-snapshotter.deckhouse.io
-            or empty
-          rule: '!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup)
-            == 0 || self.dataSource.apiGroup == ''demo.state-snapshotter.deckhouse.io'''
-        - message: size is required when dataSource is not set (scratch disk provisioning)
-          rule: has(self.dataSource) || has(self.size)
     served: true
     storage: true
     subresources:

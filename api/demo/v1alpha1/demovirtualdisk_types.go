@@ -24,9 +24,6 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovd
-// +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || self.dataSource.kind == 'DemoVirtualDiskSnapshot'",message="dataSource must reference DemoVirtualDiskSnapshot (cloning from another DemoVirtualDisk is not supported)"
-// +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup) == 0 || self.dataSource.apiGroup == 'demo.state-snapshotter.deckhouse.io'",message="dataSource apiGroup must be demo.state-snapshotter.deckhouse.io or empty"
-// +kubebuilder:validation:XValidation:rule="has(self.dataSource) || has(self.size)",message="size is required when dataSource is not set (scratch disk provisioning)"
 // DemoVirtualDisk is the demo domain data resource. The domain controller materializes its backing PVC
 // (from scratch or restored from a DemoVirtualDiskSnapshot) and publishes real allocated capacity in status.
 type DemoVirtualDisk struct {
@@ -37,6 +34,9 @@ type DemoVirtualDisk struct {
 }
 
 // +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || self.dataSource.kind == 'DemoVirtualDiskSnapshot'",message="dataSource must reference DemoVirtualDiskSnapshot (cloning from another DemoVirtualDisk is not supported)"
+// +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup) == 0 || self.dataSource.apiGroup == 'demo.state-snapshotter.deckhouse.io'",message="dataSource apiGroup must be demo.state-snapshotter.deckhouse.io or empty"
+// +kubebuilder:validation:XValidation:rule="has(self.dataSource) || has(self.size)",message="size is required when dataSource is not set (scratch disk provisioning)"
 type DemoVirtualDiskSpec struct {
 	// PersistentVolumeClaimName is the in-namespace PVC the disk controller creates and owns. When set,
 	// the disk snapshot owns the PVC data leg: it creates a VolumeCaptureRequest for the PVC and publishes
