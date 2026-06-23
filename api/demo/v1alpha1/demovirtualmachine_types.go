@@ -21,8 +21,10 @@ import (
 )
 
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovm
-// DemoVirtualMachine is a minimal placeholder "resource" side for CSD mapping (PR5b); not reconciled beyond registration.
+// DemoVirtualMachine is the demo domain compute resource. The domain controller materializes a Pod that
+// mounts the backing PVC of the linked DemoVirtualDisk.
 type DemoVirtualMachine struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -31,6 +33,7 @@ type DemoVirtualMachine struct {
 	Status DemoVirtualMachineStatus `json:"status,omitempty"`
 }
 
+// +k8s:deepcopy-gen=true
 type DemoVirtualMachineSpec struct {
 	// VirtualDiskName links this VM to a DemoVirtualDisk for snapshot-tree planning (parent -> child).
 	// The reference points DOWN the hierarchy (VM -> Disk -> PVC), mirroring
@@ -40,7 +43,22 @@ type DemoVirtualMachineSpec struct {
 	VirtualDiskName string `json:"virtualDiskName,omitempty"`
 }
 
-type DemoVirtualMachineStatus struct{}
+// +k8s:deepcopy-gen=true
+type DemoVirtualMachineStatus struct {
+	// Phase summarizes VM materialization (Pending, Ready, Failed).
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// Conditions report readiness and materialization progress.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// PodRef references the materialized demo Pod in the same namespace.
+	// +optional
+	PodRef *DemoObjectRef `json:"podRef,omitempty"`
+}
 
 // +kubebuilder:object:root=true
 type DemoVirtualMachineList struct {
