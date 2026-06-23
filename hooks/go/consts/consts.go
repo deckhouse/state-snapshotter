@@ -64,7 +64,8 @@ const (
 	// DomainCoreReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the CORE SA for
 	// the dynamic demo GVRs: read + create + patch + status-write on the snapshot GVRs (the core
 	// SnapshotReconciler is the parent-graph planner — it creates one child snapshot per source object and
-	// patches its ownerRef back to the root Snapshot), list on the source GVRs (source enumeration), plus
+	// patches its ownerRef back to the root Snapshot), get + list on the source GVRs (list to enumerate
+	// sources during planning, get to capture each target's manifest), plus
 	// get on the domain /manifests-with-data-restoration aggregated subresource (so core can delegate
 	// restore). These names are domain-specific (from CSD), so they cannot live in the static,
 	// domain-agnostic core RBAC.

@@ -147,19 +147,23 @@ func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.Pol
 	return rules
 }
 
-// buildCoreSourceReadRules grants the CORE SA list on the dynamic demo SOURCE GVRs. The core
-// SnapshotReconciler enumerates the mapped source objects (e.g. DemoVirtualMachine, DemoVirtualDisk) to
-// build the parent-owned child graph (parent_graph.go:ensureParentOwnedChildGraphLayer); without this the
-// list is Forbidden and the root Snapshot degrades to ChildrenSnapshotReady=False/SourceListForbidden.
+// buildCoreSourceReadRules grants the CORE SA get + list on the dynamic demo SOURCE GVRs. The core has two
+// distinct, both-direct (non-cached) source access patterns, so it needs both verbs:
 //
-// The verb is list ONLY (least privilege), because that is the entire access pattern: the planner does a
-// one-shot r.Dynamic...List(namespace) per reconcile via a non-cached dynamic client. It never reads a
-// single source by name (get) — it cannot know the names in advance, which is why it lists — and it never
-// establishes a source informer (watch): the core controller's dynamic watches cover only the SNAPSHOT
-// child GVKs (dynamic_watch.go), not sources, and sources are re-listed fresh on every reconcile. If a
-// source-driven informer is ever added, add the watch verb here too. Read-only regardless: core discovers
-// sources but never mutates them (creation/ownership is the domain SA's job). Like the snapshot GVRs,
-// these resource names are domain-specific (from CSD), so they cannot live in the static,
+//   - list — the SnapshotReconciler enumerates the mapped source objects (e.g. DemoVirtualMachine,
+//     DemoVirtualDisk) to build the parent-owned child graph (parent_graph.go), one-shot
+//     r.Dynamic...List(namespace) per reconcile. Without it the root Snapshot degrades to
+//     ChildrenSnapshotReady=False/SourceListForbidden.
+//   - get — once the graph is planned, the ManifestCaptureRequest controller fetches each named source
+//     target by name to capture its manifest (checkpoint_controller.go: r.Get(target)). Without it the MCR
+//     terminates Ready=False/Failed ("cannot get demovirtualdisks ...") and the root Snapshot hangs on
+//     ManifestCapturePending.
+//
+// No watch: neither path establishes a source informer (the core's dynamic watches cover only the SNAPSHOT
+// child GVKs in dynamic_watch.go, and unstructured Gets are uncached), and sources are re-read fresh each
+// reconcile; add watch only if a source-driven informer is introduced. Read-only regardless: core discovers
+// and reads sources but never mutates them (creation/ownership is the domain SA's job). Like the snapshot
+// GVRs, these resource names are domain-specific (from CSD), so they cannot live in the static,
 // domain-agnostic core RBAC.
 func buildCoreSourceReadRules(sourceGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
 	if len(sourceGVRs) == 0 {
@@ -180,7 +184,7 @@ func buildCoreSourceReadRules(sourceGVRs []schema.GroupVersionResource) []rbacv1
 		rules = append(rules, rbacv1.PolicyRule{
 			APIGroups: []string{g},
 			Resources: sortedUnique(byGroup[g]),
-			Verbs:     []string{"list"},
+			Verbs:     []string{"get", "list"},
 		})
 	}
 	return rules
