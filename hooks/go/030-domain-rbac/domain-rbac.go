@@ -48,7 +48,8 @@ var _ = registry.RegisterFunc(
 //  2. Resolves source and snapshot GVKs → GVRs for each eligible CSD.
 //  3. Creates/updates the split ClusterRoles + bindings: the DOMAIN SA gets source/snapshot GVR rights
 //     (incl. /status, /finalizers) + get on core's per-CR /manifests-download; the CORE SA gets read +
-//     status-write on the snapshot GVRs + get on the domain /manifests-with-data-restoration subresource.
+//     status-write on the snapshot GVRs, read on the source GVRs (parent-owned child-graph planning), and
+//     get on the domain /manifests-with-data-restoration subresource.
 //  4. Writes RBACReady (True / Pending / ApplyFailed) on each eligible CSD.
 func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	cl := input.DC.MustGetK8sClient(sdkk8s.WithSchemeBuilder(v1alpha1.SchemeBuilder))
@@ -69,9 +70,11 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	domainRules := buildRules(sourceGVRs, snapshotGVRs)
 	domainRules = append(domainRules, coreManifestsSubresourceRules(snapshotGVRs)...)
 
-	// CORE SA: read + status-write on the dynamic demo snapshot GVRs + get on the domain
+	// CORE SA: read + status-write on the dynamic demo snapshot GVRs, read on the demo source GVRs (the
+	// core SnapshotReconciler lists sources to build the parent-owned child graph), and get on the domain
 	// /manifests-with-data-restoration subresource (restore delegation).
 	coreReadRules := buildCoreReadRules(snapshotGVRs)
+	coreReadRules = append(coreReadRules, buildCoreSourceReadRules(sourceGVRs)...)
 	coreReadRules = append(coreReadRules, domainRestoreSubresourceRules(snapshotGVRs)...)
 
 	applyErr := applyDomainRBAC(ctx, cl, domainRules, coreReadRules)

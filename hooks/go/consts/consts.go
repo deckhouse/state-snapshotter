@@ -62,9 +62,11 @@ const (
 	DomainClusterRoleName = "d8:state-snapshotter:controller:domain"
 
 	// DomainCoreReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the CORE SA for
-	// the dynamic demo snapshot GVRs: read + status-write (binding/projection) plus get on the domain
-	// /manifests-with-data-restoration aggregated subresource (so core can delegate restore). These names
-	// are domain-specific (from CSD), so they cannot live in the static, domain-agnostic core RBAC.
+	// the dynamic demo GVRs: read + status-write (binding/projection) on the snapshot GVRs, read on the
+	// source GVRs (the core SnapshotReconciler lists sources to build the parent-owned child graph), plus
+	// get on the domain /manifests-with-data-restoration aggregated subresource (so core can delegate
+	// restore). These names are domain-specific (from CSD), so they cannot live in the static,
+	// domain-agnostic core RBAC.
 	DomainCoreReadClusterRoleName = "d8:state-snapshotter:controller:domain-read"
 
 	// CoreSubresourcesGroup is the core controller's aggregated subresources API group. The domain pod

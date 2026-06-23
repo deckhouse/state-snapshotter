@@ -57,10 +57,11 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 		entry.snapshots = sortedUnique(entry.snapshots)
 
 		if len(entry.sources) > 0 {
-			// PERMANENT: the general controller lists source resources (e.g. DemoVirtualDisk,
-			// DemoVirtualMachine) to discover what child snapshots to create.
-			// Forbidden → sourceListForbiddenError: graph degrades, not silently empty.
-			// Reference: parent_graph.go:ensureParentOwnedChildGraphLayer.
+			// The domain snapshot controllers read each source object (referenced by the child
+			// snapshot's spec.sourceRef, e.g. DemoVirtualDisk/DemoVirtualMachine) to capture it.
+			// Read-only here; creation/ownership of the snapshot CRs is the snapshot-GVR rule below.
+			// The CORE SA also needs source read for parent-graph planning — granted separately in
+			// buildCoreSourceReadRules.
 			rules = append(rules, rbacv1.PolicyRule{
 				APIGroups: []string{g},
 				Resources: entry.sources,
@@ -133,6 +134,45 @@ func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.Pol
 			APIGroups: []string{g},
 			Resources: statusResources,
 			Verbs:     []string{"get", "update", "patch"},
+		})
+	}
+	return rules
+}
+
+// buildCoreSourceReadRules grants the CORE SA list on the dynamic demo SOURCE GVRs. The core
+// SnapshotReconciler enumerates the mapped source objects (e.g. DemoVirtualMachine, DemoVirtualDisk) to
+// build the parent-owned child graph (parent_graph.go:ensureParentOwnedChildGraphLayer); without this the
+// list is Forbidden and the root Snapshot degrades to ChildrenSnapshotReady=False/SourceListForbidden.
+//
+// The verb is list ONLY (least privilege), because that is the entire access pattern: the planner does a
+// one-shot r.Dynamic...List(namespace) per reconcile via a non-cached dynamic client. It never reads a
+// single source by name (get) — it cannot know the names in advance, which is why it lists — and it never
+// establishes a source informer (watch): the core controller's dynamic watches cover only the SNAPSHOT
+// child GVKs (dynamic_watch.go), not sources, and sources are re-listed fresh on every reconcile. If a
+// source-driven informer is ever added, add the watch verb here too. Read-only regardless: core discovers
+// sources but never mutates them (creation/ownership is the domain SA's job). Like the snapshot GVRs,
+// these resource names are domain-specific (from CSD), so they cannot live in the static,
+// domain-agnostic core RBAC.
+func buildCoreSourceReadRules(sourceGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(sourceGVRs) == 0 {
+		return nil
+	}
+	byGroup := make(map[string][]string)
+	var groupOrder []string
+	for _, gvr := range sourceGVRs {
+		if _, ok := byGroup[gvr.Group]; !ok {
+			groupOrder = append(groupOrder, gvr.Group)
+		}
+		byGroup[gvr.Group] = append(byGroup[gvr.Group], gvr.Resource)
+	}
+	sort.Strings(groupOrder)
+
+	var rules []rbacv1.PolicyRule
+	for _, g := range groupOrder {
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{g},
+			Resources: sortedUnique(byGroup[g]),
+			Verbs:     []string{"list"},
 		})
 	}
 	return rules
