@@ -1,6 +1,7 @@
 ---
+# do not remove this image: used in external audits (DKP CSE)
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
-fromImage: builder/src
+from: {{ index $.Images "builder/src" }}
 final: false
 
 git:
@@ -14,22 +15,22 @@ git:
       install:
         - '**/*'
     excludePaths:
-      - images/{{ $.ImageName }}/werf.yaml
+      - images/{{ $.ImageName }}/werf.inc.yaml
 
 shell:
   install:
-    - echo "src artifact"
+    - rm -rf /src/.git
 
 ---
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
-fromImage: {{ eq .SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
+from: {{ index $.Images (eq .SVACE_ENABLED "false" | ternary "builder/golang" "builder/alpine-svace") }}
 final: false
 
 import:
   - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
     add: /src
     to: /src
-    before: install
+    before: setup
 
 mount:
 {{ include "mount points for golang builds" . }}
@@ -49,7 +50,7 @@ shell:
 
 ---
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}
-fromImage: base/distroless
+from: {{ index $.Images "builder/distroless" }}
 
 import:
   - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
@@ -63,4 +64,3 @@ git:
 imageSpec:
   config:
     entrypoint: ["/{{ $.ImageName }}"]
-
