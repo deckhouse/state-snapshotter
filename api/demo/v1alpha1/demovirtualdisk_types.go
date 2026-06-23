@@ -25,8 +25,8 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovd
 // +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || self.dataSource.kind == 'DemoVirtualDiskSnapshot'",message="dataSource must reference DemoVirtualDiskSnapshot (cloning from another DemoVirtualDisk is not supported)"
-// +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || self.dataSource.apiGroup == '' || self.dataSource.apiGroup == 'demo.state-snapshotter.deckhouse.io'",message="dataSource apiGroup must be demo.state-snapshotter.deckhouse.io or empty"
-// +kubebuilder:validation:XValidation:rule="has(self.dataSource) || size(self.size) > 0",message="size is required when dataSource is not set (scratch disk provisioning)"
+// +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup) == 0 || self.dataSource.apiGroup == 'demo.state-snapshotter.deckhouse.io'",message="dataSource apiGroup must be demo.state-snapshotter.deckhouse.io or empty"
+// +kubebuilder:validation:XValidation:rule="has(self.dataSource) || has(self.size)",message="size is required when dataSource is not set (scratch disk provisioning)"
 // DemoVirtualDisk is the demo domain data resource. The domain controller materializes its backing PVC
 // (from scratch or restored from a DemoVirtualDiskSnapshot) and publishes real allocated capacity in status.
 type DemoVirtualDisk struct {

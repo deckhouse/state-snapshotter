@@ -25,8 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -71,8 +71,12 @@ func TestDemoVirtualMachineCreatesPod(t *testing.T) {
 	if pod.Spec.Containers[0].Image != "busybox:1.36" {
 		t.Fatalf("image = %q", pod.Spec.Containers[0].Image)
 	}
-	if pod.Spec.Containers[0].SecurityContext == nil || pod.Spec.Containers[0].SecurityContext.RunAsNonRoot == nil || !*pod.Spec.Containers[0].SecurityContext.RunAsNonRoot {
+	sc := pod.Spec.Containers[0].SecurityContext
+	if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
 		t.Fatal("expected PSA-compatible runAsNonRoot on container")
+	}
+	if sc.RunAsUser == nil || *sc.RunAsUser == 0 {
+		t.Fatal("expected explicit non-zero runAsUser on container (kubelet cannot verify non-root for busybox otherwise)")
 	}
 }
 

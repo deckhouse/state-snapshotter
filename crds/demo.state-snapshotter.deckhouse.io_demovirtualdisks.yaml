@@ -197,10 +197,10 @@ spec:
           rule: '!has(self.dataSource) || self.dataSource.kind == ''DemoVirtualDiskSnapshot'''
         - message: dataSource apiGroup must be demo.state-snapshotter.deckhouse.io
             or empty
-          rule: '!has(self.dataSource) || self.dataSource.apiGroup == '''' || self.dataSource.apiGroup
-            == ''demo.state-snapshotter.deckhouse.io'''
+          rule: '!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup)
+            == 0 || self.dataSource.apiGroup == ''demo.state-snapshotter.deckhouse.io'''
         - message: size is required when dataSource is not set (scratch disk provisioning)
-          rule: has(self.dataSource) || size(self.size) > 0
+          rule: has(self.dataSource) || has(self.size)
     served: true
     storage: true
     subresources:

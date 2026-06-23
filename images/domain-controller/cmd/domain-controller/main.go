@@ -14,12 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command domain-controller is the demo domain controller binary. It runs ONLY the demo dedicated
-// reconcilers (MCR/VCR + child snapshots + snapshot.status, never SnapshotContent) in its own manager,
-// and hosts its own aggregated API server for the demo snapshot kinds' restore subresources. The
-// restore path fetches BASE manifests from the core aggregated API server (via the kube-apiserver
-// aggregation layer, SA token) and applies the demo restore mutation in-process — it never reads
-// SnapshotContent/ManifestCheckpoint. No generic controllers run here.
+// Command domain-controller is the demo domain controller binary. It runs the demo dedicated reconcilers
+// in its own manager: the SNAPSHOT reconcilers (MCR/VCR + child snapshots + snapshot.status) are
+// content-free and never touch SnapshotContent, while the RESOURCE reconcilers (DemoVirtualDisk /
+// DemoVirtualMachine materialization) read SnapshotContent.status.dataRef read-only via an uncached
+// APIReader to drive restore. It also hosts its own aggregated API server for the demo snapshot kinds'
+// restore subresources. The aggregated restore path fetches BASE manifests from the core aggregated API
+// server (via the kube-apiserver aggregation layer, SA token) and applies the demo restore mutation
+// in-process — it never reads SnapshotContent/ManifestCheckpoint. No generic controllers run here.
 package main
 
 import (

@@ -173,6 +173,10 @@ func buildDemoVMPod(vm *demov1alpha1.DemoVirtualMachine, disk *demov1alpha1.Demo
 		image = "busybox:1.36"
 	}
 	runAsNonRoot := true
+	// runAsUser is required: PSA "restricted" only mandates runAsNonRoot, but the kubelet cannot verify a
+	// non-root UID for an image that defaults to root (busybox), so it refuses to start the container with
+	// CreateContainerConfigError. Pin an explicit non-zero UID so the Pod actually runs.
+	runAsUser := int64(1000)
 	allowPrivilegeEscalation := false
 	seccompProfile := &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
 	return &corev1.Pod{
@@ -192,6 +196,7 @@ func buildDemoVMPod(vm *demov1alpha1.DemoVirtualMachine, disk *demov1alpha1.Demo
 			RestartPolicy: corev1.RestartPolicyNever,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot:   &runAsNonRoot,
+				RunAsUser:      &runAsUser,
 				SeccompProfile: seccompProfile,
 			},
 			Containers: []corev1.Container{
@@ -202,6 +207,7 @@ func buildDemoVMPod(vm *demov1alpha1.DemoVirtualMachine, disk *demov1alpha1.Demo
 					Args:    []string{"infinity"},
 					SecurityContext: &corev1.SecurityContext{
 						RunAsNonRoot:             &runAsNonRoot,
+						RunAsUser:                &runAsUser,
 						AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 						Capabilities: &corev1.Capabilities{
 							Drop: []corev1.Capability{"ALL"},

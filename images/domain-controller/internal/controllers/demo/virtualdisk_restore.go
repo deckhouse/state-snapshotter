@@ -103,16 +103,25 @@ func resolveDemoDiskRestore(
 		return out, err
 	}
 
-	if content.Spec.SnapshotRef != nil && content.Spec.SnapshotRef.Namespace != "" && content.Spec.SnapshotRef.Namespace != disk.Namespace {
+	// Defense-in-depth secondary namespace check: the owning Snapshot's namespace must match the disk's.
+	// Any missing/empty/mismatched field fails closed (the authoritative check is dataRef.Target.Namespace
+	// below, which also fails closed).
+	if content.Spec.SnapshotRef == nil {
 		out.Failed = true
 		out.Reason = demoReasonRestoreDenied
-		out.Message = fmt.Sprintf("snapshotRef namespace %q does not match disk namespace %q", content.Spec.SnapshotRef.Namespace, disk.Namespace)
+		out.Message = "SnapshotContent.spec.snapshotRef is absent (fail closed)"
 		return out, nil
 	}
-	if content.Spec.SnapshotRef != nil && content.Spec.SnapshotRef.Namespace == "" {
+	if content.Spec.SnapshotRef.Namespace == "" {
 		out.Failed = true
 		out.Reason = demoReasonRestoreDenied
 		out.Message = "snapshotRef namespace is empty (fail closed)"
+		return out, nil
+	}
+	if content.Spec.SnapshotRef.Namespace != disk.Namespace {
+		out.Failed = true
+		out.Reason = demoReasonRestoreDenied
+		out.Message = fmt.Sprintf("snapshotRef namespace %q does not match disk namespace %q", content.Spec.SnapshotRef.Namespace, disk.Namespace)
 		return out, nil
 	}
 
@@ -232,7 +241,10 @@ func ensureDemoDiskVRR(ctx context.Context, c client.Client, disk *demov1alpha1.
 		if !apierrors.IsNotFound(err) {
 			return err
 		}
-		return c.Create(ctx, desired)
+		if createErr := c.Create(ctx, desired); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
+			return createErr
+		}
+		return nil
 	}
 	return nil
 }
