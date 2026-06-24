@@ -20,11 +20,9 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -33,16 +31,15 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
 // DemoVirtualDiskSnapshotReconciler owns demo disk DOMAIN planning only: sourceRef validation, the
 // per-snapshot manifest-capture request (MCR), the data-leg volume-capture request (VCR), and the
-// ChildrenSnapshotReady planning barrier. It publishes results into demo.status and never touches the
-// cluster-scoped SnapshotContent (created/owned/projected/mirrored by GenericSnapshotBinderController).
-// Content-free for SNAPSHOT reconcilers: re-creation of MCR/VCR is suppressed by the common controller's
-// domain-only markers (status.manifestCaptured / status.dataCaptured), so this controller never reads
-// SnapshotContent. DemoVirtualDisk resource materialization (virtualdisk_controller.go) is the sole
-// domain path that reads SnapshotContent.status.dataRef via uncached APIReader for restore.
+// planning barrier. All Kubernetes transport (capture requests, owner references, optimistic-locked status
+// patches, the barrier condition) is delegated to the snapshot SDK (pkg/snapshotsdk). The domain decides
+// only what its source is and which PVC makes up its data leg; it never touches the cluster-scoped
+// SnapshotContent (owned by GenericSnapshotBinderController).
 type DemoVirtualDiskSnapshotReconciler struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -68,6 +65,10 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 		})
 }
 
+func (r *DemoVirtualDiskSnapshotReconciler) capture() snapshotsdk.CaptureSDK {
+	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client))
+}
+
 func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("demoVirtualDiskSnapshot", req.NamespacedName)
 	ctx = log.IntoContext(ctx, logger)
@@ -87,203 +88,93 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 
 	// Import mode (C5): spec.dataSource switches this disk snapshot off capture. The domain controller
 	// does NO capture planning (no source-disk lookup, no MCR/VCR) — the live DemoVirtualDisk may be
-	// absent on import. The common controller (GenericSnapshotBinderController) materializes the backing
-	// SnapshotContent from the uploaded manifests (reconstructed ManifestCheckpoint) and the data leg from
-	// DataImport.status.dataArtifactRef. Domain planning is trivially complete for an import leaf.
+	// absent on import. The common controller materializes the backing SnapshotContent from the uploaded
+	// manifests and the data leg from DataImport.status.dataArtifactRef. Domain planning is trivially
+	// complete for an import leaf.
 	if s.Spec.DataSource != nil {
 		return ctrl.Result{}, nil
 	}
 
+	adapter := demoVirtualDiskSnapshotAdapter{snap: s}
+	sdk := r.capture()
+
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		if patchErr := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, resolution.Reason, resolution.Message); patchErr != nil {
-			return ctrl.Result{}, patchErr
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
 	}
-	sourceName := resolution.Name
 	source := &demov1alpha1.DemoVirtualDisk{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: resolution.Name}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		if err := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, demoReasonSourceNotFound, fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, sourceName)); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
+			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, resolution.Name),
+		})
 	}
 
-	// Stale-cache guard (TOCTOU): the suppression markers (status.dataCaptured / status.manifestCaptured)
-	// are set by the common controller via a live write immediately BEFORE it deletes the VCR/MCR. If this
-	// reconcile started from a stale informer cache (marker still false) it would re-create a request the
-	// common controller already cleaned up — leaking a duplicate VolumeSnapshot/VolumeSnapshotContent.
-	// Refresh the markers from a live read before planning. Once both are set the cached gate below
-	// short-circuits, so steady state pays no extra live read.
-	if !s.Status.DataCaptured || !s.Status.ManifestCaptured {
-		live := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := r.APIReader.Get(ctx, req.NamespacedName, live); err != nil {
-			if apierrors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, err
+	// Data leg (D3): resolve the source disk's PVC into a capture target (domain decision). A missing PVC
+	// is an actionable, surfaced Ready=False (the PVC may still appear), not an endless raw requeue. A disk
+	// without spec.persistentVolumeClaimName is manifest-only (no data leg).
+	targets, terminalReason, terminalMessage, err := r.resolveDemoVirtualDiskDataTargets(ctx, s, source)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if terminalReason != "" {
+		if perr := sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+			Reason:  snapshotsdk.Reason(terminalReason),
+			Message: terminalMessage,
+			Requeue: true,
+		}); perr != nil {
+			return ctrl.Result{}, perr
 		}
-		s.Status.DataCaptured = live.Status.DataCaptured
-		s.Status.ManifestCaptured = live.Status.ManifestCaptured
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
 
-	// Data leg (D3): ensure the data-leg VCR (named by the disk snapshot UID, owned by the disk snapshot)
-	// and publish its name. The common controller reads the VCR, enriches + hands off the bound
-	// VolumeSnapshotContent into SnapshotContent.status.dataRefs, then deletes the VCR and sets
-	// status.dataCaptured to suppress re-creation here. A manifest-only disk has no data leg.
-	var vcrName string
-	if !s.Status.DataCaptured {
-		name, terminalReason, terminalMessage, err := r.ensureDemoVirtualDiskDataLeg(ctx, s, source)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if terminalReason != "" {
-			if perr := patchDemoVirtualDiskSnapshotNotReady(ctx, r.Client, req.NamespacedName, terminalReason, terminalMessage); perr != nil {
-				return ctrl.Result{}, perr
-			}
-			// PVC may still appear (creation race); keep polling.
-			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
-		}
-		vcrName = name
-		if vcrName != "" {
-			if err := patchDemoVirtualDiskSnapshotVolumeCaptureRequestName(ctx, r.Client, req.NamespacedName, vcrName); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
+	if err := sdk.EnsureVolumeCapture(ctx, adapter, snapshotsdk.VolumeCaptureSpec{Targets: targets}); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// Manifest leg: ensure the per-snapshot MCR (owned by the disk snapshot, manifest targets derived from
-	// the data-leg VCR per D3) and publish its name. Suppressed once status.manifestCaptured is set.
-	if !s.Status.ManifestCaptured {
-		mcr, err := ensureDemoSnapshotManifestCaptureRequest(
-			ctx,
-			r.Client,
-			s.Namespace,
-			s.Name,
-			controllercommon.KindDemoVirtualDiskSnapshot,
-			demov1alpha1.SchemeGroupVersion.String(),
-			controllercommon.KindDemoVirtualDisk,
-			source.Name,
-			demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualDiskSnapshot, s.Name, s.UID),
-			vcrName,
-		)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := patchDemoVirtualDiskSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
+		TargetAPIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		TargetKind:       controllercommon.KindDemoVirtualDisk,
+		TargetName:       source.Name,
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Planning barrier: for a leaf disk "domain planning complete" means its own MCR/VCR are created and
 	// published (it has no child snapshots). The common controller waits on this before taking over content.
-	if err := patchDemoVirtualDiskSnapshotChildrenSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, storagev1alpha1.ReasonCompleted, "manifest capture request planned"); err != nil {
-		return ctrl.Result{}, err
+	return ctrl.Result{}, sdk.MarkPlanningReady(ctx, adapter, "manifest capture request planned")
+}
+
+// resolveDemoVirtualDiskDataTargets resolves the source disk's PVC into the SDK data-leg capture targets.
+// It returns no targets for a manifest-only disk, or a non-empty terminalReason (ArtifactMissing) when the
+// configured PVC is not yet present.
+func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataTargets(
+	ctx context.Context,
+	s *demov1alpha1.DemoVirtualDiskSnapshot,
+	source *demov1alpha1.DemoVirtualDisk,
+) (targets []snapshotsdk.Target, terminalReason string, terminalMessage string, err error) {
+	pvcName := source.Spec.PersistentVolumeClaimName
+	if pvcName == "" {
+		return nil, "", "", nil
 	}
-	return ctrl.Result{}, nil
-}
 
-func patchDemoVirtualDiskSnapshotChildrenSnapshotReady(
-	ctx context.Context,
-	c client.Client,
-	diskKey types.NamespacedName,
-	status metav1.ConditionStatus,
-	reason string,
-	message string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := c.Get(ctx, diskKey, o); err != nil {
-			return err
+	reader := demoReconcilerReader(r.APIReader, r.Client)
+	pvc := &corev1.PersistentVolumeClaim{}
+	if getErr := reader.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: pvcName}, pvc); getErr != nil {
+		if apierrors.IsNotFound(getErr) {
+			return nil, storagev1alpha1.ReasonArtifactMissing, fmt.Sprintf("PersistentVolumeClaim %q not found for disk data leg", pvcName), nil
 		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady); rc != nil &&
-			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
-			return nil
-		}
-		base := o.DeepCopy()
-		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionChildrenSnapshotReady,
-			Status:             status,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: o.Generation,
-		})
-		// D4a: optimistic-lock merge patch so co-writing conditions (core writes Ready) never
-		// silently clobbers this owner's entry — a concurrent write yields 409 → RetryOnConflict re-reads.
-		return c.Status().Patch(ctx, o, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
-}
+		return nil, "", "", getErr
+	}
 
-func patchDemoVirtualDiskSnapshotManifestCaptureRequestName(
-	ctx context.Context,
-	c client.Client,
-	diskKey types.NamespacedName,
-	mcrName string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := c.Get(ctx, diskKey, o); err != nil {
-			return err
-		}
-		if o.Status.ManifestCaptureRequestName == mcrName {
-			return nil
-		}
-		base := o.DeepCopy()
-		o.Status.ManifestCaptureRequestName = mcrName
-		return c.Status().Patch(ctx, o, client.MergeFrom(base))
-	})
-}
-
-func patchDemoVirtualDiskSnapshotVolumeCaptureRequestName(
-	ctx context.Context,
-	c client.Client,
-	diskKey types.NamespacedName,
-	vcrName string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := c.Get(ctx, diskKey, o); err != nil {
-			return err
-		}
-		if o.Status.VolumeCaptureRequestName == vcrName {
-			return nil
-		}
-		base := o.DeepCopy()
-		o.Status.VolumeCaptureRequestName = vcrName
-		return c.Status().Patch(ctx, o, client.MergeFrom(base))
-	})
-}
-
-func patchDemoVirtualDiskSnapshotNotReady(
-	ctx context.Context,
-	c client.Client,
-	diskKey types.NamespacedName,
-	reason string,
-	message string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := c.Get(ctx, diskKey, o); err != nil {
-			return err
-		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, storagev1alpha1.ConditionReady); rc != nil &&
-			rc.Status == metav1.ConditionFalse && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
-			return nil
-		}
-		base := o.DeepCopy()
-		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: o.Generation,
-		})
-		// D4a: optimistic-lock merge patch so this early validation Ready=False and the common controller's
-		// Ready mirror co-own the same conditions array safely (409 → RetryOnConflict re-reads).
-		return c.Status().Patch(ctx, o, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
+	return []snapshotsdk.Target{{
+		UID:        string(pvc.UID),
+		APIVersion: corev1.SchemeGroupVersion.String(),
+		Kind:       "PersistentVolumeClaim",
+		Name:       pvc.Name,
+		Namespace:  pvc.Namespace,
+	}}, "", "", nil
 }

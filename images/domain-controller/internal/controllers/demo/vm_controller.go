@@ -24,10 +24,8 @@ import (
 	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -38,12 +36,14 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
-// DemoVirtualMachineSnapshotReconciler owns demo VM sourceRef validation,
-// domain MCR creation, parent-owned disk child graph, snapshot-level Ready,
-// and binding to common SnapshotContent. Content status/result aggregation
-// stays in SnapshotContentController.
+// DemoVirtualMachineSnapshotReconciler owns demo VM DOMAIN planning only: sourceRef validation, the
+// owned-disk child snapshot graph, the per-snapshot manifest-capture request (MCR), and the planning
+// barrier. All Kubernetes transport (child adoption, owner references, orphan GC, optimistic-locked status
+// patches, the barrier condition) is delegated to the snapshot SDK (pkg/snapshotsdk). The VM snapshot is
+// manifest-only (no data leg); it never touches the cluster-scoped SnapshotContent.
 type DemoVirtualMachineSnapshotReconciler struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -55,12 +55,9 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
 	// before RBACReady=True is set on CSD.
-	// Content-free for SNAPSHOT reconcilers: NO SnapshotContent watch/informer here. DemoVirtualDisk
-	// resource restore reads SnapshotContent via APIReader only (get RBAC). The core
-	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind
-	// The capture marker this controller gates on (status.manifestCaptured) is written by core onto this
-	// snapshot's OWN status, observed by the For() watch. The child DemoVirtualDiskSnapshot watch stays so
-	// the parent re-plans when a child changes.
+	// Content-free for SNAPSHOT reconcilers: NO SnapshotContent watch/informer here. The core
+	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind.
+	// The child DemoVirtualDiskSnapshot watch stays so the parent re-plans when a child changes.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualMachineSnapshot{}).
 		Watches(&demov1alpha1.DemoVirtualDiskSnapshot{}, handler.EnqueueRequestsFromMapFunc(mapDemoDiskSnapshotToParentVM)).
@@ -69,6 +66,10 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 			APIReader: mgr.GetAPIReader(),
 			Config:    cfg,
 		})
+}
+
+func (r *DemoVirtualMachineSnapshotReconciler) capture() snapshotsdk.CaptureSDK {
+	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client))
 }
 
 func demoVirtualMachineDiskSnapshotName(namespace, vmSnapshotName, sourceDiskName string) string {
@@ -97,94 +98,64 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
-	// Deletion is handled by higher-level lifecycle (no finalizers here).
-	// This controller is materialization-only.
+	// Deletion is handled by higher-level lifecycle (no finalizers here). Materialization-only.
 	if s.DeletionTimestamp != nil {
 		return ctrl.Result{}, nil
 	}
 
+	adapter := demoVirtualMachineSnapshotAdapter{snap: s}
+	sdk := r.capture()
+
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		if patchErr := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, resolution.Reason, resolution.Message); patchErr != nil {
-			return ctrl.Result{}, patchErr
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
 	}
-	sourceName := resolution.Name
 	source := &demov1alpha1.DemoVirtualMachine{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: sourceName}, source); err != nil {
+	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: resolution.Name}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		if err := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, demoReasonSourceNotFound, fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualMachine, sourceName)); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
+			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualMachine, resolution.Name),
+		})
 	}
 
-	// Stale-cache guard (TOCTOU): status.manifestCaptured is set by the common controller via a live write
-	// immediately BEFORE it deletes the MCR. Refresh it from a live read before planning so a stale
-	// informer cache cannot re-create an MCR the common controller already cleaned up.
-	if !s.Status.ManifestCaptured {
-		live := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := r.APIReader.Get(ctx, req.NamespacedName, live); err != nil {
-			if apierrors.IsNotFound(err) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, err
-		}
-		s.Status.ManifestCaptured = live.Status.ManifestCaptured
-	}
-
-	// Children planning: ensure child DemoVirtualDiskSnapshot objects (owned by this VM snapshot) and
-	// publish status.childrenSnapshotRefs. The common controller projects these into
-	// SnapshotContent.status.childrenSnapshotContentRefs once the children are bound.
-	childRefs, err := r.ensureDemoVirtualMachineChildren(ctx, s, source)
+	// Children planning: the domain decides which disks the VM owns and builds the desired child snapshot
+	// objects; the SDK adopts them, publishes status.childrenSnapshotRefs, and garbage-collects orphans.
+	children, err := r.planDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
-		if patchErr := patchDemoVirtualMachineSnapshotChildrenSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, storagev1alpha1.ReasonCreateChildFailed, err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
-		}
 		return ctrl.Result{}, err
 	}
-	if err := patchDemoVirtualMachineSnapshotChildrenRefs(ctx, r.Client, req.NamespacedName, childRefs); err != nil {
-		if patchErr := patchDemoVirtualMachineSnapshotChildrenSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, storagev1alpha1.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
+	if err := sdk.EnsureChildren(ctx, adapter, children); err != nil {
+		if perr := sdk.MarkPlanningFailed(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed), err); perr != nil {
+			return ctrl.Result{}, perr
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Manifest leg: ensure the per-snapshot MCR (owned by this VM snapshot; VM is manifest-only, no data
-	// leg) and publish its name. Suppressed once status.manifestCaptured is set by the common controller.
-	if !s.Status.ManifestCaptured {
-		mcr, err := ensureDemoSnapshotManifestCaptureRequest(
-			ctx,
-			r.Client,
-			s.Namespace,
-			s.Name,
-			controllercommon.KindDemoVirtualMachineSnapshot,
-			demov1alpha1.SchemeGroupVersion.String(),
-			controllercommon.KindDemoVirtualMachine,
-			source.Name,
-			demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualMachineSnapshot, s.Name, s.UID),
-			"",
-		)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := patchDemoVirtualMachineSnapshotManifestCaptureRequestName(ctx, r.Client, req.NamespacedName, mcr.Name); err != nil {
-			return ctrl.Result{}, err
-		}
+	// Manifest leg: ensure the per-snapshot MCR (VM is manifest-only, no data leg) and publish its name.
+	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
+		TargetAPIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		TargetKind:       controllercommon.KindDemoVirtualMachine,
+		TargetName:       source.Name,
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Planning barrier: children planned/published and MCR created. The common controller waits on this
 	// before taking over SnapshotContent (creation, children/MCP projection, Ready mirror).
-	if err := patchDemoVirtualMachineSnapshotChildrenSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionTrue, storagev1alpha1.ReasonCompleted, "child planning complete"); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, sdk.MarkPlanningReady(ctx, adapter, "child planning complete")
 }
 
-func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, source *demov1alpha1.DemoVirtualMachine) ([]storagev1alpha1.SnapshotChildRef, error) {
+// planDemoVirtualMachineChildren builds the desired set of child DemoVirtualDiskSnapshot objects for the
+// disks owned by the VM. Owner references, adoption, ref derivation, and orphan GC are the SDK's job; the
+// domain only authors the child object identity and its immutable spec.sourceRef.
+func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
+	ctx context.Context,
+	vm *demov1alpha1.DemoVirtualMachineSnapshot,
+	source *demov1alpha1.DemoVirtualMachine,
+) ([]snapshotsdk.ChildSpec, error) {
 	disks := &demov1alpha1.DemoVirtualDiskList{}
 	if err := r.Client.List(ctx, disks, client.InNamespace(vm.Namespace)); err != nil {
 		return nil, err
@@ -193,74 +164,32 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineChildren(
 		return disks.Items[i].Name < disks.Items[j].Name
 	})
 
-	var refs []storagev1alpha1.SnapshotChildRef
+	var children []snapshotsdk.ChildSpec
 	for i := range disks.Items {
 		disk := &disks.Items[i]
 		if !demoDiskOwnedByVM(disk, source) {
 			continue
 		}
 		childName := demoVirtualMachineDiskSnapshotName(vm.Namespace, vm.Name, disk.Name)
-		if err := r.ensureDemoVirtualMachineDiskChild(ctx, vm, disk, childName); err != nil {
-			return nil, err
-		}
-		refs = append(refs, storagev1alpha1.SnapshotChildRef{
-			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-			Kind:       controllercommon.KindDemoVirtualDiskSnapshot,
-			Name:       childName,
+		children = append(children, snapshotsdk.ChildSpec{
+			Object: &demov1alpha1.DemoVirtualDiskSnapshot{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      childName,
+					Namespace: vm.Namespace,
+				},
+				// spec.sourceRef is the single source-of-truth for what the child disk snapshot captures;
+				// the CRD enforces its immutability, so it is set once at creation and never rewritten.
+				Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
+					SourceRef: demov1alpha1.SnapshotSourceRef{
+						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+						Kind:       controllercommon.KindDemoVirtualDisk,
+						Name:       disk.Name,
+					},
+				},
+			},
 		})
 	}
-	return refs, nil
-}
-
-func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild(ctx context.Context, vm *demov1alpha1.DemoVirtualMachineSnapshot, disk *demov1alpha1.DemoVirtualDisk, childName string) error {
-	key := types.NamespacedName{Namespace: vm.Namespace, Name: childName}
-	child := &demov1alpha1.DemoVirtualDiskSnapshot{}
-	// spec.sourceRef is the single source-of-truth for what the child disk snapshot captures; the CRD
-	// enforces its immutability, so it is set once at creation and never rewritten.
-	desiredSourceRef := demov1alpha1.SnapshotSourceRef{
-		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		Kind:       controllercommon.KindDemoVirtualDisk,
-		Name:       disk.Name,
-	}
-	err := r.Client.Get(ctx, key, child)
-	if apierrors.IsNotFound(err) {
-		child = &demov1alpha1.DemoVirtualDiskSnapshot{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      childName,
-				Namespace: vm.Namespace,
-				OwnerReferences: []metav1.OwnerReference{demoSnapshotOwnerReference(
-					demov1alpha1.SchemeGroupVersion.String(),
-					controllercommon.KindDemoVirtualMachineSnapshot,
-					vm.Name,
-					vm.UID,
-				)},
-			},
-			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				SourceRef: desiredSourceRef,
-			},
-		}
-		if err := r.Client.Create(ctx, child); err != nil && !apierrors.IsAlreadyExists(err) {
-			return err
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	desiredOwnerRefs := []metav1.OwnerReference{demoSnapshotOwnerReference(
-		demov1alpha1.SchemeGroupVersion.String(),
-		controllercommon.KindDemoVirtualMachineSnapshot,
-		vm.Name,
-		vm.UID,
-	)}
-	base := child.DeepCopy()
-	if err := ensureDemoSnapshotOwnerRef(child, desiredOwnerRefs[0]); err != nil {
-		return err
-	}
-	if controllercommon.OwnerReferencesEqual(child.GetOwnerReferences(), desiredOwnerRefs) {
-		return nil
-	}
-	return r.Client.Patch(ctx, child, client.MergeFrom(base))
+	return children, nil
 }
 
 // demoDiskOwnedByVM resolves the snapshot-tree parent->child link from the VM side:
@@ -268,106 +197,4 @@ func (r *DemoVirtualMachineSnapshotReconciler) ensureDemoVirtualMachineDiskChild
 // carries a back-reference to the VM, so topology flows strictly downward.
 func demoDiskOwnedByVM(disk *demov1alpha1.DemoVirtualDisk, vm *demov1alpha1.DemoVirtualMachine) bool {
 	return vm.Spec.VirtualDiskName != "" && vm.Spec.VirtualDiskName == disk.Name
-}
-
-func patchDemoVirtualMachineSnapshotChildrenSnapshotReady(
-	ctx context.Context,
-	c client.Client,
-	vmKey types.NamespacedName,
-	status metav1.ConditionStatus,
-	reason string,
-	message string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := c.Get(ctx, vmKey, o); err != nil {
-			return err
-		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady); rc != nil &&
-			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
-			return nil
-		}
-		base := o.DeepCopy()
-		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionChildrenSnapshotReady,
-			Status:             status,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: o.Generation,
-		})
-		// D4a: optimistic-lock merge patch so co-writing conditions (core writes Ready) never
-		// silently clobbers this owner's entry — a concurrent write yields 409 → RetryOnConflict re-reads.
-		return c.Status().Patch(ctx, o, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
-}
-
-func patchDemoVirtualMachineSnapshotChildrenRefs(
-	ctx context.Context,
-	c client.Client,
-	parent types.NamespacedName,
-	desired []storagev1alpha1.SnapshotChildRef,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := c.Get(ctx, parent, o); err != nil {
-			return err
-		}
-		if controllercommon.SnapshotChildRefsEqualIgnoreOrder(desired, o.Status.ChildrenSnapshotRefs) {
-			return nil
-		}
-		base := o.DeepCopy()
-		o.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), desired...)
-		return c.Status().Patch(ctx, o, client.MergeFrom(base))
-	})
-}
-
-func patchDemoVirtualMachineSnapshotManifestCaptureRequestName(
-	ctx context.Context,
-	c client.Client,
-	vmKey types.NamespacedName,
-	mcrName string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := c.Get(ctx, vmKey, o); err != nil {
-			return err
-		}
-		if o.Status.ManifestCaptureRequestName == mcrName {
-			return nil
-		}
-		base := o.DeepCopy()
-		o.Status.ManifestCaptureRequestName = mcrName
-		return c.Status().Patch(ctx, o, client.MergeFrom(base))
-	})
-}
-
-func patchDemoVirtualMachineSnapshotReady(
-	ctx context.Context,
-	c client.Client,
-	vmKey types.NamespacedName,
-	status metav1.ConditionStatus,
-	reason string,
-	message string,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		o := &demov1alpha1.DemoVirtualMachineSnapshot{}
-		if err := c.Get(ctx, vmKey, o); err != nil {
-			return err
-		}
-		if rc := meta.FindStatusCondition(o.Status.Conditions, storagev1alpha1.ConditionReady); rc != nil &&
-			rc.Status == status && rc.Reason == reason && rc.Message == message && rc.ObservedGeneration == o.Generation {
-			return nil
-		}
-		base := o.DeepCopy()
-		meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionReady,
-			Status:             status,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: o.Generation,
-		})
-		// D4a: optimistic-lock merge patch so this Ready write and the domain ChildrenSnapshotReady
-		// writer co-own the same conditions array safely (409 → RetryOnConflict re-reads).
-		return c.Status().Patch(ctx, o, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
 }

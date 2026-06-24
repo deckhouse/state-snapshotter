@@ -14,7 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package domainsdk
+// Package transform is the domain restore extension point of the snapshot SDK. A domain package implements
+// Transformer next to its domain types; the generic restore compiler never references domain kinds or
+// field names.
+package transform
 
 import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"

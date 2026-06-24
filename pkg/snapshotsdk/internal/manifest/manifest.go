@@ -14,21 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package demo
+// Package manifest builds the ManifestCaptureRequest target set: the base manifest target plus the
+// owned-PVC targets derived from the snapshot's own data-leg VolumeCaptureRequest.
+package manifest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	vcpkg "github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/volumecapture"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/storagefoundation"
 )
 
-// manifestTargetsFromVolumeTargets converts owned PVC volume targets to explicit MCR manifest targets.
-// It works directly on the api ManifestTarget type (no intermediate controller-layer type).
-func manifestTargetsFromVolumeTargets(targets []vcpkg.Target) []ssv1alpha1.ManifestTarget {
+// RequestName returns the deterministic ManifestCaptureRequest name for a snapshot identity. The name is
+// derivable from the snapshot alone (kind/namespace/name), so it is stable across reconciles and restarts.
+func RequestName(kind, namespace, name string) string {
+	sum := sha256.Sum256([]byte(kind + ":" + namespace + "/" + name))
+	return "mcr-" + hex.EncodeToString(sum[:10])
+}
+
+// Targets merges the base manifest target with the owned-PVC targets derived from the data-leg VCR,
+// deduplicated by (apiVersion|kind|namespace|name) and sorted deterministically.
+func Targets(base []ssv1alpha1.ManifestTarget, ownedPVCs []storagefoundation.Target, namespace string) []ssv1alpha1.ManifestTarget {
+	owned := fromVolumeTargets(ownedPVCs)
+	return appendOwnedPVCManifestTargets(base, owned, namespace)
+}
+
+func fromVolumeTargets(targets []storagefoundation.Target) []ssv1alpha1.ManifestTarget {
 	out := make([]ssv1alpha1.ManifestTarget, 0, len(targets))
 	for _, t := range targets {
 		if t.Kind != "PersistentVolumeClaim" {
@@ -44,41 +60,32 @@ func manifestTargetsFromVolumeTargets(targets []vcpkg.Target) []ssv1alpha1.Manif
 			Name:       t.Name,
 		})
 	}
-	sortManifestTargets(out)
+	sortTargets(out)
 	return out
 }
 
-// appendOwnedPVCManifestTargets adds owned PVC targets not already present and not in subtree exclude (E5).
-func appendOwnedPVCManifestTargets(
-	base []ssv1alpha1.ManifestTarget,
-	owned []ssv1alpha1.ManifestTarget,
-	exclude map[string]struct{},
-	snapshotNamespace string,
-) []ssv1alpha1.ManifestTarget {
+func appendOwnedPVCManifestTargets(base, owned []ssv1alpha1.ManifestTarget, namespace string) []ssv1alpha1.ManifestTarget {
 	if len(owned) == 0 {
-		return base
+		return append([]ssv1alpha1.ManifestTarget(nil), base...)
 	}
 	seen := make(map[string]struct{}, len(base)+len(owned))
 	for _, t := range base {
-		seen[manifestTargetDedupKey(snapshotNamespace, t)] = struct{}{}
+		seen[dedupKey(namespace, t)] = struct{}{}
 	}
 	out := append([]ssv1alpha1.ManifestTarget(nil), base...)
 	for _, t := range owned {
-		k := manifestTargetDedupKey(snapshotNamespace, t)
-		if _, skip := exclude[k]; skip {
-			continue
-		}
+		k := dedupKey(namespace, t)
 		if _, dup := seen[k]; dup {
 			continue
 		}
 		seen[k] = struct{}{}
 		out = append(out, t)
 	}
-	sortManifestTargets(out)
+	sortTargets(out)
 	return out
 }
 
-func sortManifestTargets(targets []ssv1alpha1.ManifestTarget) {
+func sortTargets(targets []ssv1alpha1.ManifestTarget) {
 	sort.Slice(targets, func(i, j int) bool {
 		a, b := targets[i], targets[j]
 		if a.APIVersion != b.APIVersion {
@@ -91,9 +98,8 @@ func sortManifestTargets(targets []ssv1alpha1.ManifestTarget) {
 	})
 }
 
-// manifestTargetDedupKey matches aggregated manifest identity (apiVersion|kind|namespace|name).
-func manifestTargetDedupKey(snapshotNamespace string, t ssv1alpha1.ManifestTarget) string {
-	ns := snapshotNamespace
+func dedupKey(namespace string, t ssv1alpha1.ManifestTarget) string {
+	ns := namespace
 	if ns == "" {
 		ns = "_cluster"
 	}
