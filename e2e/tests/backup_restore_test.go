@@ -692,9 +692,9 @@ func backupRestoreSpecs() {
 			// backing PVC without needing a consumer (mirrors phase-3 VRR restore). The orphan PVC is restored
 			// via a plain dataSourceRef on a WaitForFirstConsumer SC, so it only binds once the probe pod (its
 			// first consumer) is scheduled below; we therefore do NOT gate on PVC Bound here.
-			Expect(waitObjectCondition(ctx, demoDiskGVR, importNS, bkDiskAName, condReady, "True", 15*time.Minute)).
+			Expect(waitDemoDiskReady(ctx, importNS, bkDiskAName, 15*time.Minute)).
 				To(Succeed(), "restored DemoVirtualDisk %s Ready", bkDiskAName)
-			Expect(waitObjectCondition(ctx, demoDiskGVR, importNS, bkDiskBName, condReady, "True", 15*time.Minute)).
+			Expect(waitDemoDiskReady(ctx, importNS, bkDiskBName, 15*time.Minute)).
 				To(Succeed(), "restored DemoVirtualDisk %s Ready", bkDiskBName)
 
 			By("Verifying restored Block volume bytes via an in-cluster probe pod")
