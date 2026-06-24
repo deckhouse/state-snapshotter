@@ -237,7 +237,13 @@ func (r *GenericSnapshotBinderController) projectDataLegFromDataImport(
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
-	if content.Status.DataRef != nil && content.Status.DataRef.Artifact == binding.Artifact {
+	// Fast-path: skip re-enriching/re-publishing only when the already-published dataRef matches both the
+	// artifact and the (now source-derived) volumeMode. Comparing volumeMode too lets a content that was
+	// bound before volumeMode propagation existed self-heal instead of staying stuck with an empty mode
+	// that fails restore closed.
+	if content.Status.DataRef != nil &&
+		content.Status.DataRef.Artifact == binding.Artifact &&
+		content.Status.DataRef.VolumeMode == binding.VolumeMode {
 		return true, "", "", nil
 	}
 
@@ -278,6 +284,14 @@ func buildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 				di.GetName(), kind, snapshot.KindVolumeSnapshotContent)
 	}
 	leafGVK := leaf.GetObjectKind().GroupVersionKind()
+	// volumeMode is the one piece of source volume metadata that downstream restore strictly requires
+	// (demo restore fails closed on an empty dataRef.volumeMode) and that EnrichDataBindingsWithVolumeMetadata
+	// cannot recover here: the binding targets the leaf snapshot, not a live PVC, so the PVC-based enricher
+	// only fills Size. DataImport republishes the original captured volumeMode into status.volumeMode (it
+	// reads capacity/storageClass/volumeMode from the uploaded manifest to provision its scratch PVC), so it
+	// is the authoritative source on the import side. storageClassName/accessModes/fsType are not exposed by
+	// DataImport and are resolved downstream from the disk spec / defaults.
+	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
 	return &storagev1alpha1.SnapshotDataBinding{
 		// The imported leaf has no live source PVC; use the leaf identity as the binding target so the
 		// dataRef is stable/idempotent (size etc. are enriched from VolumeSnapshotContent.status.restoreSize).
@@ -294,5 +308,6 @@ func buildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 			Kind:       kind,
 			Name:       name,
 		},
+		VolumeMode: volumeMode,
 	}, true, "", ""
 }
