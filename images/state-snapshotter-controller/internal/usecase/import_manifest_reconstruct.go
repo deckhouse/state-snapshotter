@@ -24,12 +24,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"sort"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -252,4 +256,76 @@ func gzipBytes(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("gzip close: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// CollectReconstructedManifestObjects decodes every object stored in a ManifestCheckpoint's chunks (the
+// base64(gzip(json[])) payload written by writeReconstructedChunks). It is the read twin of that writer.
+//
+// reader must bypass the informer cache (APIReader): ManifestCheckpoint and its chunks are internal-only
+// and not watched. It exists for callers outside the archive/restore HTTP path that need a checkpoint's
+// raw objects — currently the VolumeSnapshot import binder, which recovers the single orphan PVC manifest
+// a leaf carries so the published dataRef can target that PVC (matching the capture path); a dataRef that
+// targeted the VolumeSnapshot handle instead would make the restore compiler emit a data-less PVC.
+func CollectReconstructedManifestObjects(ctx context.Context, reader client.Reader, checkpoint *storagev1alpha1.ManifestCheckpoint) ([]unstructured.Unstructured, error) {
+	chunks := make([]storagev1alpha1.ChunkInfo, len(checkpoint.Status.Chunks))
+	copy(chunks, checkpoint.Status.Chunks)
+	sort.Slice(chunks, func(i, j int) bool { return chunks[i].Index < chunks[j].Index })
+
+	out := make([]unstructured.Unstructured, 0, checkpoint.Status.TotalObjects)
+	for _, info := range chunks {
+		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: info.Name}, chunk); err != nil {
+			return nil, fmt.Errorf("get ManifestCheckpoint chunk %s: %w", info.Name, err)
+		}
+		objects, err := decodeReconstructedChunk(chunk.Spec.Data, info.Checksum, info.Name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, objects...)
+	}
+	return out, nil
+}
+
+// ErrCorruptManifestChunk marks a chunk-content fault (bad base64/gzip/JSON or a checksum mismatch) as
+// opposed to a transient chunk fetch failure. Callers use errors.Is to decide retry vs. terminal: the
+// stored bytes are bad, so retrying the same chunk cannot succeed.
+var ErrCorruptManifestChunk = errors.New("corrupt manifest checkpoint chunk")
+
+// decodeReconstructedChunk inverts writeReconstructedChunks for a single chunk: base64 -> checksum verify
+// -> gzip-decompress -> JSON array of objects. It deliberately handles only the canonical json[] shape
+// produced on the import path (no legacy Key/Value handling), keeping it dependency-free of ArchiveService.
+// All failures wrap ErrCorruptManifestChunk: they are content faults, not retryable fetch errors.
+func decodeReconstructedChunk(encoded, expectedChecksum, chunkName string) ([]unstructured.Unstructured, error) {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("%w: decode base64 chunk %s: %v", ErrCorruptManifestChunk, chunkName, err)
+	}
+	if expectedChecksum != "" {
+		sum := sha256.Sum256(data)
+		if got := hex.EncodeToString(sum[:]); got != expectedChecksum {
+			return nil, fmt.Errorf("%w: checksum mismatch for chunk %s: have %s, want %s", ErrCorruptManifestChunk, chunkName, got, expectedChecksum)
+		}
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("%w: gzip reader for chunk %s: %v", ErrCorruptManifestChunk, chunkName, err)
+	}
+	defer gr.Close()
+	decompressed, err := io.ReadAll(gr)
+	if err != nil {
+		return nil, fmt.Errorf("%w: decompress chunk %s: %v", ErrCorruptManifestChunk, chunkName, err)
+	}
+	var raws []json.RawMessage
+	if err := json.Unmarshal(decompressed, &raws); err != nil {
+		return nil, fmt.Errorf("%w: unmarshal chunk %s as JSON array: %v", ErrCorruptManifestChunk, chunkName, err)
+	}
+	objects := make([]unstructured.Unstructured, 0, len(raws))
+	for i, raw := range raws {
+		m := map[string]interface{}{}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, fmt.Errorf("%w: unmarshal object %d in chunk %s: %v", ErrCorruptManifestChunk, i, chunkName, err)
+		}
+		objects = append(objects, unstructured.Unstructured{Object: m})
+	}
+	return objects, nil
 }
