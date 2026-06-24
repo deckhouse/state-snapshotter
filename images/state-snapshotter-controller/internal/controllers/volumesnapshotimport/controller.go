@@ -165,7 +165,12 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				Name:            contentName,
 				OwnerReferences: []metav1.OwnerReference{*ownerRef},
 			},
-			Spec: storagev1alpha1.SnapshotContentSpec{DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyDelete},
+			// snapshotRef points back at this extended VolumeSnapshot (the binding subject that sets
+			// status.boundSnapshotContentName on this content), enabling the restore handshake.
+			Spec: controllercommon.NewSnapshotContentSpec(
+				storagev1alpha1.SnapshotContentDeletionPolicyDelete,
+				controllercommon.SnapshotSubjectRefFromObject(vs),
+			),
 		}
 		if cErr := r.Create(ctx, content); cErr != nil && !errors.IsAlreadyExists(cErr) {
 			return ctrl.Result{}, cErr

@@ -206,7 +206,7 @@ func (r *Resolver) ResolveVolumeSnapshotRestoreNode(ctx context.Context, namespa
 // carries that MCP + dataRef plus the VSC->VS mapping, so the generic per-node compile path emits the
 // PVC bound to its VolumeSnapshot dataSourceRef — the orphan PVC is no longer carried on the parent.
 func (r *Resolver) resolveOrphanVolumeChildNode(ctx context.Context, namespace, vsName string) (*RestoreNode, error) {
-	boundVSC, childContentName, err := r.resolveVolumeSnapshotLeaf(ctx, namespace, vsName)
+	boundVSC, childContentName, vsUID, err := r.resolveVolumeSnapshotLeaf(ctx, namespace, vsName)
 	if err != nil {
 		return nil, err
 	}
@@ -224,6 +224,13 @@ func (r *Resolver) resolveOrphanVolumeChildNode(ctx context.Context, namespace, 
 		return nil, fmt.Errorf("failed to get orphan child SnapshotContent %s: %w", childContentName, err)
 	}
 	if err := ensureReady(childContent); err != nil {
+		return nil, err
+	}
+	// Anti-spoofing handshake: the bound child content must point its spec.snapshotRef back at this very
+	// VolumeSnapshot handle. status.boundSnapshotContentName alone is not trustworthy (a status writer
+	// could aim it at a foreign content); requiring the reverse reference closes that gap, mirroring CSI
+	// VolumeSnapshot<->VolumeSnapshotContent and the core static-bind handshake.
+	if err := verifyOrphanContentSnapshotRef(childContent, namespace, vsName, vsUID, childContentName); err != nil {
 		return nil, err
 	}
 	contentLike, err := snapshot.ExtractSnapshotContentLike(childContent)
@@ -255,37 +262,62 @@ func (r *Resolver) resolveOrphanVolumeChildNode(ctx context.Context, namespace, 
 //
 // It fails closed: the endpoint emits an apply-ready PVC with dataSourceRef to this VolumeSnapshot,
 // so a leaf that is deleting, not readyToUse, or not yet bound must not yield a manifest.
-func (r *Resolver) resolveVolumeSnapshotLeaf(ctx context.Context, namespace, vsName string) (boundVSC string, boundContentName string, err error) {
+func (r *Resolver) resolveVolumeSnapshotLeaf(ctx context.Context, namespace, vsName string) (boundVSC string, boundContentName string, vsUID string, err error) {
 	vs := &unstructured.Unstructured{}
 	vs.SetGroupVersionKind(schema.GroupVersionKind{Group: snapshot.CSISnapshotGroup, Version: snapshot.CSISnapshotVersion, Kind: snapshot.KindVolumeSnapshot})
 	if err := r.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vsName}, vs); err != nil {
 		if errors.IsNotFound(err) {
-			return "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s not found", ErrContractViolation, namespace, vsName)
+			return "", "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s not found", ErrContractViolation, namespace, vsName)
 		}
-		return "", "", fmt.Errorf("failed to get VolumeSnapshot %s/%s: %w", namespace, vsName, err)
+		return "", "", "", fmt.Errorf("failed to get VolumeSnapshot %s/%s: %w", namespace, vsName, err)
 	}
 	if vs.GetDeletionTimestamp() != nil {
-		return "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s is being deleted", ErrContractViolation, namespace, vsName)
+		return "", "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s is being deleted", ErrContractViolation, namespace, vsName)
 	}
 	readyToUse, _, rerr := unstructured.NestedBool(vs.Object, "status", "readyToUse")
 	if rerr != nil {
-		return "", "", fmt.Errorf("%w: VolumeSnapshot %s/%s readyToUse unreadable", ErrContractViolation, namespace, vsName)
+		return "", "", "", fmt.Errorf("%w: VolumeSnapshot %s/%s readyToUse unreadable", ErrContractViolation, namespace, vsName)
 	}
 	if !readyToUse {
-		return "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s is not readyToUse", ErrNotReady, namespace, vsName)
+		return "", "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s is not readyToUse", ErrNotReady, namespace, vsName)
 	}
 	boundVSC, _, err = unstructured.NestedString(vs.Object, "status", "boundVolumeSnapshotContentName")
 	if err != nil {
-		return "", "", fmt.Errorf("%w: VolumeSnapshot %s/%s boundVolumeSnapshotContentName unreadable", ErrContractViolation, namespace, vsName)
+		return "", "", "", fmt.Errorf("%w: VolumeSnapshot %s/%s boundVolumeSnapshotContentName unreadable", ErrContractViolation, namespace, vsName)
 	}
 	if boundVSC == "" {
-		return "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s has empty boundVolumeSnapshotContentName", ErrNotReady, namespace, vsName)
+		return "", "", "", fmt.Errorf("%w: VolumeSnapshot leaf %s/%s has empty boundVolumeSnapshotContentName", ErrNotReady, namespace, vsName)
 	}
 	boundContentName, _, err = unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
 	if err != nil {
-		return "", "", fmt.Errorf("%w: VolumeSnapshot %s/%s boundSnapshotContentName unreadable", ErrContractViolation, namespace, vsName)
+		return "", "", "", fmt.Errorf("%w: VolumeSnapshot %s/%s boundSnapshotContentName unreadable", ErrContractViolation, namespace, vsName)
 	}
-	return boundVSC, boundContentName, nil
+	return boundVSC, boundContentName, string(vs.GetUID()), nil
+}
+
+// verifyOrphanContentSnapshotRef enforces the anti-spoofing handshake for the orphan child volume node:
+// the bound child SnapshotContent must carry a spec.snapshotRef that points back at the VolumeSnapshot
+// handle (apiVersion/kind/namespace/name). The UID is matched only when the ref carries one — the import
+// path (extended VolumeSnapshot) sets it and we verify it against the live VS, while the capture orphan
+// path leaves it empty on purpose (the VS handle is ephemeral and re-created on import). Any
+// missing/mismatched field is a contract violation (409), never a transient not-ready.
+func verifyOrphanContentSnapshotRef(content *unstructured.Unstructured, namespace, vsName, vsUID, childContentName string) error {
+	ref, found, err := unstructured.NestedMap(content.Object, "spec", "snapshotRef")
+	if err != nil || !found || len(ref) == 0 {
+		return fmt.Errorf("%w: orphan child SnapshotContent %s has no spec.snapshotRef back-reference to VolumeSnapshot %s/%s", ErrContractViolation, childContentName, namespace, vsName)
+	}
+	apiVersion, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "kind")
+	ns, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
+	name, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
+	uid, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
+	if apiVersion != snapshot.CSISnapshotAPIVersion || kind != snapshot.KindVolumeSnapshot || ns != namespace || name != vsName {
+		return fmt.Errorf("%w: orphan child SnapshotContent %s spec.snapshotRef (apiVersion=%q kind=%q %s/%s) does not point back at VolumeSnapshot %s/%s", ErrContractViolation, childContentName, apiVersion, kind, ns, name, namespace, vsName)
+	}
+	if uid != "" && vsUID != "" && uid != vsUID {
+		return fmt.Errorf("%w: orphan child SnapshotContent %s spec.snapshotRef.uid %q does not match VolumeSnapshot %s/%s uid %q", ErrContractViolation, childContentName, uid, namespace, vsName, vsUID)
+	}
+	return nil
 }
 
 func isVolumeSnapshotLeaf(ref snapshot.ObjectRef) bool {

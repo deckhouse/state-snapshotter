@@ -125,7 +125,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 					UID:        types.UID(parentContentUID),
 				}},
 			},
-			Spec: storagev1alpha1.SnapshotContentSpec{DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain},
+			Spec: retainContentSpec(),
 		}
 		Expect(k8sClient.Create(ctx, child)).To(Succeed())
 		DeferCleanup(func() {

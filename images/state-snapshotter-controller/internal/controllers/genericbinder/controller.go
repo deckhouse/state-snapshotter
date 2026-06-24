@@ -313,9 +313,18 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 
 		// Minimal spec: durable by default (deletionPolicy=Retain), same as the namespace path
 		// (snapshot/controller.go). The spec is immutable; all data/result wiring is published
-		// into content.status by the owning controller, never carried in spec.
+		// into content.status by the owning controller, never carried in spec. snapshotRef is the
+		// required anti-spoofing back-reference to this domain XXXSnapshot (the binding subject that sets
+		// status.boundSnapshotContentName on the content).
 		contentObj.Object["spec"] = map[string]interface{}{
 			"deletionPolicy": "Retain",
+			"snapshotRef": map[string]interface{}{
+				"apiVersion": snapshotGVK.GroupVersion().String(),
+				"kind":       snapshotGVK.Kind,
+				"namespace":  obj.GetNamespace(),
+				"name":       obj.GetName(),
+				"uid":        string(obj.GetUID()),
+			},
 		}
 
 		if contentOwnerRef == nil {

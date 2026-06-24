@@ -61,9 +61,7 @@ var _ = Describe("SnapshotContent dataRef CRD validation", func() {
 		name := "single-dataref-" + randomSuffix()
 		sc := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: storagev1alpha1.SnapshotContentSpec{
-				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-			},
+			Spec:       retainContentSpec(),
 		}
 		Expect(k8sClient.Create(ctx, sc)).To(Succeed())
 		DeferCleanup(func() {
@@ -79,9 +77,7 @@ var _ = Describe("SnapshotContent dataRef CRD validation", func() {
 		name := "empty-targetuid-" + randomSuffix()
 		sc := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: storagev1alpha1.SnapshotContentSpec{
-				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-			},
+			Spec:       retainContentSpec(),
 		}
 		Expect(k8sClient.Create(ctx, sc)).To(Succeed())
 		DeferCleanup(func() {

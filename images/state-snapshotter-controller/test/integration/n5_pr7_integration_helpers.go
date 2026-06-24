@@ -43,6 +43,37 @@ import (
 
 const pr7TestLabelKey = "state-snapshotter.deckhouse.io/test"
 
+// integrationContentSnapshotRef returns a syntactically valid SnapshotContent.spec.snapshotRef for tests
+// that exercise content lifecycle/status rather than the restore handshake. snapshotRef is required by the
+// CRD, so every created SnapshotContent must carry one; the referenced Snapshot need not actually exist.
+func integrationContentSnapshotRef() *storagev1alpha1.SnapshotSubjectRef {
+	return &storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "Snapshot",
+		Namespace:  "default",
+		Name:       "integration-test-snapshot",
+	}
+}
+
+// retainContentSpec returns a CRD-valid SnapshotContent spec (deletionPolicy=Retain + required snapshotRef).
+func retainContentSpec() storagev1alpha1.SnapshotContentSpec {
+	return storagev1alpha1.SnapshotContentSpec{
+		DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
+		SnapshotRef:    integrationContentSnapshotRef(),
+	}
+}
+
+// integrationContentSnapshotRefMap is the unstructured form of integrationContentSnapshotRef for tests that
+// build SnapshotContent as *unstructured.Unstructured.
+func integrationContentSnapshotRefMap() map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
+		"kind":       "Snapshot",
+		"namespace":  "default",
+		"name":       "integration-test-snapshot",
+	}
+}
+
 // pr7RequireVolumeCaptureRequestAPI skips the pending-VCR scenario when VolumeCaptureRequest is not served.
 func pr7RequireVolumeCaptureRequestAPI() {
 	if !integrationVolumeCaptureRequestAPIAvailable {

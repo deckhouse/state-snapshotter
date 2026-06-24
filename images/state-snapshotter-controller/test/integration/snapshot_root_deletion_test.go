@@ -199,6 +199,7 @@ var _ = Describe("Integration: Snapshot deletion semantics", func() {
 			},
 			Spec: storagev1alpha1.SnapshotContentSpec{
 				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyDelete,
+				SnapshotRef:    integrationContentSnapshotRef(),
 			},
 		})).To(Succeed())
 

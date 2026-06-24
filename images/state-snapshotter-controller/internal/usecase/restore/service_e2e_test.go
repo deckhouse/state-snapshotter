@@ -122,6 +122,14 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 
 	orphanContent := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root-content-vol-orphan"},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Namespace:  "source-ns",
+				Name:       "vs-orphan",
+			},
+		},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-orphan",
 			DataRef: &storagev1alpha1.SnapshotDataBinding{

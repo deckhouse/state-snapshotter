@@ -292,6 +292,10 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			contentObj.SetGroupVersionKind(contentGVK)
 			contentObj.SetName(contentName)
 			contentObj.SetFinalizers([]string{snapshot.FinalizerParentProtect})
+			contentObj.Object["spec"] = map[string]interface{}{
+				"deletionPolicy": "Retain",
+				"snapshotRef":    integrationContentSnapshotRefMap(),
+			}
 			err = k8sClient.Create(ctx, contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
