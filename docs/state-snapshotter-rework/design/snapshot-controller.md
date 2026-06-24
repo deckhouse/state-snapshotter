@@ -143,34 +143,28 @@
 
 ---
 
-### 4.5 N2a — built-in allowlist и исключения (первый набор, SSOT до кода)
+### 4.5 Namespace capture — discovery + единое правило включения (SSOT)
 
-**Включить в первый built-in profile (namespaced, list по GVR):**
+**Перечисление видов — через discovery, не статический allowlist.** Захват больше не опирается на захардкоженный список GVR (`n2aNamespacedGVR` удалён). `BuildManifestCaptureTargets` перечисляет **все** namespaced-виды через `discovery.ServerPreferredNamespacedResources` (preferred version каждого ресурса, verbs ⊇ {`list`,`get`}, без subresource) и листит каждый в целевом namespace динамическим клиентом. Это гарантирует, что произвольные CR (например, оператор-провижененные ресурсы без CSD-маппинга) не теряются.
 
-| API group | Версия | Resource (plural) | Примечание |
-|-----------|--------|---------------------|------------|
-| `apps` | `v1` | `deployments`, `statefulsets`, `daemonsets` | |
-| `batch` | `v1` | `jobs`, `cronjobs` | |
-| | `v1` | `pods`, `services`, `configmaps`, `secrets`, `serviceaccounts`, `persistentvolumeclaims` | PVC — **только манифест** (metadata/spec), без данных тома |
-| `networking.k8s.io` | `v1` | `ingresses` | |
-| `networking.k8s.io` | `v1` | `networkpolicies` | Опционально: включать только явным решением в PR; иначе **вне** первого merge |
-| `rbac.authorization.k8s.io` | `v1` | `roles`, `rolebindings` | |
+**Единое правило включения — `ShouldIncludeNamespaceObject` (default-include).** Объект попадает в снимок, если нет доказуемого сигнала исключения. Сигналы исключения (единственное место — `pkg/namespacemanifest/targets.go`):
 
-**Явно исключить (не list / не target):**
+- **controller-`ownerReference`** (`controller: true`) — derived/runtime-состояние, которое владелец пересоздаёт после restore (backing Pod демо-VM, ReplicaSet/Pod от Deployment, domain-owned PVC — последняя захватывается отдельным volume-node путём);
+- **control-plane noise denylist** (регенерируется контрол-плейном, не пользовательский desired-state):
+  - kind-level: `Event` (`v1` + `events.k8s.io`), `v1` `Endpoints`, `coordination.k8s.io` `Lease`;
+  - object-level: `ConfigMap` `kube-root-ca.crt`; `ServiceAccount` `default`; `Secret` типа `kubernetes.io/service-account-token`;
+- **снапшотная машинерия (механизм 1, kind-level)** — виды, которые снапшоттер создаёт сам: CSI `VolumeSnapshot` плюс все зарегистрированные в живом `snapshot.GVKRegistry` snapshot/content-виды (встроенные + выведенные из CSD, напр. `VirtualMachineSnapshot`; root `Snapshot` тоже входит сюда). Набор GVK прокидывается из Snapshot-контроллера; **fail-closed**, если реестр ещё не построен (`ErrGraphRegistryNotReady` → requeue, чтобы не захватить собственные снапшот-объекты);
+- **собственная machinery state-snapshotter** — вся API-группа `state-snapshotter.deckhouse.io` (MCR/MCP/chunk) и машинерные виды `storage.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`).
 
-- `events`, `leases`, `endpointslices` (core / coordination / discovery — по фактическим GVR в кластере).
-- `replicasets`, `controllerrevisions` — derived/controller-owned; не дублировать workload.
-- **PodDisruptionBudget** — в первом наборе **не включать**; включение — отдельное решение.
-- Все **внутренние** объекты snapshotter: `Snapshot`, `SnapshotContent`, `ManifestCaptureRequest`, `ManifestCheckpoint`, `ManifestCheckpointContentChunk`, `ObjectKeeper` (и пр. CR модуля по списку), служебные объекты runner/MCR (по **labels/prefixes** — зафиксировать в коде рядом с allowlist).
-- Любые GVR не из таблицы выше — **не** захватывать в N2a (fail-closed расширение только через изменение SSOT-списка).
+**Дедуп объектов, уже снятых дочерними доменными снимками (механизм 2, object-identity)** — без изменений: `root_capture_run_exclude.go` вычитает ключи `apiVersion|kind|ns|name` из MCP дочерних content-узлов (+ predictive owned-PVC exclude). Это owner-независимо (обычный ConfigMap, попавший в дочерний VM-снимок, вычитается из root MCR).
 
-Профиль должен быть **один** в коде (или генерироваться из одного источника); ad-hoc «снять всё» запрещён (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
+**Fail-closed на неполноту (transient).** Если какой-то namespaced-вид нельзя прочитать из-за `Forbidden` (транзиентный per-namespace `RoleBinding` ещё не распространился) или из-за частичного отказа discovery (битый aggregated APIService), его GVR возвращается в `unreadable`. Контроллер **не** создаёт root MCR с неполным планом: ставит `Ready=False`/`NamespaceCaptureIncomplete` и **requeue** (ждёт RBAC), не terminal. Три класса ошибок листинга: Forbidden/partial-discovery → `NamespaceCaptureIncomplete` (transient); транзиентные ошибки apiserver (429/503/500/timeout/EOF) → requeue; только структурные/неожиданные → terminal `ListFailed`. RBAC модель — §RBAC / Phase 5.
 
 #### 4.5.0 Raw capture policy (источник истины — MCP)
 
 Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **including `status`** and runtime fields. MCP is the source of truth for import/export: `DataImport`/`DataExport` read original fields (e.g. `status.capacity`, `spec.storageClassName`, `spec.volumeMode`) directly from the stored manifest.
 
-- **Object selection** (skipping ephemeral/owner-managed/excluded kinds) is a **separate** layer applied on capture; it does **not** mutate object fields.
+- **Object selection** (`ShouldIncludeNamespaceObject`: dropping controller-owned dependents, control-plane noise, snapshot/own machinery) is a **separate** layer applied on capture; it does **not** mutate object fields.
 - **Field-level sanitization** (stripping `status`, `metadata.managedFields`, `resourceVersion`, `uid`, `creationTimestamp`, etc.) happens **only on the restore read-path** (`internal/usecase/restore`), independent of capture.
 - The **only** field-level exception on capture is `Secret` bytes — see below.
 

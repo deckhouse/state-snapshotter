@@ -23,6 +23,8 @@ import (
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
+	"io"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -30,6 +32,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -69,6 +72,32 @@ func (r *SnapshotReconciler) deleteSnapshotManifestCaptureRequest(ctx context.Co
 	return nil
 }
 
+// buildSnapshotMachineryGVKs builds the mechanism-1 (kind-level dedup) set from the live GVK registry:
+// every registered snapshot kind and content kind. These are objects the snapshotter creates itself, so
+// they MUST be excluded from namespace capture. Returns snapshotgraphregistry.ErrGraphRegistryNotReady
+// when the registry has not been built yet (fail-closed: callers requeue instead of capturing machinery).
+func (r *SnapshotReconciler) buildSnapshotMachineryGVKs() (namespacemanifest.SnapshotMachineryGVKs, error) {
+	if r.SnapshotGraphRegistry == nil {
+		return nil, snapshotgraphregistry.ErrGraphRegistryNotReady
+	}
+	reg := r.SnapshotGraphRegistry.Current()
+	if reg == nil {
+		return nil, snapshotgraphregistry.ErrGraphRegistryNotReady
+	}
+	set := make(namespacemanifest.SnapshotMachineryGVKs)
+	for _, kind := range reg.RegisteredSnapshotKinds() {
+		gvk, err := reg.ResolveSnapshotGVK(kind)
+		if err != nil {
+			continue
+		}
+		set[gvk] = struct{}{}
+	}
+	for _, gvk := range reg.RegisteredContentGVKs() {
+		set[gvk] = struct{}{}
+	}
+	return set, nil
+}
+
 // reconcileCaptureN2a drives manifest capture via MCR->ManifestCheckpoint after root SnapshotContent is bound.
 func (r *SnapshotReconciler) reconcileCaptureN2a(
 	ctx context.Context,
@@ -106,7 +135,17 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return res, err
 	}
 
-	targets, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Client, nsSnap, content.Name)
+	if r.Discovery == nil {
+		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Discovery client is nil")
+	}
+	snapshotKinds, skErr := r.buildSnapshotMachineryGVKs()
+	if skErr != nil {
+		// Fail-closed: the live snapshot-kind registry (mechanism 1 dedup) is not built yet. Planning now
+		// would risk capturing our own snapshot machinery, so requeue without building targets.
+		logger.V(1).Info("snapshot graph registry not ready; requeue capture planning", "err", skErr)
+		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 2 * time.Second}, nil)
+	}
+	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds)
 	if err != nil {
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
@@ -171,6 +210,24 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 2 * time.Second}, nil)
 		}
 		return r.failCapture(ctx, freshParent, content, "ListFailed", fmt.Sprintf("build capture targets: %v", err))
+	}
+	// Fail-closed on an incomplete capture plan: some namespaced types could not be read (Forbidden — the
+	// transient per-namespace RoleBinding has not propagated yet — or partial discovery). Do NOT create the
+	// root MCR with a partial plan; degrade Ready transiently and requeue until the types become readable.
+	if len(unreadable) > 0 {
+		freshParent := &storagev1alpha1.Snapshot{}
+		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
+			return ctrl.Result{}, gerr
+		}
+		// Do not leave a stale root MCR built from a previous (possibly complete) plan while capture is incomplete.
+		if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
+			return ctrl.Result{}, delErr
+		}
+		msg := fmt.Sprintf("namespace capture incomplete; cannot read: %s", formatUnreadableGVRs(unreadable))
+		if err := r.setSnapshotReadyFalse(ctx, freshParent, snapshotpkg.ReasonNamespaceCaptureIncomplete, msg); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 2 * time.Second}, nil)
 	}
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
@@ -391,17 +448,52 @@ func (r *SnapshotReconciler) snapshotManifestCaptureRequestReadyForCleanup(ctx c
 	return manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.snapshotContentReader(), key, nsSnap.Status.BoundSnapshotContentName)
 }
 
+// isTransientCaptureTargetError classifies a capture-target build error as a transient apiserver/network
+// hiccup (requeue, NOT terminal ListFailed). Discovery lists ALL namespaced types (plus flaky aggregated
+// APIServers), so the window for these errors is large; treating them as terminal would stick the snapshot
+// (failCapture returns no requeue). Forbidden is NOT classified here — it is collected as unreadable and
+// handled as fail-closed transient (ReasonNamespaceCaptureIncomplete) separately.
 func isTransientCaptureTargetError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if apierrors.IsServerTimeout(err) ||
+		apierrors.IsTimeout(err) ||
+		apierrors.IsTooManyRequests(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsInternalError(err) ||
+		apierrors.IsUnexpectedServerError(err) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
 	msg := err.Error()
-	return strings.Contains(msg, "Informer to sync") || strings.Contains(msg, "failed waiting for")
+	return strings.Contains(msg, "Informer to sync") ||
+		strings.Contains(msg, "failed waiting for") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset")
 }
 
-func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
+// formatUnreadableGVRs renders unreadable GVRs for a degraded-condition message (stable order).
+func formatUnreadableGVRs(gvrs []schema.GroupVersionResource) string {
+	parts := make([]string, 0, len(gvrs))
+	for _, gvr := range gvrs {
+		parts = append(parts, gvr.String())
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
+// setSnapshotReadyFalse writes Ready=False with reason/msg on a fresh Snapshot (conflict-retried).
+// Used by pre-publish degrade/fail paths where a local Ready reason is allowed (no bound content mirror yet).
+func (r *SnapshotReconciler) setSnapshotReadyFalse(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, reason, msg string) error {
 	nsKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &storagev1alpha1.Snapshot{}
 		if err := r.Client.Get(ctx, nsKey, fresh); err != nil {
 			return err
@@ -415,7 +507,11 @@ func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1a
 			ObservedGeneration: fresh.Generation,
 		})
 		return r.Client.Status().Update(ctx, fresh)
-	}); err != nil {
+	})
+}
+
+func (r *SnapshotReconciler) failCapture(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent, reason, msg string) (ctrl.Result, error) {
+	if err := r.setSnapshotReadyFalse(ctx, nsSnap, reason, msg); err != nil {
 		return ctrl.Result{}, err
 	}
 	_ = content

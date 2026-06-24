@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,6 +56,7 @@ type SnapshotReconciler struct {
 	Client                client.Client
 	APIReader             client.Reader
 	Dynamic               dynamic.Interface
+	Discovery             discovery.DiscoveryInterface
 	Scheme                *runtime.Scheme
 	Config                *config.Options
 	Archive               *usecase.ArchiveService
@@ -92,11 +94,16 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	if err != nil {
 		return fmt.Errorf("snapshot controller: dynamic client: %w", err)
 	}
+	disco, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("snapshot controller: discovery client: %w", err)
+	}
 	logImpl, _ := liblogger.NewLogger("error")
 	r := &SnapshotReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Dynamic:   dyn,
+		Discovery: disco,
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
 		// Chunks are internal-only (no list/watch informer); use APIReader like the /manifests API server.

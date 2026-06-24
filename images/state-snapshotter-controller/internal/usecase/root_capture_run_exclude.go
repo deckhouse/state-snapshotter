@@ -25,6 +25,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -66,26 +68,46 @@ func BuildRootNamespaceManifestCaptureTargets(
 	ctx context.Context,
 	arch *ArchiveService,
 	dyn dynamic.Interface,
+	disco discovery.DiscoveryInterface,
 	c client.Reader,
 	rootNS *storagev1alpha1.Snapshot,
 	rootContentName string,
-) ([]namespacemanifest.ManifestTarget, error) {
+	snapshotKinds namespacemanifest.SnapshotMachineryGVKs,
+) ([]namespacemanifest.ManifestTarget, []schema.GroupVersionResource, error) {
 	if arch == nil {
-		return nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
+		return nil, nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
 	}
 	targetNamespace := ResolveSnapshotTargetNamespace(rootNS)
-	base, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, targetNamespace)
-	if err != nil {
-		return nil, err
-	}
+
 	rootContent := &storagev1alpha1.SnapshotContent{}
 	if err := c.Get(ctx, client.ObjectKey{Name: rootContentName}, rootContent); err != nil {
-		return nil, fmt.Errorf("get root SnapshotContent %q: %w", rootContentName, err)
+		return nil, nil, fmt.Errorf("get root SnapshotContent %q: %w", rootContentName, err)
 	}
+
+	// Subtree readiness pre-check BEFORE the expensive full-namespace discovery listing. While the root has
+	// a real subtree, descendant content nodes must publish a Ready ManifestCheckpoint before the exclude
+	// set can be computed; otherwise this returns ErrSubtreeManifestCapturePending/...Failed. Computing it
+	// first avoids listing the whole namespace on every requeue while children are still publishing MCPs.
+	hasSubtree := hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0
+	var subtreeExcl map[string]struct{}
+	if hasSubtree {
+		var err error
+		subtreeExcl, err = collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, rootContent)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds)
+	if err != nil {
+		return nil, unreadable, err
+	}
+
 	// Variant A: a residual/orphan root PVC is captured as a standalone child volume node (its own
 	// SnapshotContent + its own ManifestCheckpoint holding that PVC's manifest + its own dataRef). The root
 	// is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So the residual root-owned
@@ -95,7 +117,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 	// both the root and the child (co-ownership violation, spec §3.9.2). Every residual root PVC goes
 	// through ensureOrphanPVCVolumeSnapshots → child volume node, so dropping them here never loses a
 	// manifest.
-	exclude := make(map[string]struct{}, len(ownedPVC))
+	exclude := make(map[string]struct{}, len(ownedPVC)+len(subtreeExcl))
 	for _, t := range ownedPVC {
 		exclude[namespacemanifest.ManifestTargetDedupKey(targetNamespace, t)] = struct{}{}
 	}
@@ -103,16 +125,10 @@ func BuildRootNamespaceManifestCaptureTargets(
 	// manifest objects already captured in descendant content-node ManifestCheckpoints (E5 / INV-S0). This
 	// covers domain-owned PVC manifests (which never appear in the root residual set) and is the durable
 	// dedup once children publish their MCPs.
-	if hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0 {
-		subtreeExcl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
-		if err != nil {
-			return nil, err
-		}
-		for k := range subtreeExcl {
-			exclude[k] = struct{}{}
-		}
+	for k := range subtreeExcl {
+		exclude[k] = struct{}{}
 	}
-	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), nil
+	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), unreadable, nil
 }
 
 // hasNonVisibilityChildSnapshotRefs reports whether any child ref is a real domain/subtree child.
