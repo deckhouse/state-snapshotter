@@ -1,0 +1,65 @@
+# Snapshot Read API
+
+Normative contract: [`../spec/snapshot-aggregated-read.md`](../spec/snapshot-aggregated-read.md).
+
+## Generic Aggregated Endpoint
+
+```text
+GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/{resource}/{name}/manifests
+```
+
+Examples:
+
+```bash
+curl -s \
+  https://<api-host>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/root/manifests
+
+curl -s \
+  https://<api-host>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualmachinesnapshots/vm-1/manifests
+
+curl -s \
+  https://<api-host>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/disk-a/manifests
+```
+
+The response is `application/json`: an array of Kubernetes manifest objects from the requested snapshot subtree.
+
+## TODO: Retained Manifest Read API
+
+Current `/snapshots/{name}/manifests` route is semantically a live Snapshot route. After the Snapshot object is deleted, this route should return `404 Snapshot not found`.
+
+Retained manifests should be read through a durable content route:
+
+```text
+GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/{contentName}/manifests
+```
+
+`SnapshotContent` is the retained source of truth after Snapshot deletion. Do not rely on resolving deleted Snapshot name through root ObjectKeeper as the long-term API contract. ObjectKeeper is lifecycle/TTL infrastructure, not the retained read identifier. Current root ObjectKeeper-based retained lookup is temporary behavior / implementation detail until the durable content route exists.
+
+## MCP-Level Endpoints
+
+MCP endpoints return only one `ManifestCheckpoint` local archive:
+
+```text
+GET /api/v1/checkpoints/{mcp-name}/archive
+GET /api/v1/checkpoints/{mcp-name}/info
+GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/{mcp-name}/manifests
+```
+
+Use the generic aggregated endpoint when the expected result is the full snapshot subtree.
+
+## Errors
+
+| Case | Status |
+|------|--------|
+| Snapshot not found | `404 Not Found` |
+| `status.boundSnapshotContentName` is empty | `400 Bad Request` |
+| Resource is not a registered snapshot resource | `400 Bad Request` |
+| Cluster-scoped snapshot resource | `400 Bad Request` |
+| Duplicate object in subtree | `409 Conflict` |
+| Graph registry unavailable | `503 Service Unavailable` |
+
+Duplicate object errors include:
+
+```text
+duplicate object detected in snapshot tree
+```

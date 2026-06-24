@@ -1,0 +1,81 @@
+# Единица дедупликации и **вычисляемое** coverage (v1)
+
+**Статус:** Historical design (частично реализовано).  
+> ⚠️ This document contains historical and potentially outdated design decisions.
+> Current normative behavior is defined in:
+> - [`spec/system-spec.md`](../../spec/system-spec.md)
+> - [`design/implementation-plan.md`](../implementation-plan.md) (current state)
+
+**Базовая модель:** [`08-universal-snapshot-tree-model.md`](08-universal-snapshot-tree-model.md) (dedup не хранится; ownerRef ≠ dedup).
+
+**Не использовать:** persisted **`domainCoverage`**, аннотации-кэш, отдельные summary-поля в CR.
+
+---
+
+## 1. Два слоя dedup
+
+| Слой | Вопрос |
+|------|--------|
+| **Data dedup** | Один **PVC** — не два **VolumeSnapshot** в одном root run (**future work для demo CSI data-path**). |
+| **Resource dedup** | Один logical disk / объект **не** дважды в subtree и **не** повторно в generic root **MCP**, если манифесты/данные уже покрыты **domain MCP этого run** (см. уточнение ниже). Manifest-side часть — текущий baseline; data-side часть остаётся target-моделью до CSI path. |
+
+**Принцип:** **generic path** не повторно захватывает ресурс, уже покрытый более специфичным subtree (см. также [`04-coverage-dedup.md`](04-coverage-dedup.md)).
+
+**Уточнение (manifest / resource dedup).** Для exclude на **manifest**-стороне объект считается «уже в domain subtree» **только** если вычисление по дереву refs + API подтверждает **материализацию** в **domain MCP** этого run (или эквивалент, зафиксированный в **spec**). Промежуточное состояние «snapshot есть, MCP ещё пустой/не готов» **не** даёт основания считать ресурс полностью покрытым для агрессивного exclude — иначе generic мог бы **пропустить** нужный root capture.
+
+---
+
+## 2. Ключи «тот же ресурс» (входы **функции вычисления**, не поля CR)
+
+| Ресурс | Канонический ключ при вычислении |
+|--------|----------------------------------|
+| **PVC** | `metadata.uid` PVC (**`pvcUID`**). |
+| **Диск в demo v1** | **Упрощение модели:** логический диск отождествляется с **`pvcUID`**, потому что в v1 задано **1:1** disk ↔ PVC; при появлении multi-volume / абстракции диска ключ в **spec** меняется **отдельно**, этот ряд таблицы **не** универсальная истина. |
+| **Объект в root allowlist** | `{ apiVersion, kind, namespace, name }` или **uid**. |
+
+Инварианты **INV-D1** / **INV-D2** (два disk snapshot на один `pvcUID`; standalone vs под VM) — по-прежнему; контроль — reconcile demo + проверка API, не поле в status.
+
+---
+
+## 3. Кто что делает
+
+| Роль | Обязанность |
+|------|-------------|
+| **Demo controllers** | Создают объекты дерева и MCR; заполняют **`childrenSnapshotRefs`** на своих snapshot objects; лейблы/ownerRef для однозначной выявляемости в API. **`childrenSnapshotContentRefs`** и MCP links на common content заполняет **`SnapshotContentController`**. **Не** пишут coverage в CR. |
+| **Generic controller** | Перед root capture **вычисляет** exclude-множества, обходя дерево по **общим refs** (§4); **без** доменно-специфичных правил по типам ([`05-tree-and-graph-invariants.md`](05-tree-and-graph-invariants.md) G1–G4, **INV-REF1**). |
+
+---
+
+## 4. Алгоритм вычисления (черновик)
+
+**Граница области (INV-S0).** Dedup и exclude считаются **только в пределах дерева текущего snapshot-run** — обход от конкретного root **`Snapshot`** по **`childrenSnapshotRefs`** / **`childrenSnapshotContentRefs`**. **Не** опираться на «все похожие snapshot-объекты в namespace» или чужие деревья без явной связи через refs этого run.
+
+**Реализация (чувствительное место PR5).** Конкретный детерминированный критерий «объект **принадлежит этому run**» (лейблы с UID root snapshot, цепочка от refs, ограничения **ownerRef** между namespace и т.д.) должен быть **жёстко** зафиксирован в **`spec/system-spec.md`** и покрыт тестами; на уровне дизайна достаточно **INV-S0** и осознания, что ошибка здесь даст ложный dedup или пропуск exclude.
+
+**Шаг 3 — нормативность.** До PR5 **нельзя** считать конкретный алгоритм шага 3 **единственно верной** реализацией без фиксации в **spec** **одного** выбранного критерия принадлежности **VolumeSnapshot** (и при необходимости связанных объектов) **текущему** root run; перечисление «лейблы / ownerRef / цепочка от refs» — **пространство вариантов**, а не меню «что угодно в проде». Две реализации с разным выбором критерия обе «по черновику» могут быть **несовместимы** — норматив только **spec** + тесты.
+
+На reconcile root **`Snapshot`** (или helper в `pkg/…` без импорта demo-типов по имени, только по **динамическим** GVK из refs):
+
+1. Прочитать **`status.childrenSnapshotRefs`** (и при необходимости content refs) с **root** и **рекурсивно** обойти детей по тем же полям на дочерних snapshot’ах.
+2. Для каждого узла generic **запрашивает из API только те связанные ресурсы**, принадлежность которых к **этому** run определяется **критерием из `spec/system-spec.md`** и цепочкой от **refs** — **не** произвольный list «всех **VolumeSnapshot** в namespace» и **не** достраивание дерева из API (**INV-REF1** в [`05`](05-tree-and-graph-invariants.md)).
+3. Построить множество **`pvcUID`**, для которых уже существует доменный **VolumeSnapshot** на пути данных, **принадлежащий** этому root run, по **тому же** зафиксированному в spec критерию принадлежности (см. абзац «Шаг 3 — нормативность» выше).
+4. Построить множество **object refs**, чьи манифесты **уже материализованы** в **domain MCP** этого run (критерий «материализовано» — в **spec**; **не** «доменный snapshot существует», если MCP ещё не подтверждён шагом вычисления).
+5. Применить (3)–(4) как **exclude** при планировании generic root MCR / volume path.
+
+**INV-C1.** Результат **не** сериализуется в CR; на каждом reconcile **пересчитывается** из API.
+
+**INV-P1 (data / VS).** Generic **не** создаёт второй **VolumeSnapshot** для **`pvcUID`**, если вычисление шага (3) уже нашло доменный VS для этого root run по нормативному критерию spec.
+
+**INV-P1b (manifest / MCP).** Generic **не** включает объект в **root** manifest capture (план/MCR), если вычисление шага (4) уже подтвердило, что объект **покрыт domain MCP** этого run по критерию spec — симметрия к **INV-P1** на data-стороне.
+
+**INV-E1 (fail-closed).** Если из-за неполных/битых refs, частично недоступного API, отсутствующего или нечитаемого MCP и т.п. **нельзя надёжно** построить множества (3)–(4), generic **не** принимает решение о dedup/exclude по **догадке** или по обрезанным данным: поведение **fail-closed** (не расширять exclude за пределы доказуемо вычисленного; блокировка/деградация этапа root capture, **`Ready`**, **`reason`** — нормативно в **spec** + согласование с [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md)). Dedup — **не** место для silent best-effort, иначе возможен лишний захват.
+
+**INV-C2.** Dedup/coverage **ничего** не хранят в CR: удаление chunk / смена состояния MCP **не** требует «очистки» вычислительных полей — следующий reconcile **пересчитает** exclude из API.
+
+**INV-C3.** Деградация **`Ready`** при поломке MCP/chunk и отображение причины пользователю — **отдельно**, в [`07-ready-delete-matrix.md`](07-ready-delete-matrix.md); с **INV-C2** **не** смешивать (это про готовность, а не про хранение dedup).
+
+---
+
+## 5. ownerRef
+
+Не источник dedup и не источник дерева — см. **[`08` часть B](08-universal-snapshot-tree-model.md#часть-b-роль-ownerreferences)**.

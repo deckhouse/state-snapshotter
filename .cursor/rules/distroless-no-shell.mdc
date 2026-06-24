@@ -1,0 +1,14 @@
+---
+description: Enforce distroless runtime images and forbid shell entrypoints in Pods/Jobs.
+alwaysApply: true
+---
+
+# Distroless Runtime Policy
+
+- Runtime containers for controllers/helpers/jobs MUST be compatible with distroless images.
+- Do NOT use shell-based entrypoints or wrappers (`/bin/sh`, `bash`, `sh -c`) in Pod/Job specs.
+- Container commands MUST invoke binaries directly (for example, the controller binary built from `images/state-snapshotter-controller/cmd`).
+- If multi-step behavior is needed, implement it in Go/helper binaries, not inline shell scripts.
+- For **state-snapshotter** module images (werf-built controller/webhook), NEVER assume a shell exists: do not use `/bin/sh -lc ...` in manifests.
+- In ad-hoc debug/e2e probes: use direct binary invocation with explicit `command`/`args`; if shell scripting is required, use a shell-friendly utility image (e.g. BusyBox), not the distroless controller image.
+- Generated demo manifests: do NOT use shell entrypoints for runtime containers; keep them distroless-compatible.

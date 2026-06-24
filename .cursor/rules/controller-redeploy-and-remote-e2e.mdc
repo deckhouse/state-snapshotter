@@ -1,0 +1,12 @@
+---
+description: Redeploy gate, test locations under images/state-snapshotter-controller, lint, local envtest vs cluster smoke, kubeconfig.
+alwaysApply: true
+---
+
+# Controller redeploy and remote e2e (single source of truth)
+
+- **Where to run tests:** Orchestration, paths, and when to use cluster smoke are defined in `docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`. This repository keeps integration and envtest-based e2e under **`images/state-snapshotter-controller/test/`** (there is no top-level `tests/e2e-go`). Remote/cluster validation applies when that doc or CI requires it.
+- **Before redeploy:** 1) Run unit tests locally (`cd images/state-snapshotter-controller && go test ./pkg/... ./internal/...`). 2) Run linter (`./go-lint.sh` from repo root with `GO_BUILD_TAGS` as in CI — **go-lint-script.mdc**; commit before a full lint run when required). 3) If controller code changed: commit and push (see controller-redeploy-requires-commit-and-push), then redeploy and wait for rollout success.
+- **After redeploy:** Run integration/e2e or cluster smoke as required by `e2e-testing-strategy.md` / CI.
+- **Local vs remote:** Unit and envtest — local under `images/state-snapshotter-controller`. Cluster smoke or module-specific checks — remote when applicable.
+- **Kubeconfig:** Assume standard location on developer machine (~/.kube/config or KUBECONFIG).

@@ -18,21 +18,19 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	goruntime "runtime"
-	"strings"
+	"runtime/debug"
 	"syscall"
-	"time"
 
 	v1 "k8s.io/api/core/v1"
 	sv1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,17 +41,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumesnapshotimport"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 var (
 	resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
+		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (Snapshot, SnapshotContent, ...)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
 		extv1.AddToScheme,
@@ -62,17 +67,15 @@ var (
 	}
 
 	// API server flags
-	apiAddr             string
-	apiTLSCertFile      string
-	apiTLSKeyFile       string
-	apiAllowedClientCNs string
+	apiAddr        string
+	apiTLSCertFile string
+	apiTLSKeyFile  string
 )
 
 func init() {
 	flag.StringVar(&apiAddr, "api-addr", ":8443", "Address for API server to listen on")
 	flag.StringVar(&apiTLSCertFile, "api-tls-cert-file", "", "Path to TLS certificate file for API server")
 	flag.StringVar(&apiTLSKeyFile, "api-tls-private-key-file", "", "Path to TLS private key file for API server")
-	flag.StringVar(&apiAllowedClientCNs, "api-allowed-client-cns", "system:kube-apiserver,kubernetes,front-proxy-client", "Comma-separated list of allowed client certificate CNs for mTLS")
 }
 
 func main() {
@@ -104,6 +107,23 @@ func main() {
 
 	log.Info(fmt.Sprintf("[main] Go Version:%s ", goruntime.Version()))
 	log.Info(fmt.Sprintf("[main] OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
+	if buildInfo, ok := debug.ReadBuildInfo(); ok {
+		log.Info(fmt.Sprintf("[main] BuildInfo: module=%s version=%s", buildInfo.Main.Path, buildInfo.Main.Version))
+		var vcsRevision, vcsTime, vcsModified string
+		for _, setting := range buildInfo.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				vcsRevision = setting.Value
+			case "vcs.time":
+				vcsTime = setting.Value
+			case "vcs.modified":
+				vcsModified = setting.Value
+			}
+		}
+		if vcsRevision != "" || vcsTime != "" || vcsModified != "" {
+			log.Info(fmt.Sprintf("[main] VCS: revision=%s time=%s modified=%s", vcsRevision, vcsTime, vcsModified))
+		}
+	}
 
 	log.Info("[main] CfgParams has been successfully created")
 	log.Info(fmt.Sprintf("[main] %s = %s", config.LogLevelEnvName, cfgParams.Loglevel))
@@ -132,7 +152,8 @@ func main() {
 	// Create full scheme for API direct client (no informers)
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
-	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group
+	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (Snapshot, SnapshotContent)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
 	// Create controller manager with full scheme (for informers)
@@ -156,6 +177,16 @@ func main() {
 	}
 	log.Info("[main] successfully created kubernetes manager")
 
+	graphRegProvider, err := snapshotgraphregistry.NewProvider(cfgParams, mgr.GetRESTMapper(), mgr.GetAPIReader(), ctrl.Log.WithName("snapshot-graph-registry"))
+	if err != nil {
+		log.Error(err, "[main] snapshot graph registry provider")
+		cancel()
+		os.Exit(1)
+	}
+	if err := graphRegProvider.Refresh(ctx); err != nil {
+		log.Warning("initial snapshot graph registry refresh failed (generic graph may be empty until CSD reconcile)", "error", err)
+	}
+
 	// Add controllers
 	if err := controllers.AddManifestCheckpointControllerToManager(mgr, log, cfgParams); err != nil {
 		log.Error(err, "Failed to add ManifestCheckpointController to manager")
@@ -163,6 +194,134 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("ManifestCheckpointController added to manager")
+
+	if err := controllers.AddSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
+		log.Error(err, "Failed to add NamespaceGenericSnapshotBinderController to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("NamespaceGenericSnapshotBinderController added to manager")
+
+	// Demo dedicated controllers (DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot) run in the
+	// separate domain-controller pod/binary, not in core (commit "core-remove-demo"). Core no longer
+	// reconciles demo CRs nor serves an in-process restore transform: it owns SnapshotContent for the
+	// demo kinds (see the unified runtime Syncer wiring below) and delegates demo restore subtrees to
+	// the domain aggregated apiserver (see the domain restore client passed to api.NewServer).
+
+	contentController, err := controllers.NewSnapshotContentController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		mgr.GetRESTMapper(),
+		cfgParams,
+		[]schema.GroupVersionKind{unifiedbootstrap.CommonSnapshotContentGVK()},
+	)
+	if err != nil {
+		log.Error(err, "Failed to create SnapshotContentController")
+		cancel()
+		os.Exit(1)
+	}
+	if err := contentController.SetupWithManager(mgr); err != nil {
+		log.Error(err, "Failed to setup SnapshotContentController with manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", 1)
+
+	// Unified runtime is always on in v0; bootstrap list comes from env defaults or STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
+	csdBootstrapClient, err := client.New(kConfig, client.Options{
+		Scheme: scheme,
+		Mapper: mgr.GetRESTMapper(),
+	})
+	if err != nil {
+		log.Error(err, "[main] unable to create client for CSD→unified GVK bootstrap")
+		cancel()
+		os.Exit(1)
+	}
+	csdPairs, err := csdregistry.EligibleUnifiedGVKPairs(ctx, csdBootstrapClient)
+	if err != nil {
+		log.Warning("CSD list/parse for unified GVK bootstrap failed; using bootstrap-only merge", "error", err)
+		csdPairs = nil
+	} else {
+		log.Info("[main] CSD-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(csdPairs))
+	}
+	bootstrapPairs := cfgParams.EffectiveUnifiedBootstrapPairs()
+	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs), "bootstrapMode", cfgParams.UnifiedBootstrapMode)
+	mergedPairs := unifiedbootstrap.MergeBootstrapAndCSDPairs(bootstrapPairs, csdPairs)
+	log.Info("[main] unified GVK pairs after merge (bootstrap + CSD)", "count", len(mergedPairs))
+	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+		mgr.GetRESTMapper(),
+		mergedPairs,
+		ctrl.Log.WithName("unified-bootstrap"),
+	)
+	if len(snapshotGVKs) == 0 {
+		log.Info("[main] no unified snapshot CRDs found in API; unified snapshot controllers run with zero watches (manifest/MCR and other controllers continue)")
+	} else {
+		log.Info("[main] unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
+	}
+
+	genericSnapshotGVKs, genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
+	for _, snapshotGVK := range snapshotGVKs {
+		if err := contentController.AddSnapshotStatusWatch(mgr, snapshotGVK); err != nil {
+			log.Error(err, "Failed to setup SnapshotContentController snapshot status watch", "snapshotGVK", snapshotGVK.String())
+			cancel()
+			os.Exit(1)
+		}
+	}
+
+	snapshotController, err := controllers.NewGenericSnapshotBinderController(
+		mgr.GetClient(),
+		mgr.GetAPIReader(),
+		mgr.GetScheme(),
+		cfgParams,
+		nil,
+	)
+	if err != nil {
+		log.Error(err, "Failed to create GenericSnapshotBinderController")
+		cancel()
+		os.Exit(1)
+	}
+	for i := range genericSnapshotGVKs {
+		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
+			log.Error(err, "Failed to setup GenericSnapshotBinderController watch", "snapshotGVK", genericSnapshotGVKs[i].String(), "snapshotContentGVK", genericContentGVKs[i].String())
+			cancel()
+			os.Exit(1)
+		}
+	}
+	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
+
+	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.dataImportName -> DataImport).
+	// The forked snapshot-controller skips these; this common controller materializes their SnapshotContent
+	// and writes the binding (extended boundSnapshotContentName + legacy boundVolumeSnapshotContentName/readyToUse).
+	// Self-guards by RESTMapping: a not-yet-installed VolumeSnapshot CRD degrades to "no controller".
+	if err := volumesnapshotimport.AddToManager(mgr); err != nil {
+		log.Error(err, "Failed to add VolumeSnapshot import binder to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("VolumeSnapshot import binder added to manager")
+
+	// No dedicated controller activators in core: the demo dedicated planning controllers run in the
+	// domain-controller pod. The Syncer still drives generic Snapshot/SnapshotContent watches AND the
+	// generic binder's ownership of domain-capture SnapshotContent (demo kinds): with no local
+	// activator wired, the binder owns that content directly (its unstructured informer needs no field
+	// index, so there is no informer-ordering hazard). See unifiedruntime.Syncer.Sync.
+	unifiedSync := unifiedruntime.NewSyncer(
+		mgr,
+		ctrl.Log,
+		cfgParams.EffectiveUnifiedBootstrapPairs(),
+		mgr.GetAPIReader(),
+		snapshotController,
+		contentController,
+		nil,
+	)
+
+	if err := controllers.AddCustomSnapshotDefinitionControllerToManager(mgr, log, cfgParams, unifiedSync.Sync, graphRegProvider.Refresh); err != nil {
+		log.Error(err, "Failed to add CustomSnapshotDefinition reconciler to manager")
+		cancel()
+		os.Exit(1)
+	}
+	log.Info("CustomSnapshotDefinition reconciler added to manager")
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
@@ -207,71 +366,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read front-proxy CA from extension-apiserver-authentication ConfigMap
-	// This CA is used to verify client certificates from kube-apiserver
-	// mTLS is mandatory - server will not start if CA cannot be loaded
-	var mTLSCACert []byte
-	cm := &v1.ConfigMap{}
-	err = directClient.Get(ctx, client.ObjectKey{
-		Namespace: "kube-system",
-		Name:      "extension-apiserver-authentication",
-	}, cm)
+	// The aggregated apiserver's authentication (front-proxy requestheader + TokenReview) and
+	// authorization (SubjectAccessReview) are delegated to genericapiserver: it reads the front-proxy CA
+	// + allowed-names from the extension-apiserver-authentication ConfigMap itself (via the
+	// extension-apiserver-authentication-reader Role) and validates the kube-apiserver proxy client cert.
+	// No manual ConfigMap read or CN allowlist is needed here anymore.
+
+	// Domain restore delegation: core orchestrates restore over the run tree and, on a domain snapshot
+	// subtree, calls the domain controller's aggregated apiserver
+	// (manifests-with-data-restoration) through the kube-apiserver aggregation layer (SA token). Until
+	// the domain APIService is registered (deploy commit), this path simply errors for domain subtrees;
+	// pure-generic restores are unaffected.
+	domainRestoreClient, err := api.NewDomainRestoreClient(kConfig, mapper, log)
 	if err != nil {
-		log.Error(err, "[main] Failed to read extension-apiserver-authentication ConfigMap, mTLS is required - server cannot start")
-		cancel() // Ensure cleanup before exit
+		log.Error(err, "[main] unable to create domain restore delegation client")
+		cancel()
 		os.Exit(1)
 	}
 
-	caData, ok := cm.Data["requestheader-client-ca-file"]
-	if !ok || caData == "" {
-		log.Error(nil, "[main] requestheader-client-ca-file not found in ConfigMap, mTLS is required - server cannot start")
-		cancel() // Ensure cleanup before exit
-		os.Exit(1)
-	}
-
-	mTLSCACert = []byte(caData)
-
-	// Parse and log CA certificate details for debugging
-	block, _ := pem.Decode(mTLSCACert)
-	if block != nil && block.Type == "CERTIFICATE" {
-		caCert, err := x509.ParseCertificate(block.Bytes)
-		if err == nil {
-			log.Info("[main] Successfully loaded front-proxy CA from extension-apiserver-authentication ConfigMap",
-				"ca_subject", caCert.Subject.String(),
-				"ca_issuer", caCert.Issuer.String(),
-				"ca_serial", caCert.SerialNumber.String(),
-				"ca_not_before", caCert.NotBefore.Format(time.RFC3339),
-				"ca_not_after", caCert.NotAfter.Format(time.RFC3339),
-				"ca_is_ca", caCert.IsCA,
-				"ca_key_usage", fmt.Sprintf("%d", caCert.KeyUsage),
-			)
-		} else {
-			log.Info("[main] Successfully loaded front-proxy CA (failed to parse for logging)", "error", err)
-		}
-	} else {
-		log.Info("[main] Successfully loaded front-proxy CA (failed to decode PEM for logging)")
-	}
-
-	// Create API server with direct client (no informer cache)
-	// ArchiveService will use directClient for all CRD operations
-	// Parse allowed client CNs
-	allowedCNsList := []string{}
-	if apiAllowedClientCNs != "" {
-		allowedCNs := strings.Split(apiAllowedClientCNs, ",")
-		for _, cn := range allowedCNs {
-			cn = strings.TrimSpace(cn)
-			if cn != "" {
-				allowedCNsList = append(allowedCNsList, cn)
-			}
-		}
-	}
-
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, apiTLSCertFile, apiTLSKeyFile, mTLSCACert, allowedCNsList)
-	if apiServer == nil {
-		log.Error(nil, "[main] Failed to create API server (mTLS configuration failed)")
-		cancel() // Ensure cleanup before exit
-		os.Exit(1)
-	}
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsDomainCaptureSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
 
 	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
 

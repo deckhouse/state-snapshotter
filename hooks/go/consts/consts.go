@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,6 +32,14 @@ const (
 	// This can be different from APIServerCertCN for better naming clarity
 	APIServerSecretName = "state-snapshotter-tls-certs"
 
+	// DomainAPIServerCertCN is the Common Name (and Service name) of the domain controller's aggregated
+	// API server serving certificate. Must match the Service name in templates/domain-controller/service.yaml.
+	DomainAPIServerCertCN = "domain-controller"
+
+	// DomainAPIServerSecretName is the Secret holding the domain aggregated API server's serving cert.
+	// Distinct from APIServerSecretName so the core and domain pods each mount only their own key.
+	DomainAPIServerSecretName = "state-snapshotter-domain-tls-certs"
+
 	ModulePluralName = "state-snapshotter"
 
 	// WebhookCertCN is the Common Name for webhook certificate
@@ -39,4 +47,62 @@ const (
 
 	// WebhookSecretName is the name of the Kubernetes Secret containing webhook TLS certificates
 	WebhookSecretName = "webhooks-https-certs"
+
+	// ControllerSAName is the ServiceAccount name of the state-snapshotter (core) controller.
+	ControllerSAName = "controller"
+
+	// DomainSAName is the ServiceAccount name of the domain (demo) controller pod. The 030-domain-rbac
+	// hook binds the dynamic domain GVR rights (source + snapshot kinds) to this SA, not the core SA.
+	DomainSAName = "domain-controller"
+
+	// DomainClusterRoleName is the aggregated ClusterRole the 030-domain-rbac hook binds to the DOMAIN SA:
+	// dynamic source/snapshot GVR rights (incl. /status, /finalizers) plus get on core's per-CR
+	// /manifests-download subresource (so the domain pod can fetch each node's own base manifests from the
+	// core apiserver).
+	DomainClusterRoleName = "d8:state-snapshotter:controller:domain"
+
+	// DomainCoreReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the CORE SA for
+	// the dynamic demo GVRs: read + create + patch + status-write on the snapshot GVRs (the core
+	// SnapshotReconciler is the parent-graph planner — it creates one child snapshot per source object and
+	// patches its ownerRef back to the root Snapshot), get + list on the source GVRs (list to enumerate
+	// sources during planning, get to capture each target's manifest), plus
+	// get on the domain /manifests-with-data-restoration aggregated subresource (so core can delegate
+	// restore). These names are domain-specific (from CSD), so they cannot live in the static,
+	// domain-agnostic core RBAC.
+	DomainCoreReadClusterRoleName = "d8:state-snapshotter:controller:domain-read"
+
+	// DataExportModuleNamespace is the namespace of the storage-volume-data-manager module, whose
+	// DataExport controller resolves snapshot exports generically (no domain types compiled in).
+	DataExportModuleNamespace = "d8-storage-volume-data-manager"
+
+	// DataExportControllerSAName is the ServiceAccount name of the storage-volume-data-manager controller
+	// (the DataExport/DataImport reconciler). It runs in DataExportModuleNamespace.
+	DataExportControllerSAName = "controller"
+
+	// DomainDataExportReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the
+	// storage-volume-data-manager DataExport controller SA: read on the dynamic demo snapshot GVRs. The
+	// DataExport controller resolves a snapshot export by GETting the snapshot leaf to read
+	// status.boundSnapshotContentName (then follows it to the cluster-scoped SnapshotContent). These names
+	// are domain-specific (from CSD), so they cannot live in that module's static, domain-agnostic RBAC.
+	DomainDataExportReadClusterRoleName = "d8:state-snapshotter:data-export:domain-read"
+
+	// CoreSubresourcesGroup is the core controller's aggregated subresources API group. The domain pod
+	// fetches each node's own base manifests from "<snapshotResource>/manifests-download" in this group.
+	CoreSubresourcesGroup = "subresources.state-snapshotter.deckhouse.io"
+
+	// DomainSubresourcesGroupPrefix is prepended to a domain snapshot's API group to address its
+	// aggregated subresources group (e.g. "demo.state-snapshotter.deckhouse.io" ->
+	// "subresources.demo.state-snapshotter.deckhouse.io"). Keep in sync with internal/api and
+	// internal/domainapi.
+	DomainSubresourcesGroupPrefix = "subresources."
+
+	// CSD condition types referenced by the domain-RBAC hook.
+	// Accepted is owned by the CSD reconciler; RBACReady is owned exclusively by this hook.
+	CSDConditionAccepted  = "Accepted"
+	CSDConditionRBACReady = "RBACReady"
+
+	// RBACReady condition reasons per ADR snapshot-rework/2026-01-23-unified-snapshots-registry.md §2.
+	RBACReadyReasonPending     = "Pending"     // snapshot GVR not yet resolvable via discovery
+	RBACReadyReasonApplyFailed = "ApplyFailed" // ClusterRole/Binding creation or update failed
+	RBACReadyReasonApplied     = "Applied"     // RBAC successfully applied for all snapshot GVRs
 )

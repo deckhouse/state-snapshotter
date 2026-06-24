@@ -1,32 +1,36 @@
 #!/bin/bash
 
-# Copyright 2025 Flant JSC
+# Copyright 2026 Flant JSC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# run from repository root
+# Run from any directory; paths are resolved from the repository root.
 
 set -euo pipefail
 
-CONTROLLER_GEN=controller-gen
-HEADER=./hack/boilerplate.txt
+# Keep in sync with api/README.md and CRD annotation controller-gen.kubebuilder.io/version.
+CONTROLLER_GEN_VERSION=v0.18.0
+CONTROLLER_GEN_BIN="$(go env GOPATH)/bin/controller-gen"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+API_PATHS="${ROOT_DIR}/api/v1alpha1;${ROOT_DIR}/api/storage/v1alpha1;${ROOT_DIR}/api/demo/v1alpha1"
 
-if ! command -v "${CONTROLLER_GEN}" &>/dev/null; then
-  echo "controller-gen not found. Installing..."
-  go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0
-  export PATH="$(go env GOPATH)/bin:$PATH"
-fi
+echo "Ensuring controller-gen ${CONTROLLER_GEN_VERSION}..."
+go install "sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}"
 
-${CONTROLLER_GEN} object:headerFile="${HEADER}" paths=./api/v1alpha1
+echo "Generating deepcopy code..."
+"${CONTROLLER_GEN_BIN}" object:headerFile="${ROOT_DIR}/hack/boilerplate.txt" paths="${API_PATHS}"
 
-${CONTROLLER_GEN} crd:crdVersions=v1 output:crd:dir=./crds paths=./api/v1alpha1
+echo "Generating CRD manifests..."
+"${CONTROLLER_GEN_BIN}" crd:crdVersions=v1 output:crd:dir="${ROOT_DIR}/crds" paths="${API_PATHS}"
+
+echo "Deepcopy and CRD generation complete."

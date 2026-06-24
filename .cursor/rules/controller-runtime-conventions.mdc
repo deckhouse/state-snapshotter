@@ -1,0 +1,41 @@
+---
+description: Controller runtime conventions for this repo: enum values as domain constants, CRD status uses conditions only, and VolumeSnapshot uses annotation phases. Apply when editing controllers or domain constants. Apply when editing relevant files, and when reasoning/planning/answering questions where this rule could influence code decisions (even if matching files are not currently open).
+globs: images/state-snapshotter-controller/internal/controllers/**/*.go,images/state-snapshotter-controller/pkg/snapshot/**/*.go
+alwaysApply: false
+---
+
+- Enum-like values (MUST):
+  - All string enum values (e.g., condition Types/Reasons, phase/status strings, finalizers) MUST be constants in `pkg/snapshot` (or a dedicated domain package) — not scattered string literals.
+  - Do NOT use string literals for these values in controllers or tests.
+
+- CRD status policy (MUST):
+  - For our CRD statuses, use conditions only (no custom phase/status strings).
+
+- This repo’s first-class resources (MUST):
+  - Unified **Snapshot** / **SnapshotContent** (unstructured) and **ManifestCheckpoint** / MCR — use `pkg/snapshot` condition and finalizer constants; follow `docs/architecture/controller-pattern.md`.
+
+- VolumeSnapshot state (MUST) — when code touches CSI **VolumeSnapshot**:
+  - Keep state in annotations (phase strings).
+  - Do NOT write custom state into `VolumeSnapshot.status`.
+  - Do NOT emulate conditions for VolumeSnapshot (no `.../condition-*` keys, etc.).
+
+- VolumeSnapshot metadata writes (MUST):
+  - Update only metadata (labels/annotations/finalizers) via
+    `client.Patch(ctx, obj, client.MergeFrom(base))` where `base := obj.DeepCopy()`.
+  - Do NOT use `Update()` for VolumeSnapshot unless a comment explains why it is safe.
+
+- System metadata precedence (MUST):
+  - System labels/annotations are authoritative.
+  - User templates MUST NOT override them; on conflict, system wins.
+
+- Label/value limits (MUST):
+  - Any label value that can exceed limits MUST be shortened via a deterministic hash.
+  - Same for VS names (<=253): use hashing when needed.
+
+- Events on failure (MUST):
+  - When setting a Failed terminal condition on **our** CRDs, emit a Warning Event with a short reason (and useful object refs / selectors when applicable).
+  - Running events are optional.
+
+- Intent and heavy path (MUST):
+  - Invalid or not-yet-ready preconditions MUST NOT start heavy path; see **intent-classification** and `spec/system-spec.md`.
+  - When integrating **CSI VolumeSnapshot**: restore terminal success follows bound user VolumeSnapshot state, not annotations alone; `readyToUse` may gate work but is not a long-lived “phase” field we own.

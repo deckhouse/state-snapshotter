@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -100,8 +100,10 @@ func CleanObjectForSnapshot(u *unstructured.Unstructured, excludeAnnotations []s
 		if shouldExclude {
 			continue
 		}
-		// Keep only backup.deckhouse.io annotations
-		if strings.HasPrefix(k, "backup.deckhouse.io/") {
+		// Keep only backup.deckhouse.io / state-snapshotter.deckhouse.io annotations.
+		// NOTE: this is the legacy namespace-archive cleaner (removed in C9); the snapshot-capture path
+		// no longer calls CleanObjectForSnapshot, so opt-in secret markers there survive verbatim.
+		if strings.HasPrefix(k, "backup.deckhouse.io/") || strings.HasPrefix(k, "state-snapshotter.deckhouse.io/") {
 			keepAnn[k] = v
 		}
 	}
@@ -122,8 +124,8 @@ func CleanObjectForSnapshot(u *unstructured.Unstructured, excludeAnnotations []s
 	// Kind-specific cleanup
 	switch kind {
 	case "Secret":
-		// Do not include secret data unless explicitly requested
-		if ann == nil || ann["backup.deckhouse.io/include-secret-data"] != "true" {
+		// Do not include secret data unless explicitly requested (secure-by-default opt-in).
+		if ann == nil || ann[AnnotationIncludeSecretData] != "true" {
 			unstructured.RemoveNestedField(out.Object, "data")
 			unstructured.RemoveNestedField(out.Object, "stringData")
 		}
@@ -151,5 +153,28 @@ func CleanObjectForSnapshot(u *unstructured.Unstructured, excludeAnnotations []s
 		return nil
 	}
 
+	return out
+}
+
+// SanitizeObjectForManifestCheckpoint removes sensitive Secret fields before checkpoint storage.
+// Non-Secret objects are returned unchanged as a copy.
+func SanitizeObjectForManifestCheckpoint(u *unstructured.Unstructured) *unstructured.Unstructured {
+	if u == nil {
+		return nil
+	}
+	out := u.DeepCopy()
+	if out.GetKind() != "Secret" {
+		return out
+	}
+	secretType, found, _ := unstructured.NestedString(out.Object, "type")
+	if !found || secretType != "Opaque" {
+		return nil
+	}
+	annotations := out.GetAnnotations()
+	if annotations[AnnotationIncludeSecretData] == "true" {
+		return out
+	}
+	unstructured.RemoveNestedField(out.Object, "data")
+	unstructured.RemoveNestedField(out.Object, "stringData")
 	return out
 }

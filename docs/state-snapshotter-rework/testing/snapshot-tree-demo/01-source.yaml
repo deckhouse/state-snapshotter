@@ -1,0 +1,86 @@
+# Source objects for the snapshot-tree demo.
+# Namespace + ConfigMap (manifest leg) + PVCs that exercise BOTH data-capture paths:
+#   - demo-pvc        : standalone/orphan PVC at the namespace root -> captured via a CSI
+#                       VolumeSnapshot (VS) visibility leaf (root orphan-PVC path).
+#   - disk-vm         : nested under DemoVirtualMachine/vm-1 (spec.virtualDiskName)
+#                       -> domain-controller materializes demo-pvc-disk (scratch) from
+#                          DemoVirtualDisk.spec.{size,storageClassName,volumeMode};
+#                       capture uses the domain VolumeCaptureRequest (VCR) path.
+# demo-domain inventory: one VM (owns disk-vm), one disk linked from the VM, one standalone Disk.
+# The hierarchy references point DOWN: VM.spec.virtualDiskName -> Disk,
+# Disk.spec.persistentVolumeClaimName -> PVC. ownerReferences are lifecycle metadata only and are
+# not used as snapshot-tree topology.
+#
+# Restore-from-snapshot disks: create a DemoVirtualDisk with spec.dataSource -> DemoVirtualDiskSnapshot
+# (same namespace). The domain-controller resolves bound SnapshotContent.status.dataRef and creates a
+# VolumeRestoreRequest directly (demo path); PVC adoption + VRR cleanup are automatic.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: snapshot-demo-tree
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-snapshot-cm
+  namespace: snapshot-demo-tree
+data:
+  demo: tree
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: demo-pvc
+  namespace: snapshot-demo-tree
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-thin
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bind-demo-pvc
+  namespace: snapshot-demo-tree
+spec:
+  restartPolicy: Never
+  containers:
+    - name: hold
+      image: registry.k8s.io/pause:3.9
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: demo-pvc
+---
+apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+kind: DemoVirtualMachine
+metadata:
+  name: vm-1
+  namespace: snapshot-demo-tree
+spec:
+  # Parent -> child link points DOWN the hierarchy (VM -> Disk).
+  virtualDiskName: disk-vm
+---
+apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+kind: DemoVirtualDisk
+metadata:
+  name: disk-vm
+  namespace: snapshot-demo-tree
+spec:
+  # Nested PVC -> materialized by domain-controller (scratch), then captured via VCR.
+  persistentVolumeClaimName: demo-pvc-disk
+  size: 1Gi
+  storageClassName: local-thin
+  volumeMode: Filesystem
+---
+apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+kind: DemoVirtualDisk
+metadata:
+  name: disk-standalone
+  namespace: snapshot-demo-tree
+spec: {}

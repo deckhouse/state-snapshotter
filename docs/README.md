@@ -27,6 +27,10 @@ The `state-snapshotter` module is essential for:
 - **Audit and Compliance**: Maintain historical records of resource states for audit purposes
 - **Integration with Other Modules**: Used by other Deckhouse modules (e.g., `virtualization`, `backup`) to capture and restore application state
 
+### Contributor docs (roadmap & spec)
+
+Internal design roadmap, normative excerpts, test matrix, and high-level status live under **[`docs/state-snapshotter-rework/`](state-snapshotter-rework/)** (same layout as shared Deckhouse Cursor rules). Long-form ADR drafts remain in **`snapshot-rework/`** at the repository root.
+
 ### Why you should NOT disable it
 
 ⚠️ **Important**: The `state-snapshotter` module should **NOT** be disabled because:

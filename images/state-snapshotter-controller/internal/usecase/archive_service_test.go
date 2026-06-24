@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -1481,12 +1481,10 @@ func TestDecodeChunkDataWithChecksum_KeyValueFormat(t *testing.T) {
 	}
 }
 
-// TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields tests that status and managedFields are filtered from returned objects.
-// Verifies:
-// - status field is removed from all objects
-// - managedFields is removed from metadata of all objects
-// - Other fields remain intact
-func TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields(t *testing.T) {
+// TestGetArchiveFromCheckpoint_PreservesStatusAndManagedFields tests that status and managedFields
+// are returned verbatim from MCP chunks (raw archive read). Manifest cleaning for apply-ready restore
+// output is performed only by the restore sanitizer (manifests-with-data-restoration).
+func TestGetArchiveFromCheckpoint_PreservesStatusAndManagedFields(t *testing.T) {
 	service, client := setupTestService()
 
 	// Create objects with status and managedFields
@@ -1554,7 +1552,7 @@ func TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields(t *testing.T) {
 		t.Fatalf("Failed to get archive: %v", err)
 	}
 
-	// Parse JSON to verify fields are filtered
+	// Parse JSON to verify fields are preserved verbatim
 	var result []interface{}
 	if err := json.Unmarshal(archiveData, &result); err != nil {
 		t.Fatalf("Failed to parse archive JSON: %v", err)
@@ -1570,19 +1568,14 @@ func TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields(t *testing.T) {
 		t.Fatalf("First object is not a map, got: %T", result[0])
 	}
 
-	// Verify status is removed
-	if _, hasStatus := obj1["status"]; hasStatus {
-		t.Error("status field should be removed from ConfigMap, but it's still present")
-		t.Logf("Object 1: %+v", obj1)
+	if status, hasStatus := obj1["status"].(map[string]interface{}); !hasStatus || status["phase"] != "Active" {
+		t.Errorf("status field should be preserved on ConfigMap, got status=%v", obj1["status"])
 	}
 
-	// Verify managedFields is removed from metadata
 	if metadata, ok := obj1["metadata"].(map[string]interface{}); ok {
-		if _, hasManagedFields := metadata["managedFields"]; hasManagedFields {
-			t.Error("managedFields should be removed from ConfigMap metadata, but it's still present")
-			t.Logf("Metadata: %+v", metadata)
+		if _, hasManagedFields := metadata["managedFields"]; !hasManagedFields {
+			t.Error("managedFields should be preserved in ConfigMap metadata")
 		}
-		// Verify other metadata fields are still present
 		if name, ok := metadata["name"].(string); !ok || name != "test-cm" {
 			t.Errorf("Expected metadata.name='test-cm', got: %v", metadata["name"])
 		}
@@ -1590,7 +1583,6 @@ func TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields(t *testing.T) {
 		t.Error("Metadata is not a map")
 	}
 
-	// Verify other fields are still present
 	if _, hasData := obj1["data"]; !hasData {
 		t.Error("data field should still be present in ConfigMap")
 	}
@@ -1604,19 +1596,14 @@ func TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields(t *testing.T) {
 		t.Fatalf("Second object is not a map, got: %T", result[1])
 	}
 
-	// Verify status is removed
-	if _, hasStatus := obj2["status"]; hasStatus {
-		t.Error("status field should be removed from Secret, but it's still present")
-		t.Logf("Object 2: %+v", obj2)
+	if status, hasStatus := obj2["status"].(map[string]interface{}); !hasStatus || status["observedGeneration"] != float64(1) {
+		t.Errorf("status field should be preserved on Secret, got status=%v", obj2["status"])
 	}
 
-	// Verify managedFields is removed from metadata
 	if metadata, ok := obj2["metadata"].(map[string]interface{}); ok {
-		if _, hasManagedFields := metadata["managedFields"]; hasManagedFields {
-			t.Error("managedFields should be removed from Secret metadata, but it's still present")
-			t.Logf("Metadata: %+v", metadata)
+		if _, hasManagedFields := metadata["managedFields"]; !hasManagedFields {
+			t.Error("managedFields should be preserved in Secret metadata")
 		}
-		// Verify other metadata fields are still present
 		if name, ok := metadata["name"].(string); !ok || name != "test-secret" {
 			t.Errorf("Expected metadata.name='test-secret', got: %v", metadata["name"])
 		}
@@ -1624,7 +1611,6 @@ func TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields(t *testing.T) {
 		t.Error("Metadata is not a map")
 	}
 
-	// Verify other fields are still present
 	if _, hasType := obj2["type"]; !hasType {
 		t.Error("type field should still be present in Secret")
 	}
@@ -1632,13 +1618,12 @@ func TestGetArchiveFromCheckpoint_FiltersStatusAndManagedFields(t *testing.T) {
 		t.Errorf("Expected kind='Secret', got: %v", obj2["kind"])
 	}
 
-	// Verify JSON string doesn't contain status or managedFields
 	jsonStr := string(archiveData)
-	if strings.Contains(jsonStr, `"status"`) {
-		t.Error("Archive JSON should not contain 'status' field")
+	if !strings.Contains(jsonStr, `"status"`) {
+		t.Error("Archive JSON should contain 'status' field")
 	}
-	if strings.Contains(jsonStr, `"managedFields"`) {
-		t.Error("Archive JSON should not contain 'managedFields' field")
+	if !strings.Contains(jsonStr, `"managedFields"`) {
+		t.Error("Archive JSON should contain 'managedFields' field")
 	}
 }
 

@@ -12,6 +12,19 @@ metadata:
   name: d8:{{ .Chart.Name }}:controller
   {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
 rules:
+# CustomSnapshotDefinition (cluster-scoped; registry reconciler)
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["customsnapshotdefinitions"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["customsnapshotdefinitions/status"]
+  verbs: ["get", "update", "patch"]
+
+# CustomResourceDefinition (read-only discovery for CSD mapping resolution)
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch"]
+
 # ManifestCaptureRequest (namespaced)
 - apiGroups: ["state-snapshotter.deckhouse.io"]
   resources: ["manifestcapturerequests"]
@@ -37,9 +50,9 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["create", "get", "delete"]
 
-# ObjectKeeper (cluster-scoped) - created by this controller for lifecycle management
-# ObjectKeeper is used in FollowObject mode to manage ManifestCheckpoint lifecycle
-# Watch permission is needed because controller-runtime creates informer for all types in scheme
+# ObjectKeeper (cluster-scoped): controller creates/patches spec (drift/TTL/followRef); never deletes.
+# Deletion is Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained content/MCP.
+# No objectkeepers/status: state-snapshotter does not write ObjectKeeper status.
 - apiGroups: ["deckhouse.io"]
   resources: ["objectkeepers"]
   verbs: ["get", "list", "watch", "create", "update", "patch"]
@@ -48,25 +61,113 @@ rules:
 - apiGroups: [""]
   resources: ["namespaces"]
   verbs: ["get", "list", "watch"]
-# Allow controller-runtime to watch configmaps (needed for informer cache)
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
-# Core Kubernetes resources (temporary wide permissions)
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["get", "list"]
 
-# API Server permissions (for /manifests subresource)
-# Only 'get' permission needed - no list/watch (no informer cache)
-# TODO: Remove access to manifestcheckpointcontentchunks - move archive assembly to controller
-# Currently API server assembles JSON from chunks directly (archive_service.go:257)
-# This requires 'get' permission. According to ADR, API server should NOT have access to chunks.
-# Future: Move archive assembly logic to ManifestCheckpointController, store assembled archive
-# in checkpoint.Status or as a separate resource, so API server only needs to read the final result.
-- apiGroups: ["state-snapshotter.deckhouse.io"]
-  resources: ["manifestcheckpointcontentchunks"]
-  verbs: ["get"]  # Only 'get' by name - no list/watch needed (no informer cache)
+# Snapshot root capture allowlist (read-only)
+- apiGroups: [""]
+  resources:
+  - "pods"
+  - "services"
+  - "configmaps"
+  - "secrets"
+  - "serviceaccounts"
+  - "persistentvolumeclaims"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources:
+  - "deployments"
+  - "statefulsets"
+  - "daemonsets"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources:
+  - "jobs"
+  - "cronjobs"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources:
+  - "ingresses"
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources:
+  - "roles"
+  - "rolebindings"
+  verbs: ["get", "list", "watch"]
+
+# Unified Snapshots RBAC (for XxxxSnapshot roots and common SnapshotContent)
+# RBAC is scoped to API group, not to concrete Snapshot kinds
+# Adding a new Snapshot kind requires adding its resource name here
+# See ADR section 7 (RBAC Strategy) for details
+# Note: Kubernetes RBAC does NOT support wildcards in resource names
+# We need to list all snapshot resource types explicitly
+
+# storage.deckhouse.io group (Snapshot, SnapshotContent)
+- apiGroups: ["storage.deckhouse.io"]
+  resources:
+  - "snapshots"                    # Snapshot kind
+  - "snapshotcontents"            # SnapshotContent kind
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Unified Snapshots status subresources for storage.deckhouse.io
+- apiGroups: ["storage.deckhouse.io"]
+  resources:
+  - "snapshots/status"
+  - "snapshotcontents/status"
+  verbs: ["get", "update", "patch"]
+
+# VolumeCaptureRequest (storage-foundation): N5 PR-4 ensure/publish/delete per SnapshotContent
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumecapturerequests"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumecapturerequests/status"]
+  verbs: ["get", "update", "patch"]
+
+# DataImport (storage-volume-data-manager, SVDM): the import binder (C5) reads a leaf's DataImport
+# status.dataArtifactRef to populate SnapshotContent.dataRef on import. Read-only (the controller never
+# writes DataImport); the import-safe RBAC gate for *creating* DataImports lives on d8/user roles.
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["dataimports"]
+  verbs: ["get", "list", "watch"]
+
+# VolumeSnapshotContent handoff after VCR publish (ownerRef -> SnapshotContent).
+# "delete" is required by the C5 teardown physical reclaim: an import VSC carries a second
+# (DataImport-keeper) ownerRef, so deleting the SnapshotContent does NOT GC it — the controller must
+# flip deletionPolicy Retain->Delete (patch) and then explicitly delete the VSC so CSI reclaims the data.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotcontents"]
+  verbs: ["get", "list", "watch", "update", "patch", "delete"]
+
+# VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
+# binder (C5) binds extended VS with spec.source.dataImportName.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots"]
+  verbs: ["get", "list", "watch", "create", "patch", "delete"]
+# VolumeSnapshot status: capture writes the extended status.boundSnapshotContentName on orphan VS leaves;
+# the import binder additionally writes legacy status.boundVolumeSnapshotContentName/readyToUse.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots/status"]
+  verbs: ["get", "update", "patch"]
+
+# VolumeSnapshotClass (CSI): orphan PVC data leg resolves the class via the PVC StorageClass
+# annotation and validates its driver. Read-only, fetched directly (APIReader), so "get" is enough.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotclasses"]
+  verbs: ["get"]
+
+# PersistentVolume (cluster-scoped) and StorageClass: orphan PVC data leg reads the bound PV CSI driver
+# and the StorageClass volumesnapshotclass annotation. Read-only, fetched directly (APIReader).
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get"]
+
+# Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
+# Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
+# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD/DSC
+# condition RBACReady=True. See docs/state-snapshotter-rework/operations/project-status.md for the
+# rollout dependency (live-demo requires the external demo-domain RBAC to be provisioned out-of-band
+# until the RBACReady hook lands).
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -110,6 +211,44 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: d8:{{ .Chart.Name }}:controller
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+# Aggregation layer (C7): the core aggregated apiserver delegates authentication to genericapiserver,
+# which reads the k8s-managed front-proxy requestheader CA + allowed-names from
+# kube-system/extension-apiserver-authentication. Bind to the built-in auth-reader Role so the controller
+# SA can read that ConfigMap (canonical aggregated-apiserver pattern, least privilege).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Chart.Name }}-controller-auth-reader
+  namespace: kube-system
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+# Aggregation layer (C7): delegated authentication (TokenReview) and authorization (SubjectAccessReview)
+# require the system:auth-delegator ClusterRole. genericapiserver uses it to validate bearer tokens and to
+# authorize each request against the kube-apiserver.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:controller:auth-delegator
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
 subjects:
   - kind: ServiceAccount
     name: controller

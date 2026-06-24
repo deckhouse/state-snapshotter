@@ -1,4 +1,9 @@
 ---
+# Admin-kubeconfig ClusterRole: manual kubectl / demo-e2e (NOT controller SA).
+# - Create/read/delete Snapshots; patch Snapshot/SnapshotContent status for demo graph wiring (merge_child_graph_into_root).
+# - Read per-CR manifest subresources (manifests-download / manifests-with-data-restoration).
+# - Read-only MCR/MCP/ObjectKeeper for diagnostics.
+# - Do NOT grant objectkeepers patch/update (forced TTL uses demo-e2e temp RBAC or cluster-admin).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -9,17 +14,126 @@ rules:
   - state-snapshotter.deckhouse.io
   resources:
   - manifestcapturerequests
-  - manifestcheckpointcontentchunks
   - manifestcheckpoints
   verbs:
   - get
   - list
   - watch
+# Chunk payloads are controller-internal only: admin/manual paths MUST download via the per-CR
+# /manifests-download subresources below, never by reading the raw chunk objects directly.
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshots
+  verbs:
+  - get
+  - list
+  - watch
   - create
+  - update
+  - patch
   - delete
-  - deletecollection
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshots/status
+  verbs:
+  - get
   - patch
   - update
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshotcontents
+  verbs:
+  - get
+  - list
+  - watch
+  - patch
+  - update
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshotcontents/status
+  verbs:
+  - get
+  - patch
+  - update
+# Per-CR manifest read subresources. The whole-subtree /manifests aggregation was removed in C9: export
+# now walks the tree client-side and downloads each node's own manifests via /manifests-download.
+# Includes the per-domain-snapshot routes (demo domain export by a domain snapshot name); these demo
+# subresources belong here (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
+# manifestcheckpoints/manifests is the raw single-checkpoint read served directly by the archive handler.
+- apiGroups:
+  - subresources.state-snapshotter.deckhouse.io
+  resources:
+  - snapshots/manifests-download
+  - snapshots/manifests-with-data-restoration
+  - manifestcheckpoints/manifests
+  - demovirtualmachinesnapshots/manifests-download
+  - demovirtualdisksnapshots/manifests-download
+  verbs:
+  - get
+# C8 connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
+# user-facing capability to export (manifests-download), restore (manifests-with-data-restoration), and
+# import (manifests-and-children-refs-upload) a single volume snapshot by namespaced VS name.
+- apiGroups:
+  - subresources.snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots/manifests-download
+  - volumesnapshots/manifests-with-data-restoration
+  verbs:
+  - get
+- apiGroups:
+  - subresources.snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots/manifests-and-children-refs-upload
+  verbs:
+  - create
+- apiGroups:
+  - deckhouse.io
+  resources:
+  - objectkeepers
+  verbs:
+  - get
+  - list
+  - watch
+# Demo domain inventory + generated child snapshots (live demo / pre-e2e manual kubectl).
+- apiGroups:
+  - demo.state-snapshotter.deckhouse.io
+  resources:
+  - demovirtualmachines
+  - demovirtualdisks
+  - demovirtualmachinesnapshots
+  - demovirtualdisksnapshots
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - state-snapshotter.deckhouse.io
+  resources:
+  - customsnapshotdefinitions
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - state-snapshotter.deckhouse.io
+  resources:
+  - customsnapshotdefinitions/status
+  verbs:
+  - get
+  - update
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

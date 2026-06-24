@@ -1,0 +1,137 @@
+{{- if .Values.stateSnapshotter.enableDemoDomain }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: domain-controller
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+
+---
+# Static, domain-agnostic RBAC for the domain controller SA. The DOMAIN-SPECIFIC rights (demo source +
+# snapshot GVRs, incl. /status and /finalizers, and the inter-server aggregated subresource gets) are
+# dynamic (derived from the CSD) and granted by the 030-domain-rbac hook, not here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d8:{{ .Chart.Name }}:domain-controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+rules:
+# ManifestCaptureRequest: the dedicated controllers ensure (get + create) a per-snapshot MCR. They never
+# update/patch/delete it (the MCR is immutable; the common controller in core consumes and deletes it).
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcapturerequests"]
+  verbs: ["get", "list", "watch", "create"]
+
+# VolumeCaptureRequest (storage.deckhouse.io): the disk controller ensures the data-leg VCR (create +
+# ownerRef patch). The common controller in core deletes it after handoff, so no delete here.
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumecapturerequests"]
+  verbs: ["get", "list", "watch", "create", "patch"]
+
+# SnapshotContent: get-only via uncached APIReader for DemoVirtualDisk restore (reverses the f297d01
+# content-free stance for SNAPSHOT reconcilers only). The domain resource reconciler reads
+# SnapshotContent.status.dataRef to build a VolumeRestoreRequest; it never list/watch/mutates content.
+# Snapshot reconcilers remain content-free (zero snapshotcontents rights would suffice for them alone).
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["snapshotcontents"]
+  verbs: ["get"]
+
+# VolumeRestoreRequest: DemoVirtualDisk restore materialization (create + lifecycle cleanup after PVC adoption).
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumerestorerequests"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+
+# PersistentVolumeClaim: disk snapshot data-leg reads PVCs for VCR; disk/VM resource reconcilers create,
+# patch and delete backing PVCs (scratch + restore adoption).
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "patch", "delete"]
+
+# Pods: DemoVirtualMachine resource reconciler materializes the demo workload Pod.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:domain-controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: d8:{{ .Chart.Name }}:domain-controller
+subjects:
+  - kind: ServiceAccount
+    name: domain-controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: domain-controller-leader-election
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Allow the domain controller to create Events in its namespace.
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: domain-controller-leader-election
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: domain-controller-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: domain-controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+# The domain aggregated apiserver verifies kube-apiserver's front-proxy client cert against the k8s-managed
+# requestheader CA in kube-system/extension-apiserver-authentication. Bind to the built-in auth-reader Role
+# so the domain SA can read that ConfigMap (canonical aggregated-apiserver pattern, least privilege).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Chart.Name }}-domain-controller-auth-reader
+  namespace: kube-system
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: domain-controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+# Aggregation layer (C7): delegated authentication (TokenReview) and authorization (SubjectAccessReview)
+# require the system:auth-delegator ClusterRole, the same as the core controller.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:domain-controller:auth-delegator
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: domain-controller
+    namespace: d8-{{ .Chart.Name }}
+{{- end }}

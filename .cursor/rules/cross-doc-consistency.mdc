@@ -1,0 +1,24 @@
+---
+description: When changing key docs, check consistency across spec, design plan, testing, operations.
+alwaysApply: true
+---
+
+# Cross-doc consistency
+
+When changing any of:
+- `docs/state-snapshotter-rework/spec/system-spec.md`
+- `docs/state-snapshotter-rework/architecture/overview.md` (or added `system-overview.puml`)
+- `docs/state-snapshotter-rework/design/implementation-plan.md`
+- `docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`
+- `docs/state-snapshotter-rework/operations/project-status.md`
+
+check consistency (no contradiction) at least on:
+- registry state vs runtime watch activation
+- DSC conditions (`Accepted`, `RBACReady`, derived `Ready`) and watch activation formula
+- optional unified CRD / bootstrap (S1–S2) vs future DSC-driven registry
+- manifest / MCR track vs unified snapshot registry (separate concerns)
+- stage / progress in `project-status.md` vs tables in `implementation-plan.md` and test IDs in `e2e-testing-strategy.md`
+
+Related long-form ADR under `snapshot-rework/` must not disagree with `spec/system-spec.md` without an explicit documented transition.
+
+Fix inconsistencies in the same change or document a temporary divergence and follow-up.

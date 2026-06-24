@@ -1,7 +1,19 @@
-.PHONY: help test test-unit test-e2e build clean deps setup-envtest
+SHELL := /bin/bash
+.PHONY: help test test-unit test-integration test-e2e build clean deps setup-envtest run fox_build_and_push redeploy switch_to_local_dev switch_from_local_dev
 
 # Default target
 .DEFAULT_GOAL := help
+
+# Local cluster dev build/deploy
+repo_local := localhost:5000
+repo_fox := registry.flant.com/deckhouse/storage
+image_name := localbuild
+deployment_name := controller
+namespace := d8-state-snapshotter
+system_namespace := d8-system
+pull_secret_name := fox-registry
+USER := $(shell whoami)
+image_tag := $(USER)-state-snapshotter-controller
 
 # Variables
 GO := go
@@ -40,12 +52,35 @@ setup-envtest: ## Setup envtest binaries (required for e2e tests)
 			echo "$(YELLOW)Note: Run 'make test-e2e' to download binaries automatically$(NC)"; \
 		fi
 
-test: test-unit ## Run all tests (unit + e2e)
+test: test-unit test-integration ## Run all tests (unit + integration + e2e)
 
 test-unit: ## Run unit tests only
 	@echo "$(BLUE)Running unit tests...$(NC)"
-	$(GO) test -v -timeout $(TEST_TIMEOUT) ./internal/... -coverprofile=coverage.out
+	$(GO) test -v -timeout $(TEST_TIMEOUT) ./pkg/... ./internal/... -coverprofile=coverage.out
 	@echo "$(GREEN)Unit tests completed!$(NC)"
+
+test-integration: ## Run integration tests (requires envtest)
+	@echo "$(BLUE)Running integration tests...$(NC)"
+	@echo "$(YELLOW)Setting up envtest (this may download binaries on first run)...$(NC)"
+	@GOPATH=$$($(GO) env GOPATH) && \
+		if [ ! -f $$GOPATH/bin/setup-envtest ]; then \
+			echo "$(YELLOW)Installing setup-envtest...$(NC)"; \
+			$(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest; \
+		fi && \
+		KUBEBUILDER_ASSETS=$$($$GOPATH/bin/setup-envtest use -p path) && \
+		export KUBEBUILDER_ASSETS && \
+		if [ -n "$$KUBEBUILDER_ASSETS" ]; then \
+			echo "$(BLUE)KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS$(NC)"; \
+			if [ -d "$$KUBEBUILDER_ASSETS" ]; then \
+				echo "$(YELLOW)Ensuring binaries are executable...$(NC)"; \
+				chmod +x $$KUBEBUILDER_ASSETS/etcd $$KUBEBUILDER_ASSETS/kube-apiserver $$KUBEBUILDER_ASSETS/kubectl 2>/dev/null || true; \
+			fi; \
+		fi && \
+		echo "$(BLUE)Pass 1/2: shared-manager suite (label-filter !isolated)...$(NC)" && \
+		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -count=1 -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v -ginkgo.label-filter='!isolated' && \
+		echo "$(BLUE)Pass 2/2: isolation-sensitive specs in a fresh env (label-filter isolated)...$(NC)" && \
+		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -count=1 -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v -ginkgo.label-filter='isolated'
+	@echo "$(GREEN)Integration tests completed!$(NC)"
 
 test-e2e: ## Run e2e tests (automatically sets up envtest)
 	@echo "$(BLUE)Running e2e tests...$(NC)"
@@ -122,4 +157,31 @@ verify: fmt lint test-unit ## Verify code (format, lint, test)
 e2e: test-e2e ## Alias for test-e2e (convenience target - recommended)
 
 .PHONY: e2e
+
+run: ## Run controller locally
+	$(GO) run -race ./cmd/main.go
+
+fox_build_and_push: ## Build dev image and push to fox registry
+	DOCKER_BUILDKIT=1 docker build -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
+	docker push $(repo_fox)/$(image_name):$(image_tag)
+
+redeploy: ## Restart controller deployment in the cluster
+	kubectl -n $(namespace) rollout restart deployment $(deployment_name)
+
+switch_to_local_dev: ## Scale down deckhouse and patch deployment to use local dev image
+	kubectl -n $(system_namespace) scale deployment deckhouse --replicas=0
+	kubectl -n $(namespace) patch deployment $(deployment_name) -p \
+		'{"spec": {"template": {"spec": {"containers": [{"name": "$(deployment_name)", "image": "$(repo_fox)/$(image_name):$(image_tag)"}]}}}}'
+	kubectl -n $(namespace) patch deployment $(deployment_name) -p \
+		'{"spec": {"template": {"spec": {"containers": [{"name": "$(deployment_name)", "imagePullPolicy": "Always"}]}}}}'
+	kubectl -n $(namespace) patch deployment $(deployment_name) --type='json' \
+		-p='[{"op": "add", "path": "/spec/template/spec/imagePullSecrets", "value": [{"name": "$(pull_secret_name)"}]}]'
+
+switch_from_local_dev: ## Restore deckhouse and let it recreate controller with module image
+	kubectl -n $(system_namespace) scale deployment deckhouse --replicas=1
+	kubectl -n $(system_namespace) rollout status deployment deckhouse
+	kubectl -n $(namespace) delete deployment $(deployment_name) --ignore-not-found
+	kubectl -n $(system_namespace) exec deploy/deckhouse -c deckhouse -- \
+		deckhouse-controller module ensure state-snapshotter
+	kubectl -n $(namespace) rollout status deployment $(deployment_name)
 

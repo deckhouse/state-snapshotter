@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -167,6 +167,6 @@ func (s *NamespaceArchiveService) cleanResourceForBackup(u *unstructured.Unstruc
 	return common.CleanObjectForSnapshot(u, nil)
 }
 
-// Methods that use NamespaceSnapshot (CreateNamespaceArchive, createConfigMapsWithYAML, etc.)
+// Methods that use Snapshot (CreateNamespaceArchive, createConfigMapsWithYAML, etc.)
 // are not used in state-snapshotter module and have been removed.
 // Only getNamespaceResources and cleanResourceForBackup are used here.

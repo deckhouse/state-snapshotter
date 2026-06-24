@@ -1,0 +1,24 @@
+---
+description: Checklist for API package changes in this repo. Apply whenever modifying api/v*/. Ensure validation, annotations/markers, generation, and tests are done before moving on.
+globs: api/v*/**/*.go
+alwaysApply: false
+---
+
+- API change checklist (MUST):
+  - Review the API schema against the agreed plan:
+    - ensure required resources are present,
+    - remove resources that are not part of the target model.
+  - Validate markers/annotations on fields:
+    - required fields have no `omitempty`,
+    - validation markers are present where needed.
+  - Check for shared types and duplication:
+    - shared types must live in `common_types.go`.
+- Run code generation (MUST):
+  - `bash hack/generate_code.sh` after API changes.
+  - This is mandatory and blocks moving forward until done.
+- Run API tests (MUST):
+  - `cd api && go test ./...`.
+  - Do NOT proceed until tests are green.
+
+- Default behavior (MUST):
+  - Treat codegen + API tests as automatic follow-up to any API change.

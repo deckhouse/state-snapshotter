@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"github.com/deckhouse/module-sdk/pkg/app"
 
 	_ "github.com/deckhouse/state-snapshotter/hooks/go/020-apiserver-certs"
+	_ "github.com/deckhouse/state-snapshotter/hooks/go/030-domain-rbac"
 	// Front-proxy CA is read directly by controller from extension-apiserver-authentication ConfigMap
 	// No hook needed - controller handles mTLS client certificate verification internally
 )

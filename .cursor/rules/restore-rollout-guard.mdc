@@ -1,0 +1,16 @@
+---
+description: CSI VolumeSnapshot restore with empty spec.source is rollout-dependent; document snapshot-controller deps.
+alwaysApply: true
+---
+
+# Restore rollout guard (CSI VolumeSnapshot)
+
+Applies when this module implements or relies on **CSI VolumeSnapshot** restore semantics. Unified **Snapshot** / **SnapshotContent** contract — `docs/state-snapshotter-rework/spec/system-spec.md` and `snapshot-rework/` ADR.
+
+- **Restore intent** with empty `spec.source` is a **rollout-dependent** feature. Do not assume this flow is safe without special-case support in the snapshot-controller (or equivalent).
+- The following MUST be documented and satisfied in docs (spec/design/status):
+  - allow create VolumeSnapshot with empty `spec.source` for restore intent;
+  - allow one-shot fill of `spec.source` by the controller (e.g. to volumeSnapshotContentName) after restore;
+  - `spec.source` immutable after that;
+  - reconcile is no-op while `spec.source` is empty (controller does not drive restore intent until source is set).
+- Any change that relies on or changes this behavior must preserve the snapshot-controller dependency and document it (rollout dependencies / known gaps).

@@ -12,7 +12,6 @@ rules:
   resources:
   - manifestcapturerequests
   - manifestcheckpoints
-  - manifestcheckpointcontentchunks
   verbs:
   - get
   - list
@@ -31,10 +30,32 @@ rules:
   resources:
   - manifestcapturerequests
   - manifestcheckpoints
-  - manifestcheckpointcontentchunks
   verbs:
   - create
   - delete
   - deletecollection
   - patch
   - update
+# storage.deckhouse.io unified Snapshot API (cluster editor; mirrors admin-kubeconfig / controller)
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshots
+  - snapshotcontents
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - storage.deckhouse.io
+  resources:
+  - snapshots/status
+  - snapshotcontents/status
+  verbs:
+  - get
+  - update
+  - patch

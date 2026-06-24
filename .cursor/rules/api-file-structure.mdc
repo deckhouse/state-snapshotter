@@ -1,0 +1,17 @@
+---
+description: API file-structure conventions for this repo. Apply when creating/renaming/editing Go files under api/v*/. Apply when editing relevant files, and when reasoning/planning/answering questions where this rule could influence code decisions (even if matching files are not currently open).
+globs: api/v*/**/*.go
+alwaysApply: false
+---
+
+- Per-object files (MUST):
+  - Each API object lives in its own `<object>_types.go` file
+    (e.g. `manifestcheckpoint_types.go`, `domainspecificsnapshotcontroller_types.go`).
+  - Keep one root object per file.
+
+- Common files (SHOULD):
+  - `doc.go` for package docs and group/version markers.
+  - `register.go` for scheme registration.
+
+- Generated files (MUST NOT edit by hand):
+  - Do NOT edit `zz_generated*` files manually.

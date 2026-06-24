@@ -1,0 +1,13 @@
+---
+description: RBAC source of truth for state-snapshotter
+alwaysApply: true
+---
+
+# RBAC Source of Truth
+
+- Do not use `// +kubebuilder:rbac` markers as a source of RBAC in this module.
+- Static production controller RBAC is maintained manually in `templates/controller/rbac-for-us.yaml`.
+- If the controller needs static core permissions, update `templates/controller/rbac-for-us.yaml`; do not add kubebuilder RBAC markers as the fix.
+- Domain/custom resource RBAC is granted externally by Deckhouse RBAC controller/hook and signaled through `DomainSpecificSnapshotController.status.conditions[RBACReady=True]`.
+- Controller code under `images/state-snapshotter-controller/internal/controllers/` must not contain `+kubebuilder:rbac` markers; this prevents stale or misleading generated-RBAC hints.
+- Do not add demo/domain custom resources to production static RBAC; document them as external RBAC requirements instead.

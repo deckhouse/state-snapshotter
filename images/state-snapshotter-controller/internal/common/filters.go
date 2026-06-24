@@ -1,5 +1,5 @@
 /*
-Copyright 2025 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,16 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
+)
+
+const (
+	// AnnotationIncludeSecret allows an Opaque Secret to be stored without data (opt-in).
+	AnnotationIncludeSecret = "state-snapshotter.deckhouse.io/include-secret"
+	// AnnotationIncludeSecretData allows an Opaque Secret to be stored WITH its data/stringData bytes.
+	// Secrets are secure-by-default: without this annotation the bytes are stripped. This is the SINGLE
+	// field-level exception to raw-capture (the snapshot store has no at-rest encryption), so it is opt-in
+	// and must be used intentionally. See the unified snapshot plan §7 / module docs (C1b).
+	AnnotationIncludeSecretData = "state-snapshotter.deckhouse.io/include-secret-data"
 )
 
 // Constants for resource type filtering
@@ -58,9 +68,17 @@ var (
 // If excludeKinds is provided (from ConfigMap), it will be checked in addition to built-in rules.
 // If nil or empty, only built-in rules are applied.
 func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool {
+	return ShouldSkipObjectWithContext(u, excludeKinds, CaptureFilterContext{})
+}
+
+// ShouldSkipObjectWithContext applies the same rules as ShouldSkipObject with optional scoped-target overrides.
+func ShouldSkipObjectWithContext(u *unstructured.Unstructured, excludeKinds []string, filter CaptureFilterContext) bool {
 	kind := u.GetKind()
 	name := u.GetName()
 	labels := u.GetLabels()
+	scopedPVC := filter.ExplicitTarget &&
+		kind == "PersistentVolumeClaim" &&
+		u.GetAPIVersion() == "v1"
 
 	// 1) Explicit opt-out
 	if labels != nil && labels["backup.deckhouse.io/exclude-from-backup"] == "true" {
@@ -84,21 +102,9 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 		}
 	}
 
-	// 3) Service account Secrets (recreated automatically)
-	// TZ: exclude all service account Secrets, not just service-account-token
-	// Includes: kubernetes.io/service-account-token, kubernetes.io/dockercfg, kubernetes.io/dockerconfigjson
-	// Semantics: secrets are whitelisted via label, not by name
+	// 3) Secrets are sensitive by default.
 	if kind == "Secret" {
-		if t, found, _ := unstructured.NestedString(u.Object, "type"); found {
-			// Skip all non-Opaque secrets unless explicitly marked for backup
-			if t != "Opaque" {
-				// Allow explicitly marked secrets via label
-				if labels != nil && labels["backup.deckhouse.io/include-secret"] == "true" {
-					return false
-				}
-				return true
-			}
-		}
+		return ShouldSkipSecretObject(u)
 	}
 
 	// 4) Temporary PVCs
@@ -108,9 +114,11 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 		}
 	}
 
-	// 5) Owner references — skip managed objects
-	if ownerRefs := u.GetOwnerReferences(); len(ownerRefs) > 0 {
-		return true
+	// 5) Owner references — skip managed objects (except explicit MCR PVC targets).
+	if !scopedPVC {
+		if ownerRefs := u.GetOwnerReferences(); len(ownerRefs) > 0 {
+			return true
+		}
 	}
 
 	// 6) Ephemeral kinds (built-in)
@@ -152,7 +160,7 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 	}
 
 	// 9) Storage & virtualization objects (CSI and VD layers)
-	if storageKinds[kind] {
+	if !scopedPVC && storageKinds[kind] {
 		return true
 	}
 
@@ -167,6 +175,25 @@ func ShouldSkipObject(u *unstructured.Unstructured, excludeKinds []string) bool 
 	}
 
 	return false
+}
+
+// ShouldSkipSecretObject applies the ManifestCheckpoint Secret security contract.
+func ShouldSkipSecretObject(u *unstructured.Unstructured) bool {
+	if u == nil || u.GetKind() != "Secret" {
+		return false
+	}
+
+	secretType, found, _ := unstructured.NestedString(u.Object, "type")
+	if !found || secretType != "Opaque" {
+		return true
+	}
+
+	annotations := u.GetAnnotations()
+	if annotations[AnnotationIncludeSecret] == "true" || annotations[AnnotationIncludeSecretData] == "true" {
+		return false
+	}
+
+	return true
 }
 
 // ShouldSkipObjectWithLog is a helper function that combines ShouldSkipObject

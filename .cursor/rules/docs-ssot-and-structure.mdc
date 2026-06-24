@@ -1,0 +1,64 @@
+---
+description: SSOT, docs/state-snapshotter-rework structure, document boundaries table, naming, development order.
+alwaysApply: true
+---
+
+# Documentation SSOT and structure
+
+## 1. Single source of truth
+
+Each type of information lives in one place; others reference it.
+
+| Type | Where |
+|------|--------|
+| spec/ | Normative contract (state machines, keys, invariants) |
+| architecture/ | Diagrams and high-level flow |
+| design/ | Redesign, migration, rollout plan |
+| adr/ | Reasons for decisions |
+| testing/ | Test strategy, scenarios, run modes |
+| operations/ | High-level status only; no copy of spec/design |
+
+Do not copy contract across documents. Root: `docs/state-snapshotter-rework/`. Extended ADR drafts live under `snapshot-rework/` at repo root — keep **normative summaries** in sync with `docs/state-snapshotter-rework/spec/system-spec.md`; do not treat `snapshot-rework/` alone as SSOT for implementable contract. When deprecating a doc: mark in README or file header; point to new source.
+
+## 2. Document boundaries (explicit)
+
+- **spec/** — normative contract only.
+- **architecture/** — diagrams and high-level flow; not normative.
+- **design/** — redesign / migration / rollout plan; does not become status.
+- **adr/** — why the decision was made; not edited as current specification.
+- **testing/** — test strategy, scenarios, run modes; references spec, does not copy it.
+- **operations/** — high-level only; no long spec/design/TODO/state machine dumps (see operations-status-update and status-high-level-only).
+
+In docs, separate clearly: **implemented** | **current target** | **planned/future** | **legacy/deprecated**.
+
+## 3. Structure
+
+```
+docs/state-snapshotter-rework/
+  spec/system-spec.md
+  architecture/overview.md (diagrams may add system-overview.puml)
+  design/implementation-plan.md (and other design notes)
+  adr/README.md (long-form ADR may stay in snapshot-rework/ until migrated)
+  testing/e2e-testing-strategy.md
+  operations/project-status.md
+```
+
+## 4. Before changing code
+
+Read spec/system-spec.md; if redesign — design/; if touching a decision — adr/. On contract change: update spec; run e2e checks; add ADR if needed. New mechanism: design → spec → tests → code.
+
+## 5. Development order
+
+**design → spec → tests → code.** If code and spec disagree, fix code or update spec; do not leave inconsistent.
+
+## 6. Naming
+
+Docs: `kebab-case.md`. ADR: `adr-XXXX-short-title.md`. Diagrams: `system-overview.puml`, unified-snapshot / manifest flow diagrams as needed. E2E scripts: `NN_description.sh` when used under `images/state-snapshotter-controller/test/` or repo root smoke.
+
+## 7. Before PR
+
+Spec matches code; unit and envtest pass; e2e not broken (see controller-redeploy-and-remote-e2e); docs updated; critical changes → operations-status-update; stages → delivery-gating.
+
+## 8. Main rule
+
+Docs must answer: **What must the system do?** → spec. **Why is it designed so?** → ADR. **How to verify?** → testing.
