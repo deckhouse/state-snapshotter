@@ -154,6 +154,47 @@ func TestReconstructManifestCheckpoint_RejectsNonArray(t *testing.T) {
 	}
 }
 
+func TestCollectReconstructedManifestObjects_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	cl := newReconstructClient(t)
+	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--rt")
+
+	// A reconstructed orphan-PVC leaf checkpoint carries the PVC manifest (uid preserved) the import
+	// binder reads back to target the dataRef at the PVC.
+	objs := []map[string]interface{}{
+		{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]interface{}{"name": "bk-pvc", "namespace": "ns1", "uid": "pvc-uid-123"}},
+	}
+	raw, err := json.Marshal(objs)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, nil, raw); err != nil {
+		t.Fatalf("reconstruct: %v", err)
+	}
+
+	cp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: name}, cp); err != nil {
+		t.Fatalf("get checkpoint: %v", err)
+	}
+
+	got, err := CollectReconstructedManifestObjects(ctx, cl, cp)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(got))
+	}
+	if got[0].GetKind() != "PersistentVolumeClaim" || got[0].GetName() != "bk-pvc" {
+		t.Fatalf("unexpected object: kind=%s name=%s", got[0].GetKind(), got[0].GetName())
+	}
+	if got[0].GetUID() != "pvc-uid-123" {
+		t.Fatalf("PVC uid must be preserved for dataRef matching, got %q", got[0].GetUID())
+	}
+	if got[0].GetNamespace() != "ns1" {
+		t.Fatalf("PVC namespace must be preserved, got %q", got[0].GetNamespace())
+	}
+}
+
 func TestReconstructedNameStableAndUnique(t *testing.T) {
 	a := ReconstructedManifestCheckpointName(types.UID("uid-1"), "node-a")
 	if a != ReconstructedManifestCheckpointName(types.UID("uid-1"), "node-a") {
