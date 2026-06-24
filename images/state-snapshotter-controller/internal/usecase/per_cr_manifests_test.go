@@ -78,8 +78,8 @@ func TestBuildSingleNodeJSON_OwnNodeOnly_NoSubtree(t *testing.T) {
 	if m["name"] != "root-own" {
 		t.Fatalf("want own object root-own, got %v", m["name"])
 	}
-	if _, ok := m["namespace"]; ok {
-		t.Fatalf("single-node output must be namespace-relative, got %v", m)
+	if ns, ok := m["namespace"].(string); !ok || ns != "ns1" {
+		t.Fatalf("single-node output must preserve metadata.namespace (raw), got %v", m["namespace"])
 	}
 }
 
@@ -106,6 +106,130 @@ func TestBuildSingleNodeJSONFromContent_ChildNodeOwnOnly(t *testing.T) {
 	_ = json.Unmarshal(raw, &arr)
 	if len(arr) != 1 || arr[0]["metadata"].(map[string]interface{})["name"] != "child-own" {
 		t.Fatalf("want only the child node's own object, got %v", arr)
+	}
+}
+
+// TestBuildSingleNodeJSON_ImportReconstructedObjectsKept verifies that objects stored in an import-
+// reconstructed MCP (including those without metadata.namespace) are returned verbatim on download.
+func TestBuildSingleNodeJSON_ImportReconstructedObjectsKept(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	arch := NewArchiveService(cl, cl, log)
+	ctx := context.Background()
+
+	// Stored verbatim as the import upload persists it.
+	d, cs := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]interface{}{"name": "imported-pvc"}},
+	})
+	ch := aggManifestCreateChunk("ch-mcp-import", "mcp-import", d, cs)
+	if err := cl.Create(ctx, ch); err != nil {
+		t.Fatal(err)
+	}
+	mcp := aggManifestReadyMCP("mcp-import", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+	if err := cl.Create(ctx, mcp); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Create(ctx, aggManifestContent("import-content", "mcp-import")); err != nil {
+		t.Fatal(err)
+	}
+
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
+	raw, err := agg.BuildSingleNodeJSONFromContent(ctx, "import-content")
+	if err != nil {
+		t.Fatalf("BuildSingleNodeJSONFromContent: %v", err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 1 {
+		t.Fatalf("import-reconstructed object must be kept, got %d: %v", len(arr), arr)
+	}
+	if arr[0]["kind"] != "PersistentVolumeClaim" {
+		t.Fatalf("want PersistentVolumeClaim, got %v", arr[0]["kind"])
+	}
+}
+
+// TestBuildSingleNodeJSON_DownloadUploadRoundTripPreservesRawFields verifies that manifests-download
+// output can be stored verbatim via import upload (ReconstructManifestCheckpoint) and read back with
+// namespace and status intact — the shape DataImport needs for PVC parameter extraction.
+func TestBuildSingleNodeJSON_DownloadUploadRoundTripPreservesRawFields(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&ssv1alpha1.ManifestCheckpoint{}).
+		Build()
+	arch := NewArchiveService(cl, cl, log)
+	ctx := context.Background()
+
+	pvcObj := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]interface{}{
+			"name":      "disk-pvc",
+			"namespace": "ns1",
+		},
+		"spec": map[string]interface{}{
+			"storageClassName": "local",
+			"resources": map[string]interface{}{
+				"requests": map[string]interface{}{"storage": "1Gi"},
+			},
+		},
+		"status": map[string]interface{}{
+			"capacity": map[string]interface{}{"storage": "1Gi"},
+		},
+	}
+	d, cs := aggManifestEncodeChunk([]map[string]interface{}{pvcObj})
+	ch := aggManifestCreateChunk("ch-mcp-capture", "mcp-capture", d, cs)
+	if err := cl.Create(ctx, ch); err != nil {
+		t.Fatal(err)
+	}
+	mcp := aggManifestReadyMCP("mcp-capture", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+	if err := cl.Create(ctx, mcp); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Create(ctx, aggManifestContent("capture-content", "mcp-capture")); err != nil {
+		t.Fatal(err)
+	}
+
+	agg := NewAggregatedNamespaceManifests(cl, arch, nil)
+	downloaded, err := agg.BuildSingleNodeJSONFromContent(ctx, "capture-content")
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+
+	importMCPName := "mcp-import-roundtrip"
+	if err := ReconstructManifestCheckpoint(ctx, cl, importMCPName, "ns1", nil, nil, downloaded); err != nil {
+		t.Fatalf("reconstruct import MCP: %v", err)
+	}
+	if err := cl.Create(ctx, aggManifestContent("import-content", importMCPName)); err != nil {
+		t.Fatal(err)
+	}
+
+	roundTripped, err := agg.BuildSingleNodeJSONFromContent(ctx, "import-content")
+	if err != nil {
+		t.Fatalf("download after upload: %v", err)
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(roundTripped, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 1 {
+		t.Fatalf("want 1 object after round-trip, got %d", len(arr))
+	}
+	meta := arr[0]["metadata"].(map[string]interface{})
+	if meta["namespace"] != "ns1" {
+		t.Fatalf("namespace must survive round-trip, got %v", meta["namespace"])
+	}
+	status, ok := arr[0]["status"].(map[string]interface{})
+	if !ok {
+		t.Fatal("status must survive round-trip")
+	}
+	capacity, ok := status["capacity"].(map[string]interface{})
+	if !ok || capacity["storage"] != "1Gi" {
+		t.Fatalf("status.capacity.storage must survive round-trip, got %v", status["capacity"])
 	}
 }
 

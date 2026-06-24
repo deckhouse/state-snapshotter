@@ -64,10 +64,14 @@ const (
 	defaultProbeImage        = "busybox:1.36"
 	defaultBackupClientImage = "curlimages/curl:8.11.1"
 
-	moduleName  = "state-snapshotter"
-	demoCSDName = "demo-virtual-machine-disk"
-	d8ModuleNS  = "d8-state-snapshotter"
+	moduleName     = "state-snapshotter"
+	demoCSDName    = "demo-virtual-machine-disk"
+	d8ModuleNS     = "d8-state-snapshotter"
+	d8SVDMModuleNS = "d8-storage-volume-data-manager"
 )
+
+// phase5ImportNS is set by the phase-5 restore spec while it runs; diagnostics use it on failure.
+var phase5ImportNS string
 
 // Aggregated subresource API groups (C8/C9). The core group serves the generic and core-Snapshot
 // subresources; the demo group is the domain controller's own aggregated apiserver; the VS connector

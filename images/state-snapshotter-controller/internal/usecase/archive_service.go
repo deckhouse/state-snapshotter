@@ -393,26 +393,16 @@ func (s *ArchiveService) decodeChunkDataWithChecksum(encodedData string, expecte
 	return objects, nil
 }
 
-// createJSONArchive creates a JSON array with all resources
+// createJSONArchive creates a JSON array with all resources as stored in ManifestCheckpoint
+// chunks (raw verbatim: status, managedFields, and namespace preserved). Manifest cleaning for
+// apply-ready restore output is performed only by the restore sanitizer
+// (manifests-with-data-restoration), not on download/upload paths.
 func (s *ArchiveService) createJSONArchive(objects []unstructured.Unstructured) ([]byte, error) {
 	// Convert unstructured objects to JSON-serializable maps
 	jsonObjects := make([]interface{}, 0, len(objects))
 	for _, obj := range objects {
 		// Convert object to map and normalize (handle yaml.MapSlice if present)
 		objMap := s.convertMapSliceToMap(obj.Object)
-
-		// Filter out status and managedFields from metadata
-		// These fields are runtime-specific and should not be included in snapshots
-		if objMapMap, ok := objMap.(map[string]interface{}); ok {
-			// Remove status field
-			delete(objMapMap, "status")
-
-			// Remove managedFields from metadata if present
-			if metadata, ok := objMapMap["metadata"].(map[string]interface{}); ok {
-				delete(metadata, "managedFields")
-			}
-		}
-
 		jsonObjects = append(jsonObjects, objMap)
 	}
 

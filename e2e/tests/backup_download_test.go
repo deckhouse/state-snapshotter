@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -168,6 +169,52 @@ func writeBlockAndChecksum(ctx context.Context, ns, podName, pvcName string) (st
 		return "", fmt.Errorf("unexpected sha256 output for PVC %s: %q (stderr=%q)", pvcName, sum, stderr)
 	}
 	return sum, nil
+}
+
+// writeBlockDataParallel creates one block-writer pod per PVC, waits for binding, writes random
+// block data and records checksums concurrently. Safe with WaitForFirstConsumer: each pod is an
+// independent first consumer for its PVC.
+func writeBlockDataParallel(ctx context.Context, ns string, pvcs []string, checksums map[string]string) error {
+	errCh := make(chan error, len(pvcs))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i, pvc := range pvcs {
+		i, pvc := i, pvc
+		podName := fmt.Sprintf("block-writer-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := suiteClientset.CoreV1().Pods(ns).Create(ctx, blockWriterPodSpec(ns, podName, pvc), metav1.CreateOptions{}); err != nil {
+				errCh <- fmt.Errorf("create block writer pod for %s: %w", pvc, err)
+				return
+			}
+			if err := waitPodRunning(ctx, ns, podName, 10*time.Minute); err != nil {
+				errCh <- fmt.Errorf("wait block writer pod for %s: %w", pvc, err)
+				return
+			}
+			sum, err := writeBlockAndChecksum(ctx, ns, podName, pvc)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			mu.Lock()
+			checksums[pvc] = sum
+			mu.Unlock()
+			GinkgoWriter.Printf("  source checksum pvc=%s sha256=%s\n", pvc, sum)
+			deletePod(ctx, ns, podName)
+			if err := waitPodDeleted(ctx, ns, podName, 2*time.Minute); err != nil {
+				errCh <- fmt.Errorf("delete block writer pod for %s: %w", pvc, err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func deletePod(ctx context.Context, ns, name string) {
@@ -700,19 +747,8 @@ func backupDownloadSpecs() {
 			// block-writer Pod below is the first consumer that triggers binding, and waitPodRunning blocks
 			// until the WaitForFirstConsumer bind completes.
 			pvcs := []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}
-			for i, pvc := range pvcs {
-				podName := fmt.Sprintf("block-writer-%d", i)
-				By("Writing Block data and recording checksum for PVC " + pvc)
-				_, err = suiteClientset.CoreV1().Pods(backup.srcNS).Create(ctx, blockWriterPodSpec(backup.srcNS, podName, pvc), metav1.CreateOptions{})
-				Expect(err).NotTo(HaveOccurred(), "create block writer pod for %s", pvc)
-				Expect(waitPodRunning(ctx, backup.srcNS, podName, 10*time.Minute)).To(Succeed())
-				sum, werr := writeBlockAndChecksum(ctx, backup.srcNS, podName, pvc)
-				Expect(werr).NotTo(HaveOccurred(), "write+checksum PVC %s", pvc)
-				backup.checksums[pvc] = sum
-				GinkgoWriter.Printf("  source checksum pvc=%s sha256=%s\n", pvc, sum)
-				deletePod(ctx, backup.srcNS, podName)
-				Expect(waitPodDeleted(ctx, backup.srcNS, podName, 2*time.Minute)).To(Succeed())
-			}
+			By("Writing Block data and recording checksums for all PVCs in parallel")
+			Expect(writeBlockDataParallel(ctx, backup.srcNS, pvcs, backup.checksums)).To(Succeed())
 
 			By("Creating DemoVirtualMachine " + bkVMName + " attached to " + bkDiskAName)
 			Expect(applyObjects(ctx, []*unstructured.Unstructured{buildBackupVM(backup.srcNS)}, backup.srcNS)).To(Succeed())

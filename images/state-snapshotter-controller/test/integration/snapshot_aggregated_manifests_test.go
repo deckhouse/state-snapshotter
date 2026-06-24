@@ -167,7 +167,7 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests", srv.URL, nsName)
+		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests-download", srv.URL, nsName)
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
@@ -184,7 +184,7 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 			}
 			meta, ok := obj["metadata"].(map[string]interface{})
 			Expect(ok).To(BeTrue())
-			Expect(meta).NotTo(HaveKey("namespace"), "aggregated output must be namespace-relative")
+			Expect(meta).To(HaveKeyWithValue("namespace", nsName), "aggregated output must preserve metadata.namespace (raw)")
 			if ok && meta["name"] == "cm1" {
 				foundConfigMap = true
 				break
@@ -193,7 +193,7 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 		Expect(foundConfigMap).To(BeTrue(), "Snapshot own MCP should include namespace-scoped allowlist manifests")
 	})
 
-	It("returns aggregated manifests for parent + one manual child SnapshotContent (disjoint MCP objects)", func() {
+	It("returns only the root node manifests from manifests-download even when child contents exist", func() {
 		ctx := context.Background()
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
@@ -239,14 +239,14 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests", srv.URL, nsName)
+		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests-download", srv.URL, nsName)
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 		var arr []map[string]interface{}
 		Expect(json.NewDecoder(resp.Body).Decode(&arr)).To(Succeed())
-		Expect(len(arr)).To(BeNumerically(">=", 2))
+		Expect(arr).NotTo(BeEmpty())
 		foundCM, foundSecret := false, false
 		for _, o := range arr {
 			k, _ := o["kind"].(string)
@@ -263,10 +263,10 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 			}
 		}
 		Expect(foundCM).To(BeTrue(), "root MCP should include cm1")
-		Expect(foundSecret).To(BeTrue(), "child MCP should include only-child")
+		Expect(foundSecret).To(BeFalse(), "manifests-download is single-node and must not walk child content")
 	})
 
-	It("aggregates parent + two manual child SnapshotContents (lexicographic child order)", func() {
+	It("serves child SnapshotContent manifests through the content manifests-download endpoint", func() {
 		ctx := context.Background()
 		ns := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
@@ -323,37 +323,34 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/%s/snapshots/snap/manifests", srv.URL, nsName)
-		resp, err := http.Get(url)
-		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
-		Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		var arr []map[string]interface{}
-		Expect(json.NewDecoder(resp.Body).Decode(&arr)).To(Succeed())
 
-		var names []string
-		for _, o := range arr {
-			m := o["metadata"].(map[string]interface{})
-			names = append(names, m["name"].(string))
+		for _, tc := range []struct {
+			content string
+			want    string
+		}{
+			{content: childA, want: "only-a"},
+			{content: childB, want: "only-b"},
+		} {
+			url := fmt.Sprintf("%s/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/%s/manifests-download", srv.URL, tc.content)
+			resp, err := http.Get(url)
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			var arr []map[string]interface{}
+			Expect(json.NewDecoder(resp.Body).Decode(&arr)).To(Succeed())
+			Expect(arr).To(HaveLen(1))
+			Expect(arr[0]["kind"]).To(Equal("Secret"))
+			meta, ok := arr[0]["metadata"].(map[string]interface{})
+			Expect(ok).To(BeTrue())
+			Expect(meta).To(HaveKeyWithValue("name", tc.want))
+			Expect(meta).To(HaveKeyWithValue("namespace", nsName), "content manifests-download must preserve namespace (raw)")
 		}
-		ia, ib := -1, -1
-		for i, n := range names {
-			if n == "only-a" {
-				ia = i
-			}
-			if n == "only-b" {
-				ib = i
-			}
-		}
-		Expect(ia).To(BeNumerically(">", -1))
-		Expect(ib).To(BeNumerically(">", -1))
-		Expect(ia).To(BeNumerically("<", ib), "child-a before child-b lexicographically")
 	})
 
 	It("returns 404 for missing Snapshot", func() {
 		srv := aggregatedManifestsIntegrationStartServer()
 		defer srv.Close()
-		url := srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/snapshots/does-not-exist-agg/manifests"
+		url := srv.URL + "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/snapshots/does-not-exist-agg/manifests-download"
 		resp, err := http.Get(url)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()

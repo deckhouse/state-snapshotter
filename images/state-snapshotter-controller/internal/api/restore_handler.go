@@ -228,7 +228,7 @@ func (h *RestoreHandler) HandleGenericSnapshotManifestsWithDataRestoration(w htt
 }
 
 // HandleCoreSnapshotManifestsDownload returns the own-node (single-node) manifests of a core Snapshot
-// root — raw, with status preserved, WITHOUT walking the subtree (the per-CR export/import/restore unit).
+// root — raw verbatim from MCP (status, managedFields, namespace preserved), WITHOUT walking the subtree.
 func (h *RestoreHandler) HandleCoreSnapshotManifestsDownload(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
 	start := time.Now()
 	if h.nsAggregated == nil {
@@ -245,7 +245,7 @@ func (h *RestoreHandler) HandleCoreSnapshotManifestsDownload(w http.ResponseWrit
 }
 
 // HandleGenericSnapshotManifestsDownload returns the own-node manifests of any registered (non-core)
-// namespaced snapshot kind (single-node, raw with status), resolving the resource to its GVK.
+// namespaced snapshot kind (single-node, raw verbatim from MCP), resolving the resource to its GVK.
 func (h *RestoreHandler) HandleGenericSnapshotManifestsDownload(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
 	start := time.Now()
 	if h.nsAggregated == nil {
@@ -267,7 +267,7 @@ func (h *RestoreHandler) HandleGenericSnapshotManifestsDownload(w http.ResponseW
 }
 
 // HandleContentManifestsDownload returns the own-node manifests addressed by cluster-scoped
-// SnapshotContent name (single-node, raw with status). Used by DataImport on the import path.
+// SnapshotContent name (single-node, raw verbatim from MCP). Used by DataImport on the import path.
 func (h *RestoreHandler) HandleContentManifestsDownload(w http.ResponseWriter, r *http.Request, contentName string) {
 	start := time.Now()
 	if h.nsAggregated == nil {

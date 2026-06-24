@@ -236,24 +236,9 @@ func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(
 				fmt.Sprintf("duplicate object detected in snapshot tree: %s", key))
 		}
 		seenKeys[key] = struct{}{}
-		if !makeAggregatedObjectNamespaceRelative(obj) {
-			continue
-		}
 		*objects = append(*objects, obj)
 	}
 	return nil
-}
-
-func makeAggregatedObjectNamespaceRelative(obj map[string]interface{}) bool {
-	meta, ok := obj["metadata"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	if ns, _ := meta["namespace"].(string); ns == "" {
-		return false
-	}
-	delete(meta, "namespace")
-	return true
 }
 
 func aggregatedObjectIdentityKey(obj map[string]interface{}) (string, error) {

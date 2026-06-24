@@ -36,8 +36,9 @@ import (
 // (storageClass/volumeMode/status.capacity) of a single leaf, and the recursive per-CR restore (C9)
 // uses it as each node's base. There is no whole-subtree server-side aggregation anymore.
 //
-// It decodes a node's manifests as raw objects with status preserved, namespace made relative, and
-// intra-node dedup.
+// It decodes a node's manifests as raw objects verbatim from MCP (status, managedFields, and
+// namespace preserved) with intra-node dedup. Manifest cleaning for apply-ready restore output is
+// performed only by the restore sanitizer (manifests-with-data-restoration).
 func (s *AggregatedNamespaceManifests) BuildSingleNodeJSON(ctx context.Context, contentName string) ([]byte, error) {
 	if contentName == "" {
 		return nil, NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "content name is required")
@@ -90,7 +91,7 @@ func (s *AggregatedNamespaceManifests) BuildSingleNodeJSONFromSnapshot(ctx conte
 
 // BuildSingleNodeJSONFromContent returns the own-node manifests for a cluster-scoped SnapshotContent
 // addressed directly by name. This backs manifests-download on snapshotcontents/<name>, used by
-// DataImport on the import path to read the original manifest before any namespaced snapshot CR binds.
+// DataImport on the import path to read the original PVC manifest (raw verbatim from MCP).
 func (s *AggregatedNamespaceManifests) BuildSingleNodeJSONFromContent(ctx context.Context, contentName string) ([]byte, error) {
 	return s.BuildSingleNodeJSON(ctx, contentName)
 }
