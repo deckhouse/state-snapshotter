@@ -72,6 +72,15 @@ func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, nam
 				continue
 			}
 			seen[key] = struct{}{}
+			// Dependent objects managed by a controller (controller ownerReference set) are runtime/derived
+			// state that their owner recreates after restore (e.g. the demo VM's backing Pod owned by
+			// DemoVirtualMachine, or a Deployment's ReplicaSets/Pods). Capturing them would put ephemeral
+			// objects into the snapshot manifest inventory, so they MUST be skipped. Domain-owned PVCs are
+			// also controller-owned and are intentionally captured via the dedicated volume-node path
+			// instead of the namespace allowlist, so dropping them here does not lose any manifest.
+			if hasControllerOwnerReference(&item) {
+				continue
+			}
 			apiVersion := item.GetAPIVersion()
 			if apiVersion == "" {
 				apiVersion = gvr.GroupVersion().String()
@@ -97,6 +106,19 @@ func BuildManifestCaptureTargets(ctx context.Context, dyn dynamic.Interface, nam
 
 func isForbiddenManifestTarget(apiVersion, kind string) bool {
 	return apiVersion == snapshotpkg.CSISnapshotAPIVersion && kind == snapshotpkg.KindVolumeSnapshot
+}
+
+// hasControllerOwnerReference reports whether the object is a dependent managed by a controller
+// (it carries an ownerReference with controller=true). Such objects are recreated by their owning
+// controller and MUST NOT enter the snapshot manifest inventory. Objects created directly by a user
+// (no controller owner) are kept.
+func hasControllerOwnerReference(u *unstructured.Unstructured) bool {
+	for _, ref := range u.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 func sortManifestTargets(targets []ManifestTarget) {

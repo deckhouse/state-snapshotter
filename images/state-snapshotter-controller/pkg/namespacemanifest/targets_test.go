@@ -80,6 +80,55 @@ func TestBuildManifestCaptureTargets_PVCCapturedVolumeSnapshotExcluded(t *testin
 	}
 }
 
+func TestBuildManifestCaptureTargets_SkipsControllerOwnedDependents(t *testing.T) {
+	listKinds := make(map[schema.GroupVersionResource]string, len(n2aNamespacedGVR))
+	for _, gvr := range n2aNamespacedGVR {
+		listKinds[gvr] = gvr.Resource + "List"
+	}
+
+	// Backing Pod owned by a controller (mirrors the demo VM's Pod): must be skipped.
+	ownedPod := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata": map[string]interface{}{
+			"name":      "demo-vm-pod",
+			"namespace": "ns1",
+			"ownerReferences": []interface{}{map[string]interface{}{
+				"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+				"kind":       "DemoVirtualMachine",
+				"name":       "vm",
+				"uid":        "vm-uid",
+				"controller": true,
+			}},
+		},
+	}}
+	// Standalone Pod created directly by a user (no controller owner): must be kept.
+	standalonePod := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata":   map[string]interface{}{"name": "standalone-pod", "namespace": "ns1"},
+	}}
+
+	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), listKinds, ownedPod, standalonePod)
+
+	targets, err := BuildManifestCaptureTargets(context.Background(), dyn, "ns1")
+	if err != nil {
+		t.Fatalf("BuildManifestCaptureTargets: %v", err)
+	}
+	var standaloneFound bool
+	for _, target := range targets {
+		if target.Kind == "Pod" && target.Name == "demo-vm-pod" {
+			t.Fatalf("controller-owned dependent Pod must be skipped, got %#v", target)
+		}
+		if target.Kind == "Pod" && target.Name == "standalone-pod" {
+			standaloneFound = true
+		}
+	}
+	if !standaloneFound {
+		t.Fatalf("standalone Pod (no controller owner) must be kept, got %#v", targets)
+	}
+}
+
 func TestIsForbiddenManifestTargetRejectsVolumeSnapshot(t *testing.T) {
 	if !isForbiddenManifestTarget("snapshot.storage.k8s.io/v1", "VolumeSnapshot") {
 		t.Fatal("VolumeSnapshot must never be captured into ManifestCheckpoint inventory")

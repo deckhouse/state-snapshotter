@@ -18,6 +18,8 @@ package tests
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -321,6 +323,80 @@ func gvrForLiveKind(kind string) (schema.GroupVersionResource, bool) {
 	default:
 		return schema.GroupVersionResource{}, false
 	}
+}
+
+// forbiddenSnapshotKinds are dependent/runtime object kinds that a snapshot must never capture: their
+// owning controller recreates them after restore, so their presence in any manifests-download payload
+// means the capture allowlist leaked a dependent object (e.g. the demo VM's backing Pod). The download
+// path returns raw manifests verbatim from the ManifestCheckpoint, so any such object here is a real
+// capture regression rather than a download artefact.
+var forbiddenSnapshotKinds = map[string]struct{}{
+	"Pod": {},
+}
+
+func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []unstructured.Unstructured) error {
+	checked := 0
+	for i := range downloaded {
+		obj := &downloaded[i]
+		if _, forbidden := forbiddenSnapshotKinds[obj.GetKind()]; forbidden {
+			return fmt.Errorf(
+				"dependent object %s/%s leaked into snapshot manifests-download: %s is recreated by its owner and must be excluded from capture",
+				obj.GetKind(), obj.GetName(), obj.GetKind(),
+			)
+		}
+		gvr, ok := gvrForLiveKind(obj.GetKind())
+		if !ok {
+			return fmt.Errorf("downloaded manifest %s/%s has no live GVR mapping for raw comparison", obj.GetKind(), obj.GetName())
+		}
+		if obj.GetNamespace() != ns {
+			return fmt.Errorf("%s/%s metadata.namespace mismatch: want %q, got %q", obj.GetKind(), obj.GetName(), ns, obj.GetNamespace())
+		}
+		live, err := getResource(ctx, gvr, ns, obj.GetName())
+		if err != nil {
+			return fmt.Errorf("get live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+		liveSum, liveJSON, err := canonicalManifestChecksum(live.Object)
+		if err != nil {
+			return fmt.Errorf("checksum live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+		downloadedSum, downloadedJSON, err := canonicalManifestChecksum(obj.Object)
+		if err != nil {
+			return fmt.Errorf("checksum downloaded %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+		if liveSum != downloadedSum {
+			return fmt.Errorf(
+				"raw manifest %s/%s differs from live object\nlive_sha256=%s downloaded_sha256=%s\nlive=%s\ndownloaded=%s",
+				obj.GetKind(), obj.GetName(), liveSum, downloadedSum,
+				truncate(prettyManifestJSON(liveJSON), 4096),
+				truncate(prettyManifestJSON(downloadedJSON), 4096),
+			)
+		}
+		checked++
+	}
+	if checked == 0 {
+		return fmt.Errorf("no downloaded manifests were checked against live objects")
+	}
+	return nil
+}
+
+func canonicalManifestChecksum(obj map[string]interface{}) (sum string, canonical []byte, err error) {
+	canonical, err = json.Marshal(obj)
+	if err != nil {
+		return "", nil, err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(canonical)), canonical, nil
+}
+
+func prettyManifestJSON(canonical []byte) []byte {
+	var obj interface{}
+	if err := json.Unmarshal(canonical, &obj); err != nil {
+		return []byte(fmt.Sprintf("<unmarshal failed: %v>", err))
+	}
+	out, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		return []byte(fmt.Sprintf("<marshal failed: %v>", err))
+	}
+	return out
 }
 
 func assertManifestsMatchLive(ctx context.Context, ns string, downloaded []unstructured.Unstructured) error {
@@ -803,7 +879,7 @@ func backupDownloadSpecs() {
 				objs, derr := decodeManifestArray(body)
 				Expect(derr).NotTo(HaveOccurred())
 				Expect(objs).NotTo(BeEmpty(), "manifests-download for %s/%s", ref.kind, ref.name)
-				Expect(assertManifestsMatchLive(ctx, backup.srcNS, objs)).To(Succeed())
+				Expect(assertRawManifestsMatchLive(ctx, backup.srcNS, objs)).To(Succeed())
 			}
 		})
 
