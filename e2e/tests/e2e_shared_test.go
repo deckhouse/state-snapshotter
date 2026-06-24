@@ -464,6 +464,37 @@ func waitObjectCondition(ctx context.Context, gvr schema.GroupVersionResource, n
 	}
 }
 
+// waitDemoDiskReady waits for a restored DemoVirtualDisk to reach Ready=True, failing fast if the disk
+// enters its terminal Failed phase (e.g. RestoreDenied) instead of burning the whole timeout. A Failed
+// phase on the demo restore path is permanent (the controller will not retry), so polling further is
+// pointless and only delays surfacing the real error.
+func waitDemoDiskReady(ctx context.Context, ns, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		obj, err := getResource(ctx, demoDiskGVR, ns, name)
+		if err == nil {
+			st, reason, found := conditionStatus(obj, condReady)
+			if found && st == "True" {
+				return nil
+			}
+			phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+			if phase == "Failed" {
+				return fmt.Errorf("DemoVirtualDisk %s/%s entered terminal Failed phase (Ready.status=%q reason=%q)", ns, name, st, reason)
+			}
+			last = fmt.Sprintf("phase=%q Ready.status=%q reason=%q", phase, st, reason)
+		} else {
+			last = fmt.Sprintf("get err=%v", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for DemoVirtualDisk %s/%s Ready=True; last: %s", ns, name, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
 // waitSnapshotReady waits for a namespaced Snapshot to reach Ready=True and returns its bound content name.
 func waitSnapshotReady(ctx context.Context, ns, name string, timeout time.Duration) (string, error) {
 	if err := waitObjectCondition(ctx, snapshotGVR, ns, name, condReady, "True", timeout); err != nil {
