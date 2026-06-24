@@ -525,6 +525,10 @@ func sweepOrphanedLeafSnapshotContents(ctx context.Context, leafNames []string) 
 // (root + direct child contents) to be reclaimed before the import namespace is removed.
 func cleanupImportRootTree(ctx context.Context, importNS, rootName string, timeout time.Duration) {
 	GinkgoHelper()
+	if cleanupSkippedOnFailure() {
+		GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping import-root tree %s/%s (spec failed)\n", importNS, rootName)
+		return
+	}
 	snap, err := getResource(ctx, snapshotGVR, importNS, rootName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -605,6 +609,10 @@ func backupRestoreSpecs() {
 				Expect(createDataImport(ctx, importNS, leaf.name, leaf.group, leaf.resource, leaf.name)).To(Succeed())
 				DeferCleanup(func(name string) func() {
 					return func() {
+						if cleanupSkippedOnFailure() {
+							GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping DataImport %s/%s (spec failed)\n", importNS, name)
+							return
+						}
 						cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
 						defer ccancel()
 						deleteDataImport(cctx, importNS, name)

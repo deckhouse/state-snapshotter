@@ -304,7 +304,21 @@ func ensureNamespace(ctx context.Context, name string) error {
 	return err
 }
 
+// cleanupSkippedOnFailure reports whether per-spec resource cleanup must be skipped because a spec
+// failed and the operator asked to keep everything for debugging (E2E_KEEP_CLUSTER_ON_FAILURE).
+// It mirrors the suite-level nested-cluster teardown guard (cleanupSuite) so a failed run leaves its
+// namespaces and resources intact for live inspection instead of being torn down by DeferCleanup
+// (which Ginkgo runs regardless of pass/fail). It is safe to call from any DeferCleanup/destructor:
+// on a passing spec CurrentSpecReport().Failed() is false, so cleanup proceeds as usual.
+func cleanupSkippedOnFailure() bool {
+	return suiteCfg.keepOnFailure && CurrentSpecReport().Failed()
+}
+
 func deleteNamespace(ctx context.Context, name string) {
+	if cleanupSkippedOnFailure() {
+		GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping namespace %q (spec failed)\n", name)
+		return
+	}
 	cs := suiteClientset
 	if cs == nil {
 		return

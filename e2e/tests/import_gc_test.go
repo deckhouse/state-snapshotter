@@ -87,6 +87,10 @@ func importSpecs() {
 			defer cancel()
 			Expect(ensureNamespace(ctx, importNS)).To(Succeed())
 			DeferCleanup(func() {
+				if cleanupSkippedOnFailure() {
+					GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping import namespace %q and root Snapshot (spec failed)\n", importNS)
+					return
+				}
 				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				defer ccancel()
 				_ = suiteDyn.Resource(snapshotGVR).Namespace(importNS).Delete(cctx, importRootSnapshotName, metav1.DeleteOptions{})
