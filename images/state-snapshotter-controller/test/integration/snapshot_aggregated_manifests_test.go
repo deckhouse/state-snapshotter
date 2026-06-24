@@ -107,9 +107,7 @@ func aggregatedManifestsIntegrationMustCreateSnapshotContent(ctx context.Context
 	}
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: storagev1alpha1.SnapshotContentSpec{
-			DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-		},
+		Spec:       retainContentSpec(),
 	}
 	Expect(cl.Create(ctx, content)).To(Succeed())
 	content.Status.ManifestCheckpointName = mcpName

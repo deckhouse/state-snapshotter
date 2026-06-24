@@ -75,7 +75,7 @@ func (r *SnapshotReconciler) reconcileImport(ctx context.Context, nsSnap *storag
 		om.OwnerReferences = []metav1.OwnerReference{controllercommon.RootObjectKeeperOwnerReference(rootOK)}
 		newContent := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: om,
-			Spec:       desiredImportSnapshotContentSpec(),
+			Spec:       desiredImportSnapshotContentSpec(nsSnap),
 		}
 		if err := r.Client.Create(ctx, newContent); err != nil {
 			if errors.IsAlreadyExists(err) {
@@ -139,10 +139,11 @@ func (r *SnapshotReconciler) reconcileImport(ctx context.Context, nsSnap *storag
 
 // desiredImportSnapshotContentSpec returns the SnapshotContent spec for an imported node: deletionPolicy
 // Delete (vs Retain on capture). The spec is immutable; all data/result wiring is published into status.
-func desiredImportSnapshotContentSpec() storagev1alpha1.SnapshotContentSpec {
-	return storagev1alpha1.SnapshotContentSpec{
-		DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyDelete,
-	}
+func desiredImportSnapshotContentSpec(nsSnap *storagev1alpha1.Snapshot) storagev1alpha1.SnapshotContentSpec {
+	return controllercommon.NewSnapshotContentSpec(
+		storagev1alpha1.SnapshotContentDeletionPolicyDelete,
+		controllercommon.SnapshotSubjectRefFromSnapshot(nsSnap),
+	)
 }
 
 // bindImportSnapshotContent sets status.boundSnapshotContentName (+ observedGeneration) under conflict

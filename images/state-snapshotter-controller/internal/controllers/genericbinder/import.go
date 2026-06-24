@@ -108,7 +108,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 				Name:            contentName,
 				OwnerReferences: []metav1.OwnerReference{*ownerRef},
 			},
-			Spec: importSnapshotContentSpec(),
+			Spec: importSnapshotContentSpec(obj),
 		}
 		if err := r.Create(ctx, content); err != nil && !errors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
@@ -192,13 +192,16 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	return ctrl.Result{}, nil
 }
 
-// importSnapshotContentSpec returns the SnapshotContent spec for an imported node: deletionPolicy=Delete
-// (capture uses Retain). An imported tree has no live source to re-capture from, so deleting the import
-// root must reclaim the materialized content+artifacts rather than park them in the TTL bin.
-func importSnapshotContentSpec() storagev1alpha1.SnapshotContentSpec {
-	return storagev1alpha1.SnapshotContentSpec{
-		DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyDelete,
-	}
+// importSnapshotContentSpec returns the SnapshotContent spec for an imported leaf: deletionPolicy=Delete
+// (capture uses Retain) and snapshotRef pointing back at the leaf snapshot itself (the binding subject
+// that sets status.boundSnapshotContentName on this content). An imported tree has no live source to
+// re-capture from, so deleting the import root must reclaim the materialized content+artifacts rather
+// than park them in the TTL bin.
+func importSnapshotContentSpec(leaf *unstructured.Unstructured) storagev1alpha1.SnapshotContentSpec {
+	return controllercommon.NewSnapshotContentSpec(
+		storagev1alpha1.SnapshotContentDeletionPolicyDelete,
+		controllercommon.SnapshotSubjectRefFromObject(leaf),
+	)
 }
 
 // projectDataLegFromDataImport reads the leaf's DataImport, resolves its produced durable artifact

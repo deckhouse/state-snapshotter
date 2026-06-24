@@ -47,9 +47,7 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 
 		content := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: "mcp-wake-content-"},
-			Spec: storagev1alpha1.SnapshotContentSpec{
-				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-			},
+			Spec:       retainContentSpec(),
 		}
 		Expect(k8sClient.Create(ctx, content)).To(Succeed())
 		contentName := content.Name
@@ -150,7 +148,7 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 
 		content := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: "chunk-wake-content-"},
-			Spec:       storagev1alpha1.SnapshotContentSpec{DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain},
+			Spec:       retainContentSpec(),
 		}
 		Expect(k8sClient.Create(ctx, content)).To(Succeed())
 		contentName := content.Name

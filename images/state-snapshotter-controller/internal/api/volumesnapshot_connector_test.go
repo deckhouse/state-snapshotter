@@ -143,6 +143,14 @@ func seedVolumeSnapshotLeaf(t *testing.T, cl client.Client, vsName string, ready
 
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "vol-content"},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Namespace:  "ns1",
+				Name:       vsName,
+			},
+		},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-vol",
 			DataRef: &storagev1alpha1.SnapshotDataBinding{

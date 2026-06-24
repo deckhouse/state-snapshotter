@@ -103,7 +103,7 @@ var _ = Describe("Integration: VSC degradation wakes owning SnapshotContent", Se
 	setupReadyDataLeaf := func(ctx context.Context, prefix string) (string, string, string, string) {
 		content := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: prefix + "-content-"},
-			Spec:       storagev1alpha1.SnapshotContentSpec{DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain},
+			Spec:       retainContentSpec(),
 		}
 		Expect(k8sClient.Create(ctx, content)).To(Succeed())
 		contentName := content.Name

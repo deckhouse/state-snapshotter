@@ -395,7 +395,10 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			contentObj := &unstructured.Unstructured{}
 			contentObj.SetGroupVersionKind(contentGVK)
 			contentObj.SetName(contentName)
-			contentObj.Object["spec"] = map[string]interface{}{}
+			contentObj.Object["spec"] = map[string]interface{}{
+				"deletionPolicy": "Retain",
+				"snapshotRef":    integrationContentSnapshotRefMap(),
+			}
 
 			err = k8sClient.Create(ctx, contentObj)
 			Expect(err).NotTo(HaveOccurred())

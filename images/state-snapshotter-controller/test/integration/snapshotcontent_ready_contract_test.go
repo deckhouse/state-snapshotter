@@ -69,7 +69,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 	createContent := func(generateName string) (string, string) {
 		c := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: generateName},
-			Spec:       storagev1alpha1.SnapshotContentSpec{DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain},
+			Spec:       retainContentSpec(),
 		}
 		Expect(k8sClient.Create(ctx, c)).To(Succeed())
 		name := c.Name

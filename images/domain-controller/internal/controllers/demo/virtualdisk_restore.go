@@ -103,25 +103,15 @@ func resolveDemoDiskRestore(
 		return out, err
 	}
 
-	// Defense-in-depth secondary namespace check: the owning Snapshot's namespace must match the disk's.
-	// Any missing/empty/mismatched field fails closed (the authoritative check is dataRef.Target.Namespace
-	// below, which also fails closed).
-	if content.Spec.SnapshotRef == nil {
+	// Anti-spoofing handshake: the bound content must point its spec.snapshotRef back at this very
+	// DemoVirtualDiskSnapshot. Without this, a user with status write on the snapshot could set
+	// status.boundSnapshotContentName to a foreign content and restore someone else's data. We require a
+	// full identity match (apiVersion+kind+namespace+name, and UID when the content carries one) rather
+	// than a namespace-only check. Any missing/mismatched field fails closed.
+	if msg := demoSnapshotContentRefMismatch(content.Spec.SnapshotRef, snap); msg != "" {
 		out.Failed = true
 		out.Reason = demoReasonRestoreDenied
-		out.Message = "SnapshotContent.spec.snapshotRef is absent (fail closed)"
-		return out, nil
-	}
-	if content.Spec.SnapshotRef.Namespace == "" {
-		out.Failed = true
-		out.Reason = demoReasonRestoreDenied
-		out.Message = "snapshotRef namespace is empty (fail closed)"
-		return out, nil
-	}
-	if content.Spec.SnapshotRef.Namespace != disk.Namespace {
-		out.Failed = true
-		out.Reason = demoReasonRestoreDenied
-		out.Message = fmt.Sprintf("snapshotRef namespace %q does not match disk namespace %q", content.Spec.SnapshotRef.Namespace, disk.Namespace)
+		out.Message = msg
 		return out, nil
 	}
 
@@ -186,6 +176,35 @@ func resolveDemoDiskRestore(
 	out.Reason = storagev1alpha1.ReasonCompleted
 	out.Message = "restore chain resolved"
 	return out, nil
+}
+
+// demoSnapshotContentRefMismatch returns a non-empty, human-readable reason when the content's
+// spec.snapshotRef does not identify snap, and "" when the handshake passes. It enforces a full identity
+// match (apiVersion+kind+namespace+name) so a content bound to a different subject (another snapshot, a
+// core Snapshot, or a CSI VolumeSnapshot) is rejected. The UID is verified only when the ref carries one:
+// domain-leaf imports always set it, while the orphan VolumeSnapshot path legitimately leaves it empty —
+// but that path never backs a DemoVirtualDiskSnapshot, so an empty UID here still requires the kind to be
+// DemoVirtualDiskSnapshot.
+func demoSnapshotContentRefMismatch(ref *storagev1alpha1.SnapshotSubjectRef, snap *demov1alpha1.DemoVirtualDiskSnapshot) string {
+	if ref == nil {
+		return "SnapshotContent.spec.snapshotRef is absent (fail closed)"
+	}
+	if want := demov1alpha1.SchemeGroupVersion.String(); ref.APIVersion != want {
+		return fmt.Sprintf("snapshotRef apiVersion %q does not match %q (fail closed)", ref.APIVersion, want)
+	}
+	if ref.Kind != controllercommon.KindDemoVirtualDiskSnapshot {
+		return fmt.Sprintf("snapshotRef kind %q does not match %q (fail closed)", ref.Kind, controllercommon.KindDemoVirtualDiskSnapshot)
+	}
+	if ref.Namespace != snap.Namespace {
+		return fmt.Sprintf("snapshotRef namespace %q does not match snapshot namespace %q (fail closed)", ref.Namespace, snap.Namespace)
+	}
+	if ref.Name != snap.Name {
+		return fmt.Sprintf("snapshotRef name %q does not match snapshot name %q (fail closed)", ref.Name, snap.Name)
+	}
+	if ref.UID != "" && ref.UID != snap.UID {
+		return fmt.Sprintf("snapshotRef uid %q does not match snapshot uid %q (fail closed)", ref.UID, snap.UID)
+	}
+	return ""
 }
 
 func buildDemoDiskVRR(disk *demov1alpha1.DemoVirtualDisk, resolution demoRestoreResolution) *unstructured.Unstructured {

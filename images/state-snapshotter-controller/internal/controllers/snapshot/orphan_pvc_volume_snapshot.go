@@ -546,7 +546,19 @@ func (r *SnapshotReconciler) ensureOrphanVolumeChildNode(
 	if eerr != nil {
 		return false, eerr
 	}
-	child, err := snapshotcontent.EnsureVolumeChildContent(ctx, r.Client, root, target.UID)
+	// snapshotRef points back at the orphan CSI VolumeSnapshot that binds this child via its
+	// status.boundSnapshotContentName (INV-ORPHAN4) — that is the handshake subject, not the root
+	// content ownerRef (which is only the GC lifecycle link). UID is intentionally left empty: the
+	// orphan VolumeSnapshot is an ephemeral per-run handle, so the deterministic name + namespace are
+	// the anti-spoofing boundary and the restore handshake matches UID only when present (mirrors the
+	// core staticBindRefMatches pre-provisioned allowance).
+	orphanVSRef := &storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: snapshotpkg.CSISnapshotAPIVersion,
+		Kind:       snapshotpkg.KindVolumeSnapshot,
+		Namespace:  nsSnap.Namespace,
+		Name:       orphanPVCVolumeSnapshotName(nsSnap.UID, target),
+	}
+	child, err := snapshotcontent.EnsureVolumeChildContent(ctx, r.Client, root, target.UID, orphanVSRef)
 	if err != nil {
 		return false, err
 	}
