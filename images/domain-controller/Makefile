@@ -10,7 +10,7 @@ repo_fox := registry.flant.com/deckhouse/storage
 image_name := localbuild
 deployment_name := domain-controller
 namespace := d8-state-snapshotter
-system_namespace := d8-system
+module_name := state-snapshotter
 pull_secret_name := fox-registry
 USER := $(shell whoami)
 image_tag := $(USER)-domain-controller
@@ -90,8 +90,9 @@ fox_build_and_push: ## Build dev image and push to fox registry
 redeploy: ## Restart domain-controller deployment in the cluster
 	kubectl -n $(namespace) rollout restart deployment $(deployment_name)
 
-switch_to_local_dev: ## Scale down deckhouse and patch deployment to use local dev image
-	kubectl -n $(system_namespace) scale deployment deckhouse --replicas=0
+switch_to_local_dev: ## Pause module reconciliation (maintenance) and patch deployment to local dev image
+	kubectl patch moduleconfig $(module_name) --type=merge \
+		-p '{"spec": {"maintenance": "NoResourceReconciliation"}}'
 	kubectl -n $(namespace) patch deployment $(deployment_name) -p \
 		'{"spec": {"template": {"spec": {"containers": [{"name": "$(deployment_name)", "image": "$(repo_fox)/$(image_name):$(image_tag)"}]}}}}'
 	kubectl -n $(namespace) patch deployment $(deployment_name) -p \
@@ -99,10 +100,7 @@ switch_to_local_dev: ## Scale down deckhouse and patch deployment to use local d
 	kubectl -n $(namespace) patch deployment $(deployment_name) --type='json' \
 		-p='[{"op": "add", "path": "/spec/template/spec/imagePullSecrets", "value": [{"name": "$(pull_secret_name)"}]}]'
 
-switch_from_local_dev: ## Restore deckhouse and let it recreate domain-controller with module image
-	kubectl -n $(system_namespace) scale deployment deckhouse --replicas=1
-	kubectl -n $(system_namespace) rollout status deployment deckhouse
-	kubectl -n $(namespace) delete deployment $(deployment_name) --ignore-not-found
-	kubectl -n $(system_namespace) exec deploy/deckhouse -c deckhouse -- \
-		deckhouse-controller module ensure state-snapshotter
-	kubectl -n $(namespace) rollout status deployment $(deployment_name)
+switch_from_local_dev: ## Resume module reconciliation so Deckhouse restores the module image
+	kubectl patch moduleconfig $(module_name) --type=merge \
+		-p '{"spec": {"maintenance": null}}'
+	@echo "Maintenance disabled for module '$(module_name)'. Deckhouse will restore $(deployment_name) to the module image shortly."
