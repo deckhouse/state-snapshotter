@@ -66,6 +66,10 @@ func dataImportWithArtifact(apiVersion, kind, name string) *unstructured.Unstruc
 // and the VSC as the data artifact (size etc. are enriched downstream from VSC.status.restoreSize).
 func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	di := dataImportWithArtifact("snapshot.storage.k8s.io/v1", "VolumeSnapshotContent", "snapcontent-abc")
+	// DataImport republishes the original captured volume mode into status.volumeMode; the binding must
+	// carry it because the leaf-targeted dataRef cannot be enriched from a live PVC and downstream restore
+	// fails closed on an empty volumeMode.
+	_ = unstructured.SetNestedField(di.Object, "Block", "status", "volumeMode")
 	leaf := importLeafObject()
 
 	binding, ready, reason, _ := buildImportDataBinding(di, leaf)
@@ -86,6 +90,9 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	}
 	if binding.Target.Kind != "DemoVirtualDiskSnapshot" || binding.Target.Name != "disk-snap" || binding.Target.Namespace != "project-a" {
 		t.Fatalf("unexpected target: %#v", binding.Target)
+	}
+	if binding.VolumeMode != "Block" {
+		t.Fatalf("expected volumeMode propagated from DataImport.status.volumeMode, got %q", binding.VolumeMode)
 	}
 }
 
