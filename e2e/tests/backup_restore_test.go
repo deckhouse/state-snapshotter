@@ -41,6 +41,7 @@ const (
 	bkImportRootName   = "import-root"
 	bkRestoreProbePod  = "restore-probe"
 	bkRestoreProbeCont = "probe"
+	bkProbeDevicePath  = "/dev/xvda"
 	bkDataImportTTL    = "15m"
 	bkDataArtifactType = "VolumeSnapshotContent"
 	vsAPIVersion       = "snapshot.storage.k8s.io/v1"
@@ -322,32 +323,37 @@ func readBlockChecksum(ctx context.Context, ns, podName, container, devicePath s
 	return sum, nil
 }
 
-func restoreProbePodSpec(ns string, pvcs []string, devicePaths []string) *corev1.Pod {
-	devices := make([]corev1.VolumeDevice, 0, len(pvcs))
-	volumes := make([]corev1.Volume, 0, len(pvcs))
-	for i, pvc := range pvcs {
-		devices = append(devices, corev1.VolumeDevice{Name: pvc, DevicePath: devicePaths[i]})
-		volumes = append(volumes, corev1.Volume{
-			Name: pvc,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc},
-			},
-		})
-	}
+// restoreProbePodSpec builds a probe pod that raw-block-mounts a SINGLE restored PVC. One pod per volume
+// (rather than one pod mounting all volumes) is required because with node-local storage each restored
+// volume can be pinned to a different node: demo disks are bound by the domain VolumeRestoreRequest
+// without a consumer (so they may spread across workers) and the orphan PVC binds WaitForFirstConsumer on
+// whichever node its probe lands. A single pod mounting every volume could never satisfy all PVs' node
+// affinities at once (Unschedulable). A per-volume pod schedules onto its own volume's node, and for the
+// RWO disk already mounted by the restored workload it co-tenants on that workload's node (RWO permits
+// multiple pods on a single node).
+func restoreProbePodSpec(ns, podName, pvc, devicePath string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: bkRestoreProbePod, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:          bkRestoreProbeCont,
 				Image:         suiteCfg.probeImage,
 				Command:       []string{"sh", "-c", "sleep 3600"},
-				VolumeDevices: devices,
+				VolumeDevices: []corev1.VolumeDevice{{Name: pvc, DevicePath: devicePath}},
 			}},
-			Volumes: volumes,
+			Volumes: []corev1.Volume{{
+				Name: pvc,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc},
+				},
+			}},
 		},
 	}
 }
+
+// restoreProbePodName is the per-PVC probe pod name.
+func restoreProbePodName(pvc string) string { return bkRestoreProbePod + "-" + pvc }
 
 func buildLeafImports(ctx context.Context) ([]leafImportSpec, []byte, []childRef, error) {
 	srcNS := backup.srcNS
@@ -584,7 +590,9 @@ func backupRestoreSpecs() {
 				cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Minute)
 				defer ccancel()
 				deletePod(cctx, backup.srcNS, bkBackupClientPod)
-				deletePod(cctx, importNS, bkRestoreProbePod)
+				for _, pvc := range []string{bkPVCName, bkPVCDiskA, bkPVCDiskB} {
+					deletePod(cctx, importNS, restoreProbePodName(pvc))
+				}
 				cleanupImportRootTree(cctx, importNS, bkImportRootName, 5*time.Minute)
 				deleteNamespace(cctx, importNS)
 				deleteNamespace(cctx, backup.srcNS)
@@ -697,15 +705,23 @@ func backupRestoreSpecs() {
 			Expect(waitDemoDiskReady(ctx, importNS, bkDiskBName, 15*time.Minute)).
 				To(Succeed(), "restored DemoVirtualDisk %s Ready", bkDiskBName)
 
-			By("Verifying restored Block volume bytes via an in-cluster probe pod")
-			pvcs := []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}
-			devicePaths := []string{"/dev/xvda", "/dev/xvdb", "/dev/xvdc"}
-			_, err = suiteClientset.CoreV1().Pods(importNS).Create(ctx, restoreProbePodSpec(importNS, pvcs, devicePaths), metav1.CreateOptions{})
-			Expect(err).NotTo(HaveOccurred(), "create restore probe pod")
-			Expect(waitPodRunning(ctx, importNS, bkRestoreProbePod, 15*time.Minute)).To(Succeed())
+			By("Verifying restored Block volume bytes via per-PVC in-cluster probe pods")
+			// One probe pod per restored PVC: the volumes may be pinned to different nodes (node-local
+			// storage + consumer-less VRR binding) and the disks are RWO already held by the restored
+			// workload, so a single pod mounting all of them is unschedulable. See restoreProbePodSpec.
+			//
+			// Create all probe pods up front so they schedule/bind/populate in parallel (each lands on its
+			// own volume's node), then wait + checksum each; otherwise three serial 15m waits would dominate.
+			probePVCs := []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}
+			for _, pvc := range probePVCs {
+				_, err = suiteClientset.CoreV1().Pods(importNS).Create(ctx, restoreProbePodSpec(importNS, restoreProbePodName(pvc), pvc, bkProbeDevicePath), metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred(), "create restore probe pod for PVC %s", pvc)
+			}
+			for _, pvc := range probePVCs {
+				podName := restoreProbePodName(pvc)
+				Expect(waitPodRunning(ctx, importNS, podName, 15*time.Minute)).To(Succeed(), "probe pod for PVC %s Running", pvc)
 
-			for i, pvc := range pvcs {
-				got, rerr := readBlockChecksum(ctx, importNS, bkRestoreProbePod, bkRestoreProbeCont, devicePaths[i])
+				got, rerr := readBlockChecksum(ctx, importNS, podName, bkRestoreProbeCont, bkProbeDevicePath)
 				Expect(rerr).NotTo(HaveOccurred(), "checksum restored PVC %s", pvc)
 				want := backup.checksums[pvc]
 				Expect(want).NotTo(BeEmpty(), "source checksum for PVC %s", pvc)
