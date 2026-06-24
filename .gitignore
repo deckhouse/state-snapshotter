@@ -49,3 +49,4 @@ artifacts/
 # dev
 **/Dockerfile-dev
 .secret
+base_images.yml
