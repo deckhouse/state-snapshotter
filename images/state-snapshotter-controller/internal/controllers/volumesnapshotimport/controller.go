@@ -268,6 +268,13 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, pErr
 	}
 
+	// Wire the imported VSC's spec.volumeSnapshotRef back to this VS so the pair is a CSI-valid bound
+	// snapshot BEFORE announcing readiness on the VS status. Without the back-ref the external-provisioner
+	// rejects PVC restores from this VS with "snapshot not bound" (the orphan-PVC restore leg).
+	if bErr := r.ensureVolumeSnapshotContentBoundRef(ctx, vscName, req.NamespacedName); bErr != nil {
+		return ctrl.Result{}, bErr
+	}
+
 	// Legacy CSI binding on the VS so it reads as a bound, ready snapshot pointing at the imported VSC.
 	if lErr := r.setLegacyVolumeSnapshotBound(ctx, req.NamespacedName, vscName); lErr != nil {
 		return ctrl.Result{}, lErr
@@ -446,6 +453,46 @@ func (r *Controller) setLegacyVolumeSnapshotBound(ctx context.Context, key clien
 			return err
 		}
 		return r.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
+// ensureVolumeSnapshotContentBoundRef sets the imported VSC's spec.volumeSnapshotRef back to the importing
+// VolumeSnapshot (name/namespace/uid). The CSI external-provisioner only accepts a VolumeSnapshot as a PVC
+// restore source when its bound VolumeSnapshotContent points back at it (a valid statically-bound pair);
+// DataImport produces the VSC with an empty volumeSnapshotRef, so wiring the back-ref is ours — the spec
+// counterpart of the status binding in setLegacyVolumeSnapshotBound. Idempotent under optimistic retry.
+func (r *Controller) ensureVolumeSnapshotContentBoundRef(ctx context.Context, vscName string, vsKey client.ObjectKey) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vs := &unstructured.Unstructured{}
+		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+		if err := r.Get(ctx, vsKey, vs); err != nil {
+			return err
+		}
+		vsUID := string(vs.GetUID())
+
+		vsc := &unstructured.Unstructured{}
+		vsc.SetGroupVersionKind(csiVolumeSnapshotContentGVK)
+		if err := r.Get(ctx, client.ObjectKey{Name: vscName}, vsc); err != nil {
+			return err
+		}
+		curName, _, _ := unstructured.NestedString(vsc.Object, "spec", "volumeSnapshotRef", "name")
+		curNS, _, _ := unstructured.NestedString(vsc.Object, "spec", "volumeSnapshotRef", "namespace")
+		curUID, _, _ := unstructured.NestedString(vsc.Object, "spec", "volumeSnapshotRef", "uid")
+		if curName == vsKey.Name && curNS == vsKey.Namespace && curUID == vsUID {
+			return nil
+		}
+		base := vsc.DeepCopy()
+		ref := map[string]interface{}{
+			"apiVersion": csiVolumeSnapshotGVK.GroupVersion().String(),
+			"kind":       csiVolumeSnapshotGVK.Kind,
+			"name":       vsKey.Name,
+			"namespace":  vsKey.Namespace,
+			"uid":        vsUID,
+		}
+		if err := unstructured.SetNestedMap(vsc.Object, ref, "spec", "volumeSnapshotRef"); err != nil {
+			return err
+		}
+		return r.Patch(ctx, vsc, client.MergeFrom(base))
 	})
 }
 
