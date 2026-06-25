@@ -231,6 +231,13 @@ func isControlPlaneNoise(u *unstructured.Unstructured, gvk schema.GroupVersionKi
 		return gvk.Kind == "Event"
 	case "coordination.k8s.io":
 		return gvk.Kind == "Lease"
+	case "cilium.io":
+		// CiliumEndpoint is an ephemeral per-pod runtime object (named after the pod, recreated by the
+		// cilium agent as pods come and go), not user desired-state. Capturing it is both meaningless for
+		// restore and racy: its name churns between target planning and MCR validation, which fails the
+		// ManifestCaptureRequest admission check ("CiliumEndpoint not found in namespace") and wedges the
+		// whole manifest-capture leg.
+		return gvk.Kind == "CiliumEndpoint"
 	}
 	return false
 }

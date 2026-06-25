@@ -60,6 +60,7 @@ func defaultGVRs() []gvrEntry {
 		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "endpoints"}, "Endpoints", "EndpointsList"},
 		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}, "PersistentVolumeClaim", "PersistentVolumeClaimList"},
 		{schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, "Lease", "LeaseList"},
+		{schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumendpoints"}, "CiliumEndpoint", "CiliumEndpointList"},
 		{schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}, "VolumeSnapshot", "VolumeSnapshotList"},
 		{schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests"}, "ManifestCaptureRequest", "ManifestCaptureRequestList"},
 		{schema.GroupVersionResource{Group: "kafka.example.com", Version: "v1", Resource: "kafkas"}, "Kafka", "KafkaList"},
@@ -163,13 +164,14 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 	})
 	endpoints := obj("v1", "Endpoints", "app", nil)
 	lease := obj("coordination.k8s.io/v1", "Lease", "leader", nil)
+	ciliumEndpoint := obj("cilium.io/v2", "CiliumEndpoint", "app-pod-xyz", nil)
 	csiVS := obj("snapshot.storage.k8s.io/v1", "VolumeSnapshot", "vs-a", nil)
 	mcr := obj("state-snapshotter.deckhouse.io/v1alpha1", "ManifestCaptureRequest", "root-mcr", nil)
 	kafka := obj("kafka.example.com/v1", "Kafka", "my-kafka", nil)
 
 	dyn := dynamicFromEntries(entries,
 		userCM, rootCA, defaultSA, userSA, opaqueSecret, tokenSecret,
-		standalonePod, ownedPod, endpoints, lease, csiVS, mcr, kafka,
+		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, csiVS, mcr, kafka,
 	)
 
 	targets, unreadable, err := BuildManifestCaptureTargets(
@@ -206,6 +208,7 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		"Pod/owned",
 		"Endpoints/app",
 		"Lease/leader",
+		"CiliumEndpoint/app-pod-xyz",
 		"VolumeSnapshot/vs-a",
 		"ManifestCaptureRequest/root-mcr",
 	}
