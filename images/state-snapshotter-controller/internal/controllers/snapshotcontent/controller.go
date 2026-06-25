@@ -357,6 +357,14 @@ type commonContentStatusPlan struct {
 	readyStatus  metav1.ConditionStatus
 	readyReason  string
 	readyMessage string
+
+	// ManifestsArchived is the subtree latch (NOT part of the Ready formula): True once this node's own
+	// manifest leg reached readiness AND every child content is ManifestsArchived=True; it never
+	// re-opens. Failed is terminal (own manifest leg failed before archive, or a child can never be
+	// archived). See pkg/snapshot ConditionManifestsArchived.
+	manifestsArchivedStatus  metav1.ConditionStatus
+	manifestsArchivedReason  string
+	manifestsArchivedMessage string
 }
 
 func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
@@ -386,6 +394,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		{Type: snapshot.ConditionVolumesReady, Status: plan.volumesReady, Reason: plan.volumesReason, Message: plan.volumesMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionChildrenReady, Status: plan.childrenReady, Reason: plan.childrenReason, Message: plan.childrenMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionReady, Status: plan.readyStatus, Reason: plan.readyReason, Message: plan.readyMessage, ObservedGeneration: gen},
+		{Type: snapshot.ConditionManifestsArchived, Status: plan.manifestsArchivedStatus, Reason: plan.manifestsArchivedReason, Message: plan.manifestsArchivedMessage, ObservedGeneration: gen},
 	}
 
 	changed := false
@@ -503,7 +512,121 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyReason = snapshot.ReasonCompleted
 		plan.readyMessage = "manifest, data, and child content are ready"
 	}
+
+	if err := r.computeManifestsArchived(ctx, obj, &plan); err != nil {
+		return plan, err
+	}
 	return plan, nil
+}
+
+// computeManifestsArchived fills the ManifestsArchived subtree latch on plan. It is a lifelong latch
+// (never re-opens) and is NOT part of the Ready formula — Ready is live-health, ManifestsArchived
+// records the irreversible fact that this node and its whole subtree had their manifests captured.
+//
+//   - If the current condition is already True (Archived) or terminally False (Failed), it is held as-is
+//     (immune to later ManifestsReady/Ready degradation or to a child disappearing). Snapshot.spec is
+//     immutable, so there is no recapture and no generation bookkeeping is needed.
+//   - Otherwise it is derived from the current subtree state: own manifest leg failed terminally before
+//     archive OR a child is Failed -> Failed; own ManifestsReady=True AND all children Archived -> True;
+//     else Capturing (transient; includes the fail-closed NamespaceCaptureIncomplete wait).
+func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
+	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
+	if err != nil {
+		return fmt.Errorf("extract SnapshotContentLike for ManifestsArchived: %w", err)
+	}
+	cur := snapshot.GetCondition(contentLike, snapshot.ConditionManifestsArchived)
+	if cur != nil && cur.Status == metav1.ConditionTrue {
+		plan.manifestsArchivedStatus = metav1.ConditionTrue
+		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchived
+		plan.manifestsArchivedMessage = cur.Message
+		return nil
+	}
+	if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == snapshot.ReasonManifestsArchiveFailed {
+		plan.manifestsArchivedStatus = metav1.ConditionFalse
+		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchiveFailed
+		plan.manifestsArchivedMessage = cur.Message
+		return nil
+	}
+
+	childrenArchived, anyChildFailed, childMessage, err := r.aggregateChildrenManifestsArchived(ctx, obj)
+	if err != nil {
+		return err
+	}
+	switch {
+	case plan.manifestsFailed:
+		plan.manifestsArchivedStatus = metav1.ConditionFalse
+		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchiveFailed
+		plan.manifestsArchivedMessage = "own manifest capture failed terminally before archive: " + plan.manifestsMessage
+	case anyChildFailed:
+		plan.manifestsArchivedStatus = metav1.ConditionFalse
+		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchiveFailed
+		plan.manifestsArchivedMessage = childMessage
+	case plan.manifestsReady == metav1.ConditionTrue && childrenArchived:
+		plan.manifestsArchivedStatus = metav1.ConditionTrue
+		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchived
+		plan.manifestsArchivedMessage = "manifests for this node and all descendants are archived"
+	default:
+		plan.manifestsArchivedStatus = metav1.ConditionFalse
+		plan.manifestsArchivedReason = snapshot.ReasonManifestsCapturing
+		if childMessage != "" {
+			plan.manifestsArchivedMessage = childMessage
+		} else {
+			plan.manifestsArchivedMessage = "manifests are being captured: " + plan.manifestsMessage
+		}
+	}
+	return nil
+}
+
+// aggregateChildrenManifestsArchived reports the children's ManifestsArchived latch state for this
+// node: allArchived (every child content ManifestsArchived=True), anyFailed (a child is terminally
+// Failed -> the subtree can never be archived), and a progress message. A NotFound or not-yet-archived
+// child is pending (not a failure): the subtree is simply not archived yet. This mirrors the child walk
+// in validateCommonContentChildren but keys on ManifestsArchived rather than Ready.
+func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, bool, string, error) {
+	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
+	if err != nil {
+		return false, false, "", err
+	}
+	total := 0
+	archivedCount := 0
+	var pendingNames []string
+	for _, raw := range rawRefs {
+		refMap, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := refMap["name"].(string)
+		if name == "" {
+			continue
+		}
+		total++
+		childContent := &unstructured.Unstructured{}
+		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
+			if errors.IsNotFound(err) {
+				pendingNames = append(pendingNames, name)
+				continue
+			}
+			return false, false, "", err
+		}
+		childLike, err := snapshot.ExtractSnapshotContentLike(childContent)
+		if err != nil {
+			return false, false, "", err
+		}
+		cond := snapshot.GetCondition(childLike, snapshot.ConditionManifestsArchived)
+		if cond != nil && cond.Status == metav1.ConditionTrue {
+			archivedCount++
+			continue
+		}
+		if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == snapshot.ReasonManifestsArchiveFailed {
+			return false, true, fmt.Sprintf("child snapshot content %s manifests archive failed: %s", name, cond.Message), nil
+		}
+		pendingNames = append(pendingNames, name)
+	}
+	if len(pendingNames) > 0 {
+		return false, false, "waiting for child manifests archive: " + formatReadyProgress(archivedCount, total, pendingNames), nil
+	}
+	return true, false, "", nil
 }
 
 // terminalDataFailureReasons lists data/volume-leg Ready=False reasons treated as terminal (vs pending).

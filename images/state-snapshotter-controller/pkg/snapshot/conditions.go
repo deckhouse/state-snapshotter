@@ -29,11 +29,21 @@ import (
 const (
 	ConditionReady                 = storagev1alpha1.ConditionReady
 	ConditionChildrenSnapshotReady = storagev1alpha1.ConditionChildrenSnapshotReady
+	// ConditionManifestsArchived is the subtree-latch contract condition (see api/storage). It is NOT
+	// part of the Ready formula; it signals that this node and all descendants have archived their
+	// manifests at least once and never re-opens once True.
+	ConditionManifestsArchived = storagev1alpha1.ConditionManifestsArchived
 
 	ReasonArtifactMissing     = storagev1alpha1.ReasonArtifactMissing
 	ReasonCompleted           = storagev1alpha1.ReasonCompleted
 	ReasonCreateChildFailed   = storagev1alpha1.ReasonCreateChildFailed
 	ReasonGraphPlanningFailed = storagev1alpha1.ReasonGraphPlanningFailed
+
+	// ManifestsArchived reasons (subtree latch): Archived (True, lifelong), Capturing (False,
+	// transient), Failed (False, terminal). Defined canonically in api/storage.
+	ReasonManifestsArchived      = storagev1alpha1.ReasonManifestsArchived
+	ReasonManifestsCapturing     = storagev1alpha1.ReasonManifestsCapturing
+	ReasonManifestsArchiveFailed = storagev1alpha1.ReasonManifestsArchiveFailed
 )
 
 // Condition types: the public condition model

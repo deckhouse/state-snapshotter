@@ -673,7 +673,20 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		message = readyCond.Message
 	}
 	logger.V(1).Info("Mirroring SnapshotContent Ready", "content", contentName, "status", status, "reason", reason)
-	return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message)
+	if err := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message); err != nil {
+		return err
+	}
+
+	// Mirror the ManifestsArchived subtree latch (NOT part of the Ready formula). The RBAC hook reads it
+	// off the root Snapshot to drop the transient capture RoleBinding once the subtree is archived. The
+	// content-side latch never re-opens, so this verbatim mirror is also monotone. If the content has no
+	// ManifestsArchived condition yet, skip (absent == still capturing for downstream readers).
+	if archivedCond := snapshot.GetCondition(contentLike, snapshot.ConditionManifestsArchived); archivedCond != nil {
+		logger.V(1).Info("Mirroring SnapshotContent ManifestsArchived", "content", contentName, "status", archivedCond.Status, "reason", archivedCond.Reason)
+		return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionManifestsArchived,
+			archivedCond.Status, archivedCond.Reason, archivedCond.Message)
+	}
+	return nil
 }
 
 func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
@@ -684,8 +697,29 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 	reason string,
 	message string,
 ) error {
-	// Fast path: nothing to do if the in-memory view already matches the desired Ready.
-	if cur := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady); cur != nil &&
+	return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionReady, status, reason, message)
+}
+
+// patchSnapshotConditionFromContent mirrors a single condition type (Ready or ManifestsArchived) from
+// the bound SnapshotContent onto the Snapshot, gen-stamped under an optimistic-lock merge patch.
+//
+// D4a: read-modify-write only the target condition. The demo domain controller co-writes
+// ChildrenSnapshotReady (and an early validation Ready=False) into the same conditions array; a bare
+// Status().Update / MergeFrom would replace the whole list and could silently drop the other writer's
+// entry. MergeFromWithOptimisticLock turns a concurrent write into a 409 so RetryOnConflict re-reads the
+// fresh object (already carrying the other condition) and re-applies only this condition, stamping
+// observedGeneration for gen-gated readers (INV-DOMAIN-GEN).
+func (r *GenericSnapshotBinderController) patchSnapshotConditionFromContent(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+	snapshotLike snapshot.SnapshotLike,
+	condType string,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	// Fast path: nothing to do if the in-memory view already matches the desired condition.
+	if cur := snapshot.GetCondition(snapshotLike, condType); cur != nil &&
 		cur.Status == status && cur.Reason == reason && cur.Message == message &&
 		cur.ObservedGeneration == obj.GetGeneration() {
 		return nil
@@ -694,12 +728,6 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 
-	// D4a: read-modify-write only the Ready condition under an optimistic-lock merge patch. The demo
-	// domain controller co-writes ChildrenSnapshotReady (and an early validation Ready=False) into the
-	// same conditions array; a bare Status().Update / MergeFrom would replace the whole list and could
-	// silently drop the other writer's entry. MergeFromWithOptimisticLock turns a concurrent write into
-	// a 409 so RetryOnConflict re-reads the fresh object (already carrying the other condition) and
-	// re-applies only Ready, stamping observedGeneration for gen-gated readers (INV-DOMAIN-GEN).
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &unstructured.Unstructured{}
 		fresh.SetGroupVersionKind(gvk)
@@ -711,23 +739,23 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 			return err
 		}
 		gen := fresh.GetGeneration()
-		if cur := snapshot.GetCondition(freshLike, snapshot.ConditionReady); cur != nil &&
+		if cur := snapshot.GetCondition(freshLike, condType); cur != nil &&
 			cur.Status == status && cur.Reason == reason && cur.Message == message &&
 			cur.ObservedGeneration == gen {
 			return nil
 		}
 		base := fresh.DeepCopy()
-		snapshot.SetCondition(freshLike, snapshot.ConditionReady, status, reason, message)
+		snapshot.SetCondition(freshLike, condType, status, reason, message)
 		conds := freshLike.GetStatusConditions()
 		for i := range conds {
-			if conds[i].Type == snapshot.ConditionReady {
+			if conds[i].Type == condType {
 				conds[i].ObservedGeneration = gen
 			}
 		}
 		freshLike.SetStatusConditions(conds)
 		snapshot.SyncConditionsToUnstructured(fresh, freshLike.GetStatusConditions())
 		if err := r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return fmt.Errorf("failed to mirror SnapshotContent Ready: %w", err)
+			return fmt.Errorf("failed to mirror SnapshotContent %s: %w", condType, err)
 		}
 		return nil
 	})
