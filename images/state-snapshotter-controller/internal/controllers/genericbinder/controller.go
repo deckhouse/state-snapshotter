@@ -842,6 +842,15 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// (including Ready=True -> False after the binder stopped polling). Enqueue-only; truth stays on
 		// SnapshotContent. See mapBoundContentToSnapshots.
 		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapBoundContentToSnapshots(gvk))).
+		// Event-driven parent->child unblock: when a PARENT SnapshotContent appears/changes, wake the child
+		// snapshots of this GVK that are waiting to resolve their parent's content ownerRef. Replaces the
+		// per-poll re-check that previously gated children on the Reconcile RequeueAfter fallback. See
+		// mapParentContentToChildSnapshots.
+		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapParentContentToChildSnapshots(gvk))).
+		// Event-driven capture handoff: when an MCR publishes its checkpoint, wake the owning snapshot so
+		// the binder publishes SnapshotContent.status.manifestCheckpointName immediately instead of on the
+		// next poll. See mapMCRToOwningSnapshots.
+		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(r.mapMCRToOwningSnapshots(gvk))).
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 	return builder.Complete(r)
 }
