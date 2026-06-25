@@ -124,6 +124,12 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Mirror the bound content's ManifestsArchived subtree-latch onto the root Snapshot on every capture
+	// reconcile (incl. steady-state and child degradation): the content owns the latch, the Snapshot mirrors
+	// it. Runs before the steady-state short-circuit below so the mirror still fires once capture completes.
+	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, content.Name); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.ensureVolumeCaptureLeg(ctx, nsSnap, content); err != nil {
 		return ctrl.Result{}, err
 	}

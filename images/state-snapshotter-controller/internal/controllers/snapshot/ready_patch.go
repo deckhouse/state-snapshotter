@@ -87,6 +87,60 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 }
 
+// mirrorSnapshotManifestsArchivedFromBoundContent mirrors the bound SnapshotContent's ManifestsArchived
+// subtree-latch condition verbatim onto the root Snapshot. The SnapshotContent carries the source of truth
+// (it aggregates the latch across the whole subtree); the Snapshot is a read mirror so consumers (and the
+// per-namespace capture RBAC hook / e2e) can observe the latch on the Snapshot itself.
+//
+// This is independent of the Ready formula (ManifestsArchived is NOT part of Ready), so it is an additive
+// mirror that does not touch the single-aggregator Ready contract (INV-COND2/INV-COND4).
+//
+// Latch semantics: once the Snapshot's ManifestsArchived is True it is never downgraded (the content latch is
+// itself lifelong; this guard also protects against a transient content read that momentarily lost the
+// condition, e.g. child-content degradation — see E3). If the content has no ManifestsArchived condition yet
+// this is a no-op (the capture has not archived for the first time).
+func (r *SnapshotReconciler) mirrorSnapshotManifestsArchivedFromBoundContent(
+	ctx context.Context,
+	parentKey types.NamespacedName,
+	contentName string,
+) error {
+	fresh, err := r.getSnapshotContentFresh(ctx, contentName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	src := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
+	if src == nil {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.Snapshot{}
+		if err := r.Client.Get(ctx, parentKey, cur); err != nil {
+			return err
+		}
+		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
+		// Latch: never re-open a Snapshot ManifestsArchived=True (the content latch is lifelong).
+		if existing != nil && existing.Status == metav1.ConditionTrue && src.Status != metav1.ConditionTrue {
+			return nil
+		}
+		if existing != nil && existing.Status == src.Status && existing.Reason == src.Reason &&
+			existing.Message == src.Message && existing.ObservedGeneration == cur.Generation {
+			return nil
+		}
+		cur.Status.ObservedGeneration = cur.Generation
+		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
+			Type:               snapshotpkg.ConditionManifestsArchived,
+			Status:             src.Status,
+			Reason:             src.Reason,
+			Message:            src.Message,
+			ObservedGeneration: cur.Generation,
+		})
+		return r.Client.Status().Update(ctx, cur)
+	})
+}
+
 // mirrorSnapshotReadyFromBoundContent sets the parent Snapshot.Ready to a verbatim mirror of the bound
 // SnapshotContent.Ready (status/reason/message), gen-gated on the Snapshot. This enforces the
 // single-aggregator contract during the pre-capture pending window (the parent cannot build its own
