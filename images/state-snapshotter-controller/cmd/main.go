@@ -70,6 +70,13 @@ var (
 	apiAddr        string
 	apiTLSCertFile string
 	apiTLSKeyFile  string
+
+	// version is the human-readable build marker, injected at build time via
+	// -ldflags "-X main.version=...". It defaults to "dev" for local `go run` and is set by the dev
+	// image build (Makefile fox_build_and_push -> Dockerfile APP_VERSION) to git sha + dirty + timestamp,
+	// so the startup log unambiguously identifies which build is running (debug.ReadBuildInfo VCS data is
+	// empty in the docker build because .git is not in the build context).
+	version = "dev"
 )
 
 func init() {
@@ -80,6 +87,11 @@ func init() {
 
 func main() {
 	flag.Parse()
+
+	// Print the build version unconditionally, before the logger exists and independent of the configurable
+	// logrus level (LOG_LEVEL defaults to warn=3 in production, which would suppress an Info-level version
+	// log). This guarantees the running build is always identifiable in `kubectl logs`.
+	fmt.Printf("[main] Version: %s\n", version)
 
 	// Enable controller-runtime logs FIRST, before any manager/recorder creation
 	// This prevents the warning: "[controller-runtime] log.SetLogger(...) was never called; logs will not be displayed"
