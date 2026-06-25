@@ -247,7 +247,7 @@ Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **inc
 
 **Поведение до завершения capture:**
 
-7. **Immutability `spec.targets`:** расхождение снимаемого плана с live namespace → **`CapturePlanDrift`** (пока MCR ещё существует; см. integration-тест: drift проверяется **до** удаления MCR). Стабильный порядок targets — отсортированный набор (`BuildManifestCaptureTargets`).
+7. **Point-in-time / frozen `spec.targets`:** снимок — это point-in-time. Полный list namespace выполняется **ровно один раз** — только когда рабочего MCR ещё нет (gate `OR(capture done, MCR существует)` в `reconcileCaptureN2a`, существование MCR читается через `APIReader`). Как только MCR создан, его `spec.targets` **заморожены** и **не сравниваются** с live namespace и **не переписываются** (никакого continuous drift). Прежнее состояние **`CapturePlanDrift`** для корня **больше не возникает** (логика дрейфа удалена). Пересоздание плана происходит только через транзиентные delete-пути (`unreadable`/subtree-pending удалили MCR → на следующем reconcile свежий list). Стабильный порядок targets — отсортированный набор (`BuildManifestCaptureTargets`, параллельный list-sweep). Перед единственным list — RBAC-гейт `SelfSubjectAccessReview(verb=list, group=*, resource=*, ns)`, который убирает гонку с асинхронной выдачей per-namespace capture RoleBinding.
 
 **Публичный статус root** — без полей MCR (§4.4). **Каноническая ссылка на артефакт** после success — **`SnapshotContent.status.manifestCheckpointName`**.
 

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,16 +57,27 @@ import (
 // stays in SnapshotContentController.
 // Root SnapshotContent is not owned by Snapshot; binding lives in Snapshot status.
 type SnapshotReconciler struct {
-	Client                client.Client
-	APIReader             client.Reader
-	Dynamic               dynamic.Interface
-	Discovery             discovery.DiscoveryInterface
+	Client    client.Client
+	APIReader client.Reader
+	Dynamic   dynamic.Interface
+	Discovery discovery.DiscoveryInterface
+	// SARClient gates the (single) full namespace list on the per-namespace capture RoleBinding having
+	// propagated (SelfSubjectAccessReview verb=list group=* resource=*). May be nil in tests/envtest, in
+	// which case the gate is skipped (see namespaceCaptureRBACReady).
+	SARClient             selfSubjectAccessReviewer
 	Scheme                *runtime.Scheme
 	Config                *config.Options
 	Archive               *usecase.ArchiveService
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
 	Mgr                   ctrl.Manager
 	childWatchMgr         *snapshotDynamicWatchManager
+}
+
+// selfSubjectAccessReviewer is the minimal SelfSubjectAccessReview creator used by the capture-RBAC gate
+// (satisfied by k8s.io/client-go/kubernetes/typed/authorization/v1.SelfSubjectAccessReviewInterface);
+// narrowed to an interface so it can be faked in unit tests.
+type selfSubjectAccessReviewer interface {
+	Create(ctx context.Context, sar *authorizationv1.SelfSubjectAccessReview, opts metav1.CreateOptions) (*authorizationv1.SelfSubjectAccessReview, error)
 }
 
 // childSnapshotStatusReader returns the client used for child snapshot status reads.
@@ -100,12 +113,17 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	if err != nil {
 		return fmt.Errorf("snapshot controller: discovery client: %w", err)
 	}
+	authzClient, err := authorizationv1client.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("snapshot controller: authorization client: %w", err)
+	}
 	logImpl, _ := liblogger.NewLogger("error")
 	r := &SnapshotReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Dynamic:   dyn,
 		Discovery: disco,
+		SARClient: authzClient.SelfSubjectAccessReviews(),
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
 		// Chunks are internal-only (no list/watch informer); use APIReader like the /manifests API server.
@@ -139,7 +157,17 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	return b.Complete(r)
 }
 
-func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
+	// #region agent log
+	dbgLog := log.FromContext(ctx)
+	dbgStart := time.Now()
+	dbgLog.Info("DBGCAP reconcile-enter", "snapshot", req.NamespacedName.String())
+	defer func() {
+		dbgLog.Info("DBGCAP reconcile-exit", "snapshot", req.NamespacedName.String(),
+			"elapsedMs", time.Since(dbgStart).Milliseconds(),
+			"requeue", res.Requeue, "requeueAfter", res.RequeueAfter.String(), "err", fmt.Sprintf("%v", err))
+	}()
+	// #endregion
 	log.FromContext(ctx).V(1).Info("reconcile Snapshot", "snapshot", req.NamespacedName)
 	nsSnap := &storagev1alpha1.Snapshot{}
 	if err := r.snapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
@@ -286,6 +314,9 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, err
 	}
+	// #region agent log
+	log.FromContext(ctx).Info("DBGCAP gate", "snapshot", nsSnap.Name, "graphChanged", graphChanged, "graphReady", graphReady)
+	// #endregion
 	if res, block := childGraphCaptureGate(graphChanged, graphReady); block {
 		return res, nil
 	}

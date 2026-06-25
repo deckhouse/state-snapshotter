@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // State-snapshotter own machinery API groups/kinds that discovery will enumerate inside the target
@@ -102,49 +105,86 @@ func BuildManifestCaptureTargets(
 		return nil, nil, fmt.Errorf("namespacemanifest: discovery client is nil")
 	}
 
+	dbgDiscoStart := time.Now()
 	gvrs, unreadable, err := enumerateNamespacedGVRs(disco)
+	dbgDiscoMs := time.Since(dbgDiscoStart).Milliseconds()
 	if err != nil {
 		return nil, unreadable, err
 	}
 
-	seen := make(map[string]struct{})
+	dbgSweepStart := time.Now()
+	// The per-type LIST sweep is the dominant cost of capture planning: a namespace exposes ~130
+	// namespaced types and each List is an independent apiserver round-trip (~100-200ms through
+	// auth/RBAC/admission). Done serially this is ~25s per reconcile and the capture flow re-plans on
+	// every requeue, so a trivial namespace capture took >75s. The lists are independent and read-only,
+	// so fan them out with bounded concurrency; shared accumulators are mutex-guarded and the final
+	// sortManifestTargets keeps the MCR spec deterministic regardless of completion order.
+	const listSweepConcurrency = 32
+	var (
+		mu       sync.Mutex
+		seen     = make(map[string]struct{})
+		firstErr error
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, listSweepConcurrency)
+	)
 	for _, gvr := range gvrs {
-		lst, lerr := dyn.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
-		if lerr != nil {
-			if isDiscoveryNotFound(lerr) {
-				continue
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			lst, lerr := dyn.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
+			if lerr != nil {
+				if isDiscoveryNotFound(lerr) {
+					return
+				}
+				mu.Lock()
+				if apierrors.IsForbidden(lerr) {
+					unreadable = append(unreadable, gvr)
+				} else if firstErr == nil {
+					firstErr = fmt.Errorf("list %s in namespace %s: %w", gvr.String(), namespace, lerr)
+				}
+				mu.Unlock()
+				return
 			}
-			if apierrors.IsForbidden(lerr) {
-				unreadable = append(unreadable, gvr)
-				continue
+			mu.Lock()
+			defer mu.Unlock()
+			for i := range lst.Items {
+				item := lst.Items[i]
+				key := objectKey(&item)
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				if !ShouldIncludeNamespaceObject(&item, snapshotKinds) {
+					continue
+				}
+				apiVersion := item.GetAPIVersion()
+				if apiVersion == "" {
+					apiVersion = gvr.GroupVersion().String()
+				}
+				kind := item.GetKind()
+				if kind == "" {
+					continue
+				}
+				targets = append(targets, ManifestTarget{
+					APIVersion: apiVersion,
+					Kind:       kind,
+					Name:       item.GetName(),
+				})
 			}
-			return nil, unreadable, fmt.Errorf("list %s in namespace %s: %w", gvr.String(), namespace, lerr)
-		}
-		for i := range lst.Items {
-			item := lst.Items[i]
-			key := objectKey(&item)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			if !ShouldIncludeNamespaceObject(&item, snapshotKinds) {
-				continue
-			}
-			apiVersion := item.GetAPIVersion()
-			if apiVersion == "" {
-				apiVersion = gvr.GroupVersion().String()
-			}
-			kind := item.GetKind()
-			if kind == "" {
-				continue
-			}
-			targets = append(targets, ManifestTarget{
-				APIVersion: apiVersion,
-				Kind:       kind,
-				Name:       item.GetName(),
-			})
-		}
+		}()
 	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, unreadable, firstErr
+	}
+
+	// #region agent log
+	ctrllog.FromContext(ctx).Info("DBGCAP listsweep", "namespace", namespace,
+		"nGVRs", len(gvrs), "discoveryMs", dbgDiscoMs, "sweepMs", time.Since(dbgSweepStart).Milliseconds(),
+		"nTargets", len(targets), "nUnreadable", len(unreadable))
+	// #endregion
 
 	sortManifestTargets(targets)
 	return targets, unreadable, nil

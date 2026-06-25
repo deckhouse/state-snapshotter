@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,10 +51,6 @@ import (
 )
 
 const labelSnapshotUID = "state-snapshotter.deckhouse.io/snapshot-uid"
-
-// errManifestCapturePlanDrift is returned when an existing MCR for this Snapshot has a different
-// target set than the current namespace listing; MCR spec is not silently rewritten.
-var errManifestCapturePlanDrift = errors.New("manifest capture plan drift")
 
 // deleteSnapshotManifestCaptureRequest removes the namespace-flow MCR after capture is persisted.
 // NotFound is success; other errors are returned so the reconciler can retry.
@@ -98,6 +95,37 @@ func (r *SnapshotReconciler) buildSnapshotMachineryGVKs() (namespacemanifest.Sna
 	return set, nil
 }
 
+// namespaceCaptureRBACReady reports whether this controller is already authorized to list every resource
+// in the target namespace, i.e. the per-namespace capture RoleBinding (d8-state-snapshotter-capture,
+// wildcard get/list) created by hooks/go/040-namespace-capture-rbac has propagated. It issues a
+// SelfSubjectAccessReview with Group/Resource "*"; the RBAC authorizer answers allowed for such a request
+// only when a rule with resources:["*"] (the capture grant) is in effect — the controller's own narrow
+// roles do not match. The review goes through the same authorizer as the subsequent list, so once it
+// allows the list is guaranteed readable (no Forbidden race, strictly one list).
+//
+// When SARClient is nil (tests/envtest without RBAC wiring) the gate is skipped (returns true) so capture
+// behaves as before.
+func (r *SnapshotReconciler) namespaceCaptureRBACReady(ctx context.Context, namespace string) (bool, error) {
+	if r.SARClient == nil {
+		return true, nil
+	}
+	sar := &authorizationv1.SelfSubjectAccessReview{
+		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationv1.ResourceAttributes{
+				Namespace: namespace,
+				Verb:      "list",
+				Group:     "*",
+				Resource:  "*",
+			},
+		},
+	}
+	resp, err := r.SARClient.Create(ctx, sar, metav1.CreateOptions{})
+	if err != nil {
+		return false, fmt.Errorf("self subject access review (list */* in namespace %s): %w", namespace, err)
+	}
+	return resp.Status.Allowed, nil
+}
+
 // reconcileCaptureN2a drives manifest capture via MCR->ManifestCheckpoint after root SnapshotContent is bound.
 func (r *SnapshotReconciler) reconcileCaptureN2a(
 	ctx context.Context,
@@ -105,6 +133,9 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	content *storagev1alpha1.SnapshotContent,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	// #region agent log
+	logger.Info("DBGCAP n2a-enter", "snapshot", nsSnap.Name, "content", content.Name)
+	// #endregion
 
 	if r.Dynamic == nil {
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic client is nil")
@@ -141,6 +172,20 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return res, err
 	}
 
+	// MCR-gate: a namespace snapshot is point-in-time. Once the root MCR exists its plan is frozen, so do
+	// NOT re-list the namespace (the dominant cost). Drive readiness from the existing MCR instead.
+	// The existence check uses APIReader (non-cached): the split-client cache can lag a just-created MCR
+	// and report a stale "absent", which would trigger a redundant full list + an AlreadyExists on Create.
+	// MaxConcurrentReconciles=1, so there is no concurrent reconcile of the same Snapshot to race the gate.
+	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
+	existingMCR := &ssv1alpha1.ManifestCaptureRequest{}
+	switch err := r.APIReader.Get(ctx, mcrKey, existingMCR); {
+	case err == nil:
+		return r.driveRootManifestCheckpointReadiness(ctx, nsSnap, content, existingMCR.UID)
+	case !apierrors.IsNotFound(err):
+		return ctrl.Result{}, err
+	}
+
 	if r.Discovery == nil {
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Discovery client is nil")
 	}
@@ -151,7 +196,27 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		logger.V(1).Info("snapshot graph registry not ready; requeue capture planning", "err", skErr)
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 2 * time.Second}, nil)
 	}
+	// RBAC gate before the (single) full namespace list. The per-namespace capture RoleBinding
+	// (d8-state-snapshotter-capture, wildcard get/list) is created asynchronously by the
+	// hooks/go/040-namespace-capture-rbac hook, so the first list otherwise races RBAC propagation and
+	// hits Forbidden -> NamespaceCaptureIncomplete. A SelfSubjectAccessReview goes through the same
+	// authorizer as the list, so once it allows, the list is guaranteed readable (strictly one list).
+	if allowed, sarErr := r.namespaceCaptureRBACReady(ctx, nsSnap.Namespace); sarErr != nil {
+		return ctrl.Result{}, sarErr
+	} else if !allowed {
+		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
+	}
+	dbgBuildStart := time.Now()
 	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds)
+	// #region agent log
+	{
+		errKind := "nil"
+		if err != nil {
+			errKind = err.Error()
+		}
+		logger.Info("DBGCAP buildroot", "snapshot", nsSnap.Name, "elapsedMs", time.Since(dbgBuildStart).Milliseconds(), "err", errKind, "nTargets", len(targets), "nUnreadable", len(unreadable), "unreadable", formatUnreadableGVRs(unreadable))
+	}
+	// #endregion
 	if err != nil {
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
@@ -233,32 +298,32 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		if err := r.setSnapshotReadyFalse(ctx, freshParent, snapshotpkg.ReasonNamespaceCaptureIncomplete, msg); err != nil {
 			return ctrl.Result{}, err
 		}
-		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 2 * time.Second}, nil)
+		// Safety net behind the SAR gate (namespaceCaptureRBACReady): if a Forbidden still slips through,
+		// retry quickly (500ms) instead of the old 2s — the capture RoleBinding propagates within ~1s.
+		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}
 	mcr, res, err := r.ensureManifestCaptureRequest(ctx, nsSnap, content, targets)
 	if err != nil {
-		if errors.Is(err, errManifestCapturePlanDrift) {
-			freshParent := &storagev1alpha1.Snapshot{}
-			if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
-				return ctrl.Result{}, gerr
-			}
-			// Subtree-root: plan drift is not the primary convergence path; delete stale MCR and retry with fresh targets.
-			// Plain N2a (no real domain children; VS visibility leaves do not count): terminal CapturePlanDrift for operator visibility.
-			if hasNonVisibilitySnapshotChildren(freshParent.Status.ChildrenSnapshotRefs) {
-				if delErr := r.deleteSnapshotManifestCaptureRequest(ctx, freshParent); delErr != nil {
-					return ctrl.Result{}, delErr
-				}
-				return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil)
-			}
-			return r.failCapture(ctx, freshParent, content, "CapturePlanDrift", err.Error())
-		}
 		return ctrl.Result{}, err
 	}
 	if res.RequeueAfter > 0 || res.Requeue {
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
 	}
+	return r.driveRootManifestCheckpointReadiness(ctx, nsSnap, content, mcr.UID)
+}
 
-	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
+// driveRootManifestCheckpointReadiness publishes the deterministic ManifestCheckpoint name for the root
+// MCR and drives the Snapshot toward Ready WITHOUT re-listing the namespace. It is the convergence path
+// for both the MCR-gate (existing MCR) and the just-created MCR: the namespace plan is frozen on the MCR,
+// so readiness is mirrored from the bound SnapshotContent (INV-COND4) and the MCR is cleaned up once the
+// capture is persisted (reconcileN2aRootReadyAfterManifestCapture).
+func (r *SnapshotReconciler) driveRootManifestCheckpointReadiness(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	content *storagev1alpha1.SnapshotContent,
+	mcrUID types.UID,
+) (ctrl.Result, error) {
+	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
 	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -290,10 +355,10 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 
 	if readyCond.Reason != ssv1alpha1.ManifestCheckpointConditionReasonCompleted {
 		// Ready=True with unexpected reason — still treat as success if True (defensive).
-		logger.Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
+		log.FromContext(ctx).Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
 	}
 
-	res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+	res, err := r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
 	return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
 }
 
@@ -328,29 +393,9 @@ func (r *SnapshotReconciler) reconcileIfRootManifestCheckpointAlreadyReady(
 		return false, ctrl.Result{}, nil
 	}
 
-	// Publisher-complete: bound content Ready means capture is done; mirror snapshot Ready even if MCR
-	// still exists (avoids re-entering BuildRootNamespaceManifestCaptureTargets after transient ListFailed).
-	contentReady := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionReady)
-	if contentReady != nil && contentReady.Status == metav1.ConditionTrue {
-		res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
-		res, err = r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
-		return true, res, err
-	}
-
-	// Steady-state fast path only after the request is gone; while MCR exists we must run
-	// ensureManifestCaptureRequest (capture plan drift vs live namespace).
-	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
-	staleMCR := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := r.Client.Get(ctx, mcrKey, staleMCR); err == nil {
-		readyCond := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
-		if readyCond != nil && readyCond.Status == metav1.ConditionFalse && readyCond.Reason == "CapturePlanDrift" {
-			return true, ctrl.Result{}, nil
-		}
-		return false, ctrl.Result{}, nil
-	} else if !apierrors.IsNotFound(err) {
-		return true, ctrl.Result{}, err
-	}
-
+	// MCP is Ready => the manifest capture is persisted (point-in-time). Drive Snapshot Ready (mirror of
+	// bound content) and clean up the MCR once safe, WITHOUT re-listing the namespace. The namespace plan
+	// is frozen on the MCR; there is no drift recompute against the live namespace.
 	res, err = r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
 	res, err = r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
 	return true, res, err
@@ -694,9 +739,10 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 			}
 			return nil, ctrl.Result{Requeue: true}, nil
 		}
-		if !manifestTargetsEqual(existing.Spec.Targets, specTargets) {
-			return nil, ctrl.Result{}, fmt.Errorf("%w: ManifestCaptureRequest %s spec.targets differ from current resolved capture targets; delete the MCR to retry with a fresh plan", errManifestCapturePlanDrift, key.String())
-		}
+		// A namespace snapshot is point-in-time: an existing, owned MCR's spec.targets are frozen and never
+		// rewritten or compared against the live namespace (no drift recompute). Ownership checks above are
+		// the only validity gate; the MCR-gate in reconcileCaptureN2a means we normally never reach this
+		// branch via a fresh list, but it stays idempotent for the AlreadyExists retry.
 		if err := r.patchSnapshotManifestCaptureRequestName(ctx, nsSnap, name); err != nil {
 			return nil, ctrl.Result{}, err
 		}
@@ -717,36 +763,5 @@ func (r *SnapshotReconciler) patchSnapshotManifestCaptureRequestName(ctx context
 		base := fresh.DeepCopy()
 		fresh.Status.ManifestCaptureRequestName = name
 		return r.Client.Status().Patch(ctx, fresh, client.MergeFrom(base))
-	})
-}
-
-// manifestTargetsEqual compares capture plans in canonical order (APIVersion, Kind, Name).
-// New MCR targets are always sorted; existing spec may be unsorted, so both sides are sorted before compare.
-func manifestTargetsEqual(a, b []ssv1alpha1.ManifestTarget) bool {
-	aa := append([]ssv1alpha1.ManifestTarget(nil), a...)
-	bb := append([]ssv1alpha1.ManifestTarget(nil), b...)
-	sortManifestSpecTargets(aa)
-	sortManifestSpecTargets(bb)
-	if len(aa) != len(bb) {
-		return false
-	}
-	for i := range aa {
-		if aa[i].APIVersion != bb[i].APIVersion || aa[i].Kind != bb[i].Kind || aa[i].Name != bb[i].Name {
-			return false
-		}
-	}
-	return true
-}
-
-func sortManifestSpecTargets(ts []ssv1alpha1.ManifestTarget) {
-	sort.Slice(ts, func(i, j int) bool {
-		a, b := ts[i], ts[j]
-		if a.APIVersion != b.APIVersion {
-			return a.APIVersion < b.APIVersion
-		}
-		if a.Kind != b.Kind {
-			return a.Kind < b.Kind
-		}
-		return a.Name < b.Name
 	})
 }

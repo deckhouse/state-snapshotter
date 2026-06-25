@@ -24,7 +24,9 @@ import (
 	"os/signal"
 	goruntime "runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	sv1 "k8s.io/api/storage/v1"
@@ -85,6 +87,21 @@ func init() {
 	flag.StringVar(&apiTLSKeyFile, "api-tls-private-key-file", "", "Path to TLS private key file for API server")
 }
 
+// buildTimeFromVersion extracts the UTC build timestamp embedded as the trailing
+// "<sha>[-dirty]-YYYYMMDDTHHMMSSZ" segment of the version marker (see Makefile build_ts).
+// Returns ok=false for versions without a timestamp suffix, e.g. the "dev" default.
+func buildTimeFromVersion(v string) (time.Time, bool) {
+	idx := strings.LastIndex(v, "-")
+	if idx < 0 || idx+1 >= len(v) {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("20060102T150405Z", v[idx+1:])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 func main() {
 	flag.Parse()
 
@@ -92,6 +109,9 @@ func main() {
 	// logrus level (LOG_LEVEL defaults to warn=3 in production, which would suppress an Info-level version
 	// log). This guarantees the running build is always identifiable in `kubectl logs`.
 	fmt.Printf("[main] Version: %s\n", version)
+	if buildTime, ok := buildTimeFromVersion(version); ok {
+		fmt.Printf("[main] Build time: %s UTC\n", buildTime.Format("2006-01-02 15:04:05"))
+	}
 
 	// Enable controller-runtime logs FIRST, before any manager/recorder creation
 	// This prevents the warning: "[controller-runtime] log.SetLogger(...) was never called; logs will not be displayed"
