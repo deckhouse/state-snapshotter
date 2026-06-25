@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -105,11 +106,18 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}
-	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
+	// The namespace capture plan lists ~130 namespaced types in one parallel sweep. The default client-go
+	// rate limiter (QPS 5 / Burst 10) serializes those List calls to ~25s regardless of fan-out, so raise
+	// QPS/Burst on a dedicated rest.Config copy used only by the capture dynamic/discovery clients. This
+	// keeps the single sweep to ~1-2s and does not touch the manager's shared client/informer config.
+	captureRESTConfig := rest.CopyConfig(mgr.GetConfig())
+	captureRESTConfig.QPS = 100
+	captureRESTConfig.Burst = 200
+	dyn, err := dynamic.NewForConfig(captureRESTConfig)
 	if err != nil {
 		return fmt.Errorf("snapshot controller: dynamic client: %w", err)
 	}
-	disco, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	disco, err := discovery.NewDiscoveryClientForConfig(captureRESTConfig)
 	if err != nil {
 		return fmt.Errorf("snapshot controller: discovery client: %w", err)
 	}
