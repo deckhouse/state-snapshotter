@@ -21,14 +21,23 @@ test-focus: ## Run a focused Ginkgo spec (make test-focus FOCUS="captures the de
 	fi
 	go test -v -count=1 -timeout 120m ./tests/ -ginkgo.timeout 120m -ginkgo.v -ginkgo.focus "$(FOCUS)"
 
+# Directory where the e2e capture timeline writes its per-kind/diff logs (mirrors the default in
+# tests/timeline_test.go: $E2E_TIMELINE_DIR, else <go os.TempDir()>/e2e/timeline). Go's os.TempDir()
+# uses $TMPDIR and falls back to /tmp when it is unset (typical in CI). Override TIMELINE_DIR for custom
+# runs. Double slashes (TMPDIR with a trailing slash) are harmless for rm.
+TMP_BASE := $(if $(TMPDIR),$(TMPDIR),/tmp)
+TIMELINE_DIR ?= $(if $(E2E_TIMELINE_DIR),$(E2E_TIMELINE_DIR),$(TMP_BASE)/e2e/timeline)
+
 .PHONY: clean-env
-clean-env: ## Delete leftover e2e resources: namespaces (snap-e2e*) + ObjectKeepers (ret-snap-snap-e2e*)
+clean-env: ## Delete leftover e2e resources: namespaces (snap-e2e*) + ObjectKeepers (ret-snap-snap-e2e*) + timeline logs
 	@echo "==> Deleting namespaces with prefix 'snap-e2e'..."
 	@ns=$$(kubectl get ns -o name | grep -E '^namespace/snap-e2e' || true); \
 	if [ -n "$$ns" ]; then echo "$$ns" | xargs kubectl delete --wait=false; else echo "  none found"; fi
 	@echo "==> Deleting ObjectKeepers with prefix 'ret-snap-snap-e2e'..."
 	@oks=$$(kubectl get objectkeepers.deckhouse.io -o name | grep -E '/ret-snap-snap-e2e' || true); \
 	if [ -n "$$oks" ]; then echo "$$oks" | xargs kubectl delete --wait=false; else echo "  none found"; fi
+	@echo "==> Deleting capture timeline logs in '$(TIMELINE_DIR)'..."
+	@if [ -d "$(TIMELINE_DIR)" ]; then rm -rf "$(TIMELINE_DIR)" && echo "  removed"; else echo "  none found"; fi
 
 .PHONY: vet
 vet: ## go vet (also type-checks the _test.go files -> compile gate)
