@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -38,8 +39,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -56,6 +59,34 @@ import (
 func setSingleCondition(conds *[]metav1.Condition, cond metav1.Condition) {
 	meta.RemoveStatusCondition(conds, cond.Type)
 	meta.SetStatusCondition(conds, cond)
+}
+
+// terminalCaptureError marks a chunk-build failure as permanent (retry will never help):
+// deterministic marshal/compress/checksum failures, or apiserver shape/validation rejections.
+// Errors NOT wrapped in this sentinel are treated as transient and requeued, so a momentary
+// apiserver/network hiccup never wedges the snapshot (see processCaptureRequest).
+type terminalCaptureError struct{ err error }
+
+func (e *terminalCaptureError) Error() string { return e.err.Error() }
+func (e *terminalCaptureError) Unwrap() error { return e.err }
+
+// terminalCapturef builds a terminalCaptureError with a formatted message.
+func terminalCapturef(format string, a ...interface{}) error {
+	return &terminalCaptureError{err: fmt.Errorf(format, a...)}
+}
+
+// isTerminalCaptureError reports whether err (or anything it wraps) is a terminalCaptureError.
+func isTerminalCaptureError(err error) bool {
+	var t *terminalCaptureError
+	return stderrors.As(err, &t)
+}
+
+// chunkCreateErrorIsTerminal classifies an apiserver error from creating a chunk as permanent: only
+// validation/shape/size rejections will never succeed on retry. Everything else (timeouts, 5xx,
+// connection blips, even Forbidden during module rollout) is treated as transient and requeued,
+// mirroring the bias-to-retry policy of isTransientCaptureTargetError in the snapshot controller.
+func chunkCreateErrorIsTerminal(err error) bool {
+	return errors.IsInvalid(err) || errors.IsBadRequest(err) || errors.IsRequestEntityTooLargeError(err)
 }
 
 // ManifestCheckpointController reconciles ManifestCaptureRequest objects
@@ -323,14 +354,21 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		Controller: controllerTrue,
 	}}
 
-	// If checkpoint already exists → publish checkpointName and wait for SnapshotContent handoff.
-	// This handles the case where checkpoint was created but MCR status update failed.
+	// If checkpoint already exists, only short-circuit to the SnapshotContent-handoff path when the
+	// checkpoint is genuinely done (Ready=True) or terminally failed. If it exists but chunk creation
+	// is still incomplete (e.g. a prior reconcile requeued mid-creation on a transient error), fall
+	// through so the r.Create→AlreadyExists resume path below re-enters createChunks idempotently.
 	var existingCheckpoint storagev1alpha1.ManifestCheckpoint
 	if err := r.Get(ctx, client.ObjectKey{Name: checkpointName}, &existingCheckpoint); err == nil {
-		r.Logger.Info("Checkpoint already exists, checking SnapshotContent handoff before MCR completion",
+		if manifestCheckpointDoneOrFailed(&existingCheckpoint) {
+			r.Logger.Info("Checkpoint already exists, checking SnapshotContent handoff before MCR completion",
+				"checkpoint", checkpointName)
+			mcr.Status.CheckpointName = checkpointName
+			return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &existingCheckpoint)
+		}
+		r.Logger.Info("Checkpoint exists but chunk creation is incomplete; resuming",
 			"checkpoint", checkpointName)
-		mcr.Status.CheckpointName = checkpointName
-		return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &existingCheckpoint)
+		// fall through: r.Create below returns AlreadyExists and resumes createChunks
 	}
 
 	// Create ManifestCheckpoint owned by the execution ObjectKeeper. Handoff to SnapshotContent is done
@@ -435,6 +473,20 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Creating chunks for checkpoint %s (%d objects)...", checkpointName, len(objects)))
 	chunks, err := r.createChunks(ctx, checkpointName, string(checkpoint.UID), objects)
 	if err != nil {
+		// Transient apiserver/network errors must NOT mark the MCP/MCR terminal: keep the checkpoint
+		// Processing and requeue so the next reconcile resumes chunk creation idempotently (the MCP
+		// already exists, so the AlreadyExists path re-enters createChunks). Only errors explicitly
+		// wrapped as terminalCaptureError (validation/shape/size, deterministic marshal/compress,
+		// checksum/identity conflicts) fail the request. This mirrors collectTargetObjects, where only
+		// a missing target (NotFound) is terminal.
+		if !isTerminalCaptureError(err) {
+			r.Logger.Info("Step 3: chunk creation hit a transient error; requeueing without marking the request terminal",
+				"checkpoint", checkpointName,
+				"objects", len(objects),
+				"error", err.Error())
+			r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Transient error creating chunks, retrying: %v", err))
+			return ctrl.Result{}, err
+		}
 		r.Logger.Error(err, "❌ Step 3 failed: Failed to create chunks",
 			"checkpoint", checkpointName,
 			"objects", len(objects),
@@ -542,6 +594,19 @@ func (r *ManifestCheckpointController) finalizeMCRIfCheckpointHandedOff(
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// manifestCheckpointDoneOrFailed reports whether the checkpoint has reached a stable state where no
+// further chunk creation is needed: Ready=True (Completed) or Ready=False with reason Failed
+// (terminal). A checkpoint that is still Processing (or has no Ready condition yet) returns false so
+// the caller resumes chunk creation instead of prematurely treating it as handed off.
+func manifestCheckpointDoneOrFailed(cp *storagev1alpha1.ManifestCheckpoint) bool {
+	ready := meta.FindStatusCondition(cp.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
+	if ready == nil {
+		return false
+	}
+	return ready.Status == metav1.ConditionTrue ||
+		(ready.Status == metav1.ConditionFalse && ready.Reason == storagev1alpha1.ManifestCheckpointConditionReasonFailed)
 }
 
 func manifestCheckpointOwnedBySnapshotContent(checkpoint *storagev1alpha1.ManifestCheckpoint) bool {
@@ -669,7 +734,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		// Get gzip bytes first for size calculation
 		gzipBytes, err := r.compressToBytes(emptyJSON)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compress empty chunk: %w", err)
+			return nil, terminalCapturef("failed to compress empty chunk: %w", err)
 		}
 		// Encode to base64 for storage
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
@@ -709,6 +774,11 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		}
 
 		if err := r.Create(ctx, chunk); err != nil && !errors.IsAlreadyExists(err) {
+			// Transient apiserver/network errors are requeued (plain error); only genuine shape/size
+			// rejections are terminal so a momentary hiccup does not wedge the snapshot.
+			if chunkCreateErrorIsTerminal(err) {
+				return nil, terminalCapturef("failed to create empty chunk: %w", err)
+			}
 			return nil, fmt.Errorf("failed to create empty chunk: %w", err)
 		}
 
@@ -780,13 +850,13 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 
 		testJSON, err := json.Marshal(testChunk)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal test chunk: %w", err)
+			return nil, terminalCapturef("failed to marshal test chunk: %w", err)
 		}
 
 		// Compress to check actual size (compare gzip bytes, not base64 string)
 		gzipBytes, err := r.compressToBytes(testJSON)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compress test chunk: %w", err)
+			return nil, terminalCapturef("failed to compress test chunk: %w", err)
 		}
 
 		// If compressed size exceeds limit, finalize current chunk first
@@ -836,14 +906,14 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		// Marshal chunk objects to JSON array
 		chunkJSON, err := json.Marshal(chunk.objects)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal chunk %d: %w", i, err)
+			return nil, terminalCapturef("failed to marshal chunk %d: %w", i, err)
 		}
 
 		// Compress and encode (each chunk has its own gzip, not a split of one global gzip)
 		// Get gzip bytes first for size calculation (SizeBytes should reflect etcd/apiserver object size)
 		gzipBytes, err := r.compressToBytes(chunkJSON)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compress chunk %d: %w", i, err)
+			return nil, terminalCapturef("failed to compress chunk %d: %w", i, err)
 		}
 		// Encode to base64 for storage
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
@@ -905,6 +975,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				"checkpoint", checkpointName)
 			if err := r.Get(ctx, client.ObjectKey{Name: chunkName}, chunk); err != nil {
 				r.Logger.Error(err, "Failed to get existing chunk", "chunk", chunkName)
+				// Transient read error: requeue (plain error), do not wedge the snapshot.
 				return nil, fmt.Errorf("failed to get existing chunk %s: %w", chunkName, err)
 			}
 			// Verify it's the same chunk (same index, checkpoint, and checksum)
@@ -917,7 +988,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 						"actualChecksum", chunk.Spec.Checksum,
 						"checkpoint", checkpointName,
 						"index", i)
-					return nil, fmt.Errorf("chunk %s already exists but checksum mismatch: expected %s, got %s", chunkName, checksum, chunk.Spec.Checksum)
+					return nil, terminalCapturef("chunk %s already exists but checksum mismatch: expected %s, got %s", chunkName, checksum, chunk.Spec.Checksum)
 				}
 				r.Logger.Info("✅ Chunk already exists and matches (index, checkpoint, checksum)",
 					"chunk", chunkName,
@@ -932,15 +1003,21 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 					"actualCheckpoint", chunk.Spec.CheckpointName,
 					"expectedIndex", i,
 					"actualIndex", chunk.Spec.Index)
-				return nil, fmt.Errorf("chunk %s already exists but belongs to different checkpoint", chunkName)
+				return nil, terminalCapturef("chunk %s already exists but belongs to different checkpoint", chunkName)
 			}
 		default:
-			// Fail-fast: any other error → terminal failure
 			r.Logger.Error(err, "Failed to create chunk",
 				"chunk", chunkName,
 				"checkpoint", checkpointName,
 				"index", i,
 				"sizeBytes", len(gzipBytes))
+			// Only validation/shape/size rejections are terminal; every other error (timeouts, 5xx,
+			// connection blips, Forbidden during rollout) is transient and requeued so a momentary
+			// apiserver hiccup does not wedge the whole snapshot. createChunks resumes idempotently
+			// (the AlreadyExists branch above verifies checksum on re-run).
+			if chunkCreateErrorIsTerminal(err) {
+				return nil, terminalCapturef("failed to create chunk %s: %w", chunkName, err)
+			}
 			return nil, fmt.Errorf("failed to create chunk %s: %w", chunkName, err)
 		}
 
@@ -1235,6 +1312,14 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).
+		WithOptions(controller.Options{
+			// Bound the per-item retry backoff so transient chunk-creation requeues (apiserver/network
+			// blips) re-run quickly instead of backing off to the controller-runtime default (~16min),
+			// which would stall a snapshot whose capture hit a momentary hiccup. Terminal failures
+			// finalize without requeue, so this only affects the transient retry loop. Mirrors the
+			// Snapshot controller's rate limiter (200ms floor -> 10s ceiling).
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](200*time.Millisecond, 10*time.Second),
+		}).
 		Complete(r)
 }
 
