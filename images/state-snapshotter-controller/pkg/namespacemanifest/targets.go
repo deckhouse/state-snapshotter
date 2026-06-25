@@ -138,9 +138,16 @@ func BuildManifestCaptureTargets(
 	return targets, unreadable, nil
 }
 
-// enumerateNamespacedGVRs returns every namespaced GVR (preferred version) that supports both list and
-// get and is not a subresource. Partial discovery failures (broken aggregated APIServices) are returned
+// enumerateNamespacedGVRs returns every namespaced GVR (preferred version) that supports list, get and
+// watch and is not a subresource. Partial discovery failures (broken aggregated APIServices) are returned
 // in unreadable instead of being silently dropped, so the caller fails closed.
+//
+// The watch verb requirement is an explicit, discovery-level signal that excludes virtual/computed-on-read
+// resources (e.g. metrics.k8s.io PodMetrics/NodeMetrics served by the metrics aggregation layer): these are
+// not persisted desired-state, support only get+list, and cannot be restored. Capturing them is also racy —
+// a name listed at planning time may be gone by MCR validation (a GET-by-name 404), wedging the whole
+// manifest-capture leg. Any genuinely persisted (etcd-backed) resource supports watch, so this drops the
+// virtual class without a per-resource denylist.
 func enumerateNamespacedGVRs(disco discovery.DiscoveryInterface) (gvrs []schema.GroupVersionResource, unreadable []schema.GroupVersionResource, err error) {
 	lists, derr := disco.ServerPreferredNamespacedResources()
 	if derr != nil {
@@ -167,7 +174,7 @@ func enumerateNamespacedGVRs(disco discovery.DiscoveryInterface) (gvrs []schema.
 			if strings.Contains(res.Name, "/") {
 				continue // subresource (e.g. pods/status)
 			}
-			if !hasVerb(res.Verbs, "list") || !hasVerb(res.Verbs, "get") {
+			if !hasVerb(res.Verbs, "list") || !hasVerb(res.Verbs, "get") || !hasVerb(res.Verbs, "watch") {
 				continue
 			}
 			gvrs = append(gvrs, schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: res.Name})

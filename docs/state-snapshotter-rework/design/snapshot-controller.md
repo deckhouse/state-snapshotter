@@ -145,14 +145,17 @@
 
 ### 4.5 Namespace capture — discovery + единое правило включения (SSOT)
 
-**Перечисление видов — через discovery, не статический allowlist.** Захват больше не опирается на захардкоженный список GVR (`n2aNamespacedGVR` удалён). `BuildManifestCaptureTargets` перечисляет **все** namespaced-виды через `discovery.ServerPreferredNamespacedResources` (preferred version каждого ресурса, verbs ⊇ {`list`,`get`}, без subresource) и листит каждый в целевом namespace динамическим клиентом. Это гарантирует, что произвольные CR (например, оператор-провижененные ресурсы без CSD-маппинга) не теряются.
+**Перечисление видов — через discovery, не статический allowlist.** Захват больше не опирается на захардкоженный список GVR (`n2aNamespacedGVR` удалён). `BuildManifestCaptureTargets` перечисляет **все** namespaced-виды через `discovery.ServerPreferredNamespacedResources` (preferred version каждого ресурса, verbs ⊇ {`list`,`get`,`watch`}, без subresource) и листит каждый в целевом namespace динамическим клиентом. Это гарантирует, что произвольные CR (например, оператор-провижененные ресурсы без CSD-маппинга) не теряются.
+
+**Требование verb `watch` исключает виртуальные/вычисляемые ресурсы.** Признак `watch` — это явный discovery-сигнал «настоящий хранимый desired-state vs computed-on-read». Любой etcd-backed ресурс (все CRD, встроенные виды, агрегированные API с реальным хранилищем) поддерживает `watch`; виртуальные ресурсы aggregation-слоя (`metrics.k8s.io`/`PodMetrics`/`NodeMetrics`, `custom/external.metrics.k8s.io`) отдают только `get,list` — их нельзя восстановить, и они racy при capture (имя, видимое в LIST на этапе планирования, может отсутствовать при GET-by-name в MCR-валидации → reject всего MCR). Признак режет именно по оси persisted/virtual, а не по «Local vs aggregated»: агрегированные, но реально хранимые ресурсы поддерживают `watch` и **остаются** в снимке. Verbs у CRD задаёт apiserver фиксированным набором (включая `watch`) — автор CR **не может** отключить `watch`, поэтому пользовательские манифесты этим фильтром не теряются.
 
 **Единое правило включения — `ShouldIncludeNamespaceObject` (default-include).** Объект попадает в снимок, если нет доказуемого сигнала исключения. Сигналы исключения (единственное место — `pkg/namespacemanifest/targets.go`):
 
 - **controller-`ownerReference`** (`controller: true`) — derived/runtime-состояние, которое владелец пересоздаёт после restore (backing Pod демо-VM, ReplicaSet/Pod от Deployment, domain-owned PVC — последняя захватывается отдельным volume-node путём);
 - **control-plane noise denylist** (регенерируется контрол-плейном, не пользовательский desired-state):
-  - kind-level: `Event` (`v1` + `events.k8s.io`), `v1` `Endpoints`, `coordination.k8s.io` `Lease`;
+  - kind-level: `Event` (`v1` + `events.k8s.io`), `v1` `Endpoints`, `coordination.k8s.io` `Lease`, `cilium.io` `CiliumEndpoint` (эфемерный per-pod runtime-объект, имя = имя пода; cilium-агент пересоздаёт его при churn подов — бессмыслен для restore и racy при capture, как и виртуальные метрики);
   - object-level: `ConfigMap` `kube-root-ca.crt`; `ServiceAccount` `default`; `Secret` типа `kubernetes.io/service-account-token`;
+  - примечание: виртуальные ресурсы aggregation-слоя (`metrics.k8s.io` и т. п.) исключаются **не** здесь, а раньше — на этапе перечисления через отсутствие verb `watch` (см. абзац про discovery выше);
 - **снапшотная машинерия (механизм 1, kind-level)** — виды, которые снапшоттер создаёт сам: CSI `VolumeSnapshot` плюс все зарегистрированные в живом `snapshot.GVKRegistry` snapshot/content-виды (встроенные + выведенные из CSD, напр. `VirtualMachineSnapshot`; root `Snapshot` тоже входит сюда). Набор GVK прокидывается из Snapshot-контроллера; **fail-closed**, если реестр ещё не построен (`ErrGraphRegistryNotReady` → requeue, чтобы не захватить собственные снапшот-объекты);
 - **собственная machinery state-snapshotter** — вся API-группа `state-snapshotter.deckhouse.io` (MCR/MCP/chunk) и машинерные виды `storage.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`).
 
@@ -176,6 +179,30 @@ Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **inc
 - `Secret`s excluded by the unified inclusion rule (`ShouldIncludeNamespaceObject`) — e.g. `kubernetes.io/service-account-token` secrets — are not captured at all; this is object selection, not field stripping.
 
 > At-rest encryption of the snapshot store is a separate, future concern. The legacy opt-in annotations (`state-snapshotter.deckhouse.io/include-secret`, `…/include-secret-data`) and the secure-by-default stripping have been removed.
+
+#### 4.5.2 Что попадает в снимок namespace (сводка)
+
+Модель — **default-include**: в снимок попадает **любой** namespaced-объект целевого namespace, кроме явно исключённого. Отдельного allowlist «снимать только это» нет — захватывается весь пользовательский desired-state, включая произвольные CR без CSD-маппинга.
+
+**Попадает в снимок (примеры):**
+
+- встроенные пользовательские ресурсы: `ConfigMap`, `Secret` (любого типа, кроме service-account-token), `Service`, `PersistentVolumeClaim`, `ServiceAccount` (кроме `default`), `Pod` без controller-владельца (standalone) и т. п.;
+- workload-объекты верхнего уровня, создаваемые пользователем: `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob` и т. п. (их производные — `ReplicaSet`/`Pod` — исключаются как controller-owned, владелец пересоздаст их при restore);
+- любые **CRD-ресурсы** в namespace (операторные/вендорные CR), в т. ч. агрегированные API с реальным хранилищем (поддерживают `watch`);
+- сетевые/политики/прочее: `Ingress`, `NetworkPolicy`, `Role`, `RoleBinding` и др.
+
+**НЕ попадает в снимок:**
+
+| Категория | Что именно | Почему |
+|-----------|------------|--------|
+| Производные (controller-owned) | объекты с `ownerReference.controller: true` (`ReplicaSet`/`Pod` от Deployment, backing-Pod демо-VM, domain-owned PVC) | владелец пересоздаёт их при restore; PVC данных захватывается отдельным volume-путём |
+| Control-plane noise | `Event`, `Endpoints`, `Lease`, `CiliumEndpoint`, `ConfigMap/kube-root-ca.crt`, `ServiceAccount/default`, service-account-token `Secret` | регенерируется контрол-плейном/CNI, не пользовательский desired-state |
+| Виртуальные/computed | `metrics.k8s.io` (`PodMetrics`/`NodeMetrics`), `custom/external.metrics.k8s.io` | не хранятся (только `get,list`, без `watch`), невосстановимы |
+| Снапшотная машинерия | CSI `VolumeSnapshot`, все snapshot/content-виды из `snapshot.GVKRegistry` (вкл. root `Snapshot`, `VirtualMachineSnapshot` и пр.) | создаются самим снапшоттером (self-referential) |
+| Собственная машинерия | вся группа `state-snapshotter.deckhouse.io` (MCR/MCP/chunk) + `storage.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`) | внутренние execution/transfer-объекты |
+| Уже снятое дочерними снимками | объекты, попавшие в MCP дочерних доменных content-узлов (механизм 2, object-identity) | дедуп, чтобы не дублировать в root |
+
+> Примечание про «ресурсы, создаваемые Deckhouse»: специального исключения «по владельцу Deckhouse» нет. Deckhouse-managed объекты отсекаются теми же общими сигналами: либо они controller-owned (пересоздаются модулем), либо это control-plane noise, либо это наша/снапшотная машинерия. Всё остальное в namespace — в том числе ресурсы, которые лишь *настроены* пользователем поверх модулей, — считается desired-state и попадает в снимок.
 
 ---
 

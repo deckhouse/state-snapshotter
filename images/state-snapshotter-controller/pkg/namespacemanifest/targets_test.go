@@ -44,26 +44,32 @@ func (f *fakeDiscovery) ServerPreferredNamespacedResources() ([]*metav1.APIResou
 	return f.resources, f.err
 }
 
-// gvrEntry pairs a GVR with its list Kind for wiring both discovery and the dynamic fake.
+// gvrEntry pairs a GVR with its list Kind for wiring both discovery and the dynamic fake. verbs overrides
+// the discovery verbs for this resource; when empty it defaults to the full get,list,watch set (a normal
+// etcd-backed resource).
 type gvrEntry struct {
 	gvr      schema.GroupVersionResource
 	kind     string
 	listKind string
+	verbs    metav1.Verbs
 }
 
 func defaultGVRs() []gvrEntry {
 	return []gvrEntry{
-		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}, "Pod", "PodList"},
-		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}, "ConfigMap", "ConfigMapList"},
-		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}, "Secret", "SecretList"},
-		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "serviceaccounts"}, "ServiceAccount", "ServiceAccountList"},
-		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "endpoints"}, "Endpoints", "EndpointsList"},
-		{schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}, "PersistentVolumeClaim", "PersistentVolumeClaimList"},
-		{schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, "Lease", "LeaseList"},
-		{schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumendpoints"}, "CiliumEndpoint", "CiliumEndpointList"},
-		{schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}, "VolumeSnapshot", "VolumeSnapshotList"},
-		{schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests"}, "ManifestCaptureRequest", "ManifestCaptureRequestList"},
-		{schema.GroupVersionResource{Group: "kafka.example.com", Version: "v1", Resource: "kafkas"}, "Kafka", "KafkaList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}, kind: "Pod", listKind: "PodList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}, kind: "ConfigMap", listKind: "ConfigMapList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}, kind: "Secret", listKind: "SecretList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "serviceaccounts"}, kind: "ServiceAccount", listKind: "ServiceAccountList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "endpoints"}, kind: "Endpoints", listKind: "EndpointsList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}, kind: "PersistentVolumeClaim", listKind: "PersistentVolumeClaimList"},
+		{gvr: schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, kind: "Lease", listKind: "LeaseList"},
+		{gvr: schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumendpoints"}, kind: "CiliumEndpoint", listKind: "CiliumEndpointList"},
+		// metrics.k8s.io is a virtual aggregated API: get+list only, no watch. It must be dropped at
+		// enumeration by the watch-verb signal (not a per-resource denylist).
+		{gvr: schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods"}, kind: "PodMetrics", listKind: "PodMetricsList", verbs: metav1.Verbs{"get", "list"}},
+		{gvr: schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}, kind: "VolumeSnapshot", listKind: "VolumeSnapshotList"},
+		{gvr: schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests"}, kind: "ManifestCaptureRequest", listKind: "ManifestCaptureRequestList"},
+		{gvr: schema.GroupVersionResource{Group: "kafka.example.com", Version: "v1", Resource: "kafkas"}, kind: "Kafka", listKind: "KafkaList"},
 	}
 }
 
@@ -76,11 +82,15 @@ func discoveryFromEntries(entries []gvrEntry, err error) *fakeDiscovery {
 			list = &metav1.APIResourceList{GroupVersion: gv}
 			byGV[gv] = list
 		}
+		verbs := e.verbs
+		if len(verbs) == 0 {
+			verbs = metav1.Verbs{"get", "list", "watch"}
+		}
 		list.APIResources = append(list.APIResources, metav1.APIResource{
 			Name:       e.gvr.Resource,
 			Namespaced: true,
 			Kind:       e.kind,
-			Verbs:      metav1.Verbs{"get", "list", "watch"},
+			Verbs:      verbs,
 		})
 	}
 	out := make([]*metav1.APIResourceList, 0, len(byGV))
@@ -165,13 +175,14 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 	endpoints := obj("v1", "Endpoints", "app", nil)
 	lease := obj("coordination.k8s.io/v1", "Lease", "leader", nil)
 	ciliumEndpoint := obj("cilium.io/v2", "CiliumEndpoint", "app-pod-xyz", nil)
+	podMetrics := obj("metrics.k8s.io/v1beta1", "PodMetrics", "app-pod-xyz", nil)
 	csiVS := obj("snapshot.storage.k8s.io/v1", "VolumeSnapshot", "vs-a", nil)
 	mcr := obj("state-snapshotter.deckhouse.io/v1alpha1", "ManifestCaptureRequest", "root-mcr", nil)
 	kafka := obj("kafka.example.com/v1", "Kafka", "my-kafka", nil)
 
 	dyn := dynamicFromEntries(entries,
 		userCM, rootCA, defaultSA, userSA, opaqueSecret, tokenSecret,
-		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, csiVS, mcr, kafka,
+		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, podMetrics, csiVS, mcr, kafka,
 	)
 
 	targets, unreadable, err := BuildManifestCaptureTargets(
@@ -209,6 +220,7 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		"Endpoints/app",
 		"Lease/leader",
 		"CiliumEndpoint/app-pod-xyz",
+		"PodMetrics/app-pod-xyz",
 		"VolumeSnapshot/vs-a",
 		"ManifestCaptureRequest/root-mcr",
 	}
@@ -221,7 +233,7 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 
 func TestBuildManifestCaptureTargets_ExcludesRegisteredSnapshotKinds(t *testing.T) {
 	fooSnapGVR := schema.GroupVersionResource{Group: "x.example.com", Version: "v1", Resource: "foosnapshots"}
-	entries := append(defaultGVRs(), gvrEntry{fooSnapGVR, "FooSnapshot", "FooSnapshotList"})
+	entries := append(defaultGVRs(), gvrEntry{gvr: fooSnapGVR, kind: "FooSnapshot", listKind: "FooSnapshotList"})
 
 	fooSnap := obj("x.example.com/v1", "FooSnapshot", "snap-1", nil)
 	dyn := dynamicFromEntries(entries, fooSnap)
@@ -325,6 +337,31 @@ func TestBuildManifestCaptureTargets_ListErrorIsReturnedWrapped(t *testing.T) {
 	}
 	if !apierrors.IsServiceUnavailable(err) {
 		t.Fatalf("expected wrapped error to preserve apierrors classification (ServiceUnavailable), got %v", err)
+	}
+}
+
+func TestBuildManifestCaptureTargets_ExcludesResourcesWithoutWatchVerb(t *testing.T) {
+	// A virtual/aggregated resource that supports only get+list (no watch) must be dropped at enumeration
+	// by the explicit watch-verb signal, regardless of its group/name (this is the generic rule that also
+	// covers metrics.k8s.io, without a per-resource denylist).
+	virtualGVR := schema.GroupVersionResource{Group: "vendor.example.com", Version: "v1", Resource: "widgets"}
+	entries := append(defaultGVRs(), gvrEntry{gvr: virtualGVR, kind: "Widget", listKind: "WidgetList", verbs: metav1.Verbs{"get", "list"}})
+
+	widget := obj("vendor.example.com/v1", "Widget", "w1", nil)
+	dyn := dynamicFromEntries(entries, widget)
+
+	targets, _, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dyn,
+		discoveryFromEntries(entries, nil),
+		"ns1",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("BuildManifestCaptureTargets: %v", err)
+	}
+	if _, ok := targetNames(targets)["Widget/w1"]; ok {
+		t.Fatalf("resource without watch verb must be excluded at enumeration, got %#v", targets)
 	}
 }
 
