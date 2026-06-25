@@ -178,9 +178,50 @@ func collectRunSubtreeManifestExcludeKeys(
 			return nil, fmt.Errorf("%w: childrenSnapshotRefs %s/%s -> %q not visited from root SnapshotContent %q",
 				ErrRunGraphChildNotReachable, rootNS.Namespace, ch.Name, resolved, rootContentName)
 		}
+		// Wave barrier: the direct child's whole subtree must be ManifestsArchived before the root MCR is
+		// built. See requireContentManifestsArchived.
+		if err := requireContentManifestsArchived(ctx, c, resolved); err != nil {
+			return nil, err
+		}
 	}
 
 	return exclude, nil
+}
+
+// requireContentManifestsArchived is the wave barrier for root manifest capture: a declared direct child
+// of the root snapshot must have its bound SnapshotContent at ManifestsArchived=True before the root MCR
+// is built. Because the content-node ManifestsArchived latch is fail-closed against declared-but-unlinked
+// children (see snapshotcontent.aggregateChildrenManifestsArchived), a direct child's True transitively
+// guarantees its ENTIRE subtree is archived and fully edge-linked. That makes WalkSnapshotContentSubtree
+// reach every descendant content, so the exclude set is complete and a descendant-captured object can
+// never leak back into the root MCP (the 409 duplicate-object race).
+//
+// A child not yet archived -> ErrSubtreeManifestCapturePending (transient requeue); a child terminally
+// ManifestsArchived=False/ManifestsArchiveFailed -> ErrSubtreeManifestCaptureFailed.
+//
+// The root's OWN ManifestsArchived is intentionally NOT consulted: it can only become True after the root
+// MCR exists and is processed (own ManifestsReady) AND all children are archived, so gating root-MCR
+// creation on it would be circular and deadlock. The root content node is not special; its own latch is
+// computed by the same content-controller path once its MCP is ready and children are archived.
+func requireContentManifestsArchived(ctx context.Context, c client.Reader, contentName string) error {
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: direct child SnapshotContent %q not found (subtree not archived yet)",
+				ErrSubtreeManifestCapturePending, contentName)
+		}
+		return fmt.Errorf("get direct child SnapshotContent %q: %w", contentName, err)
+	}
+	cond := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
+	if cond != nil && cond.Status == metav1.ConditionTrue {
+		return nil
+	}
+	if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == snapshotpkg.ReasonManifestsArchiveFailed {
+		return fmt.Errorf("%w: direct child SnapshotContent %q: %s",
+			ErrSubtreeManifestCaptureFailed, contentName, cond.Message)
+	}
+	return fmt.Errorf("%w: direct child SnapshotContent %q ManifestsArchived not yet True",
+		ErrSubtreeManifestCapturePending, contentName)
 }
 
 func appendManifestCheckpointObjectsToExclude(

@@ -18,6 +18,7 @@ package snapshotcontent
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"strings"
@@ -41,6 +42,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
@@ -582,11 +584,26 @@ func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context
 // Failed -> the subtree can never be archived), and a progress message. A NotFound or not-yet-archived
 // child is pending (not a failure): the subtree is simply not archived yet. This mirrors the child walk
 // in validateCommonContentChildren but keys on ManifestsArchived rather than Ready.
+//
+// Reliability (fail-closed against declared-but-unlinked children): a published-edges-only view
+// (status.childrenSnapshotContentRefs) can momentarily see FEWER (or zero) children than the owning
+// snapshot declares, because child content edges are published atomically only AFTER every declared
+// child snapshot binds (PublishSnapshotContentChildrenFromSnapshotRefs). Latching ManifestsArchived=True
+// on that partial view is the root cause of duplicate root captures: a not-yet-linked descendant subtree
+// is not reached by the root subtree walk and so its manifests are not excluded. Therefore allArchived
+// also requires every DECLARED non-leaf child of the owning snapshot (spec.snapshotRef ->
+// status.childrenSnapshotRefs) to be resolved, bound, linked into childrenSnapshotContentRefs, AND
+// archived; any unresolved/unbound/unlinked declared child is pending (not a failure). Because the latch
+// is one-way (never re-opens), this declared-vs-linked check is the only way to guarantee True implies a
+// complete, fully linked subtree.
 func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, bool, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
 		return false, false, "", err
 	}
+	// linked tracks every published child content edge so the declared-vs-linked check below can detect a
+	// declared child that is not yet present in childrenSnapshotContentRefs.
+	linked := make(map[string]struct{}, len(rawRefs))
 	total := 0
 	archivedCount := 0
 	var pendingNames []string
@@ -599,6 +616,7 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		if name == "" {
 			continue
 		}
+		linked[name] = struct{}{}
 		total++
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
@@ -623,10 +641,96 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		}
 		pendingNames = append(pendingNames, name)
 	}
+
+	// Fail-closed: every declared non-leaf child must be linked into the published edge set before the
+	// subtree can be considered archived.
+	declaredNames, declaredComplete, err := r.declaredNonLeafChildContentNames(ctx, parentContentObj)
+	if err != nil {
+		return false, false, "", err
+	}
+	if !declaredComplete {
+		return false, false, "waiting for declared child snapshot graph to bind and link", nil
+	}
+	var unlinked []string
+	for _, dn := range declaredNames {
+		if _, ok := linked[dn]; !ok {
+			unlinked = append(unlinked, dn)
+		}
+	}
+	if len(unlinked) > 0 {
+		return false, false, "waiting for declared child content to be linked: " + strings.Join(unlinked, ", "), nil
+	}
+
 	if len(pendingNames) > 0 {
 		return false, false, "waiting for child manifests archive: " + formatReadyProgress(archivedCount, total, pendingNames), nil
 	}
 	return true, false, "", nil
+}
+
+// declaredNonLeafChildContentNames resolves, from this content's owning snapshot (spec.snapshotRef ->
+// status.childrenSnapshotRefs), the bound child SnapshotContent name of every declared non-leaf child.
+// It is the authoritative "expected children" set used to fail-close ManifestsArchived against
+// declared-but-unlinked children.
+//
+// Returns (names, complete, err):
+//   - complete=true with names: every declared non-leaf child is resolved+bound (names may be empty for a
+//     leaf node with no declared children).
+//   - complete=false: a child is not yet resolvable/bound, or the owning snapshot is not observable yet
+//     (pending, fail-closed; never treat an unverifiable set as archived).
+//   - err: only for unexpected API errors.
+//
+// When spec.snapshotRef is entirely absent (Required by the CRD and set at every creation site; absence
+// only occurs for synthetic/legacy objects) the declared set cannot be verified and the function falls
+// back to the published-edges-only view (complete=true, no declared names).
+func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context.Context, contentObj *unstructured.Unstructured) ([]string, bool, error) {
+	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
+	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
+	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
+	if apiVersion == "" || kind == "" || name == "" {
+		return nil, true, nil
+	}
+
+	owner := &unstructured.Unstructured{}
+	owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(apiVersion, kind))
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+
+	rawRefs, _, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return nil, false, err
+	}
+	names := make([]string, 0, len(rawRefs))
+	for _, raw := range rawRefs {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ref := storagev1alpha1.SnapshotChildRef{}
+		ref.APIVersion, _ = m["apiVersion"].(string)
+		ref.Kind, _ = m["kind"].(string)
+		ref.Name, _ = m["name"].(string)
+		if snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
+			continue
+		}
+		bound, rerr := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, r.APIReader, ref, namespace)
+		if rerr != nil {
+			if stderrors.Is(rerr, usecase.ErrRunGraphChildNotBound) ||
+				stderrors.Is(rerr, usecase.ErrRunGraphChildSnapshotNotFound) {
+				return nil, false, nil
+			}
+			return nil, false, rerr
+		}
+		if bound == "" {
+			return nil, false, nil
+		}
+		names = append(names, bound)
+	}
+	return names, true, nil
 }
 
 // terminalDataFailureReasons lists data/volume-leg Ready=False reasons treated as terminal (vs pending).
