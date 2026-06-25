@@ -94,6 +94,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  TEST_CLUSTER_CREATE_MODE:   %q\n", os.Getenv("TEST_CLUSTER_CREATE_MODE"))
 	GinkgoWriter.Printf("  namespace prefix:           %q\n", suiteCfg.nsPrefix)
 	GinkgoWriter.Printf("  snapshot ready timeout:     %s\n", suiteCfg.snapshotReadyTO)
+	GinkgoWriter.Printf("  capture ready timeout:      %s\n", suiteCfg.captureReadyTO)
 	GinkgoWriter.Printf("  module ready timeout:       %s\n", suiteCfg.moduleReadyTO)
 	GinkgoWriter.Printf("  GC TTL (snapshotRootOkTtl): %s\n", suiteCfg.gcTTL)
 	GinkgoWriter.Printf("  volume-data phase enabled:  %v\n", suiteCfg.volumeData)

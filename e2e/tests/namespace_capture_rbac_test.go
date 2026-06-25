@@ -102,7 +102,7 @@ func namespaceCaptureReworkSpecs() {
 func captureRBACHookSpecs() {
 	Context("Commit 5 / E1: transient per-namespace capture RBAC", func() {
 		It("creates the capture RoleBinding while capturing and removes it once archived", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.snapshotReadyTO+2*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
 			ns := uniqueNS("rbac-life")
@@ -123,13 +123,13 @@ func captureRBACHookSpecs() {
 				g.Expect(subjects).NotTo(BeEmpty())
 				subjName, _, _ := unstructured.NestedString(subjects[0].(map[string]interface{}), "name")
 				g.Expect(subjName).To(Equal("controller"))
-			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(2 * time.Second).Should(Succeed())
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(2 * time.Second).Should(Succeed())
 
 			By("Waiting for the root to reach ManifestsArchived=True")
-			Expect(waitRootArchived(ctx, ns, "e1-snap", suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitRootArchived(ctx, ns, "e1-snap", suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Asserting the hook removes the capture RoleBinding once archived (least privilege restored)")
-			assertResourceGone(ctx, roleBindingGVR, ns, captureRoleBindingName, suiteCfg.snapshotReadyTO)
+			assertResourceGone(ctx, roleBindingGVR, ns, captureRoleBindingName, suiteCfg.captureReadyTO)
 		})
 
 		It("does not create a capture RoleBinding for import- or static-bind snapshots", func() {
@@ -179,7 +179,7 @@ func captureRBACHookSpecs() {
 			Eventually(func() error {
 				_, err := getResource(ctx, roleBindingGVR, ns, captureRoleBindingName)
 				return err
-			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(2 * time.Second).Should(Succeed())
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(2 * time.Second).Should(Succeed())
 
 			By("Deleting the Snapshot and asserting the RoleBinding is removed")
 			Expect(suiteDyn.Resource(snapshotGVR).Namespace(ns).Delete(ctx, "e1-del", metav1.DeleteOptions{})).To(Succeed())
@@ -192,7 +192,7 @@ func captureRBACHookSpecs() {
 func rawSecretsSpecs() {
 	Context("Commit 5 / E4: raw secret capture and denylist", func() {
 		It("captures Opaque/TLS secrets verbatim and excludes denylisted noise", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.snapshotReadyTO+2*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
 			ns := uniqueNS("secrets")
@@ -230,9 +230,9 @@ func rawSecretsSpecs() {
 			Expect(applyObjects(ctx, []*unstructured.Unstructured{opaque, tls, saToken}, ns)).To(Succeed())
 
 			Expect(createRootSnapshot(ctx, ns, "e4-snap")).To(Succeed())
-			_, err := waitSnapshotReady(ctx, ns, "e4-snap", suiteCfg.snapshotReadyTO)
+			_, err := waitSnapshotReady(ctx, ns, "e4-snap", suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitRootArchived(ctx, ns, "e4-snap", suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitRootArchived(ctx, ns, "e4-snap", suiteCfg.captureReadyTO)).To(Succeed())
 
 			objs, err := getRootOwnManifests(ctx, ns, "e4-snap")
 			Expect(err).NotTo(HaveOccurred())
@@ -330,9 +330,9 @@ func specImmutabilitySpecs() {
 
 		It("mirrors ManifestsArchived onto the captured root Snapshot", func() {
 			Expect(captured.namespace).NotTo(BeEmpty(), "capture phase must have run first")
-			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.snapshotReadyTO+time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
-			Expect(waitRootArchived(ctx, captured.namespace, captured.rootSnap, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitRootArchived(ctx, captured.namespace, captured.rootSnap, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 	})
 }
@@ -344,7 +344,7 @@ func arbitraryCRSpecs() {
 			if !envBool(os.Getenv(envNSCaptureRework)) {
 				Skip(envNSCaptureRework + " not set: skipping temporary-CRD discovery spec")
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.snapshotReadyTO+3*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+3*time.Minute)
 			defer cancel()
 
 			crd := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -394,7 +394,7 @@ func arbitraryCRSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(createRootSnapshot(ctx, ns, "e2-snap")).To(Succeed())
-			_, err = waitSnapshotReady(ctx, ns, "e2-snap", suiteCfg.snapshotReadyTO)
+			_, err = waitSnapshotReady(ctx, ns, "e2-snap", suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
 
 			objs, err := getRootOwnManifests(ctx, ns, "e2-snap")
@@ -412,7 +412,7 @@ func childDegradationSpecs() {
 			if !envBool(os.Getenv(envNSCaptureRework)) {
 				Skip(envNSCaptureRework + " not set: skipping child-degradation spec")
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 4*suiteCfg.snapshotReadyTO+3*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 4*suiteCfg.captureReadyTO+3*time.Minute)
 			defer cancel()
 
 			ns := uniqueNS("degrade")
@@ -421,10 +421,10 @@ func childDegradationSpecs() {
 
 			Expect(applyObjects(ctx, buildManifestOnlySource(ns), ns)).To(Succeed())
 			Expect(createRootSnapshot(ctx, ns, "e3-snap")).To(Succeed())
-			rootContent, err := waitSnapshotReady(ctx, ns, "e3-snap", suiteCfg.snapshotReadyTO)
+			rootContent, err := waitSnapshotReady(ctx, ns, "e3-snap", suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, rootContent, suiteCfg.snapshotReadyTO)).To(Succeed())
-			Expect(waitRootArchived(ctx, ns, "e3-snap", suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, rootContent, suiteCfg.captureReadyTO)).To(Succeed())
+			Expect(waitRootArchived(ctx, ns, "e3-snap", suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Degrading the tree by deleting a child snapshot's bound SnapshotContent")
 			nodes, err := walkSnapshotTree(ctx, ns, "e3-snap")
@@ -438,7 +438,7 @@ func childDegradationSpecs() {
 			Expect(suiteDyn.Resource(snapshotContentGVR).Delete(ctx, childContent, metav1.DeleteOptions{})).To(Succeed())
 
 			By("Asserting the root degrades to Ready=False (children leg) but the latch stays True")
-			Expect(waitObjectCondition(ctx, snapshotGVR, ns, "e3-snap", condReady, "False", suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitObjectCondition(ctx, snapshotGVR, ns, "e3-snap", condReady, "False", suiteCfg.captureReadyTO)).To(Succeed())
 			Consistently(func(g Gomega) {
 				root, err := getResource(ctx, snapshotGVR, ns, "e3-snap")
 				g.Expect(err).NotTo(HaveOccurred())

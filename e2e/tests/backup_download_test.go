@@ -481,7 +481,7 @@ func anyBoundSnapshotContent(ctx context.Context, ns string) (bool, error) {
 func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]dataExportTarget, error) {
 	// Wait for the asynchronously-published orphan-PVC dataRef so we never miss a binding (see
 	// waitContentDataRefs); reading once can race right after the snapshot children report Ready.
-	bindings, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO)
+	bindings, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.captureReadyTO)
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +716,7 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 	// The orphan-PVC child volume node's dataRef is published asynchronously after its VolumeSnapshot
 	// leaf becomes readyToUse, so poll the content tree until all three PVC bindings are linked under
 	// the root content rather than reading once (which races right after waitChildrenReady).
-	if _, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO); err != nil {
+	if _, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.captureReadyTO); err != nil {
 		return err
 	}
 	var orphanVS string
@@ -835,16 +835,22 @@ func backupDownloadSpecs() {
 		})
 
 		It("captures the Block-volume snapshot tree (Ready + expected topology)", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+5*time.Minute)
+			// Capture (LVM snapshot creation) is fast — bound by captureReadyTO, not the restore-path
+			// snapshotReadyTO.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+5*time.Minute)
 			defer cancel()
+
+			// Background capture timeline: surfaces where the Block-volume snapshot creation spends time.
+			tl := startCaptureTimeline(backup.srcNS)
+			defer tl.stop()
 
 			By("Creating the root Snapshot over the Block-volume tree")
 			Expect(createRootSnapshot(ctx, backup.srcNS, bkRootSnapshotName)).To(Succeed())
 
 			By("Waiting for the Snapshot + bound SnapshotContent to become Ready")
-			content, err := waitSnapshotReady(ctx, backup.srcNS, bkRootSnapshotName, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, backup.srcNS, bkRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 			backup.rootContent = content
 			backup.rootSnap = bkRootSnapshotName
 
@@ -852,7 +858,7 @@ func backupDownloadSpecs() {
 			nodes, err := walkSnapshotTree(ctx, backup.srcNS, bkRootSnapshotName)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(nodes).NotTo(BeEmpty())
-			Expect(waitChildrenReady(ctx, backup.srcNS, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitChildrenReady(ctx, backup.srcNS, nodes, suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Resolving snapshot leaf names for the phase-5 import tree")
 			Expect(resolveBackupSnapRefs(ctx, backup.srcNS, bkRootSnapshotName, content)).To(Succeed())

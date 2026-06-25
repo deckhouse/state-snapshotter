@@ -46,6 +46,7 @@ import (
 const (
 	envNSPrefix             = "E2E_SNAPSHOTTER_NS_PREFIX"
 	envSnapshotReadyTO      = "E2E_SNAPSHOT_READY_TIMEOUT"
+	envCaptureReadyTO       = "E2E_CAPTURE_READY_TIMEOUT"
 	envModuleReadyTO        = "E2E_MODULE_READY_TIMEOUT"
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
@@ -56,8 +57,13 @@ const (
 )
 
 const (
-	defaultNSPrefix          = "snap-e2e"
-	defaultSnapshotTO        = 10 * time.Minute
+	defaultNSPrefix   = "snap-e2e"
+	defaultSnapshotTO = 10 * time.Minute
+	// defaultCaptureTO bounds snapshot *creation* (capture): manifests and LVM volume snapshots are both
+	// fast to create (copy-on-write, no data movement), so a short deadline fails fast instead of dragging
+	// on the generous snapshotReadyTO. snapshotReadyTO stays reserved for the restore/data-upload path,
+	// where DataImport actually streams bytes back.
+	defaultCaptureTO         = 30 * time.Second
 	defaultModuleTO          = 15 * time.Minute
 	defaultGCTTL             = "60s"
 	defaultStorageClass      = "e2e-thin"
@@ -179,6 +185,7 @@ const pollInterval = 5 * time.Second
 type e2eConfig struct {
 	nsPrefix          string
 	snapshotReadyTO   time.Duration
+	captureReadyTO    time.Duration
 	moduleReadyTO     time.Duration
 	gcTTL             string
 	volumeData        bool
@@ -228,6 +235,7 @@ func loadConfig() e2eConfig {
 		cfg.backupClientImage = defaultBackupClientImage
 	}
 	cfg.snapshotReadyTO = parseDuration(os.Getenv(envSnapshotReadyTO), defaultSnapshotTO)
+	cfg.captureReadyTO = parseDuration(os.Getenv(envCaptureReadyTO), defaultCaptureTO)
 	cfg.moduleReadyTO = parseDuration(os.Getenv(envModuleReadyTO), defaultModuleTO)
 	return cfg
 }

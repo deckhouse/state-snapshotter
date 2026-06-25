@@ -11,7 +11,7 @@ deps: ## Download dependencies and tidy go.mod/go.sum
 
 .PHONY: test
 test: ## Run the full nested-cluster E2E suite
-	go test -v -count=1 -timeout 120m ./tests/ -ginkgo.timeout 120m
+	go test -v -count=1 -timeout 120m ./tests/ -ginkgo.timeout 120m -ginkgo.v
 
 .PHONY: test-focus
 test-focus: ## Run a focused Ginkgo spec (make test-focus FOCUS="captures the demo tree")
@@ -19,7 +19,7 @@ test-focus: ## Run a focused Ginkgo spec (make test-focus FOCUS="captures the de
 		echo "Error: specify FOCUS=<Ginkgo focus string>"; \
 		exit 1; \
 	fi
-	go test -v -count=1 -timeout 120m ./tests/ -ginkgo.timeout 120m -ginkgo.focus "$(FOCUS)"
+	go test -v -count=1 -timeout 120m ./tests/ -ginkgo.timeout 120m -ginkgo.v -ginkgo.focus "$(FOCUS)"
 
 .PHONY: clean-env
 clean-env: ## Delete leftover e2e resources: namespaces (snap-e2e*) + ObjectKeepers (ret-snap-snap-e2e*)
