@@ -220,6 +220,10 @@ func writeBlockDataParallel(ctx context.Context, ns string, pvcs []string, check
 }
 
 func deletePod(ctx context.Context, ns, name string) {
+	if cleanupSkippedOnFailure() {
+		GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping pod %s/%s (spec failed)\n", ns, name)
+		return
+	}
 	_ = suiteClientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
@@ -913,6 +917,10 @@ func backupDownloadSpecs() {
 				Expect(createDataExport(ctx, backup.srcNS, target)).To(Succeed())
 				DeferCleanup(func(t dataExportTarget) func() {
 					return func() {
+						if cleanupSkippedOnFailure() {
+							GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping DataExport %s/%s (spec failed)\n", backup.srcNS, t.exportName)
+							return
+						}
 						cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
 						defer ccancel()
 						deleteDataExport(cctx, backup.srcNS, t.exportName)

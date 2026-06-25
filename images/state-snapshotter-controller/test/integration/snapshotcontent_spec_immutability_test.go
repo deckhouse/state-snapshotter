@@ -20,9 +20,7 @@ var _ = Describe("Integration: SnapshotContent spec immutability", func() {
 		ctx := context.Background()
 		content := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: "spec-immutable-content-"},
-			Spec: storagev1alpha1.SnapshotContentSpec{
-				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-			},
+			Spec:       retainContentSpec(),
 		}
 		DeferCleanup(func() {
 			_ = k8sClient.Delete(context.Background(), &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: content.Name}})

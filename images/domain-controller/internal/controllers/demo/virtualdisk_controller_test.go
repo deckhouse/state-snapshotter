@@ -86,8 +86,10 @@ func TestDemoVirtualDiskRestoreRejectsCrossNamespace(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "content-1"},
 		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
-				Namespace: matNS,
-				Name:      "src-snap",
+				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+				Kind:       controllercommon.KindDemoVirtualDiskSnapshot,
+				Namespace:  matNS,
+				Name:       "src-snap",
 			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
@@ -141,7 +143,12 @@ func TestDemoVirtualDiskRestoreVRRHasNoSize(t *testing.T) {
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "content-1"},
 		Spec: storagev1alpha1.SnapshotContentSpec{
-			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "src-snap"},
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+				Kind:       controllercommon.KindDemoVirtualDiskSnapshot,
+				Namespace:  matNS,
+				Name:       "src-snap",
+			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			DataRef: &storagev1alpha1.SnapshotDataBinding{
@@ -169,6 +176,66 @@ func TestDemoVirtualDiskRestoreVRRHasNoSize(t *testing.T) {
 	}
 	if _, ok, _ := unstructured.NestedString(vrr.Object, "spec", "size"); ok {
 		t.Fatal("VRR spec must not contain size")
+	}
+}
+
+// TestDemoVirtualDiskRestoreDeniedOnSnapshotRefSpoof verifies the anti-spoofing handshake: even when the
+// disk's snapshot has status.boundSnapshotContentName=content-1, restore must fail closed if that content's
+// spec.snapshotRef points back at a different snapshot. Without the reverse-reference check, a user able to
+// write the snapshot status could bind a foreign content and restore another tenant's data.
+func TestDemoVirtualDiskRestoreDeniedOnSnapshotRefSpoof(t *testing.T) {
+	disk := &demov1alpha1.DemoVirtualDisk{
+		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "disk-spoof", UID: types.UID("disk-spoof-uid")},
+		Spec: demov1alpha1.DemoVirtualDiskSpec{
+			PersistentVolumeClaimName: "restored-pvc",
+			DataSource: &demov1alpha1.DemoVirtualDiskDataSource{
+				Kind: controllercommon.KindDemoVirtualDiskSnapshot,
+				Name: "src-snap",
+			},
+		},
+	}
+	snap := &demov1alpha1.DemoVirtualDiskSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "src-snap"},
+		Status:     demov1alpha1.DemoVirtualDiskSnapshotStatus{BoundSnapshotContentName: "content-1"},
+	}
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "content-1"},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+				Kind:       controllercommon.KindDemoVirtualDiskSnapshot,
+				Namespace:  matNS,
+				Name:       "other-snap", // points at a different subject -> spoof
+			},
+		},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			DataRef: &storagev1alpha1.SnapshotDataBinding{
+				Target: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
+				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+					Kind: vscKind,
+					Name: "vsc-1",
+				},
+				VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+				StorageClassName: "local-thin",
+			},
+		},
+	}
+	cl := newMaterializationFakeClient(t, disk, snap, content)
+	r := &DemoVirtualDiskReconciler{Client: cl, APIReader: cl}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(disk)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	fresh := &demov1alpha1.DemoVirtualDisk{}
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(disk), fresh); err != nil {
+		t.Fatalf("get disk: %v", err)
+	}
+	if fresh.Status.Phase != demoPhaseFailed {
+		t.Fatalf("phase = %q, want Failed", fresh.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(fresh.Status.Conditions, storagev1alpha1.ConditionReady)
+	if cond == nil || cond.Reason != demoReasonRestoreDenied {
+		t.Fatalf("condition = %#v, want RestoreDenied", cond)
 	}
 }
 

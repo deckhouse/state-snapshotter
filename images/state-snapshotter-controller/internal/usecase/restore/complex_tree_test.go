@@ -150,7 +150,7 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 		childContentName := content + "-vol-" + o.vsName
 		childMCP := "mcp-vol-" + o.vsName
 		objs = append(objs, materializeMCP(childMCP, []map[string]interface{}{pvcManifestRaw(o.pvcName, o.pvcUID)})...)
-		objs = append(objs, readySnapshotContent(childContentName, childMCP, &storagev1alpha1.SnapshotDataBinding{
+		objs = append(objs, orphanChildContent(childContentName, childMCP, o.vsName, &storagev1alpha1.SnapshotDataBinding{
 			TargetUID: o.pvcUID,
 			Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: o.pvcName, Namespace: "source-ns", UID: types.UID(o.pvcUID)},
 			Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: o.vscName},

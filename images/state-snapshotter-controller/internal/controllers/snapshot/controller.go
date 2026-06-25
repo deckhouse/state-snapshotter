@@ -401,10 +401,11 @@ func (r *SnapshotReconciler) updateSnapshotRemoveFinalizer(ctx context.Context, 
 	})
 }
 
-func desiredSnapshotContentSpec(_ *storagev1alpha1.Snapshot) storagev1alpha1.SnapshotContentSpec {
-	return storagev1alpha1.SnapshotContentSpec{
-		DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-	}
+func desiredSnapshotContentSpec(nsSnap *storagev1alpha1.Snapshot) storagev1alpha1.SnapshotContentSpec {
+	return controllercommon.NewSnapshotContentSpec(
+		storagev1alpha1.SnapshotContentDeletionPolicyRetain,
+		controllercommon.SnapshotSubjectRefFromSnapshot(nsSnap),
+	)
 }
 
 func snapshotContentName(ns *storagev1alpha1.Snapshot) string {

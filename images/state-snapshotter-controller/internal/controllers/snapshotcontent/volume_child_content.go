@@ -43,14 +43,17 @@ func ChildVolumeContentName(rootContentName, targetUID string) string {
 // EnsureVolumeChildContent ensures the cluster-scoped child volume-node SnapshotContent backing one PVC.
 // It is created on first call with a controlling lifecycle ownerRef to the root content (so GC of the
 // root removes the child) and spec.deletionPolicy mirrored from the root (the whole spec is immutable,
-// so it must be correct at creation). It returns the live child content for the caller to publish its
-// dataRef / manifestCheckpointName onto. Used only by the root residual/orphan capture path (V4): domain
-// leaves already are their own single-PVC node.
+// so it must be correct at creation). snapshotRef is the required back-reference to the orphan CSI
+// VolumeSnapshot that binds this child via its status.boundSnapshotContentName (INV-ORPHAN4); the GC
+// ownerRef (root content) is a separate lifecycle concern and is NOT the handshake subject. It returns
+// the live child content for the caller to publish its dataRef / manifestCheckpointName onto. Used only
+// by the root residual/orphan capture path (V4): domain leaves already are their own single-PVC node.
 func EnsureVolumeChildContent(
 	ctx context.Context,
 	c client.Client,
 	root *storagev1alpha1.SnapshotContent,
 	targetUID string,
+	snapshotRef *storagev1alpha1.SnapshotSubjectRef,
 ) (*storagev1alpha1.SnapshotContent, error) {
 	childName := ChildVolumeContentName(root.Name, targetUID)
 	child := &storagev1alpha1.SnapshotContent{}
@@ -69,9 +72,7 @@ func EnsureVolumeChildContent(
 				Labels:          map[string]string{snapshotpkg.LabelChildVolumeNode: "true"},
 				OwnerReferences: []metav1.OwnerReference{controllercommon.SnapshotContentOwnerReference(root)},
 			},
-			Spec: storagev1alpha1.SnapshotContentSpec{
-				DeletionPolicy: deletionPolicy,
-			},
+			Spec: controllercommon.NewSnapshotContentSpec(deletionPolicy, snapshotRef),
 		}
 		if cerr := c.Create(ctx, child); cerr != nil {
 			if apierrors.IsAlreadyExists(cerr) {

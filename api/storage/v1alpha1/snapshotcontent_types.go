@@ -59,13 +59,16 @@ type SnapshotContentSpec struct {
 	// +kubebuilder:validation:Enum=Retain;Delete
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 
-	// SnapshotRef is an immutable back-reference to the owning Snapshot, mirroring
-	// VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time (in particular
-	// by the import path for pre-provisioned content) and enables the static-binding handshake:
-	// a Snapshot with spec.source.snapshotContentName binds only when this ref points back at it.
-	// The whole spec is immutable, so this ref cannot change after creation.
-	// +optional
-	SnapshotRef *SnapshotSubjectRef `json:"snapshotRef,omitempty"`
+	// SnapshotRef is the required, immutable back-reference to the snapshot subject that owns this
+	// content, mirroring VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time by
+	// whichever controller binds the content via the snapshot's status.boundSnapshotContentName (a core
+	// Snapshot, a domain XXXSnapshot, or a CSI VolumeSnapshot for orphan volume nodes), and it is the
+	// anti-spoofing handshake: a consumer (static bind / restore) accepts a content only when this ref
+	// points back at the very snapshot that referenced it, so a user cannot attach a foreign content by
+	// pointing status.boundSnapshotContentName at it. The whole spec is immutable, so this ref cannot
+	// change after creation.
+	// +kubebuilder:validation:Required
+	SnapshotRef *SnapshotSubjectRef `json:"snapshotRef"`
 }
 
 // +k8s:deepcopy-gen=true

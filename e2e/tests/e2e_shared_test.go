@@ -304,7 +304,21 @@ func ensureNamespace(ctx context.Context, name string) error {
 	return err
 }
 
+// cleanupSkippedOnFailure reports whether per-spec resource cleanup must be skipped because a spec
+// failed and the operator asked to keep everything for debugging (E2E_KEEP_CLUSTER_ON_FAILURE).
+// It mirrors the suite-level nested-cluster teardown guard (cleanupSuite) so a failed run leaves its
+// namespaces and resources intact for live inspection instead of being torn down by DeferCleanup
+// (which Ginkgo runs regardless of pass/fail). It is safe to call from any DeferCleanup/destructor:
+// on a passing spec CurrentSpecReport().Failed() is false, so cleanup proceeds as usual.
+func cleanupSkippedOnFailure() bool {
+	return suiteCfg.keepOnFailure && CurrentSpecReport().Failed()
+}
+
 func deleteNamespace(ctx context.Context, name string) {
+	if cleanupSkippedOnFailure() {
+		GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping namespace %q (spec failed)\n", name)
+		return
+	}
 	cs := suiteClientset
 	if cs == nil {
 		return
@@ -443,6 +457,37 @@ func waitObjectCondition(ctx context.Context, gvr schema.GroupVersionResource, n
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for %s %s/%s condition %s=%s; last: %s", gvr.Resource, ns, name, condType, wantStatus, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
+// waitDemoDiskReady waits for a restored DemoVirtualDisk to reach Ready=True, failing fast if the disk
+// enters its terminal Failed phase (e.g. RestoreDenied) instead of burning the whole timeout. A Failed
+// phase on the demo restore path is permanent (the controller will not retry), so polling further is
+// pointless and only delays surfacing the real error.
+func waitDemoDiskReady(ctx context.Context, ns, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		obj, err := getResource(ctx, demoDiskGVR, ns, name)
+		if err == nil {
+			st, reason, found := conditionStatus(obj, condReady)
+			if found && st == "True" {
+				return nil
+			}
+			phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+			if phase == "Failed" {
+				return fmt.Errorf("DemoVirtualDisk %s/%s entered terminal Failed phase (Ready.status=%q reason=%q)", ns, name, st, reason)
+			}
+			last = fmt.Sprintf("phase=%q Ready.status=%q reason=%q", phase, st, reason)
+		} else {
+			last = fmt.Sprintf("get err=%v", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for DemoVirtualDisk %s/%s Ready=True; last: %s", ns, name, last)
 		}
 		if !sleepCtx(ctx, pollInterval) {
 			return ctx.Err()

@@ -55,6 +55,21 @@ func readySnapshotContent(name, mcp string, dataRef *storagev1alpha1.SnapshotDat
 	return c
 }
 
+// orphanChildContent builds a Ready child volume-node SnapshotContent that carries the anti-spoofing
+// back-reference (spec.snapshotRef) to the orphan VolumeSnapshot vsName (in source-ns) that binds it via
+// status.boundSnapshotContentName. The restore resolver requires this reverse reference to fail closed
+// against a content bound to a foreign snapshot subject.
+func orphanChildContent(name, mcp, vsName string, dataRef *storagev1alpha1.SnapshotDataBinding) *storagev1alpha1.SnapshotContent {
+	c := readySnapshotContent(name, mcp, dataRef)
+	c.Spec.SnapshotRef = &storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Namespace:  "source-ns",
+		Name:       vsName,
+	}
+	return c
+}
+
 func demoDiskSnapshotObj(name, contentName string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
@@ -128,7 +143,7 @@ func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 		{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
 	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
-	orphanContent := readySnapshotContent("root-content-vol-orphan", "mcp-orphan", &storagev1alpha1.SnapshotDataBinding{
+	orphanContent := orphanChildContent("root-content-vol-orphan", "mcp-orphan", "vs-orphan", &storagev1alpha1.SnapshotDataBinding{
 		TargetUID: "uid-orphan",
 		Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
 		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
@@ -330,6 +345,35 @@ func TestResolveRestoreTree_OrphanVSEmptyBoundContentFailsClosed(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNotReady) {
 		t.Fatalf("expected ErrNotReady, got %v", err)
+	}
+}
+
+// TestResolveRestoreTree_OrphanContentSnapshotRefMismatchFailsClosed proves the anti-spoofing handshake:
+// an orphan child SnapshotContent whose spec.snapshotRef does not point back at the VolumeSnapshot handle
+// that bound it (status.boundSnapshotContentName) is rejected as a contract violation, even though every
+// readiness/dataRef field is otherwise valid. This prevents binding a foreign content via a forged handle.
+func TestResolveRestoreTree_OrphanContentSnapshotRefMismatchFailsClosed(t *testing.T) {
+	scheme := restoreTreeScheme()
+	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
+		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
+	})
+	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	// The child content's spec.snapshotRef points at a DIFFERENT VolumeSnapshot than the one binding it.
+	orphanContent := orphanChildContent("root-content-vol-orphan", "mcp-orphan", "vs-other", &storagev1alpha1.SnapshotDataBinding{
+		TargetUID: "uid-orphan",
+		Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
+		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
+	})
+	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-orphan")
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, orphanContent, vs).Build()
+
+	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
+	if err == nil {
+		t.Fatal("expected error when the orphan child content snapshotRef does not point back at the VolumeSnapshot")
+	}
+	if !errors.Is(err, ErrContractViolation) {
+		t.Fatalf("expected ErrContractViolation, got %v", err)
 	}
 }
 

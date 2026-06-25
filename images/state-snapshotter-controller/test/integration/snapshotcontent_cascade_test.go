@@ -118,7 +118,10 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 			parentContentObj := &unstructured.Unstructured{}
 			parentContentObj.SetGroupVersionKind(contentGVK)
 			parentContentObj.SetName(parentContentName)
-			parentContentObj.Object["spec"] = map[string]interface{}{}
+			parentContentObj.Object["spec"] = map[string]interface{}{
+				"deletionPolicy": "Retain",
+				"snapshotRef":    integrationContentSnapshotRefMap(),
+			}
 			parentContentObj.Object["status"] = map[string]interface{}{}
 
 			err = k8sClient.Create(ctx, parentContentObj)
@@ -129,7 +132,10 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 			childContentObj := &unstructured.Unstructured{}
 			childContentObj.SetGroupVersionKind(contentGVK)
 			childContentObj.SetName(childContentName)
-			childContentObj.Object["spec"] = map[string]interface{}{}
+			childContentObj.Object["spec"] = map[string]interface{}{
+				"deletionPolicy": "Retain",
+				"snapshotRef":    integrationContentSnapshotRefMap(),
+			}
 			childContentObj.Object["status"] = map[string]interface{}{}
 
 			// Set ownerRef: child is owned by parent
