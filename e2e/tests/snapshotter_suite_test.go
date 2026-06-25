@@ -76,14 +76,15 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		dumpFailedSpecDiagnostics(ctx)
 	})
 
-	captureSpecs()        // capture_test.go: apply demo source + root Snapshot, assert Ready tree (phase 1)
-	aggregatedApiSpecs()  // aggregated_api_test.go: --raw manifests-download / -with-data-restoration (phase 1)
-	restoreSpecs()        // restore_test.go: manifest-level restore into a fresh namespace (phase 1)
-	importSpecs()         // import_gc_test.go: export -> import round-trip (phase 2)
-	gcSpecs()             // import_gc_test.go: TTL/GC cascade (phase 2)
-	volumeDataSpecs()     // volumedata_test.go: full volume-data flow (phase 3, env-gated)
-	backupDownloadSpecs() // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
-	backupRestoreSpecs()  // backup_restore_test.go: backup-system restore import (phase 5, env-gated)
+	captureSpecs()                // capture_test.go: apply demo source + root Snapshot, assert Ready tree (phase 1)
+	aggregatedApiSpecs()          // aggregated_api_test.go: --raw manifests-download / -with-data-restoration (phase 1)
+	namespaceCaptureReworkSpecs() // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability (commit 5)
+	restoreSpecs()                // restore_test.go: manifest-level restore into a fresh namespace (phase 1)
+	importSpecs()                 // import_gc_test.go: export -> import round-trip (phase 2)
+	gcSpecs()                     // import_gc_test.go: TTL/GC cascade (phase 2)
+	volumeDataSpecs()             // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	backupDownloadSpecs()         // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
+	backupRestoreSpecs()          // backup_restore_test.go: backup-system restore import (phase 5, env-gated)
 })
 
 func prepareSuite() {
