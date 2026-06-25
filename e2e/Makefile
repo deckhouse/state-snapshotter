@@ -21,6 +21,15 @@ test-focus: ## Run a focused Ginkgo spec (make test-focus FOCUS="captures the de
 	fi
 	go test -v -count=1 -timeout 120m ./tests/ -ginkgo.timeout 120m -ginkgo.focus "$(FOCUS)"
 
+.PHONY: clean-env
+clean-env: ## Delete leftover e2e resources: namespaces (snap-e2e*) + ObjectKeepers (ret-snap-snap-e2e*)
+	@echo "==> Deleting namespaces with prefix 'snap-e2e'..."
+	@ns=$$(kubectl get ns -o name | grep -E '^namespace/snap-e2e' || true); \
+	if [ -n "$$ns" ]; then echo "$$ns" | xargs kubectl delete --wait=false; else echo "  none found"; fi
+	@echo "==> Deleting ObjectKeepers with prefix 'ret-snap-snap-e2e'..."
+	@oks=$$(kubectl get objectkeepers.deckhouse.io -o name | grep -E '/ret-snap-snap-e2e' || true); \
+	if [ -n "$$oks" ]; then echo "$$oks" | xargs kubectl delete --wait=false; else echo "  none found"; fi
+
 .PHONY: vet
 vet: ## go vet (also type-checks the _test.go files -> compile gate)
 	go vet ./...
