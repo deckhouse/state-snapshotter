@@ -68,6 +68,7 @@ func defaultGVRs() []gvrEntry {
 		// enumeration by the watch-verb signal (not a per-resource denylist).
 		{gvr: schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods"}, kind: "PodMetrics", listKind: "PodMetricsList", verbs: metav1.Verbs{"get", "list"}},
 		{gvr: schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}, kind: "VolumeSnapshot", listKind: "VolumeSnapshotList"},
+		{gvr: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}, kind: "RoleBinding", listKind: "RoleBindingList"},
 		{gvr: schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests"}, kind: "ManifestCaptureRequest", listKind: "ManifestCaptureRequestList"},
 		{gvr: schema.GroupVersionResource{Group: "kafka.example.com", Version: "v1", Resource: "kafkas"}, kind: "Kafka", listKind: "KafkaList"},
 	}
@@ -178,11 +179,15 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 	podMetrics := obj("metrics.k8s.io/v1beta1", "PodMetrics", "app-pod-xyz", nil)
 	csiVS := obj("snapshot.storage.k8s.io/v1", "VolumeSnapshot", "vs-a", nil)
 	mcr := obj("state-snapshotter.deckhouse.io/v1alpha1", "ManifestCaptureRequest", "root-mcr", nil)
+	userRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "app-binding", nil)
+	captureRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "d8-state-snapshotter-capture", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"heritage": "deckhouse"}
+	})
 	kafka := obj("kafka.example.com/v1", "Kafka", "my-kafka", nil)
 
 	dyn := dynamicFromEntries(entries,
 		userCM, rootCA, defaultSA, userSA, opaqueSecret, tokenSecret,
-		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, podMetrics, csiVS, mcr, kafka,
+		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, podMetrics, csiVS, mcr, userRB, captureRB, kafka,
 	)
 
 	targets, unreadable, err := BuildManifestCaptureTargets(
@@ -205,7 +210,8 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		"ServiceAccount/app",
 		"Secret/app-secret",
 		"Pod/standalone",
-		"Kafka/my-kafka", // arbitrary CR with no CSD mapping — the headline feature
+		"RoleBinding/app-binding", // user-authored RBAC is desired-state and must be kept
+		"Kafka/my-kafka",          // arbitrary CR with no CSD mapping — the headline feature
 	}
 	for _, k := range mustInclude {
 		if _, ok := got[k]; !ok {
@@ -223,6 +229,7 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		"PodMetrics/app-pod-xyz",
 		"VolumeSnapshot/vs-a",
 		"ManifestCaptureRequest/root-mcr",
+		"RoleBinding/d8-state-snapshotter-capture", // Deckhouse-managed transient capture RBAC (heritage=deckhouse)
 	}
 	for _, k := range mustExclude {
 		if _, ok := got[k]; ok {
@@ -368,5 +375,26 @@ func TestBuildManifestCaptureTargets_ExcludesResourcesWithoutWatchVerb(t *testin
 func TestShouldIncludeNamespaceObject_DefaultInclude(t *testing.T) {
 	if !ShouldIncludeNamespaceObject(obj("v1", "ConfigMap", "x", nil), nil) {
 		t.Fatal("plain ConfigMap with no exclusion signal must be included")
+	}
+}
+
+func TestShouldIncludeNamespaceObject_ExcludesDeckhouseManagedObjects(t *testing.T) {
+	captureRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "d8-state-snapshotter-capture", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"heritage": "deckhouse"}
+	})
+	if ShouldIncludeNamespaceObject(captureRB, nil) {
+		t.Fatal("Deckhouse-managed object (heritage=deckhouse) must be excluded from capture")
+	}
+
+	userRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "app-binding", nil)
+	if !ShouldIncludeNamespaceObject(userRB, nil) {
+		t.Fatal("user-authored RoleBinding must be included")
+	}
+
+	otherHeritageRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "helm-binding", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"heritage": "Helm"}
+	})
+	if !ShouldIncludeNamespaceObject(otherHeritageRB, nil) {
+		t.Fatal("object with a non-deckhouse heritage value must be included")
 	}
 }
