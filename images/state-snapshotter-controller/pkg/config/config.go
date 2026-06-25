@@ -68,13 +68,6 @@ type Options struct {
 	MaxChunkSizeBytes int64
 	DefaultTTL        time.Duration
 	DefaultTTLStr     string // String representation for annotation (e.g., "168h", "7d")
-	ExcludeKinds      []string
-	// EnableFiltering controls whether object SELECTION (skipping ephemeral/owner-managed/excluded
-	// kinds) is applied on capture. It does NOT clean object fields: snapshot-capture stores raw
-	// manifests AS-IS (status included); field sanitization happens on the restore read-path.
-	// If false, all selected objects are captured (Secret bytes are still secured by default).
-	// Default: false (selection disabled by default).
-	EnableFiltering bool
 
 	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible CSD (R5).
 	// See EffectiveUnifiedBootstrapPairs().
@@ -121,12 +114,6 @@ func NewConfig() *Options {
 	opts.MaxChunkSizeBytes = DefaultMaxChunkSizeBytes
 	opts.DefaultTTL = DefaultTTL
 	opts.DefaultTTLStr = formatDurationForAnnotation(DefaultTTL)
-	opts.ExcludeKinds = []string{
-		"Pod", "Event", "Endpoints", "EndpointSlice", "Lease", "Node", "ControllerRevision",
-		"VolumeSnapshot", "VolumeSnapshotContent", "*Snapshot", "*SnapshotContent",
-	}
-	// Selection disabled by default - all targeted objects captured as-is
-	opts.EnableFiltering = false
 
 	mode, pairs, perr := ParseUnifiedBootstrapPairsEnv(os.Getenv(EnvUnifiedBootstrapPairs))
 	if perr != nil {
@@ -172,8 +159,6 @@ func positiveDurationFromEnv(key string) (time.Duration, bool) {
 // ConfigMap fields:
 //   - maxChunkSizeBytes: maximum chunk size in bytes (e.g., "800000")
 //   - defaultTTL: default TTL duration (e.g., "10m", "1h", "168h")
-//   - excludeKinds: comma-separated list of kinds to exclude (e.g., "Pod,Event")
-//   - enableFiltering: enable object selection on capture ("true"/"false"/"1"/"yes")
 func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 	// maxChunkSizeBytes
 	if val, ok := configMapData["maxChunkSizeBytes"]; ok {
@@ -188,25 +173,6 @@ func (opts *Options) LoadFromConfigMap(configMapData map[string]string) {
 			opts.DefaultTTL = duration
 			opts.DefaultTTLStr = formatDurationForAnnotation(duration)
 		}
-	}
-
-	// excludeKinds
-	if val, ok := configMapData["excludeKinds"]; ok && val != "" {
-		kinds := strings.Split(val, ",")
-		opts.ExcludeKinds = make([]string, 0, len(kinds))
-		for _, kind := range kinds {
-			kind = strings.TrimSpace(kind)
-			if kind != "" {
-				opts.ExcludeKinds = append(opts.ExcludeKinds, kind)
-			}
-		}
-	}
-
-	// enableFiltering
-	if val, ok := configMapData["enableFiltering"]; ok {
-		// Accept: "true", "True", "TRUE", "1", "yes", "Yes", "YES"
-		valLower := strings.ToLower(strings.TrimSpace(val))
-		opts.EnableFiltering = valLower == "true" || valLower == "1" || valLower == "yes"
 	}
 }
 

@@ -166,44 +166,16 @@ Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **inc
 
 - **Object selection** (`ShouldIncludeNamespaceObject`: dropping controller-owned dependents, control-plane noise, snapshot/own machinery) is a **separate** layer applied on capture; it does **not** mutate object fields.
 - **Field-level sanitization** (stripping `status`, `metadata.managedFields`, `resourceVersion`, `uid`, `creationTimestamp`, etc.) happens **only on the restore read-path** (`internal/usecase/restore`), independent of capture.
-- The **only** field-level exception on capture is `Secret` bytes — see below.
+- There are **no** field-level exceptions on capture — see §4.5.1.
 
 #### 4.5.1 Secret handling in ManifestCheckpoint
 
-`Secret` objects are sensitive and are **secure-by-default**: their bytes are not stored in `ManifestCheckpoint` unless explicitly opted in. This is the single field-level exception to the raw-capture policy above, because the snapshot store has no at-rest encryption.
+`Secret` objects are captured **verbatim**, like every other object: their `.data`/`.stringData` are stored as-is in `ManifestCheckpoint`. There is no secret-specific selection or field stripping on the capture path.
 
-- Non-`Opaque` secrets are always skipped (`kubernetes.io/tls`, `kubernetes.io/dockerconfigjson`, `kubernetes.io/service-account-token`, and any other `type != Opaque`).
-- `Opaque` secrets without explicit annotations are skipped.
-- `Opaque` secrets annotated with `state-snapshotter.deckhouse.io/include-secret: "true"` are stored with `.data` and `.stringData` removed; other fields are preserved as-is.
-- `Opaque` secrets annotated with `state-snapshotter.deckhouse.io/include-secret-data: "true"` are stored with `.data` and `.stringData`. This annotation is a standalone opt-in, not an addition to `state-snapshotter.deckhouse.io/include-secret`. It is dangerous because sensitive values are persisted in `ManifestCheckpoint`; use it only intentionally.
+- All selected `Secret`s (any `type`) are stored raw with their bytes intact.
+- `Secret`s excluded by the unified inclusion rule (`ShouldIncludeNamespaceObject`) — e.g. `kubernetes.io/service-account-token` secrets — are not captured at all; this is object selection, not field stripping.
 
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: example
-  annotations:
-    state-snapshotter.deckhouse.io/include-secret: "true"
-type: Opaque
-data:
-  password: ...
-```
-
-This Secret is stored without `.data` and `.stringData`.
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: example-with-data
-  annotations:
-    state-snapshotter.deckhouse.io/include-secret-data: "true"
-type: Opaque
-data:
-  password: ...
-```
-
-This Secret is stored together with `.data` and `.stringData`.
+> At-rest encryption of the snapshot store is a separate, future concern. The legacy opt-in annotations (`state-snapshotter.deckhouse.io/include-secret`, `…/include-secret-data`) and the secure-by-default stripping have been removed.
 
 ---
 

@@ -45,7 +45,6 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
@@ -196,10 +195,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 	}
 
-	// Collect all target objects
-	// Note: NotFound errors from collectTargetObjects are always from target objects, not related objects.
-	// Related objects (ConfigMaps, Secrets from volumes) are collected in collectRelatedObjects,
-	// which silently ignores NotFound errors (checks err == nil). So if we get NotFound here, it's a target.
+	// Collect all target objects (verbatim: each explicit spec.targets entry, stored raw).
+	// A NotFound here is always from a missing target object and is terminal (see below).
 	objects, err := r.collectTargetObjects(ctx, mcr)
 	if err != nil {
 		// Only a genuinely absent target (NotFound) is terminal: Kubernetes is declarative, so if the
@@ -223,9 +220,6 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 		return ctrl.Result{}, nil
 	}
-
-	// Filtering and cleaning are now done inside addObject() during collection
-	// No need for separate filtering pass
 
 	// Handle empty objects list
 	if len(objects) == 0 {
@@ -586,56 +580,24 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	var objects []unstructured.Unstructured
 	collected := make(map[string]bool) // Track collected objects to avoid duplicates
 
-	// Helper to add object if not already collected.
-	// Object SELECTION (when EnableFiltering is on) and the Secret security contract are applied here,
-	// BEFORE adding. Capture stores RAW manifests (no field cleaning); the Secret bytes opt-in is the
-	// only field-level exception, and it is enforced regardless of EnableFiltering.
-	addObject := func(obj *unstructured.Unstructured, filterCtx common.CaptureFilterContext) {
-		// Secret filtering is a security invariant for ManifestCheckpoint and is
-		// enforced even when general backup filtering is disabled.
-		if common.ShouldSkipSecretObject(obj) {
-			r.Logger.Info("Skipping secret object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
-			return
-		}
-
-		// Object SELECTION (skip ephemeral/owner-managed/excluded kinds) is applied when filtering is
-		// enabled, but is deliberately kept SEPARATE from field-level cleaning: snapshot-capture stores
-		// RAW manifests AS-IS (status included) so that the MCP is the source of truth for import/export
-		// (e.g. DataImport reads status.capacity, storageClass, volumeMode from the original manifest).
-		// All field-level sanitization happens on the restore read-path (internal/usecase/restore,
-		// independent of capture). See the unified snapshot plan §1/§2 (C1b raw-capture).
-		if r.Config.EnableFiltering {
-			if common.ShouldSkipObjectWithContext(obj, r.Config.ExcludeKinds, filterCtx) {
-				r.Logger.Info("Skipping object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
-				return
-			}
-		}
-
-		// The ONLY field-level exception on capture is Secret bytes: secure-by-default opt-in. Everything
-		// else is stored raw. SanitizeObjectForManifestCheckpoint deep-copies, so obj is never mutated.
-		finalObj := common.SanitizeObjectForManifestCheckpoint(obj)
-		if finalObj == nil {
-			return
-		}
-
-		// Preserve apiVersion/kind: TypeMeta is tracked separately on unstructured.Unstructured and a
-		// DeepCopy/normalize round-trip elsewhere may drop it.
-		finalObj.SetAPIVersion(obj.GetAPIVersion())
-		finalObj.SetKind(obj.GetKind())
-
-		// Check for duplicates
+	// Stage B is VERBATIM: fetch each explicit target and store it raw. Object selection and any
+	// field-level transformation are NOT done here — the MCR creator owns the target list (a namespace
+	// snapshot builds it via discovery in Stage A; a domain controller passes explicit targets), and all
+	// sanitization happens on the restore read-path (internal/usecase/restore). Capture stores manifests
+	// AS-IS (status included) so the MCP is the source of truth for import/export.
+	addObject := func(obj *unstructured.Unstructured) {
 		key := fmt.Sprintf("%s/%s/%s/%s",
-			finalObj.GetAPIVersion(),
-			finalObj.GetKind(),
-			finalObj.GetNamespace(),
-			finalObj.GetName())
-		if !collected[key] {
-			collected[key] = true
-			objects = append(objects, *finalObj)
+			obj.GetAPIVersion(),
+			obj.GetKind(),
+			obj.GetNamespace(),
+			obj.GetName())
+		if collected[key] {
+			return
 		}
+		collected[key] = true
+		objects = append(objects, *obj)
 	}
 
-	// Step 1: Collect target objects (TZ section 5, step 1).
 	// MCR targets are namespaced in the same namespace as ManifestCaptureRequest.
 	for _, target := range mcr.Spec.Targets {
 		gv, err := schema.ParseGroupVersion(target.APIVersion)
@@ -661,97 +623,13 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			return nil, fmt.Errorf("failed to get %s %s: %w", target.Kind, key.String(), err)
 		}
 
-		// Add target object (filtering happens inside addObject; explicit MCR targets use scoped PVC rules).
-		addObject(obj, common.CaptureFilterContext{ExplicitTarget: true})
-
-		// Step 2: Recursively collect related objects (TZ section 5, step 2)
-		// collectRelatedObjects now uses addObject directly, so filtering is applied
-		// Collect related objects (ConfigMaps, Secrets, etc.)
-		// Errors are ignored - continue even if related objects collection fails
-		r.collectRelatedObjects(ctx, obj, mcr.Namespace, func(related *unstructured.Unstructured) {
-			addObject(related, common.CaptureFilterContext{})
-		})
+		addObject(obj)
 	}
 
-	// Step 4: Sort objects (TZ section 5, step 4)
-	// Sort by: groupVersion, kind, namespace, name
+	// Sort by: groupVersion, kind, namespace, name (stable chunk content / drift checks).
 	r.sortObjects(objects)
 
 	return objects, nil
-}
-
-// collectRelatedObjects recursively collects ConfigMaps, Secrets, and volumeClaimTemplates (TZ section 5, step 2)
-// CRITICAL: Uses addObject callback so object selection + secret enforcement are applied immediately
-// (capture stores raw manifests; no field cleaning here).
-func (r *ManifestCheckpointController) collectRelatedObjects(ctx context.Context, obj *unstructured.Unstructured, namespace string, addObject func(*unstructured.Unstructured)) {
-	// Collect ConfigMaps referenced in volumes
-	if volumes, found, _ := unstructured.NestedSlice(obj.Object, "spec", "volumes"); found {
-		for _, vol := range volumes {
-			volMap, ok := vol.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if cm, found := volMap["configMap"]; found {
-				cmMap, ok := cm.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if name, found := cmMap["name"]; found {
-					if nameStr, ok := name.(string); ok {
-						cmObj := &unstructured.Unstructured{}
-						cmObj.SetGroupVersionKind(schema.GroupVersionKind{
-							Group:   "",
-							Version: "v1",
-							Kind:    "ConfigMap",
-						})
-						cmObj.SetName(nameStr)
-						cmObj.SetNamespace(namespace)
-						if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nameStr}, cmObj); err == nil {
-							// addObject applies object selection + secret enforcement (no field cleaning)
-							addObject(cmObj)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Collect Secrets referenced in volumes (exclude all service account Secrets)
-	if volumes, found, _ := unstructured.NestedSlice(obj.Object, "spec", "volumes"); found {
-		for _, vol := range volumes {
-			volMap, ok := vol.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if secret, found := volMap["secret"]; found {
-				secretMap, ok := secret.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if name, found := secretMap["secretName"]; found {
-					if nameStr, ok := name.(string); ok {
-						secretObj := &unstructured.Unstructured{}
-						secretObj.SetGroupVersionKind(schema.GroupVersionKind{
-							Group:   "",
-							Version: "v1",
-							Kind:    "Secret",
-						})
-						secretObj.SetName(nameStr)
-						secretObj.SetNamespace(namespace)
-						if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nameStr}, secretObj); err == nil {
-							// addObject enforces the Secret security contract (ShouldSkipSecretObject) unconditionally,
-							// so non-Opaque / unannotated Opaque secrets are skipped here without manual filtering.
-							addObject(secretObj)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// volumeClaimTemplates are embedded in StatefulSet, not separate resources
-	// They will be included in the main object automatically
-	// No need to collect them separately
 }
 
 // sortObjects sorts objects by groupVersion, kind, namespace, name (TZ section 5, step 4)
@@ -859,30 +737,24 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	// This prevents Key/Value serialization when reading chunks later
 	jsonObjects := make([]interface{}, 0, len(objects))
 	for _, obj := range objects {
-		if common.ShouldSkipSecretObject(&obj) {
-			r.Logger.Info("Skipping secret object before chunk storage", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
-			continue
-		}
-		sanitized := common.SanitizeObjectForManifestCheckpoint(&obj)
-		if sanitized == nil {
-			continue
-		}
+		// Verbatim: objects are stored raw (no field cleaning, no secret stripping). Selection already
+		// happened upstream (Stage A / MCR creator). Sanitization is a restore read-path concern.
 
 		// Normalize object to ensure clean JSON serialization
-		normalized := r.normalizeObjectForJSON(sanitized.Object)
+		normalized := r.normalizeObjectForJSON(obj.Object)
 
 		// FIX: Ensure apiVersion and kind are present in normalized object
 		// normalizeObjectForJSON works on obj.Object (map), which doesn't include TypeMeta
 		// We need to explicitly add apiVersion and kind to the normalized map
 		if normalizedMap, ok := normalized.(map[string]interface{}); ok {
-			normalizedMap["apiVersion"] = sanitized.GetAPIVersion()
-			normalizedMap["kind"] = sanitized.GetKind()
+			normalizedMap["apiVersion"] = obj.GetAPIVersion()
+			normalizedMap["kind"] = obj.GetKind()
 		}
 
 		jsonObjects = append(jsonObjects, normalized)
 	}
 	if len(jsonObjects) == 0 {
-		r.Logger.Info("createChunks: No objects left after checkpoint filtering, creating empty chunk")
+		r.Logger.Info("createChunks: No objects to chunk, creating empty chunk")
 		return createEmptyChunk()
 	}
 
@@ -1149,8 +1021,6 @@ func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData str
 // ConfigMap allows runtime configuration without restart:
 //   - maxChunkSizeBytes: maximum chunk size for checkpoint content (default: 800000)
 //   - defaultTTL: default TTL for ManifestCaptureRequest (default: 168h, see config.DefaultTTL)
-//   - excludeKinds: comma-separated list of kinds to exclude from snapshots
-//   - enableFiltering: enable object selection on capture (default: false)
 //
 // See templates/controller/configmap.yaml for ConfigMap structure
 func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Context) error {
@@ -1186,9 +1056,7 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 	r.Logger.Info("Loaded controller configuration from ConfigMap",
 		"configMap", fmt.Sprintf("%s/%s", namespace, configMapName),
 		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-		"defaultTTL", r.Config.DefaultTTL,
-		"excludeKinds", len(r.Config.ExcludeKinds),
-		"enableFiltering", r.Config.EnableFiltering)
+		"defaultTTL", r.Config.DefaultTTL)
 
 	return nil
 }

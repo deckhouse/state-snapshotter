@@ -693,8 +693,7 @@ var _ = BeforeSuite(func() {
 
 	// Setup config
 	testCfg = &config.Options{
-		EnableFiltering: false,
-		DefaultTTL:      168 * time.Hour,
+		DefaultTTL: 168 * time.Hour,
 	}
 
 	integrationLog, err := logger.NewLogger("error")

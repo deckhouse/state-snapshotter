@@ -26,7 +26,7 @@ import (
 //
 // The restore compiler emits apply-ready manifests, so it MUST strip runtime/server-managed
 // fields that block `kubectl apply` and rewrite the namespace to the restore target. Sanitization
-// happens on the read path (independent of capture-time EnableFiltering).
+// happens on the read path; capture stores raw manifests as-is.
 //
 // This is the domain controller's own copy: its aggregated API server fetches base manifests from
 // core and must produce the same apply-ready output as the core restore compiler, without importing
