@@ -165,17 +165,7 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	return b.Complete(r)
 }
 
-func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
-	// #region agent log
-	dbgLog := log.FromContext(ctx)
-	dbgStart := time.Now()
-	dbgLog.Info("DBGCAP reconcile-enter", "snapshot", req.NamespacedName.String())
-	defer func() {
-		dbgLog.Info("DBGCAP reconcile-exit", "snapshot", req.NamespacedName.String(),
-			"elapsedMs", time.Since(dbgStart).Milliseconds(),
-			"requeue", res.Requeue, "requeueAfter", res.RequeueAfter.String(), "err", fmt.Sprintf("%v", err))
-	}()
-	// #endregion
+func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log.FromContext(ctx).V(1).Info("reconcile Snapshot", "snapshot", req.NamespacedName)
 	nsSnap := &storagev1alpha1.Snapshot{}
 	if err := r.snapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
@@ -322,9 +312,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 		return ctrl.Result{}, err
 	}
-	// #region agent log
-	log.FromContext(ctx).Info("DBGCAP gate", "snapshot", nsSnap.Name, "graphChanged", graphChanged, "graphReady", graphReady)
-	// #endregion
 	if res, block := childGraphCaptureGate(graphChanged, graphReady); block {
 		return res, nil
 	}

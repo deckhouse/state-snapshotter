@@ -133,9 +133,6 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	content *storagev1alpha1.SnapshotContent,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	// #region agent log
-	logger.Info("DBGCAP n2a-enter", "snapshot", nsSnap.Name, "content", content.Name)
-	// #endregion
 
 	if r.Dynamic == nil {
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic client is nil")
@@ -206,17 +203,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	} else if !allowed {
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}
-	dbgBuildStart := time.Now()
 	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds)
-	// #region agent log
-	{
-		errKind := "nil"
-		if err != nil {
-			errKind = err.Error()
-		}
-		logger.Info("DBGCAP buildroot", "snapshot", nsSnap.Name, "elapsedMs", time.Since(dbgBuildStart).Milliseconds(), "err", errKind, "nTargets", len(targets), "nUnreadable", len(unreadable), "unreadable", formatUnreadableGVRs(unreadable))
-	}
-	// #endregion
 	if err != nil {
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {

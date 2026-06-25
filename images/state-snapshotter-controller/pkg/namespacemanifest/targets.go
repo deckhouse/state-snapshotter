@@ -23,7 +23,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // State-snapshotter own machinery API groups/kinds that discovery will enumerate inside the target
@@ -105,20 +103,17 @@ func BuildManifestCaptureTargets(
 		return nil, nil, fmt.Errorf("namespacemanifest: discovery client is nil")
 	}
 
-	dbgDiscoStart := time.Now()
 	gvrs, unreadable, err := enumerateNamespacedGVRs(disco)
-	dbgDiscoMs := time.Since(dbgDiscoStart).Milliseconds()
 	if err != nil {
 		return nil, unreadable, err
 	}
 
-	dbgSweepStart := time.Now()
 	// The per-type LIST sweep is the dominant cost of capture planning: a namespace exposes ~130
 	// namespaced types and each List is an independent apiserver round-trip (~100-200ms through
-	// auth/RBAC/admission). Done serially this is ~25s per reconcile and the capture flow re-plans on
-	// every requeue, so a trivial namespace capture took >75s. The lists are independent and read-only,
-	// so fan them out with bounded concurrency; shared accumulators are mutex-guarded and the final
-	// sortManifestTargets keeps the MCR spec deterministic regardless of completion order.
+	// auth/RBAC/admission). Done serially this is ~25s, so fan them out with bounded concurrency; shared
+	// accumulators are mutex-guarded and the final sortManifestTargets keeps the MCR spec deterministic
+	// regardless of completion order. The capture dynamic client uses an elevated QPS/Burst (see
+	// AddSnapshotControllerToManager) so the fan-out is not re-serialized by client-side rate limiting.
 	const listSweepConcurrency = 32
 	var (
 		mu       sync.Mutex
@@ -179,12 +174,6 @@ func BuildManifestCaptureTargets(
 	if firstErr != nil {
 		return nil, unreadable, firstErr
 	}
-
-	// #region agent log
-	ctrllog.FromContext(ctx).Info("DBGCAP listsweep", "namespace", namespace,
-		"nGVRs", len(gvrs), "discoveryMs", dbgDiscoMs, "sweepMs", time.Since(dbgSweepStart).Milliseconds(),
-		"nTargets", len(targets), "nUnreadable", len(unreadable))
-	// #endregion
 
 	sortManifestTargets(targets)
 	return targets, unreadable, nil

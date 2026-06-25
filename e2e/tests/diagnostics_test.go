@@ -50,10 +50,6 @@ func dumpFailedSpecDiagnostics(ctx context.Context) {
 	}
 	dumpControllerLogs(ctx, d8ModuleNS)
 	dumpControllerLogs(ctx, d8SVDMModuleNS)
-	// #region agent log
-	dumpFilteredControllerLogs(ctx, d8ModuleNS, "DBGCAP")
-	agentDebugDumpControllerLogsToFile(ctx, d8ModuleNS)
-	// #endregion
 	GinkgoWriter.Printf("=======================================================\n\n")
 }
 
