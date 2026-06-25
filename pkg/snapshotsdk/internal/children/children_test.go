@@ -21,13 +21,10 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 const childNS = "ns"
@@ -54,7 +51,7 @@ func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	refs, err := Reconcile(context.Background(), cl, scheme, childNS, owner(), []client.Object{childCM("a")}, nil)
+	refs, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -70,23 +67,41 @@ func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
 	}
 }
 
-func TestReconcileGarbageCollectsOrphans(t *testing.T) {
+func TestReconcileIsDeleteFreeAndDetachesOldChildren(t *testing.T) {
 	scheme := testScheme(t)
+	// 'old' was a previously created child; the new desired set no longer references it.
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: childNS, OwnerReferences: []metav1.OwnerReference{owner()}}}).
 		Build()
 
-	previous := []storagev1alpha1.SnapshotChildRef{{APIVersion: "v1", Kind: "ConfigMap", Name: "old"}}
-	refs, err := Reconcile(context.Background(), cl, scheme, childNS, owner(), nil, previous)
+	refs, err := Reconcile(context.Background(), cl, scheme, owner(), nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if len(refs) != 0 {
-		t.Fatalf("expected no refs for empty desired, got %#v", refs)
+		t.Fatalf("expected empty refs for empty desired, got %#v", refs)
 	}
-	err = cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "old"}, &corev1.ConfigMap{})
-	if !apierrors.IsNotFound(err) {
-		t.Fatalf("expected orphan 'old' deleted, got err=%v", err)
+	// SDK v1 is delete-free: the old child is detached from the published graph but NOT deleted.
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "old"}, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("old child must not be deleted by SDK v1, got err=%v", err)
+	}
+}
+
+func TestReconcileDoesNotMutateCallerTemplate(t *testing.T) {
+	scheme := testScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	template := childCM("a")
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{template}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	// The caller-owned template must be left pristine: no owner refs stamped, no resourceVersion/UID from Create.
+	tmpl := template.(*corev1.ConfigMap)
+	if len(tmpl.OwnerReferences) != 0 {
+		t.Fatalf("template must not receive owner refs, got %#v", tmpl.OwnerReferences)
+	}
+	if tmpl.ResourceVersion != "" || tmpl.UID != "" {
+		t.Fatalf("template must not be mutated by Create, got rv=%q uid=%q", tmpl.ResourceVersion, tmpl.UID)
 	}
 }
 
@@ -97,7 +112,7 @@ func TestReconcileFailsClosedOnConflictingOwner(t *testing.T) {
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS, OwnerReferences: []metav1.OwnerReference{conflicting}}}).
 		Build()
 
-	if _, err := Reconcile(context.Background(), cl, scheme, childNS, owner(), []client.Object{childCM("a")}, nil); err == nil {
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")}); err == nil {
 		t.Fatal("expected conflict error when adopting a child owned by another parent")
 	}
 	got := &corev1.ConfigMap{}
@@ -115,7 +130,7 @@ func TestReconcileAdoptsUnownedChild(t *testing.T) {
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS}}).
 		Build()
 
-	if _, err := Reconcile(context.Background(), cl, scheme, childNS, owner(), []client.Object{childCM("a")}, nil); err != nil {
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	got := &corev1.ConfigMap{}

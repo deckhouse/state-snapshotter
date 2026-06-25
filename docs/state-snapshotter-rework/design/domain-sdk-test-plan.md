@@ -15,8 +15,8 @@
 - **Доменные контроллеры → на SDK (MUST).** Используют только публичный root `pkg/snapshotsdk` и
   `pkg/snapshotsdk/transform`; прямые patch/condition/ownerRef-хелперы capture-протокола из reconcile уходят.
 
-> Терминология синхронизирована с дизайн-планом: `MarkNotReady`/`NotReadySpec` (Р30), orphan-GC diff против
-> durable `childrenSnapshotRefs` (Р29), `ChildSpec{Object}` child-builder seam (Р17.5).
+> Терминология синхронизирована с дизайн-планом: `MarkNotReady`/`NotReadySpec` (Р30), delete-free children
+> (Р23; orphan-diff Р29 в v1 не применяется), `ChildSpec{Object}` child-builder seam (Р17.5).
 
 ## 1. Baseline (до любых изменений) — no-op refactor reference
 
@@ -61,9 +61,12 @@ cd pkg/snapshotsdk && go list -deps ./... | rg "state-snapshotter"
 - create-or-adopt child object;
 - ownerRef выставляется **SDK** (parent ownerRef на child);
 - `SnapshotChildRef` **деривируется из** child object (single source of truth, Р17.5);
-- `EnsureChildren([A,C])` после `[A,B]` удаляет SDK-owned orphan `B` (Р23/Р29);
-- `EnsureChildren(nil)` удаляет все прежние SDK-owned children (Р23; empty desired = «детей нет»);
-- orphan-GC **не трогает** чужие child objects без SDK ownerRef (Р23 boundary; Р29 diff против durable refs).
+- `EnsureChildren([A,C])` после `[A,B]` → refs `[A,C]`, `B` **detached** (выпал из refs), но **не удалён**
+  (delete-free, Р23);
+- `EnsureChildren(nil)` публикует пустой список refs; прежние SDK-owned children **не удаляются**
+  (delete-free, Р23; empty desired = «детей нет»);
+- delete-free: SDK **никогда** не удаляет child objects (ни свои, ни чужие) — реклейм выбывших через ownerRef
+  GC (Р23).
 
 ## 4. SDK facade — conformance / restart-safe tests
 

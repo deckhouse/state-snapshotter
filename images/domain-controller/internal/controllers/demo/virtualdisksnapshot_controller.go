@@ -113,10 +113,10 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		})
 	}
 
-	// Data leg (D3): resolve the source disk's PVC into a capture target (domain decision). A missing PVC
-	// is an actionable, surfaced Ready=False (the PVC may still appear), not an endless raw requeue. A disk
-	// without spec.persistentVolumeClaimName is manifest-only (no data leg).
-	targets, terminalReason, terminalMessage, err := r.resolveDemoVirtualDiskDataTargets(ctx, s, source)
+	// Data leg (D3): resolve the source disk's single PVC into the data-leg target (domain decision). A
+	// missing PVC is an actionable, surfaced Ready=False (the PVC may still appear), not an endless raw
+	// requeue. A disk without spec.persistentVolumeClaimName is manifest-only (no data leg).
+	dataRef, terminalReason, terminalMessage, err := r.resolveDemoVirtualDiskDataRef(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -131,7 +131,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
 
-	if err := sdk.EnsureVolumeCapture(ctx, adapter, snapshotsdk.VolumeCaptureSpec{Targets: targets}); err != nil {
+	if err := sdk.EnsureVolumeCapture(ctx, adapter, snapshotsdk.VolumeCaptureSpec{DataRef: dataRef}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -148,14 +148,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	return ctrl.Result{}, sdk.MarkPlanningReady(ctx, adapter, "manifest capture request planned")
 }
 
-// resolveDemoVirtualDiskDataTargets resolves the source disk's PVC into the SDK data-leg capture targets.
-// It returns no targets for a manifest-only disk, or a non-empty terminalReason (ArtifactMissing) when the
+// resolveDemoVirtualDiskDataRef resolves the source disk's single PVC into the SDK data-leg target. It
+// returns a nil ref for a manifest-only disk, or a non-empty terminalReason (ArtifactMissing) when the
 // configured PVC is not yet present.
-func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataTargets(
+func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataRef(
 	ctx context.Context,
 	s *demov1alpha1.DemoVirtualDiskSnapshot,
 	source *demov1alpha1.DemoVirtualDisk,
-) (targets []snapshotsdk.Target, terminalReason string, terminalMessage string, err error) {
+) (dataRef *snapshotsdk.Target, terminalReason string, terminalMessage string, err error) {
 	pvcName := source.Spec.PersistentVolumeClaimName
 	if pvcName == "" {
 		return nil, "", "", nil
@@ -170,11 +170,11 @@ func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataTargets(
 		return nil, "", "", getErr
 	}
 
-	return []snapshotsdk.Target{{
+	return &snapshotsdk.Target{
 		UID:        string(pvc.UID),
 		APIVersion: corev1.SchemeGroupVersion.String(),
 		Kind:       "PersistentVolumeClaim",
 		Name:       pvc.Name,
 		Namespace:  pvc.Namespace,
-	}}, "", "", nil
+	}, "", "", nil
 }

@@ -32,11 +32,12 @@ import (
 type VolumeCaptureProvider interface {
 	// VCRName returns the deterministic, snapshot-owned capture-request name for a snapshot UID.
 	VCRName(snapshotUID types.UID) string
-	// EnsureVCR reconciles the snapshot's capture request toward the desired owner reference and targets.
-	EnsureVCR(ctx context.Context, namespace, name string, ownerRef metav1.OwnerReference, targets []Target) error
-	// OwnedPVCTargets returns the PVC targets recorded on the snapshot's capture request (for the manifest
-	// leg). A missing request yields no targets.
-	OwnedPVCTargets(ctx context.Context, namespace, vcrName string) ([]Target, error)
+	// EnsureVCR reconciles the snapshot's capture request toward the desired owner reference and single
+	// data-leg PVC target (a snapshot node binds at most one data artifact).
+	EnsureVCR(ctx context.Context, namespace, name string, ownerRef metav1.OwnerReference, dataRef Target) error
+	// OwnedPVCTarget returns the single PVC target recorded on the snapshot's capture request (for the
+	// manifest leg), or nil when the request is absent or has no target.
+	OwnedPVCTarget(ctx context.Context, namespace, vcrName string) (*Target, error)
 }
 
 // NewStorageFoundationProvider returns the default VolumeCaptureProvider, backed by the storage-foundation

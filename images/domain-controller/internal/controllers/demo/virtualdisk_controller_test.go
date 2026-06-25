@@ -38,12 +38,12 @@ import (
 
 const matNS = "ns-mat"
 
-func TestDemoVirtualDiskScratchCreatesPVC(t *testing.T) {
+func TestDemoVirtualDiskBlankCreatesPVC(t *testing.T) {
 	size := resource.MustParse("1Gi")
 	disk := &demov1alpha1.DemoVirtualDisk{
-		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "disk-scratch", UID: types.UID("disk-scratch-uid")},
+		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "disk-blank", UID: types.UID("disk-blank-uid")},
 		Spec: demov1alpha1.DemoVirtualDiskSpec{
-			PersistentVolumeClaimName: "scratch-pvc",
+			PersistentVolumeClaimName: "blank-pvc",
 			Size:                      &size,
 			StorageClassName:          "local-thin",
 			VolumeMode:                string(corev1.PersistentVolumeFilesystem),
@@ -57,11 +57,11 @@ func TestDemoVirtualDiskScratchCreatesPVC(t *testing.T) {
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{}
-	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: matNS, Name: "scratch-pvc"}, pvc); err != nil {
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: matNS, Name: "blank-pvc"}, pvc); err != nil {
 		t.Fatalf("get pvc: %v", err)
 	}
 	if !diskHasControllerOwner(pvc, disk) {
-		t.Fatal("expected disk controller owner on scratch PVC")
+		t.Fatal("expected disk controller owner on blank PVC")
 	}
 }
 

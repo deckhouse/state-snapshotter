@@ -148,7 +148,7 @@ func (r *DemoVirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// The container must attach the backing PVC with the API that matches its volumeMode: a Block
 		// PVC is a raw block device (volumeDevices), a Filesystem PVC is a mount (volumeMounts). Mixing
 		// them makes the kubelet refuse the Pod ("volume has volumeMode Block, but is specified in
-		// volumeMounts"). Read the real PVC mode (authoritative for both scratch and restored disks)
+		// volumeMounts"). Read the real PVC mode (authoritative for both blank and restored disks)
 		// instead of assuming Filesystem.
 		pvc := &corev1.PersistentVolumeClaim{}
 		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: vm.Namespace, Name: pvcName}, pvc); err != nil {

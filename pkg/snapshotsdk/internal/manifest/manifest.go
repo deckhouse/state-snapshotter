@@ -37,31 +37,27 @@ func RequestName(kind, namespace, name string) string {
 	return "mcr-" + hex.EncodeToString(sum[:10])
 }
 
-// Targets merges the base manifest target with the owned-PVC targets derived from the data-leg VCR,
-// deduplicated by (apiVersion|kind|namespace|name) and sorted deterministically.
-func Targets(base []ssv1alpha1.ManifestTarget, ownedPVCs []storagefoundation.Target, namespace string) []ssv1alpha1.ManifestTarget {
-	owned := fromVolumeTargets(ownedPVCs)
+// Targets merges the base manifest target(s) with the snapshot's single owned data-leg PVC (derived from
+// the data-leg VCR), deduplicated by (apiVersion|kind|namespace|name) and sorted deterministically. A nil
+// ownedPVC (manifest-only snapshot) returns the base unchanged.
+func Targets(base []ssv1alpha1.ManifestTarget, ownedPVC *storagefoundation.Target, namespace string) []ssv1alpha1.ManifestTarget {
+	owned := ownedPVCManifestTarget(ownedPVC)
 	return appendOwnedPVCManifestTargets(base, owned, namespace)
 }
 
-func fromVolumeTargets(targets []storagefoundation.Target) []ssv1alpha1.ManifestTarget {
-	out := make([]ssv1alpha1.ManifestTarget, 0, len(targets))
-	for _, t := range targets {
-		if t.Kind != "PersistentVolumeClaim" {
-			continue
-		}
-		apiVersion := t.APIVersion
-		if apiVersion == "" {
-			apiVersion = corev1.SchemeGroupVersion.String()
-		}
-		out = append(out, ssv1alpha1.ManifestTarget{
-			APIVersion: apiVersion,
-			Kind:       t.Kind,
-			Name:       t.Name,
-		})
+func ownedPVCManifestTarget(t *storagefoundation.Target) []ssv1alpha1.ManifestTarget {
+	if t == nil || t.Kind != "PersistentVolumeClaim" {
+		return nil
 	}
-	sortTargets(out)
-	return out
+	apiVersion := t.APIVersion
+	if apiVersion == "" {
+		apiVersion = corev1.SchemeGroupVersion.String()
+	}
+	return []ssv1alpha1.ManifestTarget{{
+		APIVersion: apiVersion,
+		Kind:       t.Kind,
+		Name:       t.Name,
+	}}
 }
 
 func appendOwnedPVCManifestTargets(base, owned []ssv1alpha1.ManifestTarget, namespace string) []ssv1alpha1.ManifestTarget {

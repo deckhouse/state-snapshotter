@@ -62,52 +62,52 @@ func dataLegPVC() *corev1.PersistentVolumeClaim {
 	}
 }
 
-// A manifest-only disk (no spec.persistentVolumeClaimName) yields no data-leg targets and no terminal
-// reason, so the SDK ensures no VolumeCaptureRequest.
-func TestDiskDataTargets_NoPVC(t *testing.T) {
+// A manifest-only disk (no spec.persistentVolumeClaimName) yields no data-leg ref and no terminal reason,
+// so the SDK ensures no VolumeCaptureRequest.
+func TestDiskDataRef_NoPVC(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	targets, reason, _, err := r.resolveDemoVirtualDiskDataTargets(context.Background(), dataLegDiskSnap(), dataLegSource(""))
+	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(targets) != 0 || reason != "" {
-		t.Fatalf("manifest-only disk: want no targets/no-reason, got targets=%#v reason=%q", targets, reason)
+	if dataRef != nil || reason != "" {
+		t.Fatalf("manifest-only disk: want nil ref/no-reason, got dataRef=%#v reason=%q", dataRef, reason)
 	}
 }
 
-// With a configured and present PVC the data leg resolves a single PVC capture target.
-func TestDiskDataTargets_ResolvesPVCTarget(t *testing.T) {
+// With a configured and present PVC the data leg resolves a single PVC capture ref.
+func TestDiskDataRef_ResolvesPVCTarget(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap(), dataLegPVC())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	targets, reason, _, err := r.resolveDemoVirtualDiskDataTargets(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
+	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reason != "" {
 		t.Fatalf("present PVC: want no terminal reason, got %q", reason)
 	}
-	if len(targets) != 1 || targets[0].UID != dataLegPVCUID || targets[0].Name != dataLegPVCName || targets[0].Kind != "PersistentVolumeClaim" {
-		t.Fatalf("unexpected data-leg targets: %#v", targets)
+	if dataRef == nil || dataRef.UID != dataLegPVCUID || dataRef.Name != dataLegPVCName || dataRef.Kind != "PersistentVolumeClaim" {
+		t.Fatalf("unexpected data-leg ref: %#v", dataRef)
 	}
 }
 
 // A missing PVC is an actionable ArtifactMissing terminal reason (config not yet present), not a raw
-// error, and yields no targets.
-func TestDiskDataTargets_MissingPVCIsTerminal(t *testing.T) {
+// error, and yields no ref.
+func TestDiskDataRef_MissingPVCIsTerminal(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	targets, reason, _, err := r.resolveDemoVirtualDiskDataTargets(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
+	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reason != storagev1alpha1.ReasonArtifactMissing {
 		t.Fatalf("want reason %q, got %q", storagev1alpha1.ReasonArtifactMissing, reason)
 	}
-	if len(targets) != 0 {
-		t.Fatalf("missing PVC must not yield targets, got %#v", targets)
+	if dataRef != nil {
+		t.Fatalf("missing PVC must not yield a ref, got %#v", dataRef)
 	}
 }

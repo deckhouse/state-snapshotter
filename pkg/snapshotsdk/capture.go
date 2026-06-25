@@ -36,9 +36,11 @@ import (
 // data-leg volume capture, and its manifest capture. Each method reconciles the cluster toward the desired
 // intent and publishes the resulting names/refs into the snapshot status.
 type Planning interface {
-	// EnsureChildren makes the cluster match the desired set of child snapshots (adopting each under this
-	// snapshot), garbage-collects children no longer desired, and publishes the resulting child refs. A nil
-	// or empty desired set means "no children": any previously recorded children are collected.
+	// EnsureChildren makes the cluster match the desired set of child snapshots (create/adopt each under
+	// this snapshot) and publishes the resulting refs as status.childrenSnapshotRefs. It performs
+	// create/adopt + publication only and never deletes children (SDK v1 is delete-free). A nil or empty
+	// desired set publishes empty refs: a child no longer desired becomes detached from the snapshot graph
+	// but is left in the cluster for ownerRef GC / a future cleanup component to reclaim.
 	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error
 
 	// EnsureVolumeCapture ensures the data-leg capture request for the given PVC targets and publishes its
@@ -69,7 +71,7 @@ type ReadinessFault interface {
 
 // CaptureSDK is the capture-side protocol facade a domain snapshot controller drives. It hides all
 // Kubernetes transport (capture requests, owner references, optimistic-locked status patches, the planning
-// barrier condition, orphan GC) behind a small set of intent verbs.
+// barrier condition) behind a small set of intent verbs.
 type CaptureSDK interface {
 	Planning
 	PlanningBarrier
@@ -98,8 +100,7 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 	for _, d := range desired {
 		objs = append(objs, d.Object)
 	}
-	previous := t.GetDomainCaptureState().ChildrenSnapshotRefs
-	newRefs, err := children.Reconcile(ctx, s.client, s.client.Scheme(), obj.GetNamespace(), owner, objs, previous)
+	newRefs, err := children.Reconcile(ctx, s.client, s.client.Scheme(), owner, objs)
 	if err != nil {
 		return err
 	}
@@ -115,7 +116,7 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 }
 
 func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error {
-	if len(in.Targets) == 0 {
+	if in.DataRef == nil {
 		return nil
 	}
 	obj := t.Object()
@@ -135,7 +136,7 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 		return err
 	}
 	name := s.provider.VCRName(obj.GetUID())
-	if err := s.provider.EnsureVCR(ctx, obj.GetNamespace(), name, owner, in.Targets); err != nil {
+	if err := s.provider.EnsureVCR(ctx, obj.GetNamespace(), name, owner, *in.DataRef); err != nil {
 		return err
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
@@ -175,7 +176,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		return getErr
 	}
 	if apierrors.IsNotFound(getErr) {
-		ownedPVCs, err := s.provider.OwnedPVCTargets(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
+		ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
 		if err != nil {
 			return err
 		}
@@ -195,7 +196,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 				OwnerReferences: []metav1.OwnerReference{owner},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
-				Targets: manifest.Targets(base, ownedPVCs, namespace),
+				Targets: manifest.Targets(base, ownedPVC, namespace),
 			},
 		}
 		if err := s.client.Create(ctx, mcr); err != nil && !apierrors.IsAlreadyExists(err) {

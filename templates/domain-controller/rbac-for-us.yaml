@@ -42,7 +42,7 @@ rules:
   verbs: ["get", "list", "watch", "create", "delete"]
 
 # PersistentVolumeClaim: disk snapshot data-leg reads PVCs for VCR; disk/VM resource reconcilers create,
-# patch and delete backing PVCs (scratch + restore adoption).
+# patch and delete backing PVCs (blank provisioning + restore adoption).
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]

@@ -25,7 +25,8 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovd
 // DemoVirtualDisk is the demo domain data resource. The domain controller materializes its backing PVC
-// (from scratch or restored from a DemoVirtualDiskSnapshot) and publishes real allocated capacity in status.
+// (a blank, freshly provisioned disk, or one restored from a DemoVirtualDiskSnapshot) and publishes real
+// allocated capacity in status.
 type DemoVirtualDisk struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -36,7 +37,7 @@ type DemoVirtualDisk struct {
 // +k8s:deepcopy-gen=true
 // +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || self.dataSource.kind == 'DemoVirtualDiskSnapshot'",message="dataSource must reference DemoVirtualDiskSnapshot (cloning from another DemoVirtualDisk is not supported)"
 // +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup) == 0 || self.dataSource.apiGroup == 'demo.state-snapshotter.deckhouse.io'",message="dataSource apiGroup must be demo.state-snapshotter.deckhouse.io or empty"
-// +kubebuilder:validation:XValidation:rule="has(self.dataSource) || has(self.size)",message="size is required when dataSource is not set (scratch disk provisioning)"
+// +kubebuilder:validation:XValidation:rule="has(self.dataSource) || has(self.size)",message="size is required when dataSource is not set (blank disk provisioning)"
 type DemoVirtualDiskSpec struct {
 	// PersistentVolumeClaimName is the in-namespace PVC the disk controller creates and owns. When set,
 	// the disk snapshot owns the PVC data leg: it creates a VolumeCaptureRequest for the PVC and publishes
@@ -46,17 +47,17 @@ type DemoVirtualDiskSpec struct {
 	// +optional
 	PersistentVolumeClaimName string `json:"persistentVolumeClaimName,omitempty"`
 
-	// Size is the requested storage capacity for a scratch (empty) disk. Required when dataSource is unset.
+	// Size is the requested storage capacity for a blank (empty) disk. Required when dataSource is unset.
 	// Ignored for restore disks (size comes from the snapshot data artifact / VSC.restoreSize).
 	// +optional
 	Size *resource.Quantity `json:"size,omitempty"`
 
-	// StorageClassName is the StorageClass for the scratch PVC, or the fallback when restoring if the
+	// StorageClassName is the StorageClass for the blank PVC, or the fallback when restoring if the
 	// snapshot dataRef does not carry a StorageClassName.
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
-	// VolumeMode selects Block or Filesystem for the scratch PVC, or the fallback when restoring if the
+	// VolumeMode selects Block or Filesystem for the blank PVC, or the fallback when restoring if the
 	// snapshot dataRef does not carry volumeMode (restore still requires a mode before VRR creation).
 	// +kubebuilder:validation:Enum=Block;Filesystem
 	// +optional
@@ -104,7 +105,7 @@ type DemoVirtualDiskStatus struct {
 
 	// Capacity reports the REAL allocated size of the disk's backing volume, mirroring
 	// PersistentVolumeClaim.status.capacity (a ResourceList keyed by resource name such as "storage").
-	// The snapshot import path reads this from the captured raw manifest in MCP to size the scratch PVC /
+	// The snapshot import path reads this from the captured raw manifest in MCP to size the blank PVC /
 	// restored volume, so every domain data resource MUST publish its real allocated size here (not the
 	// requested size). The map is typed with apimachinery's resource.Quantity (string key) to keep the
 	// api module dependency-free while staying wire-compatible with corev1.ResourceList. See unified

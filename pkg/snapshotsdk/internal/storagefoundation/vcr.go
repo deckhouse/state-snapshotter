@@ -67,18 +67,23 @@ func NewProvider(c client.Client) *Provider { return &Provider{client: c} }
 // VCRName returns the deterministic VCR name for a snapshot UID.
 func (p *Provider) VCRName(snapshotUID types.UID) string { return VCRName(snapshotUID) }
 
-// EnsureVCR reconciles the snapshot's VolumeCaptureRequest toward the desired owner reference and targets.
-// It creates the request when absent, adopts it (adds the owner reference) when present but unowned, and
-// fails closed if an existing request's targets differ from the desired PVC target. The request is keyed by
-// the snapshot UID, so the operation is idempotent and restart-safe.
-func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerRef metav1.OwnerReference, targets []Target) error {
+// EnsureVCR reconciles the snapshot's VolumeCaptureRequest toward the desired owner reference and single
+// data-leg PVC target. It creates the request when absent, adopts it (adds the owner reference) when
+// present but unowned, and fails closed if an existing request's target differs from the desired one. The
+// request is keyed by the snapshot UID, so the operation is idempotent and restart-safe.
+//
+// A snapshot node binds at most one data artifact, so this takes a single target. The foundation
+// VolumeCaptureRequest CRD models spec.targets as a list, so the single target is written as a one-element
+// list here (the list shape is confined to this foundation boundary).
+func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerRef metav1.OwnerReference, dataRef Target) error {
+	desired := []Target{dataRef}
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(VolumeCaptureRequestGVK)
 	err := p.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, existing)
 	if apierrors.IsNotFound(err) {
-		createErr := p.client.Create(ctx, newVolumeCaptureRequestObject(namespace, name, ownerRef, targets))
+		createErr := p.client.Create(ctx, newVolumeCaptureRequestObject(namespace, name, ownerRef, desired))
 		if apierrors.IsAlreadyExists(createErr) {
-			return p.EnsureVCR(ctx, namespace, name, ownerRef, targets)
+			return p.EnsureVCR(ctx, namespace, name, ownerRef, dataRef)
 		}
 		return createErr
 	}
@@ -97,7 +102,7 @@ func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerR
 	if parseErr != nil {
 		return parseErr
 	}
-	if !targetsEqual(existingTargets, targets) {
+	if !targetsEqual(existingTargets, desired) {
 		return fmt.Errorf("VolumeCaptureRequest %s/%s spec.targets differ from desired PVC target", namespace, name)
 	}
 	return nil
@@ -133,9 +138,9 @@ func sortByUID(ts []Target) {
 	sort.Slice(ts, func(i, j int) bool { return ts[i].UID < ts[j].UID })
 }
 
-// OwnedPVCTargets reads spec.targets[] from the snapshot's VolumeCaptureRequest. A missing request yields
-// no targets (manifest-only or not yet created).
-func (p *Provider) OwnedPVCTargets(ctx context.Context, namespace, vcrName string) ([]Target, error) {
+// OwnedPVCTarget reads the snapshot's single data-leg PVC target from its VolumeCaptureRequest. A missing
+// request (or one with no target) yields nil (manifest-only or not yet created).
+func (p *Provider) OwnedPVCTarget(ctx context.Context, namespace, vcrName string) (*Target, error) {
 	if vcrName == "" {
 		return nil, nil
 	}
@@ -147,7 +152,14 @@ func (p *Provider) OwnedPVCTargets(ctx context.Context, namespace, vcrName strin
 		}
 		return nil, err
 	}
-	return parseTargets(obj)
+	targets, err := parseTargets(obj)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	return &targets[0], nil
 }
 
 func newVolumeCaptureRequestObject(namespace, name string, ownerRef metav1.OwnerReference, targets []Target) *unstructured.Unstructured {

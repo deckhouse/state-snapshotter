@@ -15,7 +15,12 @@ limitations under the License.
 */
 
 // Package children reconciles a snapshot's desired set of child snapshot objects: create-or-adopt each
-// desired child, derive its durable SnapshotChildRef, and garbage-collect orphans no longer desired.
+// desired child and derive its durable SnapshotChildRef. SDK v1 is a publication layer, not a lifecycle
+// owner: it never deletes children. A child no longer desired simply drops out of the published
+// childrenSnapshotRefs and becomes detached from the snapshot graph; reclaiming the leftover object is left
+// to ownerRef garbage collection (the parent owns each child) or a future cleanup component. This keeps the
+// contract delete-free — no List, no orphan diff, no unstructured delete, no risk of removing a foreign
+// object on the strength of a stale status (see design Р23/Р29).
 package children
 
 import (
@@ -24,9 +29,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
@@ -35,18 +38,17 @@ import (
 )
 
 // Reconcile makes the cluster match desired (the domain-built child snapshot objects), adopting each child
-// under owner, and deletes children present in previous but no longer desired (orphan-GC, diffed against
-// the durable child refs). It returns the resulting, sorted SnapshotChildRefs to publish into status.
+// under owner, and returns the resulting, sorted SnapshotChildRefs to publish into status. It performs
+// create/adopt + ref derivation only and never deletes children (SDK v1 is delete-free; see package doc).
+// A nil/empty desired set therefore yields empty refs without touching any previously created object.
 //
 // It fails closed on a child already owned by a different parent (no theft), leaving that child untouched.
 func Reconcile(
 	ctx context.Context,
 	c client.Client,
 	scheme *runtime.Scheme,
-	namespace string,
 	owner metav1.OwnerReference,
 	desired []client.Object,
-	previous []storagev1alpha1.SnapshotChildRef,
 ) ([]storagev1alpha1.SnapshotChildRef, error) {
 	newRefs := make([]storagev1alpha1.SnapshotChildRef, 0, len(desired))
 	for _, d := range desired {
@@ -64,23 +66,23 @@ func Reconcile(
 		})
 	}
 
-	if err := collectOrphans(ctx, c, namespace, previous, newRefs); err != nil {
-		return nil, err
-	}
-
 	SortRefs(newRefs)
 	return newRefs, nil
 }
 
+// ensureChild creates-or-adopts the child described by desired without ever mutating desired itself: the
+// desired object is a caller-owned template (ChildSpec.Object), so owner-reference stamping and the create
+// happen on a deep copy.
 func ensureChild(ctx context.Context, c client.Client, desired client.Object, owner metav1.OwnerReference) error {
 	key := client.ObjectKeyFromObject(desired)
 	existing := desired.DeepCopyObject().(client.Object)
 	err := c.Get(ctx, key, existing)
 	if apierrors.IsNotFound(err) {
-		if oErr := ownerref.Ensure(desired, owner); oErr != nil {
+		child := desired.DeepCopyObject().(client.Object)
+		if oErr := ownerref.Ensure(child, owner); oErr != nil {
 			return oErr
 		}
-		return c.Create(ctx, desired)
+		return c.Create(ctx, child)
 	}
 	if err != nil {
 		return err
@@ -93,30 +95,6 @@ func ensureChild(ctx context.Context, c client.Client, desired client.Object, ow
 		return nil
 	}
 	return c.Patch(ctx, existing, client.MergeFrom(base))
-}
-
-func collectOrphans(ctx context.Context, c client.Client, namespace string, previous, desired []storagev1alpha1.SnapshotChildRef) error {
-	desiredSet := make(map[storagev1alpha1.SnapshotChildRef]struct{}, len(desired))
-	for _, r := range desired {
-		desiredSet[r] = struct{}{}
-	}
-	for _, p := range previous {
-		if _, keep := desiredSet[p]; keep {
-			continue
-		}
-		gv, err := schema.ParseGroupVersion(p.APIVersion)
-		if err != nil {
-			return err
-		}
-		orphan := &unstructured.Unstructured{}
-		orphan.SetGroupVersionKind(gv.WithKind(p.Kind))
-		orphan.SetNamespace(namespace)
-		orphan.SetName(p.Name)
-		if err := c.Delete(ctx, orphan); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
 }
 
 // SortRefs orders child refs deterministically by (apiVersion, kind, name).

@@ -34,9 +34,16 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/config"
 )
 
-// DemoVirtualDiskReconciler materializes the backing PVC for a DemoVirtualDisk (scratch or restored from
-// a DemoVirtualDiskSnapshot). Restore resolves SnapshotContent.status.dataRef via APIReader (uncached)
-// and creates a storage-foundation VolumeRestoreRequest directly; snapshot reconcilers stay content-free.
+// DemoVirtualDiskReconciler materializes the persistent backing PersistentVolumeClaim for a
+// DemoVirtualDisk. The PVC is the disk's long-lived backing volume: it lives for the entire lifetime of
+// the DemoVirtualDisk and is reclaimed by ownerRef garbage collection when the disk is deleted (it is NOT
+// a temporary staging volume).
+//
+// A disk is materialized along exactly one of two paths, selected by spec.dataSource:
+//   - no dataSource  -> blank disk:    provision an empty backing PVC from spec.size/storageClassName.
+//   - has dataSource -> restored disk: provision the backing PVC from a DemoVirtualDiskSnapshot by
+//     resolving SnapshotContent.status.dataRef (via APIReader, uncached) and creating a storage-foundation
+//     VolumeRestoreRequest. Snapshot reconcilers themselves stay content-free.
 type DemoVirtualDiskReconciler struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -69,6 +76,8 @@ func (r *DemoVirtualDiskReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	// No backing PVC requested: the disk is manifest-only (it contributes its manifest to the snapshot
+	// graph but owns no data volume). Nothing to provision.
 	pvcName := disk.Spec.PersistentVolumeClaimName
 	if pvcName == "" {
 		if err := patchDemoVirtualDiskStatus(ctx, r.Client, req.NamespacedName, demoPhaseReady, metav1.ConditionTrue, storagev1alpha1.ReasonCompleted, "manifest-only disk (no PVC)", nil, nil); err != nil {
@@ -77,21 +86,25 @@ func (r *DemoVirtualDiskReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	// spec.dataSource selects the materialization path: restored-from-snapshot vs blank (empty).
 	if disk.Spec.DataSource != nil {
-		return r.reconcileRestoreDisk(ctx, req.NamespacedName, disk, pvcName)
+		return r.reconcileRestoredDisk(ctx, req.NamespacedName, disk, pvcName)
 	}
-	return r.reconcileScratchDisk(ctx, req.NamespacedName, disk, pvcName)
+	return r.reconcileBlankDisk(ctx, req.NamespacedName, disk, pvcName)
 }
 
-func (r *DemoVirtualDiskReconciler) reconcileScratchDisk(ctx context.Context, nn types.NamespacedName, disk *demov1alpha1.DemoVirtualDisk, pvcName string) (ctrl.Result, error) {
+// reconcileBlankDisk provisions the persistent backing PVC for a disk that has no restore source: an empty
+// volume sized from spec.size/storageClassName. The PVC is created once, owned by the disk, and then kept
+// in sync (adopted if pre-existing); readiness is published once it binds.
+func (r *DemoVirtualDiskReconciler) reconcileBlankDisk(ctx context.Context, nn types.NamespacedName, disk *demov1alpha1.DemoVirtualDisk, pvcName string) (ctrl.Result, error) {
 	if disk.Spec.Size == nil || disk.Spec.Size.IsZero() {
-		if err := patchDemoVirtualDiskStatus(ctx, r.Client, nn, demoPhaseFailed, metav1.ConditionFalse, demoReasonMissingSize, "spec.size is required for scratch disks", nil, nil); err != nil {
+		if err := patchDemoVirtualDiskStatus(ctx, r.Client, nn, demoPhaseFailed, metav1.ConditionFalse, demoReasonMissingSize, "spec.size is required for blank disks", nil, nil); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
 	if disk.Spec.StorageClassName == "" {
-		if err := patchDemoVirtualDiskStatus(ctx, r.Client, nn, demoPhaseFailed, metav1.ConditionFalse, demoReasonMissingStorageClass, "spec.storageClassName is required for scratch disks", nil, nil); err != nil {
+		if err := patchDemoVirtualDiskStatus(ctx, r.Client, nn, demoPhaseFailed, metav1.ConditionFalse, demoReasonMissingStorageClass, "spec.storageClassName is required for blank disks", nil, nil); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -111,7 +124,7 @@ func (r *DemoVirtualDiskReconciler) reconcileScratchDisk(ctx context.Context, nn
 		if !apierrors.IsNotFound(getErr) {
 			return ctrl.Result{}, getErr
 		}
-		pvc = buildScratchPVC(disk, pvcName, volumeMode)
+		pvc = buildBlankPVC(disk, pvcName, volumeMode)
 		if createErr := r.Client.Create(ctx, pvc); createErr != nil {
 			return ctrl.Result{}, createErr
 		}
@@ -130,7 +143,10 @@ func (r *DemoVirtualDiskReconciler) reconcileScratchDisk(ctx context.Context, nn
 	return r.publishDiskReadyFromPVC(ctx, nn, disk, pvc, pvcName)
 }
 
-func buildScratchPVC(disk *demov1alpha1.DemoVirtualDisk, pvcName string, volumeMode corev1.PersistentVolumeMode) *corev1.PersistentVolumeClaim {
+// buildBlankPVC constructs the empty backing PVC for a blank disk. The PVC carries a controller ownerRef
+// to the DemoVirtualDisk, so its lifetime is tied to the disk (deleted via ownerRef GC with the disk) —
+// this is the disk's durable data volume, not a transient one.
+func buildBlankPVC(disk *demov1alpha1.DemoVirtualDisk, pvcName string, volumeMode corev1.PersistentVolumeMode) *corev1.PersistentVolumeClaim {
 	sc := disk.Spec.StorageClassName
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -158,7 +174,11 @@ func buildScratchPVC(disk *demov1alpha1.DemoVirtualDisk, pvcName string, volumeM
 	return pvc
 }
 
-func (r *DemoVirtualDiskReconciler) reconcileRestoreDisk(ctx context.Context, nn types.NamespacedName, disk *demov1alpha1.DemoVirtualDisk, pvcName string) (ctrl.Result, error) {
+// reconcileRestoredDisk provisions the persistent backing PVC for a disk that restores from a
+// DemoVirtualDiskSnapshot. It resolves the snapshot's data artifact, creates a storage-foundation
+// VolumeRestoreRequest that populates the PVC, adopts the resulting PVC under the disk, tears the
+// VolumeRestoreRequest down, and publishes readiness once the PVC binds.
+func (r *DemoVirtualDiskReconciler) reconcileRestoredDisk(ctx context.Context, nn types.NamespacedName, disk *demov1alpha1.DemoVirtualDisk, pvcName string) (ctrl.Result, error) {
 	resolution, err := resolveDemoDiskRestore(ctx, r.APIReader, disk)
 	if err != nil {
 		return ctrl.Result{}, err

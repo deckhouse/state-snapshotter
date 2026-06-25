@@ -42,18 +42,13 @@ func TestTargetsManifestOnly(t *testing.T) {
 	}
 }
 
-func TestTargetsMergesOwnedPVCsDeduppedAndSorted(t *testing.T) {
+func TestTargetsMergesOwnedPVCAndSorts(t *testing.T) {
 	base := []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}}
-	owned := []storagefoundation.Target{
-		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-b"},
-		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
-		{APIVersion: "v1", Kind: "Secret", Name: "ignored"}, // non-PVC kinds are skipped
-	}
+	owned := &storagefoundation.Target{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}
 	got := Targets(base, owned, "ns")
 	want := []ssv1alpha1.ManifestTarget{
 		{APIVersion: "demo/v1", Kind: "Disk", Name: "d"},
 		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
-		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-b"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %#v, want %#v", got, want)
@@ -65,9 +60,18 @@ func TestTargetsMergesOwnedPVCsDeduppedAndSorted(t *testing.T) {
 	}
 }
 
+func TestTargetsSkipsNonPVCOwnedTarget(t *testing.T) {
+	base := []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}}
+	owned := &storagefoundation.Target{APIVersion: "v1", Kind: "Secret", Name: "ignored"}
+	got := Targets(base, owned, "ns")
+	if len(got) != 1 || got[0] != base[0] {
+		t.Fatalf("non-PVC owned target must be skipped, got %#v", got)
+	}
+}
+
 func TestTargetsDedupesOverlapWithBase(t *testing.T) {
 	base := []ssv1alpha1.ManifestTarget{{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}}
-	owned := []storagefoundation.Target{{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}}
+	owned := &storagefoundation.Target{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}
 	got := Targets(base, owned, "ns")
 	if len(got) != 1 {
 		t.Fatalf("expected dedup to a single target, got %#v", got)

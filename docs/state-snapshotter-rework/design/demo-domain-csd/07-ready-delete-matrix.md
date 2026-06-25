@@ -65,7 +65,7 @@
 
 При любой поломке нижнего уровня:
 
-1. Узел (leaf `SnapshotContent` со своей request-ногой) переходит в **`Ready=False`** с **`reason` / `message`**, отражающими **первопричину**.
+1. Узел (leaf `SnapshotContent` со своей request-линией) переходит в **`Ready=False`** с **`reason` / `message`**, отражающими **первопричину**.
 2. Каждый предок-`SnapshotContent` при агрегации видит ребёнка `Ready=False` → выставляет `ChildrenReady=False` / `Ready=False` (reason `ChildrenFailed`) и сохраняет имя/первопричину в `message`.
 3. Каскад **до корня**: root `SnapshotContent`, затем root `Snapshot.Ready` как зеркало.
 

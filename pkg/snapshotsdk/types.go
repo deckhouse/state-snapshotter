@@ -31,14 +31,14 @@ type SourceRef struct {
 	Name       string
 }
 
-// SnapshotChildRef identifies one child snapshot CR in the snapshot run tree. It is the durable record
-// the SDK diffs against for orphan garbage collection. This is the shared api contract type, re-exported
-// so domain controllers and adapters reference a single definition.
+// SnapshotChildRef identifies one child snapshot CR in the snapshot run tree. It is the durable record the
+// SDK publishes (the set of children currently attached to the snapshot graph). This is the shared api
+// contract type, re-exported so domain controllers and adapters reference a single definition.
 type SnapshotChildRef = storagev1alpha1.SnapshotChildRef
 
-// Target is a PVC capture target that makes up part of a snapshot's data leg. The domain resolves its own
-// PVCs (including readiness/ArtifactMissing decisions) and hands the SDK the resulting set; the SDK turns
-// them into the storage-foundation VolumeCaptureRequest.
+// Target is the single PVC capture target of a snapshot's data leg. The domain resolves its own PVC
+// (including readiness/ArtifactMissing decisions) and hands the SDK the result; the SDK turns it into the
+// storage-foundation VolumeCaptureRequest.
 type Target = storagefoundation.Target
 
 // Reason is a stable, machine-readable condition reason published by the SDK on behalf of the domain. The
@@ -87,10 +87,14 @@ type NotReadySpec struct {
 	Requeue bool
 }
 
-// VolumeCaptureSpec is the domain's data-leg intent: the PVC targets to capture. An empty Targets slice
-// means the snapshot is manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no name.
+// VolumeCaptureSpec is the domain's data-leg intent: the single PVC to capture. A snapshot node binds at
+// most one data artifact (Variant A, cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
+// multiple volumes are modeled as child snapshot nodes, never as several data refs on one node. A nil
+// DataRef means the snapshot is manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no
+// name.
 type VolumeCaptureSpec struct {
-	Targets []Target
+	// DataRef is the snapshot's single data-leg PVC, or nil for a manifest-only snapshot.
+	DataRef *Target
 }
 
 // ManifestCaptureSpec is the domain's manifest-leg intent: the single base manifest target (the source
