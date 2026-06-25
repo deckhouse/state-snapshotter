@@ -33,9 +33,11 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -119,6 +121,15 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	passAll := predicate.NewPredicateFuncs(func(client.Object) bool { return true })
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.Snapshot{}).
+		WithOptions(controller.Options{
+			// Bound the per-item retry backoff for the Snapshot controller only (domain controllers keep the
+			// controller-runtime default, where a not-found MCR target is critical). Namespace manifest capture
+			// races against ephemeral-target churn: an MCR admission rejection ("target not found in namespace")
+			// or a similar transient surfaces as a reconcile error, and the default rate limiter backs off up to
+			// ~16min, so a wedged capture re-plans far too slowly. Capping the exponential backoff at 10s keeps
+			// the re-plan/retry loop tight (200ms floor -> 10s ceiling) without hot-looping a wedged item.
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](200*time.Millisecond, 10*time.Second),
+		}).
 		Watches(
 			&storagev1alpha1.SnapshotContent{},
 			snapshotContentToSnapshotEnqueueHandler(mgr.GetClient()),
