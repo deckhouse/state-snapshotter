@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -46,6 +47,7 @@ import (
 const (
 	envNSPrefix             = "E2E_SNAPSHOTTER_NS_PREFIX"
 	envSnapshotReadyTO      = "E2E_SNAPSHOT_READY_TIMEOUT"
+	envCaptureReadyTO       = "E2E_CAPTURE_READY_TIMEOUT"
 	envModuleReadyTO        = "E2E_MODULE_READY_TIMEOUT"
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
@@ -56,8 +58,13 @@ const (
 )
 
 const (
-	defaultNSPrefix          = "snap-e2e"
-	defaultSnapshotTO        = 10 * time.Minute
+	defaultNSPrefix   = "snap-e2e"
+	defaultSnapshotTO = 10 * time.Minute
+	// defaultCaptureTO bounds snapshot *creation* (capture): manifests and LVM volume snapshots are both
+	// fast to create (copy-on-write, no data movement), so a short deadline fails fast instead of dragging
+	// on the generous snapshotReadyTO. snapshotReadyTO stays reserved for the restore/data-upload path,
+	// where DataImport actually streams bytes back.
+	defaultCaptureTO         = 30 * time.Second
 	defaultModuleTO          = 15 * time.Minute
 	defaultGCTTL             = "60s"
 	defaultStorageClass      = "e2e-thin"
@@ -179,6 +186,7 @@ const pollInterval = 5 * time.Second
 type e2eConfig struct {
 	nsPrefix          string
 	snapshotReadyTO   time.Duration
+	captureReadyTO    time.Duration
 	moduleReadyTO     time.Duration
 	gcTTL             string
 	volumeData        bool
@@ -228,6 +236,7 @@ func loadConfig() e2eConfig {
 		cfg.backupClientImage = defaultBackupClientImage
 	}
 	cfg.snapshotReadyTO = parseDuration(os.Getenv(envSnapshotReadyTO), defaultSnapshotTO)
+	cfg.captureReadyTO = parseDuration(os.Getenv(envCaptureReadyTO), defaultCaptureTO)
 	cfg.moduleReadyTO = parseDuration(os.Getenv(envModuleReadyTO), defaultModuleTO)
 	return cfg
 }
@@ -698,6 +707,64 @@ func walkSnapshotTree(ctx context.Context, ns, rootSnapshot string) ([]childRef,
 // errIsNotFound reports whether err is a Kubernetes NotFound (used by GC assertions).
 func errIsNotFound(err error) bool {
 	return apierrors.IsNotFound(err)
+}
+
+// startAppearWatch opens a watch for a namespaced resource and returns a blocking wait function plus a
+// stop function. It MUST be opened BEFORE the action that creates the resource, so an object whose entire
+// lifetime is shorter than any poll interval is still observed: a transient resource (e.g. the capture
+// RoleBinding, which now lives only for the ~1s capture window between Snapshot creation and
+// ManifestsArchived=True) is reliably missed by an interval poll, but a watch opened first cannot lose
+// the ADDED event because client-go applies backpressure on its result channel rather than dropping it.
+//
+// The returned wait function first tries a direct Get (covers an already-present object), then consumes
+// watch events until an ADDED/MODIFIED for the named object arrives or the timeout elapses. The caller
+// must always invoke stop (e.g. via defer) to release the watch.
+func startAppearWatch(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) (wait func(time.Duration) (*unstructured.Unstructured, error), stop func(), err error) {
+	w, err := suiteDyn.Resource(gvr).Namespace(ns).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("watch %s in namespace %s: %w", gvr.Resource, ns, err)
+	}
+	wait = func(timeout time.Duration) (*unstructured.Unstructured, error) {
+		if obj, getErr := getResource(ctx, gvr, ns, name); getErr == nil {
+			return obj, nil
+		} else if !apierrors.IsNotFound(getErr) {
+			return nil, fmt.Errorf("get %s %s/%s: %w", gvr.Resource, ns, name, getErr)
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		for {
+			select {
+			case ev, ok := <-w.ResultChan():
+				if !ok {
+					// Watch ended unexpectedly; a final Get covers an event delivered as it closed.
+					if obj, getErr := getResource(ctx, gvr, ns, name); getErr == nil {
+						return obj, nil
+					}
+					return nil, fmt.Errorf("watch for %s %s/%s closed before it appeared", gvr.Resource, ns, name)
+				}
+				if ev.Type == watch.Error {
+					// Treat a watch error like a close: try a Get, otherwise surface it instead of looping.
+					if obj, getErr := getResource(ctx, gvr, ns, name); getErr == nil {
+						return obj, nil
+					}
+					return nil, fmt.Errorf("watch error for %s %s/%s: %v", gvr.Resource, ns, name, ev.Object)
+				}
+				if ev.Type != watch.Added && ev.Type != watch.Modified {
+					continue
+				}
+				obj, ok := ev.Object.(*unstructured.Unstructured)
+				if !ok || obj.GetName() != name {
+					continue
+				}
+				return obj, nil
+			case <-timer.C:
+				return nil, fmt.Errorf("timeout after %s waiting for %s %s/%s to appear", timeout, gvr.Resource, ns, name)
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return wait, w.Stop, nil
 }
 
 // assertResourceGone blocks until the (possibly cluster-scoped) resource is NotFound, failing the spec

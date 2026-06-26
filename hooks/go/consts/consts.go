@@ -51,6 +51,12 @@ const (
 	// ControllerSAName is the ServiceAccount name of the state-snapshotter (core) controller.
 	ControllerSAName = "controller"
 
+	// WebhooksSAName is the ServiceAccount name of the state-snapshotter webhooks pod (must match
+	// templates/webhooks/rbac-for-us.yaml). The 040-namespace-capture-rbac hook adds it as a second
+	// subject on the transient per-namespace capture RoleBinding so the MCR-validation webhook can resolve
+	// arbitrary (non-allowlisted) namespaced CR targets via a dynamic Get during the capture window.
+	WebhooksSAName = "webhooks"
+
 	// DomainSAName is the ServiceAccount name of the domain (demo) controller pod. The 030-domain-rbac
 	// hook binds the dynamic domain GVR rights (source + snapshot kinds) to this SA, not the core SA.
 	DomainSAName = "domain-controller"

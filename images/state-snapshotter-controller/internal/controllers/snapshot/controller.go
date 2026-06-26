@@ -24,17 +24,23 @@ import (
 	"strings"
 	"time"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -52,15 +58,27 @@ import (
 // stays in SnapshotContentController.
 // Root SnapshotContent is not owned by Snapshot; binding lives in Snapshot status.
 type SnapshotReconciler struct {
-	Client                client.Client
-	APIReader             client.Reader
-	Dynamic               dynamic.Interface
+	Client    client.Client
+	APIReader client.Reader
+	Dynamic   dynamic.Interface
+	Discovery discovery.DiscoveryInterface
+	// SARClient gates the (single) full namespace list on the per-namespace capture RoleBinding having
+	// propagated (SelfSubjectAccessReview verb=list group=* resource=*). May be nil in tests/envtest, in
+	// which case the gate is skipped (see namespaceCaptureRBACReady).
+	SARClient             selfSubjectAccessReviewer
 	Scheme                *runtime.Scheme
 	Config                *config.Options
 	Archive               *usecase.ArchiveService
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
 	Mgr                   ctrl.Manager
 	childWatchMgr         *snapshotDynamicWatchManager
+}
+
+// selfSubjectAccessReviewer is the minimal SelfSubjectAccessReview creator used by the capture-RBAC gate
+// (satisfied by k8s.io/client-go/kubernetes/typed/authorization/v1.SelfSubjectAccessReviewInterface);
+// narrowed to an interface so it can be faked in unit tests.
+type selfSubjectAccessReviewer interface {
+	Create(ctx context.Context, sar *authorizationv1.SelfSubjectAccessReview, opts metav1.CreateOptions) (*authorizationv1.SelfSubjectAccessReview, error)
 }
 
 // childSnapshotStatusReader returns the client used for child snapshot status reads.
@@ -88,15 +106,32 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}
-	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
+	// The namespace capture plan lists ~130 namespaced types in one parallel sweep. The default client-go
+	// rate limiter (QPS 5 / Burst 10) serializes those List calls to ~25s regardless of fan-out, so raise
+	// QPS/Burst on a dedicated rest.Config copy used only by the capture dynamic/discovery clients. This
+	// keeps the single sweep to ~1-2s and does not touch the manager's shared client/informer config.
+	captureRESTConfig := rest.CopyConfig(mgr.GetConfig())
+	captureRESTConfig.QPS = 100
+	captureRESTConfig.Burst = 200
+	dyn, err := dynamic.NewForConfig(captureRESTConfig)
 	if err != nil {
 		return fmt.Errorf("snapshot controller: dynamic client: %w", err)
+	}
+	disco, err := discovery.NewDiscoveryClientForConfig(captureRESTConfig)
+	if err != nil {
+		return fmt.Errorf("snapshot controller: discovery client: %w", err)
+	}
+	authzClient, err := authorizationv1client.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("snapshot controller: authorization client: %w", err)
 	}
 	logImpl, _ := liblogger.NewLogger("error")
 	r := &SnapshotReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Dynamic:   dyn,
+		Discovery: disco,
+		SARClient: authzClient.SelfSubjectAccessReviews(),
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
 		// Chunks are internal-only (no list/watch informer); use APIReader like the /manifests API server.
@@ -112,6 +147,22 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	passAll := predicate.NewPredicateFuncs(func(client.Object) bool { return true })
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.Snapshot{}).
+		WithOptions(controller.Options{
+			// Parallelize reconciles across DISTINCT Snapshots so a large/parallel capture wave is not
+			// serialized through a single worker. controller-runtime still serializes reconciles of the same
+			// object key within this controller; the MCR gate is additionally idempotent (existence check via
+			// APIReader + Create that tolerates AlreadyExists), so even the pre-existing same-key concurrency
+			// from the child-watch relay (it calls Reconcile directly, see dynamic_watch.go) is safe — at worst
+			// two reconciles briefly duplicate the namespace list before one wins the Create.
+			MaxConcurrentReconciles: 8,
+			// Bound the per-item retry backoff for the Snapshot controller only (domain controllers keep the
+			// controller-runtime default, where a not-found MCR target is critical). Namespace manifest capture
+			// races against ephemeral-target churn: an MCR admission rejection ("target not found in namespace")
+			// or a similar transient surfaces as a reconcile error, and the default rate limiter backs off up to
+			// ~16min, so a wedged capture re-plans far too slowly. Capping the exponential backoff at 10s keeps
+			// the re-plan/retry loop tight (200ms floor -> 10s ceiling) without hot-looping a wedged item.
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](200*time.Millisecond, 10*time.Second),
+		}).
 		Watches(
 			&storagev1alpha1.SnapshotContent{},
 			snapshotContentToSnapshotEnqueueHandler(mgr.GetClient()),

@@ -359,11 +359,11 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 		if err != nil {
 			return fmt.Errorf("get live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
-		liveSum, liveJSON, err := canonicalManifestChecksum(live.Object)
+		liveSum, liveJSON, err := canonicalManifestChecksum(strippedForRawCompare(live))
 		if err != nil {
 			return fmt.Errorf("checksum live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
-		downloadedSum, downloadedJSON, err := canonicalManifestChecksum(obj.Object)
+		downloadedSum, downloadedJSON, err := canonicalManifestChecksum(strippedForRawCompare(obj))
 		if err != nil {
 			return fmt.Errorf("checksum downloaded %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
@@ -381,6 +381,32 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 		return fmt.Errorf("no downloaded manifests were checked against live objects")
 	}
 	return nil
+}
+
+// rawCompareVolatileMetadata are server-managed metadata fields that cannot stay stable between a
+// point-in-time captured manifest and the live object read back later: resourceVersion is bumped on
+// every write, and managedFields is server-side-apply bookkeeping whose timestamps/managers drift.
+// Capture stores raw manifests verbatim (sanitization is a restore-path concern, see
+// internal/usecase/restore/sanitizer.go), so the raw-vs-live checksum strips these from both sides to
+// compare actual object content (spec/data/labels/annotations/ownerRefs) without false diffs.
+//
+// status is deliberately NOT stripped: the capture spec waits for every source object to reach its
+// terminal Ready state before snapshotting (see "captures the Block-volume snapshot tree"), so the
+// captured status equals the (now-stable) live status and is part of what this test verifies.
+var rawCompareVolatileMetadata = [][]string{
+	{"metadata", "resourceVersion"},
+	{"metadata", "managedFields"},
+}
+
+// strippedForRawCompare returns a deep copy of obj's content with volatile server-managed metadata
+// removed, so a faithful capture is not flagged as differing just because the live object advanced its
+// resourceVersion (or rewrote managedFields) after the snapshot was taken.
+func strippedForRawCompare(obj *unstructured.Unstructured) map[string]interface{} {
+	clone := obj.DeepCopy()
+	for _, path := range rawCompareVolatileMetadata {
+		unstructured.RemoveNestedField(clone.Object, path...)
+	}
+	return clone.Object
 }
 
 func canonicalManifestChecksum(obj map[string]interface{}) (sum string, canonical []byte, err error) {
@@ -481,7 +507,7 @@ func anyBoundSnapshotContent(ctx context.Context, ns string) (bool, error) {
 func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]dataExportTarget, error) {
 	// Wait for the asynchronously-published orphan-PVC dataRef so we never miss a binding (see
 	// waitContentDataRefs); reading once can race right after the snapshot children report Ready.
-	bindings, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO)
+	bindings, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.captureReadyTO)
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +742,7 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 	// The orphan-PVC child volume node's dataRef is published asynchronously after its VolumeSnapshot
 	// leaf becomes readyToUse, so poll the content tree until all three PVC bindings are linked under
 	// the root content rather than reading once (which races right after waitChildrenReady).
-	if _, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO); err != nil {
+	if _, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.captureReadyTO); err != nil {
 		return err
 	}
 	var orphanVS string
@@ -835,16 +861,36 @@ func backupDownloadSpecs() {
 		})
 
 		It("captures the Block-volume snapshot tree (Ready + expected topology)", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+5*time.Minute)
+			// Capture (LVM snapshot creation) is fast — bound by captureReadyTO, not the restore-path
+			// snapshotReadyTO.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+5*time.Minute)
 			defer cancel()
+
+			// Background capture timeline: surfaces where the Block-volume snapshot creation spends time.
+			tl := startCaptureTimeline(backup.srcNS)
+			defer tl.stop()
+
+			// Snapshot captures status verbatim (point-in-time). Wait for every source object to reach its
+			// terminal Ready state (status no longer changes) BEFORE snapshotting, so the Phase 4 raw
+			// manifest-vs-live comparison stays sound: otherwise a captured status (e.g. VM phase=Pending,
+			// disk still provisioning) would drift from the live object that keeps reconciling to Ready. The
+			// VM's own Ready already implies its attached disk-a is usable, but disk-b is a standalone root
+			// child, so all three are awaited explicitly.
+			By("Waiting for the source objects to settle into a terminal Ready state before snapshotting")
+			Expect(waitDemoDiskReady(ctx, backup.srcNS, bkDiskAName, suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualDisk %s Ready before snapshot", bkDiskAName)
+			Expect(waitDemoDiskReady(ctx, backup.srcNS, bkDiskBName, suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualDisk %s Ready before snapshot", bkDiskBName)
+			Expect(waitObjectCondition(ctx, demoVMGVR, backup.srcNS, bkVMName, condReady, "True", suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualMachine %s Ready before snapshot", bkVMName)
 
 			By("Creating the root Snapshot over the Block-volume tree")
 			Expect(createRootSnapshot(ctx, backup.srcNS, bkRootSnapshotName)).To(Succeed())
 
 			By("Waiting for the Snapshot + bound SnapshotContent to become Ready")
-			content, err := waitSnapshotReady(ctx, backup.srcNS, bkRootSnapshotName, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, backup.srcNS, bkRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 			backup.rootContent = content
 			backup.rootSnap = bkRootSnapshotName
 
@@ -852,7 +898,7 @@ func backupDownloadSpecs() {
 			nodes, err := walkSnapshotTree(ctx, backup.srcNS, bkRootSnapshotName)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(nodes).NotTo(BeEmpty())
-			Expect(waitChildrenReady(ctx, backup.srcNS, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitChildrenReady(ctx, backup.srcNS, nodes, suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Resolving snapshot leaf names for the phase-5 import tree")
 			Expect(resolveBackupSnapRefs(ctx, backup.srcNS, bkRootSnapshotName, content)).To(Succeed())

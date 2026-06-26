@@ -44,12 +44,13 @@ type SnapshotList struct {
 }
 
 // +k8s:deepcopy-gen=true
-// SnapshotSpec is the capture/import mode selector. spec.source is fully immutable: a field-level
-// transition rule (self == oldSelf) freezes its contents while present, and this spec-level rule
-// forbids adding or removing it after creation. Without the spec-level rule the optional-field
-// transition would only run when source is present in BOTH old and new, so a dynamic↔import↔static
-// mode switch (add/remove source) would otherwise slip through and could orphan already-captured
-// content or kick off an unintended capture.
+// SnapshotSpec is the capture/import mode selector and is fully immutable after creation. A snapshot
+// is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the spec
+// must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
+// UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
+// no recapture (a new capture requires a new Snapshot). The narrower spec.source rules below are now
+// subsumed by this rule but kept for clearer, field-scoped admission messages.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.source) == has(oldSelf.source)",message="spec.source cannot be added or removed after creation"
 type SnapshotSpec struct {
 	// SnapshotClassName optionally selects class/policy (aligned with unified snapshot model; resolution is N2+).

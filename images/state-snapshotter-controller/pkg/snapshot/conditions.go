@@ -29,11 +29,21 @@ import (
 const (
 	ConditionReady                 = storagev1alpha1.ConditionReady
 	ConditionChildrenSnapshotReady = storagev1alpha1.ConditionChildrenSnapshotReady
+	// ConditionManifestsArchived is the subtree-latch contract condition (see api/storage). It is NOT
+	// part of the Ready formula; it signals that this node and all descendants have archived their
+	// manifests at least once and never re-opens once True.
+	ConditionManifestsArchived = storagev1alpha1.ConditionManifestsArchived
 
 	ReasonArtifactMissing     = storagev1alpha1.ReasonArtifactMissing
 	ReasonCompleted           = storagev1alpha1.ReasonCompleted
 	ReasonCreateChildFailed   = storagev1alpha1.ReasonCreateChildFailed
 	ReasonGraphPlanningFailed = storagev1alpha1.ReasonGraphPlanningFailed
+
+	// ManifestsArchived reasons (subtree latch): Archived (True, lifelong), Capturing (False,
+	// transient), Failed (False, terminal). Defined canonically in api/storage.
+	ReasonManifestsArchived      = storagev1alpha1.ReasonManifestsArchived
+	ReasonManifestsCapturing     = storagev1alpha1.ReasonManifestsCapturing
+	ReasonManifestsArchiveFailed = storagev1alpha1.ReasonManifestsArchiveFailed
 )
 
 // Condition types: the public condition model
@@ -107,6 +117,13 @@ const (
 	// while status.childrenSnapshotRefs is non-empty but the subtree exclude set cannot be computed yet
 	// (no root ManifestCaptureRequest until exclude is complete — distinct from ChildrenPending / ListFailed).
 	ReasonSubtreeManifestCapturePending = "SubtreeManifestCapturePending"
+	// ReasonNamespaceCaptureIncomplete is the non-terminal, fail-closed reason on a root Snapshot when
+	// discovery-based namespace capture planning could not read every namespaced type: a Forbidden list
+	// (RBAC for the transient per-namespace RoleBinding has not propagated yet) or a partial discovery
+	// failure (broken aggregated APIService). The controller does NOT create the root MCR with an
+	// incomplete plan; it degrades Ready and requeues until the missing types become readable. The
+	// message lists the unreadable GVRs.
+	ReasonNamespaceCaptureIncomplete = "NamespaceCaptureIncomplete"
 	// ReasonManifestCapturePending is set while a snapshot controller waits for its own MCR/MCP materialization.
 	ReasonManifestCapturePending = "ManifestCapturePending"
 	// ReasonChildrenFailed is set when any required child has a terminal Ready=False

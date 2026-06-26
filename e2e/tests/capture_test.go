@@ -46,6 +46,10 @@ type capturedTree struct {
 
 var captured capturedTree
 
+// captureTL records the capture state-transition timeline for the phase-1 manifest capture (started in
+// BeforeAll, stopped in AfterAll) so bottlenecks in snapshot creation are visible in the test log.
+var captureTL *captureTimeline
+
 // buildManifestOnlySource returns the PVC-free demo source: a ConfigMap (manifest leg) plus the demo
 // inventory (one VM owning a disk, plus a standalone disk). The disks set spec.size (required by the CEL
 // scratch-provisioning rule) but leave spec.persistentVolumeClaimName empty, so the disk controller keeps
@@ -119,6 +123,10 @@ func captureSpecs() {
 			By("Creating the source namespace " + captured.namespace)
 			Expect(ensureNamespace(ctx, captured.namespace)).To(Succeed())
 
+			// Start the background capture timeline before applying the source so the demo-CR reconcile and
+			// the whole snapshot creation chain are timed (see AfterAll for stop).
+			captureTL = startCaptureTimeline(captured.namespace)
+
 			By("Applying the PVC-free demo source (ConfigMap + demo VM/disks)")
 			Expect(applyObjects(ctx, buildManifestOnlySource(captured.namespace), captured.namespace)).To(Succeed())
 
@@ -126,27 +134,32 @@ func captureSpecs() {
 			Expect(createRootSnapshot(ctx, captured.namespace, captured.rootSnap)).To(Succeed())
 		})
 
+		AfterAll(func() {
+			captureTL.stop()
+		})
+
 		It("captures the demo snapshot tree (root Snapshot + SnapshotContent Ready)", func() {
-			// Budget for the two sequential waits below (Snapshot Ready, then SnapshotContent legs),
-			// each bounded by snapshotReadyTO, plus a buffer for the intervening GETs.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+time.Minute)
+			// Snapshot creation (capture) must complete quickly, so both waits below are bounded by the
+			// short captureReadyTO (fail fast) instead of the generous restore-path snapshotReadyTO.
+			// Budget for the two sequential waits plus a buffer for the intervening GETs.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 
 			By("Waiting for the root Snapshot to become Ready")
-			content, err := waitSnapshotReady(ctx, captured.namespace, captured.rootSnap, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, captured.namespace, captured.rootSnap, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(content).NotTo(BeEmpty())
 			captured.rootContent = content
 			GinkgoWriter.Printf("root SnapshotContent: %s\n", content)
 
 			By("Waiting for the bound SnapshotContent to reach all leg conditions (Manifests/Volumes/Children/Ready)")
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 
 		It("populates the demo child snapshot tree (childrenSnapshotRefs) with Ready nodes", func() {
-			// Budget for the tree walk plus the (shared-deadline) children readiness wait, each bounded
-			// by snapshotReadyTO.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+time.Minute)
+			// Snapshot creation: bound the tree walk and children readiness by the short captureReadyTO
+			// (fail fast) rather than the restore-path snapshotReadyTO.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 
 			By("Walking status.childrenSnapshotRefs from the root Snapshot")
@@ -156,7 +169,7 @@ func captureSpecs() {
 				nodes, err = walkSnapshotTree(ctx, captured.namespace, captured.rootSnap)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(nodes).NotTo(BeEmpty(), "root Snapshot should have demo child snapshots")
-			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 
 			By("Asserting the demo inventory is represented in the tree")
 			kinds := map[string]int{}
@@ -168,7 +181,7 @@ func captureSpecs() {
 			Expect(kinds["DemoVirtualDiskSnapshot"]).To(BeNumerically(">=", 2), "expected disk snapshots for disk-vm + disk-standalone")
 
 			By("Asserting every demo child snapshot is Ready=True")
-			Expect(waitChildrenReady(ctx, captured.namespace, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitChildrenReady(ctx, captured.namespace, nodes, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 	})
 }

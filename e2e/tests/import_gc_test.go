@@ -120,12 +120,13 @@ func importSpecs() {
 			}).WithTimeout(2*time.Minute).WithPolling(pollInterval).Should(Succeed(), "POST %s", ulPath)
 
 			By("Waiting for the import Snapshot to become Ready (content materialized)")
-			content, err := waitSnapshotReady(ctx, importNS, importRootSnapshotName, suiteCfg.snapshotReadyTO)
+			// Manifest-only import (uploaded payload, no volume-data streaming) materializes fast.
+			content, err := waitSnapshotReady(ctx, importNS, importRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(content).NotTo(BeEmpty())
 
 			By("Asserting the reconstructed SnapshotContent reaches all leg conditions")
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 	})
 }
@@ -247,9 +248,9 @@ func gcSpecs() {
 			Expect(applyObjects(ctx, buildManifestOnlySource(gcNS), gcNS)).To(Succeed())
 			Expect(createRootSnapshot(ctx, gcNS, gcRootSnapshotName)).To(Succeed())
 
-			content, err := waitSnapshotReady(ctx, gcNS, gcRootSnapshotName, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, gcNS, gcRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Recording the content graph (children + ManifestCheckpoint) before deletion")
 			co, err := getResource(ctx, snapshotContentGVR, "", content)
@@ -259,7 +260,7 @@ func gcSpecs() {
 			GinkgoWriter.Printf("GC root content=%s children=%v checkpoint=%s\n", content, children, checkpoint)
 
 			By("Confirming the short TTL has propagated to the root ObjectKeeper")
-			Expect(waitRootOkTTL(ctx, gcNS, gcRootSnapshotName, gcTTLDur, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitRootOkTTL(ctx, gcNS, gcRootSnapshotName, gcTTLDur, suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Deleting the root Snapshot")
 			Expect(suiteDyn.Resource(snapshotGVR).Namespace(gcNS).Delete(ctx, gcRootSnapshotName, metav1.DeleteOptions{})).To(Succeed())

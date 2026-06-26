@@ -455,16 +455,22 @@ func volumeDataSpecs() {
 		})
 
 		It("captures the volume data (VolumesReady + dataRef artifacts populated)", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+5*time.Minute)
+			// Capture (LVM snapshot creation) is fast — bound by captureReadyTO, not the restore-path
+			// snapshotReadyTO. Only the restore/data-upload waits keep the generous budget.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+5*time.Minute)
 			defer cancel()
+
+			// Background capture timeline: surfaces where the volume-data snapshot creation spends time.
+			tl := startCaptureTimeline(srcNS)
+			defer tl.stop()
 
 			By("Creating the root Snapshot over the PVC tree")
 			Expect(createRootSnapshot(ctx, srcNS, vdRootSnapshotName)).To(Succeed())
 
 			By("Waiting for the Snapshot + bound SnapshotContent (incl. VolumesReady) to become Ready")
-			content, err := waitSnapshotReady(ctx, srcNS, vdRootSnapshotName, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, srcNS, vdRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 			rootContent = content
 
 			By("Walking the content tree to collect data artifacts (PVC -> VolumeSnapshotContent)")

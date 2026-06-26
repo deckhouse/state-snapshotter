@@ -61,10 +61,10 @@ func CollectSubtreeCoveredPVCUIDs(
 			return nil
 		}
 		// Variant A: a child volume node materialized for a root-residual/orphan PVC IS the orphan capture
-		// itself, not a separate subtree owner. Counting it as covered would drop its PVC from the root
-		// residual target set and prune the PVC's CSI VolumeSnapshot handle on the next reconcile, so it
-		// must keep the PVC in scope here. The PVC manifest is still excluded from the root
-		// ManifestCheckpoint via the separate MCP subtree-exclude path (root_capture_run_exclude.go).
+		// itself, not a separate subtree owner. Counting it as covered would drop its own PVC from the root
+		// residual target set (double-handling the same PVC), so it must keep the PVC in scope here. The PVC
+		// manifest is still excluded from the root ManifestCheckpoint via the separate MCP subtree-exclude
+		// path (root_capture_run_exclude.go).
 		// Detected by the explicit LabelChildVolumeNode marker (a name-prefix heuristic would be fragile).
 		if snapshotpkg.IsChildVolumeNodeContent(content) {
 			return nil

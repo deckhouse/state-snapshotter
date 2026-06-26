@@ -37,7 +37,6 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	manifestcommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
@@ -148,7 +147,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(objects[0].GetNamespace()).To(Equal("ns1"))
 		})
 
-		It("should enforce Secret security contract before checkpoint chunking", func() {
+		It("should capture all Secret targets verbatim with raw data preserved", func() {
 			ctx := context.Background()
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{Name: "cm1", Namespace: "ns1"},
@@ -156,11 +155,11 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			}
 			Expect(baseClient.Create(ctx, cm)).To(Succeed())
 
+			// Stage B is verbatim: every targeted Secret is fetched and stored as-is, regardless of
+			// its type or annotations. There is no selection or data stripping on the capture path.
 			secrets := []*unstructured.Unstructured{
 				secretForManifestCaptureTest("tls-secret", nil, "kubernetes.io/tls"),
 				secretForManifestCaptureTest("opaque-default", nil, "Opaque"),
-				secretForManifestCaptureTest("opaque-include", map[string]string{manifestcommon.AnnotationIncludeSecret: "true"}, "Opaque"),
-				secretForManifestCaptureTest("opaque-include-data", map[string]string{manifestcommon.AnnotationIncludeSecretData: "true"}, "Opaque"),
 			}
 			for _, secret := range secrets {
 				Expect(baseClient.Create(ctx, secret)).To(Succeed())
@@ -173,8 +172,6 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 						{APIVersion: "v1", Kind: "ConfigMap", Name: "cm1"},
 						{APIVersion: "v1", Kind: "Secret", Name: "tls-secret"},
 						{APIVersion: "v1", Kind: "Secret", Name: "opaque-default"},
-						{APIVersion: "v1", Kind: "Secret", Name: "opaque-include"},
-						{APIVersion: "v1", Kind: "Secret", Name: "opaque-include-data"},
 					},
 				},
 			}
@@ -185,35 +182,27 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 
 			captured := objectsByKindName(objects)
 			Expect(captured).To(HaveKey("ConfigMap/cm1"))
-			Expect(captured).NotTo(HaveKey("Secret/tls-secret"))
-			Expect(captured).NotTo(HaveKey("Secret/opaque-default"))
+			Expect(captured).To(HaveKey("Secret/tls-secret"))
+			Expect(captured).To(HaveKey("Secret/opaque-default"))
 
-			included := captured["Secret/opaque-include"]
-			Expect(included.GetAnnotations()).To(HaveKeyWithValue(manifestcommon.AnnotationIncludeSecret, "true"))
-			_, found, err := unstructured.NestedMap(included.Object, "data")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeFalse(), "include-secret must remove Secret data")
-			_, found, err = unstructured.NestedMap(included.Object, "stringData")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeFalse(), "include-secret must remove Secret stringData")
-
-			withData := captured["Secret/opaque-include-data"]
-			data, found, err := unstructured.NestedMap(withData.Object, "data")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeTrue())
-			Expect(data).To(HaveKeyWithValue("password", "cGFzcw=="))
-			stringData, found, err := unstructured.NestedMap(withData.Object, "stringData")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeTrue())
-			Expect(stringData).To(HaveKeyWithValue("token", "plain"))
+			for _, name := range []string{"Secret/tls-secret", "Secret/opaque-default"} {
+				secret := captured[name]
+				data, found, err := unstructured.NestedMap(secret.Object, "data")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue(), "verbatim capture must preserve Secret data: %s", name)
+				Expect(data).To(HaveKeyWithValue("password", "cGFzcw=="))
+				stringData, found, err := unstructured.NestedMap(secret.Object, "stringData")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeTrue(), "verbatim capture must preserve Secret stringData: %s", name)
+				Expect(stringData).To(HaveKeyWithValue("token", "plain"))
+			}
 		})
 
-		It("should store RAW manifests (status + non-domain annotations) while selection still drops owned objects", func() {
+		It("should store RAW manifests verbatim including status, annotations and owner-managed objects", func() {
 			ctx := context.Background()
-			// Filtering ON exercises the SELECTION layer; field-level cleaning (status / non-domain
-			// annotation stripping) must NOT happen on capture anymore — the MCP is the source of truth
-			// for import/export. Selection and field-cleaning are now decoupled.
-			cfg.EnableFiltering = true
+			// Stage B is verbatim: the MCR targets are an explicit list produced by the creator, so the
+			// controller fetches and stores them as-is. There is no selection (owner-managed objects are
+			// NOT dropped) and no field-level cleaning (status / non-domain annotations are preserved).
 
 			// Service is NOT registered via WithStatusSubresource above, so the fake client round-trips
 			// its typed status on Create/Get (a status-subresource registration would drop it).
@@ -235,7 +224,8 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			}
 			Expect(baseClient.Create(ctx, svc)).To(Succeed())
 
-			// An owner-managed ConfigMap must be dropped by selection even though capture no longer cleans.
+			// An owner-managed ConfigMap is captured verbatim too: selection happens upstream (the MCR
+			// creator decides what to list), Stage B just fetches whatever targets it is given.
 			ownedCM := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "owned-cm",
@@ -265,7 +255,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			captured := objectsByKindName(objects)
-			Expect(captured).NotTo(HaveKey("ConfigMap/owned-cm"), "selection must drop owner-managed objects")
+			Expect(captured).To(HaveKey("ConfigMap/owned-cm"), "verbatim Stage B must NOT drop owner-managed targets")
 			Expect(captured).To(HaveKey("Service/svc1"))
 
 			svcCaptured := captured["Service/svc1"]

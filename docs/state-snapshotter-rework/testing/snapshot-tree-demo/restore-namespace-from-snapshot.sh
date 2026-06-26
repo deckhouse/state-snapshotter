@@ -118,7 +118,7 @@ jq -e 'type=="array"' "$AGGFILE" >/dev/null || die "aggregated manifests is not 
 kubectl get ns "$TARGET_NS" >/dev/null 2>&1 || { info "creating namespace $TARGET_NS"; kubectl create namespace "$TARGET_NS" >/dev/null; }
 
 # --- 3+4. prepare and apply non-PVC manifests -------------------------------
-# Aggregated API (default capture EnableFiltering=false) strips only metadata.namespace
+# Aggregated API (capture stores raw manifests as-is) strips only metadata.namespace
 # and drops cluster-scoped objects; uid/resourceVersion/creationTimestamp/managedFields/
 # ownerReferences/status may remain. Clean them here until the API guarantees clean output.
 read -r -d '' EXCLUDE_DEF <<'JQ' || true

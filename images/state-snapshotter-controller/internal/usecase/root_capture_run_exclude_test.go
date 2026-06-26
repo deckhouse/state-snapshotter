@@ -65,13 +65,22 @@ func fixtureContent(name, mcpName string, children ...string) *storagev1alpha1.S
 	for _, child := range children {
 		refs = append(refs, storagev1alpha1.SnapshotContentChildRef{Name: child})
 	}
-	return &storagev1alpha1.SnapshotContent{
+	c := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName:      mcpName,
 			ChildrenSnapshotContentRefs: refs,
 		},
 	}
+	// Direct children of the root must be ManifestsArchived=True for the root-capture wave barrier
+	// (requireContentManifestsArchived) to proceed. Fixture direct children represent a fully archived
+	// subtree.
+	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+		Type:   snapshot.ConditionManifestsArchived,
+		Status: metav1.ConditionTrue,
+		Reason: snapshot.ReasonManifestsArchived,
+	})
+	return c
 }
 
 func TestCollectRunSubtreeManifestExcludeKeys_ChildContentMCPContributes(t *testing.T) {
@@ -220,6 +229,10 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 	meta.SetStatusCondition(&childContentObj.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
 	})
+	// Direct child of the root: must be ManifestsArchived=True for the wave barrier to proceed.
+	meta.SetStatusCondition(&childContentObj.Status.Conditions, metav1.Condition{
+		Type: snapshot.ConditionManifestsArchived, Status: metav1.ConditionTrue, Reason: snapshot.ReasonManifestsArchived,
+	})
 
 	childSnap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
@@ -272,6 +285,77 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 	})
 	if _, ok := excl[orphanKey]; ok {
 		t.Fatalf("object from SnapshotContent not in run graph must not affect exclude (INV-S0)")
+	}
+}
+
+// Grandchild dedup (the 409 scenario, healthy state): root -> child (archived, links grandchild) ->
+// grandchild whose MCP captures a leaf object (disk-vm). When the direct child is ManifestsArchived=True
+// (subtree fully linked), the content-graph walk reaches the grandchild and the leaf object is added to
+// the root exclude set, so the root MCR cannot double-capture it.
+func TestCollectRunSubtreeManifestExcludeKeys_GrandchildLeafExcluded(t *testing.T) {
+	scheme := rootCaptureTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	ctx := context.Background()
+
+	dChild, cChild := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "child-cm", "namespace": "ns1"}},
+	})
+	chChild := aggManifestCreateChunk("ch-child", "mcp-child", dChild, cChild)
+	mcpChild := aggManifestReadyMCP("mcp-child", "ns1", []ssv1alpha1.ChunkInfo{{Name: chChild.Name, Index: 0, Checksum: cChild}}, 1)
+
+	dGC, cGC := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1", "kind": "DemoVirtualDisk", "metadata": map[string]interface{}{"name": "disk-vm", "namespace": "ns1"}},
+	})
+	chGC := aggManifestCreateChunk("ch-gc", "mcp-gc", dGC, cGC)
+	mcpGC := aggManifestReadyMCP("mcp-gc", "ns1", []ssv1alpha1.ChunkInfo{{Name: chGC.Name, Index: 0, Checksum: cGC}}, 1)
+
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-content"}},
+		},
+	}
+	// child-content is a direct child: archived (fixtureContent sets ManifestsArchived=True) and links the
+	// grandchild edge.
+	childContent := fixtureContent("child-content", "mcp-child", "grandchild-content")
+	grandchildContent := fixtureContent("grandchild-content", "mcp-gc")
+
+	childSnap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "ch1", Namespace: "ns1"},
+		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "child-content"},
+	}
+	rootNS := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "Snapshot",
+				Name:       "ch1",
+			}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		chChild, mcpChild, chGC, mcpGC,
+		rootContentObj, childContent, grandchildContent, childSnap, rootNS,
+	).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	excl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
+	if err != nil {
+		t.Fatalf("collectRunSubtreeManifestExcludeKeys: %v", err)
+	}
+	gcKey := namespacemanifest.ManifestTargetDedupKey("ns1", namespacemanifest.ManifestTarget{
+		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDisk", Name: "disk-vm",
+	})
+	if _, ok := excl[gcKey]; !ok {
+		t.Fatalf("grandchild leaf object disk-vm must be in the root exclude set, got %#v", excl)
+	}
+	childKey := namespacemanifest.ManifestTargetDedupKey("ns1", namespacemanifest.ManifestTarget{
+		APIVersion: "v1", Kind: "ConfigMap", Name: "child-cm",
+	})
+	if _, ok := excl[childKey]; !ok {
+		t.Fatalf("direct child object child-cm must be in the root exclude set, got %#v", excl)
 	}
 }
 
@@ -346,6 +430,101 @@ func TestCollectRunSubtreeManifestExcludeKeys_MCPReadFailClosed(t *testing.T) {
 	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
 	if err == nil {
 		t.Fatal("expected error when ManifestCheckpoint is missing / not readable")
+	}
+}
+
+// Wave barrier: a reachable direct child whose ManifestCheckpoint is Ready but whose subtree latch
+// (ManifestsArchived) is not yet True must hold root capture as pending, never build the root MCR. This
+// is the guard against the 409 duplicate race: while a descendant subtree is not fully archived/linked,
+// the root must not capture (its exclude set could miss not-yet-linked descendant manifests).
+func TestCollectRunSubtreeManifestExcludeKeys_DirectChildNotArchivedPends(t *testing.T) {
+	scheme := rootCaptureTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	ctx := context.Background()
+	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "demo-owned", "namespace": "ns1"}},
+	})
+	ch := aggManifestCreateChunk("ch-d", "mcp-d", d1, c1)
+	mcp := aggManifestReadyMCP("mcp-d", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: c1}}, 1)
+
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
+		},
+	}
+	// disk-content has a Ready MCP but NO ManifestsArchived=True condition (subtree not fully archived).
+	diskContent := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},
+		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-d"},
+	}
+	disk := fixtureSnapshotUnstructured("disk-content")
+	rootNS := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{{
+				APIVersion: "generic.state-snapshotter.test/v1",
+				Kind:       "FixtureDomainSnapshot",
+				Name:       "disk-a",
+			}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ch, mcp, rootContentObj, diskContent, disk, rootNS).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
+	if !errors.Is(err, ErrSubtreeManifestCapturePending) {
+		t.Fatalf("expected ErrSubtreeManifestCapturePending while a direct child is not ManifestsArchived, got %v", err)
+	}
+}
+
+// Wave barrier: a direct child terminally ManifestsArchived=False/ManifestsArchiveFailed makes root
+// capture terminally fail (the subtree can never be archived), not merely pend.
+func TestCollectRunSubtreeManifestExcludeKeys_DirectChildArchiveFailedFails(t *testing.T) {
+	scheme := rootCaptureTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	ctx := context.Background()
+	d1, c1 := aggManifestEncodeChunk([]map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "demo-owned", "namespace": "ns1"}},
+	})
+	ch := aggManifestCreateChunk("ch-d", "mcp-d", d1, c1)
+	mcp := aggManifestReadyMCP("mcp-d", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: c1}}, 1)
+
+	rootContentObj := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
+		},
+	}
+	diskContent := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},
+		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-d"},
+	}
+	meta.SetStatusCondition(&diskContent.Status.Conditions, metav1.Condition{
+		Type:    snapshot.ConditionManifestsArchived,
+		Status:  metav1.ConditionFalse,
+		Reason:  snapshot.ReasonManifestsArchiveFailed,
+		Message: "descendant capture failed",
+	})
+	disk := fixtureSnapshotUnstructured("disk-content")
+	rootNS := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"},
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{{
+				APIVersion: "generic.state-snapshotter.test/v1",
+				Kind:       "FixtureDomainSnapshot",
+				Name:       "disk-a",
+			}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ch, mcp, rootContentObj, diskContent, disk, rootNS).Build()
+	arch := NewArchiveService(cl, cl, log)
+
+	_, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, cl, rootNS, "root-content")
+	if !errors.Is(err, ErrSubtreeManifestCaptureFailed) {
+		t.Fatalf("expected ErrSubtreeManifestCaptureFailed for a terminally archive-failed direct child, got %v", err)
 	}
 }
 

@@ -91,8 +91,8 @@ English demo note:
 ## Что отдаёт агрегированный API (проверено по коду + замером 2026-06-01)
 
 `AggregatedNamespaceManifests` отдаёт объекты так, как они лежат в архиве
-`ManifestCheckpoint`. В дефолтной конфигурации capture (`EnableFiltering=false`,
-«include everything as-is») API:
+`ManifestCheckpoint`. Capture хранит сырые манифесты как есть
+(«include everything as-is»), поэтому API:
 
 - **удаляет `metadata.namespace`** у каждого объекта;
 - **отбрасывает cluster-scoped объекты** (namespace пуст);
@@ -104,8 +104,8 @@ English demo note:
 
 Поэтому `restore-namespace-from-snapshot.sh` чистит identity/runtime-поля +
 `ownerReferences` + `status` и проставляет `metadata.namespace`. Это не «лишняя»
-санитизация — API её не гарантирует. При `EnableFiltering=true` чистка станет
-безвредным no-op.
+санитизация — API её не гарантирует (capture хранит сырьё, чистка — на restore
+read-path).
 
 ### Агрегированные routes
 

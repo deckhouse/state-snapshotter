@@ -103,13 +103,21 @@ func getSnapshotContent(ctx context.Context, c client.Client, name string) (*sto
 
 // LinkChildVolumeContentRef idempotently adds childName to root.status.childrenSnapshotContentRefs so the
 // content graph (subtree manifest exclude, GC, restore traversal) sees the child volume node.
-func LinkChildVolumeContentRef(ctx context.Context, c client.Client, rootContentName, childName string) error {
+//
+// The current edge set is read via reader (the non-cached APIReader): the append is otherwise computed
+// against a possibly stale cache that may not yet show the snapshot-derived domain child edges, and a
+// MergeFrom patch off that stale base would clobber them — exactly the write-war that PublishSnapshot-
+// ContentChildrenRefs guards against from the other side. A fresh read makes this strictly additive.
+func LinkChildVolumeContentRef(ctx context.Context, c client.Client, reader client.Reader, rootContentName, childName string) error {
 	if rootContentName == "" || childName == "" {
 		return nil
 	}
+	if reader == nil {
+		reader = c
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		root := &storagev1alpha1.SnapshotContent{}
-		if err := c.Get(ctx, client.ObjectKey{Name: rootContentName}, root); err != nil {
+		if err := reader.Get(ctx, client.ObjectKey{Name: rootContentName}, root); err != nil {
 			return err
 		}
 		for _, ref := range root.Status.ChildrenSnapshotContentRefs {
@@ -121,6 +129,10 @@ func LinkChildVolumeContentRef(ctx context.Context, c client.Client, rootContent
 		root.Status.ChildrenSnapshotContentRefs = append(root.Status.ChildrenSnapshotContentRefs,
 			storagev1alpha1.SnapshotContentChildRef{Name: childName})
 		controllercommon.SortSnapshotContentChildRefs(root.Status.ChildrenSnapshotContentRefs)
-		return c.Status().Patch(ctx, root, client.MergeFrom(base))
+		// Optimistic lock: childrenSnapshotContentRefs is co-written by the domain publisher
+		// (PublishSnapshotContentChildrenRefs); a concurrent edit turns into a 409 so RetryOnConflict
+		// re-reads the fresh list and re-appends, instead of blindly replacing (which would drop the
+		// domain child edges). Matches genericbinder.patchSnapshotConditionFromContent.
+		return c.Status().Patch(ctx, root, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }

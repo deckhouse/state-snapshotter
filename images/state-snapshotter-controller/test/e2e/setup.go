@@ -353,8 +353,7 @@ var _ = BeforeSuite(func() {
 
 	// Setup config
 	cfgOptions := &config.Options{
-		EnableFiltering: false, // Disable filtering for tests to capture all objects
-		DefaultTTL:      168 * time.Hour,
+		DefaultTTL: 168 * time.Hour,
 	}
 
 	// Setup ManifestCheckpointController
