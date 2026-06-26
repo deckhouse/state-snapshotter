@@ -149,6 +149,15 @@ func (r *GenericSnapshotBinderController) isDomainCaptureKind(gvk schema.GroupVe
 	return ok
 }
 
+// MarkDataBacked records whether a snapshot Kind carries a volume data leg (CSD spec.dataBacked) on the
+// GVK registry, so the import path knows whether to wait for a DataImport/data artifact. Idempotent;
+// guarded by watchMu (the same lock that serializes registry mutations in AddWatchForPair).
+func (r *GenericSnapshotBinderController) MarkDataBacked(snapshotKind string, dataBacked bool) {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	r.GVKRegistry.MarkDataBacked(snapshotKind, dataBacked)
+}
+
 // isDomainPlanningComplete reports whether the domain controller finished planning for the snapshot's
 // current generation: ChildrenSnapshotReady=True with observedGeneration == metadata.generation.
 func isDomainPlanningComplete(snapshotLike snapshot.SnapshotLike) bool {

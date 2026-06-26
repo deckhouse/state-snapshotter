@@ -45,56 +45,50 @@ spec:
           metadata:
             type: object
           spec:
+            description: |-
+              CustomSnapshotDefinitionSpec maps one source resource GVK to the snapshot GVK that materializes it.
+              One CSD registers exactly one snapshot kind (flat schema): the snapshot apiVersion/kind live at the
+              top level, the domain resource being snapshotted is referenced by Source.
             properties:
-              snapshotResourceMapping:
-                description: SnapshotResourceMapping declares source resource CRD
-                  -> snapshot CRD mappings.
-                items:
-                  description: SnapshotResourceMappingEntry maps source resource GVKs
-                    to snapshot GVKs.
-                  properties:
-                    priority:
-                      description: Priority orders universal traversal across mappings.
-                        Higher values run first.
-                      format: int32
-                      minimum: 0
-                      type: integer
-                    snapshot:
-                      description: Snapshot is the GVK of the snapshot resource that
-                        materializes Source.
-                      properties:
-                        apiVersion:
-                          minLength: 1
-                          type: string
-                        kind:
-                          minLength: 1
-                          type: string
-                      required:
-                      - apiVersion
-                      - kind
-                      type: object
-                    source:
-                      description: Source is the GVK of the domain resource being
-                        snapshotted.
-                      properties:
-                        apiVersion:
-                          minLength: 1
-                          type: string
-                        kind:
-                          minLength: 1
-                          type: string
-                      required:
-                      - apiVersion
-                      - kind
-                      type: object
-                  required:
-                  - snapshot
-                  - source
-                  type: object
-                minItems: 1
-                type: array
+              apiVersion:
+                description: APIVersion is the apiVersion of the snapshot resource
+                  that materializes Source.
+                minLength: 1
+                type: string
+              dataBacked:
+                description: |-
+                  DataBacked marks that this snapshot kind carries a volume data leg: the generic controller must
+                  wait for the data artifact (capture) or the matching DataImport (import). Manifest-only snapshot
+                  kinds (no volume data) set false.
+                type: boolean
+              kind:
+                description: Kind is the kind of the snapshot resource that materializes
+                  Source.
+                minLength: 1
+                type: string
+              priority:
+                description: Priority orders universal traversal across snapshot kinds.
+                  Higher values run first.
+                format: int32
+                minimum: 0
+                type: integer
+              source:
+                description: Source is the GVK of the domain resource being snapshotted.
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                type: object
             required:
-            - snapshotResourceMapping
+            - apiVersion
+            - kind
+            - source
             type: object
           status:
             properties:

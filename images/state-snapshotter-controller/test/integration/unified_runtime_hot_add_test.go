@@ -86,17 +86,11 @@ var _ = Describe("Integration: unified runtime hot-add (CSD → Sync)", Serial, 
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: hotCSDName},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
-					{
-						Source: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "RegistrationTestSnapshot",
-						},
-						Snapshot: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "RegistrationTestSnapshot",
-						},
-					},
+				APIVersion: "test.deckhouse.io/v1alpha1",
+				Kind:       "RegistrationTestSnapshot",
+				Source: storagev1alpha1.SnapshotGVKRef{
+					APIVersion: "test.deckhouse.io/v1alpha1",
+					Kind:       "RegistrationTestSnapshot",
 				},
 			},
 		}

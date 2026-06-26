@@ -51,26 +51,29 @@ func resolveEligibleGVRs(
 
 	for _, csd := range eligible {
 		var errMsgs []string
-		for _, entry := range csd.Spec.SnapshotResourceMapping {
-			// On resolve error the returned GVR is the zero value; never collect it, or the
-			// ClusterRole would gain an empty (resource: "") rule. Record the failure so the
-			// CSD stays pending and is retried once discovery catches up.
-			srcGVR, err := resolve(entry.Source)
-			if err != nil {
-				errMsgs = append(errMsgs, fmt.Sprintf("source %s/%s: %v", entry.Source.APIVersion, entry.Source.Kind, err))
-			} else if _, ok := seenSource[srcGVR]; !ok {
-				seenSource[srcGVR] = struct{}{}
-				sourceGVRs = append(sourceGVRs, srcGVR)
-			}
+		// Flat CSD schema: one source GVK and one snapshot GVK per object. The snapshot GVK is the
+		// object's own apiVersion/kind; the source is referenced by spec.source.
+		snapshotRef := v1alpha1.SnapshotGVKRef{APIVersion: csd.Spec.APIVersion, Kind: csd.Spec.Kind}
 
-			snapGVR, err := resolve(entry.Snapshot)
-			if err != nil {
-				errMsgs = append(errMsgs, fmt.Sprintf("snapshot %s/%s: %v", entry.Snapshot.APIVersion, entry.Snapshot.Kind, err))
-			} else if _, ok := seenSnapshot[snapGVR]; !ok {
-				seenSnapshot[snapGVR] = struct{}{}
-				snapshotGVRs = append(snapshotGVRs, snapGVR)
-			}
+		// On resolve error the returned GVR is the zero value; never collect it, or the
+		// ClusterRole would gain an empty (resource: "") rule. Record the failure so the
+		// CSD stays pending and is retried once discovery catches up.
+		srcGVR, err := resolve(csd.Spec.Source)
+		if err != nil {
+			errMsgs = append(errMsgs, fmt.Sprintf("source %s/%s: %v", csd.Spec.Source.APIVersion, csd.Spec.Source.Kind, err))
+		} else if _, ok := seenSource[srcGVR]; !ok {
+			seenSource[srcGVR] = struct{}{}
+			sourceGVRs = append(sourceGVRs, srcGVR)
 		}
+
+		snapGVR, err := resolve(snapshotRef)
+		if err != nil {
+			errMsgs = append(errMsgs, fmt.Sprintf("snapshot %s/%s: %v", snapshotRef.APIVersion, snapshotRef.Kind, err))
+		} else if _, ok := seenSnapshot[snapGVR]; !ok {
+			seenSnapshot[snapGVR] = struct{}{}
+			snapshotGVRs = append(snapshotGVRs, snapGVR)
+		}
+
 		if len(errMsgs) > 0 {
 			pendingByName[csd.Name] = "GVR resolution failed: " + strings.Join(errMsgs, "; ")
 		}

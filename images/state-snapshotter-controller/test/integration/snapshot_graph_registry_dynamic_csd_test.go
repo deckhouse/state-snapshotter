@@ -49,17 +49,13 @@ const (
 	registryTestSnapshotKind       = "GraphRegistryTestSnapshot"
 )
 
-func registryTestSnapshotMapping() []ssv1alpha1.SnapshotResourceMappingEntry {
-	return []ssv1alpha1.SnapshotResourceMappingEntry{
-		{
-			Source: ssv1alpha1.SnapshotGVKRef{
-				APIVersion: registryTestSourceAPIVersion,
-				Kind:       registryTestSourceKind,
-			},
-			Snapshot: ssv1alpha1.SnapshotGVKRef{
-				APIVersion: registryTestSnapshotAPIVersion,
-				Kind:       registryTestSnapshotKind,
-			},
+func registryTestSnapshotSpec() ssv1alpha1.CustomSnapshotDefinitionSpec {
+	return ssv1alpha1.CustomSnapshotDefinitionSpec{
+		APIVersion: registryTestSnapshotAPIVersion,
+		Kind:       registryTestSnapshotKind,
+		Source: ssv1alpha1.SnapshotGVKRef{
+			APIVersion: registryTestSourceAPIVersion,
+			Kind:       registryTestSourceKind,
 		},
 	}
 }
@@ -116,9 +112,7 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 
 		csd := &ssv1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: csdName},
-			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: registryTestSnapshotMapping(),
-			},
+			Spec:       registryTestSnapshotSpec(),
 		}
 		Expect(k8sClient.Create(testCtx, csd)).To(Succeed())
 
@@ -156,9 +150,7 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 
 		csd := &ssv1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: globalCSD},
-			Spec: ssv1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: registryTestSnapshotMapping(),
-			},
+			Spec:       registryTestSnapshotSpec(),
 		}
 		Expect(k8sClient.Create(testCtx, csd)).To(Succeed())
 

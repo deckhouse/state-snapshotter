@@ -34,41 +34,28 @@ import (
 )
 
 var _ = Describe("Integration: CSD reconciler InvalidSpec", func() {
-	const dupKindName = "integration-csd-dup-snapshot-kind"
+	const unresolvableName = "integration-csd-unresolvable-kind"
 
 	BeforeEach(func() {
-		for _, n := range []string{dupKindName} {
+		for _, n := range []string{unresolvableName} {
 			d := &storagev1alpha1.CustomSnapshotDefinition{}
 			d.SetName(n)
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, d))
 		}
 	})
 
-	It("sets Accepted=False InvalidSpec when two mappings repeat the same snapshot kind", func() {
+	It("sets Accepted=False InvalidSpec when the snapshot kind cannot be resolved (no CRD)", func() {
+		// Flat schema: one mapping per CSD. The InvalidSpec path is now an unresolvable GVK — a snapshot
+		// kind that passes structural CRD validation (apiVersion/kind non-empty) but has no installed CRD,
+		// so the reconciler's RESTMapping fails. (Intra-CSD duplicate kinds are impossible by construction.)
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
-			ObjectMeta: metav1.ObjectMeta{Name: dupKindName},
+			ObjectMeta: metav1.ObjectMeta{Name: unresolvableName},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
-					{
-						Source: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "TestSnapshot",
-						},
-						Snapshot: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "TestSnapshot",
-						},
-					},
-					{
-						Source: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "TestSnapshot",
-						},
-						Snapshot: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "TestSnapshot",
-						},
-					},
+				APIVersion: "nonexistent.deckhouse.io/v1alpha1",
+				Kind:       "NonExistentSnapshot",
+				Source: storagev1alpha1.SnapshotGVKRef{
+					APIVersion: "nonexistent.deckhouse.io/v1alpha1",
+					Kind:       "NonExistentResource",
 				},
 			},
 		}
@@ -76,12 +63,11 @@ var _ = Describe("Integration: CSD reconciler InvalidSpec", func() {
 
 		Eventually(func(g Gomega) {
 			cur := &storagev1alpha1.CustomSnapshotDefinition{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dupKindName}, cur)).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: unresolvableName}, cur)).To(Succeed())
 			acc := meta.FindStatusCondition(cur.Status.Conditions, controllers.CSDConditionAccepted)
 			g.Expect(acc).NotTo(BeNil())
 			g.Expect(acc.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(acc.Reason).To(Equal(controllers.CSDReasonInvalidSpec))
-			g.Expect(acc.Message).To(ContainSubstring("duplicate snapshot kind"))
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })

@@ -313,6 +313,11 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
+	// Carry CSD spec.dataBacked from the merged pairs onto the binder's GVK registry so the import path
+	// knows which snapshot kinds expect a DataImport/data artifact. Built-in/bootstrap pairs stay false.
+	for _, p := range mergedPairs {
+		snapshotController.MarkDataBacked(p.Snapshot.Kind, p.DataBacked)
+	}
 	for i := range genericSnapshotGVKs {
 		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
 			log.Error(err, "Failed to setup GenericSnapshotBinderController watch", "snapshotGVK", genericSnapshotGVKs[i].String(), "snapshotContentGVK", genericContentGVKs[i].String())
