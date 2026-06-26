@@ -383,23 +383,31 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 	return nil
 }
 
-// rawCompareVolatileMetadata are server-managed metadata fields that cannot stay stable between a
-// point-in-time captured manifest and the live object read back later: resourceVersion is bumped on
-// every write, and managedFields is server-side-apply bookkeeping whose timestamps/managers drift.
+// rawCompareVolatileFields are fields that cannot stay stable between a point-in-time captured manifest
+// and the live object read back later:
+//   - metadata.resourceVersion is bumped on every write, and metadata.managedFields is server-side-apply
+//     bookkeeping whose timestamps/managers drift.
+//   - status is point-in-time: capture stores it verbatim at snapshot time, but the live object keeps
+//     reconciling afterwards (e.g. a DemoVirtualMachine captured while its Pod is still Pending advances
+//     to phase=Ready a moment later), so a captured status legitimately differs from live. Comparing it
+//     against the evolving live status is therefore unsound by construction.
+//
 // Capture stores raw manifests verbatim (sanitization is a restore-path concern, see
 // internal/usecase/restore/sanitizer.go), so the raw-vs-live checksum strips these from both sides to
 // compare actual object content (spec/data/labels/annotations/ownerRefs) without false diffs.
-var rawCompareVolatileMetadata = [][]string{
+var rawCompareVolatileFields = [][]string{
 	{"metadata", "resourceVersion"},
 	{"metadata", "managedFields"},
+	{"status"},
 }
 
-// strippedForRawCompare returns a deep copy of obj's content with volatile server-managed metadata
-// removed, so a faithful capture is not flagged as differing just because the live object advanced its
-// resourceVersion (or rewrote managedFields) after the snapshot was taken.
+// strippedForRawCompare returns a deep copy of obj's content with volatile, point-in-time fields removed
+// (server-managed metadata and the whole status subtree), so a faithful capture is not flagged as
+// differing just because the live object advanced its resourceVersion, rewrote managedFields, or
+// reconciled its status after the snapshot was taken.
 func strippedForRawCompare(obj *unstructured.Unstructured) map[string]interface{} {
 	clone := obj.DeepCopy()
-	for _, path := range rawCompareVolatileMetadata {
+	for _, path := range rawCompareVolatileFields {
 		unstructured.RemoveNestedField(clone.Object, path...)
 	}
 	return clone.Object
