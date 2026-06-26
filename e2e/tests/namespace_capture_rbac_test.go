@@ -109,21 +109,28 @@ func captureRBACHookSpecs() {
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
-			By("Applying a capturable ConfigMap and creating the root Snapshot")
+			By("Applying a capturable ConfigMap")
 			Expect(applyObjects(ctx, []*unstructured.Unstructured{configMapObject(ns, "e1-cm", map[string]interface{}{"a": "b"})}, ns)).To(Succeed())
+
+			// Open the appear-watch BEFORE creating the Snapshot: capture+archive now completes in ~1s, so
+			// the transient capture RoleBinding (removed the instant the root reaches ManifestsArchived=True)
+			// is reliably missed by an interval poll. A watch opened first cannot lose the ADDED event.
+			rbWait, rbStop, err := startAppearWatch(ctx, roleBindingGVR, ns, captureRoleBindingName)
+			Expect(err).NotTo(HaveOccurred())
+			defer rbStop()
+
+			By("Creating the root Snapshot")
 			Expect(createRootSnapshot(ctx, ns, "e1-snap")).To(Succeed())
 
 			By("Asserting the hook creates the capture RoleBinding while capture is in progress")
-			Eventually(func(g Gomega) {
-				rb, err := getResource(ctx, roleBindingGVR, ns, captureRoleBindingName)
-				g.Expect(err).NotTo(HaveOccurred())
-				roleRefName, _, _ := unstructured.NestedString(rb.Object, "roleRef", "name")
-				g.Expect(roleRefName).To(Equal(captureClusterRoleName))
-				subjects, _, _ := unstructured.NestedSlice(rb.Object, "subjects")
-				g.Expect(subjects).NotTo(BeEmpty())
-				subjName, _, _ := unstructured.NestedString(subjects[0].(map[string]interface{}), "name")
-				g.Expect(subjName).To(Equal("controller"))
-			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(2 * time.Second).Should(Succeed())
+			rb, err := rbWait(suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred())
+			roleRefName, _, _ := unstructured.NestedString(rb.Object, "roleRef", "name")
+			Expect(roleRefName).To(Equal(captureClusterRoleName))
+			subjects, _, _ := unstructured.NestedSlice(rb.Object, "subjects")
+			Expect(subjects).NotTo(BeEmpty())
+			subjName, _, _ := unstructured.NestedString(subjects[0].(map[string]interface{}), "name")
+			Expect(subjName).To(Equal("controller"))
 
 			By("Waiting for the root to reach ManifestsArchived=True")
 			Expect(waitRootArchived(ctx, ns, "e1-snap", suiteCfg.captureReadyTO)).To(Succeed())
@@ -173,13 +180,18 @@ func captureRBACHookSpecs() {
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
 			Expect(applyObjects(ctx, []*unstructured.Unstructured{configMapObject(ns, "e1-cm", map[string]interface{}{"a": "b"})}, ns)).To(Succeed())
+
+			// Open the appear-watch BEFORE creating the Snapshot so the ~1s capture window (the RoleBinding
+			// is removed the instant the root reaches ManifestsArchived=True) cannot be missed by polling.
+			rbWait, rbStop, err := startAppearWatch(ctx, roleBindingGVR, ns, captureRoleBindingName)
+			Expect(err).NotTo(HaveOccurred())
+			defer rbStop()
+
 			Expect(createRootSnapshot(ctx, ns, "e1-del")).To(Succeed())
 
 			By("Waiting for the capture RoleBinding to appear")
-			Eventually(func() error {
-				_, err := getResource(ctx, roleBindingGVR, ns, captureRoleBindingName)
-				return err
-			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(2 * time.Second).Should(Succeed())
+			_, err = rbWait(suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred())
 
 			By("Deleting the Snapshot and asserting the RoleBinding is removed")
 			Expect(suiteDyn.Resource(snapshotGVR).Namespace(ns).Delete(ctx, "e1-del", metav1.DeleteOptions{})).To(Succeed())

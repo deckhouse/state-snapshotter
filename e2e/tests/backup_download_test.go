@@ -359,11 +359,11 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 		if err != nil {
 			return fmt.Errorf("get live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
-		liveSum, liveJSON, err := canonicalManifestChecksum(live.Object)
+		liveSum, liveJSON, err := canonicalManifestChecksum(strippedForRawCompare(live))
 		if err != nil {
 			return fmt.Errorf("checksum live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
-		downloadedSum, downloadedJSON, err := canonicalManifestChecksum(obj.Object)
+		downloadedSum, downloadedJSON, err := canonicalManifestChecksum(strippedForRawCompare(obj))
 		if err != nil {
 			return fmt.Errorf("checksum downloaded %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
@@ -381,6 +381,28 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 		return fmt.Errorf("no downloaded manifests were checked against live objects")
 	}
 	return nil
+}
+
+// rawCompareVolatileMetadata are server-managed metadata fields that cannot stay stable between a
+// point-in-time captured manifest and the live object read back later: resourceVersion is bumped on
+// every write, and managedFields is server-side-apply bookkeeping whose timestamps/managers drift.
+// Capture stores raw manifests verbatim (sanitization is a restore-path concern, see
+// internal/usecase/restore/sanitizer.go), so the raw-vs-live checksum strips these from both sides to
+// compare actual object content (spec/data/labels/annotations/ownerRefs) without false diffs.
+var rawCompareVolatileMetadata = [][]string{
+	{"metadata", "resourceVersion"},
+	{"metadata", "managedFields"},
+}
+
+// strippedForRawCompare returns a deep copy of obj's content with volatile server-managed metadata
+// removed, so a faithful capture is not flagged as differing just because the live object advanced its
+// resourceVersion (or rewrote managedFields) after the snapshot was taken.
+func strippedForRawCompare(obj *unstructured.Unstructured) map[string]interface{} {
+	clone := obj.DeepCopy()
+	for _, path := range rawCompareVolatileMetadata {
+		unstructured.RemoveNestedField(clone.Object, path...)
+	}
+	return clone.Object
 }
 
 func canonicalManifestChecksum(obj map[string]interface{}) (sum string, canonical []byte, err error) {
