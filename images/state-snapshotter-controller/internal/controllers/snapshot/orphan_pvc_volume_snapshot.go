@@ -45,7 +45,7 @@ import (
 )
 
 // orphanPVCVolumeSnapshotNamePrefix marks VolumeSnapshots created by the namespace-root orphan-PVC
-// data leg. The prefix is the ownership signal for stale-leaf cleanup.
+// data leg. The prefix identifies our own orphan VolumeSnapshots for visibility-leaf bookkeeping.
 const orphanPVCVolumeSnapshotNamePrefix = "nss-vs-"
 
 // volumeSnapshotContentRetainPolicy is the deletionPolicy that keeps the bound VSC durable after the
@@ -82,9 +82,12 @@ type orphanVSBindingResult struct {
 	message string
 }
 
-// ensureOrphanPVCVolumeSnapshots creates standard CSI VolumeSnapshots for root residual PVC targets,
-// prunes stale leaves for PVCs that are no longer orphan, and records the current set as
-// Snapshot.status.childrenSnapshotRefs[] visibility leaves.
+// ensureOrphanPVCVolumeSnapshots creates standard CSI VolumeSnapshots for root residual PVC targets and
+// records the current set as Snapshot.status.childrenSnapshotRefs[] visibility leaves. The orphan
+// VolumeSnapshot is durable (it is the snapshot of the PVC) and is NOT pruned mid-life: it is removed only
+// by ownerRef GC when the Snapshot is deleted. Orphan volume capture is sequenced after all domain
+// children are Ready (see ensureVolumeCaptureLeg), so the targets here are the genuinely uncovered PVCs
+// and there is no "became covered -> prune" churn.
 // Domain/non-root controllers keep the VCR path; this helper is the namespace-root carve-out only.
 func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 	ctx context.Context,
@@ -93,7 +96,6 @@ func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 	targets []vcpkg.Target,
 ) error {
 	desired := make([]storagev1alpha1.SnapshotChildRef, 0, len(targets))
-	desiredNames := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
 		name := orphanPVCVolumeSnapshotName(nsSnap.UID, target)
 		treason, tmsg, err := r.ensureOrphanPVCVolumeSnapshot(ctx, nsSnap, target, name)
@@ -106,15 +108,11 @@ func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 			_, ferr := r.failCapture(ctx, nsSnap, content, treason, tmsg)
 			return ferr
 		}
-		desiredNames[name] = struct{}{}
 		desired = append(desired, storagev1alpha1.SnapshotChildRef{
 			APIVersion: snapshotpkg.CSISnapshotAPIVersion,
 			Kind:       snapshotpkg.KindVolumeSnapshot,
 			Name:       name,
 		})
-	}
-	if err := r.cleanupStaleOrphanPVCVolumeSnapshots(ctx, nsSnap, desiredNames); err != nil {
-		return err
 	}
 	return r.reconcileOrphanPVCVolumeSnapshotChildLeaves(ctx, nsSnap, desired)
 }
@@ -400,55 +398,6 @@ func volumeSnapshotConflictingSnapshotOwner(refs []metav1.OwnerReference, ns *st
 	return false
 }
 
-// cleanupStaleOrphanPVCVolumeSnapshots deletes VolumeSnapshots we created for PVCs that are no longer
-// orphan (e.g. a domain controller now covers the PVC). Only our own (nss-vs-* + ownerRef→this Snapshot)
-// objects are deleted; the corresponding stale leaf refs are dropped by reconcileOrphanPVCVolumeSnapshotChildLeaves.
-func (r *SnapshotReconciler) cleanupStaleOrphanPVCVolumeSnapshots(
-	ctx context.Context,
-	nsSnap *storagev1alpha1.Snapshot,
-	desiredNames map[string]struct{},
-) error {
-	cur := &storagev1alpha1.Snapshot{}
-	if err := r.snapshotReader().Get(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, cur); err != nil {
-		return err
-	}
-	for _, ref := range cur.Status.ChildrenSnapshotRefs {
-		if !snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
-		if _, keep := desiredNames[ref.Name]; keep {
-			continue
-		}
-		if !strings.HasPrefix(ref.Name, orphanPVCVolumeSnapshotNamePrefix) {
-			continue
-		}
-		if err := r.deleteOwnedOrphanPVCVolumeSnapshot(ctx, nsSnap, ref.Name); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *SnapshotReconciler) deleteOwnedOrphanPVCVolumeSnapshot(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, name string) error {
-	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: name}
-	vs := &unstructured.Unstructured{}
-	vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
-	if err := r.Client.Get(ctx, key, vs); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("get VolumeSnapshot %s: %w", key, err)
-	}
-	if !volumeSnapshotHasOwnerRefToSnapshot(vs.GetOwnerReferences(), nsSnap) {
-		// Not ours (no ownerRef to this Snapshot): leave the object, only the stale leaf ref is dropped.
-		return nil
-	}
-	if err := r.Client.Delete(ctx, vs); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete stale VolumeSnapshot %s: %w", key, err)
-	}
-	return nil
-}
-
 // reconcileOrphanPVCVolumeSnapshotChildLeaves rewrites the VolumeSnapshot visibility leaves on
 // Snapshot.status.childrenSnapshotRefs[] to exactly the desired set, preserving real domain child refs.
 // It does not touch observedGeneration (this is a status-refs-only write, not a generation observation).
@@ -548,10 +497,11 @@ func (r *SnapshotReconciler) ensureOrphanVolumeChildNode(
 	}
 	// snapshotRef points back at the orphan CSI VolumeSnapshot that binds this child via its
 	// status.boundSnapshotContentName (INV-ORPHAN4) — that is the handshake subject, not the root
-	// content ownerRef (which is only the GC lifecycle link). UID is intentionally left empty: the
-	// orphan VolumeSnapshot is an ephemeral per-run handle, so the deterministic name + namespace are
-	// the anti-spoofing boundary and the restore handshake matches UID only when present (mirrors the
-	// core staticBindRefMatches pre-provisioned allowance).
+	// content ownerRef (which is only the GC lifecycle link). The orphan VolumeSnapshot is durable for
+	// the life of the Snapshot (it is the snapshot of the PVC), removed only by ownerRef GC. UID is left
+	// empty for now: the deterministic name + namespace are the anti-spoofing boundary and the restore
+	// handshake matches UID only when present (mirrors the core staticBindRefMatches pre-provisioned
+	// allowance). Populating the UID is a possible future hardening now that the VS is stable.
 	orphanVSRef := &storagev1alpha1.SnapshotSubjectRef{
 		APIVersion: snapshotpkg.CSISnapshotAPIVersion,
 		Kind:       snapshotpkg.KindVolumeSnapshot,
@@ -573,7 +523,7 @@ func (r *SnapshotReconciler) ensureOrphanVolumeChildNode(
 	if err != nil {
 		return false, err
 	}
-	if err := snapshotcontent.LinkChildVolumeContentRef(ctx, r.Client, root.Name, child.Name); err != nil {
+	if err := snapshotcontent.LinkChildVolumeContentRef(ctx, r.Client, r.directReader(), root.Name, child.Name); err != nil {
 		return false, err
 	}
 	if err := r.bindOrphanVSToChildContent(ctx, nsSnap, target, child.Name); err != nil {
