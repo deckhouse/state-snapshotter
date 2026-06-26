@@ -410,6 +410,54 @@ func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Cont
 	return true, "", nil, nil
 }
 
+// allDeclaredDomainChildSnapshotsReady reports whether every declared DOMAIN child snapshot of the root
+// (Snapshot.status.childrenSnapshotRefs, excluding CSI VolumeSnapshot visibility leaves) has reached full
+// Ready=True. It is the wave barrier for root orphan/residual PVC volume capture: orphan PVCs must be
+// evaluated only after the domain subtree has finished capturing, so a PVC that a domain child covers is
+// never momentarily seen as orphan (which previously created an nss-vs-* VolumeSnapshot + child volume
+// node that then got pruned, leaving a dangling, never-archiving node). The root MANIFEST branch is not
+// gated by this. A NotFound or not-yet-Ready child is pending (not a failure); a terminal child failure is
+// surfaced separately by the content aggregation (ChildrenFailed), so here it simply keeps the gate closed.
+// Readiness reuses ClassifyGenericChildSnapshotReady (Ready=True == Completed) for the pending/failed
+// descriptors AND enforces the strict generation contract: a Ready=True is honored only when its
+// observedGeneration == metadata.generation, so a stale Ready=True from a previous spec generation cannot
+// open the orphan wave while the child re-reconciles (mirrors readyConditionIsCurrentTerminal /
+// conditionSliceHasCurrentTrue; domain child controllers stamp Ready.observedGeneration on every write).
+// A namespace with no declared domain children passes the gate vacuously.
+func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, pending []string, err error) {
+	for _, ref := range refs {
+		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ref) {
+			continue
+		}
+		gv, perr := schema.ParseGroupVersion(ref.APIVersion)
+		if perr != nil {
+			return false, nil, perr
+		}
+		gvk := gv.WithKind(ref.Kind)
+		child := &unstructured.Unstructured{}
+		child.SetGroupVersionKind(gvk)
+		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, child); gerr != nil {
+			if errors.IsNotFound(gerr) {
+				pending = append(pending, fmt.Sprintf("%s/%s/%s (not created yet)", gvk.String(), namespace, ref.Name))
+				continue
+			}
+			return false, nil, gerr
+		}
+		if class, msg := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, ref.Name); class != usecase.SnapshotChildReadyClassCompleted {
+			pending = append(pending, msg)
+			continue
+		}
+		// Completed (Ready=True): require the current generation so a stale Ready does not open the gate.
+		if rc := usecase.CurrentReadyCondition(child); rc == nil || rc.ObservedGeneration != child.GetGeneration() {
+			pending = append(pending, fmt.Sprintf("%s/%s/%s (Ready=True but observedGeneration stale/missing; want %d)", gvk.String(), namespace, ref.Name, child.GetGeneration()))
+		}
+	}
+	if len(pending) > 0 {
+		return false, pending, nil
+	}
+	return true, nil, nil
+}
+
 // maxPendingChildrenInMessage caps how many pending child descriptors are embedded in the
 // PriorityLayerPending condition message. A namespace may map a large number of source objects; without
 // a cap the condition message (and its status patch) could grow unboundedly and the apiserver may
