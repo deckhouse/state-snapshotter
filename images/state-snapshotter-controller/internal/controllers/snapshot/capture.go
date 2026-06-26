@@ -173,7 +173,10 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	// NOT re-list the namespace (the dominant cost). Drive readiness from the existing MCR instead.
 	// The existence check uses APIReader (non-cached): the split-client cache can lag a just-created MCR
 	// and report a stale "absent", which would trigger a redundant full list + an AlreadyExists on Create.
-	// MaxConcurrentReconciles=1, so there is no concurrent reconcile of the same Snapshot to race the gate.
+	// The gate is idempotent by design (Create tolerates AlreadyExists), which is what keeps it correct even
+	// under concurrent same-Snapshot reconciles: those already happen regardless of MaxConcurrentReconciles
+	// because the child-watch relay calls Reconcile directly (see dynamic_watch.go reconcileParents). At worst
+	// two concurrent reconciles briefly duplicate the namespace list before one wins the Create.
 	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotMCRName(nsSnap.UID)}
 	existingMCR := &ssv1alpha1.ManifestCaptureRequest{}
 	switch err := r.APIReader.Get(ctx, mcrKey, existingMCR); {
@@ -478,6 +481,11 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 	if err := r.patchSnapshotManifestCaptureRequestName(ctx, post, ""); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Content Ready=True now implies its ManifestsArchived subtree latch is True (the archive latch is a gate
+	// of the content Ready formula), and that latch was mirrored onto the Snapshot earlier in this reconcile
+	// (mirrorSnapshotManifestsArchivedFromBoundContent). No extra archive-wave polling is needed here: while
+	// the subtree was still archiving, content Ready was False and we kept requeuing via the not-ready branch
+	// above.
 	return ctrl.Result{}, nil
 }
 

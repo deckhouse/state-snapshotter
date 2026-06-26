@@ -33,9 +33,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -90,6 +92,23 @@ type SnapshotContentController struct {
 }
 
 const defaultSnapshotContentRequeueAfter = 500 * time.Millisecond
+
+// snapshotContentControllerOptions tunes every controller instance that drives this reconciler (the
+// per-GVK content controllers and the Snapshot-status wake-up controllers all share r). With the default
+// MaxConcurrentReconciles=1 a single worker per instance starved individual content nodes during the
+// capture wave: Ready now gates on the whole-subtree ManifestsArchived latch, so every not-ready node
+// self-requeues every defaultSnapshotContentRequeueAfter, and one node could wait tens of seconds before
+// the lone worker reached it — which in turn stalls the MCR ownerRef handoff that node performs
+// (ensureManifestCheckpointOwnedByContent runs inside the same reconcile). Parallelize across distinct
+// objects (controller-runtime still serializes reconciles of the same object key, so per-node invariants
+// hold) and bound the error backoff like the Snapshot/manifestcapture controllers (200ms floor -> 10s
+// ceiling) so transient failures re-run promptly instead of backing off to the ~16min default.
+func snapshotContentControllerOptions() controller.Options {
+	return controller.Options{
+		MaxConcurrentReconciles: 8,
+		RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](200*time.Millisecond, 10*time.Second),
+	}
+}
 
 // NewSnapshotContentController creates a new SnapshotContentController with validated dependencies
 func NewSnapshotContentController(
@@ -324,6 +343,11 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
 	}
+	// Keep actively requeuing until Ready is True. Ready includes the ManifestsArchived subtree latch as a
+	// (monotonic) gate, so while any descendant is still archiving this node's Ready stays False — this
+	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
+	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
+	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
 	if !ready {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
@@ -360,16 +384,23 @@ type commonContentStatusPlan struct {
 	readyReason  string
 	readyMessage string
 
-	// ManifestsArchived is the subtree latch (NOT part of the Ready formula): True once this node's own
-	// manifest leg reached readiness AND every child content is ManifestsArchived=True; it never
-	// re-opens. Failed is terminal (own manifest leg failed before archive, or a child can never be
-	// archived). See pkg/snapshot ConditionManifestsArchived.
+	// ManifestsArchived is the subtree latch AND the lowest-priority Ready leg (it gates the first
+	// Ready=True): True once this node's own manifest leg reached readiness AND every child content is
+	// ManifestsArchived=True; it never re-opens. Failed is terminal (own manifest leg failed before archive,
+	// or a child can never be archived). Being monotonic, it gates the first Ready=True without ever dragging
+	// Ready back down afterwards. See pkg/snapshot ConditionManifestsArchived.
 	manifestsArchivedStatus  metav1.ConditionStatus
 	manifestsArchivedReason  string
 	manifestsArchivedMessage string
 }
 
-func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
+// reconcileCommonSnapshotContentStatus aggregates and publishes the SnapshotContent conditions and
+// reports whether the derived Ready condition is True. Ready includes the ManifestsArchived subtree latch
+// as a (monotonic) gate, so while any descendant is still archiving Ready stays False; the caller keeps
+// requeuing on !ready, which is what drives the child->parent archive wave to converge via active
+// re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
+// a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
+func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -399,6 +430,8 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		{Type: snapshot.ConditionManifestsArchived, Status: plan.manifestsArchivedStatus, Reason: plan.manifestsArchivedReason, Message: plan.manifestsArchivedMessage, ObservedGeneration: gen},
 	}
 
+	ready = plan.readyStatus == metav1.ConditionTrue
+
 	changed := false
 	for _, d := range desired {
 		if upsertContentCondition(contentLike, d) {
@@ -407,7 +440,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	}
 
 	if !changed {
-		return plan.readyStatus == metav1.ConditionTrue, nil
+		return ready, nil
 	}
 	obj.Object["status"] = statusMap
 	snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
@@ -417,7 +450,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		}
 		return false, err
 	}
-	return plan.readyStatus == metav1.ConditionTrue, nil
+	return ready, nil
 }
 
 // upsertContentCondition sets desired (type/status/reason/message + observedGeneration) on contentLike
@@ -440,18 +473,21 @@ func upsertContentCondition(contentLike snapshot.SnapshotContentLike, desired me
 	return true
 }
 
-func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (bool, error) {
+func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
 	return r.reconcileCommonSnapshotContentStatus(ctx, obj)
 }
 
-// buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumesReady, ChildrenReady and the
-// derived Ready. Ready priority (single reason when several legs are not satisfied):
+// buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumesReady, ChildrenReady, the
+// ManifestsArchived subtree latch, and the derived Ready. Ready priority (single reason when several legs
+// are not satisfied):
 //
-//	manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed
+//	manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > archivePending > Completed
 //
 // Terminal failures win over pending (actionable first); own-node legs win over children, and the
-// manifest leg wins over the volume leg at equal severity. ChildrenSnapshotReady is NOT part of this
-// formula; it is only a gate/barrier upstream.
+// manifest leg wins over the volume leg at equal severity. ManifestsArchived is the lowest-priority gate:
+// it blocks the FIRST Ready=True until the whole subtree's manifests are archived, but since the latch is
+// monotonic it never drags Ready back down afterwards. ChildrenSnapshotReady is NOT part of this formula;
+// it is only a gate/barrier upstream.
 func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
 	plan := commonContentStatusPlan{
 		manifestsReady:   metav1.ConditionFalse,
@@ -484,6 +520,14 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.childrenMessage = childMessage
 	}
 
+	// ManifestsArchived gates Ready: a node cannot reach its FIRST Ready=True until its own and all
+	// descendant manifests are archived. The latch is monotonic (computeManifestsArchived holds True once
+	// True), so after the first Ready=True the gate stays satisfied and Ready is free to flap on the live
+	// legs. Computed before the switch so it can participate as the lowest-priority Ready leg.
+	if err := r.computeManifestsArchived(ctx, obj, &plan); err != nil {
+		return plan, err
+	}
+
 	switch {
 	case plan.manifestsReady != metav1.ConditionTrue && plan.manifestsFailed:
 		plan.readyStatus = metav1.ConditionFalse
@@ -509,21 +553,30 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = plan.childrenReason
 		plan.readyMessage = plan.childrenMessage
+	case plan.manifestsArchivedStatus != metav1.ConditionTrue:
+		// Subtree archive gate (lowest priority): blocks the first Ready=True until own + all-descendant
+		// manifests are archived. Reached only when every live leg is already satisfied (the cases above did
+		// not fire), so in practice archived here is the transient ManifestsCapturing state — the fail-closed
+		// declared-but-unlinked-child wait. A terminal ManifestsArchiveFailed cannot reach this case: it
+		// implies a not-Ready linked child (archived also gates the child's Ready), which trips
+		// ChildrenFailed/ChildrenPending above, and the underlying manifest failure independently surfaces as
+		// ManifestCheckpointFailed/ChildrenFailed.
+		plan.readyStatus = metav1.ConditionFalse
+		plan.readyReason = plan.manifestsArchivedReason
+		plan.readyMessage = plan.manifestsArchivedMessage
 	default:
 		plan.readyStatus = metav1.ConditionTrue
 		plan.readyReason = snapshot.ReasonCompleted
-		plan.readyMessage = "manifest, data, and child content are ready"
+		plan.readyMessage = "manifests (archived), data, and child content are ready"
 	}
 
-	if err := r.computeManifestsArchived(ctx, obj, &plan); err != nil {
-		return plan, err
-	}
 	return plan, nil
 }
 
 // computeManifestsArchived fills the ManifestsArchived subtree latch on plan. It is a lifelong latch
-// (never re-opens) and is NOT part of the Ready formula — Ready is live-health, ManifestsArchived
-// records the irreversible fact that this node and its whole subtree had their manifests captured.
+// (never re-opens) that records the irreversible fact that this node and its whole subtree had their
+// manifests captured. It also acts as the lowest-priority Ready leg (see buildCommonSnapshotContentStatusPlan):
+// because it is monotonic, it gates the FIRST Ready=True but never drags Ready back down afterwards.
 //
 //   - If the current condition is already True (Archived) or terminally False (Failed), it is held as-is
 //     (immune to later ManifestsReady/Ready degradation or to a child disappearing). Snapshot.spec is
@@ -683,6 +736,16 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 // only occurs for synthetic/legacy objects) the declared set cannot be verified and the function falls
 // back to the published-edges-only view (complete=true, no declared names).
 func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context.Context, contentObj *unstructured.Unstructured) ([]string, bool, error) {
+	// A child-volume-node content (orphan/root-residual single PVC, Variant A) is a LEAF by construction:
+	// it models a single PVC and never declares child snapshots in its owning snapshot, so its declared
+	// non-leaf set is always empty regardless of its spec.snapshotRef. Short-circuiting here also keeps it
+	// robust if the referenced orphan VolumeSnapshot is momentarily unobservable (it is durable now, but
+	// consulting the ref below on a transient miss would hit the NotFound -> declaredComplete=false
+	// fail-close and pin ManifestsArchived=Capturing forever). Treat it as a complete, childless set.
+	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
+		return nil, true, nil
+	}
+
 	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
 	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
@@ -817,6 +880,11 @@ var terminalChildContentFailureReasons = map[string]struct{}{
 	snapshot.ReasonDataArtifactNotSupported: {},
 	snapshot.ReasonArtifactMissing:          {},
 	snapshot.ReasonChildrenFailed:           {},
+	// ManifestsArchiveFailed is a terminal subtree-latch failure: if a child's subtree can never be
+	// archived, the parent's cannot either. Today a child never surfaces it on Ready (the archive gate only
+	// reports the transient ManifestsCapturing — see buildCommonSnapshotContentStatusPlan), so this entry is
+	// defense-in-depth that keeps terminal propagation correct if the Ready priority ever changes.
+	snapshot.ReasonManifestsArchiveFailed: {},
 }
 
 func isTerminalChildContentFailure(reason string) bool {
@@ -1314,6 +1382,7 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 	obj.SetGroupVersionKind(contentGVK)
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(obj).
+		WithOptions(snapshotContentControllerOptions()).
 		Named(fmt.Sprintf("snapshotcontent-%s-%s", contentGVK.Group, contentGVK.Kind))
 	if err := builder.Complete(r); err != nil {
 		if needAppendMain {
@@ -1369,6 +1438,7 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		obj.SetGroupVersionKind(gvk)
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
+			WithOptions(snapshotContentControllerOptions()).
 			Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotContentToParentContent)).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
 		// Damaged-artifact wake-up (Phase 2a): enqueue the owning SnapshotContent when its durable
@@ -1418,6 +1488,7 @@ func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manage
 	obj.SetGroupVersionKind(snapshotGVK)
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent)).
+		WithOptions(snapshotContentControllerOptions()).
 		Named(fmt.Sprintf("snapshotcontent-snapshot-%s-%s", snapshotGVK.Group, snapshotGVK.Kind)).
 		Complete(r); err != nil {
 		return fmt.Errorf("setup SnapshotContent snapshot status watch for %s: %w", snapshotGVK.String(), err)

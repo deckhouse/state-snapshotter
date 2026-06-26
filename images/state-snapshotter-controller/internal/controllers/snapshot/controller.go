@@ -148,6 +148,13 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.Snapshot{}).
 		WithOptions(controller.Options{
+			// Parallelize reconciles across DISTINCT Snapshots so a large/parallel capture wave is not
+			// serialized through a single worker. controller-runtime still serializes reconciles of the same
+			// object key within this controller; the MCR gate is additionally idempotent (existence check via
+			// APIReader + Create that tolerates AlreadyExists), so even the pre-existing same-key concurrency
+			// from the child-watch relay (it calls Reconcile directly, see dynamic_watch.go) is safe — at worst
+			// two reconciles briefly duplicate the namespace list before one wins the Create.
+			MaxConcurrentReconciles: 8,
 			// Bound the per-item retry backoff for the Snapshot controller only (domain controllers keep the
 			// controller-runtime default, where a not-found MCR target is critical). Namespace manifest capture
 			// races against ephemeral-target churn: an MCR admission rejection ("target not found in namespace")

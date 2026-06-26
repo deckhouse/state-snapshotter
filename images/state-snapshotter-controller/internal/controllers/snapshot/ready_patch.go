@@ -92,8 +92,10 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 // (it aggregates the latch across the whole subtree); the Snapshot is a read mirror so consumers (and the
 // per-namespace capture RBAC hook / e2e) can observe the latch on the Snapshot itself.
 //
-// This is independent of the Ready formula (ManifestsArchived is NOT part of Ready), so it is an additive
-// mirror that does not touch the single-aggregator Ready contract (INV-COND2/INV-COND4).
+// ManifestsArchived gates the content Ready formula (it must be True before the first content Ready=True),
+// but this Snapshot-side mirror does not itself write Ready: it is an additive, standalone latch condition
+// surfaced for visibility, so it does not touch the single-aggregator Ready contract (INV-COND2/INV-COND4).
+// It stays useful after Ready later flaps False (the latch records that archiving did happen).
 //
 // Latch semantics: once the Snapshot's ManifestsArchived is True it is never downgraded (the content latch is
 // itself lifelong; this guard also protects against a transient content read that momentarily lost the

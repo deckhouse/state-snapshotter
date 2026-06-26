@@ -385,7 +385,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumesReady, snapshot.ConditionChildrenReady, snapshot.ConditionReady} {
+	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumesReady, snapshot.ConditionChildrenReady, snapshot.ConditionManifestsArchived, snapshot.ConditionReady} {
 		cond := snapshot.GetCondition(contentLike, ct)
 		if cond == nil {
 			t.Fatalf("condition %s missing", ct)
@@ -396,5 +396,73 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 		if cond.ObservedGeneration != 7 {
 			t.Fatalf("condition %s observedGeneration=%d, want 7", ct, cond.ObservedGeneration)
 		}
+	}
+}
+
+// Ready must stay False while the ManifestsArchived subtree latch is still Capturing (here: a declared
+// child is not yet linked into childrenSnapshotContentRefs), EVEN THOUGH the live legs (ManifestsReady /
+// VolumesReady / ChildrenReady) are all satisfied. ManifestsArchived is the lowest-priority Ready gate, so
+// the first Ready=True is blocked until the whole subtree's manifests are archived. The resulting !ready is
+// what keeps the Reconcile loop requeuing until the archive wave converges.
+func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
+	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
+	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
+	// Own MCP ready and no published child content edges -> own legs + ChildrenReady are True, but the
+	// declared child (child-snap -> child-content) is not yet linked -> archive latch still Capturing -> the
+	// archive gate must hold Ready False.
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(mcp, owner, childSnap, parent).
+		WithStatusSubresource(parent).
+		Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, parent)
+	if err != nil {
+		t.Fatalf("reconcile status: %v", err)
+	}
+	if ready {
+		t.Fatalf("expected ready=false while a declared child is unlinked (archive wave still pending)")
+	}
+
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+	if err := cl.Get(ctx, client.ObjectKey{Name: "parent-content"}, fresh); err != nil {
+		t.Fatalf("get content: %v", err)
+	}
+	contentLike, err := snapshot.ExtractSnapshotContentLike(fresh)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
+	if readyCond == nil || readyCond.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready = %#v, want False", readyCond)
+	}
+	if readyCond.Reason != snapshot.ReasonManifestsCapturing {
+		t.Fatalf("Ready reason = %q, want %q (archive gate)", readyCond.Reason, snapshot.ReasonManifestsCapturing)
+	}
+}
+
+// A terminal subtree-archive failure must propagate up the tree as a ChildrenFailed: a child whose subtree
+// can never be archived makes the parent terminally failed too. ManifestsCapturing is transient (pending),
+// not terminal. This guards the terminal-reason set against a future Ready-priority change that could let a
+// child surface ManifestsArchiveFailed on Ready.
+func TestManifestsArchiveFailedIsTerminalChildFailure(t *testing.T) {
+	terminal := []string{
+		snapshot.ReasonManifestsArchiveFailed,
+		snapshot.ReasonManifestCheckpointFailed,
+		snapshot.ReasonChildrenFailed,
+	}
+	for _, reason := range terminal {
+		if !isTerminalChildContentFailure(reason) {
+			t.Fatalf("isTerminalChildContentFailure(%q) = false, want true", reason)
+		}
+	}
+	if isTerminalChildContentFailure(snapshot.ReasonManifestsCapturing) {
+		t.Fatalf("isTerminalChildContentFailure(%q) = true, want false (transient)", snapshot.ReasonManifestsCapturing)
 	}
 }
