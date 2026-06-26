@@ -172,10 +172,13 @@ rules:
 ---
 # Transient per-namespace capture role (Phase 5.1). This wildcard read-only ClusterRole is deployed with
 # the module but is NOT bound by any binding here: the 040-namespace-capture-rbac hook creates a namespaced
-# RoleBinding to it (subject = controller SA) ONLY in namespaces that currently host a Snapshot still
-# capturing the live namespace (ManifestsArchived != Archived/Failed), and deletes it once capture is done.
+# RoleBinding to it (subjects = controller SA + webhooks SA) ONLY in namespaces that currently host a
+# Snapshot still capturing the live namespace (ManifestsArchived != Archived/Failed), and deletes it once
+# capture is done. The webhooks SA is included so the MCR-validation admission webhook can resolve arbitrary
+# (non-allowlisted) namespaced CR targets via a dynamic Get during the capture window.
 # A RoleBinding to a cluster-scoped ClusterRole confines the rules to its own namespace, so this is NOT a
-# cluster-wide grant of "*". verbs = get,list only (Stage A lists, Stage B gets; capture is one-shot, no watch).
+# cluster-wide grant of "*" and does NOT reach cluster-scoped ManifestCheckpointContentChunk payloads.
+# verbs = get,list only (Stage A lists, Stage B gets; capture is one-shot, no watch).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

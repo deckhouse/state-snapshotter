@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 // Package namespace_capture_rbac implements the 040-namespace-capture-rbac hook: a level-based reconciler
-// that grants the state-snapshotter controller SA broad read access to a namespace ONLY while that
-// namespace hosts a Snapshot still capturing the live namespace. It maintains the invariant:
+// that grants the state-snapshotter controller and webhooks SAs broad read access to a namespace ONLY while
+// that namespace hosts a Snapshot still capturing the live namespace. It maintains the invariant:
 //
 //	a managed RoleBinding (to the wildcard capture ClusterRole) exists in namespace N
 //	  <=> N hosts at least one Snapshot with needsCaptureRBAC == true.
@@ -133,8 +133,8 @@ func reconcileNamespaceCaptureRBAC(ctx context.Context, input *pkg.HookInput) er
 }
 
 // applyCaptureRoleBinding creates or updates the managed RoleBinding in the given namespace, pointing the
-// controller SA at the wildcard capture ClusterRole. roleRef is immutable, so on update only subjects and
-// labels are reconciled.
+// controller and webhooks SAs at the wildcard capture ClusterRole. roleRef is immutable, so on update only
+// subjects and labels are reconciled (this also repairs an older single-subject binding in place).
 func applyCaptureRoleBinding(ctx context.Context, cl ctrlclient.Client, namespace string) error {
 	existing := new(rbacv1.RoleBinding)
 	err := cl.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: captureRoleBindingName}, existing)
@@ -181,10 +181,26 @@ func desiredCaptureRoleBinding(namespace string) *rbacv1.RoleBinding {
 	}
 }
 
+// captureSubjects are the ServiceAccounts granted the transient per-namespace wildcard read:
+//   - the controller SA reads the live namespace to plan and execute manifest capture;
+//   - the webhooks SA needs the same read so the MCR-validation admission webhook can resolve arbitrary
+//     (non-allowlisted) namespaced CR targets via a dynamic Get. Its static allowlist
+//     (templates/webhooks/rbac-for-us.yaml) cannot enumerate user CRDs, and the validator masks a Forbidden
+//     as "not found in namespace", which would otherwise wedge capture of arbitrary CRs.
+//
+// Both grants are namespace-scoped (RoleBinding to a ClusterRole) and torn down once capture finishes, so
+// neither SA gains cluster-wide rights nor access to cluster-scoped ManifestCheckpointContentChunk payloads.
 func captureSubjects() []rbacv1.Subject {
-	return []rbacv1.Subject{{
-		Kind:      "ServiceAccount",
-		Name:      consts.ControllerSAName,
-		Namespace: consts.ModuleNamespace,
-	}}
+	return []rbacv1.Subject{
+		{
+			Kind:      "ServiceAccount",
+			Name:      consts.ControllerSAName,
+			Namespace: consts.ModuleNamespace,
+		},
+		{
+			Kind:      "ServiceAccount",
+			Name:      consts.WebhooksSAName,
+			Namespace: consts.ModuleNamespace,
+		},
+	}
 }
