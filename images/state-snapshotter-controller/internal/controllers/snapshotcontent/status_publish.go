@@ -3,7 +3,6 @@ package snapshotcontent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -117,6 +116,10 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 	if err := readClient.Get(ctx, client.ObjectKey{Name: parentContentName}, parentContent); err != nil {
 		return false, err
 	}
+	alreadyPublished := make(map[string]struct{}, len(parentContent.Status.ChildrenSnapshotContentRefs))
+	for _, ref := range parentContent.Status.ChildrenSnapshotContentRefs {
+		alreadyPublished[ref.Name] = struct{}{}
+	}
 	out := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(childSnapshotRefs))
 	for _, childRef := range childSnapshotRefs {
 		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(childRef) {
@@ -133,26 +136,53 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 		if childContentName == "" {
 			return false, nil
 		}
-		if err := ensureChildSnapshotContentOwnedByParentContent(ctx, c, childContentName, parentContent); err != nil {
+		found, err := ensureChildSnapshotContentOwnedByParentContent(ctx, c, childContentName, parentContent)
+		if err != nil {
 			return false, err
+		}
+		if !found {
+			// The child snapshot is bound but its SnapshotContent object is currently absent. Two cases:
+			//   - degradation (E3): the edge was already published while the content existed, then the content
+			//     was deleted. Preserve the edge so the parent keeps aggregating it as pending
+			//     (ChildrenReady=False) — that is how a degraded subtree reaches the root Snapshot.Ready
+			//     mirror. Dropping it (or hard-erroring) wedged the parent reconcile and froze Ready at its
+			//     last value (root stayed Ready=True even though its content went Ready=False).
+			//   - initial-bind / cache lag: the edge is NOT published yet. Do NOT introduce a dangling edge to
+			//     a missing content (the later root capture-planning subtree walk would have to resolve it);
+			//     requeue until the content becomes visible, matching the pre-existing wait behavior.
+			if _, ok := alreadyPublished[childContentName]; !ok {
+				return false, nil
+			}
+			out = append(out, storagev1alpha1.SnapshotContentChildRef{Name: childContentName})
+			continue
 		}
 		out = append(out, storagev1alpha1.SnapshotContentChildRef{Name: childContentName})
 	}
 	return true, PublishSnapshotContentChildrenRefs(ctx, c, readClient, parentContentName, out)
 }
 
-func ensureChildSnapshotContentOwnedByParentContent(ctx context.Context, c client.Client, childName string, parent *storagev1alpha1.SnapshotContent) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+// ensureChildSnapshotContentOwnedByParentContent links parent as a lifecycle owner of the child content
+// and reports whether the child content currently exists. A missing child content yields found=false
+// WITHOUT an error: the child snapshot can publish its boundSnapshotContentName before the content object
+// is created, and a degraded subtree may have had its bound content deleted (E3). Treating NotFound as a
+// hard error wedged the parent reconcile and blocked Ready propagation, so callers instead keep the child
+// ref tracked (pending) regardless of found.
+func ensureChildSnapshotContentOwnedByParentContent(ctx context.Context, c client.Client, childName string, parent *storagev1alpha1.SnapshotContent) (bool, error) {
+	found := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		child := &storagev1alpha1.SnapshotContent{}
 		if err := c.Get(ctx, client.ObjectKey{Name: childName}, child); err != nil {
 			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("child SnapshotContent %s not found", childName)
+				found = false
+				return nil
 			}
 			return err
 		}
+		found = true
 		_, err := controllercommon.EnsureLifecycleOwnerRef(ctx, c, child, controllercommon.SnapshotContentOwnerReference(parent))
 		return err
 	})
+	return found, err
 }
 
 func PublishSnapshotContentLeafChildrenRefs(ctx context.Context, c client.Client, reader client.Reader, contentName string) error {
