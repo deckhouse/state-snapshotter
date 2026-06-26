@@ -188,9 +188,13 @@ func childRefSlicesEqual(current, desired []interface{}) bool {
 }
 
 // uploadTargetIsImportMode reports whether a snapshot CR is an import target. It accepts any of the
-// import markers across snapshot kinds: spec.source.import (core/structural nodes), spec.source.dataImportName
-// (generic-PVC extended VolumeSnapshot), or spec.dataSource (domain data leaves). This keeps the upload
-// endpoint from clobbering a live-capture snapshot.
+// import markers across snapshot kinds:
+//   - spec.source.import        — core/structural Snapshot nodes
+//   - spec.source.dataImportName — generic-PVC extended VolumeSnapshot
+//   - spec.dataSource           — domain data leaves
+//   - spec.import               — domain aggregator import marker (manifest-only, no data leg)
+//
+// This keeps the upload endpoint from clobbering a live-capture snapshot.
 func uploadTargetIsImportMode(obj *unstructured.Unstructured) bool {
 	if _, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import"); found {
 		return true
@@ -199,6 +203,10 @@ func uploadTargetIsImportMode(obj *unstructured.Unstructured) bool {
 		return true
 	}
 	if _, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "dataSource"); found {
+		return true
+	}
+	// Domain aggregator import marker: presence of spec.import signals manifest-only import mode.
+	if _, found, _ := unstructured.NestedMap(obj.Object, "spec", "import"); found {
 		return true
 	}
 	return false

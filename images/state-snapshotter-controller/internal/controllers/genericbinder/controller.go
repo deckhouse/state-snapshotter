@@ -206,12 +206,14 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	// (direct Status().Update walk onto ancestor Snapshots) was a pre-conditions-model remnant and has been
 	// removed; the snapshot side never recomputes its own Ready/reason.
 	if !obj.GetDeletionTimestamp().IsZero() {
-		// Import leaf deleted before its content was bound: best-effort delete the ownerless reconstructed
-		// ManifestCheckpoint (the per-CR upload creates it ownerless; once content is bound it is adopted +
-		// GC'd with the content). Mirrors the namespace Snapshot orchestrator's pre-bind cleanup.
-		if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" && snapshotLike.GetStatusContentName() == "" {
+		// Import object (leaf or aggregator) deleted before its content was bound: best-effort delete the
+		// ownerless reconstructed ManifestCheckpoint (the per-CR upload creates it ownerless; once content
+		// is bound it is adopted + GC'd with the content). Mirrors the namespace Snapshot orchestrator's
+		// pre-bind cleanup. Covers both data leaves (spec.dataSource) and aggregators (spec.import).
+		isImport := snapshotImportDataImportName(obj) != "" || snapshotHasImportMarker(obj)
+		if isImport && snapshotLike.GetStatusContentName() == "" {
 			if err := usecase.DeleteReconstructedManifestCheckpoint(ctx, r.Client, obj.GetUID()); err != nil {
-				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import leaf")
+				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import object")
 			}
 		}
 		// Remove finalizer from SnapshotContent on parent deletion (watch-driven, no reverse content ref).
@@ -223,12 +225,15 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Import branch (C5): an import-mode leaf (spec.dataSource -> DataImport) has no live capture and no
-	// domain planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
-	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint, data leg from the
-	// DataImport's produced artifact) — there is no second content creator.
+	// Import branch (C5 + aggregators): any import-mode object bypasses the Step-1 barrier.
+	//   - Data leaf (spec.dataSource.name set): data leg + manifest leg.
+	//   - Aggregator (spec.import marker set, no dataImportName): manifest + children only, data leg skipped.
+	// reconcileGenericImport handles both: it skips the data leg when dataImportName == "".
 	if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" {
 		return r.reconcileGenericImport(ctx, obj, snapshotLike, dataImportName)
+	}
+	if snapshotHasImportMarker(obj) {
+		return r.reconcileGenericImport(ctx, obj, snapshotLike, "")
 	}
 
 	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot

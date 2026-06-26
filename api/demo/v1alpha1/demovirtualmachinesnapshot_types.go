@@ -22,6 +22,12 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
+// IsImportMode reports whether this DemoVirtualMachineSnapshot is an import target (spec.import set).
+// Import-mode VM snapshots are materialised from uploaded child refs and must not trigger live-VM capture.
+func (s *DemoVirtualMachineSnapshot) IsImportMode() bool {
+	return s != nil && s.Spec.Import != nil
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovmsnap
@@ -39,10 +45,20 @@ type DemoVirtualMachineSnapshot struct {
 type DemoVirtualMachineSnapshotSpec struct {
 	// SourceRef identifies the DemoVirtualMachine captured by this snapshot. It is the single
 	// source-of-truth for what the snapshot captures (both manually-created and root-planned
-	// snapshots) and is immutable once set.
+	// snapshots) and is immutable once set. On import it still carries the original VM identity
+	// (the live VM may be absent); spec.import is what switches the node into import mode.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
 	SourceRef SnapshotSourceRef `json:"sourceRef"`
+
+	// Import, when present, marks this DemoVirtualMachineSnapshot as an import target. It is an
+	// empty marker object — its mere presence selects import mode: the domain controller skips
+	// live-VM capture and children planning; child disk-snapshot CRs are created by the CLI with
+	// ownerRefs and children refs arrive via the per-CR manifests-and-children-refs-upload payload.
+	// Immutable once set (the marker cannot be added or removed after creation).
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.import is immutable"
+	Import *storagev1alpha1.SnapshotImportSource `json:"import,omitempty"`
 }
 
 // DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.

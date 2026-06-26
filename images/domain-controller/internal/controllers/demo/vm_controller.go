@@ -103,6 +103,14 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
+	// Import mode: the CLI creates this CR with spec.import set to signal that no live VM exists.
+	// Children disk-snapshot CRs are created by the CLI with ownerRefs; childrenSnapshotRefs arrive
+	// via the upload endpoint (S6). Skip live-VM lookup, MCR creation, and children planning entirely
+	// — the genericbinder (S5) drives the aggregator content and Ready mirror.
+	if s.IsImportMode() {
+		return ctrl.Result{}, nil
+	}
+
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)
 	if resolution.Reason != "" {
 		if patchErr := patchDemoVirtualMachineSnapshotReady(ctx, r.Client, req.NamespacedName, metav1.ConditionFalse, resolution.Reason, resolution.Message); patchErr != nil {

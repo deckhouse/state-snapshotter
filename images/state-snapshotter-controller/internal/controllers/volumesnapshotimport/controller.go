@@ -51,6 +51,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -84,12 +85,13 @@ var (
 type Controller struct {
 	client.Client
 	APIReader client.Reader
+	Config    *config.Options
 }
 
 // AddToManager registers the import VolumeSnapshot binder. The watch is guarded by RESTMapping so a
 // not-yet-installed VolumeSnapshot CRD (e.g. envtest without the extended-VS fork) degrades to "no
 // controller" rather than failing manager startup; capture/domain paths are unaffected.
-func AddToManager(mgr ctrl.Manager) error {
+func AddToManager(mgr ctrl.Manager, cfg *config.Options) error {
 	if mapper := mgr.GetRESTMapper(); mapper != nil {
 		if _, err := mapper.RESTMapping(csiVolumeSnapshotGVK.GroupKind(), csiVolumeSnapshotGVK.Version); err != nil {
 			ctrl.Log.WithName("volumesnapshot-import").Info(
@@ -103,7 +105,7 @@ func AddToManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(vs, builder.WithPredicates(importVolumeSnapshotPredicate())).
 		Named("volumesnapshot-import").
-		Complete(&Controller{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()})
+		Complete(&Controller{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg})
 }
 
 // importVolumeSnapshotPredicate restricts the controller to extended VolumeSnapshots in import mode
@@ -147,14 +149,30 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	// Content owner: an imported VS leaf is a child of its parent snapshot (d8 sets child->parent
-	// ownerRefs); its SnapshotContent is owned by the parent's SnapshotContent. Wait for the parent.
+	// Content owner: normally an imported VS leaf is a child (d8 sets child->parent ownerRefs) and its
+	// SnapshotContent is owned by the parent's SnapshotContent. When selected as a standalone import root
+	// (--node VolumeSnapshot/<name>, no parent ownerRef), ensure its own root ObjectKeeper instead.
 	ownerRef, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, vs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if pending || ownerRef == nil {
+	if pending {
+		// Parent exists but its SnapshotContent is not yet materialized; poll.
 		return ctrl.Result{RequeueAfter: importPollInterval}, nil
+	}
+	if ownerRef == nil {
+		// No parent snapshot ownerRef: this VS is a standalone import root (--node selection).
+		// Materialise its SnapshotContent via its own root ObjectKeeper, mirroring the namespace
+		// Snapshot orchestrator and genericbinder standalone-root path (S1/S2).
+		ok, result, okErr := controllercommon.EnsureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, vs, csiVolumeSnapshotGVK)
+		if okErr != nil {
+			return ctrl.Result{}, okErr
+		}
+		if result.Requeue || result.RequeueAfter > 0 {
+			return result, nil
+		}
+		ref := controllercommon.RootObjectKeeperOwnerReference(ok)
+		ownerRef = &ref
 	}
 
 	contentName, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")

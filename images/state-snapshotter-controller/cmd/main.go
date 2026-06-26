@@ -294,7 +294,7 @@ func main() {
 	// The forked snapshot-controller skips these; this common controller materializes their SnapshotContent
 	// and writes the binding (extended boundSnapshotContentName + legacy boundVolumeSnapshotContentName/readyToUse).
 	// Self-guards by RESTMapping: a not-yet-installed VolumeSnapshot CRD degrades to "no controller".
-	if err := volumesnapshotimport.AddToManager(mgr); err != nil {
+	if err := volumesnapshotimport.AddToManager(mgr, cfgParams); err != nil {
 		log.Error(err, "Failed to add VolumeSnapshot import binder to manager")
 		cancel()
 		os.Exit(1)

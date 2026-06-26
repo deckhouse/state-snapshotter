@@ -127,3 +127,48 @@ func TestBuildImportDataBinding_TerminalForNonVSC(t *testing.T) {
 		t.Fatalf("expected terminal reason %q, got %q (msg=%q)", snapshot.ReasonDataArtifactInvalid, reason, msg)
 	}
 }
+
+// snapshotHasImportMarker detects the empty-object spec.import marker (aggregator import mode).
+func TestSnapshotHasImportMarker(t *testing.T) {
+	tests := []struct {
+		name string
+		obj  *unstructured.Unstructured
+		want bool
+	}{
+		{
+			name: "spec.import present (aggregator import)",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"import": map[string]interface{}{},
+				},
+			}},
+			want: true,
+		},
+		{
+			name: "spec.import absent (capture mode)",
+			obj:  &unstructured.Unstructured{Object: map[string]interface{}{"spec": map[string]interface{}{}}},
+			want: false,
+		},
+		{
+			name: "spec.dataSource present but no spec.import",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"dataSource": map[string]interface{}{"name": "di-1"},
+				},
+			}},
+			want: false,
+		},
+		{
+			name: "empty object",
+			obj:  &unstructured.Unstructured{Object: map[string]interface{}{}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := snapshotHasImportMarker(tt.obj); got != tt.want {
+				t.Fatalf("snapshotHasImportMarker = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

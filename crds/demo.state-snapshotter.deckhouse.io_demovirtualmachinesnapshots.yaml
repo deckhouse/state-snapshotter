@@ -43,11 +43,23 @@ spec:
             description: DemoVirtualMachineSnapshotSpec defines the desired state
               of DemoVirtualMachineSnapshot.
             properties:
+              import:
+                description: |-
+                  Import, when present, marks this DemoVirtualMachineSnapshot as an import target. It is an
+                  empty marker object — its mere presence selects import mode: the domain controller skips
+                  live-VM capture and children planning; child disk-snapshot CRs are created by the CLI with
+                  ownerRefs and children refs arrive via the per-CR manifests-and-children-refs-upload payload.
+                  Immutable once set (the marker cannot be added or removed after creation).
+                type: object
+                x-kubernetes-validations:
+                - message: spec.import is immutable
+                  rule: self == oldSelf
               sourceRef:
                 description: |-
                   SourceRef identifies the DemoVirtualMachine captured by this snapshot. It is the single
                   source-of-truth for what the snapshot captures (both manually-created and root-planned
-                  snapshots) and is immutable once set.
+                  snapshots) and is immutable once set. On import it still carries the original VM identity
+                  (the live VM may be absent); spec.import is what switches the node into import mode.
                 properties:
                   apiVersion:
                     minLength: 1

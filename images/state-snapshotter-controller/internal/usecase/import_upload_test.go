@@ -47,6 +47,69 @@ func uploadTestClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
+// TestUploadTargetIsImportMode_AggregatorImportMarker verifies that a domain aggregator with spec.import
+// (DemoVirtualMachineSnapshot) is recognised as an import target (S6).
+func TestUploadTargetIsImportMode_AggregatorImportMarker(t *testing.T) {
+	tests := []struct {
+		name string
+		obj  *unstructured.Unstructured
+		want bool
+	}{
+		{
+			name: "spec.import present (VM aggregator import mode)",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"import": map[string]interface{}{},
+				},
+			}},
+			want: true,
+		},
+		{
+			name: "spec.source.import present (core Snapshot import mode)",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"source": map[string]interface{}{
+						"import": map[string]interface{}{},
+					},
+				},
+			}},
+			want: true,
+		},
+		{
+			name: "spec.dataSource present (domain data leaf)",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"dataSource": map[string]interface{}{"name": "di-1"},
+				},
+			}},
+			want: true,
+		},
+		{
+			name: "spec.source.dataImportName present (CSI VS leaf)",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"spec": map[string]interface{}{
+					"source": map[string]interface{}{
+						"dataImportName": "di-2",
+					},
+				},
+			}},
+			want: true,
+		},
+		{
+			name: "no import marker (capture mode)",
+			obj:  &unstructured.Unstructured{Object: map[string]interface{}{"spec": map[string]interface{}{}}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := uploadTargetIsImportMode(tt.obj); got != tt.want {
+				t.Fatalf("uploadTargetIsImportMode = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func importModeSnapshot(name, ns string, uid types.UID) *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: uid},

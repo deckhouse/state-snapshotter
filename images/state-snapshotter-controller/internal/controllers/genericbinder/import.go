@@ -57,6 +57,14 @@ func snapshotImportDataImportName(obj *unstructured.Unstructured) string {
 	return name
 }
 
+// snapshotHasImportMarker reports whether the object carries the spec.import empty-marker that signals
+// manifest-only import mode (e.g. DemoVirtualMachineSnapshot.spec.import). Such nodes have no DataImport
+// (no data leg) — they are pure aggregators whose children carry the data.
+func snapshotHasImportMarker(obj *unstructured.Unstructured) bool {
+	_, found, _ := unstructured.NestedMap(obj.Object, "spec", "import")
+	return found
+}
+
 // reconcileGenericImport materializes the SnapshotContent that backs an import-mode generic/domain leaf
 // from the out-of-band uploaded payload + the leaf's DataImport, instead of projecting a live capture
 // (MCR/VCR). It is the import twin of the capture path (ensureSnapshotContentLinks) and uses the SAME
@@ -92,12 +100,21 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			// Parent content not yet materialized (bottom-up convergence); poll.
 			return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
 		}
-		// No parent ownerRef at all: this is a ROOT generic import snapshot. Roots are materialized by the
-		// namespace Snapshot import orchestrator (snapshot/import.go), not here; a root-capable generic kind
-		// in import mode is out of scope for this binder. Stop instead of requeueing forever.
-		logger.Info("generic import snapshot has no parent ownerRef (root); roots are materialized by the namespace Snapshot orchestrator, skipping",
+		// No parent ownerRef at all: this leaf was selected as a standalone import root (e.g. via
+		// --node <Kind>/<name>). Materialise its SnapshotContent via its own root ObjectKeeper, mirroring
+		// the namespace Snapshot orchestrator (snapshot/import.go:74-79). The OK retains the content with
+		// the same TTL as a core-Snapshot run so deletion GC is consistent.
+		logger.Info("generic import snapshot has no parent ownerRef (standalone root); ensuring root ObjectKeeper",
 			"snapshot", obj.GetName(), "gvk", gvk.String())
-		return ctrl.Result{}, nil
+		ok, result, err := controllercommon.EnsureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, obj, gvk)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if result.Requeue || result.RequeueAfter > 0 {
+			return result, nil
+		}
+		ref := controllercommon.RootObjectKeeperOwnerReference(ok)
+		ownerRef = &ref
 	}
 
 	contentName := snapshotLike.GetStatusContentName()
@@ -161,20 +178,23 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	}
 
 	// Data leg from the leaf's DataImport.status.dataArtifactRef.
-	done, treason, tmsg, dErr := r.projectDataLegFromDataImport(ctx, obj, contentName, dataImportName)
-	if dErr != nil {
-		return ctrl.Result{}, dErr
-	}
-	if treason != "" {
-		// Actionable import failure (e.g. unsupported artifact kind) surfaced as Ready=False; the content
-		// stays pending (no dataRef), so the pure content mirror cannot express it — co-write it directly.
-		if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, treason, tmsg); perr != nil {
-			return ctrl.Result{}, perr
+	// Aggregators (dataImportName == "") have no data leg — they are pure manifest+children nodes.
+	if dataImportName != "" {
+		done, treason, tmsg, dErr := r.projectDataLegFromDataImport(ctx, obj, contentName, dataImportName)
+		if dErr != nil {
+			return ctrl.Result{}, dErr
 		}
-		return ctrl.Result{}, nil
-	}
-	if !done {
-		requeue = true
+		if treason != "" {
+			// Actionable import failure (e.g. unsupported artifact kind) surfaced as Ready=False; the content
+			// stays pending (no dataRef), so the pure content mirror cannot express it — co-write it directly.
+			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, treason, tmsg); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{}, nil
+		}
+		if !done {
+			requeue = true
+		}
 	}
 
 	if requeue {
