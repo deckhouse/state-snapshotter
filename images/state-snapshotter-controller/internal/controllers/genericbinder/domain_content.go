@@ -259,6 +259,83 @@ func (r *GenericSnapshotBinderController) deleteVolumeCaptureRequest(ctx context
 	return nil
 }
 
+// mirrorLeafVolumeMetadataFromContent copies the data leaf's volume metadata
+// (storageClassName/size/volumeMode) from the bound SnapshotContent.status.dataRef onto the leaf
+// snapshot status, so d8 can read it on export (the leaf status mirrors the content dataRef). On import
+// the content dataRef carries no storageClassName (it is not derived from a live PVC), so the caller
+// passes scOverride from DataImport.spec.storageClassName; on capture scOverride is empty and the live
+// dataRef.storageClassName is used. No-op until the content has a published dataRef.
+func (r *GenericSnapshotBinderController) mirrorLeafVolumeMetadataFromContent(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+	contentName string,
+	scOverride string,
+) error {
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		return err
+	}
+	if content.Status.DataRef == nil {
+		return nil
+	}
+	sc := content.Status.DataRef.StorageClassName
+	if scOverride != "" {
+		sc = scOverride
+	}
+	return r.mirrorVolumeMetadataToLeaf(ctx, obj, sc, content.Status.DataRef.Size, content.Status.DataRef.VolumeMode)
+}
+
+// mirrorVolumeMetadataToLeaf writes the provided (non-empty) volume metadata fields onto the leaf
+// snapshot status under an optimistic-lock merge patch (D4a: demo.status is co-owned). Idempotent — it
+// re-reads and short-circuits when all provided fields already match.
+func (r *GenericSnapshotBinderController) mirrorVolumeMetadataToLeaf(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+	storageClassName string,
+	size string,
+	volumeMode string,
+) error {
+	desired := map[string]string{}
+	if storageClassName != "" {
+		desired["storageClassName"] = storageClassName
+	}
+	if size != "" {
+		desired["size"] = size
+	}
+	if volumeMode != "" {
+		desired["volumeMode"] = volumeMode
+	}
+	if len(desired) == 0 {
+		return nil
+	}
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(gvk)
+		if err := r.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		allMatch := true
+		for field, want := range desired {
+			if nestedString(fresh, field) != want {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			return nil
+		}
+		base := fresh.DeepCopy()
+		for field, want := range desired {
+			if err := unstructured.SetNestedField(fresh.Object, want, "status", field); err != nil {
+				return err
+			}
+		}
+		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
 func nestedString(obj *unstructured.Unstructured, field string) string {
 	v, _, _ := unstructured.NestedString(obj.Object, "status", field)
 	return v

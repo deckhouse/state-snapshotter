@@ -109,7 +109,10 @@ func getSnapshotUID(ctx context.Context, ns, name string) (types.UID, error) {
 	return obj.GetUID(), nil
 }
 
-func createImportDiskSnapshot(ctx context.Context, ns, name, dataImportName string, sourceRef map[string]interface{}, ownerRefs []metav1.OwnerReference) error {
+// createImportDiskSnapshot creates an import-mode DemoVirtualDiskSnapshot. Import is signalled by the
+// unified empty marker spec.source.import: {} — no sourceRef (the live disk is absent on import) and no
+// DataImport name on the leaf: the binder finds the DataImport by reverse-lookup on spec.targetRef.
+func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
 	meta := map[string]interface{}{
 		"name":      name,
 		"namespace": ns,
@@ -122,8 +125,9 @@ func createImportDiskSnapshot(ctx context.Context, ns, name, dataImportName stri
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"sourceRef":  sourceRef,
-			"dataSource": map[string]interface{}{"name": dataImportName},
+			"source": map[string]interface{}{
+				"import": map[string]interface{}{},
+			},
 		},
 	}}
 	_, err := suiteDyn.Resource(demoDiskSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
@@ -437,18 +441,6 @@ func leafUploadPath(importNS string, leaf leafImportSpec) string {
 	}
 }
 
-func diskSnapshotSourceRef(ctx context.Context, ns, snapName string) (map[string]interface{}, error) {
-	obj, err := getResource(ctx, demoDiskSnapshotGVR, ns, snapName)
-	if err != nil {
-		return nil, err
-	}
-	ref, found, _ := unstructured.NestedMap(obj.Object, "spec", "sourceRef")
-	if !found || ref == nil {
-		return nil, fmt.Errorf("disk snapshot %s has no spec.sourceRef", snapName)
-	}
-	return ref, nil
-}
-
 // collectBoundSnapshotContentNames scans demo disk snapshots and VolumeSnapshots cluster-wide and
 // returns the set of status.boundSnapshotContentName values currently in use (including the capture
 // source tree, so we do not sweep live content).
@@ -631,9 +623,7 @@ func backupRestoreSpecs() {
 				ownerRefs := importRootOwnerRef(bkImportRootName, rootUID, volumeSnapshotLeaf)
 				switch leaf.kind {
 				case "DemoVirtualDiskSnapshot":
-					sourceRef, serr := diskSnapshotSourceRef(ctx, backup.srcNS, leaf.name)
-					Expect(serr).NotTo(HaveOccurred(), "read sourceRef for %s", leaf.name)
-					Expect(createImportDiskSnapshot(ctx, importNS, leaf.name, leaf.name, sourceRef, ownerRefs)).To(Succeed())
+					Expect(createImportDiskSnapshot(ctx, importNS, leaf.name, ownerRefs)).To(Succeed())
 				case "VolumeSnapshot":
 					Expect(createImportVolumeSnapshot(ctx, importNS, leaf.name, leaf.name, ownerRefs)).To(Succeed())
 				}

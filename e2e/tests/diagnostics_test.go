@@ -241,13 +241,13 @@ func dumpImportLeavesInNS(ctx context.Context, ns string) {
 		for i := range list.Items {
 			obj := &list.Items[i]
 			bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
-			dataImport, _, _ := unstructured.NestedString(obj.Object, "spec", "dataSource", "name")
-			if dataImport == "" {
-				dataImport, _, _ = unstructured.NestedString(obj.Object, "spec", "source", "dataImportName")
-			}
+			// Import mode is the unified marker spec.source.import: {} (domain leaves + structural nodes);
+			// the extended VolumeSnapshot still carries spec.source.dataImportName until the F2 sweep.
+			_, importMarker, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
+			dataImport, _, _ := unstructured.NestedString(obj.Object, "spec", "source", "dataImportName")
 			GinkgoWriter.Printf("%s %s/%s:\n", entry.label, ns, obj.GetName())
-			GinkgoWriter.Printf("    boundSnapshotContentName=%q dataImport=%q ownerRefs=%s\n",
-				bound, dataImport, formatOwnerReferences(obj.GetOwnerReferences()))
+			GinkgoWriter.Printf("    boundSnapshotContentName=%q importMode=%v dataImportName=%q ownerRefs=%s\n",
+				bound, importMarker, dataImport, formatOwnerReferences(obj.GetOwnerReferences()))
 			dumpObjectConditions(obj)
 		}
 	}

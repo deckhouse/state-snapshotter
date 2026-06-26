@@ -34,15 +34,27 @@ type DemoVirtualMachineSnapshot struct {
 	Status DemoVirtualMachineSnapshotStatus `json:"status,omitempty"`
 }
 
-// DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot.
+// DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot. Exactly one of
+// SourceRef (capture) or Source (import) is set.
 // +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) != has(self.source)",message="exactly one of spec.sourceRef (capture) or spec.source (import) must be set"
 type DemoVirtualMachineSnapshotSpec struct {
-	// SourceRef identifies the DemoVirtualMachine captured by this snapshot. It is the single
-	// source-of-truth for what the snapshot captures (both manually-created and root-planned
-	// snapshots) and is immutable once set.
-	// +kubebuilder:validation:Required
+	// SourceRef identifies the DemoVirtualMachine captured by this snapshot in CAPTURE mode. It is the
+	// single source-of-truth for what the snapshot captures and is immutable once set. It is a pointer so
+	// its presence unambiguously selects capture mode for the exactly-one-of rule; an IMPORT-mode snapshot
+	// (spec.source.import) has no live source VM and omits it.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
-	SourceRef SnapshotSourceRef `json:"sourceRef"`
+	SourceRef *SnapshotSourceRef `json:"sourceRef,omitempty"`
+
+	// Source, when set, switches this VM snapshot into IMPORT mode (spec.source.import: {} only — no static
+	// pre-provisioning on a demo leaf). In import mode the domain controller does NO capture planning (no
+	// source-VM lookup, no children planning, no MCR): the common controller materializes it from the
+	// uploaded manifests and child refs. Immutable once set.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="has(self.import) && !has(self.snapshotContentName)",message="only spec.source.import: {} is supported on a demo snapshot leaf"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.source is immutable"
+	Source *storagev1alpha1.SnapshotSource `json:"source,omitempty"`
 }
 
 // DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.
@@ -73,6 +85,13 @@ type DemoVirtualMachineSnapshotStatus struct {
 	// +listMapKey=kind
 	// +listMapKey=name
 	ChildrenSnapshotRefs []storagev1alpha1.SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
+}
+
+// IsImportMode reports whether this VM snapshot is an import target (spec.source.import set). Import
+// nodes are materialized from an uploaded payload + child refs and MUST NOT trigger live capture or
+// children planning (parity with Snapshot.IsImportMode).
+func (s *DemoVirtualMachineSnapshot) IsImportMode() bool {
+	return s != nil && s.Spec.Source != nil && s.Spec.Source.Import != nil
 }
 
 // +kubebuilder:object:root=true

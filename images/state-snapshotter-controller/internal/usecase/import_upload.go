@@ -101,7 +101,7 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	}
 	if !uploadTargetIsImportMode(cr) {
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
-			fmt.Sprintf("%s %s/%s is not in import mode (no spec.source.import / spec.source.dataImportName / spec.dataSource): refusing manifests upload", snapshotGVK.String(), namespace, name))
+			fmt.Sprintf("%s %s/%s is not in import mode (no spec.source.import / spec.source.dataImportName): refusing manifests upload", snapshotGVK.String(), namespace, name))
 	}
 	uid := cr.GetUID()
 	if uid == "" {
@@ -187,18 +187,15 @@ func childRefSlicesEqual(current, desired []interface{}) bool {
 	return reflect.DeepEqual(current, desired)
 }
 
-// uploadTargetIsImportMode reports whether a snapshot CR is an import target. It accepts any of the
-// import markers across snapshot kinds: spec.source.import (core/structural nodes), spec.source.dataImportName
-// (generic-PVC extended VolumeSnapshot), or spec.dataSource (domain data leaves). This keeps the upload
-// endpoint from clobbering a live-capture snapshot.
+// uploadTargetIsImportMode reports whether a snapshot CR is an import target. It accepts the unified
+// import marker spec.source.import (core/structural nodes + domain data leaves) and the generic-PVC
+// extended VolumeSnapshot's spec.source.dataImportName (F1/F2). This keeps the upload endpoint from
+// clobbering a live-capture snapshot.
 func uploadTargetIsImportMode(obj *unstructured.Unstructured) bool {
-	if _, found, _ := unstructured.NestedMap(obj.Object, "spec", "source", "import"); found {
+	if _, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import"); found {
 		return true
 	}
 	if v, found, _ := unstructured.NestedString(obj.Object, "spec", "source", "dataImportName"); found && v != "" {
-		return true
-	}
-	if _, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "dataSource"); found {
 		return true
 	}
 	return false

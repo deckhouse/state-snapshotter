@@ -47,14 +47,14 @@ import (
 func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) {
 	tests := []struct {
 		name      string
-		sourceRef demov1alpha1.SnapshotSourceRef
+		sourceRef *demov1alpha1.SnapshotSourceRef
 	}{
 		{
 			name: "missing sourceRef",
 		},
 		{
 			name: "wrong kind",
-			sourceRef: demov1alpha1.SnapshotSourceRef{
+			sourceRef: &demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       controllercommon.KindDemoVirtualMachine,
 				Name:       "disk-a",
@@ -89,7 +89,7 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 	cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualDiskSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
 		Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-			SourceRef: demov1alpha1.SnapshotSourceRef{
+			SourceRef: &demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       controllercommon.KindDemoVirtualDisk,
 				Name:       "missing-disk",
@@ -120,7 +120,7 @@ func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 		&demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				SourceRef: demov1alpha1.SnapshotSourceRef{
+				SourceRef: &demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       controllercommon.KindDemoVirtualDisk,
 					Name:       "disk-a",
@@ -175,7 +175,7 @@ func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *test
 		&demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				SourceRef: demov1alpha1.SnapshotSourceRef{
+				SourceRef: &demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       controllercommon.KindDemoVirtualDisk,
 					Name:       "disk-a",
@@ -215,14 +215,14 @@ func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *test
 func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChildren(t *testing.T) {
 	tests := []struct {
 		name      string
-		sourceRef demov1alpha1.SnapshotSourceRef
+		sourceRef *demov1alpha1.SnapshotSourceRef
 	}{
 		{
 			name: "missing sourceRef",
 		},
 		{
 			name: "wrong kind",
-			sourceRef: demov1alpha1.SnapshotSourceRef{
+			sourceRef: &demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       controllercommon.KindDemoVirtualDisk,
 				Name:       "vm-a",
@@ -258,7 +258,7 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 	cl := newDemoSourceRefFakeClient(t, &demov1alpha1.DemoVirtualMachineSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
 		Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-			SourceRef: demov1alpha1.SnapshotSourceRef{
+			SourceRef: &demov1alpha1.SnapshotSourceRef{
 				APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 				Kind:       controllercommon.KindDemoVirtualMachine,
 				Name:       "missing-vm",
@@ -304,7 +304,7 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 		&demov1alpha1.DemoVirtualMachineSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
 			Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-				SourceRef: demov1alpha1.SnapshotSourceRef{
+				SourceRef: &demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       controllercommon.KindDemoVirtualMachine,
 					Name:       "vm-a",
@@ -338,7 +338,7 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: childName}, child); err != nil {
 		t.Fatalf("expected owned disk child snapshot %q: %v", childName, err)
 	}
-	if child.Spec.SourceRef != (demov1alpha1.SnapshotSourceRef{
+	if child.Spec.SourceRef == nil || *child.Spec.SourceRef != (demov1alpha1.SnapshotSourceRef{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       controllercommon.KindDemoVirtualDisk,
 		Name:       "disk-owned",
@@ -396,7 +396,7 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 				OwnerReferences: []metav1.OwnerReference{conflictingOwner},
 			},
 			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-				SourceRef: demov1alpha1.SnapshotSourceRef{
+				SourceRef: &demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       controllercommon.KindDemoVirtualDisk,
 					Name:       "disk-owned",
@@ -406,7 +406,7 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 		&demov1alpha1.DemoVirtualMachineSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
 			Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-				SourceRef: demov1alpha1.SnapshotSourceRef{
+				SourceRef: &demov1alpha1.SnapshotSourceRef{
 					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 					Kind:       controllercommon.KindDemoVirtualMachine,
 					Name:       "vm-a",
