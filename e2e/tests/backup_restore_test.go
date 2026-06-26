@@ -43,7 +43,6 @@ const (
 	bkRestoreProbeCont = "probe"
 	bkProbeDevicePath  = "/dev/xvda"
 	bkDataImportTTL    = "15m"
-	bkDataArtifactType = "VolumeSnapshotContent"
 	vsAPIVersion       = "snapshot.storage.k8s.io/v1"
 )
 
@@ -137,7 +136,7 @@ func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []
 	return nil
 }
 
-func createImportVolumeSnapshot(ctx context.Context, ns, name, dataImportName string, ownerRefs []metav1.OwnerReference) error {
+func createImportVolumeSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
 	meta := map[string]interface{}{
 		"name":      name,
 		"namespace": ns,
@@ -145,13 +144,15 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name, dataImportName st
 	if len(ownerRefs) > 0 {
 		meta["ownerReferences"] = ownerReferencesField(ownerRefs)
 	}
+	// Import-mode marker: the unified empty spec.source.import: {} (parity with every snapshot kind). The
+	// owning DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this VolumeSnapshot).
 	vs := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": vsAPIVersion,
 		"kind":       "VolumeSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
 			"source": map[string]interface{}{
-				"dataImportName": dataImportName,
+				"import": map[string]interface{}{},
 			},
 		},
 	}}
@@ -162,7 +163,23 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name, dataImportName st
 	return nil
 }
 
-func createDataImport(ctx context.Context, ns, name, group, resource, leafName string) error {
+// createDataImport creates an import DataImport carrying the scratch-volume parameters directly on spec
+// (storageClassName/size/volumeMode — mirrored from the source snapshot/PVC, no longer read from a captured
+// manifest) and a targetRef back at the leaf so the state-snapshotter binder can reverse-look-it-up.
+func createDataImport(ctx context.Context, ns, name, group, resource, leafName, storageClassName, size, volumeMode string) error {
+	spec := map[string]interface{}{
+		"ttl":              bkDataImportTTL,
+		"storageClassName": storageClassName,
+		"size":             size,
+		"targetRef": map[string]interface{}{
+			"group":    group,
+			"resource": resource,
+			"name":     leafName,
+		},
+	}
+	if volumeMode != "" {
+		spec["volumeMode"] = volumeMode
+	}
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "storage.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
@@ -170,21 +187,33 @@ func createDataImport(ctx context.Context, ns, name, group, resource, leafName s
 			"name":      name,
 			"namespace": ns,
 		},
-		"spec": map[string]interface{}{
-			"ttl":              bkDataImportTTL,
-			"dataArtifactType": bkDataArtifactType,
-			"targetRef": map[string]interface{}{
-				"group":    group,
-				"resource": resource,
-				"name":     leafName,
-			},
-		},
+		"spec": spec,
 	}}
 	_, err := suiteDyn.Resource(dataImportGVR).Namespace(ns).Create(ctx, di, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
+}
+
+// sourcePVCScratchParams reads the leaf's source PVC and returns the scratch-volume parameters the import
+// DataImport needs (storageClassName/size/volumeMode). This mirrors the real d8 flow, where these values
+// come from the source snapshot status rather than from a captured manifest.
+func sourcePVCScratchParams(ctx context.Context, ns, pvcName string) (storageClassName, size, volumeMode string, err error) {
+	pvc, gErr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, pvcName, metav1.GetOptions{})
+	if gErr != nil {
+		return "", "", "", fmt.Errorf("get source PVC %s/%s for DataImport params: %w", ns, pvcName, gErr)
+	}
+	if pvc.Spec.StorageClassName != nil {
+		storageClassName = *pvc.Spec.StorageClassName
+	}
+	if q, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+		size = q.String()
+	}
+	if pvc.Spec.VolumeMode != nil {
+		volumeMode = string(*pvc.Spec.VolumeMode)
+	}
+	return storageClassName, size, volumeMode, nil
 }
 
 func deleteDataImport(ctx context.Context, ns, name string) {
@@ -606,7 +635,9 @@ func backupRestoreSpecs() {
 			rootUID, err := getSnapshotUID(ctx, importNS, bkImportRootName)
 			Expect(err).NotTo(HaveOccurred(), "read import-root UID")
 			for _, leaf := range leaves {
-				Expect(createDataImport(ctx, importNS, leaf.name, leaf.group, leaf.resource, leaf.name)).To(Succeed())
+				scName, scSize, scMode, perr := sourcePVCScratchParams(ctx, backup.srcNS, leaf.pvcName)
+				Expect(perr).NotTo(HaveOccurred(), "resolve scratch params for leaf %s", leaf.name)
+				Expect(createDataImport(ctx, importNS, leaf.name, leaf.group, leaf.resource, leaf.name, scName, scSize, scMode)).To(Succeed())
 				DeferCleanup(func(name string) func() {
 					return func() {
 						if cleanupSkippedOnFailure() {
@@ -625,7 +656,7 @@ func backupRestoreSpecs() {
 				case "DemoVirtualDiskSnapshot":
 					Expect(createImportDiskSnapshot(ctx, importNS, leaf.name, ownerRefs)).To(Succeed())
 				case "VolumeSnapshot":
-					Expect(createImportVolumeSnapshot(ctx, importNS, leaf.name, leaf.name, ownerRefs)).To(Succeed())
+					Expect(createImportVolumeSnapshot(ctx, importNS, leaf.name, ownerRefs)).To(Succeed())
 				}
 			}
 

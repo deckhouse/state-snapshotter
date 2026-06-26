@@ -50,9 +50,10 @@ func vsConnectorScheme() *runtime.Scheme {
 	return scheme
 }
 
-// vsConnectorVolumeSnapshot builds an extended CSI VolumeSnapshot. dataImportName != "" marks it as an
-// import-mode target (spec.source.dataImportName); ready sets status.readyToUse for the restore path.
-func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent, dataImportName string, ready bool) *unstructured.Unstructured {
+// vsConnectorVolumeSnapshot builds an extended CSI VolumeSnapshot. importMode marks it as an import-mode
+// target via the unified empty marker spec.source.import: {}; ready sets status.readyToUse for the
+// restore path.
+func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMode, ready bool) *unstructured.Unstructured {
 	status := map[string]interface{}{}
 	if boundVSC != "" {
 		status["boundVolumeSnapshotContentName"] = boundVSC
@@ -69,8 +70,8 @@ func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent, dataImportName 
 		"metadata":   map[string]interface{}{"name": name, "namespace": ns, "uid": "uid-" + name},
 		"status":     status,
 	}
-	if dataImportName != "" {
-		obj["spec"] = map[string]interface{}{"source": map[string]interface{}{"dataImportName": dataImportName}}
+	if importMode {
+		obj["spec"] = map[string]interface{}{"source": map[string]interface{}{"import": map[string]interface{}{}}}
 	}
 	return &unstructured.Unstructured{Object: obj}
 }
@@ -164,7 +165,7 @@ func seedVolumeSnapshotLeaf(t *testing.T, cl client.Client, vsName string, ready
 	if err := cl.Create(context.Background(), content); err != nil {
 		t.Fatal(err)
 	}
-	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot(vsName, "ns1", "vsc-1", "vol-content", "", ready)); err != nil {
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot(vsName, "ns1", "vsc-1", "vol-content", false, ready)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -213,7 +214,7 @@ func TestVolumeSnapshotConnector_Upload(t *testing.T) {
 		WithScheme(vsConnectorScheme()).
 		WithStatusSubresource(&ssv1alpha1.ManifestCheckpoint{}, vsStatusStub).
 		Build()
-	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-import", "ns1", "", "", "di-1", false)); err != nil {
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-import", "ns1", "", "", true, false)); err != nil {
 		t.Fatal(err)
 	}
 	srv := newVSConnectorServer(t, cl)
@@ -244,7 +245,7 @@ func TestVolumeSnapshotConnector_Upload(t *testing.T) {
 // guard: a VS without an import source must not have its manifests clobbered.
 func TestVolumeSnapshotConnector_UploadRejectsNonImportMode(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(vsConnectorScheme()).Build()
-	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-capture", "ns1", "vsc-1", "vol-content", "", true)); err != nil {
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-capture", "ns1", "vsc-1", "vol-content", false, true)); err != nil {
 		t.Fatal(err)
 	}
 	srv := newVSConnectorServer(t, cl)
@@ -267,7 +268,7 @@ func TestVolumeSnapshotConnector_UploadRejectsNonImportMode(t *testing.T) {
 func TestVolumeSnapshotConnector_ErrorPaths(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(vsConnectorScheme()).Build()
 	// An existing-but-not-ready VS: status has no readyToUse, so the restore leaf check fails closed.
-	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-notready", "ns1", "vsc-1", "vol-content", "", false)); err != nil {
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-notready", "ns1", "vsc-1", "vol-content", false, false)); err != nil {
 		t.Fatal(err)
 	}
 	srv := newVSConnectorServer(t, cl)
