@@ -383,31 +383,27 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 	return nil
 }
 
-// rawCompareVolatileFields are fields that cannot stay stable between a point-in-time captured manifest
-// and the live object read back later:
-//   - metadata.resourceVersion is bumped on every write, and metadata.managedFields is server-side-apply
-//     bookkeeping whose timestamps/managers drift.
-//   - status is point-in-time: capture stores it verbatim at snapshot time, but the live object keeps
-//     reconciling afterwards (e.g. a DemoVirtualMachine captured while its Pod is still Pending advances
-//     to phase=Ready a moment later), so a captured status legitimately differs from live. Comparing it
-//     against the evolving live status is therefore unsound by construction.
-//
+// rawCompareVolatileMetadata are server-managed metadata fields that cannot stay stable between a
+// point-in-time captured manifest and the live object read back later: resourceVersion is bumped on
+// every write, and managedFields is server-side-apply bookkeeping whose timestamps/managers drift.
 // Capture stores raw manifests verbatim (sanitization is a restore-path concern, see
 // internal/usecase/restore/sanitizer.go), so the raw-vs-live checksum strips these from both sides to
 // compare actual object content (spec/data/labels/annotations/ownerRefs) without false diffs.
-var rawCompareVolatileFields = [][]string{
+//
+// status is deliberately NOT stripped: the capture spec waits for every source object to reach its
+// terminal Ready state before snapshotting (see "captures the Block-volume snapshot tree"), so the
+// captured status equals the (now-stable) live status and is part of what this test verifies.
+var rawCompareVolatileMetadata = [][]string{
 	{"metadata", "resourceVersion"},
 	{"metadata", "managedFields"},
-	{"status"},
 }
 
-// strippedForRawCompare returns a deep copy of obj's content with volatile, point-in-time fields removed
-// (server-managed metadata and the whole status subtree), so a faithful capture is not flagged as
-// differing just because the live object advanced its resourceVersion, rewrote managedFields, or
-// reconciled its status after the snapshot was taken.
+// strippedForRawCompare returns a deep copy of obj's content with volatile server-managed metadata
+// removed, so a faithful capture is not flagged as differing just because the live object advanced its
+// resourceVersion (or rewrote managedFields) after the snapshot was taken.
 func strippedForRawCompare(obj *unstructured.Unstructured) map[string]interface{} {
 	clone := obj.DeepCopy()
-	for _, path := range rawCompareVolatileFields {
+	for _, path := range rawCompareVolatileMetadata {
 		unstructured.RemoveNestedField(clone.Object, path...)
 	}
 	return clone.Object
@@ -873,6 +869,20 @@ func backupDownloadSpecs() {
 			// Background capture timeline: surfaces where the Block-volume snapshot creation spends time.
 			tl := startCaptureTimeline(backup.srcNS)
 			defer tl.stop()
+
+			// Snapshot captures status verbatim (point-in-time). Wait for every source object to reach its
+			// terminal Ready state (status no longer changes) BEFORE snapshotting, so the Phase 4 raw
+			// manifest-vs-live comparison stays sound: otherwise a captured status (e.g. VM phase=Pending,
+			// disk still provisioning) would drift from the live object that keeps reconciling to Ready. The
+			// VM's own Ready already implies its attached disk-a is usable, but disk-b is a standalone root
+			// child, so all three are awaited explicitly.
+			By("Waiting for the source objects to settle into a terminal Ready state before snapshotting")
+			Expect(waitDemoDiskReady(ctx, backup.srcNS, bkDiskAName, suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualDisk %s Ready before snapshot", bkDiskAName)
+			Expect(waitDemoDiskReady(ctx, backup.srcNS, bkDiskBName, suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualDisk %s Ready before snapshot", bkDiskBName)
+			Expect(waitObjectCondition(ctx, demoVMGVR, backup.srcNS, bkVMName, condReady, "True", suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualMachine %s Ready before snapshot", bkVMName)
 
 			By("Creating the root Snapshot over the Block-volume tree")
 			Expect(createRootSnapshot(ctx, backup.srcNS, bkRootSnapshotName)).To(Succeed())
