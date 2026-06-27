@@ -79,7 +79,7 @@ const (
 	ReasonDataArtifactInvalid      = "DataArtifactInvalid"
 	ReasonDataArtifactNotSupported = "DataArtifactNotSupported"
 	// ReasonDataImportAmbiguous is the terminal reason when more than one DataImport reverse-matches an
-	// import-mode leaf's identity (spec.targetRef group/resource/name). Exactly one DataImport must target
+	// import-mode leaf's identity (spec.targetRef group/kind/name). Exactly one DataImport must target
 	// a leaf, so an ambiguous match is fail-closed rather than picking one arbitrarily.
 	ReasonDataImportAmbiguous = "DataImportAmbiguous"
 	// ReasonVolumeCaptureFailed is the terminal data-leg reason when volume capture failed: a failed
