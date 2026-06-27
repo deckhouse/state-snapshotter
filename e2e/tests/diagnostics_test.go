@@ -192,14 +192,14 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 		return
 	}
 	targetGroup, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "group")
-	targetResource, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "resource")
+	targetKind, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "kind")
 	targetName, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "name")
 	url, _, _ := unstructured.NestedString(obj.Object, "status", "url")
 	volMode, _, _ := unstructured.NestedString(obj.Object, "status", "volumeMode")
 	ca, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
 	artifact, _, _ := unstructured.NestedMap(obj.Object, "status", "dataArtifactRef")
 	GinkgoWriter.Printf("DataImport %s/%s:\n", ns, name)
-	GinkgoWriter.Printf("    targetRef: group=%q resource=%q name=%q\n", targetGroup, targetResource, targetName)
+	GinkgoWriter.Printf("    targetRef: group=%q kind=%q name=%q\n", targetGroup, targetKind, targetName)
 	GinkgoWriter.Printf("    status: url=%q volumeMode=%q ca=%t dataArtifactRef=%v\n", url, volMode, ca != "", artifact)
 	dumpObjectConditions(obj)
 
@@ -207,9 +207,17 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 	if targetName == "" {
 		return
 	}
-	gvr := schema.GroupVersionResource{Group: targetGroup, Version: "v1alpha1", Resource: targetResource}
-	if targetGroup == "snapshot.storage.k8s.io" {
-		gvr.Version = "v1"
+	var gvr schema.GroupVersionResource
+	switch targetKind {
+	case "VolumeSnapshot":
+		gvr = volumeSnapshotGVR
+	case "DemoVirtualDiskSnapshot":
+		gvr = demoDiskSnapshotGVR
+	case "DemoVirtualMachineSnapshot":
+		gvr = demoVMSnapshotGVR
+	default:
+		GinkgoWriter.Printf("    target leaf %s/%s: <unsupported targetRef.kind %q>\n", ns, targetName, targetKind)
+		return
 	}
 	leaf, lerr := getResource(ctx, gvr, ns, targetName)
 	if lerr != nil {
