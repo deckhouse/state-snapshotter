@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -53,11 +54,35 @@ func listResidualRootOwnedPVCTargets(
 	if err != nil {
 		return nil, err
 	}
-	candidates, err := ListNamespacePVCTargets(ctx, c, namespace)
+	// Resolve the user-provided resourceSelector once (nil/Everything = capture all). It is applied here so
+	// excluded PVCs are dropped consistently from BOTH the volume-data leg and the root PVC manifest exclude
+	// set (both consumers go through this lister via ListOwnedPVCTargetsForLogicalContent). This mirrors the
+	// manifest leg, so a PVC is never half-captured (volume node without manifest, or vice versa).
+	selector, err := snap.ResolveResourceSelector()
+	if err != nil {
+		return nil, fmt.Errorf("resolve spec.resourceSelector: %w", err)
+	}
+	candidates, labelsByUID, err := listNamespacePVCTargetsWithLabels(ctx, c, namespace)
 	if err != nil {
 		return nil, err
 	}
+	candidates = filterPVCTargetsBySelector(selector, candidates, labelsByUID)
 	return residualPVCTargets(candidates, covered), nil
+}
+
+// filterPVCTargetsBySelector keeps only PVC targets whose labels (resolved by UID from the same List that
+// produced the candidates) match selector. A nil or Everything selector returns the candidates unchanged.
+func filterPVCTargetsBySelector(selector labels.Selector, candidates []vcpkg.Target, labelsByUID map[string]labels.Set) []vcpkg.Target {
+	if selector == nil || selector.Empty() || len(candidates) == 0 {
+		return candidates
+	}
+	out := make([]vcpkg.Target, 0, len(candidates))
+	for _, t := range candidates {
+		if selector.Matches(labelsByUID[t.UID]) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // listDomainNodeOwnedPVCTargets returns PVC volume targets explicitly owned by this logical node:

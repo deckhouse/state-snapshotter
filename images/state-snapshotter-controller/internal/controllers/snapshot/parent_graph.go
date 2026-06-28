@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -56,6 +57,16 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		return changed, err == nil, err
 	}
 
+	// resourceSelector narrows which top-level/standalone domain source objects the root expands into child
+	// snapshots (nil = expand all). Resolved once here and threaded into every layer. Excluded objects are
+	// consistently dropped from the root manifest leg by the same selector. Nested domain children created by
+	// domain controllers are out of scope (see plan section 5a). A resolve error is surfaced as a graph
+	// planning failure by the caller (ChildrenSnapshotReady=False).
+	selector, err := nsSnap.ResolveResourceSelector()
+	if err != nil {
+		return false, false, fmt.Errorf("resolve spec.resourceSelector: %w", err)
+	}
+
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
 	for layerStart := 0; layerStart < len(mappings); {
@@ -66,7 +77,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
+			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
@@ -116,6 +127,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	nsSnap *storagev1alpha1.Snapshot,
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
+	selector labels.Selector,
 ) ([]storagev1alpha1.SnapshotChildRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
 	list := &unstructured.UnstructuredList{}
@@ -147,6 +159,12 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	})
 	for i := range list.Items {
 		resource := &list.Items[i]
+		// User-provided resourceSelector narrows expansion: a domain source object whose labels do not match
+		// is not expanded into a child snapshot (nil selector = expand all). The same object is then dropped
+		// from the root manifest leg by the same selector, keeping the two legs consistent.
+		if selector != nil && !selector.Matches(labels.Set(resource.GetLabels())) {
+			continue
+		}
 		covered, err := coverage.IsCovered(ctx, resource)
 		if err != nil {
 			return nil, err

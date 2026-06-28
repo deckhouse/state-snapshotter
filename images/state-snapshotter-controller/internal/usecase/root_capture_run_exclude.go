@@ -103,7 +103,14 @@ func BuildRootNamespaceManifestCaptureTargets(
 		return nil, nil, err
 	}
 
-	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds)
+	// resourceSelector narrows the manifest base to objects matching the user selector (nil = capture all).
+	// The same selector is applied to the PVC and CSD legs so excluded objects are dropped consistently.
+	selector, err := rootNS.ResolveResourceSelector()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve spec.resourceSelector: %w", err)
+	}
+
+	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds, selector)
 	if err != nil {
 		return nil, unreadable, err
 	}
