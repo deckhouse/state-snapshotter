@@ -1090,15 +1090,16 @@ func (r *SnapshotContentController) validateCommonContentManifestCheckpoint(ctx 
 
 // firstMissingManifestCheckpointChunk validates chunk EXISTENCE by exact ref from MCP.status.chunks[].
 // It deliberately does NOT read/decode chunk content (.spec.data) or verify checksums — content/integrity
-// validation belongs to the explicit read/download/archive path, not to every reconcile. Each chunk is
-// fetched metadata-only (PartialObjectMetadata) so .spec.data is never transferred. It uses APIReader
-// (direct, uncached) on purpose: a cached Get would force the controller cache to start a
+// validation belongs to the explicit read/download/archive path, not to every reconcile. The MCP itself is
+// read from the cache (its informer is already running: ensureManifestCheckpointOwnedByContent does a
+// cached Get on it). Each chunk, however, is fetched metadata-only (PartialObjectMetadata) via the
+// APIReader (direct, uncached) on purpose: a cached chunk Get would force the controller cache to start a
 // ManifestCheckpointContentChunk informer (implicit list/watch), which Phase 2a avoids (chunks keep
 // get-only RBAC). It stops at the first chunk that is NotFound and returns its name; transient
 // (non-NotFound) errors are returned so reconcile requeues instead of falsely failing the tree.
 func (r *SnapshotContentController) firstMissingManifestCheckpointChunk(ctx context.Context, mcpName string) (string, error) {
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
 			// MCP vanished between checks; resolveManifestCheckpointReady reclassifies on the next reconcile.
 			return "", nil
@@ -1229,7 +1230,10 @@ func snapshotContentControllerOwnerRefsForHandoff(existing []metav1.OwnerReferen
 // Returns (resolvedName, ready, failed, message, error).
 func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.Context, mcpName string) (string, bool, bool, string, error) {
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+	// Cached read: the MCP informer is already started (ensureManifestCheckpointOwnedByContent reads it
+	// via the cache), so this forces no new watch. A stale/absent MCP keeps the manifest leg pending
+	// (fail-closed), which the self-requeue resolves once the cache catches up.
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
 			return mcpName, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcpName), nil
 		}
