@@ -66,6 +66,20 @@ const (
 	// ReasonGraphPlanningFailed: ChildrenSnapshotReady=False — graph planning failed.
 	ReasonGraphPlanningFailed = "GraphPlanningFailed"
 
+	// ReasonTopologyDrift: ChildrenSnapshotReady=False (terminal) — the desired child set changed after
+	// the snapshot's child topology was first published. The published children refs are the
+	// authoritative, immutable snapshot topology; a later reconcile that derives a different desired set
+	// (for example after a controller restart with incomplete discovery) is rejected rather than repaired,
+	// so the SDK never creates or deletes children to "fix" a drifted topology.
+	ReasonTopologyDrift = "TopologyDrift"
+
+	// ReasonManifestDrift: ChildrenSnapshotReady=False (terminal) — the desired manifest capture targets
+	// differ from the targets of the already-published ManifestCaptureRequest. The published manifest leg
+	// is fail-closed like the child topology and the data leg: a later reconcile that derives a different
+	// target set is rejected rather than repaired, so the SDK never updates/patches/deletes the request to
+	// "fix" the drift.
+	ReasonManifestDrift = "ManifestDrift"
+
 	// ReasonManifestsArchived: ManifestsArchived=True — this node and its whole subtree have had
 	// their manifests captured into checkpoints at least once (lifelong latch).
 	ReasonManifestsArchived = "Archived"

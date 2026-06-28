@@ -18,6 +18,7 @@ package demo
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,10 +36,11 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
 // Demo reconcilers are content-free (commit 2 content-ownership, D1/D3): they validate the source, plan
-// the manifest-capture request (MCR), the data-leg volume-capture request (VCR) and the owned-disk child
+// the manifest-capture request (MCR), the data-capture volume-capture request (VCR) and the owned-disk child
 // graph, and publish results into demo.status (manifestCaptureRequestName, volumeCaptureRequestName,
 // childrenSnapshotRefs, ChildrenSnapshotReady). They never create/own/bind/mirror SnapshotContent;
 // GenericSnapshotBinderController owns all SnapshotContent work for demo kinds. These unit tests therefore
@@ -198,7 +200,7 @@ func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *test
 		t.Fatalf("expected MCR %q after first reconcile: %v", mcrName, err)
 	}
 
-	// Common controller marks the leg captured and deletes the request.
+	// Common controller marks the manifest captured and deletes the request.
 	base := snap.DeepCopy()
 	snap.Status.ManifestCaptured = true
 	if err := cl.Status().Patch(context.Background(), snap, client.MergeFrom(base)); err != nil {
@@ -212,6 +214,72 @@ func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *test
 		t.Fatalf("second reconcile failed: %v", err)
 	}
 	assertNoDemoMCRs(t, cl)
+}
+
+// A ManifestCaptureRequest whose targets diverge from what the snapshot now derives (e.g. a stale request
+// surviving a controller restart) is terminal manifest drift: the demo reconciler must surface
+// MarkPlanningFailed(ManifestDrift) on ChildrenSnapshotReady and must NOT mutate the request (fail-closed,
+// no self-heal — symmetric with child snapshots and data capture).
+func TestDemoVirtualDiskSnapshot_ManifestDriftFailsPlanning(t *testing.T) {
+	cl := newDemoSourceRefFakeClient(t,
+		&demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
+		},
+		&demov1alpha1.DemoVirtualDiskSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
+			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
+				SourceRef: &demov1alpha1.SnapshotSourceRef{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       controllercommon.KindDemoVirtualDisk,
+					Name:       "disk-a",
+				},
+			},
+		},
+	)
+	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+	snap := getDemoDiskSnapshot(t, cl)
+	mcrName := snap.Status.ManifestCaptureRequestName
+	if mcrName == "" {
+		t.Fatalf("expected published manifestCaptureRequestName after first reconcile")
+	}
+
+	// Simulate a stale/drifted request: overwrite the published MCR's targets with a different set.
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
+		t.Fatalf("get MCR: %v", err)
+	}
+	stale := mcr.DeepCopy()
+	stale.Spec.Targets = []ssv1alpha1.ManifestTarget{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       controllercommon.KindDemoVirtualDisk,
+		Name:       "disk-other",
+	}}
+	if err := cl.Update(context.Background(), stale); err != nil {
+		t.Fatalf("update MCR targets: %v", err)
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if !errors.Is(err, snapshotsdk.ErrManifestDrift) {
+		t.Fatalf("expected ErrManifestDrift from second reconcile, got %v", err)
+	}
+	snap = getDemoDiskSnapshot(t, cl)
+	cond := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != storagev1alpha1.ReasonManifestDrift {
+		t.Fatalf("expected ChildrenSnapshotReady=False/ManifestDrift, got %#v", cond)
+	}
+
+	after := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, after); err != nil {
+		t.Fatalf("get MCR after drift: %v", err)
+	}
+	if len(after.Spec.Targets) != 1 || after.Spec.Targets[0].Name != "disk-other" {
+		t.Fatalf("drifted MCR must be left untouched (no self-heal), got %#v", after.Spec.Targets)
+	}
 }
 
 func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChildren(t *testing.T) {

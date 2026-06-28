@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -41,9 +42,10 @@ import (
 
 // DemoVirtualMachineSnapshotReconciler owns demo VM DOMAIN planning only: sourceRef validation, the
 // owned-disk child snapshot graph, the per-snapshot manifest-capture request (MCR), and the planning
-// barrier. All Kubernetes transport (child adoption, owner references, orphan GC, optimistic-locked status
-// patches, the barrier condition) is delegated to the snapshot SDK (pkg/snapshotsdk). The VM snapshot is
-// manifest-only (no data leg); it never touches the cluster-scoped SnapshotContent.
+// barrier. All Kubernetes transport (child adoption, owner references, optimistic-locked status patches,
+// the barrier condition) is delegated to the snapshot SDK (pkg/snapshotsdk), which is delete-free: it
+// publishes the child set as the authoritative snapshot topology and never deletes children. The VM
+// snapshot is manifest-only (captures no data); it never touches the cluster-scoped SnapshotContent.
 type DemoVirtualMachineSnapshotReconciler struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -130,19 +132,26 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 
 	// Children planning: the domain decides which disks the VM owns and builds the desired child snapshot
-	// objects; the SDK adopts them, publishes status.childrenSnapshotRefs, and garbage-collects orphans.
+	// objects; the SDK adopts them and publishes status.childrenSnapshotRefs (delete-free). The published
+	// set is the authoritative, immutable snapshot topology: once published, a different desired child set
+	// (e.g. after a restart with changed discovery) is rejected as terminal topology drift, never repaired
+	// by deletion. Detached leftovers are reclaimed by ownerRef GC when this parent is deleted.
 	children, err := r.planDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := sdk.EnsureChildren(ctx, adapter, children); err != nil {
-		if perr := sdk.MarkPlanningFailed(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed), err); perr != nil {
+		reason := snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed)
+		if errors.Is(err, snapshotsdk.ErrTopologyDrift) {
+			reason = snapshotsdk.Reason(storagev1alpha1.ReasonTopologyDrift)
+		}
+		if perr := sdk.MarkPlanningFailed(ctx, adapter, reason, err); perr != nil {
 			return ctrl.Result{}, perr
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Manifest leg: ensure the per-snapshot MCR (VM is manifest-only, no data leg) and publish its name.
+	// Manifest capture: ensure the per-snapshot MCR (VM is manifest-only, captures no data) and publish its name.
 	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
 		Targets: []snapshotsdk.ManifestTarget{{
 			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
@@ -150,6 +159,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 			Name:       source.Name,
 		}},
 	}); err != nil {
+		if errors.Is(err, snapshotsdk.ErrManifestDrift) {
+			if perr := sdk.MarkPlanningFailed(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonManifestDrift), err); perr != nil {
+				return ctrl.Result{}, perr
+			}
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -159,8 +173,9 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 }
 
 // planDemoVirtualMachineChildren builds the desired set of child DemoVirtualDiskSnapshot objects for the
-// disks owned by the VM. Owner references, adoption, ref derivation, and orphan GC are the SDK's job; the
-// domain only authors the child object identity and its immutable spec.sourceRef.
+// disks owned by the VM. Owner references, adoption, and ref derivation are the SDK's job (delete-free;
+// the published child set is the immutable snapshot topology); the domain only authors the child object
+// identity and its immutable spec.sourceRef.
 func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 	ctx context.Context,
 	vm *demov1alpha1.DemoVirtualMachineSnapshot,

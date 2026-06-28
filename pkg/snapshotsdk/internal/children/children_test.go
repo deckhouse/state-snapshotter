@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 const childNS = "ns"
@@ -47,13 +49,17 @@ func childCM(name string) client.Object {
 	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: childNS}}
 }
 
-func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
+func TestEnsureAllCreatesChildrenAndDeriveRefs(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	refs, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")})
+	desired := []client.Object{childCM("a")}
+	if err := EnsureAll(context.Background(), cl, owner(), desired); err != nil {
+		t.Fatalf("ensure all: %v", err)
+	}
+	refs, err := DeriveRefs(scheme, desired)
 	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+		t.Fatalf("derive refs: %v", err)
 	}
 	if len(refs) != 1 || refs[0].Kind != "ConfigMap" || refs[0].Name != "a" || refs[0].APIVersion != "v1" {
 		t.Fatalf("unexpected refs: %#v", refs)
@@ -67,16 +73,19 @@ func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
 	}
 }
 
-func TestReconcileIsDeleteFreeAndDetachesOldChildren(t *testing.T) {
+func TestEnsureAllIsDeleteFree(t *testing.T) {
 	scheme := testScheme(t)
 	// 'old' was a previously created child; the new desired set no longer references it.
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: childNS, OwnerReferences: []metav1.OwnerReference{owner()}}}).
 		Build()
 
-	refs, err := Reconcile(context.Background(), cl, scheme, owner(), nil)
+	if err := EnsureAll(context.Background(), cl, owner(), nil); err != nil {
+		t.Fatalf("ensure all: %v", err)
+	}
+	refs, err := DeriveRefs(scheme, nil)
 	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+		t.Fatalf("derive refs: %v", err)
 	}
 	if len(refs) != 0 {
 		t.Fatalf("expected empty refs for empty desired, got %#v", refs)
@@ -87,13 +96,13 @@ func TestReconcileIsDeleteFreeAndDetachesOldChildren(t *testing.T) {
 	}
 }
 
-func TestReconcileDoesNotMutateCallerTemplate(t *testing.T) {
+func TestEnsureAllDoesNotMutateCallerTemplate(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	template := childCM("a")
-	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{template}); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{template}); err != nil {
+		t.Fatalf("ensure all: %v", err)
 	}
 	// The caller-owned template must be left pristine: no owner refs stamped, no resourceVersion/UID from Create.
 	tmpl := template.(*corev1.ConfigMap)
@@ -105,14 +114,14 @@ func TestReconcileDoesNotMutateCallerTemplate(t *testing.T) {
 	}
 }
 
-func TestReconcileFailsClosedOnConflictingOwner(t *testing.T) {
+func TestEnsureAllFailsClosedOnConflictingOwner(t *testing.T) {
 	scheme := testScheme(t)
 	conflicting := metav1.OwnerReference{APIVersion: "demo/v1", Kind: "Parent", Name: "other"}
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS, OwnerReferences: []metav1.OwnerReference{conflicting}}}).
 		Build()
 
-	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")}); err == nil {
+	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{childCM("a")}); err == nil {
 		t.Fatal("expected conflict error when adopting a child owned by another parent")
 	}
 	got := &corev1.ConfigMap{}
@@ -124,14 +133,14 @@ func TestReconcileFailsClosedOnConflictingOwner(t *testing.T) {
 	}
 }
 
-func TestReconcileAdoptsUnownedChild(t *testing.T) {
+func TestEnsureAllAdoptsUnownedChild(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS}}).
 		Build()
 
-	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")}); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{childCM("a")}); err != nil {
+		t.Fatalf("ensure all: %v", err)
 	}
 	got := &corev1.ConfigMap{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, got); err != nil {
@@ -140,4 +149,34 @@ func TestReconcileAdoptsUnownedChild(t *testing.T) {
 	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != "p" {
 		t.Fatalf("expected child adopted by parent, got %#v", got.OwnerReferences)
 	}
+}
+
+// TestRefsEqualIgnoreOrderSetSemantics guards the topology-drift comparison: it must be set equality on the
+// canonical (apiVersion,kind,name) key, never a length check. The [A,B] vs [A,C] case (equal count,
+// different member) is the one a naive len() comparison would wrongly accept.
+func TestRefsEqualIgnoreOrderSetSemantics(t *testing.T) {
+	a := ref("a")
+	b := ref("b")
+	c := ref("c")
+	cases := []struct {
+		name        string
+		left, right []storagev1alpha1.SnapshotChildRef
+		wantEqual   bool
+	}{
+		{name: "same set, same order", left: []storagev1alpha1.SnapshotChildRef{a, b}, right: []storagev1alpha1.SnapshotChildRef{a, b}, wantEqual: true},
+		{name: "same set, different order", left: []storagev1alpha1.SnapshotChildRef{a, b}, right: []storagev1alpha1.SnapshotChildRef{b, a}, wantEqual: true},
+		{name: "shrunk set (count differs)", left: []storagev1alpha1.SnapshotChildRef{a, b}, right: []storagev1alpha1.SnapshotChildRef{a}, wantEqual: false},
+		{name: "same count, different member", left: []storagev1alpha1.SnapshotChildRef{a, b}, right: []storagev1alpha1.SnapshotChildRef{a, c}, wantEqual: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RefsEqualIgnoreOrder(tc.left, tc.right); got != tc.wantEqual {
+				t.Fatalf("RefsEqualIgnoreOrder(%v, %v) = %v, want %v", tc.left, tc.right, got, tc.wantEqual)
+			}
+		})
+	}
+}
+
+func ref(name string) storagev1alpha1.SnapshotChildRef {
+	return storagev1alpha1.SnapshotChildRef{APIVersion: "v1", Kind: "ConfigMap", Name: name}
 }

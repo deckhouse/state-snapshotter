@@ -18,6 +18,7 @@ package demo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,10 +36,10 @@ import (
 )
 
 // DemoVirtualDiskSnapshotReconciler owns demo disk DOMAIN planning only: sourceRef validation, the
-// per-snapshot manifest-capture request (MCR), the data-leg volume-capture request (VCR), and the
+// per-snapshot manifest-capture request (MCR), the data-capture volume-capture request (VCR), and the
 // planning barrier. All Kubernetes transport (capture requests, owner references, optimistic-locked status
 // patches, the barrier condition) is delegated to the snapshot SDK (pkg/snapshotsdk). The domain decides
-// only what its source is and which PVC makes up its data leg; it never touches the cluster-scoped
+// only what its source is and which PVC it captures as its data; it never touches the cluster-scoped
 // SnapshotContent (owned by GenericSnapshotBinderController).
 type DemoVirtualDiskSnapshotReconciler struct {
 	Client    client.Client
@@ -89,8 +90,8 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	// Import mode (C5): spec.source.import switches this disk snapshot off capture. The domain controller
 	// does NO capture planning (no source-disk lookup, no MCR/VCR) — the live DemoVirtualDisk may be
 	// absent on import. The common controller materializes the backing SnapshotContent from the uploaded
-	// manifests and the data leg from the matching DataImport. Domain planning is trivially complete for an
-	// import leaf.
+	// manifests and the data capture from the matching DataImport. Domain planning is trivially complete for
+	// an import leaf.
 	if s.IsImportMode() {
 		return ctrl.Result{}, nil
 	}
@@ -113,18 +114,19 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		})
 	}
 
-	// Data leg (D3): resolve the source disk's single PVC into the data-leg target (domain decision). A
-	// missing PVC is an actionable, surfaced Ready=False (the PVC may still appear), not an endless raw
-	// requeue. A disk without spec.persistentVolumeClaimName is manifest-only (no data leg).
-	dataRef, terminalReason, terminalMessage, err := r.resolveDemoVirtualDiskDataRef(ctx, s, source)
+	// Data capture (D3): resolve the source disk's single PVC into the data-capture target (domain decision).
+	// A missing PVC is an actionable, surfaced Ready=False (the PVC may still appear), not an endless raw
+	// requeue. The SDK publishes the condition; the requeue (so the PVC is re-checked) is this
+	// controller's decision via ctrl.Result. A disk without spec.persistentVolumeClaimName is
+	// manifest-only (captures no data).
+	dataRef, missingReason, missingMessage, err := r.resolveDemoVirtualDiskDataRef(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if terminalReason != "" {
+	if missingReason != "" {
 		if perr := sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
-			Reason:  snapshotsdk.Reason(terminalReason),
-			Message: terminalMessage,
-			Requeue: true,
+			Reason:  snapshotsdk.Reason(missingReason),
+			Message: missingMessage,
 		}); perr != nil {
 			return ctrl.Result{}, perr
 		}
@@ -142,6 +144,11 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 			Name:       source.Name,
 		}},
 	}); err != nil {
+		if errors.Is(err, snapshotsdk.ErrManifestDrift) {
+			if perr := sdk.MarkPlanningFailed(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonManifestDrift), err); perr != nil {
+				return ctrl.Result{}, perr
+			}
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -150,14 +157,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	return ctrl.Result{}, sdk.MarkPlanningReady(ctx, adapter, "manifest capture request planned")
 }
 
-// resolveDemoVirtualDiskDataRef resolves the source disk's single PVC into the SDK data-leg target. It
-// returns a nil ref for a manifest-only disk, or a non-empty terminalReason (ArtifactMissing) when the
-// configured PVC is not yet present.
+// resolveDemoVirtualDiskDataRef resolves the source disk's single PVC into the SDK data-capture target. It
+// returns a nil ref for a manifest-only disk, or a non-empty missingReason (ArtifactMissing) when the
+// configured PVC is not yet present (the caller surfaces Ready=False and requeues).
 func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataRef(
 	ctx context.Context,
 	s *demov1alpha1.DemoVirtualDiskSnapshot,
 	source *demov1alpha1.DemoVirtualDisk,
-) (dataRef *snapshotsdk.Target, terminalReason string, terminalMessage string, err error) {
+) (dataRef *snapshotsdk.Target, missingReason string, missingMessage string, err error) {
 	pvcName := source.Spec.PersistentVolumeClaimName
 	if pvcName == "" {
 		return nil, "", "", nil
@@ -167,7 +174,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataRef(
 	pvc := &corev1.PersistentVolumeClaim{}
 	if getErr := reader.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: pvcName}, pvc); getErr != nil {
 		if apierrors.IsNotFound(getErr) {
-			return nil, storagev1alpha1.ReasonArtifactMissing, fmt.Sprintf("PersistentVolumeClaim %q not found for disk data leg", pvcName), nil
+			return nil, storagev1alpha1.ReasonArtifactMissing, fmt.Sprintf("PersistentVolumeClaim %q not found for disk data capture", pvcName), nil
 		}
 		return nil, "", "", getErr
 	}
