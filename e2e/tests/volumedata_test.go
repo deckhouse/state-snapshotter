@@ -93,7 +93,7 @@ func buildVolumeSource(ns, sc string) []*unstructured.Unstructured {
 				"accessModes":      []interface{}{"ReadWriteOnce"},
 				"storageClassName": sc,
 				"resources": map[string]interface{}{
-					"requests": map[string]interface{}{"storage": "1Gi"},
+					"requests": map[string]interface{}{"storage": "500Mi"},
 				},
 			},
 		}}
@@ -127,7 +127,7 @@ func buildVolumeSource(ns, sc string) []*unstructured.Unstructured {
 		// pre-created PVC vdPVCDisk; the values mirror that PVC).
 		"spec": map[string]interface{}{
 			"persistentVolumeClaimName": vdPVCDisk,
-			"size":                      "1Gi",
+			"size":                      "500Mi",
 			"storageClassName":          sc,
 		},
 	}}
@@ -143,7 +143,7 @@ func buildVolumeSource(ns, sc string) []*unstructured.Unstructured {
 		// data-backed disk must never be manifest-only in the volume-data flow.
 		"spec": map[string]interface{}{
 			"persistentVolumeClaimName": vdPVCStandalone,
-			"size":                      "1Gi",
+			"size":                      "500Mi",
 			"storageClassName":          sc,
 		},
 	}}

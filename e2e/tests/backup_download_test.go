@@ -83,7 +83,7 @@ func buildBackupSource(ns, sc string) []*unstructured.Unstructured {
 				"storageClassName": sc,
 				"volumeMode":       "Block",
 				"resources": map[string]interface{}{
-					"requests": map[string]interface{}{"storage": "1Gi"},
+					"requests": map[string]interface{}{"storage": "500Mi"},
 				},
 			},
 		}}
@@ -98,7 +98,7 @@ func buildBackupSource(ns, sc string) []*unstructured.Unstructured {
 			},
 			"spec": map[string]interface{}{
 				"persistentVolumeClaimName": pvcName,
-				"size":                      "1Gi",
+				"size":                      "500Mi",
 				"storageClassName":          sc,
 				"volumeMode":                "Block",
 			},

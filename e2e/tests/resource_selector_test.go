@@ -384,7 +384,7 @@ func labeledSelectorPVC(ns, name, sc, group string) *unstructured.Unstructured {
 			"accessModes":      []interface{}{"ReadWriteOnce"},
 			"storageClassName": sc,
 			"resources": map[string]interface{}{
-				"requests": map[string]interface{}{"storage": "1Gi"},
+				"requests": map[string]interface{}{"storage": "500Mi"},
 			},
 		},
 	}}
