@@ -442,6 +442,12 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 	allowRequeue bool,
 ) (ctrl.Result, error) {
 	if len(targets) == 0 {
+		// Residual/orphan-PVC wave is done with zero orphan targets (reachable only after the domain
+		// gate opened, so there really are no orphans): latch the residual gate Complete before clearing
+		// any stale VCR. This is the anti-deadlock stamp point for the zero-targets capture root.
+		if err := snapshotcontent.MarkResidualVolumeCaptureComplete(ctx, r.Client, content.Name, nil); err != nil {
+			return ctrl.Result{}, err
+		}
 		// No orphan PVCs in residual root scope: still clear any stale VCR / status.volumeCaptureRequestName
 		// left behind by a previous (VCR-based) run or migration.
 		return r.clearOrphanPVCStaleVCR(ctx, nsSnap, content)
@@ -474,6 +480,16 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 	}
 	if !allReady {
 		return requeueVolumeCaptureIf(allowRequeue, "waiting for orphan PVC child volume nodes")
+	}
+	// Residual/orphan-PVC wave finished: every orphan child volume node is linked and ready. Latch the
+	// residual gate Complete (recording the captured orphan UIDs for diagnostics) before clearing the
+	// stale VCR. NOT stamped on the !allReady requeue above, so the gate opens only once data is ready.
+	orphanUIDs := make([]string, 0, len(targets))
+	for _, target := range targets {
+		orphanUIDs = append(orphanUIDs, target.UID)
+	}
+	if err := snapshotcontent.MarkResidualVolumeCaptureComplete(ctx, r.Client, content.Name, orphanUIDs); err != nil {
+		return ctrl.Result{}, err
 	}
 	return r.clearOrphanPVCStaleVCR(ctx, nsSnap, content)
 }

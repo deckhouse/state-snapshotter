@@ -2,6 +2,8 @@
 
 > **Import addendum (ADR `2026-06-15-snapshot-export-import.md` §12, 2026-06-26).** Этот документ — capture-side. Импорт данных orphan-PVC (extended `VolumeSnapshot`) теперь идёт через единый маркер `spec.source.import: {}` (вместо `spec.source.dataImportName`), а владеющий `DataImport` находится reverse-lookup по `DataImport.spec.targetRef`. Форк extended-VS добавляет `status.{storageClassName,size,volumeMode}`, которые `volumesnapshotimport` зеркалит из `DataImport.spec`. Capture-семантика ниже не меняется.
 
+> **Ready-gate addendum (conditions-model ADR `2026-06-03-snapshot-conditions-model.md` §2.3, 2026-06-28).** Финальная residual/orphan-PVC-волна теперь **явно гейтит первый `Ready=True`** корневого `SnapshotContent`. Завершив волну (нет orphan-таргетов **или** вся финальная orphan-PVC-волна захвачена и готова), reconciler штампует латч-поле `SnapshotContent.status.residualVolumeCapture.phase=Complete` (MergeFrom-патч, идемпотентно; reconciler — единственный писатель). До латча агрегатор держит `Ready=False/ResidualVolumeCapturePending` (fail-closed, низший приоритет среди ног `Ready`), детерминированно убирая флап `Ready` True→False→True, который возникал, когда корень преждевременно показывал `Ready=True` до завершения orphan-волны. Монотонно + upgrade-guard (уже-`Ready=True` корень не пере-гейтится). Точная механика ноги (какая именно нога роняла `Ready` при поздней линковке orphan-узла) — в §2.3 conditions-model.
+
 - **Status:** Proposed (2026-06-09). Capture-side only; restore deferred.
 - **Scope:** namespace (root) `Snapshot` residual data leg for **orphan/uncovered PVCs**.
 - **Supersedes (narrowly):** parts of the N5 root-residual data leg that publish `SnapshotContent.status.dataRefs[]` from a **`VolumeCaptureRequest`** for the **root** scope; and the blanket prohibition on creating `VolumeSnapshot` in state-snapshotter (system-spec §3.9.9 / line "no shadow VolumeSnapshot").
@@ -45,6 +47,7 @@ For the **root namespace node only**, the residual data leg is implemented with 
 - **INV-ORPHAN3:** `VolumeSnapshot` objects MUST NOT appear in any MCP / manifest inventory / aggregated manifests (capture-side filter), for all VS. The MCP MUST still hold the PVC manifest.
 - **INV-ORPHAN4:** an orphan-PVC VS leaf appears **only** in `Snapshot.status.childrenSnapshotRefs[]` (visibility/lifecycle), **never** in `SnapshotContent.status.childrenSnapshotContentRefs[]`. Aggregation (`ChildrenReady`) and dedup remain content-driven and MUST NOT observe the VS leaf.
 - **INV-ORPHAN5:** coverage/dedup is unchanged — `subtree-covered pvcUIDs` come from child SnapshotContents; orphan = not covered. At most one data capture per `pvcUID` per run (preserves INV-P1).
+- **INV-ORPHAN6 (Ready-gate, 2026-06-28):** the root `SnapshotContent` MUST NOT emit its **first** `Ready=True` until the reconciler has latched `status.residualVolumeCapture.phase=Complete` on completion of the final orphan-PVC wave (fail-closed). Only the reconciler writes the latch (status field, MergeFrom, idempotent); the aggregator reads it locally and never writes it. The latch is monotonic (never reverts; an already-`Ready=True` root is not re-gated, so a controller rollout cannot flap `Ready`). See conditions-model ADR §2.3.
 
 ### Lifecycle / GC
 

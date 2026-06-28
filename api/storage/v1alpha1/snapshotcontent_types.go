@@ -155,7 +155,51 @@ type SnapshotContentStatus struct {
 	// +optional
 	DataRef *SnapshotDataBinding `json:"dataRef,omitempty"`
 
+	// ResidualVolumeCapture latches completion of the final residual/orphan-PVC capture wave on a
+	// namespace-root SnapshotContent. It is the gate signal the aggregator reads to hold the FIRST
+	// Ready=True until the residual wave is done (fail-closed). It is written ONLY by the snapshot
+	// reconciler (the sole owner of the namespace PVC scope), never by the aggregator: absence (or any
+	// Phase != Complete) means "wave not finished yet". See ResidualVolumeCaptureStatus.
+	// +optional
+	ResidualVolumeCapture *ResidualVolumeCaptureStatus `json:"residualVolumeCapture,omitempty"`
+
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ResidualVolumeCapturePhase values for SnapshotContentStatus.residualVolumeCapture.phase.
+const (
+	// ResidualVolumeCapturePhasePending is an explicit "wave not finished" marker. The reconciler is
+	// not required to write it: an absent residualVolumeCapture is treated as Pending. It exists for
+	// observability only; the gate reacts solely to Complete.
+	ResidualVolumeCapturePhasePending = "Pending"
+	// ResidualVolumeCapturePhaseComplete latches that the residual/orphan-PVC capture wave finished
+	// (no orphan targets, or every orphan child node is linked and ready). The aggregator opens the
+	// first Ready=True only when phase == Complete. Monotonic: it never reverts (point-in-time capture,
+	// immutable spec — no recapture).
+	ResidualVolumeCapturePhaseComplete = "Complete"
+)
+
+// ResidualVolumeCaptureStatus is the residual/orphan-PVC capture latch on a namespace-root
+// SnapshotContent. Only the snapshot reconciler writes it (status field, like dataRef), and only the
+// SnapshotContent aggregator reads it (locally, to gate the first Ready=True). It is NOT a condition:
+// conditions on SnapshotContent are the aggregator's exclusive domain, so the "wave finished" signal
+// that the reconciler owns is carried as a field and surfaced to users via the aggregate Ready reason.
+// +k8s:deepcopy-gen=true
+type ResidualVolumeCaptureStatus struct {
+	// Phase is the latch state. The reconciler writes only Complete; the aggregator treats anything
+	// other than Complete (including an absent residualVolumeCapture) as "wave not finished".
+	// +kubebuilder:validation:Enum=Pending;Complete
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// TargetUIDs records the captured orphan PVC UIDs at completion (empty when there were no orphan
+	// targets). Diagnostic only; the gate does not read it.
+	// +optional
+	TargetUIDs []string `json:"targetUIDs,omitempty"`
+
+	// CompletedAt records when the latch reached Complete. Diagnostic only.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 }
 
 // DataRefList returns status.dataRef as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a

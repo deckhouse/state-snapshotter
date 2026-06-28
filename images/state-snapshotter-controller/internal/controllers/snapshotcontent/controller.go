@@ -384,14 +384,23 @@ type commonContentStatusPlan struct {
 	readyReason  string
 	readyMessage string
 
-	// ManifestsArchived is the subtree latch AND the lowest-priority Ready leg (it gates the first
-	// Ready=True): True once this node's own manifest leg reached readiness AND every child content is
-	// ManifestsArchived=True; it never re-opens. Failed is terminal (own manifest leg failed before archive,
-	// or a child can never be archived). Being monotonic, it gates the first Ready=True without ever dragging
-	// Ready back down afterwards. See pkg/snapshot ConditionManifestsArchived.
+	// ManifestsArchived is the subtree latch AND the second-lowest-priority Ready leg (the residual-sweep
+	// gate is below it): it gates the first Ready=True; True once this node's own manifest leg reached
+	// readiness AND every child content is ManifestsArchived=True; it never re-opens. Failed is terminal
+	// (own manifest leg failed before archive, or a child can never be archived). Being monotonic, it gates
+	// the first Ready=True without ever dragging Ready back down afterwards. See pkg/snapshot ConditionManifestsArchived.
 	manifestsArchivedStatus  metav1.ConditionStatus
 	manifestsArchivedReason  string
 	manifestsArchivedMessage string
+
+	// ResidualSweep gates the FIRST Ready=True on a namespace-root content until the reconciler latches
+	// status.residualVolumeCapture.phase=Complete (the residual/orphan-PVC capture wave has finished). It
+	// is a fail-closed, monotonic, lowest-priority Ready leg (below ManifestsArchived): leaf/domain-child/
+	// non-root contents and roots whose Ready is already True are never gated. False is non-terminal
+	// (ResidualVolumeCapturePending). See computeResidualSweepGate / api/storage ResidualVolumeCaptureStatus.
+	residualSweepStatus  metav1.ConditionStatus
+	residualSweepReason  string
+	residualSweepMessage string
 }
 
 // reconcileCommonSnapshotContentStatus aggregates and publishes the SnapshotContent conditions and
@@ -478,16 +487,18 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 }
 
 // buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumesReady, ChildrenReady, the
-// ManifestsArchived subtree latch, and the derived Ready. Ready priority (single reason when several legs
-// are not satisfied):
+// ManifestsArchived subtree latch, the residual-sweep gate, and the derived Ready. Ready priority (single
+// reason when several legs are not satisfied):
 //
-//	manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > archivePending > Completed
+//	manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > archivePending > residualSweepPending > Completed
 //
 // Terminal failures win over pending (actionable first); own-node legs win over children, and the
-// manifest leg wins over the volume leg at equal severity. ManifestsArchived is the lowest-priority gate:
-// it blocks the FIRST Ready=True until the whole subtree's manifests are archived, but since the latch is
-// monotonic it never drags Ready back down afterwards. ChildrenSnapshotReady is NOT part of this formula;
-// it is only a gate/barrier upstream.
+// manifest leg wins over the volume leg at equal severity. ManifestsArchived is a low-priority gate: it
+// blocks the FIRST Ready=True until the whole subtree's manifests are archived. The residual-sweep gate is
+// the LOWEST priority: on a namespace-root content it blocks the FIRST Ready=True until the residual/
+// orphan-PVC capture wave is latched Complete (fail-closed). Both are monotonic, so neither ever drags
+// Ready back down after the first Ready=True. ChildrenSnapshotReady is NOT part of this formula; it is
+// only a gate/barrier upstream.
 func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
 	plan := commonContentStatusPlan{
 		manifestsReady:   metav1.ConditionFalse,
@@ -528,6 +539,13 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		return plan, err
 	}
 
+	// Residual-sweep gate (lowest-priority Ready leg): on a namespace-root content, hold the FIRST
+	// Ready=True until the reconciler latches the residual/orphan-PVC wave Complete. Local read only
+	// (no owner GET): the discriminator comes from this content's own spec.snapshotRef.
+	if err := r.computeResidualSweepGate(obj, &plan); err != nil {
+		return plan, err
+	}
+
 	switch {
 	case plan.manifestsReady != metav1.ConditionTrue && plan.manifestsFailed:
 		plan.readyStatus = metav1.ConditionFalse
@@ -564,6 +582,15 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = plan.manifestsArchivedReason
 		plan.readyMessage = plan.manifestsArchivedMessage
+	case plan.residualSweepStatus != metav1.ConditionTrue:
+		// Residual/orphan-PVC capture gate (lowest priority, fail-closed): on a namespace-root content,
+		// block the FIRST Ready=True until the reconciler latches residualVolumeCapture.phase=Complete.
+		// Reached only when every other leg (including the archive latch) is already satisfied. Monotonic:
+		// computeResidualSweepGate opens the gate once Ready is already True (or the latch is Complete), so
+		// this case never fires afterwards and cannot drag Ready back down (no True->False flap).
+		plan.readyStatus = metav1.ConditionFalse
+		plan.readyReason = plan.residualSweepReason
+		plan.readyMessage = plan.residualSweepMessage
 	default:
 		plan.readyStatus = metav1.ConditionTrue
 		plan.readyReason = snapshot.ReasonCompleted
@@ -575,8 +602,9 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 
 // computeManifestsArchived fills the ManifestsArchived subtree latch on plan. It is a lifelong latch
 // (never re-opens) that records the irreversible fact that this node and its whole subtree had their
-// manifests captured. It also acts as the lowest-priority Ready leg (see buildCommonSnapshotContentStatusPlan):
-// because it is monotonic, it gates the FIRST Ready=True but never drags Ready back down afterwards.
+// manifests captured. It also acts as the second-lowest-priority Ready leg (the residual-sweep gate is
+// below it; see buildCommonSnapshotContentStatusPlan): because it is monotonic, it gates the FIRST
+// Ready=True but never drags Ready back down afterwards.
 //
 //   - If the current condition is already True (Archived) or terminally False (Failed), it is held as-is
 //     (immune to later ManifestsReady/Ready degradation or to a child disappearing). Snapshot.spec is
@@ -628,6 +656,54 @@ func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context
 		} else {
 			plan.manifestsArchivedMessage = "manifests are being captured: " + plan.manifestsMessage
 		}
+	}
+	return nil
+}
+
+// computeResidualSweepGate fills the residual-sweep gate on plan: the LOWEST-priority Ready leg that holds
+// the FIRST Ready=True on a namespace-root content until the snapshot reconciler latches the residual/
+// orphan-PVC capture wave Complete (status.residualVolumeCapture.phase=Complete). It is fail-closed and
+// purely LOCAL: the aggregator never reads the owning Snapshot.
+//
+// Discriminator (all from this content's OWN object, no owner GET):
+//   - A child-volume-node content (LabelChildVolumeNode) models a single PVC and has no residual wave -> open.
+//   - Only a namespace-root content (spec.snapshotRef -> a core storage.deckhouse.io Snapshot) carries the
+//     residual wave; domain XxxxSnapshot / orphan-VolumeSnapshot-bound contents are never gated -> open.
+//   - Upgrade-guard (monotonicity): if Ready is ALREADY persisted True, never re-gate. The gate blocks only
+//     the FIRST Ready=True (like ManifestsArchived); on a controller rollout this prevents an already-ready
+//     root - whose latch field is still absent because it predates this feature - from being dragged back to
+//     False (the very flap this feature removes). On a clean install Ready=True can only have been persisted
+//     after the gate opened (latch Complete, monotonic), so the guard merely confirms a valid state.
+//
+// When none of the above opens the gate, it stays closed until the latch reaches Complete.
+func (r *SnapshotContentController) computeResidualSweepGate(obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
+	// Default open: leaf/domain-child/non-root, an already-Ready root, and a Complete latch all leave this True.
+	plan.residualSweepStatus = metav1.ConditionTrue
+	plan.residualSweepReason = snapshot.ReasonCompleted
+	plan.residualSweepMessage = "residual volume capture complete"
+
+	if obj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
+		return nil
+	}
+	apiVersion, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotRef", "kind")
+	if kind != "Snapshot" || apiVersion != storagev1alpha1.SchemeGroupVersion.String() {
+		return nil
+	}
+
+	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
+	if err != nil {
+		return fmt.Errorf("extract SnapshotContentLike for residual gate: %w", err)
+	}
+	if cur := snapshot.GetCondition(contentLike, snapshot.ConditionReady); cur != nil && cur.Status == metav1.ConditionTrue {
+		return nil
+	}
+
+	phase, _, _ := unstructured.NestedString(obj.Object, "status", "residualVolumeCapture", "phase")
+	if phase != storagev1alpha1.ResidualVolumeCapturePhaseComplete {
+		plan.residualSweepStatus = metav1.ConditionFalse
+		plan.residualSweepReason = snapshot.ReasonResidualVolumeCapturePending
+		plan.residualSweepMessage = "waiting for residual/orphan-PVC volume capture wave to complete"
 	}
 	return nil
 }
