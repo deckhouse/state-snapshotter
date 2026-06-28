@@ -18,21 +18,24 @@ on a nested Deckhouse cluster brought up by
 The specs run inside a single ordered `Describe`, registered by builder
 functions in dependency order:
 
-1. **Phase 1 - manifest-only capture/restore** (`captureSpecs`,
-   `aggregatedApiSpecs`, `restoreSpecs`): apply a PVC-free demo source, create a
-   root `Snapshot`, assert the `Snapshot` / `SnapshotContent` and demo child
-   snapshots reach Ready, read the aggregated APIs, and restore the manifests
-   into a fresh namespace. Needs only `state-snapshotter` (no volume-data leg).
-2. **Phase 2 - export -> import + GC/TTL** (`importSpecs`, `gcSpecs`): walk the
-   captured tree, export each node's manifests, reconstruct it through the import
-   upload path, then exercise the root TTL/GC cascade.
-3. **Phase 3 - full volume-data flow** (`volumeDataSpecs`, env-gated by
+1. **Phase 1 & 2 - manifest-only flow** (`captureSpecs`, `aggregatedApiSpecs`,
+   `namespaceCaptureReworkSpecs`, `restoreSpecs`, `importSpecs`, `gcSpecs`): apply
+   the manifest-only source (an ownerless ConfigMap plus a single manifest-only
+   `DemoVirtualMachine`), create a root `Snapshot`, assert the `Snapshot` /
+   `SnapshotContent` and the demo child snapshot reach Ready, read the aggregated
+   APIs, restore the manifests into a fresh namespace, run the export -> import
+   round-trip, and exercise the root TTL/GC cascade. Generic-object discovery
+   (RBAC/Service/Deployment/etc.) is covered by `namespaceCaptureReworkSpecs`, not
+   the capture fixture. All these cheap specs share one `captured` tree (gc uses
+   its own short-TTL sub-tree) and need only `state-snapshotter` (no volume-data
+   leg).
+2. **Phase 3 - full volume-data flow** (`volumeDataSpecs`, env-gated by
    `E2E_VOLUME_DATA`): provision a thin, snapshot-capable StorageClass via
    `storage-e2e/pkg/testkit.EnsureDefaultStorageClass` (which auto-enables
    `sds-node-configurator` + `sds-local-volume`), capture PVC data, restore via
    `VolumeRestoreRequest`, and assert the marker bytes survive. Needs
    `storage-foundation` (enabled in `tests/cluster_config.yml`).
-4. **Phase 4 - backup-system HTTP download** (`backupDownloadSpecs`, env-gated by
+3. **Phase 4 - backup-system HTTP download** (`backupDownloadSpecs`, env-gated by
    `E2E_VOLUME_DATA`): provision Block volumes (orphan PVC + two
    `DemoVirtualDisk` scratch PVCs), write data via dedicated block-writer pods,
    attach `DemoVirtualMachine` to one disk while the other stays standalone,
@@ -41,7 +44,7 @@ functions in dependency order:
    `DataExport` from an in-cluster backup-client pod (Bearer auth +
    `GET /api/v1/block`, sha256 compared to source). Needs
    `storage-volume-data-manager` (enabled in `tests/cluster_config.yml`).
-5. **Phase 5 - backup-system restore import** (`backupRestoreSpecs`, env-gated by
+4. **Phase 5 - backup-system restore import** (`backupRestoreSpecs`, env-gated by
    `E2E_VOLUME_DATA`, chained from phase 4): reshape the captured tree for the
    import upload path (VM manifest folded into root; three data leaves), POST
    manifests via `manifests-and-children-refs-upload`, upload volume bytes via
@@ -123,6 +126,11 @@ pseudo-version. `state-snapshotter/api` is always consumed via
   `curlimages/curl:8.11.1` (Alpine/busybox, which provides all four).
 - `E2E_KEEP_CLUSTER_ON_FAILURE`: when truthy, and at least one spec failed, skip
   nested-cluster teardown so the live cluster can be inspected. Off by default.
+- `E2E_KEEP_CLUSTER`: when truthy, skip per-spec resource cleanup (namespaces, pods,
+  import trees, DataExports, etc.) regardless of pass/fail, so restored/imported
+  resources survive for live inspection. Off by default. Note: the nested-cluster
+  connection (SSH tunnels, cluster lock) is still torn down; inspect via your own
+  kubeconfig.
 
 ## Quick start
 

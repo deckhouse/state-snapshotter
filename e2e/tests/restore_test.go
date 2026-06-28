@@ -26,11 +26,11 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// restoreSpecs registers the phase-1 manifest-level restore specs: read the apply-ready manifests for
-// the captured root via manifests-with-data-restoration, apply them into a fresh namespace, and assert
-// the source objects are recreated.
+// restoreSpecs registers the manifest-level restore specs of the manifest-only flow: read the apply-ready
+// manifests for the captured root via manifests-with-data-restoration, apply them into a fresh namespace,
+// and assert the source objects are recreated.
 func restoreSpecs() {
-	Context("Phase 1: manifest-level restore", func() {
+	Context("Manifest-level restore", func() {
 		var restoreNS string
 
 		BeforeAll(func() {
@@ -73,13 +73,11 @@ func restoreSpecs() {
 			val, _, _ := unstructured.NestedString(cm.Object, "data", "demo")
 			Expect(val).To(Equal("tree"))
 
-			By("Asserting the demo CRs were recreated")
+			By("Asserting the manifest-only DemoVirtualMachine was recreated")
+			// The manifest-only tree carries no DemoVirtualDisk (dataless disks are disallowed), so only the
+			// VM domain node is expected back alongside the ConfigMap manifest leg.
 			_, err = getResource(ctx, demoVMGVR, restoreNS, srcVMName)
 			Expect(err).NotTo(HaveOccurred(), "DemoVirtualMachine should be recreated")
-			_, err = getResource(ctx, demoDiskGVR, restoreNS, srcDiskVMName)
-			Expect(err).NotTo(HaveOccurred(), "nested DemoVirtualDisk should be recreated")
-			_, err = getResource(ctx, demoDiskGVR, restoreNS, srcDiskStandalone)
-			Expect(err).NotTo(HaveOccurred(), "standalone DemoVirtualDisk should be recreated")
 		})
 	})
 }

@@ -95,7 +95,8 @@ check-env: ## Print the relevant env vars for the nested flow
 	@echo "E2E_VOLUME_DATA:                        $${E2E_VOLUME_DATA}  # true|1|yes -> run phase 3 (full volume-data flow)"
 	@echo "E2E_STORAGE_CLASS:                      $${E2E_STORAGE_CLASS}  # thin SC provisioned/used for phase 3 (default e2e-thin)"
 	@echo "E2E_PROBE_IMAGE:                        $${E2E_PROBE_IMAGE}  # image with sh+cat for PVC round-trip pods (default busybox:1.36)"
-	@echo "E2E_KEEP_CLUSTER_ON_FAILURE:            $${E2E_KEEP_CLUSTER_ON_FAILURE}  # true|1|yes -> skip teardown if a spec failed"
+	@echo "E2E_KEEP_CLUSTER_ON_FAILURE:            $${E2E_KEEP_CLUSTER_ON_FAILURE}  # true|1|yes -> keep per-spec resources if a spec failed"
+	@echo "E2E_KEEP_CLUSTER:                       $${E2E_KEEP_CLUSTER}  # true|1|yes -> keep per-spec resources always (pass or fail)"
 	@echo "E2E_TIMELINE_DIR:                       $${E2E_TIMELINE_DIR}  # capture timeline logs dir (default <tmp>/e2e/timeline)"
 	@echo "E2E_LOGS_DIR:                           $${E2E_LOGS_DIR}  # per-pod/container controller logs on failure (default <tmp>/e2e/logs)"
 
