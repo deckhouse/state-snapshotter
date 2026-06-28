@@ -212,7 +212,12 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	for _, gvk := range gvksToCheck {
 		obj.SetGroupVersionKind(gvk)
-		err = r.APIReader.Get(ctx, contentKey, obj)
+		// Read the own object from the cache: gvksToCheck only holds content GVKs that already have a
+		// started For-informer (AddWatchForContent registers the GVK and its watch transactionally), so
+		// this never forces a new informer and a non-match returns a clean NotFound, same as the uncached
+		// reader did. Spec is immutable and conditions are written under a changed-gate, so the cached
+		// (eventually consistent) read cannot add reconcile churn.
+		err = r.Client.Get(ctx, contentKey, obj)
 		if err != nil {
 			if errors.IsNotFound(err) {
 				continue
