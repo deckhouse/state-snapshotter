@@ -435,6 +435,13 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		statusMap = map[string]interface{}{}
 	}
 
+	// base for the condition-only MergeFrom patch below, captured as-read BEFORE any condition mutation.
+	// upsertContentCondition writes conditions straight into obj.status.conditions (the SnapshotContentLike
+	// wrapper is a view over obj), so capturing base here - rather than just before the write - keeps the
+	// MergeFrom diff limited to status.conditions. selfHealDataArtifactOwnerRefs already ran above, so its
+	// effects are folded into base and never enter the patch.
+	base := obj.DeepCopy()
+
 	gen := obj.GetGeneration()
 	desired := []metav1.Condition{
 		{Type: snapshot.ConditionManifestsReady, Status: plan.manifestsReady, Reason: plan.manifestsReason, Message: plan.manifestsMessage, ObservedGeneration: gen},
@@ -458,10 +465,15 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	}
 	obj.Object["status"] = statusMap
 	snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
-	if err := r.Status().Update(ctx, obj); err != nil {
-		if errors.IsConflict(err) {
-			return false, nil
-		}
+	// Condition-only MergeFrom patch (not a full Status().Update). base vs obj differ only in
+	// status.conditions, so the JSON merge patch is {"status":{"conditions":[...]}} and leaves sibling
+	// status fields written by the snapshot reconciler (residualVolumeCapture, dataRefs, ...) untouched.
+	// conditions are the aggregator's exclusive domain (INV-COND2, single writer) and reconcile of one
+	// object is serialized, so no optimistic lock is needed: MergeFrom sends no resourceVersion, so a
+	// concurrent sibling-field write does not turn into a 409 (which the previous Status().Update would
+	// convert into an extra requeue). Staleness is still safe because the changed-gate above only fires when
+	// the monotonic-cache-derived desired conditions actually differ.
+	if err := r.Status().Patch(ctx, obj, client.MergeFrom(base)); err != nil {
 		return false, err
 	}
 	return ready, nil
