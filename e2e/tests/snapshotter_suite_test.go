@@ -89,9 +89,10 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		importSpecs()                 // import_gc_test.go: export -> import round-trip
 		gcSpecs()                     // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
 	})
-	volumeDataSpecs()     // volumedata_test.go: full volume-data flow (phase 3, env-gated)
-	backupDownloadSpecs() // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
-	importVariantsSpecs() // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
+	resourceSelectorSpecs() // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
+	volumeDataSpecs()       // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	backupDownloadSpecs()   // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
+	importVariantsSpecs()   // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
 })
 
 func prepareSuite() {
