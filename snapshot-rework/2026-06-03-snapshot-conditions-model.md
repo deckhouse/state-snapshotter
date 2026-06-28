@@ -46,6 +46,19 @@ Snapshot.Ready        = mirror(SnapshotContent.Ready)   // НЕ локальны
 
 Это **новое осознанное решение по публичному API**, а не возврат старых мёртвых констант `ManifestsReady`/`DataReady` из Appendix A (те никогда не выставлялись и были удалены в PR2c). Принцип «минимальный набор conditions» сохраняется: `RequestsReady` оказался **слишком грубым** для ops-диагностики и **заменяется** двумя доменными линиями, а не расширяется набором технических `MCR`/`VCR`-conditions. На первом шаге sequencing сохраняется (волюмная линия оценивается после манифестной); пока манифесты не готовы — `VolumesReady=Unknown/ManifestCapturePending` (линия ещё не оценивалась, это не отказ тома). Независимая оценка линий — отдельный follow-up. Это **дизайн v0** — никакого `RequestsReady` в модели нет вовсе (не пишем, никаких миграций/совместимости со старым условием не предусматриваем).
 
+### 2.3. Residual-gate первого `Ready=True` (Update 2026-06-28)
+
+Для namespace-root `SnapshotContent` со смешанным деревом (доменные дети + orphan-PVC) три ноги формулы (`ManifestsReady && VolumesReady && ChildrenReady`) могли стать `True` **после** готовности доменных детей, но **до** запуска финальной residual/orphan-PVC-волны (волна стартует только когда все доменные дети готовы, затем линкует orphan child-node в дерево). Это давало флап `Ready` True→False→True (линковка orphan-ребёнка роняет `ChildrenReady`), а потребитель, увидевший первый `True`, получал на `manifests-with-data-restoration` `ErrNotReady`/409.
+
+Контракт: корневой content (и зеркало `Snapshot.Ready`) не имеет права **впервые** выдать `Ready=True`, пока residual-волна не завершена (нет orphan-таргетов **или** все orphan child-nodes слинкованы и готовы). Реализовано **fail-closed**-гейтом — дополнительной **низшей по приоритету** ногой `Ready`:
+
+- Сигнал завершения волны — поле `SnapshotContent.status.residualVolumeCapture.phase` (латч `Complete`), а **не** condition: conditions на content — эксклюзивная зона агрегатора (INV-COND2), а «волна завершена» знает только snapshot-reconciler (владелец PVC-скоупа namespace). Reconciler — **единственный писатель** латча (status-поле, как `dataRef`/`manifestCheckpointName`; MergeFrom-патч, идемпотентно), штампует `Complete` во всех root-путях: capture (после финальной orphan-волны), import (точка успеха), static-bind (steady-state).
+- Агрегатор — **чистый локальный читатель**: для root-кандидата (`!leaf(LabelChildVolumeNode) && spec.snapshotRef.kind==Snapshot` в группе `storage.deckhouse.io/v1alpha1`) при `phase != Complete` выставляет `Ready=False/ResidualVolumeCapturePending`; leaf / доменные / non-root content'ы и `phase==Complete` ногу не гейтят. Владельца агрегатор **не читает** (дискриминатор «это root» берётся из собственного `spec.snapshotRef.kind`).
+- **Монотонность + upgrade-guard:** латч `Complete` назад не откатывается; если `Ready` **уже** персистнут `True`, гейт не применяется (блокируется только **первый** `Ready=True`, как монотонный `ManifestsArchived`), что исключает флап на rollout контроллера на уже-готовые корни.
+- import/static-bind получают первый `Ready=True` чуть позже штампа (до него — `False/ResidualVolumeCapturePending`); это `False→True`, не флап.
+
+`ManifestsArchived` (subtree-latch завершения доменной волны по **не-листовым** детям) этим гейтом **не затрагивается**: его ранний `True` — необходимый precondition запуска orphan-волны (по нему root понимает, что доменные дети сняли манифесты), а манифест orphan-PVC принадлежит листовому child-node, исключённому из subtree-latch. Гейтить `ManifestsArchived` на `phase==Complete` инвертировало бы конвейер (precondition зависел бы от своего же downstream-эффекта) и задержало teardown per-namespace capture-RBAC. Гарантию «первый `Ready=True` ⟹ данные готовы» даёт только residual-gate. Детали реализации — `api/storage/v1alpha1` `ResidualVolumeCaptureStatus` и `SnapshotContentController.computeResidualSweepGate`.
+
 ## 3. Размещение conditions (Snapshot vs SnapshotContent)
 
 Асимметрия следует из архитектуры (§3.2.2 / §3.8 spec): `SnapshotContent` — долговечный SoT (переживает удаление `Snapshot`), `Snapshot.Ready` его зеркалит; барьер волны читает дочерний **`Snapshot`** (контента ребёнка может ещё не быть в момент планирования верхнего priority-слоя).
@@ -106,16 +119,16 @@ ChildrenSnapshotReady:  True/Completed | False/Planning | False/PlanningFailed
 ManifestsReady:         True/Completed | False/ManifestCapturePending | False/ManifestCheckpointFailed
 VolumesReady:           True/Completed | Unknown/ManifestCapturePending | False/DataCapturePending | False/<DataArtifact*|ArtifactMissing>
 ChildrenReady:          True/Completed | False/ChildrenPending | False/ChildrenFailed
-Ready:                  True/Completed | False/<manifest|data leg reason> | False/ChildrenPending | False/ChildrenFailed
+Ready:                  True/Completed | False/<manifest|data leg reason> | False/ChildrenPending | False/ChildrenFailed | False/ResidualVolumeCapturePending
 ```
 
 Приоритет reason у `Ready` (несёт один reason при нескольких упавших ногах):
 
 ```text
-manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed
+manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > residualVolumeCapturePending > Completed
 ```
 
-(терминальные провалы первыми — actionable; свой узел перед детьми при равной тяжести; при сохранённом sequencing `volumesPending` выставляется только после готовности манифестной линии.)
+(терминальные провалы первыми — actionable; свой узел перед детьми при равной тяжести; при сохранённом sequencing `volumesPending` выставляется только после готовности манифестной линии. `residualVolumeCapturePending` — низший по приоритету, **fail-closed** gate первого `Ready=True` только на namespace-root content (§2.3): любая обычная/терминальная нога его перекрывает.)
 
 **Фаза «до контента»:** пока bound `SnapshotContent` ещё не создан (или у него ещё нет `Ready`), `Snapshot.Ready = False/ContentBindingPending` (локальный transitional pre-bind). После bind — только mirror.
 
@@ -123,7 +136,7 @@ manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPen
 
 Дизайн: [`docs/state-snapshotter-rework/design/status-propagation-and-visibility.md`](../docs/state-snapshotter-rework/design/status-propagation-and-visibility.md). Одна модель, фазы: **Phase 1** — progress-aware `Ready=False` (богатые reason/message, счётчики прогресса, leaf-chain в `ChildrenFailed`, mirror на `Snapshot`); **Phase 2a** — MCP/VSC wake-up/revalidation watches для деградации артефактов после `Ready=True`. Pending и degradation используют один и тот же pipeline и таксономию reason'ов.
 
-- **Pending reasons:** `ManifestCapturePending`, `DataCapturePending` (наружу для not-ready data; `ArtifactNotReady` остаётся внутренним/compat), `ChildrenPending`, `ContentBindingPending` (только pre-bind на `Snapshot`).
+- **Pending reasons:** `ManifestCapturePending`, `DataCapturePending` (наружу для not-ready data; `ArtifactNotReady` остаётся внутренним/compat), `ChildrenPending`, `ResidualVolumeCapturePending` (только namespace-root, fail-closed gate первого `Ready=True` до латча `residualVolumeCapture.phase==Complete`, §2.3), `ContentBindingPending` (только pre-bind на `Snapshot`).
 - **Failed reasons:** `ManifestCheckpointFailed`, `ArtifactMissing`, `DataArtifactInvalid`/`DataArtifactNotSupported`, `ArtifactFailed` (deferred — не используется в Phase 2a), `ChildrenFailed`.
 - **Прогресс-сообщения:** `"<ready>/<total> ready"` + capped pending list (max 5, затем `" (+N more)"`).
 - **Leaf-chain (только в content-агрегации):** канонический parseable формат `ChildrenFailed`:
