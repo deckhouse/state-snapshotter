@@ -92,7 +92,7 @@ func configMapObject(ns, name string, data map[string]interface{}) *unstructured
 func namespaceCaptureReworkSpecs() {
 	captureRBACHookSpecs()  // E1
 	rawSecretsSpecs()       // E4
-	inclusionRuleSpecs()    // E5 (reuses the shared captured tree)
+	inclusionRuleSpecs()    // E5 (self-contained: generic + RBAC + domain object inclusion/exclusion)
 	specImmutabilitySpecs() // E6
 	arbitraryCRSpecs()      // E2 (env-gated)
 	childDegradationSpecs() // E3 (env-gated)
@@ -271,20 +271,142 @@ func rawSecretsSpecs() {
 	})
 }
 
-// E5 — discovery inclusion/exclusion rule on the shared captured tree.
+// E5 — discovery inclusion/exclusion rule. Self-contained: applies a rich set of ownerless user objects
+// (ConfigMap + a non-default ServiceAccount + Role + RoleBinding + headless Service + replicas:0
+// Deployment) plus a domain DemoVirtualMachine into its own namespace, captures a root Snapshot, and
+// asserts the default-include discovery rule: every ownerless user object lands in the root own-manifests,
+// while control-plane noise, controller-owned dependents, snapshot/own machinery, and domain
+// subtree-covered objects are excluded.
 func inclusionRuleSpecs() {
 	Context("Commit 5 / E5: discovery inclusion/exclusion rule", func() {
-		It("includes ownerless user objects and excludes machinery/noise/owner-managed objects", func() {
-			Expect(captured.namespace).NotTo(BeEmpty(), "capture phase must have run first")
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		It("includes ownerless user objects (RBAC/Service/Deployment/SA/ConfigMap) and excludes machinery/noise/owner-managed/domain-covered objects", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			objs, err := getRootOwnManifests(ctx, captured.namespace, captured.rootSnap)
+			ns := uniqueNS("inclusion")
+			Expect(ensureNamespace(ctx, ns)).To(Succeed())
+			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
+
+			const (
+				e5ConfigMap = "e5-cm"
+				e5SA        = "e5-sa"
+				e5Role      = "e5-role"
+				e5RoleBind  = "e5-rolebinding"
+				e5Service   = "e5-svc"
+				e5Deploy    = "e5-deploy"
+				e5VM        = "e5-vm"
+			)
+
+			configMap := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]interface{}{"name": e5ConfigMap, "namespace": ns},
+				"data":       map[string]interface{}{"demo": "tree"},
+			}}
+			serviceAccount := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "ServiceAccount",
+				"metadata":   map[string]interface{}{"name": e5SA, "namespace": ns},
+			}}
+			role := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "rbac.authorization.k8s.io/v1",
+				"kind":       "Role",
+				"metadata":   map[string]interface{}{"name": e5Role, "namespace": ns},
+				"rules": []interface{}{map[string]interface{}{
+					"apiGroups": []interface{}{""},
+					"resources": []interface{}{"configmaps"},
+					"verbs":     []interface{}{"get", "list", "watch"},
+				}},
+			}}
+			roleBinding := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "rbac.authorization.k8s.io/v1",
+				"kind":       "RoleBinding",
+				"metadata":   map[string]interface{}{"name": e5RoleBind, "namespace": ns},
+				"roleRef": map[string]interface{}{
+					"apiGroup": "rbac.authorization.k8s.io",
+					"kind":     "Role",
+					"name":     e5Role,
+				},
+				"subjects": []interface{}{map[string]interface{}{
+					"kind":      "ServiceAccount",
+					"name":      e5SA,
+					"namespace": ns,
+				}},
+			}}
+			// Headless Service (clusterIP: None): never collides on an allocated ClusterIP; its EndpointSlices
+			// are controller-owned and so excluded from the root manifests.
+			service := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Service",
+				"metadata":   map[string]interface{}{"name": e5Service, "namespace": ns},
+				"spec": map[string]interface{}{
+					"clusterIP": "None",
+					"selector":  map[string]interface{}{"app": e5Deploy},
+					"ports": []interface{}{map[string]interface{}{
+						"port":       int64(80),
+						"targetPort": int64(80),
+					}},
+				},
+			}}
+			// replicas:0 Deployment: a real workload manifest that schedules no Pod (keeps the spec infra-free).
+			// The Deployment itself is ownerless (included); its ReplicaSet is controller-owned (excluded).
+			deployment := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata":   map[string]interface{}{"name": e5Deploy, "namespace": ns},
+				"spec": map[string]interface{}{
+					"replicas": int64(0),
+					"selector": map[string]interface{}{"matchLabels": map[string]interface{}{"app": e5Deploy}},
+					"template": map[string]interface{}{
+						"metadata": map[string]interface{}{"labels": map[string]interface{}{"app": e5Deploy}},
+						"spec": map[string]interface{}{
+							"containers": []interface{}{map[string]interface{}{
+								"name":  "pause",
+								"image": "registry.k8s.io/pause:3.9",
+							}},
+						},
+					},
+				},
+			}}
+			// Domain DemoVirtualMachine: captured by its own domain child snapshot, so it must be EXCLUDED
+			// from the namespace-root own-manifests (subtree-covered).
+			vm := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": demoGroupVersion,
+				"kind":       "DemoVirtualMachine",
+				"metadata":   map[string]interface{}{"name": e5VM, "namespace": ns},
+				"spec":       map[string]interface{}{},
+			}}
+
+			By("Applying the rich ownerless user object set plus a domain VM")
+			Expect(applyObjects(ctx, []*unstructured.Unstructured{
+				configMap, serviceAccount, role, roleBinding, service, deployment, vm,
+			}, ns)).To(Succeed())
+
+			By("Capturing the root Snapshot and waiting for the whole tree to be Ready and archived")
+			Expect(createRootSnapshot(ctx, ns, "e5-snap")).To(Succeed())
+			_, err := waitSnapshotReady(ctx, ns, "e5-snap", suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(waitRootArchived(ctx, ns, "e5-snap", suiteCfg.captureReadyTO)).To(Succeed())
+
+			objs, err := getRootOwnManifests(ctx, ns, "e5-snap")
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Asserting the ownerless user ConfigMap is included")
-			_, found := findManifest(objs, "ConfigMap", srcConfigMapName)
-			Expect(found).To(BeTrue(), "ownerless ConfigMap must be included")
+			By("Asserting every ownerless user object is included in the root own-manifests")
+			for _, want := range []struct{ kind, name string }{
+				{"ConfigMap", e5ConfigMap},
+				{"ServiceAccount", e5SA},
+				{"Role", e5Role},
+				{"RoleBinding", e5RoleBind},
+				{"Service", e5Service},
+				{"Deployment", e5Deploy},
+			} {
+				_, found := findManifest(objs, want.kind, want.name)
+				Expect(found).To(BeTrue(), "ownerless %s/%s must be included in root manifests", want.kind, want.name)
+			}
+
+			By("Asserting objects captured by a domain child snapshot are excluded from the root")
+			_, hasVM := findManifest(objs, "DemoVirtualMachine", e5VM)
+			Expect(hasVM).To(BeFalse(), "DemoVirtualMachine is captured by its domain snapshot and must be excluded from root")
 
 			By("Asserting snapshot machinery and own operational kinds never leak into root manifests")
 			machineryKinds := []string{
@@ -296,13 +418,10 @@ func inclusionRuleSpecs() {
 				k := objs[i].GetKind()
 				Expect(machineryKinds).NotTo(ContainElement(k), "machinery kind %s leaked into root manifests", k)
 				Expect(k).NotTo(Equal("Pod"), "controller-owned Pod must not be captured")
+				Expect(k).NotTo(Equal("ReplicaSet"), "controller-owned ReplicaSet must not be captured")
 			}
 
-			By("Asserting objects already captured by domain child snapshots are excluded from the root")
-			_, hasVM := findManifest(objs, "DemoVirtualMachine", srcVMName)
-			Expect(hasVM).To(BeFalse(), "DemoVirtualMachine is captured by its domain snapshot and must be excluded from root")
-
-			By("Asserting noise objects are excluded")
+			By("Asserting control-plane noise is excluded")
 			_, hasDefaultSA := findManifest(objs, "ServiceAccount", "default")
 			Expect(hasDefaultSA).To(BeFalse(), "default ServiceAccount must be excluded")
 			_, hasRootCA := findManifest(objs, "ConfigMap", "kube-root-ca.crt")
