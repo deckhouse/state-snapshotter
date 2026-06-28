@@ -744,7 +744,13 @@ func TestReconcileVolumeCapturePublish_VolumeSnapshotStatusErrorIsTerminal(t *te
 	}
 }
 
-func TestEnsureOrphanPVCVolumeSnapshots_StaleLeafCleanup(t *testing.T) {
+// TestEnsureOrphanPVCVolumeSnapshots_DurableVSNotPruned verifies the orphan VolumeSnapshot is durable:
+// the visibility-leaf list on the Snapshot still tracks the current desired target set (domain children
+// preserved, new leaf added, a leaf no longer desired dropped from the list), but the VolumeSnapshot
+// OBJECT is NOT deleted mid-life — it is retained for the life of the Snapshot and removed only by
+// ownerRef GC. Orphan capture is now sequenced after the domain wave, so "became covered -> prune" churn
+// no longer happens; the durable object is the snapshot of the PVC.
+func TestEnsureOrphanPVCVolumeSnapshots_DurableVSNotPruned(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	scheme := testVolumeCaptureScheme(t)
@@ -792,13 +798,15 @@ func TestEnsureOrphanPVCVolumeSnapshots_StaleLeafCleanup(t *testing.T) {
 		t.Fatalf("new VS leaf %q must be present, got %#v", newName, fresh.Status.ChildrenSnapshotRefs)
 	}
 	if gotNames[staleName] {
-		t.Fatalf("stale VS leaf %q must be pruned, got %#v", staleName, fresh.Status.ChildrenSnapshotRefs)
+		t.Fatalf("non-desired VS leaf %q must be dropped from the visibility list, got %#v", staleName, fresh.Status.ChildrenSnapshotRefs)
 	}
 
-	goneVS := &unstructured.Unstructured{}
-	goneVS.SetGroupVersionKind(csiVolumeSnapshotGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: staleName}, goneVS); !apierrors.IsNotFound(err) {
-		t.Fatalf("stale VS object must be deleted, got %v", err)
+	// The durable VS object must NOT be deleted: it is the snapshot of the PVC and lives for the Snapshot's
+	// lifetime (ownerRef GC only). This is the core behavior change vs the old covered-driven pruning.
+	keptVS := &unstructured.Unstructured{}
+	keptVS.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: staleName}, keptVS); err != nil {
+		t.Fatalf("durable orphan VS object %q must be retained (not pruned), got err=%v", staleName, err)
 	}
 }
 

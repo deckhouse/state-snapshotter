@@ -18,122 +18,390 @@ package namespacemanifest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
-func TestBuildManifestCaptureTargets_EmptyNamespaceHasNoTargets(t *testing.T) {
-	listKinds := make(map[schema.GroupVersionResource]string, len(n2aNamespacedGVR))
-	for _, gvr := range n2aNamespacedGVR {
-		listKinds[gvr] = gvr.Resource + "List"
-	}
-	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), listKinds)
+// fakeDiscovery is a minimal discovery.DiscoveryInterface double: only ServerPreferredNamespacedResources
+// is exercised by BuildManifestCaptureTargets. The embedded interface is nil; any other method would panic
+// (none are called here).
+type fakeDiscovery struct {
+	discovery.DiscoveryInterface
+	resources []*metav1.APIResourceList
+	err       error
+}
 
-	targets, err := BuildManifestCaptureTargets(context.Background(), dyn, "ns1")
+func (f *fakeDiscovery) ServerPreferredNamespacedResources() ([]*metav1.APIResourceList, error) {
+	return f.resources, f.err
+}
+
+// gvrEntry pairs a GVR with its list Kind for wiring both discovery and the dynamic fake. verbs overrides
+// the discovery verbs for this resource; when empty it defaults to the full get,list,watch set (a normal
+// etcd-backed resource).
+type gvrEntry struct {
+	gvr      schema.GroupVersionResource
+	kind     string
+	listKind string
+	verbs    metav1.Verbs
+}
+
+func defaultGVRs() []gvrEntry {
+	return []gvrEntry{
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}, kind: "Pod", listKind: "PodList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}, kind: "ConfigMap", listKind: "ConfigMapList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}, kind: "Secret", listKind: "SecretList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "serviceaccounts"}, kind: "ServiceAccount", listKind: "ServiceAccountList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "endpoints"}, kind: "Endpoints", listKind: "EndpointsList"},
+		{gvr: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumeclaims"}, kind: "PersistentVolumeClaim", listKind: "PersistentVolumeClaimList"},
+		{gvr: schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, kind: "Lease", listKind: "LeaseList"},
+		{gvr: schema.GroupVersionResource{Group: "cilium.io", Version: "v2", Resource: "ciliumendpoints"}, kind: "CiliumEndpoint", listKind: "CiliumEndpointList"},
+		// metrics.k8s.io is a virtual aggregated API: get+list only, no watch. It must be dropped at
+		// enumeration by the watch-verb signal (not a per-resource denylist).
+		{gvr: schema.GroupVersionResource{Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods"}, kind: "PodMetrics", listKind: "PodMetricsList", verbs: metav1.Verbs{"get", "list"}},
+		{gvr: schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}, kind: "VolumeSnapshot", listKind: "VolumeSnapshotList"},
+		{gvr: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}, kind: "RoleBinding", listKind: "RoleBindingList"},
+		{gvr: schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests"}, kind: "ManifestCaptureRequest", listKind: "ManifestCaptureRequestList"},
+		{gvr: schema.GroupVersionResource{Group: "kafka.example.com", Version: "v1", Resource: "kafkas"}, kind: "Kafka", listKind: "KafkaList"},
+	}
+}
+
+func discoveryFromEntries(entries []gvrEntry, err error) *fakeDiscovery {
+	byGV := map[string]*metav1.APIResourceList{}
+	for _, e := range entries {
+		gv := e.gvr.GroupVersion().String()
+		list, ok := byGV[gv]
+		if !ok {
+			list = &metav1.APIResourceList{GroupVersion: gv}
+			byGV[gv] = list
+		}
+		verbs := e.verbs
+		if len(verbs) == 0 {
+			verbs = metav1.Verbs{"get", "list", "watch"}
+		}
+		list.APIResources = append(list.APIResources, metav1.APIResource{
+			Name:       e.gvr.Resource,
+			Namespaced: true,
+			Kind:       e.kind,
+			Verbs:      verbs,
+		})
+	}
+	out := make([]*metav1.APIResourceList, 0, len(byGV))
+	for _, l := range byGV {
+		out = append(out, l)
+	}
+	return &fakeDiscovery{resources: out, err: err}
+}
+
+func dynamicFromEntries(entries []gvrEntry, objs ...k8sruntime.Object) *fake.FakeDynamicClient {
+	listKinds := make(map[schema.GroupVersionResource]string, len(entries))
+	for _, e := range entries {
+		listKinds[e.gvr] = e.listKind
+	}
+	return fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), listKinds, objs...)
+}
+
+func obj(apiVersion, kind, name string, mutate func(map[string]interface{})) *unstructured.Unstructured {
+	meta := map[string]interface{}{"name": name, "namespace": "ns1"}
+	o := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata":   meta,
+	}}
+	if mutate != nil {
+		mutate(o.Object)
+	}
+	return o
+}
+
+func controllerOwnerRef() []interface{} {
+	return []interface{}{map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "ReplicaSet",
+		"name":       "rs",
+		"uid":        "rs-uid",
+		"controller": true,
+	}}
+}
+
+func targetNames(targets []ManifestTarget) map[string]struct{} {
+	out := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		out[t.Kind+"/"+t.Name] = struct{}{}
+	}
+	return out
+}
+
+func TestBuildManifestCaptureTargets_EmptyNamespaceHasNoTargets(t *testing.T) {
+	entries := defaultGVRs()
+	targets, unreadable, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dynamicFromEntries(entries),
+		discoveryFromEntries(entries, nil),
+		"ns1",
+		nil,
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("BuildManifestCaptureTargets: %v", err)
+	}
+	if len(unreadable) != 0 {
+		t.Fatalf("expected no unreadable GVRs, got %#v", unreadable)
 	}
 	if len(targets) != 0 {
 		t.Fatalf("expected no targets in empty namespace, got %#v", targets)
 	}
 }
 
-func TestBuildManifestCaptureTargets_PVCCapturedVolumeSnapshotExcluded(t *testing.T) {
-	volumeSnapshotsGVR := schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
-	listKinds := make(map[schema.GroupVersionResource]string, len(n2aNamespacedGVR)+1)
-	for _, gvr := range n2aNamespacedGVR {
-		listKinds[gvr] = gvr.Resource + "List"
-	}
-	listKinds[volumeSnapshotsGVR] = "VolumeSnapshotList"
+func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
+	entries := defaultGVRs()
 
-	pvc := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "PersistentVolumeClaim",
-		"metadata":   map[string]interface{}{"name": "pvc-a", "namespace": "ns1"},
-	}}
-	vs := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "snapshot.storage.k8s.io/v1",
-		"kind":       "VolumeSnapshot",
-		"metadata":   map[string]interface{}{"name": "nss-vs-a", "namespace": "ns1"},
-	}}
-	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), listKinds, pvc, vs)
+	userCM := obj("v1", "ConfigMap", "app-config", nil)
+	rootCA := obj("v1", "ConfigMap", "kube-root-ca.crt", nil)
+	defaultSA := obj("v1", "ServiceAccount", "default", nil)
+	userSA := obj("v1", "ServiceAccount", "app", nil)
+	opaqueSecret := obj("v1", "Secret", "app-secret", func(o map[string]interface{}) { o["type"] = "Opaque" })
+	tokenSecret := obj("v1", "Secret", "app-token", func(o map[string]interface{}) { o["type"] = "kubernetes.io/service-account-token" })
+	standalonePod := obj("v1", "Pod", "standalone", nil)
+	ownedPod := obj("v1", "Pod", "owned", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["ownerReferences"] = controllerOwnerRef()
+	})
+	endpoints := obj("v1", "Endpoints", "app", nil)
+	lease := obj("coordination.k8s.io/v1", "Lease", "leader", nil)
+	ciliumEndpoint := obj("cilium.io/v2", "CiliumEndpoint", "app-pod-xyz", nil)
+	podMetrics := obj("metrics.k8s.io/v1beta1", "PodMetrics", "app-pod-xyz", nil)
+	csiVS := obj("snapshot.storage.k8s.io/v1", "VolumeSnapshot", "vs-a", nil)
+	mcr := obj("state-snapshotter.deckhouse.io/v1alpha1", "ManifestCaptureRequest", "root-mcr", nil)
+	userRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "app-binding", nil)
+	captureRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "d8-state-snapshotter-capture", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"heritage": "deckhouse"}
+	})
+	kafka := obj("kafka.example.com/v1", "Kafka", "my-kafka", nil)
 
-	targets, err := BuildManifestCaptureTargets(context.Background(), dyn, "ns1")
+	dyn := dynamicFromEntries(entries,
+		userCM, rootCA, defaultSA, userSA, opaqueSecret, tokenSecret,
+		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, podMetrics, csiVS, mcr, userRB, captureRB, kafka,
+	)
+
+	targets, unreadable, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dyn,
+		discoveryFromEntries(entries, nil),
+		"ns1",
+		nil,
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("BuildManifestCaptureTargets: %v", err)
 	}
-	var pvcFound bool
-	for _, target := range targets {
-		if target.Kind == "VolumeSnapshot" {
-			t.Fatalf("VolumeSnapshot must never enter manifest inventory, got %#v", target)
-		}
-		if target.APIVersion == "v1" && target.Kind == "PersistentVolumeClaim" && target.Name == "pvc-a" {
-			pvcFound = true
+	if len(unreadable) != 0 {
+		t.Fatalf("expected no unreadable GVRs, got %#v", unreadable)
+	}
+
+	got := targetNames(targets)
+	mustInclude := []string{
+		"ConfigMap/app-config",
+		"ServiceAccount/app",
+		"Secret/app-secret",
+		"Pod/standalone",
+		"RoleBinding/app-binding", // user-authored RBAC is desired-state and must be kept
+		"Kafka/my-kafka",          // arbitrary CR with no CSD mapping — the headline feature
+	}
+	for _, k := range mustInclude {
+		if _, ok := got[k]; !ok {
+			t.Errorf("expected %q to be included, targets=%v", k, got)
 		}
 	}
-	if !pvcFound {
-		t.Fatalf("PVC manifest must remain in inventory, got %#v", targets)
+	mustExclude := []string{
+		"ConfigMap/kube-root-ca.crt",
+		"ServiceAccount/default",
+		"Secret/app-token",
+		"Pod/owned",
+		"Endpoints/app",
+		"Lease/leader",
+		"CiliumEndpoint/app-pod-xyz",
+		"PodMetrics/app-pod-xyz",
+		"VolumeSnapshot/vs-a",
+		"ManifestCaptureRequest/root-mcr",
+		"RoleBinding/d8-state-snapshotter-capture", // Deckhouse-managed transient capture RBAC (heritage=deckhouse)
+	}
+	for _, k := range mustExclude {
+		if _, ok := got[k]; ok {
+			t.Errorf("expected %q to be excluded, targets=%v", k, got)
+		}
 	}
 }
 
-func TestBuildManifestCaptureTargets_SkipsControllerOwnedDependents(t *testing.T) {
-	listKinds := make(map[schema.GroupVersionResource]string, len(n2aNamespacedGVR))
-	for _, gvr := range n2aNamespacedGVR {
-		listKinds[gvr] = gvr.Resource + "List"
+func TestBuildManifestCaptureTargets_ExcludesRegisteredSnapshotKinds(t *testing.T) {
+	fooSnapGVR := schema.GroupVersionResource{Group: "x.example.com", Version: "v1", Resource: "foosnapshots"}
+	entries := append(defaultGVRs(), gvrEntry{gvr: fooSnapGVR, kind: "FooSnapshot", listKind: "FooSnapshotList"})
+
+	fooSnap := obj("x.example.com/v1", "FooSnapshot", "snap-1", nil)
+	dyn := dynamicFromEntries(entries, fooSnap)
+
+	snapshotKinds := SnapshotMachineryGVKs{
+		{Group: "x.example.com", Version: "v1", Kind: "FooSnapshot"}: {},
 	}
-
-	// Backing Pod owned by a controller (mirrors the demo VM's Pod): must be skipped.
-	ownedPod := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "Pod",
-		"metadata": map[string]interface{}{
-			"name":      "demo-vm-pod",
-			"namespace": "ns1",
-			"ownerReferences": []interface{}{map[string]interface{}{
-				"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
-				"kind":       "DemoVirtualMachine",
-				"name":       "vm",
-				"uid":        "vm-uid",
-				"controller": true,
-			}},
-		},
-	}}
-	// Standalone Pod created directly by a user (no controller owner): must be kept.
-	standalonePod := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "Pod",
-		"metadata":   map[string]interface{}{"name": "standalone-pod", "namespace": "ns1"},
-	}}
-
-	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(k8sruntime.NewScheme(), listKinds, ownedPod, standalonePod)
-
-	targets, err := BuildManifestCaptureTargets(context.Background(), dyn, "ns1")
+	targets, _, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dyn,
+		discoveryFromEntries(entries, nil),
+		"ns1",
+		snapshotKinds,
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("BuildManifestCaptureTargets: %v", err)
 	}
-	var standaloneFound bool
-	for _, target := range targets {
-		if target.Kind == "Pod" && target.Name == "demo-vm-pod" {
-			t.Fatalf("controller-owned dependent Pod must be skipped, got %#v", target)
-		}
-		if target.Kind == "Pod" && target.Name == "standalone-pod" {
-			standaloneFound = true
-		}
-	}
-	if !standaloneFound {
-		t.Fatalf("standalone Pod (no controller owner) must be kept, got %#v", targets)
+	if _, ok := targetNames(targets)["FooSnapshot/snap-1"]; ok {
+		t.Fatalf("registered snapshot kind must be excluded (mechanism 1), got %#v", targets)
 	}
 }
 
-func TestIsForbiddenManifestTargetRejectsVolumeSnapshot(t *testing.T) {
-	if !isForbiddenManifestTarget("snapshot.storage.k8s.io/v1", "VolumeSnapshot") {
-		t.Fatal("VolumeSnapshot must never be captured into ManifestCheckpoint inventory")
+func TestBuildManifestCaptureTargets_ForbiddenListGoesToUnreadable(t *testing.T) {
+	entries := defaultGVRs()
+	kafka := obj("kafka.example.com/v1", "Kafka", "my-kafka", nil)
+	dyn := dynamicFromEntries(entries, kafka)
+	dyn.PrependReactor("list", "kafkas", func(clienttesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "kafka.example.com", Resource: "kafkas"}, "", errors.New("rbac not ready"))
+	})
+
+	targets, unreadable, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dyn,
+		discoveryFromEntries(entries, nil),
+		"ns1",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("BuildManifestCaptureTargets must not return hard error on Forbidden, got %v", err)
 	}
-	if isForbiddenManifestTarget("v1", "PersistentVolumeClaim") {
-		t.Fatal("PVC manifest must remain eligible for ManifestCheckpoint inventory")
+	if _, ok := targetNames(targets)["Kafka/my-kafka"]; ok {
+		t.Fatalf("forbidden-listed Kafka must not appear in targets, got %#v", targets)
+	}
+	var found bool
+	for _, gvr := range unreadable {
+		if gvr.Resource == "kafkas" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected kafkas GVR in unreadable, got %#v", unreadable)
+	}
+}
+
+func TestBuildManifestCaptureTargets_PartialDiscoveryGoesToUnreadable(t *testing.T) {
+	entries := defaultGVRs()
+	brokenGV := schema.GroupVersion{Group: "broken.example.com", Version: "v1"}
+	groupErr := &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{brokenGV: errors.New("aggregated apiservice down")}}
+
+	targets, unreadable, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dynamicFromEntries(entries),
+		discoveryFromEntries(entries, groupErr),
+		"ns1",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("partial discovery must not be a hard error, got %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected no targets, got %#v", targets)
+	}
+	var found bool
+	for _, gvr := range unreadable {
+		if gvr.Group == "broken.example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected broken group in unreadable, got %#v", unreadable)
+	}
+}
+
+func TestBuildManifestCaptureTargets_ListErrorIsReturnedWrapped(t *testing.T) {
+	entries := defaultGVRs()
+	dyn := dynamicFromEntries(entries)
+	sentinel := apierrors.NewServiceUnavailable("apiserver hiccup")
+	dyn.PrependReactor("list", "configmaps", func(clienttesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, sentinel
+	})
+
+	_, _, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dyn,
+		discoveryFromEntries(entries, nil),
+		"ns1",
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected a wrapped error for a non-Forbidden list failure")
+	}
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("expected wrapped error to preserve apierrors classification (ServiceUnavailable), got %v", err)
+	}
+}
+
+func TestBuildManifestCaptureTargets_ExcludesResourcesWithoutWatchVerb(t *testing.T) {
+	// A virtual/aggregated resource that supports only get+list (no watch) must be dropped at enumeration
+	// by the explicit watch-verb signal, regardless of its group/name (this is the generic rule that also
+	// covers metrics.k8s.io, without a per-resource denylist).
+	virtualGVR := schema.GroupVersionResource{Group: "vendor.example.com", Version: "v1", Resource: "widgets"}
+	entries := append(defaultGVRs(), gvrEntry{gvr: virtualGVR, kind: "Widget", listKind: "WidgetList", verbs: metav1.Verbs{"get", "list"}})
+
+	widget := obj("vendor.example.com/v1", "Widget", "w1", nil)
+	dyn := dynamicFromEntries(entries, widget)
+
+	targets, _, err := BuildManifestCaptureTargets(
+		context.Background(),
+		dyn,
+		discoveryFromEntries(entries, nil),
+		"ns1",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("BuildManifestCaptureTargets: %v", err)
+	}
+	if _, ok := targetNames(targets)["Widget/w1"]; ok {
+		t.Fatalf("resource without watch verb must be excluded at enumeration, got %#v", targets)
+	}
+}
+
+func TestShouldIncludeNamespaceObject_DefaultInclude(t *testing.T) {
+	if !ShouldIncludeNamespaceObject(obj("v1", "ConfigMap", "x", nil), nil) {
+		t.Fatal("plain ConfigMap with no exclusion signal must be included")
+	}
+}
+
+func TestShouldIncludeNamespaceObject_ExcludesDeckhouseManagedObjects(t *testing.T) {
+	captureRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "d8-state-snapshotter-capture", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"heritage": "deckhouse"}
+	})
+	if ShouldIncludeNamespaceObject(captureRB, nil) {
+		t.Fatal("Deckhouse-managed object (heritage=deckhouse) must be excluded from capture")
+	}
+
+	userRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "app-binding", nil)
+	if !ShouldIncludeNamespaceObject(userRB, nil) {
+		t.Fatal("user-authored RoleBinding must be included")
+	}
+
+	otherHeritageRB := obj("rbac.authorization.k8s.io/v1", "RoleBinding", "helm-binding", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"heritage": "Helm"}
+	})
+	if !ShouldIncludeNamespaceObject(otherHeritageRB, nil) {
+		t.Fatal("object with a non-deckhouse heritage value must be included")
 	}
 }

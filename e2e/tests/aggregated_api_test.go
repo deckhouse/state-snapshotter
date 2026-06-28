@@ -52,10 +52,10 @@ func firstNodeOfKind(nodes []childRef, kind string) (childRef, bool) {
 	return childRef{}, false
 }
 
-// aggregatedApiSpecs registers the phase-1 aggregated subresource read specs: the per-node
-// manifests-download surface (core + demo groups) and the apply-ready manifests-with-data-restoration.
+// aggregatedApiSpecs registers the aggregated subresource read specs of the manifest-only flow: the
+// per-node manifests-download surface (core + demo groups) and the apply-ready manifests-with-data-restoration.
 func aggregatedApiSpecs() {
-	Context("Phase 1: aggregated subresource APIs", func() {
+	Context("Aggregated subresource APIs", func() {
 		var vmSnapshot childRef
 
 		BeforeAll(func() {
@@ -141,10 +141,8 @@ func aggregatedApiSpecs() {
 			vm, found := findManifest(objs, "DemoVirtualMachine", srcVMName)
 			Expect(found).To(BeTrue(), "demo restore subtree should contain DemoVirtualMachine %s", srcVMName)
 			Expect(vm.GetNamespace()).To(Equal(targetNS), "demo restore output must be namespace-rewritten")
-
-			By("asserting the VM's nested disk is part of the delegated subtree (post-order child)")
-			_, hasDisk := findManifest(objs, "DemoVirtualDisk", srcDiskVMName)
-			Expect(hasDisk).To(BeTrue(), "demo restore subtree should contain the nested DemoVirtualDisk %s", srcDiskVMName)
+			// The manifest-only VM owns no DemoVirtualDisk in this tree (dataless disks are disallowed), so
+			// the delegated subtree is just the VM's own manifest.
 		})
 	})
 }

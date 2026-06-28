@@ -38,9 +38,13 @@ type demoSourceResolution struct {
 }
 
 // resolveDemoSnapshotSource validates a demo snapshot's spec.sourceRef and returns the captured source
-// object name. spec.sourceRef is required and immutable (enforced by the CRD), so it is the only
-// identity this controller consults — both for manually-created snapshots and for root-planned ones.
-func resolveDemoSnapshotSource(expectKind string, specRef demov1alpha1.SnapshotSourceRef) demoSourceResolution {
+// object name. spec.sourceRef is the capture-mode identity (immutable, enforced by the CRD). It is a
+// pointer: an import-mode snapshot omits it (callers must short-circuit on IsImportMode before calling),
+// so a nil ref here is an invalid capture snapshot (neither sourceRef nor a handled import mode).
+func resolveDemoSnapshotSource(expectKind string, specRef *demov1alpha1.SnapshotSourceRef) demoSourceResolution {
+	if specRef == nil {
+		return demoSourceResolution{Reason: demoReasonInvalidSourceRef, Message: "spec.sourceRef is required in capture mode"}
+	}
 	if specRef.APIVersion != demov1alpha1.SchemeGroupVersion.String() {
 		return demoSourceResolution{Reason: demoReasonInvalidSourceRef, Message: fmt.Sprintf("spec.sourceRef.apiVersion must be %q", demov1alpha1.SchemeGroupVersion.String())}
 	}

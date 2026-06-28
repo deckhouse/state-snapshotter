@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -52,10 +53,21 @@ func BuildRegistry(ctx context.Context, mapper meta.RESTMapper, apiReader client
 		csdPairs = nil
 	}
 	merged := unifiedbootstrap.MergeBootstrapAndCSDPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), csdPairs)
-	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(mapper, merged, log.WithName("snapshot-graph-registry-build"))
+	resolved := unifiedbootstrap.ResolveAvailableUnifiedPairs(mapper, merged, log.WithName("snapshot-graph-registry-build"))
+	snapGVKs := make([]schema.GroupVersionKind, 0, len(resolved))
+	contentGVKs := make([]schema.GroupVersionKind, 0, len(resolved))
+	for _, p := range resolved {
+		snapGVKs = append(snapGVKs, p.Snapshot)
+		contentGVKs = append(contentGVKs, p.SnapshotContent)
+	}
 	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot graph registry: NewGVKRegistryFromParallelSnapshotContentPairs: %w", err)
+	}
+	// Carry CSD spec.dataBacked onto the registry so domain-agnostic consumers learn which snapshot
+	// kinds expect a volume data leg. Built-in/bootstrap pairs leave it false.
+	for _, p := range resolved {
+		reg.MarkDataBacked(p.Snapshot.Kind, p.DataBacked)
 	}
 	return reg, nil
 }

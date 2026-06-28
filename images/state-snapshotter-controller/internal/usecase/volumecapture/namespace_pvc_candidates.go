@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -30,18 +31,27 @@ import (
 
 // ListNamespacePVCTargets lists all PVCs in namespace as volume capture targets (residual candidate discovery only).
 func ListNamespacePVCTargets(ctx context.Context, c client.Reader, namespace string) ([]vcpkg.Target, error) {
+	targets, _, err := listNamespacePVCTargetsWithLabels(ctx, c, namespace)
+	return targets, err
+}
+
+// listNamespacePVCTargetsWithLabels lists all namespace PVCs once, returning both the volume capture targets
+// and their labels keyed by UID. The labels feed resourceSelector filtering from the same List call, so the
+// residual leg does not issue a second namespace-wide List (avoiding a TOCTOU between two list snapshots).
+func listNamespacePVCTargetsWithLabels(ctx context.Context, c client.Reader, namespace string) ([]vcpkg.Target, map[string]labels.Set, error) {
 	if namespace == "" {
-		return nil, fmt.Errorf("namespace is required to list PVC candidates")
+		return nil, nil, fmt.Errorf("namespace is required to list PVC candidates")
 	}
 	list := &corev1.PersistentVolumeClaimList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("list PVCs in namespace %s: %w", namespace, err)
+		return nil, nil, fmt.Errorf("list PVCs in namespace %s: %w", namespace, err)
 	}
 	out := make([]vcpkg.Target, 0, len(list.Items))
+	labelsByUID := make(map[string]labels.Set, len(list.Items))
 	for i := range list.Items {
 		pvc := &list.Items[i]
 		if pvc.UID == "" {
-			return nil, fmt.Errorf("PVC %s/%s has empty uid", namespace, pvc.Name)
+			return nil, nil, fmt.Errorf("PVC %s/%s has empty uid", namespace, pvc.Name)
 		}
 		out = append(out, vcpkg.Target{
 			UID:        string(pvc.UID),
@@ -50,6 +60,7 @@ func ListNamespacePVCTargets(ctx context.Context, c client.Reader, namespace str
 			Name:       pvc.Name,
 			Namespace:  pvc.Namespace,
 		})
+		labelsByUID[string(pvc.UID)] = labels.Set(pvc.Labels)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].UID != out[j].UID {
@@ -57,7 +68,7 @@ func ListNamespacePVCTargets(ctx context.Context, c client.Reader, namespace str
 		}
 		return out[i].Name < out[j].Name
 	})
-	return out, nil
+	return out, labelsByUID, nil
 }
 
 // residualPVCTargets returns namespace PVC candidates minus subtree-covered UIDs.

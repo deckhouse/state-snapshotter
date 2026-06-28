@@ -38,17 +38,13 @@ var _ = Describe("Integration: CSD reconciler KindConflict", func() {
 	const nameA = "integration-csd-kc-a"
 	const nameB = "integration-csd-kc-b"
 
-	sharedMapping := func() []storagev1alpha1.SnapshotResourceMappingEntry {
-		return []storagev1alpha1.SnapshotResourceMappingEntry{
-			{
-				Source: storagev1alpha1.SnapshotGVKRef{
-					APIVersion: "test.deckhouse.io/v1alpha1",
-					Kind:       "TestSnapshot",
-				},
-				Snapshot: storagev1alpha1.SnapshotGVKRef{
-					APIVersion: "test.deckhouse.io/v1alpha1",
-					Kind:       "TestSnapshot",
-				},
+	sharedSpec := func() storagev1alpha1.CustomSnapshotDefinitionSpec {
+		return storagev1alpha1.CustomSnapshotDefinitionSpec{
+			APIVersion: "test.deckhouse.io/v1alpha1",
+			Kind:       "TestSnapshot",
+			Source: storagev1alpha1.SnapshotGVKRef{
+				APIVersion: "test.deckhouse.io/v1alpha1",
+				Kind:       "TestSnapshot",
 			},
 		}
 	}
@@ -70,15 +66,11 @@ var _ = Describe("Integration: CSD reconciler KindConflict", func() {
 	It("sets Accepted=False KindConflict on both CSDs when they claim the same snapshot kind", func() {
 		a := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: nameA},
-			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: sharedMapping(),
-			},
+			Spec:       sharedSpec(),
 		}
 		b := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: nameB},
-			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: sharedMapping(),
-			},
+			Spec:       sharedSpec(),
 		}
 		Expect(k8sClient.Create(ctx, a)).To(Succeed())
 		Expect(k8sClient.Create(ctx, b)).To(Succeed())

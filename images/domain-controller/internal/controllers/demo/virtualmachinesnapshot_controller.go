@@ -103,6 +103,14 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
+	// Import mode: spec.source.import switches this VM snapshot off capture. The domain controller does NO
+	// capture planning (no source-VM lookup, no children planning, no MCR) — the live DemoVirtualMachine
+	// and its disks may be absent on import. The common controller materializes the backing SnapshotContent
+	// from the uploaded manifests and child refs. Domain planning is trivially complete for an import node.
+	if s.IsImportMode() {
+		return ctrl.Result{}, nil
+	}
+
 	adapter := demoVirtualMachineSnapshotAdapter{snap: s}
 	sdk := r.capture()
 
@@ -180,7 +188,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 				// spec.sourceRef is the single source-of-truth for what the child disk snapshot captures;
 				// the CRD enforces its immutability, so it is set once at creation and never rewritten.
 				Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
-					SourceRef: demov1alpha1.SnapshotSourceRef{
+					SourceRef: &demov1alpha1.SnapshotSourceRef{
 						APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 						Kind:       controllercommon.KindDemoVirtualDisk,
 						Name:       disk.Name,

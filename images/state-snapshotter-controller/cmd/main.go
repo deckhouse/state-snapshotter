@@ -24,7 +24,9 @@ import (
 	"os/signal"
 	goruntime "runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	sv1 "k8s.io/api/storage/v1"
@@ -70,6 +72,13 @@ var (
 	apiAddr        string
 	apiTLSCertFile string
 	apiTLSKeyFile  string
+
+	// version is the human-readable build marker, injected at build time via
+	// -ldflags "-X main.version=...". It defaults to "dev" for local `go run` and is set by the dev
+	// image build (Makefile fox_build_and_push -> Dockerfile APP_VERSION) to git sha + dirty + timestamp,
+	// so the startup log unambiguously identifies which build is running (debug.ReadBuildInfo VCS data is
+	// empty in the docker build because .git is not in the build context).
+	version = "dev"
 )
 
 func init() {
@@ -78,8 +87,31 @@ func init() {
 	flag.StringVar(&apiTLSKeyFile, "api-tls-private-key-file", "", "Path to TLS private key file for API server")
 }
 
+// buildTimeFromVersion extracts the UTC build timestamp embedded as the trailing
+// "<sha>[-dirty]-YYYYMMDDTHHMMSSZ" segment of the version marker (see Makefile build_ts).
+// Returns ok=false for versions without a timestamp suffix, e.g. the "dev" default.
+func buildTimeFromVersion(v string) (time.Time, bool) {
+	idx := strings.LastIndex(v, "-")
+	if idx < 0 || idx+1 >= len(v) {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("20060102T150405Z", v[idx+1:])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 func main() {
 	flag.Parse()
+
+	// Print the build version unconditionally, before the logger exists and independent of the configurable
+	// logrus level (LOG_LEVEL defaults to warn=3 in production, which would suppress an Info-level version
+	// log). This guarantees the running build is always identifiable in `kubectl logs`.
+	fmt.Printf("[main] Version: %s\n", version)
+	if buildTime, ok := buildTimeFromVersion(version); ok {
+		fmt.Printf("[main] Build time: %s UTC\n", buildTime.Format("2006-01-02 15:04:05"))
+	}
 
 	// Enable controller-runtime logs FIRST, before any manager/recorder creation
 	// This prevents the warning: "[controller-runtime] log.SetLogger(...) was never called; logs will not be displayed"
@@ -281,6 +313,11 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
+	// Carry CSD spec.dataBacked from the merged pairs onto the binder's GVK registry so the import path
+	// knows which snapshot kinds expect a DataImport/data artifact. Built-in/bootstrap pairs stay false.
+	for _, p := range mergedPairs {
+		snapshotController.MarkDataBacked(p.Snapshot.Kind, p.DataBacked)
+	}
 	for i := range genericSnapshotGVKs {
 		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
 			log.Error(err, "Failed to setup GenericSnapshotBinderController watch", "snapshotGVK", genericSnapshotGVKs[i].String(), "snapshotContentGVK", genericContentGVKs[i].String())
@@ -290,7 +327,8 @@ func main() {
 	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
-	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.dataImportName -> DataImport).
+	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.import marker; owning DataImport
+	// found by reverse-lookup of DataImport.spec.targetRef).
 	// The forked snapshot-controller skips these; this common controller materializes their SnapshotContent
 	// and writes the binding (extended boundSnapshotContentName + legacy boundVolumeSnapshotContentName/readyToUse).
 	// Self-guards by RESTMapping: a not-yet-installed VolumeSnapshot CRD degrades to "no controller".

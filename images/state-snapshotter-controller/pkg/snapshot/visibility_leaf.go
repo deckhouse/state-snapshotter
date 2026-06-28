@@ -45,7 +45,7 @@ const (
 	// LabelChildVolumeNode marks a SnapshotContent created as a standalone child volume node for a
 	// root-residual/orphan PVC (Variant A). It is the authoritative signal that distinguishes the orphan
 	// capture itself from a real domain subtree child: subtree PVC-coverage must skip these nodes (the
-	// orphan PVC must stay in the root residual scope so its CSI VolumeSnapshot handle is not pruned),
+	// orphan PVC must stay in the root residual scope so the same PVC is not double-handled),
 	// while the manifest-checkpoint subtree exclude still removes the PVC manifest from the root MCP. A
 	// name-prefix heuristic on ChildVolumeContentInfix is fragile (a coincidentally named content would
 	// be misclassified); this explicit label is set at creation by EnsureVolumeChildContent.

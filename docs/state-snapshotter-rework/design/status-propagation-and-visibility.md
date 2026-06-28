@@ -44,6 +44,22 @@ build its own diagnostics. The only exception is the bridge for failures the con
 a terminal child-`Snapshot` capture failure before any child SnapshotContent exists, and pre-publish
 capture-planning failures (build/list targets, plan drift) that occur before requests are published to content.
 
+**Subtree archive latch (INV-COND5):** `ManifestsArchived` is a separate, lifelong latch on `SnapshotContent`
+(mirrored verbatim onto `Snapshot` and domain `XxxxSnapshot` by the same content→snapshot mirror path). It is
+**not** a leg of the `Ready` formula. It records the irreversible fact that this node and every descendant content
+node captured their manifests into a `ManifestCheckpoint` at least once:
+
+- `True / Archived` — own manifest leg reached readiness once **and** every child content is `ManifestsArchived=True`.
+  Once `True` it never re-opens, even if `ManifestsReady`/`Ready` later degrades or a child disappears (the capture
+  already happened). `Snapshot.spec` is immutable, so there is no recapture and no generation bookkeeping.
+- `False / Capturing` — transient: not archived yet and not failed (includes the fail-closed
+  `NamespaceCaptureIncomplete` wait while capture RBAC is still missing).
+- `False / Failed` — terminal: own manifest leg failed terminally **before** archive, or a descendant is
+  `ManifestsArchived=Failed` (the subtree can never be archived). Sticky for that immutable Snapshot.
+
+Primary consumer: the namespace-capture RBAC hook, which keeps the transient per-namespace `RoleBinding` while the
+root `Snapshot` is not yet `ManifestsArchived` (neither `Archived` nor `Failed`).
+
 ## 2. Reason taxonomy (shared by both phases)
 
 | Bucket | Reason | Where it is set |

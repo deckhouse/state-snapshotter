@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
@@ -45,15 +46,32 @@ func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 ) error {
+	// Root residual/orphan PVC volume capture is the final wave: it runs only after every declared domain
+	// child snapshot is Ready, so a PVC that a domain child covers is never momentarily treated as orphan
+	// (which previously created an nss-vs-* VolumeSnapshot + child volume node that then got pruned, leaving
+	// a dangling, never-archiving node). The gate is checked before the (costly) namespace PVC list so a
+	// long wait does not re-list every poll. The root manifest branch is independent and keeps running.
+	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, nsSnap.Namespace, nsSnap.Status.ChildrenSnapshotRefs)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			log.FromContext(ctx).V(1).Info("deferring orphan PVC volume capture until domain children are Ready", "pending", summarizePendingChildren(pending))
+			return nil
+		}
+		targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, content)
+		if err != nil {
+			_, ferr := r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
+			return ferr
+		}
+		return r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, content, targets)
+	}
+
 	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, content)
 	if err != nil {
 		_, ferr := r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
 		return ferr
-	}
-	// Root residual/orphan scope runs even with zero targets so stale nss-vs-* leaves (PVCs that became
-	// covered by a domain controller) are pruned. The domain VCR path keeps the zero-targets fast return.
-	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
-		return r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, content, targets)
 	}
 	if len(targets) == 0 {
 		return nil
@@ -80,14 +98,29 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 	content *storagev1alpha1.SnapshotContent,
 	allowRequeue bool,
 ) (ctrl.Result, error) {
+	// Residual/orphan root scope is gated on all declared domain children being Ready (final-wave
+	// sequencing, see ensureVolumeCaptureLeg). While the gate is closed, skip orphan publish and requeue on
+	// the child-graph poll cadence so it re-checks; the root manifest branch is unaffected. The RequeueAfter
+	// propagates through every n2aReturnAfterVolumePublish exit (incl. steady state). The gate is checked
+	// before the namespace PVC list so a long wait does not re-list every poll.
+	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
+		ready, _, err := r.allDeclaredDomainChildSnapshotsReady(ctx, nsSnap.Namespace, nsSnap.Status.ChildrenSnapshotRefs)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+		}
+		targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, content)
+		if err != nil {
+			return r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
+		}
+		return r.reconcileOrphanPVCVolumeSnapshotPublish(ctx, nsSnap, content, targets, allowRequeue)
+	}
+
 	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, content)
 	if err != nil {
 		return r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
-	}
-	// Residual/orphan root scope runs even with zero targets so a stale VCR / status.volumeCaptureRequestName
-	// left by a previous (VCR-based) run is cleared. The VCR path keeps the zero-targets fast return below.
-	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, content) {
-		return r.reconcileOrphanPVCVolumeSnapshotPublish(ctx, nsSnap, content, targets, allowRequeue)
 	}
 	if len(targets) == 0 {
 		return ctrl.Result{}, nil

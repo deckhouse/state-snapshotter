@@ -12,8 +12,19 @@ deployment_name := controller
 namespace := d8-state-snapshotter
 module_name := state-snapshotter
 pull_secret_name := fox-registry
+# Seconds to wait after enabling maintenance (NoResourceReconciliation) before patching the deployment,
+# so Deckhouse stops reconciling the module and does not overwrite the local-dev image patch. Override:
+# make switch_to_local_dev maintenance_wait=30
+maintenance_wait := 15
 USER := $(shell whoami)
 image_tag := $(USER)-state-snapshotter-controller
+
+# Build-time version marker injected into the binary (main.version) so the running pod self-identifies at
+# startup: git short sha + "-dirty" when the working tree has uncommitted changes + UTC build timestamp.
+git_sha := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+git_dirty := $(shell git diff --quiet 2>/dev/null || echo -dirty)
+build_ts := $(shell date -u +%Y%m%dT%H%M%SZ)
+app_version := $(git_sha)$(git_dirty)-$(build_ts)
 
 # Variables
 GO := go
@@ -162,15 +173,24 @@ run: ## Run controller locally
 	$(GO) run -race ./cmd/main.go
 
 fox_build_and_push: ## Build dev image and push to fox registry
-	DOCKER_BUILDKIT=1 docker build -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
+	@echo "$(BLUE)Building image with version: $(app_version)$(NC)"
+	DOCKER_BUILDKIT=1 docker build --build-arg APP_VERSION=$(app_version) -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
 	docker push $(repo_fox)/$(image_name):$(image_tag)
 
-redeploy: ## Restart controller deployment in the cluster
+redeploy: ## Restart controller deployment, wait for rollout, and print the running build version
 	kubectl -n $(namespace) rollout restart deployment $(deployment_name)
+	kubectl -n $(namespace) rollout status deployment $(deployment_name) --timeout=300s
+	@printf "$(BLUE)Running build version:$(NC)\n"
+	@pod=$$(kubectl -n $(namespace) get pods -l app=$(deployment_name) --field-selector=status.phase=Running --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}'); \
+	printf "  pod=%s\n" "$$pod"; \
+	kubectl -n $(namespace) logs "$$pod" | grep -m1 '\[main\] Version' \
+		|| printf "$(YELLOW)  [main] Version line not found (old image without version logging?)$(NC)\n"
 
 switch_to_local_dev: ## Pause module reconciliation (maintenance) and patch deployment to local dev image
 	kubectl patch moduleconfig $(module_name) --type=merge \
 		-p '{"spec": {"maintenance": "NoResourceReconciliation"}}'
+	@echo "$(YELLOW)Waiting $(maintenance_wait)s for Deckhouse to stop reconciling the module before patching the deployment...$(NC)"
+	@sleep $(maintenance_wait)
 	kubectl -n $(namespace) patch deployment $(deployment_name) -p \
 		'{"spec": {"template": {"spec": {"containers": [{"name": "$(deployment_name)", "image": "$(repo_fox)/$(image_name):$(image_tag)"}]}}}}'
 	kubectl -n $(namespace) patch deployment $(deployment_name) -p \

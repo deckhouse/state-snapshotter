@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -38,14 +39,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/common"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
@@ -57,6 +59,34 @@ import (
 func setSingleCondition(conds *[]metav1.Condition, cond metav1.Condition) {
 	meta.RemoveStatusCondition(conds, cond.Type)
 	meta.SetStatusCondition(conds, cond)
+}
+
+// terminalCaptureError marks a chunk-build failure as permanent (retry will never help):
+// deterministic marshal/compress/checksum failures, or apiserver shape/validation rejections.
+// Errors NOT wrapped in this sentinel are treated as transient and requeued, so a momentary
+// apiserver/network hiccup never wedges the snapshot (see processCaptureRequest).
+type terminalCaptureError struct{ err error }
+
+func (e *terminalCaptureError) Error() string { return e.err.Error() }
+func (e *terminalCaptureError) Unwrap() error { return e.err }
+
+// terminalCapturef builds a terminalCaptureError with a formatted message.
+func terminalCapturef(format string, a ...interface{}) error {
+	return &terminalCaptureError{err: fmt.Errorf(format, a...)}
+}
+
+// isTerminalCaptureError reports whether err (or anything it wraps) is a terminalCaptureError.
+func isTerminalCaptureError(err error) bool {
+	var t *terminalCaptureError
+	return stderrors.As(err, &t)
+}
+
+// chunkCreateErrorIsTerminal classifies an apiserver error from creating a chunk as permanent: only
+// validation/shape/size rejections will never succeed on retry. Everything else (timeouts, 5xx,
+// connection blips, even Forbidden during module rollout) is treated as transient and requeued,
+// mirroring the bias-to-retry policy of isTransientCaptureTargetError in the snapshot controller.
+func chunkCreateErrorIsTerminal(err error) bool {
+	return errors.IsInvalid(err) || errors.IsBadRequest(err) || errors.IsRequestEntityTooLargeError(err)
 }
 
 // ManifestCheckpointController reconciles ManifestCaptureRequest objects
@@ -196,10 +226,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 	}
 
-	// Collect all target objects
-	// Note: NotFound errors from collectTargetObjects are always from target objects, not related objects.
-	// Related objects (ConfigMaps, Secrets from volumes) are collected in collectRelatedObjects,
-	// which silently ignores NotFound errors (checks err == nil). So if we get NotFound here, it's a target.
+	// Collect all target objects (verbatim: each explicit spec.targets entry, stored raw).
+	// A NotFound here is always from a missing target object and is terminal (see below).
 	objects, err := r.collectTargetObjects(ctx, mcr)
 	if err != nil {
 		// Only a genuinely absent target (NotFound) is terminal: Kubernetes is declarative, so if the
@@ -223,9 +251,6 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 		return ctrl.Result{}, nil
 	}
-
-	// Filtering and cleaning are now done inside addObject() during collection
-	// No need for separate filtering pass
 
 	// Handle empty objects list
 	if len(objects) == 0 {
@@ -329,14 +354,21 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		Controller: controllerTrue,
 	}}
 
-	// If checkpoint already exists → publish checkpointName and wait for SnapshotContent handoff.
-	// This handles the case where checkpoint was created but MCR status update failed.
+	// If checkpoint already exists, only short-circuit to the SnapshotContent-handoff path when the
+	// checkpoint is genuinely done (Ready=True) or terminally failed. If it exists but chunk creation
+	// is still incomplete (e.g. a prior reconcile requeued mid-creation on a transient error), fall
+	// through so the r.Create→AlreadyExists resume path below re-enters createChunks idempotently.
 	var existingCheckpoint storagev1alpha1.ManifestCheckpoint
 	if err := r.Get(ctx, client.ObjectKey{Name: checkpointName}, &existingCheckpoint); err == nil {
-		r.Logger.Info("Checkpoint already exists, checking SnapshotContent handoff before MCR completion",
+		if manifestCheckpointDoneOrFailed(&existingCheckpoint) {
+			r.Logger.Info("Checkpoint already exists, checking SnapshotContent handoff before MCR completion",
+				"checkpoint", checkpointName)
+			mcr.Status.CheckpointName = checkpointName
+			return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &existingCheckpoint)
+		}
+		r.Logger.Info("Checkpoint exists but chunk creation is incomplete; resuming",
 			"checkpoint", checkpointName)
-		mcr.Status.CheckpointName = checkpointName
-		return r.finalizeMCRIfCheckpointHandedOff(ctx, mcr, &existingCheckpoint)
+		// fall through: r.Create below returns AlreadyExists and resumes createChunks
 	}
 
 	// Create ManifestCheckpoint owned by the execution ObjectKeeper. Handoff to SnapshotContent is done
@@ -441,6 +473,20 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Creating chunks for checkpoint %s (%d objects)...", checkpointName, len(objects)))
 	chunks, err := r.createChunks(ctx, checkpointName, string(checkpoint.UID), objects)
 	if err != nil {
+		// Transient apiserver/network errors must NOT mark the MCP/MCR terminal: keep the checkpoint
+		// Processing and requeue so the next reconcile resumes chunk creation idempotently (the MCP
+		// already exists, so the AlreadyExists path re-enters createChunks). Only errors explicitly
+		// wrapped as terminalCaptureError (validation/shape/size, deterministic marshal/compress,
+		// checksum/identity conflicts) fail the request. This mirrors collectTargetObjects, where only
+		// a missing target (NotFound) is terminal.
+		if !isTerminalCaptureError(err) {
+			r.Logger.Info("Step 3: chunk creation hit a transient error; requeueing without marking the request terminal",
+				"checkpoint", checkpointName,
+				"objects", len(objects),
+				"error", err.Error())
+			r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Transient error creating chunks, retrying: %v", err))
+			return ctrl.Result{}, err
+		}
 		r.Logger.Error(err, "❌ Step 3 failed: Failed to create chunks",
 			"checkpoint", checkpointName,
 			"objects", len(objects),
@@ -550,6 +596,19 @@ func (r *ManifestCheckpointController) finalizeMCRIfCheckpointHandedOff(
 	return ctrl.Result{}, nil
 }
 
+// manifestCheckpointDoneOrFailed reports whether the checkpoint has reached a stable state where no
+// further chunk creation is needed: Ready=True (Completed) or Ready=False with reason Failed
+// (terminal). A checkpoint that is still Processing (or has no Ready condition yet) returns false so
+// the caller resumes chunk creation instead of prematurely treating it as handed off.
+func manifestCheckpointDoneOrFailed(cp *storagev1alpha1.ManifestCheckpoint) bool {
+	ready := meta.FindStatusCondition(cp.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
+	if ready == nil {
+		return false
+	}
+	return ready.Status == metav1.ConditionTrue ||
+		(ready.Status == metav1.ConditionFalse && ready.Reason == storagev1alpha1.ManifestCheckpointConditionReasonFailed)
+}
+
 func manifestCheckpointOwnedBySnapshotContent(checkpoint *storagev1alpha1.ManifestCheckpoint) bool {
 	for _, ref := range checkpoint.OwnerReferences {
 		if ref.APIVersion == snapstorage.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
@@ -586,56 +645,24 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 	var objects []unstructured.Unstructured
 	collected := make(map[string]bool) // Track collected objects to avoid duplicates
 
-	// Helper to add object if not already collected.
-	// Object SELECTION (when EnableFiltering is on) and the Secret security contract are applied here,
-	// BEFORE adding. Capture stores RAW manifests (no field cleaning); the Secret bytes opt-in is the
-	// only field-level exception, and it is enforced regardless of EnableFiltering.
-	addObject := func(obj *unstructured.Unstructured, filterCtx common.CaptureFilterContext) {
-		// Secret filtering is a security invariant for ManifestCheckpoint and is
-		// enforced even when general backup filtering is disabled.
-		if common.ShouldSkipSecretObject(obj) {
-			r.Logger.Info("Skipping secret object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
-			return
-		}
-
-		// Object SELECTION (skip ephemeral/owner-managed/excluded kinds) is applied when filtering is
-		// enabled, but is deliberately kept SEPARATE from field-level cleaning: snapshot-capture stores
-		// RAW manifests AS-IS (status included) so that the MCP is the source of truth for import/export
-		// (e.g. DataImport reads status.capacity, storageClass, volumeMode from the original manifest).
-		// All field-level sanitization happens on the restore read-path (internal/usecase/restore,
-		// independent of capture). See the unified snapshot plan §1/§2 (C1b raw-capture).
-		if r.Config.EnableFiltering {
-			if common.ShouldSkipObjectWithContext(obj, r.Config.ExcludeKinds, filterCtx) {
-				r.Logger.Info("Skipping object", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
-				return
-			}
-		}
-
-		// The ONLY field-level exception on capture is Secret bytes: secure-by-default opt-in. Everything
-		// else is stored raw. SanitizeObjectForManifestCheckpoint deep-copies, so obj is never mutated.
-		finalObj := common.SanitizeObjectForManifestCheckpoint(obj)
-		if finalObj == nil {
-			return
-		}
-
-		// Preserve apiVersion/kind: TypeMeta is tracked separately on unstructured.Unstructured and a
-		// DeepCopy/normalize round-trip elsewhere may drop it.
-		finalObj.SetAPIVersion(obj.GetAPIVersion())
-		finalObj.SetKind(obj.GetKind())
-
-		// Check for duplicates
+	// Stage B is VERBATIM: fetch each explicit target and store it raw. Object selection and any
+	// field-level transformation are NOT done here — the MCR creator owns the target list (a namespace
+	// snapshot builds it via discovery in Stage A; a domain controller passes explicit targets), and all
+	// sanitization happens on the restore read-path (internal/usecase/restore). Capture stores manifests
+	// AS-IS (status included) so the MCP is the source of truth for import/export.
+	addObject := func(obj *unstructured.Unstructured) {
 		key := fmt.Sprintf("%s/%s/%s/%s",
-			finalObj.GetAPIVersion(),
-			finalObj.GetKind(),
-			finalObj.GetNamespace(),
-			finalObj.GetName())
-		if !collected[key] {
-			collected[key] = true
-			objects = append(objects, *finalObj)
+			obj.GetAPIVersion(),
+			obj.GetKind(),
+			obj.GetNamespace(),
+			obj.GetName())
+		if collected[key] {
+			return
 		}
+		collected[key] = true
+		objects = append(objects, *obj)
 	}
 
-	// Step 1: Collect target objects (TZ section 5, step 1).
 	// MCR targets are namespaced in the same namespace as ManifestCaptureRequest.
 	for _, target := range mcr.Spec.Targets {
 		gv, err := schema.ParseGroupVersion(target.APIVersion)
@@ -661,97 +688,13 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 			return nil, fmt.Errorf("failed to get %s %s: %w", target.Kind, key.String(), err)
 		}
 
-		// Add target object (filtering happens inside addObject; explicit MCR targets use scoped PVC rules).
-		addObject(obj, common.CaptureFilterContext{ExplicitTarget: true})
-
-		// Step 2: Recursively collect related objects (TZ section 5, step 2)
-		// collectRelatedObjects now uses addObject directly, so filtering is applied
-		// Collect related objects (ConfigMaps, Secrets, etc.)
-		// Errors are ignored - continue even if related objects collection fails
-		r.collectRelatedObjects(ctx, obj, mcr.Namespace, func(related *unstructured.Unstructured) {
-			addObject(related, common.CaptureFilterContext{})
-		})
+		addObject(obj)
 	}
 
-	// Step 4: Sort objects (TZ section 5, step 4)
-	// Sort by: groupVersion, kind, namespace, name
+	// Sort by: groupVersion, kind, namespace, name (stable chunk content / drift checks).
 	r.sortObjects(objects)
 
 	return objects, nil
-}
-
-// collectRelatedObjects recursively collects ConfigMaps, Secrets, and volumeClaimTemplates (TZ section 5, step 2)
-// CRITICAL: Uses addObject callback so object selection + secret enforcement are applied immediately
-// (capture stores raw manifests; no field cleaning here).
-func (r *ManifestCheckpointController) collectRelatedObjects(ctx context.Context, obj *unstructured.Unstructured, namespace string, addObject func(*unstructured.Unstructured)) {
-	// Collect ConfigMaps referenced in volumes
-	if volumes, found, _ := unstructured.NestedSlice(obj.Object, "spec", "volumes"); found {
-		for _, vol := range volumes {
-			volMap, ok := vol.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if cm, found := volMap["configMap"]; found {
-				cmMap, ok := cm.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if name, found := cmMap["name"]; found {
-					if nameStr, ok := name.(string); ok {
-						cmObj := &unstructured.Unstructured{}
-						cmObj.SetGroupVersionKind(schema.GroupVersionKind{
-							Group:   "",
-							Version: "v1",
-							Kind:    "ConfigMap",
-						})
-						cmObj.SetName(nameStr)
-						cmObj.SetNamespace(namespace)
-						if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nameStr}, cmObj); err == nil {
-							// addObject applies object selection + secret enforcement (no field cleaning)
-							addObject(cmObj)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Collect Secrets referenced in volumes (exclude all service account Secrets)
-	if volumes, found, _ := unstructured.NestedSlice(obj.Object, "spec", "volumes"); found {
-		for _, vol := range volumes {
-			volMap, ok := vol.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if secret, found := volMap["secret"]; found {
-				secretMap, ok := secret.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if name, found := secretMap["secretName"]; found {
-					if nameStr, ok := name.(string); ok {
-						secretObj := &unstructured.Unstructured{}
-						secretObj.SetGroupVersionKind(schema.GroupVersionKind{
-							Group:   "",
-							Version: "v1",
-							Kind:    "Secret",
-						})
-						secretObj.SetName(nameStr)
-						secretObj.SetNamespace(namespace)
-						if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: nameStr}, secretObj); err == nil {
-							// addObject enforces the Secret security contract (ShouldSkipSecretObject) unconditionally,
-							// so non-Opaque / unannotated Opaque secrets are skipped here without manual filtering.
-							addObject(secretObj)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// volumeClaimTemplates are embedded in StatefulSet, not separate resources
-	// They will be included in the main object automatically
-	// No need to collect them separately
 }
 
 // sortObjects sorts objects by groupVersion, kind, namespace, name (TZ section 5, step 4)
@@ -791,7 +734,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		// Get gzip bytes first for size calculation
 		gzipBytes, err := r.compressToBytes(emptyJSON)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compress empty chunk: %w", err)
+			return nil, terminalCapturef("failed to compress empty chunk: %w", err)
 		}
 		// Encode to base64 for storage
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
@@ -831,6 +774,11 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		}
 
 		if err := r.Create(ctx, chunk); err != nil && !errors.IsAlreadyExists(err) {
+			// Transient apiserver/network errors are requeued (plain error); only genuine shape/size
+			// rejections are terminal so a momentary hiccup does not wedge the snapshot.
+			if chunkCreateErrorIsTerminal(err) {
+				return nil, terminalCapturef("failed to create empty chunk: %w", err)
+			}
 			return nil, fmt.Errorf("failed to create empty chunk: %w", err)
 		}
 
@@ -859,30 +807,24 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	// This prevents Key/Value serialization when reading chunks later
 	jsonObjects := make([]interface{}, 0, len(objects))
 	for _, obj := range objects {
-		if common.ShouldSkipSecretObject(&obj) {
-			r.Logger.Info("Skipping secret object before chunk storage", "kind", obj.GetKind(), "name", obj.GetName(), "namespace", obj.GetNamespace())
-			continue
-		}
-		sanitized := common.SanitizeObjectForManifestCheckpoint(&obj)
-		if sanitized == nil {
-			continue
-		}
+		// Verbatim: objects are stored raw (no field cleaning, no secret stripping). Selection already
+		// happened upstream (Stage A / MCR creator). Sanitization is a restore read-path concern.
 
 		// Normalize object to ensure clean JSON serialization
-		normalized := r.normalizeObjectForJSON(sanitized.Object)
+		normalized := r.normalizeObjectForJSON(obj.Object)
 
 		// FIX: Ensure apiVersion and kind are present in normalized object
 		// normalizeObjectForJSON works on obj.Object (map), which doesn't include TypeMeta
 		// We need to explicitly add apiVersion and kind to the normalized map
 		if normalizedMap, ok := normalized.(map[string]interface{}); ok {
-			normalizedMap["apiVersion"] = sanitized.GetAPIVersion()
-			normalizedMap["kind"] = sanitized.GetKind()
+			normalizedMap["apiVersion"] = obj.GetAPIVersion()
+			normalizedMap["kind"] = obj.GetKind()
 		}
 
 		jsonObjects = append(jsonObjects, normalized)
 	}
 	if len(jsonObjects) == 0 {
-		r.Logger.Info("createChunks: No objects left after checkpoint filtering, creating empty chunk")
+		r.Logger.Info("createChunks: No objects to chunk, creating empty chunk")
 		return createEmptyChunk()
 	}
 
@@ -908,13 +850,13 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 
 		testJSON, err := json.Marshal(testChunk)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal test chunk: %w", err)
+			return nil, terminalCapturef("failed to marshal test chunk: %w", err)
 		}
 
 		// Compress to check actual size (compare gzip bytes, not base64 string)
 		gzipBytes, err := r.compressToBytes(testJSON)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compress test chunk: %w", err)
+			return nil, terminalCapturef("failed to compress test chunk: %w", err)
 		}
 
 		// If compressed size exceeds limit, finalize current chunk first
@@ -964,14 +906,14 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		// Marshal chunk objects to JSON array
 		chunkJSON, err := json.Marshal(chunk.objects)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal chunk %d: %w", i, err)
+			return nil, terminalCapturef("failed to marshal chunk %d: %w", i, err)
 		}
 
 		// Compress and encode (each chunk has its own gzip, not a split of one global gzip)
 		// Get gzip bytes first for size calculation (SizeBytes should reflect etcd/apiserver object size)
 		gzipBytes, err := r.compressToBytes(chunkJSON)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compress chunk %d: %w", i, err)
+			return nil, terminalCapturef("failed to compress chunk %d: %w", i, err)
 		}
 		// Encode to base64 for storage
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
@@ -1033,6 +975,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				"checkpoint", checkpointName)
 			if err := r.Get(ctx, client.ObjectKey{Name: chunkName}, chunk); err != nil {
 				r.Logger.Error(err, "Failed to get existing chunk", "chunk", chunkName)
+				// Transient read error: requeue (plain error), do not wedge the snapshot.
 				return nil, fmt.Errorf("failed to get existing chunk %s: %w", chunkName, err)
 			}
 			// Verify it's the same chunk (same index, checkpoint, and checksum)
@@ -1045,7 +988,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 						"actualChecksum", chunk.Spec.Checksum,
 						"checkpoint", checkpointName,
 						"index", i)
-					return nil, fmt.Errorf("chunk %s already exists but checksum mismatch: expected %s, got %s", chunkName, checksum, chunk.Spec.Checksum)
+					return nil, terminalCapturef("chunk %s already exists but checksum mismatch: expected %s, got %s", chunkName, checksum, chunk.Spec.Checksum)
 				}
 				r.Logger.Info("✅ Chunk already exists and matches (index, checkpoint, checksum)",
 					"chunk", chunkName,
@@ -1060,15 +1003,21 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 					"actualCheckpoint", chunk.Spec.CheckpointName,
 					"expectedIndex", i,
 					"actualIndex", chunk.Spec.Index)
-				return nil, fmt.Errorf("chunk %s already exists but belongs to different checkpoint", chunkName)
+				return nil, terminalCapturef("chunk %s already exists but belongs to different checkpoint", chunkName)
 			}
 		default:
-			// Fail-fast: any other error → terminal failure
 			r.Logger.Error(err, "Failed to create chunk",
 				"chunk", chunkName,
 				"checkpoint", checkpointName,
 				"index", i,
 				"sizeBytes", len(gzipBytes))
+			// Only validation/shape/size rejections are terminal; every other error (timeouts, 5xx,
+			// connection blips, Forbidden during rollout) is transient and requeued so a momentary
+			// apiserver hiccup does not wedge the whole snapshot. createChunks resumes idempotently
+			// (the AlreadyExists branch above verifies checksum on re-run).
+			if chunkCreateErrorIsTerminal(err) {
+				return nil, terminalCapturef("failed to create chunk %s: %w", chunkName, err)
+			}
 			return nil, fmt.Errorf("failed to create chunk %s: %w", chunkName, err)
 		}
 
@@ -1149,8 +1098,6 @@ func (r *ManifestCheckpointController) calculateChunkChecksum(compressedData str
 // ConfigMap allows runtime configuration without restart:
 //   - maxChunkSizeBytes: maximum chunk size for checkpoint content (default: 800000)
 //   - defaultTTL: default TTL for ManifestCaptureRequest (default: 168h, see config.DefaultTTL)
-//   - excludeKinds: comma-separated list of kinds to exclude from snapshots
-//   - enableFiltering: enable object selection on capture (default: false)
 //
 // See templates/controller/configmap.yaml for ConfigMap structure
 func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Context) error {
@@ -1186,9 +1133,7 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 	r.Logger.Info("Loaded controller configuration from ConfigMap",
 		"configMap", fmt.Sprintf("%s/%s", namespace, configMapName),
 		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-		"defaultTTL", r.Config.DefaultTTL,
-		"excludeKinds", len(r.Config.ExcludeKinds),
-		"enableFiltering", r.Config.EnableFiltering)
+		"defaultTTL", r.Config.DefaultTTL)
 
 	return nil
 }
@@ -1367,6 +1312,14 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).
+		WithOptions(controller.Options{
+			// Bound the per-item retry backoff so transient chunk-creation requeues (apiserver/network
+			// blips) re-run quickly instead of backing off to the controller-runtime default (~16min),
+			// which would stall a snapshot whose capture hit a momentary hiccup. Terminal failures
+			// finalize without requeue, so this only affects the transient retry loop. Mirrors the
+			// Snapshot controller's rate limiter (200ms floor -> 10s ceiling).
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](200*time.Millisecond, 10*time.Second),
+		}).
 		Complete(r)
 }
 

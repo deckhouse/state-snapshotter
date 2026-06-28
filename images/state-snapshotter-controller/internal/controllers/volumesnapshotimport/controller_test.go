@@ -59,3 +59,68 @@ func TestImportDataBinding_TargetsPVC(t *testing.T) {
 		t.Fatalf("Artifact must point at the durable VSC, got %s/%s", b.Artifact.Kind, b.Artifact.Name)
 	}
 }
+
+// isImportModeVolumeSnapshot keys solely on the unified empty marker spec.source.import: {} (parity with
+// every other snapshot kind); capture/pre-provisioned VS (other source fields) are not ours to bind.
+func TestIsImportModeVolumeSnapshot(t *testing.T) {
+	cases := []struct {
+		name   string
+		source map[string]interface{}
+		want   bool
+	}{
+		{name: "import marker present", source: map[string]interface{}{"import": map[string]interface{}{}}, want: true},
+		{name: "capture (persistentVolumeClaimName)", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
+		{name: "pre-provisioned (volumeSnapshotContentName)", source: map[string]interface{}{"volumeSnapshotContentName": "vsc-1"}, want: false},
+		{name: "no source", source: nil, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := map[string]interface{}{}
+			if tc.source != nil {
+				spec["source"] = tc.source
+			}
+			vs := &unstructured.Unstructured{Object: map[string]interface{}{"spec": spec}}
+			if got := isImportModeVolumeSnapshot(vs); got != tc.want {
+				t.Fatalf("isImportModeVolumeSnapshot = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// resolveDataImportArtifact distinguishes ready (VSC produced), pending (no artifact yet), and terminal
+// (a non-VSC artifact the extended-VS legacy binding cannot represent).
+func TestResolveDataImportArtifact(t *testing.T) {
+	newDI := func(kind, name string) *unstructured.Unstructured {
+		ref := map[string]interface{}{}
+		if kind != "" {
+			ref["kind"] = kind
+		}
+		if name != "" {
+			ref["name"] = name
+		}
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"metadata": map[string]interface{}{"name": "di-1", "namespace": "ns1"},
+			"status":   map[string]interface{}{"dataArtifactRef": ref},
+		}}
+	}
+	r := &Controller{}
+
+	t.Run("ready VSC artifact", func(t *testing.T) {
+		vscName, ready, terminal := r.resolveDataImportArtifact(newDI(snapshotpkg.KindVolumeSnapshotContent, "vsc-7"))
+		if !ready || vscName != "vsc-7" || terminal != "" {
+			t.Fatalf("got vsc=%q ready=%v terminal=%q, want vsc-7/true/empty", vscName, ready, terminal)
+		}
+	})
+	t.Run("pending (no artifact name)", func(t *testing.T) {
+		vscName, ready, terminal := r.resolveDataImportArtifact(newDI(snapshotpkg.KindVolumeSnapshotContent, ""))
+		if ready || vscName != "" || terminal != "" {
+			t.Fatalf("got vsc=%q ready=%v terminal=%q, want empty/false/empty", vscName, ready, terminal)
+		}
+	})
+	t.Run("terminal (non-VSC artifact)", func(t *testing.T) {
+		vscName, ready, terminal := r.resolveDataImportArtifact(newDI("PersistentVolume", "pv-9"))
+		if ready || vscName != "" || terminal == "" {
+			t.Fatalf("got vsc=%q ready=%v terminal=%q, want empty/false/non-empty", vscName, ready, terminal)
+		}
+	})
+}

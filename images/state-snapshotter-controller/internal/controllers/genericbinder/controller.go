@@ -149,6 +149,15 @@ func (r *GenericSnapshotBinderController) isDomainCaptureKind(gvk schema.GroupVe
 	return ok
 }
 
+// MarkDataBacked records whether a snapshot Kind carries a volume data leg (CSD spec.dataBacked) on the
+// GVK registry, so the import path knows whether to wait for a DataImport/data artifact. Idempotent;
+// guarded by watchMu (the same lock that serializes registry mutations in AddWatchForPair).
+func (r *GenericSnapshotBinderController) MarkDataBacked(snapshotKind string, dataBacked bool) {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	r.GVKRegistry.MarkDataBacked(snapshotKind, dataBacked)
+}
+
 // isDomainPlanningComplete reports whether the domain controller finished planning for the snapshot's
 // current generation: ChildrenSnapshotReady=True with observedGeneration == metadata.generation.
 func isDomainPlanningComplete(snapshotLike snapshot.SnapshotLike) bool {
@@ -209,7 +218,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		// Import leaf deleted before its content was bound: best-effort delete the ownerless reconstructed
 		// ManifestCheckpoint (the per-CR upload creates it ownerless; once content is bound it is adopted +
 		// GC'd with the content). Mirrors the namespace Snapshot orchestrator's pre-bind cleanup.
-		if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" && snapshotLike.GetStatusContentName() == "" {
+		if snapshotIsImportMode(obj) && snapshotLike.GetStatusContentName() == "" {
 			if err := usecase.DeleteReconstructedManifestCheckpoint(ctx, r.Client, obj.GetUID()); err != nil {
 				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import leaf")
 			}
@@ -223,12 +232,13 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Import branch (C5): an import-mode leaf (spec.dataSource -> DataImport) has no live capture and no
-	// domain planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
-	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint, data leg from the
-	// DataImport's produced artifact) — there is no second content creator.
-	if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" {
-		return r.reconcileGenericImport(ctx, obj, snapshotLike, dataImportName)
+	// Import branch (C5): an import-mode leaf (spec.source.import: {}) has no live capture and no domain
+	// planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
+	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint; for dataBacked
+	// kinds, the data leg from the reverse-looked-up DataImport's produced artifact) — there is no second
+	// content creator.
+	if snapshotIsImportMode(obj) {
+		return r.reconcileGenericImport(ctx, obj, snapshotLike)
 	}
 
 	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot
@@ -365,6 +375,15 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 		if requeue {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		// Mirror the captured volume metadata (storageClassName/size/volumeMode) from the bound content's
+		// dataRef onto the data leaf snapshot status, so d8 reads it on export. dataBacked leaves only —
+		// manifest-only kinds have no dataRef. No-op until the content publishes a dataRef.
+		if r.GVKRegistry.IsDataBacked(obj.GetObjectKind().GroupVersionKind().Kind) {
+			if err := r.mirrorLeafVolumeMetadataFromContent(ctx, obj, contentName, ""); err != nil {
+				logger.Error(err, "Failed to mirror captured volume metadata to leaf status")
+			}
 		}
 	}
 
@@ -673,7 +692,20 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		message = readyCond.Message
 	}
 	logger.V(1).Info("Mirroring SnapshotContent Ready", "content", contentName, "status", status, "reason", reason)
-	return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message)
+	if err := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message); err != nil {
+		return err
+	}
+
+	// Mirror the ManifestsArchived subtree latch (NOT part of the Ready formula). The RBAC hook reads it
+	// off the root Snapshot to drop the transient capture RoleBinding once the subtree is archived. The
+	// content-side latch never re-opens, so this verbatim mirror is also monotone. If the content has no
+	// ManifestsArchived condition yet, skip (absent == still capturing for downstream readers).
+	if archivedCond := snapshot.GetCondition(contentLike, snapshot.ConditionManifestsArchived); archivedCond != nil {
+		logger.V(1).Info("Mirroring SnapshotContent ManifestsArchived", "content", contentName, "status", archivedCond.Status, "reason", archivedCond.Reason)
+		return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionManifestsArchived,
+			archivedCond.Status, archivedCond.Reason, archivedCond.Message)
+	}
+	return nil
 }
 
 func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
@@ -684,8 +716,29 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 	reason string,
 	message string,
 ) error {
-	// Fast path: nothing to do if the in-memory view already matches the desired Ready.
-	if cur := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady); cur != nil &&
+	return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionReady, status, reason, message)
+}
+
+// patchSnapshotConditionFromContent mirrors a single condition type (Ready or ManifestsArchived) from
+// the bound SnapshotContent onto the Snapshot, gen-stamped under an optimistic-lock merge patch.
+//
+// D4a: read-modify-write only the target condition. The demo domain controller co-writes
+// ChildrenSnapshotReady (and an early validation Ready=False) into the same conditions array; a bare
+// Status().Update / MergeFrom would replace the whole list and could silently drop the other writer's
+// entry. MergeFromWithOptimisticLock turns a concurrent write into a 409 so RetryOnConflict re-reads the
+// fresh object (already carrying the other condition) and re-applies only this condition, stamping
+// observedGeneration for gen-gated readers (INV-DOMAIN-GEN).
+func (r *GenericSnapshotBinderController) patchSnapshotConditionFromContent(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+	snapshotLike snapshot.SnapshotLike,
+	condType string,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) error {
+	// Fast path: nothing to do if the in-memory view already matches the desired condition.
+	if cur := snapshot.GetCondition(snapshotLike, condType); cur != nil &&
 		cur.Status == status && cur.Reason == reason && cur.Message == message &&
 		cur.ObservedGeneration == obj.GetGeneration() {
 		return nil
@@ -694,12 +747,6 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 
-	// D4a: read-modify-write only the Ready condition under an optimistic-lock merge patch. The demo
-	// domain controller co-writes ChildrenSnapshotReady (and an early validation Ready=False) into the
-	// same conditions array; a bare Status().Update / MergeFrom would replace the whole list and could
-	// silently drop the other writer's entry. MergeFromWithOptimisticLock turns a concurrent write into
-	// a 409 so RetryOnConflict re-reads the fresh object (already carrying the other condition) and
-	// re-applies only Ready, stamping observedGeneration for gen-gated readers (INV-DOMAIN-GEN).
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &unstructured.Unstructured{}
 		fresh.SetGroupVersionKind(gvk)
@@ -711,23 +758,23 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 			return err
 		}
 		gen := fresh.GetGeneration()
-		if cur := snapshot.GetCondition(freshLike, snapshot.ConditionReady); cur != nil &&
+		if cur := snapshot.GetCondition(freshLike, condType); cur != nil &&
 			cur.Status == status && cur.Reason == reason && cur.Message == message &&
 			cur.ObservedGeneration == gen {
 			return nil
 		}
 		base := fresh.DeepCopy()
-		snapshot.SetCondition(freshLike, snapshot.ConditionReady, status, reason, message)
+		snapshot.SetCondition(freshLike, condType, status, reason, message)
 		conds := freshLike.GetStatusConditions()
 		for i := range conds {
-			if conds[i].Type == snapshot.ConditionReady {
+			if conds[i].Type == condType {
 				conds[i].ObservedGeneration = gen
 			}
 		}
 		freshLike.SetStatusConditions(conds)
 		snapshot.SyncConditionsToUnstructured(fresh, freshLike.GetStatusConditions())
 		if err := r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return fmt.Errorf("failed to mirror SnapshotContent Ready: %w", err)
+			return fmt.Errorf("failed to mirror SnapshotContent %s: %w", condType, err)
 		}
 		return nil
 	})
@@ -814,6 +861,15 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// (including Ready=True -> False after the binder stopped polling). Enqueue-only; truth stays on
 		// SnapshotContent. See mapBoundContentToSnapshots.
 		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapBoundContentToSnapshots(gvk))).
+		// Event-driven parent->child unblock: when a PARENT SnapshotContent appears/changes, wake the child
+		// snapshots of this GVK that are waiting to resolve their parent's content ownerRef. Replaces the
+		// per-poll re-check that previously gated children on the Reconcile RequeueAfter fallback. See
+		// mapParentContentToChildSnapshots.
+		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapParentContentToChildSnapshots(gvk))).
+		// Event-driven capture handoff: when an MCR publishes its checkpoint, wake the owning snapshot so
+		// the binder publishes SnapshotContent.status.manifestCheckpointName immediately instead of on the
+		// next poll. See mapMCRToOwningSnapshots.
+		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(r.mapMCRToOwningSnapshots(gvk))).
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 	return builder.Complete(r)
 }

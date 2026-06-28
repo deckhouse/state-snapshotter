@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -56,6 +57,16 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		return changed, err == nil, err
 	}
 
+	// resourceSelector narrows which top-level/standalone domain source objects the root expands into child
+	// snapshots (nil = expand all). Resolved once here and threaded into every layer. Excluded objects are
+	// consistently dropped from the root manifest leg by the same selector. Nested domain children created by
+	// domain controllers are out of scope (see plan section 5a). A resolve error is surfaced as a graph
+	// planning failure by the caller (ChildrenSnapshotReady=False).
+	selector, err := nsSnap.ResolveResourceSelector()
+	if err != nil {
+		return false, false, fmt.Errorf("resolve spec.resourceSelector: %w", err)
+	}
+
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
 	for layerStart := 0; layerStart < len(mappings); {
@@ -66,7 +77,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
+			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
@@ -116,6 +127,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	nsSnap *storagev1alpha1.Snapshot,
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
+	selector labels.Selector,
 ) ([]storagev1alpha1.SnapshotChildRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
 	list := &unstructured.UnstructuredList{}
@@ -147,6 +159,12 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	})
 	for i := range list.Items {
 		resource := &list.Items[i]
+		// User-provided resourceSelector narrows expansion: a domain source object whose labels do not match
+		// is not expanded into a child snapshot (nil selector = expand all). The same object is then dropped
+		// from the root manifest leg by the same selector, keeping the two legs consistent.
+		if selector != nil && !selector.Matches(labels.Set(resource.GetLabels())) {
+			continue
+		}
 		covered, err := coverage.IsCovered(ctx, resource)
 		if err != nil {
 			return nil, err
@@ -408,6 +426,54 @@ func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Cont
 		return false, "", pending, nil
 	}
 	return true, "", nil, nil
+}
+
+// allDeclaredDomainChildSnapshotsReady reports whether every declared DOMAIN child snapshot of the root
+// (Snapshot.status.childrenSnapshotRefs, excluding CSI VolumeSnapshot visibility leaves) has reached full
+// Ready=True. It is the wave barrier for root orphan/residual PVC volume capture: orphan PVCs must be
+// evaluated only after the domain subtree has finished capturing, so a PVC that a domain child covers is
+// never momentarily seen as orphan (which previously created an nss-vs-* VolumeSnapshot + child volume
+// node that then got pruned, leaving a dangling, never-archiving node). The root MANIFEST branch is not
+// gated by this. A NotFound or not-yet-Ready child is pending (not a failure); a terminal child failure is
+// surfaced separately by the content aggregation (ChildrenFailed), so here it simply keeps the gate closed.
+// Readiness reuses ClassifyGenericChildSnapshotReady (Ready=True == Completed) for the pending/failed
+// descriptors AND enforces the strict generation contract: a Ready=True is honored only when its
+// observedGeneration == metadata.generation, so a stale Ready=True from a previous spec generation cannot
+// open the orphan wave while the child re-reconciles (mirrors readyConditionIsCurrentTerminal /
+// conditionSliceHasCurrentTrue; domain child controllers stamp Ready.observedGeneration on every write).
+// A namespace with no declared domain children passes the gate vacuously.
+func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, pending []string, err error) {
+	for _, ref := range refs {
+		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ref) {
+			continue
+		}
+		gv, perr := schema.ParseGroupVersion(ref.APIVersion)
+		if perr != nil {
+			return false, nil, perr
+		}
+		gvk := gv.WithKind(ref.Kind)
+		child := &unstructured.Unstructured{}
+		child.SetGroupVersionKind(gvk)
+		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, child); gerr != nil {
+			if errors.IsNotFound(gerr) {
+				pending = append(pending, fmt.Sprintf("%s/%s/%s (not created yet)", gvk.String(), namespace, ref.Name))
+				continue
+			}
+			return false, nil, gerr
+		}
+		if class, msg := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, ref.Name); class != usecase.SnapshotChildReadyClassCompleted {
+			pending = append(pending, msg)
+			continue
+		}
+		// Completed (Ready=True): require the current generation so a stale Ready does not open the gate.
+		if rc := usecase.CurrentReadyCondition(child); rc == nil || rc.ObservedGeneration != child.GetGeneration() {
+			pending = append(pending, fmt.Sprintf("%s/%s/%s (Ready=True but observedGeneration stale/missing; want %d)", gvk.String(), namespace, ref.Name, child.GetGeneration()))
+		}
+	}
+	if len(pending) > 0 {
+		return false, pending, nil
+	}
+	return true, nil, nil
 }
 
 // maxPendingChildrenInMessage caps how many pending child descriptors are embedded in the

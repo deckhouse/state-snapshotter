@@ -159,6 +159,77 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 	})
 }
 
+// domainChildReady builds a bound child snapshot whose Ready condition reflects full readiness (Ready=True)
+// or in-progress capture (Ready=False/Capturing). It is the fixture for the orphan-PVC final-wave gate
+// (allDeclaredDomainChildSnapshotsReady), which keys on full Ready (via ClassifyGenericChildSnapshotReady),
+// not on ChildrenSnapshotReady.
+func domainChildReady(name string, ready bool) *unstructured.Unstructured {
+	cond := metav1.Condition{Type: snapshotpkg.ConditionReady, Status: metav1.ConditionTrue, Reason: snapshotpkg.ReasonCompleted, ObservedGeneration: 1}
+	if !ready {
+		cond = metav1.Condition{Type: snapshotpkg.ConditionReady, Status: metav1.ConditionFalse, Reason: "Capturing", Message: "still capturing", ObservedGeneration: 1}
+	}
+	child := demoSnapshotChild(name, []metav1.Condition{cond})
+	if err := unstructured.SetNestedField(child.Object, "content-"+name, "status", "boundSnapshotContentName"); err != nil {
+		panic(err)
+	}
+	return child
+}
+
+func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
+	ctx := context.Background()
+	ns := "ns1"
+	vsLeaf := storagev1alpha1.SnapshotChildRef{APIVersion: snapshotpkg.CSISnapshotAPIVersion, Kind: snapshotpkg.KindVolumeSnapshot, Name: "nss-vs-x"}
+
+	t.Run("no domain children passes vacuously (VS visibility leaf skipped)", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, []storagev1alpha1.SnapshotChildRef{vsLeaf})
+		if err != nil || !ready || len(pending) != 0 {
+			t.Fatalf("vacuous gate must be open, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+
+	t.Run("domain child not yet Ready keeps gate closed", func(t *testing.T) {
+		child := domainChildReady("pending", false)
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, []storagev1alpha1.SnapshotChildRef{childRef("pending")})
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+
+	t.Run("missing domain child keeps gate closed", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, []storagev1alpha1.SnapshotChildRef{childRef("absent")})
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+		if !strings.Contains(pending[0], "not created yet") {
+			t.Fatalf("pending descriptor should flag the missing child, got %q", pending[0])
+		}
+	})
+
+	t.Run("all domain children Ready opens gate, VS leaf ignored", func(t *testing.T) {
+		readyChild := domainChildReady("ready", true)
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
+		refs := []storagev1alpha1.SnapshotChildRef{childRef("ready"), vsLeaf}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
+		if err != nil || !ready || len(pending) != 0 {
+			t.Fatalf("open gate expected, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+
+	t.Run("one ready one pending keeps gate closed", func(t *testing.T) {
+		readyChild := domainChildReady("ready", true)
+		pendingChild := domainChildReady("pending", false)
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild, pendingChild).Build()}
+		refs := []storagev1alpha1.SnapshotChildRef{childRef("ready"), childRef("pending")}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected with one pending, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+}
+
 // demoSnapshotChildReadyTerminal builds a bound child snapshot with a terminal Ready=False condition
 // (one of usecase.ChildSnapshotTerminalReadyReasons), so a test can exercise the Ready-based terminal
 // path of snapshotChildTerminalFailure with explicit generation vs observedGeneration.

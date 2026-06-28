@@ -29,7 +29,7 @@ func TestResolveDemoSnapshotSource_Valid(t *testing.T) {
 		Kind:       controllercommon.KindDemoVirtualDisk,
 		Name:       "disk-a",
 	}
-	res := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, spec)
+	res := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, &spec)
 	if res.Reason != "" {
 		t.Fatalf("unexpected failure: %s/%s", res.Reason, res.Message)
 	}
@@ -58,7 +58,7 @@ func TestResolveDemoSnapshotSource_Invalid(t *testing.T) {
 	}
 	for name, spec := range cases {
 		t.Run(name, func(t *testing.T) {
-			res := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, spec)
+			res := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, &spec)
 			if res.Reason != demoReasonInvalidSourceRef {
 				t.Fatalf("expected InvalidSourceRef, got %q (%s)", res.Reason, res.Message)
 			}
