@@ -37,12 +37,14 @@ type DemoVirtualDisk struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || self.dataSource.kind == 'DemoVirtualDiskSnapshot'",message="dataSource must reference DemoVirtualDiskSnapshot (cloning from another DemoVirtualDisk is not supported)"
 // +kubebuilder:validation:XValidation:rule="!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup) == 0 || self.dataSource.apiGroup == 'demo.state-snapshotter.deckhouse.io'",message="dataSource apiGroup must be demo.state-snapshotter.deckhouse.io or empty"
 // +kubebuilder:validation:XValidation:rule="has(self.dataSource) || has(self.size)",message="size is required when dataSource is not set (scratch disk provisioning)"
+// +kubebuilder:validation:XValidation:rule="has(self.persistentVolumeClaimName) && size(self.persistentVolumeClaimName) > 0",message="persistentVolumeClaimName is required: every DemoVirtualDisk must be backed by a PVC (manifest-only disks are not allowed)"
 type DemoVirtualDiskSpec struct {
-	// PersistentVolumeClaimName is the in-namespace PVC the disk controller creates and owns. When set,
-	// the disk snapshot owns the PVC data leg: it creates a VolumeCaptureRequest for the PVC and publishes
-	// the bound VolumeSnapshotContent into its SnapshotContent.status.dataRef. The PVC then becomes a
-	// subtree-covered volume and the namespace root MUST NOT treat it as an orphan PVC (no root VS).
-	// When empty the disk is manifest-only (no data leg).
+	// PersistentVolumeClaimName is the in-namespace PVC the disk controller creates and owns: the disk
+	// snapshot owns the PVC data leg, creating a VolumeCaptureRequest for the PVC and publishing the bound
+	// VolumeSnapshotContent into its SnapshotContent.status.dataRef. The PVC then becomes a subtree-covered
+	// volume and the namespace root MUST NOT treat it as an orphan PVC (no root VS). This field is REQUIRED:
+	// every DemoVirtualDisk must be backed by a PVC; manifest-only disks (no data leg) are not allowed
+	// (enforced by a spec XValidation rule).
 	// +optional
 	PersistentVolumeClaimName string `json:"persistentVolumeClaimName,omitempty"`
 

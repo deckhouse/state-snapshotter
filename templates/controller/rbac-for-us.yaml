@@ -137,7 +137,7 @@ rules:
   verbs: ["get", "list", "watch", "update", "patch", "delete"]
 
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
-# binder (C5) binds extended VS with spec.source.dataImportName.
+# binder (C5) binds extended VS carrying the spec.source.import marker.
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]

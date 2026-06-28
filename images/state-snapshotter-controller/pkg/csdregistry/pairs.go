@@ -29,7 +29,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// EligibleResourceSnapshotMapping is one CSD row resolved to concrete resource, snapshot, and content types.
+// EligibleResourceSnapshotMapping is one CSD resolved to concrete resource, snapshot, and content types.
 type EligibleResourceSnapshotMapping struct {
 	SourceGVR       schema.GroupVersionResource
 	SourceGVK       schema.GroupVersionKind
@@ -37,11 +37,14 @@ type EligibleResourceSnapshotMapping struct {
 	SnapshotGVK     schema.GroupVersionKind
 	SnapshotContent schema.GroupVersionKind
 	Priority        int32
+	// DataBacked mirrors CSD spec.dataBacked: the snapshot kind carries a volume data leg.
+	DataBacked bool
 }
 
-// EligibleUnifiedGVKPairs returns UnifiedGVKPair entries from every snapshotResourceMapping row
-// of CSD objects that satisfy CSDWatchEligible. Duplicate snapshot GVKs in the output are skipped
-// (first wins). Caller should merge with bootstrap pairs; invalid CRDs are skipped (no error).
+// EligibleUnifiedGVKPairs returns one UnifiedGVKPair per CSD object that satisfies CSDWatchEligible.
+// Duplicate snapshot GVKs in the output are skipped (first wins). Caller should merge with bootstrap
+// pairs; invalid CRDs are skipped (no error). The pair carries spec.dataBacked so the generic
+// controller's registry learns which snapshot kinds expect a data artifact.
 func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedbootstrap.UnifiedGVKPair, error) {
 	var list ssv1alpha1.CustomSnapshotDefinitionList
 	if err := c.List(ctx, &list); err != nil {
@@ -54,21 +57,20 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 		if !CSDWatchEligible(d) {
 			continue
 		}
-		for _, entry := range d.Spec.SnapshotResourceMapping {
-			_, snapGVK, err := resolveEntryGVKs(ctx, c, entry)
-			if err != nil {
-				continue
-			}
-			key := snapGVK.String()
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, unifiedbootstrap.UnifiedGVKPair{
-				Snapshot:        snapGVK,
-				SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
-			})
+		_, snapGVK, err := resolveCSDGVKs(d)
+		if err != nil {
+			continue
 		}
+		key := snapGVK.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, unifiedbootstrap.UnifiedGVKPair{
+			Snapshot:        snapGVK,
+			SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
+			DataBacked:      d.Spec.DataBacked,
+		})
 	}
 	return out, nil
 }
@@ -87,33 +89,32 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader, mapp
 		if !CSDWatchEligible(d) {
 			continue
 		}
-		for _, entry := range d.Spec.SnapshotResourceMapping {
-			sourceGVK, snapshotGVK, err := resolveEntryGVKs(ctx, c, entry)
-			if err != nil {
-				continue
-			}
-			sourceMapping, err := mapper.RESTMapping(sourceGVK.GroupKind(), sourceGVK.Version)
-			if err != nil || sourceMapping.Scope.Name() != meta.RESTScopeNameNamespace {
-				continue
-			}
-			snapshotMapping, err := mapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version)
-			if err != nil {
-				continue
-			}
-			key := sourceGVK.String() + "=>" + snapshotGVK.String()
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, EligibleResourceSnapshotMapping{
-				SourceGVR:       sourceMapping.Resource,
-				SourceGVK:       sourceGVK,
-				SnapshotGVR:     snapshotMapping.Resource,
-				SnapshotGVK:     snapshotGVK,
-				SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
-				Priority:        entry.Priority,
-			})
+		sourceGVK, snapshotGVK, err := resolveCSDGVKs(d)
+		if err != nil {
+			continue
 		}
+		sourceMapping, err := mapper.RESTMapping(sourceGVK.GroupKind(), sourceGVK.Version)
+		if err != nil || sourceMapping.Scope.Name() != meta.RESTScopeNameNamespace {
+			continue
+		}
+		snapshotMapping, err := mapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version)
+		if err != nil {
+			continue
+		}
+		key := sourceGVK.String() + "=>" + snapshotGVK.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, EligibleResourceSnapshotMapping{
+			SourceGVR:       sourceMapping.Resource,
+			SourceGVK:       sourceGVK,
+			SnapshotGVR:     snapshotMapping.Resource,
+			SnapshotGVK:     snapshotGVK,
+			SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
+			Priority:        d.Spec.Priority,
+			DataBacked:      d.Spec.DataBacked,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Priority != out[j].Priority {
@@ -124,14 +125,13 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader, mapp
 	return out, nil
 }
 
-func resolveEntryGVKs(ctx context.Context, c client.Reader, entry ssv1alpha1.SnapshotResourceMappingEntry) (schema.GroupVersionKind, schema.GroupVersionKind, error) {
-	_ = ctx
-	_ = c
-	sourceGVK, err := gvkFromRef(entry.Source)
+// resolveCSDGVKs resolves the source and snapshot GVKs from a flat CSD spec.
+func resolveCSDGVKs(d *ssv1alpha1.CustomSnapshotDefinition) (schema.GroupVersionKind, schema.GroupVersionKind, error) {
+	sourceGVK, err := gvkFromRef(d.Spec.Source)
 	if err != nil {
 		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("source GVK: %w", err)
 	}
-	snapshotGVK, err := gvkFromRef(entry.Snapshot)
+	snapshotGVK, err := gvkFromRef(ssv1alpha1.SnapshotGVKRef{APIVersion: d.Spec.APIVersion, Kind: d.Spec.Kind})
 	if err != nil {
 		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("snapshot GVK: %w", err)
 	}

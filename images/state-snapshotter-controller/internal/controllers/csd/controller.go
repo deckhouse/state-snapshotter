@@ -133,13 +133,8 @@ func (r *CustomSnapshotDefinitionReconciler) Reconcile(ctx context.Context, _ ct
 	return ctrl.Result{}, nil
 }
 
+// csdEntryResolution is the resolution of a CSD's single snapshot mapping (flat schema).
 type csdEntryResolution struct {
-	perMapping []mappingResolution
-	// duplicateSnapshotKind is true if two mappings in the same CSD resolve to the same snapshot GroupKind.
-	duplicateSnapshotKind bool
-}
-
-type mappingResolution struct {
 	snapshotGK  schema.GroupKind
 	resolveErr  error
 	contractErr error
@@ -171,37 +166,14 @@ func (r *CustomSnapshotDefinitionReconciler) computeCSDGlobalStateFromItems(
 	for i := range items {
 		d := &items[i]
 		res := resByName[d.Name]
-		if res.duplicateSnapshotKind {
+		if res.resolveErr != nil || res.contractErr != nil {
 			continue
 		}
-		hasErr := false
-		for _, m := range res.perMapping {
-			if m.resolveErr != nil || m.contractErr != nil {
-				hasErr = true
-				break
-			}
+		gkKey := res.snapshotGK.String()
+		if snapshotOwners[gkKey] == nil {
+			snapshotOwners[gkKey] = make(map[string]struct{})
 		}
-		if hasErr {
-			continue
-		}
-		seenInCSD := make(map[string]struct{})
-		for _, m := range res.perMapping {
-			gkKey := m.snapshotGK.String()
-			if _, dup := seenInCSD[gkKey]; dup {
-				hasErr = true
-				break
-			}
-			seenInCSD[gkKey] = struct{}{}
-		}
-		if hasErr {
-			continue
-		}
-		for gk := range seenInCSD {
-			if snapshotOwners[gk] == nil {
-				snapshotOwners[gk] = make(map[string]struct{})
-			}
-			snapshotOwners[gk][d.Name] = struct{}{}
-		}
+		snapshotOwners[gkKey][d.Name] = struct{}{}
 	}
 
 	conflicting = make(map[string]struct{})
@@ -217,38 +189,23 @@ func (r *CustomSnapshotDefinitionReconciler) computeCSDGlobalStateFromItems(
 
 func (r *CustomSnapshotDefinitionReconciler) resolveCSDSpec(ctx context.Context, d *storagev1alpha1.CustomSnapshotDefinition) csdEntryResolution {
 	var out csdEntryResolution
-	out.perMapping = make([]mappingResolution, 0, len(d.Spec.SnapshotResourceMapping))
-	seenGK := make(map[string]struct{})
-
-	for _, entry := range d.Spec.SnapshotResourceMapping {
-		mr := mappingResolution{}
-		resourceGVK, snapGVK, err := r.resolveMappingGVKs(ctx, entry)
-		if err != nil {
-			mr.resolveErr = err
-			out.perMapping = append(out.perMapping, mr)
-			continue
-		}
-		_ = resourceGVK
-		mr.snapshotGK = snapGVK.GroupKind()
-		mr.contractErr = r.validateSnapshotStatusContract(ctx, snapGVK)
-
-		if _, dup := seenGK[mr.snapshotGK.String()]; dup {
-			out.duplicateSnapshotKind = true
-		}
-		seenGK[mr.snapshotGK.String()] = struct{}{}
-
-		out.perMapping = append(out.perMapping, mr)
+	_, snapGVK, err := r.resolveMappingGVKs(ctx, d)
+	if err != nil {
+		out.resolveErr = err
+		return out
 	}
+	out.snapshotGK = snapGVK.GroupKind()
+	out.contractErr = r.validateSnapshotStatusContract(ctx, snapGVK)
 	return out
 }
 
-func (r *CustomSnapshotDefinitionReconciler) resolveMappingGVKs(ctx context.Context, entry storagev1alpha1.SnapshotResourceMappingEntry) (schema.GroupVersionKind, schema.GroupVersionKind, error) {
+func (r *CustomSnapshotDefinitionReconciler) resolveMappingGVKs(ctx context.Context, d *storagev1alpha1.CustomSnapshotDefinition) (schema.GroupVersionKind, schema.GroupVersionKind, error) {
 	_ = ctx
-	resourceGVK, err := gvkFromRef(entry.Source)
+	resourceGVK, err := gvkFromRef(d.Spec.Source)
 	if err != nil {
 		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("source GVK: %w", err)
 	}
-	snapGVK, err := gvkFromRef(entry.Snapshot)
+	snapGVK, err := gvkFromRef(storagev1alpha1.SnapshotGVKRef{APIVersion: d.Spec.APIVersion, Kind: d.Spec.Kind})
 	if err != nil {
 		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, fmt.Errorf("snapshot GVK: %w", err)
 	}
@@ -437,26 +394,11 @@ func (r *CustomSnapshotDefinitionReconciler) computeAccepted(
 	if _, isConflict := conflicting[csdName]; isConflict {
 		return metav1.ConditionFalse, CSDReasonKindConflict, "snapshot kind claimed by more than one CustomSnapshotDefinition"
 	}
-	if res.duplicateSnapshotKind {
-		return metav1.ConditionFalse, CSDReasonInvalidSpec, "duplicate snapshot kind in snapshotResourceMapping within the same CSD"
+	if res.resolveErr != nil {
+		return metav1.ConditionFalse, CSDReasonInvalidSpec, res.resolveErr.Error()
 	}
-	var errMsgs []string
-	for _, m := range res.perMapping {
-		if m.resolveErr != nil {
-			errMsgs = append(errMsgs, m.resolveErr.Error())
-		}
-	}
-	if len(errMsgs) > 0 {
-		return metav1.ConditionFalse, CSDReasonInvalidSpec, strings.Join(errMsgs, "; ")
-	}
-	var contractMsgs []string
-	for _, m := range res.perMapping {
-		if m.contractErr != nil {
-			contractMsgs = append(contractMsgs, m.contractErr.Error())
-		}
-	}
-	if len(contractMsgs) > 0 {
-		return metav1.ConditionFalse, CSDReasonSnapshotContractUnsatisfied, strings.Join(contractMsgs, "; ")
+	if res.contractErr != nil {
+		return metav1.ConditionFalse, CSDReasonSnapshotContractUnsatisfied, res.contractErr.Error()
 	}
 	return metav1.ConditionTrue, "Resolved", "mapping resolved, content CRDs are cluster-scoped"
 }

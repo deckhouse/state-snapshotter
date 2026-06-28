@@ -18,9 +18,9 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -43,45 +43,40 @@ const (
 	bkRestoreProbeCont = "probe"
 	bkProbeDevicePath  = "/dev/xvda"
 	bkDataImportTTL    = "15m"
-	bkDataArtifactType = "VolumeSnapshotContent"
 	vsAPIVersion       = "snapshot.storage.k8s.io/v1"
+
+	bkImpNSVS   = "bk-imp-vs"
+	bkImpNSDisk = "bk-imp-disk"
+	bkImpNSVM   = "bk-imp-vm"
+	bkImpNSFull = "bk-imp-full"
 )
 
-type leafImportSpec struct {
-	name      string
-	kind      string
-	group     string
-	resource  string
-	pvcName   string
-	manifests []byte
+// importNode describes one node in an import subtree (nested via children).
+type importNode struct {
+	name       string
+	kind       string
+	group      string
+	apiVersion string
+	manifests  []byte
+	children   []*importNode
+	dataLeaf   bool
+	pvcName    string
 }
 
-func mergeManifestBodies(parts ...[]byte) ([]byte, error) {
-	var all []unstructured.Unstructured
-	for _, p := range parts {
-		objs, err := decodeManifestArray(p)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, objs...)
-	}
-	return json.Marshal(all)
-}
-
-// importRootOwnerRef returns the child->parent Snapshot ownerRef the generic import binder uses
-// to resolve a leaf's parent SnapshotContent (mirrors d8-cli snapimport.parentOwnerReference).
-func importRootOwnerRef(rootName string, rootUID types.UID, volumeSnapshotLeaf bool) []metav1.OwnerReference {
+// importNodeOwnerRef returns the child->parent ownerRef the import binder uses to resolve the parent's
+// SnapshotContent (mirrors d8-cli snapimport.parentOwnerReference). VolumeSnapshot leaves omit controller.
+func importNodeOwnerRef(parentAPIVersion, parentKind, parentName string, parentUID types.UID, childIsVolumeSnapshot bool) metav1.OwnerReference {
 	ref := metav1.OwnerReference{
-		APIVersion: "storage.deckhouse.io/v1alpha1",
-		Kind:       "Snapshot",
-		Name:       rootName,
-		UID:        rootUID,
+		APIVersion: parentAPIVersion,
+		Kind:       parentKind,
+		Name:       parentName,
+		UID:        parentUID,
 	}
-	if !volumeSnapshotLeaf {
+	if !childIsVolumeSnapshot {
 		controller := true
 		ref.Controller = &controller
 	}
-	return []metav1.OwnerReference{ref}
+	return ref
 }
 
 func ownerReferencesField(refs []metav1.OwnerReference) []interface{} {
@@ -109,7 +104,55 @@ func getSnapshotUID(ctx context.Context, ns, name string) (types.UID, error) {
 	return obj.GetUID(), nil
 }
 
-func createImportDiskSnapshot(ctx context.Context, ns, name, dataImportName string, sourceRef map[string]interface{}, ownerRefs []metav1.OwnerReference) error {
+func getImportNodeUID(ctx context.Context, ns string, node *importNode) (types.UID, error) {
+	var gvr schema.GroupVersionResource
+	switch node.kind {
+	case "DemoVirtualMachineSnapshot":
+		gvr = demoVMSnapshotGVR
+	case "DemoVirtualDiskSnapshot":
+		gvr = demoDiskSnapshotGVR
+	case "VolumeSnapshot":
+		gvr = volumeSnapshotGVR
+	default:
+		return "", fmt.Errorf("getImportNodeUID: unsupported kind %q", node.kind)
+	}
+	obj, err := getResource(ctx, gvr, ns, node.name)
+	if err != nil {
+		return "", err
+	}
+	return obj.GetUID(), nil
+}
+
+// createImportVMSnapshot creates an import-mode DemoVirtualMachineSnapshot (structural node, no DataImport).
+func createImportVMSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
+	meta := map[string]interface{}{
+		"name":      name,
+		"namespace": ns,
+	}
+	if len(ownerRefs) > 0 {
+		meta["ownerReferences"] = ownerReferencesField(ownerRefs)
+	}
+	snap := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": demoGroupVersion,
+		"kind":       "DemoVirtualMachineSnapshot",
+		"metadata":   meta,
+		"spec": map[string]interface{}{
+			"source": map[string]interface{}{
+				"import": map[string]interface{}{},
+			},
+		},
+	}}
+	_, err := suiteDyn.Resource(demoVMSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
+// createImportDiskSnapshot creates an import-mode DemoVirtualDiskSnapshot. Import is signalled by the
+// unified empty marker spec.source.import: {} — no sourceRef (the live disk is absent on import) and no
+// DataImport name on the leaf: the binder finds the DataImport by reverse-lookup on spec.targetRef.
+func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
 	meta := map[string]interface{}{
 		"name":      name,
 		"namespace": ns,
@@ -122,8 +165,9 @@ func createImportDiskSnapshot(ctx context.Context, ns, name, dataImportName stri
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"sourceRef":  sourceRef,
-			"dataSource": map[string]interface{}{"name": dataImportName},
+			"source": map[string]interface{}{
+				"import": map[string]interface{}{},
+			},
 		},
 	}}
 	_, err := suiteDyn.Resource(demoDiskSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
@@ -133,7 +177,7 @@ func createImportDiskSnapshot(ctx context.Context, ns, name, dataImportName stri
 	return nil
 }
 
-func createImportVolumeSnapshot(ctx context.Context, ns, name, dataImportName string, ownerRefs []metav1.OwnerReference) error {
+func createImportVolumeSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
 	meta := map[string]interface{}{
 		"name":      name,
 		"namespace": ns,
@@ -147,7 +191,7 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name, dataImportName st
 		"metadata":   meta,
 		"spec": map[string]interface{}{
 			"source": map[string]interface{}{
-				"dataImportName": dataImportName,
+				"import": map[string]interface{}{},
 			},
 		},
 	}}
@@ -158,7 +202,20 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name, dataImportName st
 	return nil
 }
 
-func createDataImport(ctx context.Context, ns, name, group, resource, leafName string) error {
+func createDataImport(ctx context.Context, ns, name, group, kind, leafName, storageClassName, size, volumeMode string) error {
+	spec := map[string]interface{}{
+		"ttl":              bkDataImportTTL,
+		"storageClassName": storageClassName,
+		"size":             size,
+		"targetRef": map[string]interface{}{
+			"group": group,
+			"kind":  kind,
+			"name":  leafName,
+		},
+	}
+	if volumeMode != "" {
+		spec["volumeMode"] = volumeMode
+	}
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "storage.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
@@ -166,21 +223,30 @@ func createDataImport(ctx context.Context, ns, name, group, resource, leafName s
 			"name":      name,
 			"namespace": ns,
 		},
-		"spec": map[string]interface{}{
-			"ttl":              bkDataImportTTL,
-			"dataArtifactType": bkDataArtifactType,
-			"targetRef": map[string]interface{}{
-				"group":    group,
-				"resource": resource,
-				"name":     leafName,
-			},
-		},
+		"spec": spec,
 	}}
 	_, err := suiteDyn.Resource(dataImportGVR).Namespace(ns).Create(ctx, di, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
+}
+
+func sourcePVCScratchParams(ctx context.Context, ns, pvcName string) (storageClassName, size, volumeMode string, err error) {
+	pvc, gErr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, pvcName, metav1.GetOptions{})
+	if gErr != nil {
+		return "", "", "", fmt.Errorf("get source PVC %s/%s for DataImport params: %w", ns, pvcName, gErr)
+	}
+	if pvc.Spec.StorageClassName != nil {
+		storageClassName = *pvc.Spec.StorageClassName
+	}
+	if q, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+		size = q.String()
+	}
+	if pvc.Spec.VolumeMode != nil {
+		volumeMode = string(*pvc.Spec.VolumeMode)
+	}
+	return storageClassName, size, volumeMode, nil
 }
 
 func deleteDataImport(ctx context.Context, ns, name string) {
@@ -283,9 +349,6 @@ func ensureUploadRBAC(ctx context.Context, importNS, clientSANamespace, clientSA
 func uploadBlockData(ctx context.Context, importNS, importURL, srcFile string) error {
 	blockURL := strings.TrimRight(importURL, "/") + "/api/v1/block"
 	finishedURL := strings.TrimRight(importURL, "/") + "/api/v1/finished"
-	// The importer's CheckRequiredHeaders middleware rejects ANY PUT lacking these five headers
-	// (X-Content-Length, X-Offset, X-Attribute-Permissions/Uid/Gid) with HTTP 400 before the block
-	// handler runs; the block handler ignores the X-Attribute-* values, so any non-empty values work.
 	putCmd := fmt.Sprintf(
 		`TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -fksS -X PUT -H "Authorization: Bearer $TOKEN" -H "X-Content-Length: %d" -H "X-Offset: 0" -H "X-Attribute-Permissions: 0644" -H "X-Attribute-Uid: 0" -H "X-Attribute-Gid: 0" --data-binary @%q %q`,
 		bkBlockBytes, srcFile, blockURL,
@@ -294,8 +357,6 @@ func uploadBlockData(ctx context.Context, importNS, importURL, srcFile string) e
 	if err != nil {
 		return fmt.Errorf("PUT block data: %w (stdout=%q stderr=%q)", err, stdout, stderr)
 	}
-	// POST /finished must NOT carry the X-Attribute-* headers: the middleware only short-circuits PUTs,
-	// so a fully-populated non-PUT would slip past its (return-less) guard and double-invoke the handler.
 	postCmd := fmt.Sprintf(
 		`TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -fksS -X POST -H "Authorization: Bearer $TOKEN" %q`,
 		finishedURL,
@@ -323,14 +384,6 @@ func readBlockChecksum(ctx context.Context, ns, podName, container, devicePath s
 	return sum, nil
 }
 
-// restoreProbePodSpec builds a probe pod that raw-block-mounts a SINGLE restored PVC. One pod per volume
-// (rather than one pod mounting all volumes) is required because with node-local storage each restored
-// volume can be pinned to a different node: demo disks are bound by the domain VolumeRestoreRequest
-// without a consumer (so they may spread across workers) and the orphan PVC binds WaitForFirstConsumer on
-// whichever node its probe lands. A single pod mounting every volume could never satisfy all PVs' node
-// affinities at once (Unschedulable). A per-volume pod schedules onto its own volume's node, and for the
-// RWO disk already mounted by the restored workload it co-tenants on that workload's node (RWO permits
-// multiple pods on a single node).
 func restoreProbePodSpec(ns, podName, pvc, devicePath string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
@@ -352,109 +405,395 @@ func restoreProbePodSpec(ns, podName, pvc, devicePath string) *corev1.Pod {
 	}
 }
 
-// restoreProbePodName is the per-PVC probe pod name.
 func restoreProbePodName(pvc string) string { return bkRestoreProbePod + "-" + pvc }
 
-func buildLeafImports(ctx context.Context) ([]leafImportSpec, []byte, []childRef, error) {
-	srcNS := backup.srcNS
+func emptyJSONArray() []byte { return []byte("[]") }
 
-	rootManifests, err := aggGet(ctx, coreSnapshotSubPath(srcNS, backup.rootSnap, subManifestsDownload), nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("GET root manifests: %w", err)
-	}
-	vmManifests, err := aggGet(ctx, coreGenericSubPath(srcNS, resDemoVMSnapshots, backup.vmSnapName, subManifestsDownload), nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("GET VM snapshot manifests: %w", err)
-	}
-	importRootManifests, err := mergeManifestBodies(rootManifests, vmManifests)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	diskAManifests, err := aggGet(ctx, coreGenericSubPath(srcNS, resDemoDiskSnapshots, backup.diskASnapName, subManifestsDownload), nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("GET disk-a manifests: %w", err)
-	}
-	diskBManifests, err := aggGet(ctx, coreGenericSubPath(srcNS, resDemoDiskSnapshots, backup.diskBSnapName, subManifestsDownload), nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("GET disk-b manifests: %w", err)
-	}
-	orphanManifests, err := aggGet(ctx, vsConnectorSubPath(srcNS, backup.orphanVSName, subManifestsDownload), nil)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("GET orphan VS manifests: %w", err)
-	}
-
-	// pvcName comes from the leaf->srcPVC map resolved during phase-4 capture (single source of truth);
-	// it keys the /backup/<pvc>.bin upload source and the restored-PVC checksum lookup.
-	leaves := []leafImportSpec{
-		{
-			name:      backup.diskASnapName,
-			kind:      "DemoVirtualDiskSnapshot",
-			group:     "demo.state-snapshotter.deckhouse.io",
-			resource:  "demovirtualdisksnapshots",
-			pvcName:   backup.leafToPVC[backup.diskASnapName],
-			manifests: diskAManifests,
-		},
-		{
-			name:      backup.diskBSnapName,
-			kind:      "DemoVirtualDiskSnapshot",
-			group:     "demo.state-snapshotter.deckhouse.io",
-			resource:  "demovirtualdisksnapshots",
-			pvcName:   backup.leafToPVC[backup.diskBSnapName],
-			manifests: diskBManifests,
-		},
-		{
-			name:      backup.orphanVSName,
-			kind:      "VolumeSnapshot",
-			group:     "snapshot.storage.k8s.io",
-			resource:  "volumesnapshots",
-			pvcName:   backup.leafToPVC[backup.orphanVSName],
-			manifests: orphanManifests,
-		},
-	}
-	for i := range leaves {
-		if leaves[i].pvcName == "" {
-			return nil, nil, nil, fmt.Errorf("no source PVC mapped for leaf %q (resolveBackupSnapRefs not run?)", leaves[i].name)
-		}
-	}
-
-	childRefs := []childRef{
-		{apiVersion: demoGroupVersion, kind: "DemoVirtualDiskSnapshot", name: backup.diskASnapName},
-		{apiVersion: demoGroupVersion, kind: "DemoVirtualDiskSnapshot", name: backup.diskBSnapName},
-		{apiVersion: vsAPIVersion, kind: "VolumeSnapshot", name: backup.orphanVSName},
-	}
-	return leaves, importRootManifests, childRefs, nil
+func fetchVMSnapManifests(ctx context.Context, name string) ([]byte, error) {
+	return aggGet(ctx, coreGenericSubPath(backup.srcNS, resDemoVMSnapshots, name, subManifestsDownload), nil)
 }
 
-func leafUploadPath(importNS string, leaf leafImportSpec) string {
-	switch leaf.kind {
+func fetchDiskSnapManifests(ctx context.Context, name string) ([]byte, error) {
+	return aggGet(ctx, coreGenericSubPath(backup.srcNS, resDemoDiskSnapshots, name, subManifestsDownload), nil)
+}
+
+func fetchVSManifests(ctx context.Context, name string) ([]byte, error) {
+	return aggGet(ctx, vsConnectorSubPath(backup.srcNS, name, subManifestsDownload), nil)
+}
+
+func fetchRootSnapManifests(ctx context.Context) ([]byte, error) {
+	return aggGet(ctx, coreSnapshotSubPath(backup.srcNS, backup.rootSnap, subManifestsDownload), nil)
+}
+
+func newDiskImportNode(ctx context.Context, snapName string) (*importNode, error) {
+	manifests, err := fetchDiskSnapManifests(ctx, snapName)
+	if err != nil {
+		return nil, fmt.Errorf("GET disk snapshot %s manifests: %w", snapName, err)
+	}
+	pvcName := backup.leafToPVC[snapName]
+	if pvcName == "" {
+		return nil, fmt.Errorf("no source PVC mapped for disk snapshot %q", snapName)
+	}
+	return &importNode{
+		name:       snapName,
+		kind:       "DemoVirtualDiskSnapshot",
+		group:      "demo.state-snapshotter.deckhouse.io",
+		apiVersion: demoGroupVersion,
+		manifests:  manifests,
+		dataLeaf:   true,
+		pvcName:    pvcName,
+	}, nil
+}
+
+func newVSImportNode(ctx context.Context, vsName string) (*importNode, error) {
+	manifests, err := fetchVSManifests(ctx, vsName)
+	if err != nil {
+		return nil, fmt.Errorf("GET VolumeSnapshot %s manifests: %w", vsName, err)
+	}
+	pvcName := backup.leafToPVC[vsName]
+	if pvcName == "" {
+		return nil, fmt.Errorf("no source PVC mapped for VolumeSnapshot %q", vsName)
+	}
+	return &importNode{
+		name:       vsName,
+		kind:       "VolumeSnapshot",
+		group:      "snapshot.storage.k8s.io",
+		apiVersion: vsAPIVersion,
+		manifests:  manifests,
+		dataLeaf:   true,
+		pvcName:    pvcName,
+	}, nil
+}
+
+func newVMImportNode(ctx context.Context, snapName string, children ...*importNode) (*importNode, error) {
+	manifests, err := fetchVMSnapManifests(ctx, snapName)
+	if err != nil {
+		return nil, fmt.Errorf("GET VM snapshot %s manifests: %w", snapName, err)
+	}
+	return &importNode{
+		name:       snapName,
+		kind:       "DemoVirtualMachineSnapshot",
+		group:      "demo.state-snapshotter.deckhouse.io",
+		apiVersion: demoGroupVersion,
+		manifests:  manifests,
+		children:   children,
+	}, nil
+}
+
+func importNodeChildRefs(children []*importNode) []childRef {
+	refs := make([]childRef, 0, len(children))
+	for _, c := range children {
+		refs = append(refs, childRef{apiVersion: c.apiVersion, kind: c.kind, name: c.name})
+	}
+	return refs
+}
+
+func importNodeUploadPath(ns string, node *importNode) string {
+	switch node.kind {
+	case "DemoVirtualMachineSnapshot":
+		return coreGenericSubPath(ns, resDemoVMSnapshots, node.name, subManifestsUpload)
 	case "DemoVirtualDiskSnapshot":
-		return coreGenericSubPath(importNS, resDemoDiskSnapshots, leaf.name, subManifestsUpload)
+		return coreGenericSubPath(ns, resDemoDiskSnapshots, node.name, subManifestsUpload)
 	case "VolumeSnapshot":
-		return vsConnectorSubPath(importNS, leaf.name, subManifestsUpload)
+		return vsConnectorSubPath(ns, node.name, subManifestsUpload)
 	default:
 		return ""
 	}
 }
 
-func diskSnapshotSourceRef(ctx context.Context, ns, snapName string) (map[string]interface{}, error) {
-	obj, err := getResource(ctx, demoDiskSnapshotGVR, ns, snapName)
-	if err != nil {
-		return nil, err
+func postUploadWithRetry(ctx context.Context, path string, body []byte) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	var lastErr error
+	for {
+		_, err := aggPost(ctx, path, body)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("POST %s: %w", path, lastErr)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
 	}
-	ref, found, _ := unstructured.NestedMap(obj.Object, "spec", "sourceRef")
-	if !found || ref == nil {
-		return nil, fmt.Errorf("disk snapshot %s has no spec.sourceRef", snapName)
-	}
-	return ref, nil
 }
 
-// collectBoundSnapshotContentNames scans demo disk snapshots and VolumeSnapshots cluster-wide and
-// returns the set of status.boundSnapshotContentName values currently in use (including the capture
-// source tree, so we do not sweep live content).
+func materializeImportNode(ctx context.Context, ns string, node *importNode, parentRef *metav1.OwnerReference) error {
+	var ownerRefs []metav1.OwnerReference
+	if parentRef != nil {
+		ownerRefs = []metav1.OwnerReference{*parentRef}
+	}
+	var createErr error
+	switch node.kind {
+	case "DemoVirtualMachineSnapshot":
+		createErr = createImportVMSnapshot(ctx, ns, node.name, ownerRefs)
+	case "DemoVirtualDiskSnapshot":
+		createErr = createImportDiskSnapshot(ctx, ns, node.name, ownerRefs)
+	case "VolumeSnapshot":
+		createErr = createImportVolumeSnapshot(ctx, ns, node.name, ownerRefs)
+	default:
+		return fmt.Errorf("materializeImportNode: unsupported kind %q", node.kind)
+	}
+	if createErr != nil {
+		return createErr
+	}
+	uid, err := getImportNodeUID(ctx, ns, node)
+	if err != nil {
+		return err
+	}
+	if node.dataLeaf {
+		scName, scSize, scMode, perr := sourcePVCScratchParams(ctx, backup.srcNS, node.pvcName)
+		if perr != nil {
+			return perr
+		}
+		if err := createDataImport(ctx, ns, node.name, node.group, node.kind, node.name, scName, scSize, scMode); err != nil {
+			return err
+		}
+	}
+	for _, child := range node.children {
+		childRef := importNodeOwnerRef(node.apiVersion, node.kind, node.name, uid, child.kind == "VolumeSnapshot")
+		if err := materializeImportNode(ctx, ns, child, &childRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func materializeImportTree(ctx context.Context, ns, rootName string, rootUID types.UID, children []*importNode) error {
+	for _, child := range children {
+		parentRef := importNodeOwnerRef("storage.deckhouse.io/v1alpha1", "Snapshot", rootName, rootUID, child.kind == "VolumeSnapshot")
+		if err := materializeImportNode(ctx, ns, child, &parentRef); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func uploadImportNode(ctx context.Context, ns string, node *importNode) error {
+	for _, child := range node.children {
+		if err := uploadImportNode(ctx, ns, child); err != nil {
+			return err
+		}
+	}
+	body, err := buildUploadBody(node.manifests, importNodeChildRefs(node.children))
+	if err != nil {
+		return err
+	}
+	path := importNodeUploadPath(ns, node)
+	if path == "" {
+		return fmt.Errorf("upload path for %s/%s is empty", node.kind, node.name)
+	}
+	return postUploadWithRetry(ctx, path, body)
+}
+
+func uploadImportTree(ctx context.Context, ns, rootName string, rootManifests []byte, children []*importNode) error {
+	for _, child := range children {
+		if err := uploadImportNode(ctx, ns, child); err != nil {
+			return err
+		}
+	}
+	body, err := buildUploadBody(rootManifests, importNodeChildRefs(children))
+	if err != nil {
+		return err
+	}
+	path := coreSnapshotSubPath(ns, rootName, subManifestsUpload)
+	return postUploadWithRetry(ctx, path, body)
+}
+
+func collectDataLeaves(nodes []*importNode) []*importNode {
+	var out []*importNode
+	var walk func(*importNode)
+	walk = func(n *importNode) {
+		if n.dataLeaf {
+			out = append(out, n)
+		}
+		for _, c := range n.children {
+			walk(c)
+		}
+	}
+	for _, n := range nodes {
+		walk(n)
+	}
+	return out
+}
+
+func uploadDataLeaves(ctx context.Context, importNS string, leaves []*importNode) error {
+	for _, leaf := range leaves {
+		url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, 15*time.Minute)
+		if werr != nil {
+			return fmt.Errorf("DataImport %s Ready: %w", leaf.name, werr)
+		}
+		srcFile := fmt.Sprintf("%s/%s.bin", backup.dataDir, leaf.pvcName)
+		if err := uploadBlockData(ctx, importNS, url, srcFile); err != nil {
+			return err
+		}
+		if err := waitDataImportCompleted(ctx, importNS, leaf.name, 15*time.Minute); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyRestoredBlockData(ctx context.Context, label, importNS string, verifyPVCs []string) error {
+	logf := func(format string, args ...any) { GinkgoWriter.Printf("  ["+label+"] "+format+"\n", args...) }
+	for _, pvc := range verifyPVCs {
+		podName := restoreProbePodName(pvc)
+		_, err := suiteClientset.CoreV1().Pods(importNS).Create(ctx, restoreProbePodSpec(importNS, podName, pvc, bkProbeDevicePath), metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("create restore probe pod for PVC %s: %w", pvc, err)
+		}
+	}
+	for _, pvc := range verifyPVCs {
+		podName := restoreProbePodName(pvc)
+		if err := waitPodRunning(ctx, importNS, podName, 15*time.Minute); err != nil {
+			return fmt.Errorf("probe pod for PVC %s Running: %w", pvc, err)
+		}
+		got, rerr := readBlockChecksum(ctx, importNS, podName, bkRestoreProbeCont, bkProbeDevicePath)
+		if rerr != nil {
+			return fmt.Errorf("checksum restored PVC %s: %w", pvc, rerr)
+		}
+		want := backup.checksums[pvc]
+		if want == "" {
+			return fmt.Errorf("source checksum for PVC %s is empty", pvc)
+		}
+		if got != want {
+			return fmt.Errorf("restored PVC %s bytes mismatch: got %s want %s", pvc, got, want)
+		}
+		logf("data PVC %s: restored sha256=%s == source sha256=%s — MATCH", pvc, got, want)
+	}
+	return nil
+}
+
+// logImportTree prints the subtree being imported, one indented line per node, marking structural nodes
+// vs data leaves (with their source PVC) so the captured topology of each variant is visible.
+func logImportTree(label string, nodes []*importNode, depth int) {
+	indent := strings.Repeat("  ", depth)
+	for _, n := range nodes {
+		role := "structural"
+		if n.dataLeaf {
+			role = fmt.Sprintf("data leaf -> PVC %s", n.pvcName)
+		}
+		GinkgoWriter.Printf("  [%s] %s%s/%s (%s)\n", label, indent, n.kind, n.name, role)
+		if len(n.children) > 0 {
+			logImportTree(label, n.children, depth+1)
+		}
+	}
+}
+
+func dataLeafSummary(leaves []*importNode) string {
+	if len(leaves) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(leaves))
+	for _, l := range leaves {
+		parts = append(parts, fmt.Sprintf("%s(PVC %s)", l.name, l.pvcName))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func restoredObjSummary(objs []unstructured.Unstructured) string {
+	parts := make([]string, 0, len(objs))
+	for i := range objs {
+		parts = append(parts, fmt.Sprintf("%s/%s", objs[i].GetKind(), objs[i].GetName()))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// runImportVariant imports one subtree variant into importNS and verifies manifests + block data.
+// label prefixes every log line so the four parallel variants stay readable in interleaved output.
+func runImportVariant(ctx context.Context, label, importNS string, rootManifests []byte, children []*importNode, verifyPVCs []string) error {
+	logf := func(format string, args ...any) { GinkgoWriter.Printf("  ["+label+"] "+format+"\n", args...) }
+
+	logf("START ns=%s — importing tree:", importNS)
+	logImportTree(label, children, 1)
+
+	if err := createImportRootSnapshot(ctx, importNS, bkImportRootName); err != nil {
+		return fmt.Errorf("create import-root: %w", err)
+	}
+	rootUID, err := getSnapshotUID(ctx, importNS, bkImportRootName)
+	if err != nil {
+		return fmt.Errorf("read import-root UID: %w", err)
+	}
+	if err := materializeImportTree(ctx, importNS, bkImportRootName, rootUID, children); err != nil {
+		return fmt.Errorf("materialize import tree: %w", err)
+	}
+	if err := uploadImportTree(ctx, importNS, bkImportRootName, rootManifests, children); err != nil {
+		return fmt.Errorf("upload manifests: %w", err)
+	}
+	leaves := collectDataLeaves(children)
+	logf("manifests uploaded; streaming %d volume data leaf(s): %s", len(leaves), dataLeafSummary(leaves))
+	if err := uploadDataLeaves(ctx, importNS, leaves); err != nil {
+		return fmt.Errorf("upload volume bytes: %w", err)
+	}
+	content, err := waitSnapshotReady(ctx, importNS, bkImportRootName, suiteCfg.snapshotReadyTO)
+	if err != nil {
+		return fmt.Errorf("import-root Ready: %w", err)
+	}
+	if err := waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO); err != nil {
+		return fmt.Errorf("import-root content Ready: %w", err)
+	}
+	nodes, err := walkSnapshotTree(ctx, importNS, bkImportRootName)
+	if err != nil {
+		return fmt.Errorf("walk import tree: %w", err)
+	}
+	if err := waitChildrenReady(ctx, importNS, nodes, suiteCfg.snapshotReadyTO); err != nil {
+		return fmt.Errorf("import children Ready: %w", err)
+	}
+	logf("import-root Snapshot + bound content %s Ready; all %d tree node(s) Ready", content, len(nodes))
+	restorePath := coreSnapshotSubPath(importNS, bkImportRootName, subManifestsRestore)
+	body, err := aggGet(ctx, restorePath, map[string]string{"targetNamespace": importNS})
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", restorePath, err)
+	}
+	objs, err := decodeManifestArray(body)
+	if err != nil {
+		return err
+	}
+	if len(objs) == 0 {
+		return fmt.Errorf("restore returned no manifests")
+	}
+	logf("restore returned %d manifest(s): %s", len(objs), restoredObjSummary(objs))
+	ptrs := make([]*unstructured.Unstructured, 0, len(objs))
+	for i := range objs {
+		ptrs = append(ptrs, &objs[i])
+	}
+	if err := applyObjects(ctx, ptrs, importNS); err != nil {
+		return fmt.Errorf("apply restored manifests: %w", err)
+	}
+	if err := assertManifestsMatchLive(ctx, label, backup.srcNS, objs); err != nil {
+		return fmt.Errorf("manifests match live: %w", err)
+	}
+	for _, pvc := range verifyPVCs {
+		switch pvc {
+		case bkPVCDiskA:
+			if err := waitDemoDiskReady(ctx, importNS, bkDiskAName, 15*time.Minute); err != nil {
+				return fmt.Errorf("restored DemoVirtualDisk %s Ready: %w", bkDiskAName, err)
+			}
+		case bkPVCDiskB:
+			if err := waitDemoDiskReady(ctx, importNS, bkDiskBName, 15*time.Minute); err != nil {
+				return fmt.Errorf("restored DemoVirtualDisk %s Ready: %w", bkDiskBName, err)
+			}
+		}
+	}
+	if err := verifyRestoredBlockData(ctx, label, importNS, verifyPVCs); err != nil {
+		return err
+	}
+	logf("PASSED — %d manifest(s) verified against source, %d volume(s) checksum-matched", len(objs), len(verifyPVCs))
+	return nil
+}
+
+func cleanupImportVariantNS(ctx context.Context, importNS string, verifyPVCs []string) {
+	for _, pvc := range verifyPVCs {
+		deletePod(ctx, importNS, restoreProbePodName(pvc))
+	}
+	cleanupImportRootTree(ctx, importNS, bkImportRootName, 5*time.Minute)
+	deleteNamespace(ctx, importNS)
+}
+
 func collectBoundSnapshotContentNames(ctx context.Context) (map[string]struct{}, error) {
 	bound := make(map[string]struct{})
-	for _, gvr := range []schema.GroupVersionResource{demoDiskSnapshotGVR, volumeSnapshotGVR} {
+	for _, gvr := range []schema.GroupVersionResource{demoDiskSnapshotGVR, demoVMSnapshotGVR, volumeSnapshotGVR} {
 		list, err := suiteDyn.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("list %s: %w", gvr.Resource, err)
@@ -489,10 +828,6 @@ func contentNameMatchesLeafPrefix(contentName string, leafNames []string) bool {
 	return false
 }
 
-// sweepOrphanedLeafSnapshotContents best-effort deletes cluster-scoped SnapshotContent (and its MCP)
-// left over from prior failed import runs. Leaf snapshot names are stable across runs, but each run
-// materializes a new {leaf}-content-{uid[:8]}; stale contents from an old leaf UID are not bound to
-// any live snapshot and only clutter diagnostics.
 func sweepOrphanedLeafSnapshotContents(ctx context.Context, leafNames []string) error {
 	if len(leafNames) == 0 {
 		return nil
@@ -527,12 +862,10 @@ func sweepOrphanedLeafSnapshotContents(ctx context.Context, leafNames []string) 
 	return nil
 }
 
-// cleanupImportRootTree deletes the import-root Snapshot and waits for its import-mode content tree
-// (root + direct child contents) to be reclaimed before the import namespace is removed.
 func cleanupImportRootTree(ctx context.Context, importNS, rootName string, timeout time.Duration) {
 	GinkgoHelper()
-	if cleanupSkippedOnFailure() {
-		GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping import-root tree %s/%s (spec failed)\n", importNS, rootName)
+	if cleanupSkipped() {
+		GinkgoWriter.Printf("%s: keeping import-root tree %s/%s\n", keepReason(), importNS, rootName)
 		return
 	}
 	snap, err := getResource(ctx, snapshotGVR, importNS, rootName)
@@ -562,170 +895,153 @@ func cleanupImportRootTree(ctx context.Context, importNS, rootName string, timeo
 	}
 }
 
-// backupRestoreSpecs registers phase-5 backup-system restore: import the snapshot tree into a fresh
-// namespace via manifests-and-children-refs-upload, upload volume bytes via SVDM DataImport, restore-apply,
-// and verify manifests + block checksums against the phase-4 source.
-func backupRestoreSpecs() {
-	Context("Phase 5: backup-system restore into another namespace", func() {
-		var importNS string
+type importVariantSpec struct {
+	label  string
+	nsRole string
+	build  func(context.Context) ([]byte, []*importNode, []string, error)
+}
 
+// importVariantsSpecs registers phase-5: four parallel import variants (any tree node) in separate namespaces.
+func importVariantsSpecs() {
+	Context("Phase 5: import any tree node (4 parallel variants)", func() {
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-5 backup restore flow")
+				Skip("E2E_VOLUME_DATA not set: skipping the phase-5 import variants flow")
 			}
 			if !backup.ready {
 				Skip("phase-4 backup download did not complete (extended-VS surface or download skipped)")
 			}
-			importNS = uniqueNS("bk-restore")
-
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			Expect(ensureNamespace(ctx, importNS)).To(Succeed())
-			Expect(ensureUploadRBAC(ctx, importNS, backup.srcNS, bkBackupClientSA)).To(Succeed())
 			Expect(sweepOrphanedLeafSnapshotContents(ctx, []string{
-				backup.diskASnapName, backup.diskBSnapName, backup.orphanVSName,
+				backup.diskASnapName, backup.diskBSnapName, backup.orphanVSName, backup.vmSnapName,
 			})).To(Succeed())
-
-			DeferCleanup(func() {
-				cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				defer ccancel()
-				deletePod(cctx, backup.srcNS, bkBackupClientPod)
-				for _, pvc := range []string{bkPVCName, bkPVCDiskA, bkPVCDiskB} {
-					deletePod(cctx, importNS, restoreProbePodName(pvc))
-				}
-				cleanupImportRootTree(cctx, importNS, bkImportRootName, 5*time.Minute)
-				deleteNamespace(cctx, importNS)
-				deleteNamespace(cctx, backup.srcNS)
-				phase5ImportNS = ""
-			})
 		})
 
-		It("imports the snapshot tree and restores workload objects with data", func() {
-			// Budget: 3 x (15m DataImport + upload) + import tree + restore materialization.
-			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Minute)
+		It("imports VolumeSnapshot, DemoVirtualDiskSnapshot, DemoVirtualMachineSnapshot, and full ns in parallel", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Minute)
 			defer cancel()
 
-			leaves, rootManifests, childRefs, err := buildLeafImports(ctx)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Creating import-mode snapshot CRs and DataImport resources for each data leaf")
-			Expect(createImportRootSnapshot(ctx, importNS, bkImportRootName)).To(Succeed())
-			phase5ImportNS = importNS
-			rootUID, err := getSnapshotUID(ctx, importNS, bkImportRootName)
-			Expect(err).NotTo(HaveOccurred(), "read import-root UID")
-			for _, leaf := range leaves {
-				Expect(createDataImport(ctx, importNS, leaf.name, leaf.group, leaf.resource, leaf.name)).To(Succeed())
-				DeferCleanup(func(name string) func() {
-					return func() {
-						if cleanupSkippedOnFailure() {
-							GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping DataImport %s/%s (spec failed)\n", importNS, name)
-							return
+			specs := []importVariantSpec{
+				{
+					label:  "VolumeSnapshot",
+					nsRole: bkImpNSVS,
+					build: func(ctx context.Context) ([]byte, []*importNode, []string, error) {
+						vs, err := newVSImportNode(ctx, backup.orphanVSName)
+						if err != nil {
+							return nil, nil, nil, err
 						}
-						cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
-						defer ccancel()
-						deleteDataImport(cctx, importNS, name)
-					}
-				}(leaf.name))
+						return emptyJSONArray(), []*importNode{vs}, []string{bkPVCName}, nil
+					},
+				},
+				{
+					label:  "DemoVirtualDiskSnapshot",
+					nsRole: bkImpNSDisk,
+					build: func(ctx context.Context) ([]byte, []*importNode, []string, error) {
+						disk, err := newDiskImportNode(ctx, backup.diskBSnapName)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						return emptyJSONArray(), []*importNode{disk}, []string{bkPVCDiskB}, nil
+					},
+				},
+				{
+					label:  "DemoVirtualMachineSnapshot",
+					nsRole: bkImpNSVM,
+					build: func(ctx context.Context) ([]byte, []*importNode, []string, error) {
+						diskA, err := newDiskImportNode(ctx, backup.diskASnapName)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						vm, err := newVMImportNode(ctx, backup.vmSnapName, diskA)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						return emptyJSONArray(), []*importNode{vm}, []string{bkPVCDiskA}, nil
+					},
+				},
+				{
+					label:  "full namespace",
+					nsRole: bkImpNSFull,
+					build: func(ctx context.Context) ([]byte, []*importNode, []string, error) {
+						rootManifests, err := fetchRootSnapManifests(ctx)
+						if err != nil {
+							return nil, nil, nil, fmt.Errorf("GET root manifests: %w", err)
+						}
+						diskA, err := newDiskImportNode(ctx, backup.diskASnapName)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						vm, err := newVMImportNode(ctx, backup.vmSnapName, diskA)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						diskB, err := newDiskImportNode(ctx, backup.diskBSnapName)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						vs, err := newVSImportNode(ctx, backup.orphanVSName)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						children := []*importNode{vm, diskB, vs}
+						verifyPVCs := []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}
+						return rootManifests, children, verifyPVCs, nil
+					},
+				},
+			}
 
-				volumeSnapshotLeaf := leaf.kind == "VolumeSnapshot"
-				ownerRefs := importRootOwnerRef(bkImportRootName, rootUID, volumeSnapshotLeaf)
-				switch leaf.kind {
-				case "DemoVirtualDiskSnapshot":
-					sourceRef, serr := diskSnapshotSourceRef(ctx, backup.srcNS, leaf.name)
-					Expect(serr).NotTo(HaveOccurred(), "read sourceRef for %s", leaf.name)
-					Expect(createImportDiskSnapshot(ctx, importNS, leaf.name, leaf.name, sourceRef, ownerRefs)).To(Succeed())
-				case "VolumeSnapshot":
-					Expect(createImportVolumeSnapshot(ctx, importNS, leaf.name, leaf.name, ownerRefs)).To(Succeed())
+			type variantRun struct {
+				ns         string
+				verifyPVCs []string
+			}
+			runs := make([]variantRun, len(specs))
+			for i, spec := range specs {
+				runs[i].ns = uniqueNS(spec.nsRole)
+			}
+
+			defer func() {
+				cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Minute)
+				defer ccancel()
+				deletePod(cctx, backup.srcNS, bkBackupClientPod)
+				for i := range runs {
+					cleanupImportVariantNS(cctx, runs[i].ns, runs[i].verifyPVCs)
 				}
+				deleteNamespace(cctx, backup.srcNS)
+				phase5ImportNS = ""
+			}()
+
+			for i := range specs {
+				setupCtx, setupCancel := context.WithTimeout(ctx, 2*time.Minute)
+				Expect(ensureNamespace(setupCtx, runs[i].ns)).To(Succeed())
+				Expect(ensureUploadRBAC(setupCtx, runs[i].ns, backup.srcNS, bkBackupClientSA)).To(Succeed())
+				setupCancel()
 			}
+			phase5ImportNS = runs[0].ns
 
-			By("Uploading leaf manifests via manifests-and-children-refs-upload (leaves first)")
-			for _, leaf := range leaves {
-				body, berr := buildUploadBody(leaf.manifests, nil)
-				Expect(berr).NotTo(HaveOccurred())
-				path := leafUploadPath(importNS, leaf)
-				Expect(path).NotTo(BeEmpty())
-				Eventually(func() error {
-					_, perr := aggPost(ctx, path, body)
-					return perr
-				}).WithContext(ctx).WithTimeout(2*time.Minute).WithPolling(pollInterval).
-					Should(Succeed(), "POST %s", path)
+			errCh := make(chan error, len(specs))
+			var wg sync.WaitGroup
+			for i, spec := range specs {
+				i, spec := i, spec
+				wg.Add(1)
+				go func() {
+					defer GinkgoRecover()
+					defer wg.Done()
+					rootManifests, children, verifyPVCs, berr := spec.build(ctx)
+					if berr != nil {
+						errCh <- fmt.Errorf("%s build: %w", spec.label, berr)
+						return
+					}
+					runs[i].verifyPVCs = verifyPVCs
+					if err := runImportVariant(ctx, spec.label, runs[i].ns, rootManifests, children, verifyPVCs); err != nil {
+						errCh <- fmt.Errorf("%s: %w", spec.label, err)
+					}
+				}()
 			}
-
-			By("Uploading the reshaped root manifests (VM folded in) with direct child refs")
-			rootBody, err := buildUploadBody(rootManifests, childRefs)
-			Expect(err).NotTo(HaveOccurred())
-			rootPath := coreSnapshotSubPath(importNS, bkImportRootName, subManifestsUpload)
-			Eventually(func() error {
-				_, perr := aggPost(ctx, rootPath, rootBody)
-				return perr
-			}).WithContext(ctx).WithTimeout(2*time.Minute).WithPolling(pollInterval).
-				Should(Succeed(), "POST %s", rootPath)
-
-			By("Uploading volume bytes to each DataImport from the phase-4 backup cache")
-			for _, leaf := range leaves {
-				url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, 15*time.Minute)
-				Expect(werr).NotTo(HaveOccurred(), "DataImport %s Ready", leaf.name)
-				srcFile := fmt.Sprintf("%s/%s.bin", backup.dataDir, leaf.pvcName)
-				Expect(uploadBlockData(ctx, importNS, url, srcFile)).To(Succeed())
-				Expect(waitDataImportCompleted(ctx, importNS, leaf.name, 15*time.Minute)).To(Succeed())
-			}
-
-			By("Waiting for the imported snapshot tree to reach Ready")
-			content, err := waitSnapshotReady(ctx, importNS, bkImportRootName, suiteCfg.snapshotReadyTO)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
-			nodes, err := walkSnapshotTree(ctx, importNS, bkImportRootName)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(waitChildrenReady(ctx, importNS, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
-
-			By("Reading apply-ready manifests and applying them into the import namespace")
-			restorePath := coreSnapshotSubPath(importNS, bkImportRootName, subManifestsRestore)
-			body, err := aggGet(ctx, restorePath, map[string]string{"targetNamespace": importNS})
-			Expect(err).NotTo(HaveOccurred(), "GET %s", restorePath)
-			objs, err := decodeManifestArray(body)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(objs).NotTo(BeEmpty())
-			ptrs := make([]*unstructured.Unstructured, 0, len(objs))
-			for i := range objs {
-				ptrs = append(ptrs, &objs[i])
-			}
-			Expect(applyObjects(ctx, ptrs, importNS)).To(Succeed())
-
-			By("Asserting restored manifests match the live source objects")
-			Expect(assertManifestsMatchLive(ctx, backup.srcNS, objs)).To(Succeed())
-
-			By("Waiting for the restored demo disks to become Ready (fail fast on the disk-restore path)")
-			// The demo disks materialize via the domain controller -> VolumeRestoreRequest, which binds the
-			// backing PVC without needing a consumer (mirrors phase-3 VRR restore). The orphan PVC is restored
-			// via a plain dataSourceRef on a WaitForFirstConsumer SC, so it only binds once the probe pod (its
-			// first consumer) is scheduled below; we therefore do NOT gate on PVC Bound here.
-			Expect(waitDemoDiskReady(ctx, importNS, bkDiskAName, 15*time.Minute)).
-				To(Succeed(), "restored DemoVirtualDisk %s Ready", bkDiskAName)
-			Expect(waitDemoDiskReady(ctx, importNS, bkDiskBName, 15*time.Minute)).
-				To(Succeed(), "restored DemoVirtualDisk %s Ready", bkDiskBName)
-
-			By("Verifying restored Block volume bytes via per-PVC in-cluster probe pods")
-			// One probe pod per restored PVC: the volumes may be pinned to different nodes (node-local
-			// storage + consumer-less VRR binding) and the disks are RWO already held by the restored
-			// workload, so a single pod mounting all of them is unschedulable. See restoreProbePodSpec.
-			//
-			// Create all probe pods up front so they schedule/bind/populate in parallel (each lands on its
-			// own volume's node), then wait + checksum each; otherwise three serial 15m waits would dominate.
-			probePVCs := []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}
-			for _, pvc := range probePVCs {
-				_, err = suiteClientset.CoreV1().Pods(importNS).Create(ctx, restoreProbePodSpec(importNS, restoreProbePodName(pvc), pvc, bkProbeDevicePath), metav1.CreateOptions{})
-				Expect(err).NotTo(HaveOccurred(), "create restore probe pod for PVC %s", pvc)
-			}
-			for _, pvc := range probePVCs {
-				podName := restoreProbePodName(pvc)
-				Expect(waitPodRunning(ctx, importNS, podName, 15*time.Minute)).To(Succeed(), "probe pod for PVC %s Running", pvc)
-
-				got, rerr := readBlockChecksum(ctx, importNS, podName, bkRestoreProbeCont, bkProbeDevicePath)
-				Expect(rerr).NotTo(HaveOccurred(), "checksum restored PVC %s", pvc)
-				want := backup.checksums[pvc]
-				Expect(want).NotTo(BeEmpty(), "source checksum for PVC %s", pvc)
-				Expect(got).To(Equal(want), "restored PVC %s bytes must match source checksum", pvc)
+			wg.Wait()
+			close(errCh)
+			for err := range errCh {
+				Expect(err).NotTo(HaveOccurred())
 			}
 		})
 	})

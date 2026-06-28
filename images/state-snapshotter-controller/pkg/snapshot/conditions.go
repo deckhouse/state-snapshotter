@@ -78,6 +78,10 @@ const (
 	ReasonDataCapturePending       = "DataCapturePending"
 	ReasonDataArtifactInvalid      = "DataArtifactInvalid"
 	ReasonDataArtifactNotSupported = "DataArtifactNotSupported"
+	// ReasonDataImportAmbiguous is the terminal reason when more than one DataImport reverse-matches an
+	// import-mode leaf's identity (spec.targetRef group/kind/name). Exactly one DataImport must target
+	// a leaf, so an ambiguous match is fail-closed rather than picking one arbitrarily.
+	ReasonDataImportAmbiguous = "DataImportAmbiguous"
 	// ReasonVolumeCaptureFailed is the terminal data-leg reason when volume capture failed: a failed
 	// VolumeCaptureRequest (domain path) or a terminal CSI VolumeSnapshot/VolumeSnapshotContent error
 	// (namespace-root orphan-PVC path, ADR 2026-06-09 / spec §3.9.11).

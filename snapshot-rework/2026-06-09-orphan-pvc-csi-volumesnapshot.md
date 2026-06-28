@@ -1,5 +1,7 @@
 ## Orphan PVC capture via standard CSI VolumeSnapshot (root residual data leg)
 
+> **Import addendum (ADR `2026-06-15-snapshot-export-import.md` §12, 2026-06-26).** Этот документ — capture-side. Импорт данных orphan-PVC (extended `VolumeSnapshot`) теперь идёт через единый маркер `spec.source.import: {}` (вместо `spec.source.dataImportName`), а владеющий `DataImport` находится reverse-lookup по `DataImport.spec.targetRef`. Форк extended-VS добавляет `status.{storageClassName,size,volumeMode}`, которые `volumesnapshotimport` зеркалит из `DataImport.spec`. Capture-семантика ниже не меняется.
+
 - **Status:** Proposed (2026-06-09). Capture-side only; restore deferred.
 - **Scope:** namespace (root) `Snapshot` residual data leg for **orphan/uncovered PVCs**.
 - **Supersedes (narrowly):** parts of the N5 root-residual data leg that publish `SnapshotContent.status.dataRefs[]` from a **`VolumeCaptureRequest`** for the **root** scope; and the blanket prohibition on creating `VolumeSnapshot` in state-snapshotter (system-spec §3.9.9 / line "no shadow VolumeSnapshot").

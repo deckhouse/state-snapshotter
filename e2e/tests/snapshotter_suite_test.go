@@ -76,15 +76,22 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		dumpFailedSpecDiagnostics(ctx)
 	})
 
-	captureSpecs()                // capture_test.go: apply demo source + root Snapshot, assert Ready tree (phase 1)
-	aggregatedApiSpecs()          // aggregated_api_test.go: --raw manifests-download / -with-data-restoration (phase 1)
-	namespaceCaptureReworkSpecs() // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability (commit 5)
-	restoreSpecs()                // restore_test.go: manifest-level restore into a fresh namespace (phase 1)
-	importSpecs()                 // import_gc_test.go: export -> import round-trip (phase 2)
-	gcSpecs()                     // import_gc_test.go: TTL/GC cascade (phase 2)
-	volumeDataSpecs()             // volumedata_test.go: full volume-data flow (phase 3, env-gated)
-	backupDownloadSpecs()         // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
-	backupRestoreSpecs()          // backup_restore_test.go: backup-system restore import (phase 5, env-gated)
+	// Phases 1 & 2 merged into one manifest-only flow (no volume data): capture, aggregated subresource
+	// reads, namespace-capture rework, manifest restore, export->import round-trip, and TTL/GC cascade.
+	// These cheap specs share one `captured` tree and run sequentially, so they live under a single phase
+	// container. (gcSpecs still builds its own short-TTL sub-tree — it deletes the root and reconfigures the
+	// module TTL, so it cannot reuse the shared root.)
+	Context("Phase 1 & 2: manifest-only flow (no volume data)", func() {
+		captureSpecs()                // capture_test.go: apply demo source + root Snapshot, assert Ready tree
+		aggregatedApiSpecs()          // aggregated_api_test.go: --raw manifests-download / -with-data-restoration
+		namespaceCaptureReworkSpecs() // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
+		restoreSpecs()                // restore_test.go: manifest-level restore into a fresh namespace
+		importSpecs()                 // import_gc_test.go: export -> import round-trip
+		gcSpecs()                     // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
+	})
+	volumeDataSpecs()     // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	backupDownloadSpecs() // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
+	importVariantsSpecs() // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
 })
 
 func prepareSuite() {
@@ -102,6 +109,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
 	GinkgoWriter.Printf("  backup client image:        %q\n", suiteCfg.backupClientImage)
 	GinkgoWriter.Printf("  keep cluster on failure:    %v\n", suiteCfg.keepOnFailure)
+	GinkgoWriter.Printf("  keep resources (always):    %v\n", suiteCfg.keepAlways)
 
 	ensureNestedTestCluster()
 
@@ -126,7 +134,7 @@ func prepareSuite() {
 // prepareSharedState runs once before the Ordered specs. Clients and module readiness are already set up
 // in BeforeSuite; this is the hook where phase BeforeAlls wire any additional shared fixtures.
 func prepareSharedState() {
-	GinkgoWriter.Printf("Shared nested cluster ready; module %s + demo CSD %s are live\n", moduleName, demoCSDName)
+	GinkgoWriter.Printf("Shared nested cluster ready; module %s + demo CSDs %s/%s are live\n", moduleName, demoVMCSDName, demoDiskCSDName)
 }
 
 func cleanupSuite() {

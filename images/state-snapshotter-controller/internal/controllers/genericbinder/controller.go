@@ -149,6 +149,15 @@ func (r *GenericSnapshotBinderController) isDomainCaptureKind(gvk schema.GroupVe
 	return ok
 }
 
+// MarkDataBacked records whether a snapshot Kind carries a volume data leg (CSD spec.dataBacked) on the
+// GVK registry, so the import path knows whether to wait for a DataImport/data artifact. Idempotent;
+// guarded by watchMu (the same lock that serializes registry mutations in AddWatchForPair).
+func (r *GenericSnapshotBinderController) MarkDataBacked(snapshotKind string, dataBacked bool) {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	r.GVKRegistry.MarkDataBacked(snapshotKind, dataBacked)
+}
+
 // isDomainPlanningComplete reports whether the domain controller finished planning for the snapshot's
 // current generation: ChildrenSnapshotReady=True with observedGeneration == metadata.generation.
 func isDomainPlanningComplete(snapshotLike snapshot.SnapshotLike) bool {
@@ -209,7 +218,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		// Import leaf deleted before its content was bound: best-effort delete the ownerless reconstructed
 		// ManifestCheckpoint (the per-CR upload creates it ownerless; once content is bound it is adopted +
 		// GC'd with the content). Mirrors the namespace Snapshot orchestrator's pre-bind cleanup.
-		if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" && snapshotLike.GetStatusContentName() == "" {
+		if snapshotIsImportMode(obj) && snapshotLike.GetStatusContentName() == "" {
 			if err := usecase.DeleteReconstructedManifestCheckpoint(ctx, r.Client, obj.GetUID()); err != nil {
 				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import leaf")
 			}
@@ -223,12 +232,13 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Import branch (C5): an import-mode leaf (spec.dataSource -> DataImport) has no live capture and no
-	// domain planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
-	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint, data leg from the
-	// DataImport's produced artifact) — there is no second content creator.
-	if dataImportName := snapshotImportDataImportName(obj); dataImportName != "" {
-		return r.reconcileGenericImport(ctx, obj, snapshotLike, dataImportName)
+	// Import branch (C5): an import-mode leaf (spec.source.import: {}) has no live capture and no domain
+	// planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
+	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint; for dataBacked
+	// kinds, the data leg from the reverse-looked-up DataImport's produced artifact) — there is no second
+	// content creator.
+	if snapshotIsImportMode(obj) {
+		return r.reconcileGenericImport(ctx, obj, snapshotLike)
 	}
 
 	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot
@@ -365,6 +375,15 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 		if requeue {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
+		// Mirror the captured volume metadata (storageClassName/size/volumeMode) from the bound content's
+		// dataRef onto the data leaf snapshot status, so d8 reads it on export. dataBacked leaves only —
+		// manifest-only kinds have no dataRef. No-op until the content publishes a dataRef.
+		if r.GVKRegistry.IsDataBacked(obj.GetObjectKind().GroupVersionKind().Kind) {
+			if err := r.mirrorLeafVolumeMetadataFromContent(ctx, obj, contentName, ""); err != nil {
+				logger.Error(err, "Failed to mirror captured volume metadata to leaf status")
+			}
 		}
 	}
 

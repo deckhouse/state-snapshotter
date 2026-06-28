@@ -42,25 +42,28 @@ type CustomSnapshotDefinitionList struct {
 }
 
 // +k8s:deepcopy-gen=true
+// CustomSnapshotDefinitionSpec maps one source resource GVK to the snapshot GVK that materializes it.
+// One CSD registers exactly one snapshot kind (flat schema): the snapshot apiVersion/kind live at the
+// top level, the domain resource being snapshotted is referenced by Source.
 type CustomSnapshotDefinitionSpec struct {
-	// SnapshotResourceMapping declares source resource CRD -> snapshot CRD mappings.
+	// Priority orders universal traversal across snapshot kinds. Higher values run first.
+	// +kubebuilder:validation:Minimum=0
+	Priority int32 `json:"priority,omitempty"`
+	// APIVersion is the apiVersion of the snapshot resource that materializes Source.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinItems=1
-	SnapshotResourceMapping []SnapshotResourceMappingEntry `json:"snapshotResourceMapping"`
-}
-
-// +k8s:deepcopy-gen=true
-// SnapshotResourceMappingEntry maps source resource GVKs to snapshot GVKs.
-type SnapshotResourceMappingEntry struct {
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+	// Kind is the kind of the snapshot resource that materializes Source.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+	// DataBacked marks that this snapshot kind carries a volume data leg: the generic controller must
+	// wait for the data artifact (capture) or the matching DataImport (import). Manifest-only snapshot
+	// kinds (no volume data) set false.
+	DataBacked bool `json:"dataBacked,omitempty"`
 	// Source is the GVK of the domain resource being snapshotted.
 	// +kubebuilder:validation:Required
 	Source SnapshotGVKRef `json:"source"`
-	// Snapshot is the GVK of the snapshot resource that materializes Source.
-	// +kubebuilder:validation:Required
-	Snapshot SnapshotGVKRef `json:"snapshot"`
-	// Priority orders universal traversal across mappings. Higher values run first.
-	// +kubebuilder:validation:Minimum=0
-	Priority int32 `json:"priority,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true

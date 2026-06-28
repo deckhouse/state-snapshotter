@@ -1,28 +1,34 @@
 {{- if .Values.stateSnapshotter.enableDemoDomain }}
-# Reference demo CustomSnapshotDefinition shipped with the module and applied by Deckhouse. It teaches the
-# core CSD registry the demo snapshot graph and drives the 030-domain-rbac hook. Contract per the
-# separate-binary design: ONLY snapshotResourceMapping[] — no manifestTransformation / serviceRef (the
-# domain restore mutation runs in-process in the domain aggregated apiserver, not via a transformer
-# service).
+# Reference demo CustomSnapshotDefinitions shipped with the module and applied by Deckhouse. They teach
+# the core CSD registry the demo snapshot graph and drive the 030-domain-rbac hook. Flat schema: one
+# snapshot kind per object (spec.apiVersion/kind), the snapshotted resource referenced by spec.source.
+# spec.dataBacked marks the kind that carries a volume data leg (the disk snapshot); the structural VM
+# snapshot is manifest-only.
 apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: CustomSnapshotDefinition
 metadata:
-  name: demo-virtual-machine-disk
+  name: demo-virtual-machine
   {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
 spec:
-  snapshotResourceMapping:
-    - source:
-        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
-        kind: DemoVirtualMachine
-      snapshot:
-        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
-        kind: DemoVirtualMachineSnapshot
-      priority: 100
-    - source:
-        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
-        kind: DemoVirtualDisk
-      snapshot:
-        apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
-        kind: DemoVirtualDiskSnapshot
-      priority: 10
+  priority: 100
+  apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+  kind: DemoVirtualMachineSnapshot
+  dataBacked: false
+  source:
+    apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+    kind: DemoVirtualMachine
+---
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
+kind: CustomSnapshotDefinition
+metadata:
+  name: demo-virtual-disk
+  {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
+spec:
+  priority: 10
+  apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+  kind: DemoVirtualDiskSnapshot
+  dataBacked: true
+  source:
+    apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
+    kind: DemoVirtualDisk
 {{- end }}

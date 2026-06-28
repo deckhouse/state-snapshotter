@@ -693,6 +693,8 @@ d8 snapshot import ./demo-snapshot-2026-01-25.tar --namespace demo-restored
 
 ### 6.3 Порядок импорта
 
+> **Устарело (см. ADR `2026-06-15-snapshot-export-import.md` §12, поправка 2026-06-26).** Модель `DataImport` ниже (один `DataImport` на иерархию с `sourceRef.kind=NamespaceSnapshot`, `storageClassMapping`, чтение манифестов через `status.manifestsUrl`) переработана. Актуально: на каждый data-лист создаётся свой `DataImport` с `spec.targetRef` (group/resource/name) на лист-снимок и параметрами тома прямо в `spec` (`storageClassName`/`size`/`volumeMode`); `dataArtifactType` убран (VSC выводится из StorageClass); манифесты `DataImport` не читает; лист несёт маркер `spec.source.import: {}`, а `DataImport` находится reverse-lookup по `targetRef`. Маппинг StorageClass выполняет d8 при формировании `DataImport.spec.storageClassName`. Текст ниже сохранён как исторический контекст.
+
 #### Шаг 1. Распаковка и анализ архива
 
 CLI распаковывает `manifests.tar.gz` и читает `index.yaml`:

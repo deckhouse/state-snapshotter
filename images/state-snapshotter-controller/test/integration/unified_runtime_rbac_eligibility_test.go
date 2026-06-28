@@ -77,17 +77,13 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		}
 	})
 
-	registrationMapping := func() []storagev1alpha1.SnapshotResourceMappingEntry {
-		return []storagev1alpha1.SnapshotResourceMappingEntry{
-			{
-				Source: storagev1alpha1.SnapshotGVKRef{
-					APIVersion: "test.deckhouse.io/v1alpha1",
-					Kind:       "RegistrationTestSnapshot",
-				},
-				Snapshot: storagev1alpha1.SnapshotGVKRef{
-					APIVersion: "test.deckhouse.io/v1alpha1",
-					Kind:       "RegistrationTestSnapshot",
-				},
+	registrationSpec := func() storagev1alpha1.CustomSnapshotDefinitionSpec {
+		return storagev1alpha1.CustomSnapshotDefinitionSpec{
+			APIVersion: "test.deckhouse.io/v1alpha1",
+			Kind:       "RegistrationTestSnapshot",
+			Source: storagev1alpha1.SnapshotGVKRef{
+				APIVersion: "test.deckhouse.io/v1alpha1",
+				Kind:       "RegistrationTestSnapshot",
 			},
 		}
 	}
@@ -97,9 +93,7 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		const name = "integration-t4-no-rbac"
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: registrationMapping(),
-			},
+			Spec:       registrationSpec(),
 		}
 		Expect(k8sClient.Create(ctx, csd)).To(Succeed())
 
@@ -126,9 +120,7 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		const name = "integration-eligibility-loss"
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
-				SnapshotResourceMapping: registrationMapping(),
-			},
+			Spec:       registrationSpec(),
 		}
 		Expect(k8sClient.Create(ctx, csd)).To(Succeed())
 
