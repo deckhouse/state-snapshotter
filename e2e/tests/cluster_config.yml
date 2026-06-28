@@ -6,13 +6,18 @@
 # per-node "additional disks" are declared here.
 #
 # Modules enabled here:
-#   - storage-volume-data-manager : the volume data-transport engine (DataImport /
-#                           DataExport, secure HTTP export/import of PVC contents)
-#                           the data leg binds to. The extended VolumeSnapshot CRDs
-#                           come from storage-foundation, not from a standalone
-#                           snapshot-controller (state-snapshotter consumes the
-#                           storage-foundation "extended-VS fork"), so the upstream
-#                           snapshot-controller module is NOT enabled here.
+#   - storage-foundation  : ships the extended VolumeSnapshot fork, the
+#                           VolumeCaptureRequest / VolumeRestoreRequest /
+#                           VolumeSnapshotClass machinery the data leg captures and
+#                           restores through, AND the volume data-transport engine
+#                           (DataImport / DataExport, secure HTTP export/import of PVC
+#                           contents) — absorbed from the former
+#                           storage-volume-data-manager module. The upstream
+#                           snapshot-controller module is NOT enabled here
+#                           (state-snapshotter consumes this "extended-VS fork").
+#                           Listed first (always on): the CRDs + controllers are cheap
+#                           for phases 1-2; the data leg itself is only exercised in
+#                           phase 3.
 #   - state-snapshotter   : the module under test. enableDemoDomain ships the
 #                           demo domain controller (separate pod + aggregated
 #                           apiserver) and the demo CustomSnapshotDefinition.
@@ -21,12 +26,6 @@
 #                           STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=pr<N>/mr<N>
 #                           (storage-e2e's generic <MODULE>_MODULE_PULL_OVERRIDE
 #                           convention; in-YAML ${VAR} is rejected).
-#   - storage-foundation  : ships the extended VolumeSnapshot fork plus the
-#                           VolumeCaptureRequest / VolumeRestoreRequest /
-#                           VolumeSnapshotClass machinery the data leg captures and
-#                           restores through. Listed here (always on) because it is
-#                           just the CRDs + controllers and is cheap for phases 1-2;
-#                           the data leg itself is only exercised in phase 3.
 # The thin snapshot-capable StorageClass backends (sds-node-configurator +
 # sds-local-volume) are NOT listed here: they are enabled at runtime by the phase-3
 # setup (testkit.EnsureDefaultStorageClass) only when E2E_VOLUME_DATA is set, so
@@ -63,7 +62,7 @@ clusterDefinition:
     registryRepo: "dev-registry.deckhouse.io/sys/deckhouse-oss"
     devBranch: "main"
     modules:
-      - name: "storage-volume-data-manager"
+      - name: "storage-foundation"
         version: 1
         enabled: true
         modulePullOverride: "main"
@@ -79,10 +78,4 @@ clusterDefinition:
         settings:
           enableDemoDomain: true
         dependencies:
-          - "storage-volume-data-manager"
-      - name: "storage-foundation"
-        version: 1
-        enabled: true
-        modulePullOverride: "main"
-        dependencies:
-          - "storage-volume-data-manager"
+          - "storage-foundation"

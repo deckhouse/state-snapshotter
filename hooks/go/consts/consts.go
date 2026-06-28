@@ -77,16 +77,17 @@ const (
 	// domain-agnostic core RBAC.
 	DomainCoreReadClusterRoleName = "d8:state-snapshotter:controller:domain-read"
 
-	// DataExportModuleNamespace is the namespace of the storage-volume-data-manager module, whose
-	// DataExport controller resolves snapshot exports generically (no domain types compiled in).
-	DataExportModuleNamespace = "d8-storage-volume-data-manager"
+	// DataExportModuleNamespace is the namespace of the storage-foundation module, whose DataExport
+	// controller resolves snapshot exports generically (no domain types compiled in). The DataExport/
+	// DataImport feature was absorbed from the former storage-volume-data-manager module.
+	DataExportModuleNamespace = "d8-storage-foundation"
 
-	// DataExportControllerSAName is the ServiceAccount name of the storage-volume-data-manager controller
-	// (the DataExport/DataImport reconciler). It runs in DataExportModuleNamespace.
-	DataExportControllerSAName = "controller"
+	// DataExportControllerSAName is the ServiceAccount name of the storage-foundation DataExport/DataImport
+	// reconciler (data-manager-controller). It runs in DataExportModuleNamespace.
+	DataExportControllerSAName = "data-manager-controller"
 
 	// DomainDataExportReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the
-	// storage-volume-data-manager DataExport controller SA: read on the dynamic demo snapshot GVRs. The
+	// storage-foundation DataExport controller SA: read on the dynamic demo snapshot GVRs. The
 	// DataExport controller resolves a snapshot export by GETting the snapshot leaf to read
 	// status.boundSnapshotContentName (then follows it to the cluster-scoped SnapshotContent). These names
 	// are domain-specific (from CSD), so they cannot live in that module's static, domain-agnostic RBAC.

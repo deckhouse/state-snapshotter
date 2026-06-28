@@ -40,18 +40,18 @@ functions in dependency order:
    `DemoVirtualDisk` scratch PVCs), write data via dedicated block-writer pods,
    attach `DemoVirtualMachine` to one disk while the other stays standalone,
    capture a snapshot, download manifests via the aggregated `manifests-download`
-   API (compared to live cluster objects), and download volume bytes via SVDM
-   `DataExport` from an in-cluster backup-client pod (Bearer auth +
-   `GET /api/v1/block`, sha256 compared to source). Needs
-   `storage-volume-data-manager` (enabled in `tests/cluster_config.yml`).
+  API (compared to live cluster objects), and download volume bytes via
+  storage-foundation `DataExport` from an in-cluster backup-client pod (Bearer
+  auth + `GET /api/v1/block`, sha256 compared to source). Needs
+  `storage-foundation` (enabled in `tests/cluster_config.yml`).
 4. **Phase 5 - backup-system restore import** (`backupRestoreSpecs`, env-gated by
    `E2E_VOLUME_DATA`, chained from phase 4): reshape the captured tree for the
    import upload path (VM manifest folded into root; three data leaves), POST
    manifests via `manifests-and-children-refs-upload`, upload volume bytes via
-   SVDM `DataImport` (`PUT /api/v1/block` + `POST /api/v1/finished` from the
-   phase-4 backup pod), wait for the imported tree Ready, restore-apply into a
-   fresh namespace, and verify manifests + block checksums. Needs
-   `storage-volume-data-manager` + `storage-foundation`.
+   storage-foundation `DataImport` (`PUT /api/v1/block` + `POST /api/v1/finished`
+   from the phase-4 backup pod), wait for the imported tree Ready, restore-apply
+   into a fresh namespace, and verify manifests + block checksums. Needs
+   `storage-foundation`.
 
 ## Module dependency note
 
@@ -95,11 +95,9 @@ pseudo-version. `state-snapshotter/api` is always consumed via
   at a `prN` / `mrN` / `main` image **without editing the committed YAML**:
   - `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` — the module under test; this is the
     one you normally set (to your PR/MR tag).
-  - `STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE` — only when co-developing
-    `storage-volume-data-manager` (the volume data-transport engine, `DataImport`/
-    `DataExport`).
   - `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` — only when co-developing
-    `storage-foundation` (the extended-VS fork + phase-3 data-leg backend).
+    `storage-foundation` (the extended-VS fork + phase-3 data-leg backend +
+    the `DataImport`/`DataExport` volume data-transport engine).
 
   Unset modules keep the literal `main` from the YAML. The phase-3 storage
   backends (`sds-node-configurator` + `sds-local-volume`) are enabled at runtime

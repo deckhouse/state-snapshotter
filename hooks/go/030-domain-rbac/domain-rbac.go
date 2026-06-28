@@ -81,7 +81,7 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	coreReadRules = append(coreReadRules, buildCoreSourceReadRules(sourceGVRs)...)
 	coreReadRules = append(coreReadRules, domainRestoreSubresourceRules(snapshotGVRs)...)
 
-	// DataExport (storage-volume-data-manager) SA: read-only on the dynamic demo snapshot GVRs so the
+	// DataExport (storage-foundation) SA: read-only on the dynamic demo snapshot GVRs so the
 	// DataExport controller can GET the snapshot leaf (status.boundSnapshotContentName) when exporting.
 	dataExportReadRules := buildDataExportReadRules(snapshotGVRs)
 

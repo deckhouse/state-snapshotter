@@ -250,14 +250,14 @@ func domainRestoreSubresourceRules(snapshotGVRs []schema.GroupVersionResource) [
 	return rules
 }
 
-// buildDataExportReadRules grants the storage-volume-data-manager DataExport controller SA read access to
+// buildDataExportReadRules grants the storage-foundation DataExport controller SA read access to
 // the dynamic demo SNAPSHOT leaf GVRs. The DataExport controller resolves a snapshot export generically
 // (no domain types compiled in): it GETs the snapshot leaf to read status.boundSnapshotContentName before
 // following it to the cluster-scoped SnapshotContent (snapshot_resolver.go:resolveSnapshotDataArtifact).
 // Without this it fails reconcile with "cannot get demovirtualdisksnapshots ... forbidden". Read-only:
 // the snapshot lifecycle (create/update/delete/status/finalizers) stays owned by the domain and core SAs.
-// These resource names are domain-specific (from CSD), so they cannot live in the storage-volume-data-
-// manager module's static, domain-agnostic controller RBAC.
+// These resource names are domain-specific (from CSD), so they cannot live in the storage-foundation
+// module's static, domain-agnostic controller RBAC.
 func buildDataExportReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
 	if len(snapshotGVRs) == 0 {
 		return nil
@@ -303,7 +303,7 @@ func sortedUnique(in []string) []string {
 // applyDomainRBAC reconciles the three managed ClusterRoles + bindings of the split model:
 //   - DomainClusterRoleName               bound to the DOMAIN SA              (domainRules)
 //   - DomainCoreReadClusterRoleName       bound to the CORE SA               (coreReadRules)
-//   - DomainDataExportReadClusterRoleName bound to the DataExport (SVDM) SA  (dataExportReadRules)
+//   - DomainDataExportReadClusterRoleName bound to the DataExport (storage-foundation) SA (dataExportReadRules)
 func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, domainRules, coreReadRules, dataExportReadRules []rbacv1.PolicyRule) error {
 	if err := applyManagedClusterRole(ctx, cl, consts.DomainClusterRoleName, domainRules, consts.DomainSAName, consts.ModuleNamespace); err != nil {
 		return err
@@ -311,7 +311,7 @@ func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, domainRules, cor
 	if err := applyManagedClusterRole(ctx, cl, consts.DomainCoreReadClusterRoleName, coreReadRules, consts.ControllerSAName, consts.ModuleNamespace); err != nil {
 		return err
 	}
-	// The DataExport controller SA lives in the storage-volume-data-manager namespace, not this module's.
+	// The DataExport controller SA lives in the storage-foundation namespace, not this module's.
 	return applyManagedClusterRole(ctx, cl, consts.DomainDataExportReadClusterRoleName, dataExportReadRules, consts.DataExportControllerSAName, consts.DataExportModuleNamespace)
 }
 
