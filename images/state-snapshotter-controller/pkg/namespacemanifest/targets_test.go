@@ -148,6 +148,7 @@ func TestBuildManifestCaptureTargets_EmptyNamespaceHasNoTargets(t *testing.T) {
 		discoveryFromEntries(entries, nil),
 		"ns1",
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("BuildManifestCaptureTargets: %v", err)
@@ -195,6 +196,7 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -254,6 +256,7 @@ func TestBuildManifestCaptureTargets_ExcludesRegisteredSnapshotKinds(t *testing.
 		discoveryFromEntries(entries, nil),
 		"ns1",
 		snapshotKinds,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("BuildManifestCaptureTargets: %v", err)
@@ -276,6 +279,7 @@ func TestBuildManifestCaptureTargets_ForbiddenListGoesToUnreadable(t *testing.T)
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -305,6 +309,7 @@ func TestBuildManifestCaptureTargets_PartialDiscoveryGoesToUnreadable(t *testing
 		dynamicFromEntries(entries),
 		discoveryFromEntries(entries, groupErr),
 		"ns1",
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -338,6 +343,7 @@ func TestBuildManifestCaptureTargets_ListErrorIsReturnedWrapped(t *testing.T) {
 		discoveryFromEntries(entries, nil),
 		"ns1",
 		nil,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected a wrapped error for a non-Forbidden list failure")
@@ -362,6 +368,7 @@ func TestBuildManifestCaptureTargets_ExcludesResourcesWithoutWatchVerb(t *testin
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
+		nil,
 		nil,
 	)
 	if err != nil {

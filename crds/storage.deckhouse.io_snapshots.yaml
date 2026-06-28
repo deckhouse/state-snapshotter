@@ -61,6 +61,63 @@ spec:
               no recapture (a new capture requires a new Snapshot). The narrower spec.source rules below are now
               subsumed by this rule but kept for clearer, field-scoped admission messages.
             properties:
+              resourceSelector:
+                description: |-
+                  ResourceSelector optionally restricts which namespace resources are captured. It is applied to the
+                  dynamic-capture legs: namespace manifests, top-level/standalone domain resources expanded via
+                  CustomSnapshotDefinition, and PVCs (volume data leg). It is layered (ANDed) on top of the built-in
+                  capture exclusions and can only narrow the capture, never force-capture controller/own machinery.
+
+                  Standard Kubernetes label selector: matchLabels and matchExpressions are ANDed together, so a single
+                  selector can both include and exclude - e.g. matchLabels {app: myapp} together with a NotIn/DoesNotExist
+                  matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
+                  When omitted, all resources are captured (no filtering).
+
+                  Ignored for spec.source modes (import / snapshotContentName): those do not list the live namespace.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
               snapshotClassName:
                 description: SnapshotClassName optionally selects class/policy (aligned
                   with unified snapshot model; resolution is N2+).

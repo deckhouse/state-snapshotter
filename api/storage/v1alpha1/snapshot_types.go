@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 // +kubebuilder:object:root=true
@@ -68,6 +69,20 @@ type SnapshotSpec struct {
 	// +kubebuilder:validation:XValidation:rule="has(self.import) != has(self.snapshotContentName)",message="exactly one of spec.source.import or spec.source.snapshotContentName must be set"
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.source is immutable"
 	Source *SnapshotSource `json:"source,omitempty"`
+
+	// ResourceSelector optionally restricts which namespace resources are captured. It is applied to the
+	// dynamic-capture legs: namespace manifests, top-level/standalone domain resources expanded via
+	// CustomSnapshotDefinition, and PVCs (volume data leg). It is layered (ANDed) on top of the built-in
+	// capture exclusions and can only narrow the capture, never force-capture controller/own machinery.
+	//
+	// Standard Kubernetes label selector: matchLabels and matchExpressions are ANDed together, so a single
+	// selector can both include and exclude - e.g. matchLabels {app: myapp} together with a NotIn/DoesNotExist
+	// matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
+	// When omitted, all resources are captured (no filtering).
+	//
+	// Ignored for spec.source modes (import / snapshotContentName): those do not list the live namespace.
+	// +optional
+	ResourceSelector *metav1.LabelSelector `json:"resourceSelector,omitempty"`
 }
 
 // SnapshotSource selects how a Snapshot obtains its content, mirroring VolumeSnapshot.spec.source.
@@ -102,6 +117,18 @@ func (s *Snapshot) IsImportMode() bool {
 // (spec.source.snapshotContentName set).
 func (s *Snapshot) IsStaticBind() bool {
 	return s != nil && s.Spec.Source != nil && s.Spec.Source.SnapshotContentName != ""
+}
+
+// ResolveResourceSelector converts spec.resourceSelector into a labels.Selector used by the dynamic
+// capture legs. A nil selector means "no filtering" and resolves to labels.Everything(); note this
+// differs from metav1.LabelSelectorAsSelector(nil), which returns labels.Nothing() (matches nothing).
+// A non-nil but malformed selector is unlikely (the field is typed and the CRD schema validates most of
+// it at admission), but the conversion can still fail, so the error is returned rather than swallowed.
+func (s *Snapshot) ResolveResourceSelector() (labels.Selector, error) {
+	if s == nil || s.Spec.ResourceSelector == nil {
+		return labels.Everything(), nil
+	}
+	return metav1.LabelSelectorAsSelector(s.Spec.ResourceSelector)
 }
 
 // +k8s:deepcopy-gen=true

@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -89,12 +90,17 @@ func (s SnapshotMachineryGVKs) containsGroupKind(gk schema.GroupKind) bool {
 //     transient apiserver hiccup (requeue) or a structural/terminal failure.
 //
 // The returned target slice is sorted by (APIVersion, Kind, Name) for stable MCR spec and drift checks.
+//
+// selector is the user-provided spec.resourceSelector (already resolved by the caller, see
+// Snapshot.ResolveResourceSelector). It is layered on top of ShouldIncludeNamespaceObject: an object is
+// kept only if it passes the built-in rules AND matches the selector. A nil selector means no filtering.
 func BuildManifestCaptureTargets(
 	ctx context.Context,
 	dyn dynamic.Interface,
 	disco discovery.DiscoveryInterface,
 	namespace string,
 	snapshotKinds SnapshotMachineryGVKs,
+	selector labels.Selector,
 ) (targets []ManifestTarget, unreadable []schema.GroupVersionResource, err error) {
 	if dyn == nil {
 		return nil, nil, fmt.Errorf("namespacemanifest: dynamic client is nil")
@@ -152,6 +158,11 @@ func BuildManifestCaptureTargets(
 				}
 				seen[key] = struct{}{}
 				if !ShouldIncludeNamespaceObject(&item, snapshotKinds) {
+					continue
+				}
+				// User-provided resourceSelector is layered on top of the built-in exclusions: it can only
+				// narrow capture. A nil selector means no filtering.
+				if selector != nil && !selector.Matches(labels.Set(item.GetLabels())) {
 					continue
 				}
 				apiVersion := item.GetAPIVersion()
