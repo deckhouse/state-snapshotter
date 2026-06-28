@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package manifest builds the ManifestCaptureRequest target set: the base manifest target plus the
-// owned-PVC targets derived from the snapshot's own data-leg VolumeCaptureRequest.
+// Package manifest builds the ManifestCaptureRequest target set: the domain-chosen manifest targets plus
+// the owned-PVC targets derived from the snapshot's own data-leg VolumeCaptureRequest.
 package manifest
 
 import (

@@ -42,7 +42,7 @@ limitations under the License.
 //	if !valid { return sdk.MarkNotReady(ctx, t, NotReadySpec{Reason: "InvalidSourceRef"}) }
 //	if err := sdk.EnsureChildren(ctx, t, children); err != nil { return sdk.MarkPlanningFailed(...) }
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
-//	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
+//	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{Targets: manifestTargets}); err != nil { ... }
 //	return sdk.MarkPlanningReady(ctx, t, "planning complete")
 //
 // # Restart-safe recipe

@@ -146,7 +146,7 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// 4. Манифест (всегда).
 	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
-		TargetAPIVersion: ..., TargetKind: ..., TargetName: ...,
+		Targets: manifestTargets,
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -159,6 +159,30 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 Порядок: планирующие линии (`EnsureChildren`/`EnsureVolumeCapture`/`EnsureManifestCapture`) — между собой в
 любом порядке, но **`MarkPlanningReady` всегда последним**. На ошибку из любого `Ensure*` — просто
 `return err`, reconcile повторится.
+
+---
+
+## `manifestTargets` — какие манифесты попадут в один MCR
+
+`EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{Targets: ...})` принимает **полный desired-set**
+манифестных объектов, которые доменный контроллер считает принадлежащими этому snapshot-узлу. SDK превращает
+этот список в **один** `ManifestCaptureRequest`.
+
+```go
+manifestTargets := []snapshotsdk.ManifestTarget{{
+	APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+	Kind:       "DemoVirtualDisk",
+	Name:       source.Name,
+}}
+```
+
+Если домен решает, что вместе с основным source object нужно захватить дополнительные namespaced-объекты, он
+добавляет их в этот же список. После capture эти объекты окажутся в MCP этого узла, и root/parent capture
+сможет исключить их из своего MCR через существующий subtree exclude-механизм.
+
+SDK не решает за домен, какие доменные манифесты принадлежат узлу. Он отвечает только за transport-механику:
+создать/проверить один MCR, проставить ownerRef, опубликовать `status.manifestCaptureRequestName`,
+сохранить restart-safe поведение и при необходимости добавить technical owned-PVC target из линии данных.
 
 ---
 

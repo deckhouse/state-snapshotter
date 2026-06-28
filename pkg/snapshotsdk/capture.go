@@ -48,9 +48,9 @@ type Planning interface {
 	// is suppressed once the core controller has stamped the data leg captured.
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
-	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (base target plus any owned-PVC
-	// targets discovered from the data leg) and publishes its name. The operation is suppressed once the
-	// core controller has stamped the manifest leg captured.
+	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the domain-chosen target set
+	// plus any owned-PVC target discovered from the data leg) and publishes its name. The operation is
+	// suppressed once the core controller has stamped the manifest leg captured.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
@@ -180,11 +180,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		if err != nil {
 			return err
 		}
-		base := []ssv1alpha1.ManifestTarget{{
-			APIVersion: in.TargetAPIVersion,
-			Kind:       in.TargetKind,
-			Name:       in.TargetName,
-		}}
+		base := append([]ssv1alpha1.ManifestTarget(nil), in.Targets...)
 		owner, err := s.ownerRef(t)
 		if err != nil {
 			return err

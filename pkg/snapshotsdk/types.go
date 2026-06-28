@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/storagefoundation"
 )
 
@@ -97,10 +98,14 @@ type VolumeCaptureSpec struct {
 	DataRef *Target
 }
 
-// ManifestCaptureSpec is the domain's manifest-leg intent: the single base manifest target (the source
-// object identity). The SDK merges any owned-PVC targets discovered from the data-leg VolumeCaptureRequest.
+// ManifestTarget identifies one namespaced object the domain wants captured in the snapshot node's
+// ManifestCaptureRequest. It is the shared API type re-exported through the SDK facade.
+type ManifestTarget = ssv1alpha1.ManifestTarget
+
+// ManifestCaptureSpec is the domain's manifest-leg intent: the complete desired set of manifest targets for
+// the snapshot node. The SDK turns this set into one ManifestCaptureRequest and merges any owned-PVC target
+// discovered from the data-leg VolumeCaptureRequest.
 type ManifestCaptureSpec struct {
-	TargetAPIVersion string
-	TargetKind       string
-	TargetName       string
+	// Targets is the complete domain-chosen manifest target set for this snapshot node.
+	Targets []ManifestTarget
 }

@@ -136,9 +136,11 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
-		TargetAPIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		TargetKind:       controllercommon.KindDemoVirtualDisk,
-		TargetName:       source.Name,
+		Targets: []snapshotsdk.ManifestTarget{{
+			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+			Kind:       controllercommon.KindDemoVirtualDisk,
+			Name:       source.Name,
+		}},
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
