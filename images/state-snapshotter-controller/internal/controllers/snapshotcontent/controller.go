@@ -754,7 +754,10 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		total++
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
+		// Cached read of the child content (same For-informer GVK). A just-created/not-yet-synced child
+		// missing from the cache is treated as pending (fail-closed), and ManifestsArchived is a one-way
+		// latch, so a stale read can only delay the archive, never falsely latch it True.
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
 				pendingNames = append(pendingNames, name)
 				continue
@@ -837,6 +840,13 @@ func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context
 
 	owner := &unstructured.Unstructured{}
 	owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(apiVersion, kind))
+	// Deliberately uncached (APIReader): this owning Snapshot's status.childrenSnapshotRefs is the
+	// AUTHORITATIVE declared-child set that fail-closes the one-way ManifestsArchived latch (see
+	// aggregateChildrenManifestsArchived). Unlike the cache-missing child CONTENT reads above - which only
+	// ever read as pending and therefore merely DELAY the latch - a stale owner can return a SMALLER
+	// declared set that omits a just-declared child while declaredComplete still reports true, letting the
+	// latch close True over an unlinked descendant subtree. Because the latch never re-opens, that is a
+	// permanent duplicate-root-capture. The declared set must be read fresh from the API server.
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
 		if errors.IsNotFound(err) {
 			return nil, false, nil
@@ -861,6 +871,9 @@ func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context
 		if snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
 			continue
 		}
+		// Uncached (APIReader) for the same reason as the owner GET above: resolving each declared child
+		// snapshot to its bound content name is part of building the authoritative declared set; a stale
+		// resolution would weaken the fail-closed declared-vs-linked guard on the one-way archive latch.
 		bound, rerr := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, r.APIReader, ref, namespace)
 		if rerr != nil {
 			if stderrors.Is(rerr, usecase.ErrRunGraphChildNotBound) ||
@@ -1001,7 +1014,10 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		total++
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
+		// Cached read of the child content (same For-informer GVK). A cache-missing child is collected as
+		// pending (fail-closed -> ChildrenPending), so a stale read delays the parent's Ready rather than
+		// asserting it.
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
 				pendingNames = append(pendingNames, name)
 				continue
