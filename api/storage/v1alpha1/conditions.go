@@ -77,4 +77,10 @@ const (
 	// ReasonManifestsArchiveFailed: ManifestsArchived=False (terminal) — the own manifest leg failed
 	// terminally before archiving, or a descendant's manifests can never be archived.
 	ReasonManifestsArchiveFailed = "Failed"
+
+	// ReasonResidualVolumeCapturePending: Ready=False (non-terminal) — the namespace-root content has
+	// finished its domain children but the final residual/orphan-PVC capture wave has not completed yet
+	// (status.residualVolumeCapture.phase != Complete). The aggregate Ready is held at this reason so a
+	// consumer never observes the first Ready=True before the orphan data is captured (fail-closed gate).
+	ReasonResidualVolumeCapturePending = "ResidualVolumeCapturePending"
 )

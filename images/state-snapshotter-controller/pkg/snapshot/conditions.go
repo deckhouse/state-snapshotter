@@ -133,6 +133,11 @@ const (
 	// ReasonChildrenFailed is set when any required child has a terminal Ready=False
 	// (see usecase.ChildSnapshotTerminalReadyReasons).
 	ReasonChildrenFailed = "ChildrenFailed"
+	// ReasonResidualVolumeCapturePending is the non-terminal, fail-closed reason on a namespace-root
+	// SnapshotContent (mirrored onto Snapshot) while the final residual/orphan-PVC capture wave has not
+	// completed (status.residualVolumeCapture.phase != Complete). It gates only the FIRST Ready=True so
+	// a consumer never restores before the orphan data is captured. Defined canonically in api/storage.
+	ReasonResidualVolumeCapturePending = storagev1alpha1.ReasonResidualVolumeCapturePending
 )
 
 // Reasons for ChildrenSnapshotReady=False.
