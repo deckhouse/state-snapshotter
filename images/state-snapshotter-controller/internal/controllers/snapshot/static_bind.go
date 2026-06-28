@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -82,6 +83,13 @@ func (r *SnapshotReconciler) reconcileStaticBind(ctx context.Context, nsSnap *st
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// A statically-bound content has no residual/orphan-PVC wave of its own (it was materialized by the
+	// import path or pre-provisioned out of band). Latch the residual gate Complete (idempotent: import
+	// content already carries it; pre-provisioned content gets it here) so the aggregator's fail-closed
+	// residual gate cannot hold the mirror's first Ready=True forever.
+	if err := snapshotcontent.MarkResidualVolumeCaptureComplete(ctx, r.Client, content.Name, nil); err != nil {
+		return ctrl.Result{}, err
+	}
 	// Steady state: mirror the bound content's Ready condition onto the Snapshot (single-aggregator
 	// contract, INV-COND4). If the content is not Ready yet, the mirror sets a pending reason.
 	if err := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); err != nil {

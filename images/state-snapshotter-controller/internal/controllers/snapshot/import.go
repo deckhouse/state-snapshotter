@@ -122,6 +122,13 @@ func (r *SnapshotReconciler) reconcileImport(ctx context.Context, nsSnap *storag
 		return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
 	}
 
+	// Import has no residual/orphan-PVC capture wave of its own: once the content graph is published the
+	// residual gate must be satisfied immediately, so latch it Complete (idempotent) before mirroring
+	// Ready. Without this the aggregator's fail-closed residual gate would hold the import root at
+	// Ready=False/ResidualVolumeCapturePending forever.
+	if err := snapshotcontent.MarkResidualVolumeCaptureComplete(ctx, r.Client, content.Name, nil); err != nil {
+		return ctrl.Result{}, err
+	}
 	// Steady state: mirror the bound content's Ready (single-aggregator, INV-COND4). The content watch
 	// also wakes this Snapshot on the Ready transition; the requeue is a missed-event fallback.
 	if err := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); err != nil {
