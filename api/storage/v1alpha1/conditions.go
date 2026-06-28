@@ -29,6 +29,28 @@ const (
 	// controller finished planning child snapshots. It is NOT part of the Ready formula; readers must
 	// require observedGeneration == generation.
 	ConditionChildrenSnapshotReady = "ChildrenSnapshotReady"
+
+	// ConditionManifestsArchived is a subtree latch on SnapshotContent (mirrored onto Snapshot and
+	// domain XxxxSnapshot): the manifests for this node AND all descendant content nodes have been
+	// captured into their ManifestCheckpoints at least once. It is a precursor/contract signal, NOT a
+	// leg of the Ready formula (Ready = ManifestsReady && VolumesReady && ChildrenReady).
+	//
+	// Latch semantics (lifelong, never re-opens):
+	//   - True  / ReasonManifestsArchived  — own manifest leg reached readiness once AND every child
+	//     content is ManifestsArchived=True. Once True it stays True forever, immune to later
+	//     ManifestsReady/Ready degradation or to a child disappearing (the fact "namespace was read
+	//     and stored in a checkpoint" is irreversible). Snapshot.spec is immutable, so there is no
+	//     recapture: observedGeneration is still stamped on the condition (like every other condition,
+	//     for gen-gated readers) but the latch state never depends on a generation change.
+	//   - False / ReasonManifestsCapturing — transient: not archived yet and not failed (includes the
+	//     fail-closed NamespaceCaptureIncomplete wait for RBAC).
+	//   - False / ReasonManifestsArchiveFailed — terminal: own manifest leg failed terminally BEFORE
+	//     archiving, or a child is ManifestsArchived=Failed (the subtree can never be archived). With
+	//     an immutable spec this state is unrecoverable for that Snapshot (a new one is required).
+	//
+	// Primary consumer: the namespace-capture RBAC hook, which grants the transient per-namespace
+	// RoleBinding while a Snapshot still needs to read the live namespace (not yet Archived/Failed).
+	ConditionManifestsArchived = "ManifestsArchived"
 )
 
 const (
@@ -43,4 +65,16 @@ const (
 
 	// ReasonGraphPlanningFailed: ChildrenSnapshotReady=False — graph planning failed.
 	ReasonGraphPlanningFailed = "GraphPlanningFailed"
+
+	// ReasonManifestsArchived: ManifestsArchived=True — this node and its whole subtree have had
+	// their manifests captured into checkpoints at least once (lifelong latch).
+	ReasonManifestsArchived = "Archived"
+
+	// ReasonManifestsCapturing: ManifestsArchived=False (transient) — the subtree is not archived
+	// yet and has not failed; capture is still in progress (or waiting for capture RBAC).
+	ReasonManifestsCapturing = "Capturing"
+
+	// ReasonManifestsArchiveFailed: ManifestsArchived=False (terminal) — the own manifest leg failed
+	// terminally before archiving, or a descendant's manifests can never be archived.
+	ReasonManifestsArchiveFailed = "Failed"
 )

@@ -24,7 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,23 +37,18 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// importDataImportGVK is the SVDM DataImport resource. The data leg of an imported leaf is produced by a
-// DataImport (a separate service); the binder reads its status.dataArtifactRef cross-service via the
-// dynamic/unstructured client, so state-snapshotter takes no Go-module dependency on SVDM.
-var importDataImportGVK = schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"}
-
 // importContentPollInterval is the polling fallback cadence while an imported leaf's SnapshotContent is
 // being materialized (uploaded ManifestCheckpoint not yet present, DataImport artifact not yet produced,
 // or content not yet Ready). The binder takes no watch on DataImport, so this poll drives convergence.
 const importContentPollInterval = 5 * time.Second
 
-// snapshotImportDataImportName returns the DataImport name that switches a generic snapshot leaf into
-// IMPORT mode (spec.dataSource.name -> DataImport), or "" for a capture leaf. This is the domain
-// data-leaf trigger (e.g. DemoVirtualDiskSnapshot.spec.dataSource); the generic-PVC extended VolumeSnapshot
-// carries its trigger as spec.source.dataImportName and is bound by the VolumeSnapshot path, not here.
-func snapshotImportDataImportName(obj *unstructured.Unstructured) string {
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "dataSource", "name")
-	return name
+// snapshotIsImportMode reports whether a generic/domain snapshot leaf is in IMPORT mode, signalled by the
+// unified empty marker spec.source.import: {} (parity with Snapshot.IsImportMode / domain IsImportMode).
+// An import leaf is materialized from the uploaded payload and — for dataBacked kinds — the matching
+// DataImport found by reverse-lookup (DataImport.spec.targetRef), not from a name carried on the leaf.
+func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
+	_, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
+	return found
 }
 
 // reconcileGenericImport materializes the SnapshotContent that backs an import-mode generic/domain leaf
@@ -76,7 +70,6 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
 	snapshotLike snapshot.SnapshotLike,
-	dataImportName string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	gvk := obj.GetObjectKind().GroupVersionKind()
@@ -160,21 +153,51 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		}
 	}
 
-	// Data leg from the leaf's DataImport.status.dataArtifactRef.
-	done, treason, tmsg, dErr := r.projectDataLegFromDataImport(ctx, obj, contentName, dataImportName)
-	if dErr != nil {
-		return ctrl.Result{}, dErr
-	}
-	if treason != "" {
-		// Actionable import failure (e.g. unsupported artifact kind) surfaced as Ready=False; the content
-		// stays pending (no dataRef), so the pure content mirror cannot express it — co-write it directly.
-		if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, treason, tmsg); perr != nil {
-			return ctrl.Result{}, perr
+	// Data leg: only dataBacked snapshot kinds (CSD spec.dataBacked) carry a volume data leg and have a
+	// matching DataImport. A structural import node (dataBacked=false, e.g. a VM snapshot or root Snapshot)
+	// has only manifests + children, so it skips the data leg entirely — otherwise it would poll forever
+	// for a DataImport that never exists.
+	if r.GVKRegistry.IsDataBacked(gvk.Kind) {
+		// Reverse-lookup: the leaf carries no DataImport name; find the DataImport whose spec.targetRef
+		// points at this leaf (exactly one; >=2 is fail-closed).
+		di, treason, tmsg, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, obj)
+		if lErr != nil {
+			return ctrl.Result{}, lErr
 		}
-		return ctrl.Result{}, nil
-	}
-	if !done {
-		requeue = true
+		if treason != "" {
+			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, treason, tmsg); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{}, nil
+		}
+		if di == nil {
+			// d8 creates the DataImport alongside the leaf; it may not be visible yet. Pending, poll.
+			return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
+		}
+
+		done, dtreason, dtmsg, dErr := r.projectDataLegFromDataImport(ctx, obj, contentName, di)
+		if dErr != nil {
+			return ctrl.Result{}, dErr
+		}
+		if dtreason != "" {
+			// Actionable import failure (e.g. unsupported artifact kind) surfaced as Ready=False; the content
+			// stays pending (no dataRef), so the pure content mirror cannot express it — co-write it directly.
+			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, dtreason, dtmsg); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{}, nil
+		}
+		if !done {
+			requeue = true
+		} else {
+			// Mirror volume metadata onto the leaf status for d8 export. storageClassName is absent from the
+			// import dataRef by design, so take it from DataImport.spec.storageClassName; size/volumeMode come
+			// from the content dataRef (enriched from VSC.restoreSize + DataImport.status.volumeMode).
+			scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
+			if mErr := r.mirrorLeafVolumeMetadataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
+				logger.Error(mErr, "Failed to mirror volume metadata to import leaf status")
+			}
+		}
 	}
 
 	if requeue {
@@ -204,7 +227,7 @@ func importSnapshotContentSpec(leaf *unstructured.Unstructured) storagev1alpha1.
 	)
 }
 
-// projectDataLegFromDataImport reads the leaf's DataImport, resolves its produced durable artifact
+// projectDataLegFromDataImport resolves the (reverse-looked-up) DataImport's produced durable artifact
 // (status.dataArtifactRef), transfers VolumeSnapshotContent ownership to the SnapshotContent (force
 // Retain + ownerRef), and publishes the single dataRef. Returns done=true once the dataRef is published.
 // A non-empty terminalReason is an actionable, non-retryable import failure.
@@ -212,18 +235,8 @@ func (r *GenericSnapshotBinderController) projectDataLegFromDataImport(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
 	contentName string,
-	dataImportName string,
+	di *unstructured.Unstructured,
 ) (done bool, terminalReason string, terminalMessage string, err error) {
-	di := &unstructured.Unstructured{}
-	di.SetGroupVersionKind(importDataImportGVK)
-	if getErr := r.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: dataImportName}, di); getErr != nil {
-		if errors.IsNotFound(getErr) {
-			// d8 creates the DataImport alongside the leaf; it may not be visible yet. Pending, not terminal.
-			return false, "", "", nil
-		}
-		return false, "", "", getErr
-	}
-
 	binding, ready, treason, tmsg := buildImportDataBinding(di, obj)
 	if treason != "" {
 		return false, treason, tmsg, nil

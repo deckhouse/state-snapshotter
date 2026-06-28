@@ -143,73 +143,72 @@
 
 ---
 
-### 4.5 N2a — built-in allowlist и исключения (первый набор, SSOT до кода)
+### 4.5 Namespace capture — discovery + единое правило включения (SSOT)
 
-**Включить в первый built-in profile (namespaced, list по GVR):**
+**Перечисление видов — через discovery, не статический allowlist.** Захват больше не опирается на захардкоженный список GVR (`n2aNamespacedGVR` удалён). `BuildManifestCaptureTargets` перечисляет **все** namespaced-виды через `discovery.ServerPreferredNamespacedResources` (preferred version каждого ресурса, verbs ⊇ {`list`,`get`,`watch`}, без subresource) и листит каждый в целевом namespace динамическим клиентом. Это гарантирует, что произвольные CR (например, оператор-провижененные ресурсы без CSD-маппинга) не теряются.
 
-| API group | Версия | Resource (plural) | Примечание |
-|-----------|--------|---------------------|------------|
-| `apps` | `v1` | `deployments`, `statefulsets`, `daemonsets` | |
-| `batch` | `v1` | `jobs`, `cronjobs` | |
-| | `v1` | `pods`, `services`, `configmaps`, `secrets`, `serviceaccounts`, `persistentvolumeclaims` | PVC — **только манифест** (metadata/spec), без данных тома |
-| `networking.k8s.io` | `v1` | `ingresses` | |
-| `networking.k8s.io` | `v1` | `networkpolicies` | Опционально: включать только явным решением в PR; иначе **вне** первого merge |
-| `rbac.authorization.k8s.io` | `v1` | `roles`, `rolebindings` | |
+**Требование verb `watch` исключает виртуальные/вычисляемые ресурсы.** Признак `watch` — это явный discovery-сигнал «настоящий хранимый desired-state vs computed-on-read». Любой etcd-backed ресурс (все CRD, встроенные виды, агрегированные API с реальным хранилищем) поддерживает `watch`; виртуальные ресурсы aggregation-слоя (`metrics.k8s.io`/`PodMetrics`/`NodeMetrics`, `custom/external.metrics.k8s.io`) отдают только `get,list` — их нельзя восстановить, и они racy при capture (имя, видимое в LIST на этапе планирования, может отсутствовать при GET-by-name в MCR-валидации → reject всего MCR). Признак режет именно по оси persisted/virtual, а не по «Local vs aggregated»: агрегированные, но реально хранимые ресурсы поддерживают `watch` и **остаются** в снимке. Verbs у CRD задаёт apiserver фиксированным набором (включая `watch`) — автор CR **не может** отключить `watch`, поэтому пользовательские манифесты этим фильтром не теряются.
 
-**Явно исключить (не list / не target):**
+**Единое правило включения — `ShouldIncludeNamespaceObject` (default-include).** Объект попадает в снимок, если нет доказуемого сигнала исключения. Сигналы исключения (единственное место — `pkg/namespacemanifest/targets.go`):
 
-- `events`, `leases`, `endpointslices` (core / coordination / discovery — по фактическим GVR в кластере).
-- `replicasets`, `controllerrevisions` — derived/controller-owned; не дублировать workload.
-- **PodDisruptionBudget** — в первом наборе **не включать**; включение — отдельное решение.
-- Все **внутренние** объекты snapshotter: `Snapshot`, `SnapshotContent`, `ManifestCaptureRequest`, `ManifestCheckpoint`, `ManifestCheckpointContentChunk`, `ObjectKeeper` (и пр. CR модуля по списку), служебные объекты runner/MCR (по **labels/prefixes** — зафиксировать в коде рядом с allowlist).
-- Любые GVR не из таблицы выше — **не** захватывать в N2a (fail-closed расширение только через изменение SSOT-списка).
+- **controller-`ownerReference`** (`controller: true`) — derived/runtime-состояние, которое владелец пересоздаёт после restore (backing Pod демо-VM, ReplicaSet/Pod от Deployment, domain-owned PVC — последняя захватывается отдельным volume-node путём);
+- **control-plane noise denylist** (регенерируется контрол-плейном, не пользовательский desired-state):
+  - kind-level: `Event` (`v1` + `events.k8s.io`), `v1` `Endpoints`, `coordination.k8s.io` `Lease`, `cilium.io` `CiliumEndpoint` (эфемерный per-pod runtime-объект, имя = имя пода; cilium-агент пересоздаёт его при churn подов — бессмыслен для restore и racy при capture, как и виртуальные метрики);
+  - object-level: `ConfigMap` `kube-root-ca.crt`; `ServiceAccount` `default`; `Secret` типа `kubernetes.io/service-account-token`;
+  - примечание: виртуальные ресурсы aggregation-слоя (`metrics.k8s.io` и т. п.) исключаются **не** здесь, а раньше — на этапе перечисления через отсутствие verb `watch` (см. абзац про discovery выше);
+- **снапшотная машинерия (механизм 1, kind-level)** — виды, которые снапшоттер создаёт сам: CSI `VolumeSnapshot` плюс все зарегистрированные в живом `snapshot.GVKRegistry` snapshot/content-виды (встроенные + выведенные из CSD, напр. `VirtualMachineSnapshot`; root `Snapshot` тоже входит сюда). Набор GVK прокидывается из Snapshot-контроллера; **fail-closed**, если реестр ещё не построен (`ErrGraphRegistryNotReady` → requeue, чтобы не захватить собственные снапшот-объекты);
+- **собственная machinery state-snapshotter** — вся API-группа `state-snapshotter.deckhouse.io` (MCR/MCP/chunk) и машинерные виды `storage.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`);
+- **Deckhouse-managed объекты по лейблу `heritage=deckhouse`** — модульная/платформенная machinery (реконсилится модулями Deckhouse), не пользовательский desired-state. Это широкий group-agnostic сигнал (`isDeckhouseManagedObject`), который ловит транзиентный per-namespace capture `RoleBinding` (`d8-state-snapshotter-capture`, чужая API-группа `rbac.authorization.k8s.io`, поэтому group-фильтр выше его не видит), а также любые другие Deckhouse-managed helper-объекты. Хук `040-namespace-capture-rbac` создаёт capture `RoleBinding` на время capture и удаляет его после `ManifestsArchived=True`; оба RBAC-хука (`030-domain-rbac`, `040-namespace-capture-rbac`) ставят `heritage=deckhouse` на создаваемые объекты. Пользовательские `RoleBinding` без этого лейбла остаются desired-state.
 
-Профиль должен быть **один** в коде (или генерироваться из одного источника); ad-hoc «снять всё» запрещён (см. [`implementation-plan.md`](implementation-plan.md) §2.4.1).
+**Дедуп объектов, уже снятых дочерними доменными снимками (механизм 2, object-identity)** — `root_capture_run_exclude.go` вычитает ключи `apiVersion|kind|ns|name` из MCP дочерних content-узлов (+ predictive owned-PVC exclude). Это owner-независимо (обычный ConfigMap, попавший в дочерний VM-снимок, вычитается из root MCR). Обход поддерева идёт по **опубликованным** рёбрам `SnapshotContent.status.childrenSnapshotContentRefs`, поэтому корректность exclude зависит от того, что к моменту root capture поддерево **полностью связано рёбрами** (иначе непривязанный внук не будет посещён и его объект попадёт в root MCR повторно → `409 duplicate object`).
+
+**Wave-барьер по `ManifestsArchived` (надёжность дедупа).** Чтобы exclude всегда строился по полному поддереву, root MCR создаётся только после того, как каждый **прямой** ребёнок root-снимка имеет `SnapshotContent.ManifestsArchived=True` (`requireContentManifestsArchived`). Если ребёнок ещё не заархивирован → `ErrSubtreeManifestCapturePending` (requeue); терминальный `ManifestsArchiveFailed` → `ErrSubtreeManifestCaptureFailed`. Собственный `ManifestsArchived` рута в барьер **не** входит: он становится `True` только после создания и обработки root MCR (own `ManifestsReady`) и архивации детей, т. е. это **выход** root capture, а не вход — иначе цикл/дедлок. Рут не особенный: его латч считается тем же путём content-контроллера, что и у любого узла.
+
+**Надёжность латча `ManifestsArchived` (fail-closed против declared-but-unlinked).** `ManifestsArchived` — однонаправленный subtree-латч (не переоткрывается), поэтому он обязан стать `True` только когда поддерево действительно полно. `childrenSnapshotContentRefs` публикуется **атомарно-целиком** (`PublishSnapshotContentChildrenFromSnapshotRefs`: либо все заявленные дети резолвятся в bound content и публикуется полный набор, либо ничего), поэтому до публикации view «дочерних рёбер» пуст и наивная агрегация по опубликованным рёбрам могла бы выдать `True` преждевременно. `aggregateChildrenManifestsArchived` сверяет **заявленный** набор детей (через `spec.snapshotRef` → owning snapshot → `status.childrenSnapshotRefs`, без visibility-leaf) с **опубликованными** рёбрами: латч может стать `True` только если каждый заявленный non-leaf ребёнок зарезолвлен, привязан, **слинкован** в `childrenSnapshotContentRefs` И сам `ManifestsArchived=True`. Любой нерезолвленный/непривязанный/неслинкованный заявленный ребёнок = pending (не failure). Тем самым «прямой ребёнок `ManifestsArchived=True`» транзитивно гарантирует, что всё его поддерево заархивировано и связано рёбрами — что и делает wave-барьер выше корректным.
+
+**Fail-closed на неполноту (transient).** Если какой-то namespaced-вид нельзя прочитать из-за `Forbidden` (транзиентный per-namespace `RoleBinding` ещё не распространился) или из-за частичного отказа discovery (битый aggregated APIService), его GVR возвращается в `unreadable`. Контроллер **не** создаёт root MCR с неполным планом: ставит `Ready=False`/`NamespaceCaptureIncomplete` и **requeue** (ждёт RBAC), не terminal. Три класса ошибок листинга: Forbidden/partial-discovery → `NamespaceCaptureIncomplete` (transient); транзиентные ошибки apiserver (429/503/500/timeout/EOF) → requeue; только структурные/неожиданные → terminal `ListFailed`. RBAC модель — §RBAC / Phase 5.
 
 #### 4.5.0 Raw capture policy (источник истины — MCP)
 
 Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **including `status`** and runtime fields. MCP is the source of truth for import/export: `DataImport`/`DataExport` read original fields (e.g. `status.capacity`, `spec.storageClassName`, `spec.volumeMode`) directly from the stored manifest.
 
-- **Object selection** (skipping ephemeral/owner-managed/excluded kinds) is a **separate** layer applied on capture; it does **not** mutate object fields.
+- **Object selection** (`ShouldIncludeNamespaceObject`: dropping controller-owned dependents, control-plane noise, snapshot/own machinery) is a **separate** layer applied on capture; it does **not** mutate object fields.
 - **Field-level sanitization** (stripping `status`, `metadata.managedFields`, `resourceVersion`, `uid`, `creationTimestamp`, etc.) happens **only on the restore read-path** (`internal/usecase/restore`), independent of capture.
-- The **only** field-level exception on capture is `Secret` bytes — see below.
+- There are **no** field-level exceptions on capture — see §4.5.1.
 
 #### 4.5.1 Secret handling in ManifestCheckpoint
 
-`Secret` objects are sensitive and are **secure-by-default**: their bytes are not stored in `ManifestCheckpoint` unless explicitly opted in. This is the single field-level exception to the raw-capture policy above, because the snapshot store has no at-rest encryption.
+`Secret` objects are captured **verbatim**, like every other object: their `.data`/`.stringData` are stored as-is in `ManifestCheckpoint`. There is no secret-specific selection or field stripping on the capture path.
 
-- Non-`Opaque` secrets are always skipped (`kubernetes.io/tls`, `kubernetes.io/dockerconfigjson`, `kubernetes.io/service-account-token`, and any other `type != Opaque`).
-- `Opaque` secrets without explicit annotations are skipped.
-- `Opaque` secrets annotated with `state-snapshotter.deckhouse.io/include-secret: "true"` are stored with `.data` and `.stringData` removed; other fields are preserved as-is.
-- `Opaque` secrets annotated with `state-snapshotter.deckhouse.io/include-secret-data: "true"` are stored with `.data` and `.stringData`. This annotation is a standalone opt-in, not an addition to `state-snapshotter.deckhouse.io/include-secret`. It is dangerous because sensitive values are persisted in `ManifestCheckpoint`; use it only intentionally.
+- All selected `Secret`s (any `type`) are stored raw with their bytes intact.
+- `Secret`s excluded by the unified inclusion rule (`ShouldIncludeNamespaceObject`) — e.g. `kubernetes.io/service-account-token` secrets — are not captured at all; this is object selection, not field stripping.
 
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: example
-  annotations:
-    state-snapshotter.deckhouse.io/include-secret: "true"
-type: Opaque
-data:
-  password: ...
-```
+> At-rest encryption of the snapshot store is a separate, future concern. The legacy opt-in annotations (`state-snapshotter.deckhouse.io/include-secret`, `…/include-secret-data`) and the secure-by-default stripping have been removed.
 
-This Secret is stored without `.data` and `.stringData`.
+#### 4.5.2 Что попадает в снимок namespace (сводка)
 
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: example-with-data
-  annotations:
-    state-snapshotter.deckhouse.io/include-secret-data: "true"
-type: Opaque
-data:
-  password: ...
-```
+Модель — **default-include**: в снимок попадает **любой** namespaced-объект целевого namespace, кроме явно исключённого. Отдельного allowlist «снимать только это» нет — захватывается весь пользовательский desired-state, включая произвольные CR без CSD-маппинга.
 
-This Secret is stored together with `.data` and `.stringData`.
+**Попадает в снимок (примеры):**
+
+- встроенные пользовательские ресурсы: `ConfigMap`, `Secret` (любого типа, кроме service-account-token), `Service`, `PersistentVolumeClaim`, `ServiceAccount` (кроме `default`), `Pod` без controller-владельца (standalone) и т. п.;
+- workload-объекты верхнего уровня, создаваемые пользователем: `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob` и т. п. (их производные — `ReplicaSet`/`Pod` — исключаются как controller-owned, владелец пересоздаст их при restore);
+- любые **CRD-ресурсы** в namespace (операторные/вендорные CR), в т. ч. агрегированные API с реальным хранилищем (поддерживают `watch`);
+- сетевые/политики/прочее: `Ingress`, `NetworkPolicy`, `Role`, `RoleBinding` и др.
+
+**НЕ попадает в снимок:**
+
+| Категория | Что именно | Почему |
+|-----------|------------|--------|
+| Производные (controller-owned) | объекты с `ownerReference.controller: true` (`ReplicaSet`/`Pod` от Deployment, backing-Pod демо-VM, domain-owned PVC) | владелец пересоздаёт их при restore; PVC данных захватывается отдельным volume-путём |
+| Control-plane noise | `Event`, `Endpoints`, `Lease`, `CiliumEndpoint`, `ConfigMap/kube-root-ca.crt`, `ServiceAccount/default`, service-account-token `Secret` | регенерируется контрол-плейном/CNI, не пользовательский desired-state |
+| Виртуальные/computed | `metrics.k8s.io` (`PodMetrics`/`NodeMetrics`), `custom/external.metrics.k8s.io` | не хранятся (только `get,list`, без `watch`), невосстановимы |
+| Снапшотная машинерия | CSI `VolumeSnapshot`, все snapshot/content-виды из `snapshot.GVKRegistry` (вкл. root `Snapshot`, `VirtualMachineSnapshot` и пр.) | создаются самим снапшоттером (self-referential) |
+| Deckhouse-managed (`heritage=deckhouse`) | capture `RoleBinding` `d8-state-snapshotter-capture` и прочие объекты с `heritage=deckhouse` | модульная machinery Deckhouse (вкл. транзиентный RBAC снапшоттера), не desired-state |
+| Собственная машинерия | вся группа `state-snapshotter.deckhouse.io` (MCR/MCP/chunk) + `storage.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`) | внутренние execution/transfer-объекты |
+| Уже снятое дочерними снимками | объекты, попавшие в MCP дочерних доменных content-узлов (механизм 2, object-identity) | дедуп, чтобы не дублировать в root |
+
+> Примечание про «ресурсы, создаваемые Deckhouse»: специального исключения «по владельцу Deckhouse» нет. Deckhouse-managed объекты отсекаются теми же общими сигналами: либо они controller-owned (пересоздаются модулем), либо это control-plane noise, либо это наша/снапшотная машинерия. Всё остальное в namespace — в том числе ресурсы, которые лишь *настроены* пользователем поверх модулей, — считается desired-state и попадает в снимок.
 
 ---
 
@@ -248,7 +247,7 @@ This Secret is stored together with `.data` and `.stringData`.
 
 **Поведение до завершения capture:**
 
-7. **Immutability `spec.targets`:** расхождение снимаемого плана с live namespace → **`CapturePlanDrift`** (пока MCR ещё существует; см. integration-тест: drift проверяется **до** удаления MCR). Стабильный порядок targets — отсортированный набор (`BuildManifestCaptureTargets`).
+7. **Point-in-time / frozen `spec.targets`:** снимок — это point-in-time. Полный list namespace выполняется **ровно один раз** — только когда рабочего MCR ещё нет (gate `OR(capture done, MCR существует)` в `reconcileCaptureN2a`, существование MCR читается через `APIReader`). Как только MCR создан, его `spec.targets` **заморожены** и **не сравниваются** с live namespace и **не переписываются** (никакого continuous drift). Прежнее состояние **`CapturePlanDrift`** для корня **больше не возникает** (логика дрейфа удалена). Пересоздание плана происходит только через транзиентные delete-пути (`unreadable`/subtree-pending удалили MCR → на следующем reconcile свежий list). Стабильный порядок targets — отсортированный набор (`BuildManifestCaptureTargets`, параллельный list-sweep). Перед единственным list — RBAC-гейт `SelfSubjectAccessReview(verb=list, group=*, resource=*, ns)`, который убирает гонку с асинхронной выдачей per-namespace capture RoleBinding.
 
 **Публичный статус root** — без полей MCR (§4.4). **Каноническая ссылка на артефакт** после success — **`SnapshotContent.status.manifestCheckpointName`**.
 

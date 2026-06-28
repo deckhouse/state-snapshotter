@@ -40,14 +40,43 @@ spec:
           metadata:
             type: object
           spec:
-            description: DemoVirtualMachineSnapshotSpec defines the desired state
-              of DemoVirtualMachineSnapshot.
+            description: |-
+              DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot. Exactly one of
+              SourceRef (capture) or Source (import) is set.
             properties:
+              source:
+                description: |-
+                  Source, when set, switches this VM snapshot into IMPORT mode (spec.source.import: {} only — no static
+                  pre-provisioning on a demo leaf). In import mode the domain controller does NO capture planning (no
+                  source-VM lookup, no children planning, no MCR): the common controller materializes it from the
+                  uploaded manifests and child refs. Immutable once set.
+                properties:
+                  import:
+                    description: |-
+                      Import, when present, marks this Snapshot as an import target. It is an empty marker object —
+                      its mere presence selects import mode (content is materialized from an uploaded payload, not
+                      captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
+                      source members and to allow future import options without another union rewrite.
+                    type: object
+                  snapshotContentName:
+                    description: |-
+                      SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
+                      (static pre-provisioning, analogous to volumeSnapshotContentName).
+                    minLength: 1
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'only spec.source.import: {} is supported on a demo snapshot
+                    leaf'
+                  rule: has(self.import) && !has(self.snapshotContentName)
+                - message: spec.source is immutable
+                  rule: self == oldSelf
               sourceRef:
                 description: |-
-                  SourceRef identifies the DemoVirtualMachine captured by this snapshot. It is the single
-                  source-of-truth for what the snapshot captures (both manually-created and root-planned
-                  snapshots) and is immutable once set.
+                  SourceRef identifies the DemoVirtualMachine captured by this snapshot in CAPTURE mode. It is the
+                  single source-of-truth for what the snapshot captures and is immutable once set. It is a pointer so
+                  its presence unambiguously selects capture mode for the exactly-one-of rule; an IMPORT-mode snapshot
+                  (spec.source.import) has no live source VM and omits it.
                 properties:
                   apiVersion:
                     minLength: 1
@@ -66,9 +95,11 @@ spec:
                 x-kubernetes-validations:
                 - message: spec.sourceRef is immutable
                   rule: self == oldSelf
-            required:
-            - sourceRef
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of spec.sourceRef (capture) or spec.source (import)
+                must be set
+              rule: has(self.sourceRef) != has(self.source)
           status:
             description: DemoVirtualMachineSnapshotStatus defines the observed state
               of DemoVirtualMachineSnapshot.

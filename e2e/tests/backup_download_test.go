@@ -62,7 +62,7 @@ const (
 type dataExportTarget struct {
 	exportName   string
 	group        string
-	resource     string
+	kind         string
 	snapshotName string
 	pvcName      string
 }
@@ -203,7 +203,9 @@ func writeBlockDataParallel(ctx context.Context, ns string, pvcs []string, check
 			checksums[pvc] = sum
 			mu.Unlock()
 			GinkgoWriter.Printf("  source checksum pvc=%s sha256=%s\n", pvc, sum)
-			deletePod(ctx, ns, podName)
+			// Functional detach, not cleanup: the writer Pod must release the RWO PVC before the
+			// volume can be snapshotted, so it deletes unconditionally regardless of keep-cluster knobs.
+			forceDeletePod(ctx, ns, podName)
 			if err := waitPodDeleted(ctx, ns, podName, 2*time.Minute); err != nil {
 				errCh <- fmt.Errorf("delete block writer pod for %s: %w", pvc, err)
 			}
@@ -220,10 +222,17 @@ func writeBlockDataParallel(ctx context.Context, ns string, pvcs []string, check
 }
 
 func deletePod(ctx context.Context, ns, name string) {
-	if cleanupSkippedOnFailure() {
-		GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping pod %s/%s (spec failed)\n", ns, name)
+	if cleanupSkipped() {
+		GinkgoWriter.Printf("%s: keeping pod %s/%s\n", keepReason(), ns, name)
 		return
 	}
+	forceDeletePod(ctx, ns, name)
+}
+
+// forceDeletePod deletes a Pod unconditionally, ignoring the keep-cluster knobs. Use it for functional
+// detach steps (e.g. releasing an RWO PVC before snapshotting) where the test logic depends on the Pod
+// actually being gone, as opposed to best-effort end-of-spec cleanup (use deletePod for that).
+func forceDeletePod(ctx context.Context, ns, name string) {
 	_ = suiteClientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
@@ -359,11 +368,11 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 		if err != nil {
 			return fmt.Errorf("get live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
-		liveSum, liveJSON, err := canonicalManifestChecksum(live.Object)
+		liveSum, liveJSON, err := canonicalManifestChecksum(strippedForRawCompare(live))
 		if err != nil {
 			return fmt.Errorf("checksum live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
-		downloadedSum, downloadedJSON, err := canonicalManifestChecksum(obj.Object)
+		downloadedSum, downloadedJSON, err := canonicalManifestChecksum(strippedForRawCompare(obj))
 		if err != nil {
 			return fmt.Errorf("checksum downloaded %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
@@ -381,6 +390,32 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 		return fmt.Errorf("no downloaded manifests were checked against live objects")
 	}
 	return nil
+}
+
+// rawCompareVolatileMetadata are server-managed metadata fields that cannot stay stable between a
+// point-in-time captured manifest and the live object read back later: resourceVersion is bumped on
+// every write, and managedFields is server-side-apply bookkeeping whose timestamps/managers drift.
+// Capture stores raw manifests verbatim (sanitization is a restore-path concern, see
+// internal/usecase/restore/sanitizer.go), so the raw-vs-live checksum strips these from both sides to
+// compare actual object content (spec/data/labels/annotations/ownerRefs) without false diffs.
+//
+// status is deliberately NOT stripped: the capture spec waits for every source object to reach its
+// terminal Ready state before snapshotting (see "captures the Block-volume snapshot tree"), so the
+// captured status equals the (now-stable) live status and is part of what this test verifies.
+var rawCompareVolatileMetadata = [][]string{
+	{"metadata", "resourceVersion"},
+	{"metadata", "managedFields"},
+}
+
+// strippedForRawCompare returns a deep copy of obj's content with volatile server-managed metadata
+// removed, so a faithful capture is not flagged as differing just because the live object advanced its
+// resourceVersion (or rewrote managedFields) after the snapshot was taken.
+func strippedForRawCompare(obj *unstructured.Unstructured) map[string]interface{} {
+	clone := obj.DeepCopy()
+	for _, path := range rawCompareVolatileMetadata {
+		unstructured.RemoveNestedField(clone.Object, path...)
+	}
+	return clone.Object
 }
 
 func canonicalManifestChecksum(obj map[string]interface{}) (sum string, canonical []byte, err error) {
@@ -403,16 +438,30 @@ func prettyManifestJSON(canonical []byte) []byte {
 	return out
 }
 
-func assertManifestsMatchLive(ctx context.Context, ns string, downloaded []unstructured.Unstructured) error {
+// assertManifestsMatchLive verifies that each restored object's meaningful spec fields equal the live
+// source object (looked up by name in ns). label prefixes every log line so parallel variants stay
+// readable; per object it prints exactly which fields were compared and the only intended difference
+// (the rewritten namespace), so a passing run produces a clear field-level diff against the original.
+func assertManifestsMatchLive(ctx context.Context, label, ns string, downloaded []unstructured.Unstructured) error {
+	logf := func(format string, args ...any) { GinkgoWriter.Printf("  ["+label+"] "+format+"\n", args...) }
 	for i := range downloaded {
 		obj := &downloaded[i]
 		gvr, ok := gvrForLiveKind(obj.GetKind())
 		if !ok {
+			logf("manifest %s/%s: restored (kind has no field-level source comparison)", obj.GetKind(), obj.GetName())
 			continue
 		}
 		live, err := getResource(ctx, gvr, ns, obj.GetName())
 		if err != nil {
 			return fmt.Errorf("get live %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+		var checked []string
+		cmp := func(field, want, got string) error {
+			if want != got {
+				return fmt.Errorf("%s %s spec.%s mismatch: live=%q downloaded=%q", obj.GetKind(), obj.GetName(), field, want, got)
+			}
+			checked = append(checked, fmt.Sprintf("%s=%q", field, got))
+			return nil
 		}
 		switch obj.GetKind() {
 		case "ConfigMap":
@@ -421,11 +470,12 @@ func assertManifestsMatchLive(ctx context.Context, ns string, downloaded []unstr
 			if fmt.Sprint(want) != fmt.Sprint(got) {
 				return fmt.Errorf("ConfigMap %s data mismatch: live=%v downloaded=%v", obj.GetName(), want, got)
 			}
+			checked = append(checked, fmt.Sprintf("data=%v", got))
 		case "DemoVirtualMachine":
 			want, _, _ := unstructured.NestedString(live.Object, "spec", "virtualDiskName")
 			got, _, _ := unstructured.NestedString(obj.Object, "spec", "virtualDiskName")
-			if want != got {
-				return fmt.Errorf("DemoVirtualMachine %s virtualDiskName mismatch: live=%q downloaded=%q", obj.GetName(), want, got)
+			if err := cmp("virtualDiskName", want, got); err != nil {
+				return err
 			}
 			if obj.GetName() == bkVMName && want != bkDiskAName {
 				return fmt.Errorf("DemoVirtualMachine %s should reference %s, got %q", bkVMName, bkDiskAName, want)
@@ -434,27 +484,29 @@ func assertManifestsMatchLive(ctx context.Context, ns string, downloaded []unstr
 			for _, key := range []string{"persistentVolumeClaimName", "storageClassName", "volumeMode", "size"} {
 				want, _, _ := unstructured.NestedString(live.Object, "spec", key)
 				got, _, _ := unstructured.NestedString(obj.Object, "spec", key)
-				if want != got {
-					return fmt.Errorf("DemoVirtualDisk %s spec.%s mismatch: live=%q downloaded=%q", obj.GetName(), key, want, got)
+				if err := cmp(key, want, got); err != nil {
+					return err
 				}
 			}
 		case "PersistentVolumeClaim":
 			wantMode, _, _ := unstructured.NestedString(live.Object, "spec", "volumeMode")
 			gotMode, _, _ := unstructured.NestedString(obj.Object, "spec", "volumeMode")
-			if wantMode != gotMode {
-				return fmt.Errorf("PVC %s volumeMode mismatch: live=%q downloaded=%q", obj.GetName(), wantMode, gotMode)
+			if err := cmp("volumeMode", wantMode, gotMode); err != nil {
+				return err
 			}
 			wantSC, _, _ := unstructured.NestedString(live.Object, "spec", "storageClassName")
 			gotSC, _, _ := unstructured.NestedString(obj.Object, "spec", "storageClassName")
-			if wantSC != gotSC {
-				return fmt.Errorf("PVC %s storageClassName mismatch: live=%q downloaded=%q", obj.GetName(), wantSC, gotSC)
+			if err := cmp("storageClassName", wantSC, gotSC); err != nil {
+				return err
 			}
 			wantStor, _, _ := unstructured.NestedString(live.Object, "spec", "resources", "requests", "storage")
 			gotStor, _, _ := unstructured.NestedString(obj.Object, "spec", "resources", "requests", "storage")
-			if wantStor != gotStor {
-				return fmt.Errorf("PVC %s resources.requests.storage mismatch: live=%q downloaded=%q", obj.GetName(), wantStor, gotStor)
+			if err := cmp("resources.requests.storage", wantStor, gotStor); err != nil {
+				return err
 			}
 		}
+		logf("manifest %s/%s matches source — checked {%s}; only diff: metadata.namespace %q -> %q",
+			obj.GetKind(), obj.GetName(), strings.Join(checked, ", "), live.GetNamespace(), obj.GetNamespace())
 	}
 	return nil
 }
@@ -481,7 +533,7 @@ func anyBoundSnapshotContent(ctx context.Context, ns string) (bool, error) {
 func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]dataExportTarget, error) {
 	// Wait for the asynchronously-published orphan-PVC dataRef so we never miss a binding (see
 	// waitContentDataRefs); reading once can race right after the snapshot children report Ready.
-	bindings, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO)
+	bindings, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.captureReadyTO)
 	if err != nil {
 		return nil, err
 	}
@@ -538,16 +590,15 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 		}
 		t := dataExportTarget{
 			exportName:   "export-" + sk.name,
+			kind:         sk.kind,
 			pvcName:      pvc,
 			snapshotName: sk.name,
 		}
 		switch sk.kind {
 		case "DemoVirtualDiskSnapshot":
 			t.group = "demo.state-snapshotter.deckhouse.io"
-			t.resource = "demovirtualdisksnapshots"
 		case "VolumeSnapshot":
 			t.group = "snapshot.storage.k8s.io"
-			t.resource = "volumesnapshots"
 		default:
 			return nil, fmt.Errorf("unsupported snapshot kind %q for PVC %q", sk.kind, pvc)
 		}
@@ -567,9 +618,9 @@ func createDataExport(ctx context.Context, ns string, target dataExportTarget) e
 		"spec": map[string]interface{}{
 			"ttl": "15m",
 			"targetRef": map[string]interface{}{
-				"group":    target.group,
-				"resource": target.resource,
-				"name":     target.snapshotName,
+				"group": target.group,
+				"kind":  target.kind,
+				"name":  target.snapshotName,
 			},
 		},
 	}}
@@ -716,7 +767,7 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 	// The orphan-PVC child volume node's dataRef is published asynchronously after its VolumeSnapshot
 	// leaf becomes readyToUse, so poll the content tree until all three PVC bindings are linked under
 	// the root content rather than reading once (which races right after waitChildrenReady).
-	if _, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.snapshotReadyTO); err != nil {
+	if _, err := waitContentDataRefs(ctx, rootContent, []string{bkPVCName, bkPVCDiskA, bkPVCDiskB}, suiteCfg.captureReadyTO); err != nil {
 		return err
 	}
 	var orphanVS string
@@ -835,16 +886,36 @@ func backupDownloadSpecs() {
 		})
 
 		It("captures the Block-volume snapshot tree (Ready + expected topology)", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+5*time.Minute)
+			// Capture (LVM snapshot creation) is fast — bound by captureReadyTO, not the restore-path
+			// snapshotReadyTO.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+5*time.Minute)
 			defer cancel()
+
+			// Background capture timeline: surfaces where the Block-volume snapshot creation spends time.
+			tl := startCaptureTimeline(backup.srcNS)
+			defer tl.stop()
+
+			// Snapshot captures status verbatim (point-in-time). Wait for every source object to reach its
+			// terminal Ready state (status no longer changes) BEFORE snapshotting, so the Phase 4 raw
+			// manifest-vs-live comparison stays sound: otherwise a captured status (e.g. VM phase=Pending,
+			// disk still provisioning) would drift from the live object that keeps reconciling to Ready. The
+			// VM's own Ready already implies its attached disk-a is usable, but disk-b is a standalone root
+			// child, so all three are awaited explicitly.
+			By("Waiting for the source objects to settle into a terminal Ready state before snapshotting")
+			Expect(waitDemoDiskReady(ctx, backup.srcNS, bkDiskAName, suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualDisk %s Ready before snapshot", bkDiskAName)
+			Expect(waitDemoDiskReady(ctx, backup.srcNS, bkDiskBName, suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualDisk %s Ready before snapshot", bkDiskBName)
+			Expect(waitObjectCondition(ctx, demoVMGVR, backup.srcNS, bkVMName, condReady, "True", suiteCfg.captureReadyTO)).
+				To(Succeed(), "source DemoVirtualMachine %s Ready before snapshot", bkVMName)
 
 			By("Creating the root Snapshot over the Block-volume tree")
 			Expect(createRootSnapshot(ctx, backup.srcNS, bkRootSnapshotName)).To(Succeed())
 
 			By("Waiting for the Snapshot + bound SnapshotContent to become Ready")
-			content, err := waitSnapshotReady(ctx, backup.srcNS, bkRootSnapshotName, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, backup.srcNS, bkRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 			backup.rootContent = content
 			backup.rootSnap = bkRootSnapshotName
 
@@ -852,7 +923,7 @@ func backupDownloadSpecs() {
 			nodes, err := walkSnapshotTree(ctx, backup.srcNS, bkRootSnapshotName)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(nodes).NotTo(BeEmpty())
-			Expect(waitChildrenReady(ctx, backup.srcNS, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitChildrenReady(ctx, backup.srcNS, nodes, suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Resolving snapshot leaf names for the phase-5 import tree")
 			Expect(resolveBackupSnapRefs(ctx, backup.srcNS, bkRootSnapshotName, content)).To(Succeed())
@@ -913,12 +984,12 @@ func backupDownloadSpecs() {
 			Expect(waitPodRunning(ctx, backup.srcNS, bkBackupClientPod, 5*time.Minute)).To(Succeed())
 
 			for _, target := range targets {
-				By(fmt.Sprintf("Exporting PVC %s via DataExport %s (target %s/%s)", target.pvcName, target.exportName, target.resource, target.snapshotName))
+				By(fmt.Sprintf("Exporting PVC %s via DataExport %s (target %s/%s)", target.pvcName, target.exportName, target.kind, target.snapshotName))
 				Expect(createDataExport(ctx, backup.srcNS, target)).To(Succeed())
 				DeferCleanup(func(t dataExportTarget) func() {
 					return func() {
-						if cleanupSkippedOnFailure() {
-							GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping DataExport %s/%s (spec failed)\n", backup.srcNS, t.exportName)
+						if cleanupSkipped() {
+							GinkgoWriter.Printf("%s: keeping DataExport %s/%s\n", keepReason(), backup.srcNS, t.exportName)
 							return
 						}
 						cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)

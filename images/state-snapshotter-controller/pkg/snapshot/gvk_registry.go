@@ -55,6 +55,9 @@ type GVKRegistry struct {
 	snapshotKindByContentGroupKind map[string]string
 	// contentGVKBySnapshotKind maps snapshot Kind -> explicit content GVK
 	contentGVKBySnapshotKind map[string]schema.GroupVersionKind
+	// dataBackedBySnapshotKind maps snapshot Kind -> whether the kind carries a volume data leg
+	// (CSD spec.dataBacked). Absent entries read as false (manifest-only kinds, built-in pairs).
+	dataBackedBySnapshotKind map[string]bool
 }
 
 // NewGVKRegistry creates a new GVK registry.
@@ -64,6 +67,7 @@ func NewGVKRegistry() *GVKRegistry {
 		contentGVKs:                    make(map[string]schema.GroupVersionKind),
 		snapshotKindByContentGroupKind: make(map[string]string),
 		contentGVKBySnapshotKind:       make(map[string]schema.GroupVersionKind),
+		dataBackedBySnapshotKind:       make(map[string]bool),
 	}
 }
 
@@ -157,6 +161,25 @@ func (r *GVKRegistry) RevertSnapshotRegistrationIfExact(snapshotKind string, sna
 	delete(r.snapshotKindByContentGroupKind, gk)
 	delete(r.snapshotGVKs, snapshotKind)
 	delete(r.contentGVKs, contentGVK.Kind)
+}
+
+// MarkDataBacked records whether a snapshot Kind carries a volume data leg (CSD spec.dataBacked).
+// Idempotent: the same kind may be marked repeatedly; the last value wins. A kind that is never
+// marked reads as false via IsDataBacked.
+func (r *GVKRegistry) MarkDataBacked(snapshotKind string, dataBacked bool) {
+	if r.dataBackedBySnapshotKind == nil {
+		r.dataBackedBySnapshotKind = make(map[string]bool)
+	}
+	r.dataBackedBySnapshotKind[snapshotKind] = dataBacked
+}
+
+// IsDataBacked reports whether the snapshot Kind carries a volume data leg. Unknown/unmarked kinds
+// read as false (manifest-only kinds, built-in pairs).
+func (r *GVKRegistry) IsDataBacked(snapshotKind string) bool {
+	if r.dataBackedBySnapshotKind == nil {
+		return false
+	}
+	return r.dataBackedBySnapshotKind[snapshotKind]
 }
 
 // ResolveSnapshotGVK resolves Snapshot GVK from Kind.

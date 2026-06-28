@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -46,6 +47,7 @@ import (
 const (
 	envNSPrefix             = "E2E_SNAPSHOTTER_NS_PREFIX"
 	envSnapshotReadyTO      = "E2E_SNAPSHOT_READY_TIMEOUT"
+	envCaptureReadyTO       = "E2E_CAPTURE_READY_TIMEOUT"
 	envModuleReadyTO        = "E2E_MODULE_READY_TIMEOUT"
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
@@ -53,21 +55,30 @@ const (
 	envProbeImage           = "E2E_PROBE_IMAGE"
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
 	envKeepClusterOnFailure = "E2E_KEEP_CLUSTER_ON_FAILURE"
+	envKeepCluster          = "E2E_KEEP_CLUSTER"
 )
 
 const (
-	defaultNSPrefix          = "snap-e2e"
-	defaultSnapshotTO        = 10 * time.Minute
+	defaultNSPrefix   = "snap-e2e"
+	defaultSnapshotTO = 10 * time.Minute
+	// defaultCaptureTO bounds snapshot *creation* (capture): manifests and LVM volume snapshots are both
+	// fast to create (copy-on-write, no data movement), so a short deadline fails fast instead of dragging
+	// on the generous snapshotReadyTO. snapshotReadyTO stays reserved for the restore/data-upload path,
+	// where DataImport actually streams bytes back.
+	defaultCaptureTO         = 30 * time.Second
 	defaultModuleTO          = 15 * time.Minute
 	defaultGCTTL             = "60s"
 	defaultStorageClass      = "e2e-thin"
 	defaultProbeImage        = "busybox:1.36"
 	defaultBackupClientImage = "curlimages/curl:8.11.1"
 
-	moduleName     = "state-snapshotter"
-	demoCSDName    = "demo-virtual-machine-disk"
-	d8ModuleNS     = "d8-state-snapshotter"
-	d8SVDMModuleNS = "d8-storage-volume-data-manager"
+	moduleName = "state-snapshotter"
+	// The demo domain ships two flat CSDs (one snapshot kind per object): the structural VM snapshot
+	// and the data-backed disk snapshot. Both must reach RBACReady before specs run.
+	demoVMCSDName   = "demo-virtual-machine"
+	demoDiskCSDName = "demo-virtual-disk"
+	d8ModuleNS      = "d8-state-snapshotter"
+	d8SVDMModuleNS  = "d8-storage-volume-data-manager"
 )
 
 // phase5ImportNS is set by the phase-5 restore spec while it runs; diagnostics use it on failure.
@@ -179,6 +190,7 @@ const pollInterval = 5 * time.Second
 type e2eConfig struct {
 	nsPrefix          string
 	snapshotReadyTO   time.Duration
+	captureReadyTO    time.Duration
 	moduleReadyTO     time.Duration
 	gcTTL             string
 	volumeData        bool
@@ -186,6 +198,7 @@ type e2eConfig struct {
 	probeImage        string
 	backupClientImage string
 	keepOnFailure     bool
+	keepAlways        bool
 
 	// vmNamespace / baseStorageClass drive the phase-3 runtime VirtualDisk attach on the base cluster.
 	vmNamespace      string
@@ -209,6 +222,7 @@ func loadConfig() e2eConfig {
 		backupClientImage: strings.TrimSpace(os.Getenv(envBackupClientImage)),
 		volumeData:        envBool(os.Getenv(envVolumeData)),
 		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
+		keepAlways:        envBool(os.Getenv(envKeepCluster)),
 		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
 		baseStorageClass:  strings.TrimSpace(os.Getenv("TEST_CLUSTER_STORAGE_CLASS")),
 	}
@@ -228,6 +242,7 @@ func loadConfig() e2eConfig {
 		cfg.backupClientImage = defaultBackupClientImage
 	}
 	cfg.snapshotReadyTO = parseDuration(os.Getenv(envSnapshotReadyTO), defaultSnapshotTO)
+	cfg.captureReadyTO = parseDuration(os.Getenv(envCaptureReadyTO), defaultCaptureTO)
 	cfg.moduleReadyTO = parseDuration(os.Getenv(envModuleReadyTO), defaultModuleTO)
 	return cfg
 }
@@ -294,7 +309,12 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO); err != nil {
 		return fmt.Errorf("module %s not Ready: %w", moduleName, err)
 	}
-	return waitObjectCondition(ctx, csdGVR, "", demoCSDName, "RBACReady", "True", suiteCfg.moduleReadyTO)
+	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
+		if err := waitObjectCondition(ctx, csdGVR, "", csd, "RBACReady", "True", suiteCfg.moduleReadyTO); err != nil {
+			return fmt.Errorf("demo CSD %s not RBACReady: %w", csd, err)
+		}
+	}
+	return nil
 }
 
 // --- namespaces ------------------------------------------------------------
@@ -304,19 +324,26 @@ func ensureNamespace(ctx context.Context, name string) error {
 	return err
 }
 
-// cleanupSkippedOnFailure reports whether per-spec resource cleanup must be skipped because a spec
-// failed and the operator asked to keep everything for debugging (E2E_KEEP_CLUSTER_ON_FAILURE).
-// It mirrors the suite-level nested-cluster teardown guard (cleanupSuite) so a failed run leaves its
-// namespaces and resources intact for live inspection instead of being torn down by DeferCleanup
-// (which Ginkgo runs regardless of pass/fail). It is safe to call from any DeferCleanup/destructor:
-// on a passing spec CurrentSpecReport().Failed() is false, so cleanup proceeds as usual.
-func cleanupSkippedOnFailure() bool {
-	return suiteCfg.keepOnFailure && CurrentSpecReport().Failed()
+// cleanupSkipped reports whether per-spec resource cleanup must be skipped to preserve resources for
+// live inspection. Two knobs drive it: E2E_KEEP_CLUSTER keeps resources unconditionally (pass or fail),
+// while E2E_KEEP_CLUSTER_ON_FAILURE keeps them only when the current spec failed. It is safe to call
+// from any DeferCleanup/destructor (which Ginkgo runs regardless of pass/fail): with neither knob set,
+// or with only the on-failure knob on a passing spec, cleanup proceeds as usual.
+func cleanupSkipped() bool {
+	return suiteCfg.keepAlways || (suiteCfg.keepOnFailure && CurrentSpecReport().Failed())
+}
+
+// keepReason names the env knob that caused cleanup to be skipped, for accurate log lines.
+func keepReason() string {
+	if suiteCfg.keepAlways {
+		return envKeepCluster
+	}
+	return envKeepClusterOnFailure
 }
 
 func deleteNamespace(ctx context.Context, name string) {
-	if cleanupSkippedOnFailure() {
-		GinkgoWriter.Printf("E2E_KEEP_CLUSTER_ON_FAILURE: keeping namespace %q (spec failed)\n", name)
+	if cleanupSkipped() {
+		GinkgoWriter.Printf("%s: keeping namespace %q\n", keepReason(), name)
 		return
 	}
 	cs := suiteClientset
@@ -698,6 +725,64 @@ func walkSnapshotTree(ctx context.Context, ns, rootSnapshot string) ([]childRef,
 // errIsNotFound reports whether err is a Kubernetes NotFound (used by GC assertions).
 func errIsNotFound(err error) bool {
 	return apierrors.IsNotFound(err)
+}
+
+// startAppearWatch opens a watch for a namespaced resource and returns a blocking wait function plus a
+// stop function. It MUST be opened BEFORE the action that creates the resource, so an object whose entire
+// lifetime is shorter than any poll interval is still observed: a transient resource (e.g. the capture
+// RoleBinding, which now lives only for the ~1s capture window between Snapshot creation and
+// ManifestsArchived=True) is reliably missed by an interval poll, but a watch opened first cannot lose
+// the ADDED event because client-go applies backpressure on its result channel rather than dropping it.
+//
+// The returned wait function first tries a direct Get (covers an already-present object), then consumes
+// watch events until an ADDED/MODIFIED for the named object arrives or the timeout elapses. The caller
+// must always invoke stop (e.g. via defer) to release the watch.
+func startAppearWatch(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) (wait func(time.Duration) (*unstructured.Unstructured, error), stop func(), err error) {
+	w, err := suiteDyn.Resource(gvr).Namespace(ns).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("watch %s in namespace %s: %w", gvr.Resource, ns, err)
+	}
+	wait = func(timeout time.Duration) (*unstructured.Unstructured, error) {
+		if obj, getErr := getResource(ctx, gvr, ns, name); getErr == nil {
+			return obj, nil
+		} else if !apierrors.IsNotFound(getErr) {
+			return nil, fmt.Errorf("get %s %s/%s: %w", gvr.Resource, ns, name, getErr)
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		for {
+			select {
+			case ev, ok := <-w.ResultChan():
+				if !ok {
+					// Watch ended unexpectedly; a final Get covers an event delivered as it closed.
+					if obj, getErr := getResource(ctx, gvr, ns, name); getErr == nil {
+						return obj, nil
+					}
+					return nil, fmt.Errorf("watch for %s %s/%s closed before it appeared", gvr.Resource, ns, name)
+				}
+				if ev.Type == watch.Error {
+					// Treat a watch error like a close: try a Get, otherwise surface it instead of looping.
+					if obj, getErr := getResource(ctx, gvr, ns, name); getErr == nil {
+						return obj, nil
+					}
+					return nil, fmt.Errorf("watch error for %s %s/%s: %v", gvr.Resource, ns, name, ev.Object)
+				}
+				if ev.Type != watch.Added && ev.Type != watch.Modified {
+					continue
+				}
+				obj, ok := ev.Object.(*unstructured.Unstructured)
+				if !ok || obj.GetName() != name {
+					continue
+				}
+				return obj, nil
+			case <-timer.C:
+				return nil, fmt.Errorf("timeout after %s waiting for %s %s/%s to appear", timeout, gvr.Resource, ns, name)
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return wait, w.Stop, nil
 }
 
 // assertResourceGone blocks until the (possibly cluster-scoped) resource is NotFound, failing the spec

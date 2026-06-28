@@ -27,17 +27,20 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// Demo source object names (PVC-free manifest-only variant of docs/.../snapshot-tree-demo/01-source.yaml).
+// Source object names for the manifest-only (no-volume-data) capture tree: an ownerless ConfigMap (the
+// manifest leg) and a single manifest-only DemoVirtualMachine that provides the domain child-snapshot
+// node. No DemoVirtualDisk is created here — dataless disks are no longer allowed (every DemoVirtualDisk
+// must be PVC-backed per a spec XValidation rule), so disks live only in the volume-data phase where they
+// get real PVCs. Generic-object discovery (RBAC/Service/Deployment/etc.) is covered by the
+// namespace-capture rework specs and deliberately not duplicated here.
 const (
-	srcConfigMapName  = "demo-snapshot-cm"
-	srcVMName         = "vm-1"
-	srcDiskVMName     = "disk-vm"
-	srcDiskStandalone = "disk-standalone"
-	rootSnapshotName  = "demo-tree"
+	srcConfigMapName = "demo-snapshot-cm"
+	srcVMName        = "vm-1"
+	rootSnapshotName = "demo-tree"
 )
 
-// capturedTree holds the shared state produced by captureSpecs (phase 1) and consumed by the
-// aggregated-API, restore, import and GC specs that run after it in the Ordered container.
+// capturedTree holds the shared state produced by captureSpecs and consumed by the aggregated-API,
+// restore and import specs that run after it in the merged manifest-only flow (Ordered container).
 type capturedTree struct {
 	namespace   string // source namespace the demo tree was applied into
 	rootSnap    string // root Snapshot name
@@ -46,10 +49,17 @@ type capturedTree struct {
 
 var captured capturedTree
 
-// buildManifestOnlySource returns the PVC-free demo source: a ConfigMap (manifest leg) plus the demo
-// inventory (one VM owning a disk, plus a standalone disk). The disks set spec.size (required by the CEL
-// scratch-provisioning rule) but leave spec.persistentVolumeClaimName empty, so the disk controller keeps
-// them manifest-only (no PVC). This yields a pure manifest tree where VolumesReady is vacuously true.
+// captureTL records the capture state-transition timeline for the manifest-only capture (started in
+// BeforeAll, stopped in AfterAll) so bottlenecks in snapshot creation are visible in the test log.
+var captureTL *captureTimeline
+
+// buildManifestOnlySource returns the no-volume-data capture source: an ownerless ConfigMap (the manifest
+// leg) and a single manifest-only DemoVirtualMachine (no virtualDiskName) that provides the domain
+// child-snapshot node. No DemoVirtualDisk is created: dataless disks are no longer allowed (every
+// DemoVirtualDisk must be PVC-backed per a spec XValidation rule), so this tree never models a disk without
+// data. Generic-object discovery (RBAC/Service/Deployment/etc.) is exercised by the namespace-capture
+// rework specs and deliberately not duplicated here. The result is a pure manifest tree where VolumesReady
+// is vacuously true.
 func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 	configMap := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "v1",
@@ -60,6 +70,8 @@ func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 		},
 		"data": map[string]interface{}{"demo": "tree"},
 	}}
+	// Manifest-only DemoVirtualMachine (no virtualDiskName): the single domain kind in this tree, present
+	// solely to produce a DemoVirtualMachineSnapshot child node without needing any volume data.
 	vm := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": demoGroupVersion,
 		"kind":       "DemoVirtualMachine",
@@ -67,27 +79,9 @@ func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 			"name":      srcVMName,
 			"namespace": ns,
 		},
-		"spec": map[string]interface{}{"virtualDiskName": srcDiskVMName},
+		"spec": map[string]interface{}{},
 	}}
-	diskVM := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": demoGroupVersion,
-		"kind":       "DemoVirtualDisk",
-		"metadata": map[string]interface{}{
-			"name":      srcDiskVMName,
-			"namespace": ns,
-		},
-		"spec": map[string]interface{}{"size": "1Gi"},
-	}}
-	diskStandalone := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": demoGroupVersion,
-		"kind":       "DemoVirtualDisk",
-		"metadata": map[string]interface{}{
-			"name":      srcDiskStandalone,
-			"namespace": ns,
-		},
-		"spec": map[string]interface{}{"size": "1Gi"},
-	}}
-	return []*unstructured.Unstructured{configMap, vm, diskVM, diskStandalone}
+	return []*unstructured.Unstructured{configMap, vm}
 }
 
 // createRootSnapshot creates the empty-spec root Snapshot (dynamic discovery of manifests + demo tree).
@@ -105,10 +99,10 @@ func createRootSnapshot(ctx context.Context, ns, name string) error {
 	return err
 }
 
-// captureSpecs registers the phase-1 capture specs: apply a PVC-free demo source, create the root
+// captureSpecs registers the capture specs of the manifest-only flow: apply the source, create the root
 // Snapshot, and assert the whole snapshot tree reaches Ready.
 func captureSpecs() {
-	Context("Phase 1: manifest-only capture", func() {
+	Context("Manifest-only capture", func() {
 		BeforeAll(func() {
 			captured.namespace = uniqueNS("src")
 			captured.rootSnap = rootSnapshotName
@@ -119,34 +113,43 @@ func captureSpecs() {
 			By("Creating the source namespace " + captured.namespace)
 			Expect(ensureNamespace(ctx, captured.namespace)).To(Succeed())
 
-			By("Applying the PVC-free demo source (ConfigMap + demo VM/disks)")
+			// Start the background capture timeline before applying the source so the demo-CR reconcile and
+			// the whole snapshot creation chain are timed (see AfterAll for stop).
+			captureTL = startCaptureTimeline(captured.namespace)
+
+			By("Applying the manifest-only source (ConfigMap + manifest-only VM)")
 			Expect(applyObjects(ctx, buildManifestOnlySource(captured.namespace), captured.namespace)).To(Succeed())
 
 			By("Creating the root Snapshot " + captured.rootSnap)
 			Expect(createRootSnapshot(ctx, captured.namespace, captured.rootSnap)).To(Succeed())
 		})
 
+		AfterAll(func() {
+			captureTL.stop()
+		})
+
 		It("captures the demo snapshot tree (root Snapshot + SnapshotContent Ready)", func() {
-			// Budget for the two sequential waits below (Snapshot Ready, then SnapshotContent legs),
-			// each bounded by snapshotReadyTO, plus a buffer for the intervening GETs.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+time.Minute)
+			// Snapshot creation (capture) must complete quickly, so both waits below are bounded by the
+			// short captureReadyTO (fail fast) instead of the generous restore-path snapshotReadyTO.
+			// Budget for the two sequential waits plus a buffer for the intervening GETs.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 
 			By("Waiting for the root Snapshot to become Ready")
-			content, err := waitSnapshotReady(ctx, captured.namespace, captured.rootSnap, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, captured.namespace, captured.rootSnap, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(content).NotTo(BeEmpty())
 			captured.rootContent = content
 			GinkgoWriter.Printf("root SnapshotContent: %s\n", content)
 
 			By("Waiting for the bound SnapshotContent to reach all leg conditions (Manifests/Volumes/Children/Ready)")
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 
 		It("populates the demo child snapshot tree (childrenSnapshotRefs) with Ready nodes", func() {
-			// Budget for the tree walk plus the (shared-deadline) children readiness wait, each bounded
-			// by snapshotReadyTO.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+time.Minute)
+			// Snapshot creation: bound the tree walk and children readiness by the short captureReadyTO
+			// (fail fast) rather than the restore-path snapshotReadyTO.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 
 			By("Walking status.childrenSnapshotRefs from the root Snapshot")
@@ -156,7 +159,7 @@ func captureSpecs() {
 				nodes, err = walkSnapshotTree(ctx, captured.namespace, captured.rootSnap)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(nodes).NotTo(BeEmpty(), "root Snapshot should have demo child snapshots")
-			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 
 			By("Asserting the demo inventory is represented in the tree")
 			kinds := map[string]int{}
@@ -165,10 +168,11 @@ func captureSpecs() {
 				GinkgoWriter.Printf("  child snapshot: %s/%s\n", n.kind, n.name)
 			}
 			Expect(kinds["DemoVirtualMachineSnapshot"]).To(BeNumerically(">=", 1), "expected a DemoVirtualMachineSnapshot")
-			Expect(kinds["DemoVirtualDiskSnapshot"]).To(BeNumerically(">=", 2), "expected disk snapshots for disk-vm + disk-standalone")
+			// No DemoVirtualDiskSnapshot is expected: the manifest-only tree no longer models dataless disks
+			// (disks must be PVC-backed); they are exercised in the volume-data phase instead.
 
 			By("Asserting every demo child snapshot is Ready=True")
-			Expect(waitChildrenReady(ctx, captured.namespace, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitChildrenReady(ctx, captured.namespace, nodes, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 	})
 }

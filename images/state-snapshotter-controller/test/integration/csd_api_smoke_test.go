@@ -96,17 +96,11 @@ var _ = Describe("Integration: CustomSnapshotDefinition API smoke", Serial, func
 			},
 			Spec: storagev1alpha1.CustomSnapshotDefinitionSpec{
 				// RegistrationTest* CRDs: avoids hanging a global TestSnapshot watch (lifecycle tests use direct Reconcile on TestSnapshot).
-				SnapshotResourceMapping: []storagev1alpha1.SnapshotResourceMappingEntry{
-					{
-						Source: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "RegistrationTestSnapshot",
-						},
-						Snapshot: storagev1alpha1.SnapshotGVKRef{
-							APIVersion: "test.deckhouse.io/v1alpha1",
-							Kind:       "RegistrationTestSnapshot",
-						},
-					},
+				APIVersion: "test.deckhouse.io/v1alpha1",
+				Kind:       "RegistrationTestSnapshot",
+				Source: storagev1alpha1.SnapshotGVKRef{
+					APIVersion: "test.deckhouse.io/v1alpha1",
+					Kind:       "RegistrationTestSnapshot",
 				},
 			},
 		}

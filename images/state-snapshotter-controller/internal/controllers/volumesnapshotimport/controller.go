@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package volumesnapshotimport binds IMPORT-mode generic-PVC leaves: extended CSI VolumeSnapshots whose
-// spec.source.dataImportName references a DataImport (the C2 extended-VS source fork). The forked
-// snapshot-controller skips these VolumeSnapshots, so this common controller is the sole binder for them.
+// Package volumesnapshotimport binds IMPORT-mode generic-PVC leaves: extended CSI VolumeSnapshots that
+// carry the unified import marker spec.source.import: {} (the C2 extended-VS source fork). The owning
+// DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this VolumeSnapshot), not named on
+// the leaf. The forked snapshot-controller skips these VolumeSnapshots, so this common controller is the
+// sole binder for them.
 //
 // It is the generic-PVC twin of the domain data-leaf import branch in genericbinder: it materializes the
 // backing cluster-scoped SnapshotContent (deletionPolicy=Delete) from the uploaded ManifestCheckpoint and
@@ -77,7 +79,6 @@ var (
 		Version: snapshotpkg.CSISnapshotVersion,
 		Kind:    snapshotpkg.KindVolumeSnapshotContent,
 	}
-	dataImportGVK = schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"}
 )
 
 // Controller binds import-mode extended VolumeSnapshots to their materialized SnapshotContent.
@@ -107,17 +108,24 @@ func AddToManager(mgr ctrl.Manager) error {
 }
 
 // importVolumeSnapshotPredicate restricts the controller to extended VolumeSnapshots in import mode
-// (spec.source.dataImportName set). Capture VolumeSnapshots (persistentVolumeClaimName) and plain
-// pre-provisioned ones (volumeSnapshotContentName) are ignored — those are not ours to bind.
+// (the unified marker spec.source.import is present). Capture VolumeSnapshots (persistentVolumeClaimName)
+// and plain pre-provisioned ones (volumeSnapshotContentName) are ignored — those are not ours to bind.
 func importVolumeSnapshotPredicate() predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
 		u, ok := o.(*unstructured.Unstructured)
 		if !ok {
 			return false
 		}
-		name, _, _ := unstructured.NestedString(u.Object, "spec", "source", "dataImportName")
-		return name != ""
+		return isImportModeVolumeSnapshot(u)
 	})
+}
+
+// isImportModeVolumeSnapshot reports whether an extended VolumeSnapshot is in IMPORT mode, signalled by
+// the unified empty marker spec.source.import: {} (parity with every other state-snapshotter snapshot
+// kind). The owning DataImport is not named here; it is found by reverse-lookup (DataImport.spec.targetRef).
+func isImportModeVolumeSnapshot(u *unstructured.Unstructured) bool {
+	_, found, _ := unstructured.NestedFieldNoCopy(u.Object, "spec", "source", "import")
+	return found
 }
 
 func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -142,8 +150,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{}, nil
 	}
-	dataImportName, _, _ := unstructured.NestedString(vs.Object, "spec", "source", "dataImportName")
-	if dataImportName == "" {
+	if !isImportModeVolumeSnapshot(vs) {
 		return ctrl.Result{}, nil
 	}
 
@@ -206,11 +213,25 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, pErr
 	}
 
-	// Data leg: resolve the DataImport's produced VolumeSnapshotContent and bind it.
-	vscName, ready, terminalMsg, dErr := r.resolveDataImportArtifact(ctx, vs.GetNamespace(), dataImportName)
-	if dErr != nil {
-		return ctrl.Result{}, dErr
+	// Reverse-lookup the DataImport that materializes this leaf's data leg: the import marker carries no
+	// name; DataImport.spec.targetRef points back at this VolumeSnapshot. Exactly one is required (>=2 is
+	// fail-closed; none means d8 has not created it yet — poll).
+	di, treason, tmsg, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, vs)
+	if lErr != nil {
+		return ctrl.Result{}, lErr
 	}
+	if treason != "" {
+		if sErr := r.setVolumeSnapshotError(ctx, req.NamespacedName, tmsg); sErr != nil {
+			return ctrl.Result{}, sErr
+		}
+		return ctrl.Result{}, nil
+	}
+	if di == nil {
+		return ctrl.Result{RequeueAfter: importPollInterval}, nil
+	}
+
+	// Data leg: resolve the DataImport's produced VolumeSnapshotContent and bind it.
+	vscName, ready, terminalMsg := r.resolveDataImportArtifact(di)
 	if terminalMsg != "" {
 		// Non-retryable import fault (e.g. a non-VolumeSnapshotContent artifact). Surface it on the VS
 		// status.error (operator-visible; the forked snapshot-controller skips these VS so it is ours to
@@ -279,36 +300,80 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if lErr := r.setLegacyVolumeSnapshotBound(ctx, req.NamespacedName, vscName); lErr != nil {
 		return ctrl.Result{}, lErr
 	}
+
+	// Mirror volume metadata onto the extended VS status for d8 export/consumption (parity with the
+	// generic/domain leaf mirror). Source is DataImport.spec — the authoritative import parameters.
+	if mErr := r.mirrorVolumeMetadataFromDataImport(ctx, req.NamespacedName, di); mErr != nil {
+		logger.Error(mErr, "Failed to mirror volume metadata to import VolumeSnapshot status")
+	}
 	return ctrl.Result{}, nil
 }
 
-// resolveDataImportArtifact reads the leaf's DataImport and returns its produced VolumeSnapshotContent
+// resolveDataImportArtifact reads the (reverse-looked-up) DataImport's produced VolumeSnapshotContent
 // name. The three outcomes are distinguished:
 //   - ready=true: a VolumeSnapshotContent artifact has been produced (vscName set);
 //   - terminalMessage != "": a non-retryable fault — the DataImport produced a non-VSC artifact (e.g. a
 //     PersistentVolume / Detach), which the extended-VS legacy binding cannot represent;
-//   - otherwise (pending): the DataImport (or its artifact) is not produced yet — poll.
-func (r *Controller) resolveDataImportArtifact(ctx context.Context, namespace, dataImportName string) (vscName string, ready bool, terminalMessage string, err error) {
-	di := &unstructured.Unstructured{}
-	di.SetGroupVersionKind(dataImportGVK)
-	if gErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: dataImportName}, di); gErr != nil {
-		if errors.IsNotFound(gErr) {
-			return "", false, "", nil
-		}
-		return "", false, "", gErr
-	}
+//   - otherwise (pending): the DataImport has not produced its artifact yet — poll.
+//
+// Pure function (the DataImport is already fetched by the reverse-lookup), so it is unit-testable directly.
+func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (vscName string, ready bool, terminalMessage string) {
 	kind, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "kind")
 	name, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "name")
 	if name == "" {
 		// Artifact not produced yet (kind may be set early, but without a name there is nothing to bind).
-		return "", false, "", nil
+		return "", false, ""
 	}
 	if kind != snapshotpkg.KindVolumeSnapshotContent {
 		return "", false, fmt.Sprintf(
 			"DataImport %s/%s produced a %q data artifact; extended VolumeSnapshot import binding supports %s only",
-			namespace, dataImportName, kind, snapshotpkg.KindVolumeSnapshotContent), nil
+			di.GetNamespace(), di.GetName(), kind, snapshotpkg.KindVolumeSnapshotContent)
 	}
-	return name, true, "", nil
+	return name, true, ""
+}
+
+// mirrorVolumeMetadataFromDataImport copies the DataImport's scratch-volume parameters
+// (spec.storageClassName/size/volumeMode) onto the extended VolumeSnapshot status.{storageClassName,size,
+// volumeMode} under an optimistic-lock merge patch (D4a). These are the mirrored volume-metadata fields the
+// forked extended-VS status exposes for d8 export/consumption; the forked snapshot-controller skips import
+// VS, so they are ours to own. Best-effort and idempotent: only non-empty source fields are written.
+func (r *Controller) mirrorVolumeMetadataFromDataImport(ctx context.Context, key client.ObjectKey, di *unstructured.Unstructured) error {
+	storageClassName, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
+	size, _, _ := unstructured.NestedString(di.Object, "spec", "size")
+	volumeMode, _, _ := unstructured.NestedString(di.Object, "spec", "volumeMode")
+	if storageClassName == "" && size == "" && volumeMode == "" {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vs := &unstructured.Unstructured{}
+		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+		if err := r.Get(ctx, key, vs); err != nil {
+			return err
+		}
+		curSC, _, _ := unstructured.NestedString(vs.Object, "status", "storageClassName")
+		curSize, _, _ := unstructured.NestedString(vs.Object, "status", "size")
+		curMode, _, _ := unstructured.NestedString(vs.Object, "status", "volumeMode")
+		if curSC == storageClassName && curSize == size && curMode == volumeMode {
+			return nil
+		}
+		base := vs.DeepCopy()
+		if storageClassName != "" {
+			if err := unstructured.SetNestedField(vs.Object, storageClassName, "status", "storageClassName"); err != nil {
+				return err
+			}
+		}
+		if size != "" {
+			if err := unstructured.SetNestedField(vs.Object, size, "status", "size"); err != nil {
+				return err
+			}
+		}
+		if volumeMode != "" {
+			if err := unstructured.SetNestedField(vs.Object, volumeMode, "status", "volumeMode"); err != nil {
+				return err
+			}
+		}
+		return r.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
 }
 
 // setVolumeSnapshotError records a terminal import fault on the VolumeSnapshot status.error
@@ -432,7 +497,7 @@ func (r *Controller) bindBoundSnapshotContentName(ctx context.Context, key clien
 
 // setLegacyVolumeSnapshotBound writes the native CSI status (boundVolumeSnapshotContentName + readyToUse)
 // so the imported VS behaves like a bound, ready snapshot of the imported VSC. The forked snapshot-controller
-// does not reconcile dataImportName VolumeSnapshots, so these fields are ours to own (D4a patch).
+// does not reconcile import-marker VolumeSnapshots, so these fields are ours to own (D4a patch).
 func (r *Controller) setLegacyVolumeSnapshotBound(ctx context.Context, key client.ObjectKey, vscName string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vs := &unstructured.Unstructured{}

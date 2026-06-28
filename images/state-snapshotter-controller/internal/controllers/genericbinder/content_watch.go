@@ -18,6 +18,7 @@ package genericbinder
 
 import (
 	"context"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -81,6 +82,79 @@ func (r *GenericSnapshotBinderController) mapBoundContentToSnapshots(snapshotGVK
 		if len(reqs) > 0 {
 			log.FromContext(ctx).V(1).Info("snapshotcontent change enqueues bound snapshot(s)",
 				"snapshotKind", snapshotGVK.Kind, "content", contentName, "count", len(reqs))
+		}
+		return reqs
+	}
+}
+
+// mapParentContentToChildSnapshots returns a watch map function that, for a (parent) SnapshotContent change,
+// enqueues the child snapshots of childGVK that are waiting for that content to exist before they can resolve
+// their parent's SnapshotContent ownerRef (controllercommon.ResolveParentSnapshotContentOwnerRef in Step 2
+// of Reconcile).
+//
+// Why this watch exists (event-driven parent->child unblock): a child snapshot cannot create/own its own
+// SnapshotContent until the PARENT's SnapshotContent exists (the child's content ownerRef points at the
+// parent content). Until then Reconcile returns the RequeueAfter fallback, so the child only re-checked the
+// parent once per poll interval. This watch wakes the waiting children the moment the parent content appears
+// (or changes), collapsing the multi-second ladder; the RequeueAfter path remains only as a safety net.
+//
+// Resolution: every SnapshotContent carries spec.snapshotRef — the binding-subject snapshot it belongs to,
+// which is exactly the PARENT of the children we must wake. We list childGVK in the subject's namespace and
+// match the snapshot-parent ownerRef (kind suffix "Snapshot", same name, and uid when present) against the
+// subject. This covers both tree levels: the namespace-root Snapshot's content wakes first-level domain
+// children, and a domain parent's content (e.g. a VM snapshot) wakes its own children (e.g. the VM's disk).
+//
+// Why List+filter: same dynamic-registration tradeoff as mapBoundContentToSnapshots — a field index cannot
+// be guaranteed before cache start for runtime-registered (CSD-driven) GVKs. The handler only enqueues.
+func (r *GenericSnapshotBinderController) mapParentContentToChildSnapshots(childGVK schema.GroupVersionKind) func(context.Context, client.Object) []reconcile.Request {
+	listGVK := schema.GroupVersionKind{
+		Group:   childGVK.Group,
+		Version: childGVK.Version,
+		Kind:    childGVK.Kind + "List",
+	}
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		content, ok := obj.(*unstructured.Unstructured)
+		if !ok || content == nil {
+			return nil
+		}
+		parentName, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
+		if parentName == "" {
+			return nil
+		}
+		parentUID, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
+		parentNS, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
+
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(listGVK)
+		opts := []client.ListOption{}
+		if parentNS != "" {
+			opts = append(opts, client.InNamespace(parentNS))
+		}
+		if err := r.Client.List(ctx, list, opts...); err != nil {
+			log.FromContext(ctx).V(1).Info("parent-content wake-up: failed to list child snapshots",
+				"childKind", childGVK.Kind, "content", content.GetName(), "error", err.Error())
+			return nil
+		}
+		var reqs []reconcile.Request
+		for i := range list.Items {
+			child := &list.Items[i]
+			for _, ref := range child.GetOwnerReferences() {
+				if !strings.HasSuffix(ref.Kind, "Snapshot") || ref.Name != parentName {
+					continue
+				}
+				if parentUID != "" && string(ref.UID) != parentUID {
+					continue
+				}
+				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+					Namespace: child.GetNamespace(),
+					Name:      child.GetName(),
+				}})
+				break
+			}
+		}
+		if len(reqs) > 0 {
+			log.FromContext(ctx).V(1).Info("parent SnapshotContent change enqueues waiting child snapshot(s)",
+				"childKind", childGVK.Kind, "content", content.GetName(), "count", len(reqs))
 		}
 		return reqs
 	}

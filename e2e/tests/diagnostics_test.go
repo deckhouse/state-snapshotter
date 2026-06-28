@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -37,6 +39,9 @@ const diagnosticsLogTailLines = 200
 // graph (Snapshots / SnapshotContents / demo snapshots) with their conditions, and the controller logs.
 func dumpFailedSpecDiagnostics(ctx context.Context) {
 	GinkgoWriter.Printf("\n========== state-snapshotter e2e diagnostics ==========\n")
+	if dir := e2eLogsDir(); dir != "" {
+		GinkgoWriter.Printf("controller logs -> %s%c (one file per pod/container)\n", dir, filepath.Separator)
+	}
 	dumpModuleConfig(ctx)
 	dumpResourceConditions(ctx, "Snapshot", snapshotGVR, true)
 	if phase5ImportNS == "" {
@@ -187,14 +192,14 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 		return
 	}
 	targetGroup, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "group")
-	targetResource, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "resource")
+	targetKind, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "kind")
 	targetName, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "name")
 	url, _, _ := unstructured.NestedString(obj.Object, "status", "url")
 	volMode, _, _ := unstructured.NestedString(obj.Object, "status", "volumeMode")
 	ca, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
 	artifact, _, _ := unstructured.NestedMap(obj.Object, "status", "dataArtifactRef")
 	GinkgoWriter.Printf("DataImport %s/%s:\n", ns, name)
-	GinkgoWriter.Printf("    targetRef: group=%q resource=%q name=%q\n", targetGroup, targetResource, targetName)
+	GinkgoWriter.Printf("    targetRef: group=%q kind=%q name=%q\n", targetGroup, targetKind, targetName)
 	GinkgoWriter.Printf("    status: url=%q volumeMode=%q ca=%t dataArtifactRef=%v\n", url, volMode, ca != "", artifact)
 	dumpObjectConditions(obj)
 
@@ -202,9 +207,17 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 	if targetName == "" {
 		return
 	}
-	gvr := schema.GroupVersionResource{Group: targetGroup, Version: "v1alpha1", Resource: targetResource}
-	if targetGroup == "snapshot.storage.k8s.io" {
-		gvr.Version = "v1"
+	var gvr schema.GroupVersionResource
+	switch targetKind {
+	case "VolumeSnapshot":
+		gvr = volumeSnapshotGVR
+	case "DemoVirtualDiskSnapshot":
+		gvr = demoDiskSnapshotGVR
+	case "DemoVirtualMachineSnapshot":
+		gvr = demoVMSnapshotGVR
+	default:
+		GinkgoWriter.Printf("    target leaf %s/%s: <unsupported targetRef.kind %q>\n", ns, targetName, targetKind)
+		return
 	}
 	leaf, lerr := getResource(ctx, gvr, ns, targetName)
 	if lerr != nil {
@@ -236,13 +249,12 @@ func dumpImportLeavesInNS(ctx context.Context, ns string) {
 		for i := range list.Items {
 			obj := &list.Items[i]
 			bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
-			dataImport, _, _ := unstructured.NestedString(obj.Object, "spec", "dataSource", "name")
-			if dataImport == "" {
-				dataImport, _, _ = unstructured.NestedString(obj.Object, "spec", "source", "dataImportName")
-			}
+			// Import mode is the unified marker spec.source.import: {} across every snapshot kind, including
+			// the extended VolumeSnapshot (the owning DataImport is reverse-looked-up, not named on the leaf).
+			_, importMarker, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
 			GinkgoWriter.Printf("%s %s/%s:\n", entry.label, ns, obj.GetName())
-			GinkgoWriter.Printf("    boundSnapshotContentName=%q dataImport=%q ownerRefs=%s\n",
-				bound, dataImport, formatOwnerReferences(obj.GetOwnerReferences()))
+			GinkgoWriter.Printf("    boundSnapshotContentName=%q importMode=%v ownerRefs=%s\n",
+				bound, importMarker, formatOwnerReferences(obj.GetOwnerReferences()))
 			dumpObjectConditions(obj)
 		}
 	}
@@ -326,6 +338,7 @@ func dumpControllerLogs(ctx context.Context, moduleNS string) {
 		return
 	}
 	tail := int64(diagnosticsLogTailLines)
+	dir := e2eLogsDir()
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		for _, container := range pod.Spec.Containers {
@@ -336,8 +349,13 @@ func dumpControllerLogs(ctx context.Context, moduleNS string) {
 				GinkgoWriter.Printf("logs %s/%s [%s]: <failed: %v>\n", moduleNS, pod.Name, container.Name, err)
 				continue
 			}
-			GinkgoWriter.Printf("---- logs %s/%s [%s] (last %d lines) ----\n%s\n",
-				moduleNS, pod.Name, container.Name, tail, string(data))
+			header := fmt.Sprintf("---- logs %s/%s [%s] (last %d lines) ----\n", moduleNS, pod.Name, container.Name, tail)
+			if path := writeLogFile(dir, moduleNS, pod.Name, container.Name, "", header+string(data)); path != "" {
+				GinkgoWriter.Printf("logs %s/%s [%s] (last %d lines) -> %s\n", moduleNS, pod.Name, container.Name, tail, path)
+				continue
+			}
+			// No writable log dir: fall back to dumping inline so diagnostics are never lost.
+			GinkgoWriter.Printf("%s%s\n", header, string(data))
 		}
 	}
 }
@@ -354,6 +372,7 @@ func dumpFilteredControllerLogs(ctx context.Context, moduleNS string, filters ..
 	}
 	tail := int64(2000)
 	const maxLines = 200
+	dir := e2eLogsDir()
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		for _, container := range pod.Spec.Containers {
@@ -378,10 +397,51 @@ func dumpFilteredControllerLogs(ctx context.Context, moduleNS string, filters ..
 			if len(matched) > maxLines {
 				matched = matched[len(matched)-maxLines:]
 			}
-			GinkgoWriter.Printf("---- filtered logs %s/%s [%s] (filters=%s, showing %d lines) ----\n%s\n",
-				moduleNS, pod.Name, container.Name, jsonFilters(filters), len(matched), strings.Join(matched, "\n"))
+			header := fmt.Sprintf("---- filtered logs %s/%s [%s] (filters=%s, showing %d lines) ----\n",
+				moduleNS, pod.Name, container.Name, jsonFilters(filters), len(matched))
+			body := strings.Join(matched, "\n")
+			if path := writeLogFile(dir, moduleNS, pod.Name, container.Name, ".filtered", header+body+"\n"); path != "" {
+				GinkgoWriter.Printf("filtered logs %s/%s [%s] (filters=%s, %d lines) -> %s\n",
+					moduleNS, pod.Name, container.Name, jsonFilters(filters), len(matched), path)
+				continue
+			}
+			// No writable log dir: fall back to dumping inline so diagnostics are never lost.
+			GinkgoWriter.Printf("%s%s\n", header, body)
 		}
 	}
+}
+
+// e2eLogsDir returns the directory for per-pod/container controller log dumps, creating it on demand.
+// It mirrors the capture-timeline layout: $E2E_LOGS_DIR when set, else <tmp>/e2e/logs, scoped by the
+// failing spec so sequential failures (and reruns) do not clobber each other's files. Returns "" only
+// when the directory cannot be created, signalling callers to fall back to GinkgoWriter.
+func e2eLogsDir() string {
+	base := os.Getenv("E2E_LOGS_DIR")
+	if base == "" {
+		base = filepath.Join(os.TempDir(), "e2e", "logs")
+	}
+	if specDir := sanitizeKind(CurrentSpecReport().LeafNodeText); specDir != "" {
+		base = filepath.Join(base, specDir)
+	}
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return ""
+	}
+	return base
+}
+
+// writeLogFile writes content to <dir>/<moduleNS>__<pod>__<container><suffix>.log and returns the path.
+// Returns "" when dir is empty or the write fails, so the caller can fall back to GinkgoWriter.
+func writeLogFile(dir, moduleNS, pod, container, suffix, content string) string {
+	if dir == "" {
+		return ""
+	}
+	name := fmt.Sprintf("%s__%s__%s%s.log",
+		sanitizeKind(moduleNS), sanitizeKind(pod), sanitizeKind(container), suffix)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return ""
+	}
+	return path
 }
 
 func jsonFilters(filters []string) string {

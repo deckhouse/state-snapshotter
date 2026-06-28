@@ -18,6 +18,8 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // +kubebuilder:object:root=true
@@ -32,37 +34,28 @@ type DemoVirtualDiskSnapshot struct {
 	Status DemoVirtualDiskSnapshotStatus `json:"status,omitempty"`
 }
 
-// DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot.
+// DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot. Exactly one of
+// SourceRef (capture) or Source (import) is set.
 // +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) != has(self.source)",message="exactly one of spec.sourceRef (capture) or spec.source (import) must be set"
 type DemoVirtualDiskSnapshotSpec struct {
-	// SourceRef identifies the DemoVirtualDisk captured by this snapshot. It is the single
-	// source-of-truth for what the snapshot captures (both manually-created and root-planned
-	// snapshots) and is immutable once set. On import it still carries the original disk identity
-	// (the live disk may be absent); spec.dataSource is what switches the node into import mode.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
-	SourceRef SnapshotSourceRef `json:"sourceRef"`
-
-	// DataSource, when set, switches this disk snapshot into IMPORT mode: instead of capturing the live
-	// DemoVirtualDisk (no MCR/VCR planning), the data leg is materialized by the common controller from
-	// the referenced DataImport's produced artifact (DataImport.status.dataArtifactRef). The domain
-	// controller skips capture planning for import-mode snapshots; manifests + children arrive via the
-	// per-CR manifests-and-children-refs-upload payload. Immutable once set (C5; demo-domain reference
-	// for the domain leaf spec.dataSource->DataImport import trigger).
+	// SourceRef identifies the DemoVirtualDisk captured by this snapshot in CAPTURE mode. It is the
+	// single source-of-truth for what the snapshot captures and is immutable once set. It is a pointer so
+	// its presence unambiguously selects capture mode for the exactly-one-of rule; an IMPORT-mode snapshot
+	// (spec.source.import) has no live source disk and omits it.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.dataSource is immutable"
-	DataSource *SnapshotDataImportRef `json:"dataSource,omitempty"`
-}
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
+	SourceRef *SnapshotSourceRef `json:"sourceRef,omitempty"`
 
-// SnapshotDataImportRef references the namespace-local DataImport (storage.deckhouse.io DataImport)
-// whose status.dataArtifactRef provides this snapshot node's data artifact on import. The DataImport is
-// resolved in the snapshot's own namespace; apiGroup/kind are fixed (storage.deckhouse.io / DataImport).
-// +k8s:deepcopy-gen=true
-type SnapshotDataImportRef struct {
-	// Name is the DataImport object name in the same namespace as this snapshot.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
+	// Source, when set, switches this disk snapshot into IMPORT mode. Only the import marker is allowed on
+	// a demo snapshot leaf (no static pre-provisioning), so spec.source.import: {} is the sole valid form.
+	// In import mode the domain controller does NO capture planning (no source-disk lookup, no MCR/VCR):
+	// the common controller materializes the backing SnapshotContent from the uploaded manifests and the
+	// data leg from the matching DataImport (reverse-lookup by DataImport.spec.targetRef). Immutable once set.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="has(self.import) && !has(self.snapshotContentName)",message="only spec.source.import: {} is supported on a demo snapshot leaf"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.source is immutable"
+	Source *storagev1alpha1.SnapshotSource `json:"source,omitempty"`
 }
 
 // DemoVirtualDiskSnapshotStatus defines the observed state of DemoVirtualDiskSnapshot.
@@ -91,11 +84,33 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// common controller deletes it. Always considered captured for a manifest-only disk (no data leg).
 	DataCaptured bool `json:"dataCaptured,omitempty"`
 
+	// StorageClassName mirrors this data leaf's volume StorageClass for d8 export: the bound
+	// SnapshotContent.status.dataRef.storageClassName on capture, or DataImport.spec.storageClassName on
+	// import (the import dataRef carries no storageClassName). Populated by the common controller.
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// Size mirrors the real allocated volume size (e.g. "10Gi"): the bound dataRef.size on capture, or the
+	// VolumeSnapshotContent restoreSize on import. Populated by the common controller.
+	// +optional
+	Size string `json:"size,omitempty"`
+
+	// VolumeMode mirrors the source volume mode (Filesystem or Block). Populated by the common controller.
+	// +optional
+	VolumeMode string `json:"volumeMode,omitempty"`
+
 	// Conditions report readiness (e.g. Ready=True for generic parent children-readiness aggregation).
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// IsImportMode reports whether this disk snapshot is an import target (spec.source.import set). Import
+// leaves are materialized from an uploaded payload plus the matching DataImport and MUST NOT trigger
+// live capture (parity with Snapshot.IsImportMode).
+func (s *DemoVirtualDiskSnapshot) IsImportMode() bool {
+	return s != nil && s.Spec.Source != nil && s.Spec.Source.Import != nil
 }
 
 // +kubebuilder:object:root=true

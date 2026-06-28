@@ -22,8 +22,11 @@ rules:
   # Permission to read resources for validation (to check if they exist in the correct namespace)
   # Webhook needs to verify that target resources exist before validating user permissions
   # Only GET is needed - webhook calls Get() for specific resources, not List() or Watch()
-  # Keep this allowlist explicit: wildcard resources would also grant direct access
-  # to ManifestCheckpointContentChunk payloads.
+  # Keep this allowlist explicit: a cluster-wide wildcard here would also grant direct access
+  # to cluster-scoped ManifestCheckpointContentChunk payloads.
+  # Arbitrary (non-allowlisted) namespaced CR targets are NOT covered by this static allowlist; instead the
+  # 040-namespace-capture-rbac hook adds this SA to the transient, namespace-scoped capture RoleBinding for
+  # the duration of capture, so the webhook can Get them without a standing wildcard grant.
   # Demo inventory (Track D0/D1): MCR validation resolves targets via dynamic client Get().
   # get/list/watch — admission paths beyond a single named Get.
   - apiGroups:

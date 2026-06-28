@@ -137,7 +137,7 @@ rules:
   verbs: ["get", "list", "watch", "update", "patch", "delete"]
 
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
-# binder (C5) binds extended VS with spec.source.dataImportName.
+# binder (C5) binds extended VS carrying the spec.source.import marker.
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]
@@ -168,6 +168,26 @@ rules:
 # condition RBACReady=True. See docs/state-snapshotter-rework/operations/project-status.md for the
 # rollout dependency (live-demo requires the external demo-domain RBAC to be provisioned out-of-band
 # until the RBACReady hook lands).
+
+---
+# Transient per-namespace capture role (Phase 5.1). This wildcard read-only ClusterRole is deployed with
+# the module but is NOT bound by any binding here: the 040-namespace-capture-rbac hook creates a namespaced
+# RoleBinding to it (subjects = controller SA + webhooks SA) ONLY in namespaces that currently host a
+# Snapshot still capturing the live namespace (ManifestsArchived != Archived/Failed), and deletes it once
+# capture is done. The webhooks SA is included so the MCR-validation admission webhook can resolve arbitrary
+# (non-allowlisted) namespaced CR targets via a dynamic Get during the capture window.
+# A RoleBinding to a cluster-scoped ClusterRole confines the rules to its own namespace, so this is NOT a
+# cluster-wide grant of "*" and does NOT reach cluster-scoped ManifestCheckpointContentChunk payloads.
+# verbs = get,list only (Stage A lists, Stage B gets; capture is one-shot, no watch).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d8:{{ .Chart.Name }}:capture-namespace
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["get", "list"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

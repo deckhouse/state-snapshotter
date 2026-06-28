@@ -34,14 +34,16 @@ import (
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
-// Phase-3 source object names (full PVC variant of docs/.../snapshot-tree-demo/01-source.yaml). Both PVCs
-// exercise a distinct data-capture path: demo-pvc is a root orphan PVC (CSI VolumeSnapshot leaf) and
-// demo-pvc-disk is nested under DemoVirtualDisk/disk-vm (domain VolumeCaptureRequest path).
+// Phase-3 source object names (full PVC variant of docs/.../snapshot-tree-demo/01-source.yaml). All three
+// PVCs exercise a distinct data-capture path: demo-pvc is a root orphan PVC (CSI VolumeSnapshot leaf),
+// demo-pvc-disk is nested under DemoVirtualDisk/disk-vm (domain VolumeCaptureRequest path), and
+// demo-pvc-standalone backs the standalone DemoVirtualDisk/disk-standalone (domain path, direct root child).
 const (
 	vdRootSnapshotName = "vol-tree"
 	vdConfigMapName    = "demo-snapshot-cm"
 	vdPVCRoot          = "demo-pvc"
 	vdPVCDisk          = "demo-pvc-disk"
+	vdPVCStandalone    = "demo-pvc-standalone"
 	vdVMName           = "vm-1"
 	vdDiskVM           = "disk-vm"
 	vdDiskStandalone   = "disk-standalone"
@@ -76,8 +78,8 @@ func vsConnectorSubPath(ns, name, sub string) string {
 }
 
 // buildVolumeSource returns the full demo source (minus the bind Pod, which the suite builds separately as a
-// shell-capable probe): ConfigMap + two PVCs on the provisioned SC + the demo inventory wiring disk-vm to
-// the nested PVC.
+// shell-capable probe): ConfigMap + three PVCs on the provisioned SC + the demo inventory wiring disk-vm and
+// disk-standalone to their backing PVCs.
 func buildVolumeSource(ns, sc string) []*unstructured.Unstructured {
 	pvc := func(name string) *unstructured.Unstructured {
 		return &unstructured.Unstructured{Object: map[string]interface{}{
@@ -136,10 +138,16 @@ func buildVolumeSource(ns, sc string) []*unstructured.Unstructured {
 			"name":      vdDiskStandalone,
 			"namespace": ns,
 		},
-		// Manifest-only disk (no persistentVolumeClaimName); size is required by the CEL rule.
-		"spec": map[string]interface{}{"size": "1Gi"},
+		// Standalone disk (attached to no VM) backed by its own pre-created PVC, so it captures real
+		// volume data as a direct root-child data leaf — mirroring disk-vm's adopt-the-PVC wiring. A
+		// data-backed disk must never be manifest-only in the volume-data flow.
+		"spec": map[string]interface{}{
+			"persistentVolumeClaimName": vdPVCStandalone,
+			"size":                      "1Gi",
+			"storageClassName":          sc,
+		},
 	}}
-	return []*unstructured.Unstructured{configMap, pvc(vdPVCRoot), pvc(vdPVCDisk), vm, diskVM, diskStandalone}
+	return []*unstructured.Unstructured{configMap, pvc(vdPVCRoot), pvc(vdPVCDisk), pvc(vdPVCStandalone), vm, diskVM, diskStandalone}
 }
 
 // probePodSpec builds a long-lived shell-capable Pod (the probe image must ship sh/echo/cat) mounting the
@@ -412,6 +420,7 @@ func volumeDataSpecs() {
 			srcNS = uniqueNS("vol")
 			markers[vdPVCRoot] = "root-" + fmt.Sprintf("%d", time.Now().UnixNano())
 			markers[vdPVCDisk] = "disk-" + fmt.Sprintf("%d", time.Now().UnixNano())
+			markers[vdPVCStandalone] = "standalone-" + fmt.Sprintf("%d", time.Now().UnixNano())
 
 			// SC provisioning + module enablement is the slow part of phase 3.
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
@@ -441,30 +450,37 @@ func volumeDataSpecs() {
 				deleteNamespace(cctx, srcNS)
 			})
 
-			By("Starting the source probe Pod and waiting for it to run (binds both PVCs)")
-			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, vdProbePod, []string{vdPVCRoot, vdPVCDisk}), metav1.CreateOptions{})
+			By("Starting the source probe Pod and waiting for it to run (binds all three PVCs)")
+			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, vdProbePod, []string{vdPVCRoot, vdPVCDisk, vdPVCStandalone}), metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "create source probe pod")
 			Expect(waitPodRunning(ctx, srcNS, vdProbePod, 10*time.Minute)).To(Succeed())
 
-			By("Writing marker bytes into both source PVCs")
-			writeCmd := fmt.Sprintf("printf %%s %q > %s && printf %%s %q > %s && sync",
+			By("Writing marker bytes into all three source PVCs")
+			writeCmd := fmt.Sprintf("printf %%s %q > %s && printf %%s %q > %s && printf %%s %q > %s && sync",
 				markers[vdPVCRoot], markerVolumePath(vdPVCRoot),
-				markers[vdPVCDisk], markerVolumePath(vdPVCDisk))
+				markers[vdPVCDisk], markerVolumePath(vdPVCDisk),
+				markers[vdPVCStandalone], markerVolumePath(vdPVCStandalone))
 			_, _, err = storagekube.ExecInPod(ctx, suiteRestCfg, srcNS, vdProbePod, vdProbeContainer, []string{"sh", "-c", writeCmd})
 			Expect(err).NotTo(HaveOccurred(), "write marker bytes")
 		})
 
 		It("captures the volume data (VolumesReady + dataRef artifacts populated)", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.snapshotReadyTO+5*time.Minute)
+			// Capture (LVM snapshot creation) is fast — bound by captureReadyTO, not the restore-path
+			// snapshotReadyTO. Only the restore/data-upload waits keep the generous budget.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+5*time.Minute)
 			defer cancel()
+
+			// Background capture timeline: surfaces where the volume-data snapshot creation spends time.
+			tl := startCaptureTimeline(srcNS)
+			defer tl.stop()
 
 			By("Creating the root Snapshot over the PVC tree")
 			Expect(createRootSnapshot(ctx, srcNS, vdRootSnapshotName)).To(Succeed())
 
 			By("Waiting for the Snapshot + bound SnapshotContent (incl. VolumesReady) to become Ready")
-			content, err := waitSnapshotReady(ctx, srcNS, vdRootSnapshotName, suiteCfg.snapshotReadyTO)
+			content, err := waitSnapshotReady(ctx, srcNS, vdRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.snapshotReadyTO)).To(Succeed())
+			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 			rootContent = content
 
 			By("Walking the content tree to collect data artifacts (PVC -> VolumeSnapshotContent)")

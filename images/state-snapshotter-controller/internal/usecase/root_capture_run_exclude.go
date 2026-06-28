@@ -25,6 +25,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -66,26 +68,46 @@ func BuildRootNamespaceManifestCaptureTargets(
 	ctx context.Context,
 	arch *ArchiveService,
 	dyn dynamic.Interface,
+	disco discovery.DiscoveryInterface,
 	c client.Reader,
 	rootNS *storagev1alpha1.Snapshot,
 	rootContentName string,
-) ([]namespacemanifest.ManifestTarget, error) {
+	snapshotKinds namespacemanifest.SnapshotMachineryGVKs,
+) ([]namespacemanifest.ManifestTarget, []schema.GroupVersionResource, error) {
 	if arch == nil {
-		return nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
+		return nil, nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
 	}
 	targetNamespace := ResolveSnapshotTargetNamespace(rootNS)
-	base, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, targetNamespace)
-	if err != nil {
-		return nil, err
-	}
+
 	rootContent := &storagev1alpha1.SnapshotContent{}
 	if err := c.Get(ctx, client.ObjectKey{Name: rootContentName}, rootContent); err != nil {
-		return nil, fmt.Errorf("get root SnapshotContent %q: %w", rootContentName, err)
+		return nil, nil, fmt.Errorf("get root SnapshotContent %q: %w", rootContentName, err)
 	}
+
+	// Subtree readiness pre-check BEFORE the expensive full-namespace discovery listing. While the root has
+	// a real subtree, descendant content nodes must publish a Ready ManifestCheckpoint before the exclude
+	// set can be computed; otherwise this returns ErrSubtreeManifestCapturePending/...Failed. Computing it
+	// first avoids listing the whole namespace on every requeue while children are still publishing MCPs.
+	hasSubtree := hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0
+	var subtreeExcl map[string]struct{}
+	if hasSubtree {
+		var err error
+		subtreeExcl, err = collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, rootContent)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds)
+	if err != nil {
+		return nil, unreadable, err
+	}
+
 	// Variant A: a residual/orphan root PVC is captured as a standalone child volume node (its own
 	// SnapshotContent + its own ManifestCheckpoint holding that PVC's manifest + its own dataRef). The root
 	// is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So the residual root-owned
@@ -95,7 +117,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 	// both the root and the child (co-ownership violation, spec §3.9.2). Every residual root PVC goes
 	// through ensureOrphanPVCVolumeSnapshots → child volume node, so dropping them here never loses a
 	// manifest.
-	exclude := make(map[string]struct{}, len(ownedPVC))
+	exclude := make(map[string]struct{}, len(ownedPVC)+len(subtreeExcl))
 	for _, t := range ownedPVC {
 		exclude[namespacemanifest.ManifestTargetDedupKey(targetNamespace, t)] = struct{}{}
 	}
@@ -103,16 +125,10 @@ func BuildRootNamespaceManifestCaptureTargets(
 	// manifest objects already captured in descendant content-node ManifestCheckpoints (E5 / INV-S0). This
 	// covers domain-owned PVC manifests (which never appear in the root residual set) and is the durable
 	// dedup once children publish their MCPs.
-	if hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0 {
-		subtreeExcl, err := collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
-		if err != nil {
-			return nil, err
-		}
-		for k := range subtreeExcl {
-			exclude[k] = struct{}{}
-		}
+	for k := range subtreeExcl {
+		exclude[k] = struct{}{}
 	}
-	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), nil
+	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), unreadable, nil
 }
 
 // hasNonVisibilityChildSnapshotRefs reports whether any child ref is a real domain/subtree child.
@@ -162,9 +178,50 @@ func collectRunSubtreeManifestExcludeKeys(
 			return nil, fmt.Errorf("%w: childrenSnapshotRefs %s/%s -> %q not visited from root SnapshotContent %q",
 				ErrRunGraphChildNotReachable, rootNS.Namespace, ch.Name, resolved, rootContentName)
 		}
+		// Wave barrier: the direct child's whole subtree must be ManifestsArchived before the root MCR is
+		// built. See requireContentManifestsArchived.
+		if err := requireContentManifestsArchived(ctx, c, resolved); err != nil {
+			return nil, err
+		}
 	}
 
 	return exclude, nil
+}
+
+// requireContentManifestsArchived is the wave barrier for root manifest capture: a declared direct child
+// of the root snapshot must have its bound SnapshotContent at ManifestsArchived=True before the root MCR
+// is built. Because the content-node ManifestsArchived latch is fail-closed against declared-but-unlinked
+// children (see snapshotcontent.aggregateChildrenManifestsArchived), a direct child's True transitively
+// guarantees its ENTIRE subtree is archived and fully edge-linked. That makes WalkSnapshotContentSubtree
+// reach every descendant content, so the exclude set is complete and a descendant-captured object can
+// never leak back into the root MCP (the 409 duplicate-object race).
+//
+// A child not yet archived -> ErrSubtreeManifestCapturePending (transient requeue); a child terminally
+// ManifestsArchived=False/ManifestsArchiveFailed -> ErrSubtreeManifestCaptureFailed.
+//
+// The root's OWN ManifestsArchived is intentionally NOT consulted: it can only become True after the root
+// MCR exists and is processed (own ManifestsReady) AND all children are archived, so gating root-MCR
+// creation on it would be circular and deadlock. The root content node is not special; its own latch is
+// computed by the same content-controller path once its MCP is ready and children are archived.
+func requireContentManifestsArchived(ctx context.Context, c client.Reader, contentName string) error {
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: direct child SnapshotContent %q not found (subtree not archived yet)",
+				ErrSubtreeManifestCapturePending, contentName)
+		}
+		return fmt.Errorf("get direct child SnapshotContent %q: %w", contentName, err)
+	}
+	cond := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
+	if cond != nil && cond.Status == metav1.ConditionTrue {
+		return nil
+	}
+	if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == snapshotpkg.ReasonManifestsArchiveFailed {
+		return fmt.Errorf("%w: direct child SnapshotContent %q: %s",
+			ErrSubtreeManifestCaptureFailed, contentName, cond.Message)
+	}
+	return fmt.Errorf("%w: direct child SnapshotContent %q ManifestsArchived not yet True",
+		ErrSubtreeManifestCapturePending, contentName)
 }
 
 func appendManifestCheckpointObjectsToExclude(

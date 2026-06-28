@@ -26,18 +26,14 @@ func stubResolver(table map[string]schema.GroupVersionResource, failKinds map[st
 	}
 }
 
-func csd(name string, entries ...v1alpha1.SnapshotResourceMappingEntry) v1alpha1.CustomSnapshotDefinition {
+// csd builds a flat-schema CSD: one snapshot kind (snapAPI/snapKind) for one source (srcAPI/srcKind).
+func csd(name, srcAPI, srcKind, snapAPI, snapKind string) v1alpha1.CustomSnapshotDefinition {
 	c := v1alpha1.CustomSnapshotDefinition{}
 	c.Name = name
-	c.Spec.SnapshotResourceMapping = entries
+	c.Spec.APIVersion = snapAPI
+	c.Spec.Kind = snapKind
+	c.Spec.Source = v1alpha1.SnapshotGVKRef{APIVersion: srcAPI, Kind: srcKind}
 	return c
-}
-
-func entry(srcAPI, srcKind, snapAPI, snapKind string) v1alpha1.SnapshotResourceMappingEntry {
-	return v1alpha1.SnapshotResourceMappingEntry{
-		Source:   v1alpha1.SnapshotGVKRef{APIVersion: srcAPI, Kind: srcKind},
-		Snapshot: v1alpha1.SnapshotGVKRef{APIVersion: snapAPI, Kind: snapKind},
-	}
 }
 
 func TestResolveEligibleGVRs(t *testing.T) {
@@ -58,10 +54,8 @@ func TestResolveEligibleGVRs(t *testing.T) {
 
 	t.Run("all resolve: ordered, no pending", func(t *testing.T) {
 		eligible := []v1alpha1.CustomSnapshotDefinition{
-			csd("demo",
-				entry(demoAPI, "DemoVirtualMachine", demoAPI, "DemoVirtualMachineSnapshot"),
-				entry(demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot"),
-			),
+			csd("demo-vm", demoAPI, "DemoVirtualMachine", demoAPI, "DemoVirtualMachineSnapshot"),
+			csd("demo-disk", demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot"),
 		}
 		src, snap, pending := resolveEligibleGVRs(eligible, stubResolver(table, nil))
 
@@ -79,15 +73,13 @@ func TestResolveEligibleGVRs(t *testing.T) {
 	})
 
 	t.Run("resolve error never yields zero-value GVR", func(t *testing.T) {
-		// Source fails to resolve; the other entry resolves fully. The failed source must NOT
+		// One CSD's source fails to resolve; the other CSD resolves fully. The failed source must NOT
 		// leak a zero-value GVR into the output (which would become an empty ClusterRole rule),
-		// but its CSD must be recorded as pending.
+		// but its CSD must be recorded as pending (its snapshot side still resolves and is collected).
 		fail := map[string]struct{}{demoAPI + "/DemoVirtualDisk": {}}
 		eligible := []v1alpha1.CustomSnapshotDefinition{
-			csd("partial",
-				entry(demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot"),
-				entry(demoAPI, "DemoVirtualMachine", demoAPI, "DemoVirtualMachineSnapshot"),
-			),
+			csd("partial-disk", demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot"),
+			csd("partial-vm", demoAPI, "DemoVirtualMachine", demoAPI, "DemoVirtualMachineSnapshot"),
 		}
 		src, snap, pending := resolveEligibleGVRs(eligible, stubResolver(table, fail))
 
@@ -110,15 +102,15 @@ func TestResolveEligibleGVRs(t *testing.T) {
 		if !reflect.DeepEqual(snap, wantSnap) {
 			t.Errorf("snapshot GVRs = %v, want %v", snap, wantSnap)
 		}
-		if _, ok := pending["partial"]; !ok {
-			t.Errorf("CSD %q must be pending after a resolve error, pending = %v", "partial", pending)
+		if _, ok := pending["partial-disk"]; !ok {
+			t.Errorf("CSD %q must be pending after a resolve error, pending = %v", "partial-disk", pending)
 		}
 	})
 
 	t.Run("dedup across CSDs", func(t *testing.T) {
 		eligible := []v1alpha1.CustomSnapshotDefinition{
-			csd("a", entry(demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot")),
-			csd("b", entry(demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot")),
+			csd("a", demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot"),
+			csd("b", demoAPI, "DemoVirtualDisk", demoAPI, "DemoVirtualDiskSnapshot"),
 		}
 		src, snap, pending := resolveEligibleGVRs(eligible, stubResolver(table, nil))
 

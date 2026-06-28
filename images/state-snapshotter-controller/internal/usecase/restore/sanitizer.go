@@ -26,7 +26,7 @@ import (
 //
 // The restore compiler emits apply-ready manifests, so it MUST strip runtime/server-managed
 // fields that block `kubectl apply` and rewrite the namespace to the restore target. Sanitization
-// happens on the read path (independent of capture-time EnableFiltering).
+// happens on the read path; capture stores raw manifests as-is.
 
 // controlPlaneExactKinds are control-plane / snapshot-machinery kinds that MUST NOT appear in
 // restore output. VS/VSC and snapshot tree nodes are transferred separately (data + tree); the
