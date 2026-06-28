@@ -44,7 +44,7 @@ limitations under the License.
 // A typical domain Reconcile resolves its source, then drives child snapshot planning, data capture, and
 // manifest capture, and closes with a planning barrier:
 //
-//	if !valid { return sdk.MarkNotReady(ctx, t, NotReadySpec{Reason: "InvalidSourceRef"}) }
+//	if !valid { return sdk.MarkNotReady(ctx, t, NotReadyStatus{Reason: "InvalidSourceRef"}) }
 //	if err := sdk.EnsureChildren(ctx, t, children); err != nil { return sdk.MarkPlanningFailed(...) }
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
 //	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{Targets: manifestTargets}); err != nil { ... }

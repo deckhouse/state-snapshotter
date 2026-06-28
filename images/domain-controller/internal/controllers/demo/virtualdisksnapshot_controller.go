@@ -101,14 +101,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadyStatus{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
 	}
 	source := &demov1alpha1.DemoVirtualDisk{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: resolution.Name}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadyStatus{
 			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
 			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, resolution.Name),
 		})
@@ -124,7 +124,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 	if missingReason != "" {
-		if perr := sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+		if perr := sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadyStatus{
 			Reason:  snapshotsdk.Reason(missingReason),
 			Message: missingMessage,
 		}); perr != nil {

@@ -18,6 +18,7 @@ package snapshotsdk
 
 import (
 	"context"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,9 +53,10 @@ type Planning interface {
 
 	// EnsureVolumeCapture ensures the volume capture request for the snapshot's single data-ref PVC and
 	// publishes its name. A nil DataRef is a manifest-only snapshot: the SDK ensures no request and, being
-	// delete-free, never clears a name it published earlier (the data slot is fixed at first planning, the
-	// same immutable-topology contract as children — see VolumeCaptureSpec). The operation is suppressed
-	// once the core controller has stamped the data captured.
+	// delete-free, never clears a name it published earlier (so a published VCR survives a later nil). Unlike
+	// the child topology, the SDK does NOT enforce data-slot immutability or fail closed on a nil after a
+	// published VCR — keeping the slot stable is a domain convention (immutable spec.sourceRef), see
+	// VolumeCaptureSpec. The operation is suppressed once the core controller has stamped the data captured.
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
 	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the domain-chosen target set
@@ -86,7 +88,7 @@ type PlanningBarrier interface {
 // ReadinessFault publishes a Ready=False outcome for a snapshot whose source or required artifact is not
 // (yet) usable.
 type ReadinessFault interface {
-	MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadySpec) error
+	MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadyStatus) error
 }
 
 // CaptureSDK is the capture-side protocol facade a domain snapshot controller drives. It hides all
@@ -117,7 +119,10 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 		return err
 	}
 	objs := make([]client.Object, 0, len(desired))
-	for _, d := range desired {
+	for i, d := range desired {
+		if d.Object == nil {
+			return fmt.Errorf("snapshotsdk: desired[%d].Object is nil; ChildSpec.Object must be a domain-built child object", i)
+		}
 		objs = append(objs, d.Object)
 	}
 	desiredRefs, err := children.DeriveRefs(s.client.Scheme(), objs)
@@ -276,7 +281,7 @@ func (s *sdk) MarkPlanningFailed(ctx context.Context, t SnapshotAdapter, reason 
 	return s.patchCondition(ctx, t, storagev1alpha1.ConditionChildrenSnapshotReady, metav1.ConditionFalse, string(reason), message)
 }
 
-func (s *sdk) MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadySpec) error {
+func (s *sdk) MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadyStatus) error {
 	message := in.Message
 	if message == "" && in.Cause != nil {
 		message = in.Cause.Error()

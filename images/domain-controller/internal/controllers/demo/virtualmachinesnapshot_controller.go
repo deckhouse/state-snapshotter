@@ -118,24 +118,25 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadyStatus{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
 	}
 	source := &demov1alpha1.DemoVirtualMachine{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: resolution.Name}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadyStatus{
 			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
 			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualMachine, resolution.Name),
 		})
 	}
 
 	// Children planning: the domain decides which disks the VM owns and builds the desired child snapshot
-	// objects; the SDK adopts them and publishes status.childrenSnapshotRefs (delete-free). The published
-	// set is the authoritative, immutable snapshot topology: once published, a different desired child set
-	// (e.g. after a restart with changed discovery) is rejected as terminal topology drift, never repaired
-	// by deletion. Detached leftovers are reclaimed by ownerRef GC when this parent is deleted.
+	// objects; the SDK adopts them and publishes status.childrenSnapshotRefs (delete-free). The set
+	// becomes the authoritative, immutable snapshot topology once the planning barrier is committed
+	// (ChildrenSnapshotReady=True): after that a different desired child set (e.g. after a restart with
+	// changed discovery) is rejected as terminal topology drift, never repaired by deletion. Detached
+	// leftovers are reclaimed by ownerRef GC when this parent is deleted.
 	children, err := r.planDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -174,8 +175,8 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 
 // planDemoVirtualMachineChildren builds the desired set of child DemoVirtualDiskSnapshot objects for the
 // disks owned by the VM. Owner references, adoption, and ref derivation are the SDK's job (delete-free;
-// the published child set is the immutable snapshot topology); the domain only authors the child object
-// identity and its immutable spec.sourceRef.
+// the child set becomes the immutable snapshot topology once the planning barrier is committed); the
+// domain only authors the child object identity and its immutable spec.sourceRef.
 func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 	ctx context.Context,
 	vm *demov1alpha1.DemoVirtualMachineSnapshot,

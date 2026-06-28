@@ -74,16 +74,17 @@ type ChildSpec struct {
 	Object client.Object
 }
 
-// NotReadySpec describes a Ready=False outcome the domain wants published (invalid source, missing
+// NotReadyStatus describes a Ready=False outcome the domain wants published (invalid source, missing
 // artifact, …). It generalizes the various Ready=False paths into one verb. The SDK only publishes the
 // condition; whether and when to requeue is the controller's decision, expressed through its own
 // ctrl.Result (the SDK does not drive the reconcile loop).
-type NotReadySpec struct {
+type NotReadyStatus struct {
 	// Reason is the machine-readable Ready=False reason (domain-chosen).
 	Reason Reason
 	// Message is an optional human-readable explanation.
 	Message string
-	// Cause, when set, is logged/returned so the manager can surface the underlying error.
+	// Cause, when set and Message is empty, is used as the human-readable condition message
+	// (Cause.Error()). It is not otherwise stored or returned by the SDK.
 	Cause error
 }
 
@@ -93,11 +94,12 @@ type NotReadySpec struct {
 // DataRef means the snapshot is manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no
 // name.
 //
-// Like the child topology, the data slot is fixed at first planning. The domain resolves it from the
-// snapshot's immutable spec.sourceRef, so it does not flip between data capture and manifest-only across
-// reconciles. EnsureVolumeCapture therefore treats a nil DataRef as "no data capture to ensure" and never
-// clears or deletes a VolumeCaptureRequest name it published earlier (delete-free, consistent with the
-// immutable-topology contract).
+// The domain is expected to resolve DataRef from the snapshot's immutable spec.sourceRef, so in practice it
+// does not flip between data capture and manifest-only across reconciles. Note this is a domain convention,
+// NOT an SDK-enforced barrier: unlike the child topology (which fails closed on post-barrier drift),
+// EnsureVolumeCapture does not enforce data-slot immutability. A nil DataRef is always a plain no-op — the
+// SDK ensures no VolumeCaptureRequest and, being delete-free, does not clear a name it published earlier
+// (so a published VCR survives a later nil; it is not failed closed and not cleared).
 type VolumeCaptureSpec struct {
 	// DataRef is the single PVC the snapshot captures as its data, or nil for a manifest-only snapshot.
 	DataRef *Target
