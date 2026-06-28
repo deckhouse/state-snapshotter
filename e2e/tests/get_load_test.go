@@ -110,11 +110,36 @@ func leaderControllerPod(ctx context.Context) (string, error) {
 	return id, nil
 }
 
+// controllerMetricsPortName is the deployment container port exposing controller-runtime's default
+// plain-HTTP metrics server. It is resolved to a NUMERIC port for the proxy path (see controllerMetricsPort).
+const controllerMetricsPortName = "metrics"
+
+// controllerMetricsPort resolves the NUMERIC container port serving /metrics on the given controller pod.
+// The apiserver pod-proxy must address this port by number: a named-port proxy path
+// (pods/<pod>:metrics/proxy/...) resets the stream with an http2 INTERNAL_ERROR against the plain-HTTP
+// metrics server, whereas the numeric form (pods/<pod>:8080/proxy/...) works. We read the number from the
+// pod spec rather than hardcoding it so a deployment port change surfaces as a clear error, not a silent miss.
+func controllerMetricsPort(ctx context.Context, pod string) (int32, error) {
+	p, err := suiteClientset.CoreV1().Pods(d8ModuleNS).Get(ctx, pod, metav1.GetOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("get controller pod %s/%s: %w", d8ModuleNS, pod, err)
+	}
+	for _, c := range p.Spec.Containers {
+		for _, cp := range c.Ports {
+			if cp.Name == controllerMetricsPortName {
+				return cp.ContainerPort, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("controller pod %s/%s exposes no container port named %q", d8ModuleNS, pod, controllerMetricsPortName)
+}
+
 // podMetricsPath is the apiserver pod-proxy path to one controller pod's plain-HTTP /metrics endpoint
-// (controller-runtime's default metrics server on the container port named "metrics"). No Prometheus/RBAC
+// (controller-runtime's default metrics server). The port is addressed by NUMBER, not by name: a named-port
+// proxy path resets the stream against the plain-HTTP server (see controllerMetricsPort). No Prometheus/RBAC
 // setup is needed: the cluster-admin suite kubeconfig proxies it.
-func podMetricsPath(pod string) string {
-	return fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:metrics/proxy/metrics", d8ModuleNS, pod)
+func podMetricsPath(pod string, port int32) string {
+	return fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:%d/proxy/metrics", d8ModuleNS, pod, port)
 }
 
 // scrapeRestClientGETs scrapes one controller pod's /metrics via the apiserver pod-proxy and returns the
@@ -192,8 +217,10 @@ func getLoadSpecs() {
 			By("Resolving the reconciliation leader pod and pinning both scrapes to it")
 			leaderPod, err := leaderControllerPod(ctx)
 			Expect(err).NotTo(HaveOccurred(), "resolve controller leader pod")
-			metricsPath := podMetricsPath(leaderPod)
-			GinkgoWriter.Printf("GET-load: pinning /metrics scrapes to leader pod %q\n", leaderPod)
+			metricsPort, err := controllerMetricsPort(ctx, leaderPod)
+			Expect(err).NotTo(HaveOccurred(), "resolve controller metrics container port")
+			metricsPath := podMetricsPath(leaderPod, metricsPort)
+			GinkgoWriter.Printf("GET-load: pinning /metrics scrapes to leader pod %q (numeric metrics port %d)\n", leaderPod, metricsPort)
 
 			By("Scraping the leader /metrics counter BEFORE creating the root Snapshot")
 			before, err := scrapeRestClientGETs(ctx, metricsPath)
