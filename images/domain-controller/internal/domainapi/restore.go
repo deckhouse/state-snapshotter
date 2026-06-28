@@ -34,7 +34,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/demo"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/logger"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/usecase/restore"
-	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/domainsdk"
+	domainsdk "github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/transform"
 )
 
 // Domain snapshot resources (lowercase plural) this controller serves.

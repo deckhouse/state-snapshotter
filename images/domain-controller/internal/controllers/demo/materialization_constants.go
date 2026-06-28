@@ -49,4 +49,6 @@ const (
 	objectKeeperAPIVersion = "deckhouse.io/v1alpha1"
 
 	defaultDemoResourceRequeueAfter = 500 * time.Millisecond
+
+	defaultDemoSnapshotRequeueAfter = 500 * time.Millisecond
 )

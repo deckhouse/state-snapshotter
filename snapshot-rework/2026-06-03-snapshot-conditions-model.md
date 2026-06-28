@@ -1,7 +1,7 @@
 # ADR: модель conditions снапшота (ChildrenSnapshotReady / ManifestsReady / VolumesReady / ChildrenReady / Ready)
 
 - **Дата:** 2026-06-03
-- **Статус:** Accepted — реализовано в PR2a–PR2c. **Update 2026-06-14:** единый `RequestsReady` разнесён на две публичные ноги `ManifestsReady` + `VolumesReady` (см. §2.2); формула и инварианты обновлены ниже. Нормативные выдержки — в `docs/state-snapshotter-rework/spec/system-spec.md` §3.8 / §3.9.7 (INV-COND1..6, INV-FAIL1). Этот документ — long-form запись решения (почему), не текущая спецификация.
+- **Статус:** Accepted — реализовано в PR2a–PR2c. **Update 2026-06-14:** единый `RequestsReady` разнесён на две публичные линии `ManifestsReady` + `VolumesReady` (см. §2.2); формула и инварианты обновлены ниже. Нормативные выдержки — в `docs/state-snapshotter-rework/spec/system-spec.md` §3.8 / §3.9.7 (INV-COND1..6, INV-FAIL1). Этот документ — long-form запись решения (почему), не текущая спецификация.
 - **Область:** `storage.deckhouse.io/v1alpha1` `Snapshot` / `SnapshotContent`, domain `XxxxSnapshot` (demo VM/Disk), `GenericSnapshotBinderController`, `SnapshotContentController`.
 
 > Канон для кода и тестов — `spec/system-spec.md`; этот ADR держим в синхроне с ним (cross-doc-consistency). Предыстория (какой набор conditions был до этой модели) — в Appendix A.
@@ -18,8 +18,8 @@
 const (
     ConditionReady                 = "Ready"                 // external aggregate: ManifestsReady && VolumesReady && ChildrenReady
     ConditionChildrenSnapshotReady = "ChildrenSnapshotReady" // domain/custom controller завершил планирование (gate)
-    ConditionManifestsReady        = "ManifestsReady"        // манифестная нога узла: MCP/checkpoint опубликован и Ready
-    ConditionVolumesReady          = "VolumesReady"          // волюмная нога узла: все required dataRefs[] артефакты Ready
+    ConditionManifestsReady        = "ManifestsReady"        // манифестная линия узла: MCP/checkpoint опубликован и Ready
+    ConditionVolumesReady          = "VolumesReady"          // волюмная линия узла: все required dataRefs[] артефакты Ready
     ConditionChildrenReady         = "ChildrenReady"         // все child SnapshotContent.Ready=True (нет детей → True)
 )
 ```
@@ -27,11 +27,11 @@ const (
 Семантика и последовательность (хэндофф между контроллерами):
 
 1. **`ChildrenSnapshotReady`** — доменный/snapshot-контроллер первым берётся за объект и выставляет `ChildrenSnapshotReady=True`, когда закончил планирование: дети созданы и опубликованы как `status.childrenSnapshotRefs`, свои `MCR`/`VCR`/иные requests созданы. Это **gate** для общего контроллера и **барьер волны** для родителя.
-2. **`ManifestsReady` / `VolumesReady`** — common/content-path вступает **после** `ChildrenSnapshotReady` (увидел, что requests созданы) и публикует durable refs в `SnapshotContent`: `status.manifestCheckpointName` (манифестная нога) и `status.dataRefs[]` (волюмная нога). `ManifestsReady=True`, когда MCP опубликован и `Ready=True`; `VolumesReady=True`, когда все required `dataRefs[]` артефакты `Ready`.
+2. **`ManifestsReady` / `VolumesReady`** — common/content-path вступает **после** `ChildrenSnapshotReady` (увидел, что requests созданы) и публикует durable refs в `SnapshotContent`: `status.manifestCheckpointName` (манифестная линия) и `status.dataRefs[]` (волюмная линия). `ManifestsReady=True`, когда MCP опубликован и `Ready=True`; `VolumesReady=True`, когда все required `dataRefs[]` артефакты `Ready`.
 3. **`ChildrenReady`** — `True`, когда у всех дочерних `SnapshotContent` `Ready=True`. Нет детей (leaf) → `True` вакуумно.
 4. **`Ready`** — агрегат **на `SnapshotContent`**: `Ready = ManifestsReady && VolumesReady && ChildrenReady`. На `Snapshot` — **только mirror** `Content.Ready` (snapshot-контроллер не пересчитывает дерево).
 
-`SelfReady` намеренно **не вводим**: он эквивалентен `ManifestsReady && VolumesReady` (т.к. обе ноги ⇒ `ChildrenSnapshotReady`) и не несёт новой информации.
+`SelfReady` намеренно **не вводим**: он эквивалентен `ManifestsReady && VolumesReady` (т.к. обе линии ⇒ `ChildrenSnapshotReady`) и не несёт новой информации.
 
 ### 2.1. Финальная формула
 
@@ -40,11 +40,11 @@ SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildrenReady
 Snapshot.Ready        = mirror(SnapshotContent.Ready)   // НЕ локальный пересчёт
 ```
 
-### 2.2. Почему две ноги вместо единого `RequestsReady` (Update 2026-06-14)
+### 2.2. Почему две линии вместо единого `RequestsReady` (Update 2026-06-14)
 
-`RequestsReady` скрывал **две разные причины ожидания/отказа**: манифестную (MCR → `ManifestCheckpoint`) и волюмную (VCR → `dataRefs[]`/`VolumeSnapshotContent`). Для эксплуатации это плохо: видно «снапшот не готов», но не видно — застрял ли он на capture манифестов или на data-артефактах. Ноги имеют **разную природу и таймскейл** (манифесты — секунды; снятие тома — потенциально часы), и алертить/диагностировать их нужно раздельно. После сплита причина видна **сразу по типу condition**, без парсинга reason.
+`RequestsReady` скрывал **две разные причины ожидания/отказа**: манифестную (MCR → `ManifestCheckpoint`) и волюмную (VCR → `dataRefs[]`/`VolumeSnapshotContent`). Для эксплуатации это плохо: видно «снапшот не готов», но не видно — застрял ли он на capture манифестов или на data-артефактах. Линии имеют **разную природу и таймскейл** (манифесты — секунды; снятие тома — потенциально часы), и алертить/диагностировать их нужно раздельно. После сплита причина видна **сразу по типу condition**, без парсинга reason.
 
-Это **новое осознанное решение по публичному API**, а не возврат старых мёртвых констант `ManifestsReady`/`DataReady` из Appendix A (те никогда не выставлялись и были удалены в PR2c). Принцип «минимальный набор conditions» сохраняется: `RequestsReady` оказался **слишком грубым** для ops-диагностики и **заменяется** двумя доменными ногами, а не расширяется набором технических `MCR`/`VCR`-conditions. На первом шаге sequencing сохраняется (волюмная нога оценивается после манифестной); пока манифесты не готовы — `VolumesReady=Unknown/ManifestCapturePending` (нога ещё не оценивалась, это не отказ тома). Независимая оценка ног — отдельный follow-up. Это **дизайн v0** — никакого `RequestsReady` в модели нет вовсе (не пишем, никаких миграций/совместимости со старым условием не предусматриваем).
+Это **новое осознанное решение по публичному API**, а не возврат старых мёртвых констант `ManifestsReady`/`DataReady` из Appendix A (те никогда не выставлялись и были удалены в PR2c). Принцип «минимальный набор conditions» сохраняется: `RequestsReady` оказался **слишком грубым** для ops-диагностики и **заменяется** двумя доменными линиями, а не расширяется набором технических `MCR`/`VCR`-conditions. На первом шаге sequencing сохраняется (волюмная линия оценивается после манифестной); пока манифесты не готовы — `VolumesReady=Unknown/ManifestCapturePending` (линия ещё не оценивалась, это не отказ тома). Независимая оценка линий — отдельный follow-up. Это **дизайн v0** — никакого `RequestsReady` в модели нет вовсе (не пишем, никаких миграций/совместимости со старым условием не предусматриваем).
 
 ## 3. Размещение conditions (Snapshot vs SnapshotContent)
 
@@ -66,7 +66,7 @@ Snapshot.Ready        = mirror(SnapshotContent.Ready)   // НЕ локальны
 - **INV-COND2 (один агрегатор):** `Ready` вычисляется ровно в одном месте — на `SnapshotContent` (`ManifestsReady && VolumesReady && ChildrenReady`). Везде остальное — mirror. Запрещён локальный пересчёт `Ready` по mirror-копиям под-кондишинов (избегаем двойной агрегации и stale-гонок).
 - **INV-COND3 (generation-gating):** `ChildrenSnapshotReady` и `Ready` MUST нести `condition.observedGeneration == object.metadata.generation`. Без этого parent wave-barrier может принять устаревший `True`. Рекомендуется gen-gating и для `ManifestsReady`/`VolumesReady`/`ChildrenReady` (единообразие).
 - **INV-COND4 (mirror, не пересчёт):** `Snapshot.Ready := mirror(SnapshotContent.Ready)` (status/reason/message копируются). Snapshot-контроллер не вычисляет собственный alternative reason.
-- **INV-COND5 (well-defined legs):** ноги узла определены, потому что на логический узел приходится **максимум один MCR + один VCR** (spec §3.9.5). `ManifestsReady = (MCR done|нет)`; `VolumesReady = (VCR done|нет)`.
+- **INV-COND5 (well-defined legs):** линии узла определены, потому что на логический узел приходится **максимум один MCR + один VCR** (spec §3.9.5). `ManifestsReady = (MCR done|нет)`; `VolumesReady = (VCR done|нет)`.
 - **INV-COND6 (вырождения):** leaf без детей → `ChildrenReady=True`; пустой MCP (0 объектов, но `manifestCheckpointName` присутствует и MCP `Ready=True`) → `ManifestsReady=True`; пустой `dataRefs[]` → `VolumesReady=True`.
 
 ## 5. Failure propagation (INV-FAIL1: ancestor-chain, без заражения siblings)
@@ -75,7 +75,7 @@ Snapshot.Ready        = mirror(SnapshotContent.Ready)   // НЕ локальны
 
 ### 5.1. Целевое поведение
 
-1. **Leaf** `SnapshotContent` с терминальным failure собственной ноги (нет `ManifestCheckpoint`; MCP `Ready=False`; нет chunk; нет/сломан data artifact, напр. `VolumeSnapshotContent`; иной терминальный failure в манифестной или волюмной ноге):
+1. **Leaf** `SnapshotContent` с терминальным failure собственной линии (нет `ManifestCheckpoint`; MCP `Ready=False`; нет chunk; нет/сломан data artifact, напр. `VolumeSnapshotContent`; иной терминальный failure в манифестной или волюмной линии):
    - `ManifestsReady=False` или `VolumesReady=False` (и, как следствие, `Ready=False`) c конкретным reason;
    - `message` содержит конкретный affected object: `kind/name` или `targetUID`/`dataRef` id;
    - `Ready=False`.
@@ -115,7 +115,7 @@ Ready:                  True/Completed | False/<manifest|data leg reason> | Fals
 manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed
 ```
 
-(терминальные провалы первыми — actionable; свой узел перед детьми при равной тяжести; при сохранённом sequencing `volumesPending` выставляется только после готовности манифестной ноги.)
+(терминальные провалы первыми — actionable; свой узел перед детьми при равной тяжести; при сохранённом sequencing `volumesPending` выставляется только после готовности манифестной линии.)
 
 **Фаза «до контента»:** пока bound `SnapshotContent` ещё не создан (или у него ещё нет `Ready`), `Snapshot.Ready = False/ContentBindingPending` (локальный transitional pre-bind). После bind — только mirror.
 
@@ -133,7 +133,7 @@ child SnapshotContent <direct-child> failed: leaf=<failed-leaf> reason=<original
 ```
 
 Родитель, видя терминального ребёнка с reason `ChildrenFailed`, переиспользует `leaf`/`reason`/`message` из его message и подставляет своего direct child; иначе ребёнок и есть failed leaf. `Snapshot` ничего не анализирует — только verbatim mirror (исключение — child-Snapshot bridge, §5.2).
-- **Revalidation без watch (Phase 1):** на каждом reconcile `SnapshotContentController` пересчитывает ноги; если опубликованный data artifact ref перестал резолвиться (был `Ready=True`, стал missing/failed) → `VolumesReady=False`/`ArtifactMissing` (для manifest-ноги — `ManifestsReady=False`/`ManifestCheckpointFailed`) → `Ready=False` с kind/name в message.
+- **Revalidation без watch (Phase 1):** на каждом reconcile `SnapshotContentController` пересчитывает линии; если опубликованный data artifact ref перестал резолвиться (был `Ready=True`, стал missing/failed) → `VolumesReady=False`/`ArtifactMissing` (для manifest-линии — `ManifestsReady=False`/`ManifestCheckpointFailed`) → `Ready=False` с kind/name в message.
 - **Phase 2a — wake-up (truth=refs, ownerRef=routing, watch=enqueue-only):** события `ManifestCheckpoint`/`VolumeSnapshotContent` будят владельца **только** по `ownerRef → SnapshotContent`; handler не пишет conditions; broken/missing ownerRef логируется и дропается (correctness — на reconcile, `INV-RECONCILE-TRUTH`). **Без** reverse-index по `dataRefs[]` и **без** shortcut `chunk → SnapshotContent` (chunk, если когда-либо, — только `chunk → MCP → SnapshotContent`, `INV-OWNCHAIN`). **Без watermark:** классификация только по текущему состоянию артефакта (MCP NotFound → `ManifestCapturePending`; VSC NotFound → `ArtifactMissing`; VSC `readyToUse=false` → `DataCapturePending`; `ArtifactFailed` отложен). Content переустанавливает ownerRef VSC из `dataRefs[]` (self-heal, idempotent, best-effort, deleting VSC не патчится). Watches регистрируются c guard по RESTMapping.
 - **Chunk existence (get-only, без list/watch):** при MCP `Ready=True` — exact GET по `MCP.status.chunks[]`; первый `NotFound` → `ManifestCheckpointFailed` (terminal, message `ManifestCheckpoint <mcp> references missing chunk <chunk>`). Только **existence**, без чтения/декода `.spec.data` и без проверки checksum (content-валидация — на read/download/archive, не на каждом reconcile); GET — metadata-only (`PartialObjectMetadata`), payload не тянется. GET через uncached reader (cached Get создал бы chunk-informer = неявный list/watch — запрещено); транзиентная ошибка → requeue, не terminal. **Chunk deletion не будит reconcile** (нет chunk-watch): correctness — на следующем reconcile; read/download/archive ловит ошибку немедленно. Content/consistency (checksum в conditions) и `chunk → MCP → content` wake-up — вне scope (отдельный ADR/RBAC).
 
@@ -141,7 +141,7 @@ child SnapshotContent <direct-child> failed: leaf=<failed-leaf> reason=<original
 
 ### A. Unit (SnapshotContentController aggregation, depth ≥ 2)
 - Дерево `root -> child-a -> leaf-broken` и `root -> child-ok`.
-- `leaf-broken` имеет терминальный failure в artifact/request-ноге.
+- `leaf-broken` имеет терминальный failure в artifact/request-линии.
 - reconcile `leaf-broken`, `child-a`, `root`; assert:
   - `leaf-broken` `Ready=False` с исходным reason;
   - `child-a` `ChildrenReady=False`, `Ready=False`, reason `ChildrenFailed`;

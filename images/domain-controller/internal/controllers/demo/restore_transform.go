@@ -23,7 +23,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/domainsdk"
+	domainsdk "github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/transform"
 )
 
 // RestoreTransformer is the demo domain implementation of domainsdk.Transformer

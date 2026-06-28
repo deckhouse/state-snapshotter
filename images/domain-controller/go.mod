@@ -4,6 +4,7 @@ go 1.26.4
 require (
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-00010101000000-000000000000
 	github.com/go-logr/logr v1.4.3
 	k8s.io/api v0.32.10
 	k8s.io/apiextensions-apiserver v0.32.10
@@ -109,3 +110,5 @@ require (
 )
 
 replace github.com/deckhouse/state-snapshotter/api => ../../api
+
+replace github.com/deckhouse/state-snapshotter/pkg/snapshotsdk => ../../pkg/snapshotsdk

@@ -1,0 +1,80 @@
+---
+description: Demo/domain controllers are executable architecture documentation — reference-grade naming, package layout, intent-comments, and zero hidden magic. Demo code must be cleaner than production. Apply when editing demo/domain controllers or the snapshot SDK semantic layer, and when naming or placing any function/type/field/file a new engineer would read as a contract.
+globs: images/domain-controller/**/*.go,pkg/snapshotsdk/**/*.go
+alwaysApply: false
+---
+
+# Demo / SDK code quality contract
+
+Demo (`images/domain-controller`) and the snapshot SDK (`pkg/snapshotsdk`) are **executable architecture
+documentation / reference implementation**. New engineers read them instead of ADRs, and copy-paste them
+into new domain controllers. A reader must understand the architecture from this code alone, in ~30
+minutes, without opening any ADR or design doc. "It works" is not enough — it must be **impossible to
+misread**. These standards are therefore *stricter than production*: demo code must be cleaner than prod,
+because prod may carry legacy / compat hacks and demo never may.
+
+## 1. Naming is architecture-grade (MUST)
+
+A name must, on its own, reveal: who owns the logic, the entity lifecycle, persistent-vs-temporary, and
+domain-vs-infrastructure. If a name needs a verbal explanation, it is wrong.
+
+- **Litmus:** if a function/type name cannot be explained in one domain sentence without the words
+  `generic` / `raw` / `scratch` / `temp` / `dynamic` / `somehow`, the name is bad — rename it.
+- **Banned vague words in identifiers** (unless explicitly justified by a comment, or a real upstream type
+  name like `genericapiserver`): `scratch`, `temp`/`tmp`/`temporary`, `generic`, `raw`, `helper`, `util`,
+  `misc`, `stuff`, `object`, `resource`, `data` (without a qualifier), `manager` (unless it truly owns a
+  lifecycle), `blob`.
+- **Banned magic verbs** unless the contract is obvious from the name: `do`, `handle`, `process`,
+  `manage`, `execute`.
+- `scratch` is banned repo-wide unless the code literally models CDI scratch-space (it does not): an
+  empty/freshly provisioned disk is **blank**, not scratch.
+- Examples — Bad: `reconcileScratchDisk`, `processObject`, `handleResource`. Good: `reconcileBlankDisk`,
+  `reconcileRestoredDisk`, `buildBlankPVC`.
+
+## 2. Package & file layout encodes architecture (MUST)
+
+For every file you must be able to answer "why is it here?" instantly.
+
+- A file name MUST match the primary type/role it holds (e.g. the file with
+  `DemoVirtualDiskSnapshotReconciler` is `virtualdisksnapshot_controller.go`, not `disk_controller.go`).
+- Use one naming convention per kind; do not mix short and long forms for the same concept.
+- **Banned dumping-ground files**: `helpers.go`, `utils.go`, `common.go`, `misc.go`, `glue.go`. Group code
+  by the concept it serves and name the file after that concept.
+- Test-only helpers MUST live in `_test.go` files. A non-`_test.go` file MUST NOT import `testing`.
+
+## 3. No hidden magic (MUST)
+
+Demo/SDK code must be maximally statically readable.
+
+- Forbidden: reflection, unnecessary dynamic type assertions, `unstructured.Unstructured`, raw GVK
+  assembly, `map[string]any`/`interface{}` object bodies, magic strings for dispatch, silent fallbacks.
+- Exception only at an **explicitly documented integration boundary** (foreign CRD with no Go types, the
+  generic restore-manifest transform, the aggregated apiserver). Such boundaries MUST be isolated behind a
+  typed seam and documented as sanctioned (see `pkg/snapshotsdk/internal/storagefoundation` and
+  `pkg/snapshotsdk/transform`).
+
+## 4. Comments explain WHY, not WHAT (MUST)
+
+- A comment that can be deleted without losing meaning is garbage — delete it.
+- Explain intent and lifecycle. Bad: `// create pvc`, `// reconcile disk`. Good: `// Creates the
+  persistent backing PVC for a blank disk; its lifetime is bound to the DemoVirtualDisk via controller
+  ownerRef.`
+
+## 5. Domain / SDK separation is visually obvious (MUST)
+
+Reading the code, the boundary must be unambiguous; no grey zones. If you ask "is this domain or SDK?",
+the boundary is leaking.
+
+- Domain owns: source validation, child planning, domain-specific objects.
+- SDK owns: conditions, ownerRefs, capture orchestration, request lifecycle.
+
+## 6. Zero accidental abstractions (MUST)
+
+Do not introduce abstractions ahead of need. Forbidden: types like `ResourceManager`, `GenericHandler`,
+`ControllerHelper` that are just a renamed util bag. Every abstraction MUST have a clear owner, an
+invariant, and a contract.
+
+## 7. Litmus
+
+A new engineer opens the demo controller, reads no ADR, and understands the architecture (happy path and
+failure paths, domain vs SDK boundary) within 30 minutes. If not, the demo is not done.

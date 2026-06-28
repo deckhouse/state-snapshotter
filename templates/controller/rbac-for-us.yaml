@@ -121,7 +121,7 @@ rules:
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
-# DataImport (storage-volume-data-manager, SVDM): the import binder (C5) reads a leaf's DataImport
+# DataImport (storage-foundation): the import binder (C5) reads a leaf's DataImport
 # status.dataArtifactRef to populate SnapshotContent.dataRef on import. Read-only (the controller never
 # writes DataImport); the import-safe RBAC gate for *creating* DataImports lives on d8/user roles.
 - apiGroups: ["storage.deckhouse.io"]

@@ -21,7 +21,8 @@ spec:
       openAPIV3Schema:
         description: |-
           DemoVirtualDisk is the demo domain data resource. The domain controller materializes its backing PVC
-          (from scratch or restored from a DemoVirtualDiskSnapshot) and publishes real allocated capacity in status.
+          (a blank, freshly provisioned disk, or one restored from a DemoVirtualDiskSnapshot) and publishes real
+          allocated capacity in status.
         properties:
           apiVersion:
             description: |-
@@ -79,18 +80,18 @@ spec:
                 - type: integer
                 - type: string
                 description: |-
-                  Size is the requested storage capacity for a scratch (empty) disk. Required when dataSource is unset.
+                  Size is the requested storage capacity for a blank (empty) disk. Required when dataSource is unset.
                   Ignored for restore disks (size comes from the snapshot data artifact / VSC.restoreSize).
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
               storageClassName:
                 description: |-
-                  StorageClassName is the StorageClass for the scratch PVC, or the fallback when restoring if the
+                  StorageClassName is the StorageClass for the blank PVC, or the fallback when restoring if the
                   snapshot dataRef does not carry a StorageClassName.
                 type: string
               volumeMode:
                 description: |-
-                  VolumeMode selects Block or Filesystem for the scratch PVC, or the fallback when restoring if the
+                  VolumeMode selects Block or Filesystem for the blank PVC, or the fallback when restoring if the
                   snapshot dataRef does not carry volumeMode (restore still requires a mode before VRR creation).
                 enum:
                 - Block
@@ -105,7 +106,7 @@ spec:
                 or empty
               rule: '!has(self.dataSource) || !has(self.dataSource.apiGroup) || size(self.dataSource.apiGroup)
                 == 0 || self.dataSource.apiGroup == ''demo.state-snapshotter.deckhouse.io'''
-            - message: size is required when dataSource is not set (scratch disk provisioning)
+            - message: size is required when dataSource is not set (blank disk provisioning)
               rule: has(self.dataSource) || has(self.size)
             - message: 'persistentVolumeClaimName is required: every DemoVirtualDisk
                 must be backed by a PVC (manifest-only disks are not allowed)'
@@ -123,7 +124,7 @@ spec:
                 description: |-
                   Capacity reports the REAL allocated size of the disk's backing volume, mirroring
                   PersistentVolumeClaim.status.capacity (a ResourceList keyed by resource name such as "storage").
-                  The snapshot import path reads this from the captured raw manifest in MCP to size the scratch PVC /
+                  The snapshot import path reads this from the captured raw manifest in MCP to size the blank PVC /
                   restored volume, so every domain data resource MUST publish its real allocated size here (not the
                   requested size). The map is typed with apimachinery's resource.Quantity (string key) to keep the
                   api module dependency-free while staying wire-compatible with corev1.ResourceList. See unified

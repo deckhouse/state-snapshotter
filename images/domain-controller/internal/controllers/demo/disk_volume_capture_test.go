@@ -21,23 +21,18 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
-	vcctrl "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/volumecapture"
-	vcpkg "github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/volumecapture"
 )
 
-// The demo disk data leg is content-free (commit 2 content-ownership, D3): the domain controller only
-// ensures the VolumeCaptureRequest (named by the disk snapshot UID, owned by the disk snapshot) and
-// publishes its name; reading the VCR result, the VolumeSnapshotContent ownership handoff and dataRefs
-// publication, and VCR deletion are all owned by GenericSnapshotBinderController and tested there.
+// The demo disk data leg is content-free (D3): the domain controller only resolves the source disk's PVC
+// into a capture target; the SDK turns it into the VolumeCaptureRequest (named by the disk snapshot UID,
+// owned by the disk snapshot) and the common controller owns reading the VCR result, the
+// VolumeSnapshotContent ownership handoff and dataRefs publication, and VCR deletion. These unit tests
+// therefore assert only the domain target-resolution decision.
 
 const (
 	dataLegNS      = "ns1"
@@ -67,89 +62,52 @@ func dataLegPVC() *corev1.PersistentVolumeClaim {
 	}
 }
 
-// dataLegVCRName is the deterministic data-leg VCR name keyed by the disk snapshot UID (D3).
-func dataLegVCRName() string { return vcpkg.SnapshotOwnedVCRName(types.UID(dataLegSnapUID)) }
-
-func dataLegGetVCR(t *testing.T, cl client.Client) (*unstructured.Unstructured, bool) {
-	t.Helper()
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: dataLegNS, Name: dataLegVCRName()}, obj); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, false
-		}
-		t.Fatalf("get VCR: %v", err)
-	}
-	return obj, true
-}
-
-// A manifest-only disk (no spec.persistentVolumeClaimName) publishes an empty VCR name and never creates
-// a VolumeCaptureRequest.
-func TestDiskDataLeg_NoPVC_NoVCR(t *testing.T) {
+// A manifest-only disk (no spec.persistentVolumeClaimName) yields no data-leg ref and no terminal reason,
+// so the SDK ensures no VolumeCaptureRequest.
+func TestDiskDataRef_NoPVC(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	vcrName, reason, _, err := r.ensureDemoVirtualDiskDataLeg(context.Background(), dataLegDiskSnap(), dataLegSource(""))
+	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if vcrName != "" || reason != "" {
-		t.Fatalf("manifest-only disk: want empty vcrName/no-reason, got vcrName=%q reason=%q", vcrName, reason)
-	}
-	if _, ok := dataLegGetVCR(t, cl); ok {
-		t.Fatalf("manifest-only disk must not create a VolumeCaptureRequest")
+	if dataRef != nil || reason != "" {
+		t.Fatalf("manifest-only disk: want nil ref/no-reason, got dataRef=%#v reason=%q", dataRef, reason)
 	}
 }
 
-// With a configured PVC and no VCR yet, the data leg creates the VCR (named by the disk snapshot UID,
-// owned by the disk snapshot) and returns its name without a terminal condition.
-func TestDiskDataLeg_CreatesVCR(t *testing.T) {
+// With a configured and present PVC the data leg resolves a single PVC capture ref.
+func TestDiskDataRef_ResolvesPVCTarget(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap(), dataLegPVC())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	vcrName, reason, _, err := r.ensureDemoVirtualDiskDataLeg(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
+	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reason != "" {
-		t.Fatalf("create VCR: want no terminal reason, got %q", reason)
+		t.Fatalf("present PVC: want no terminal reason, got %q", reason)
 	}
-	if vcrName != dataLegVCRName() {
-		t.Fatalf("want vcrName %q (keyed by snapshot UID), got %q", dataLegVCRName(), vcrName)
-	}
-	vcr, ok := dataLegGetVCR(t, cl)
-	if !ok {
-		t.Fatalf("expected a VolumeCaptureRequest to be created")
-	}
-	targets, err := vcctrl.ParseVolumeCaptureTargets(vcr)
-	if err != nil {
-		t.Fatalf("parse VCR targets: %v", err)
-	}
-	if len(targets) != 1 || targets[0].UID != dataLegPVCUID || targets[0].Name != dataLegPVCName {
-		t.Fatalf("VCR target mismatch: %#v", targets)
-	}
-	if !demoDiskVCRHasOwnerRef(vcr.GetOwnerReferences(), demoSnapshotOwnerReference(demov1alpha1.SchemeGroupVersion.String(), controllercommon.KindDemoVirtualDiskSnapshot, dataLegSnap, types.UID(dataLegSnapUID))) {
-		t.Fatalf("VCR missing ownerRef to disk snapshot: %#v", vcr.GetOwnerReferences())
+	if dataRef == nil || dataRef.UID != dataLegPVCUID || dataRef.Name != dataLegPVCName || dataRef.Kind != "PersistentVolumeClaim" {
+		t.Fatalf("unexpected data-leg ref: %#v", dataRef)
 	}
 }
 
-// A missing PVC is an actionable ArtifactMissing condition (config not yet present), not a raw error,
-// and no VCR is created.
-func TestDiskDataLeg_MissingPVCIsTerminal(t *testing.T) {
+// A missing PVC is an actionable ArtifactMissing terminal reason (config not yet present), not a raw
+// error, and yields no ref.
+func TestDiskDataRef_MissingPVCIsTerminal(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	vcrName, reason, _, err := r.ensureDemoVirtualDiskDataLeg(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
+	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if reason != storagev1alpha1.ReasonArtifactMissing {
 		t.Fatalf("want reason %q, got %q", storagev1alpha1.ReasonArtifactMissing, reason)
 	}
-	if vcrName != "" {
-		t.Fatalf("missing PVC must not yield a VCR name, got %q", vcrName)
-	}
-	if _, ok := dataLegGetVCR(t, cl); ok {
-		t.Fatalf("missing PVC must not create a VolumeCaptureRequest")
+	if dataRef != nil {
+		t.Fatalf("missing PVC must not yield a ref, got %#v", dataRef)
 	}
 }

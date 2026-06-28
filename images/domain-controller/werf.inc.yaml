@@ -1,7 +1,8 @@
 ---
-# The domain-controller is its own self-contained Go module (images/domain-controller) that depends only
-# on the shared api/ module (replace => ../../api) plus k8s; it does NOT pull in the core module or
-# lib/go. The folder is copyable as-is, so the src artifact ships only api + images/domain-controller.
+# The domain-controller is its own self-contained Go module (images/domain-controller) that depends on the
+# shared api/ module (replace => ../../api) and the capture SDK pkg/snapshotsdk (replace => ../../pkg/snapshotsdk)
+# plus k8s; it does NOT pull in the core module or lib/go. The folders are copyable as-is, so the src
+# artifact ships only api + pkg/snapshotsdk + images/domain-controller.
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
 from: {{ index $.Images "builder/src" }}
 final: false
@@ -11,6 +12,7 @@ git:
     to: /src
     includePaths:
       - api
+      - pkg/snapshotsdk
       - images/{{ $.ImageName }}
     stageDependencies:
       install:

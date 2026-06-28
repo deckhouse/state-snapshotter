@@ -14,7 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package domainsdk
+// Package transform is the domain restore extension point of the snapshot SDK. A domain package implements
+// Transformer next to its domain types; the generic restore compiler never references domain kinds or
+// field names.
+//
+// # Sanctioned unstructured boundary
+//
+// Unlike the capture-side facade (package snapshotsdk), which is a typed, semantic API that deliberately
+// hides Kubernetes transport, this package intentionally exposes unstructured.Unstructured in its public
+// signatures. That is a conscious, documented exception, not a transport leak: the restore compiler
+// operates over arbitrary captured manifests (ConfigMap, Secret, PVC, and unknown domain CRDs) whose Go
+// types are not known at compile time, so a typed API is impossible here. The boundary is therefore:
+//
+//	capture  -> typed, semantic protocol (snapshotsdk.CaptureSDK)
+//	restore  -> intentionally unstructured manifest transform (this package)
+//
+// Keep unstructured confined to this restore-transform seam; the capture facade must stay typed.
+package transform
 
 import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"

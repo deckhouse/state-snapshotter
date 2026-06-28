@@ -78,7 +78,9 @@ const (
 	demoVMCSDName   = "demo-virtual-machine"
 	demoDiskCSDName = "demo-virtual-disk"
 	d8ModuleNS      = "d8-state-snapshotter"
-	d8SVDMModuleNS  = "d8-storage-volume-data-manager"
+	// d8DataManagerNS is the namespace of the DataExport/DataImport controller. The feature was absorbed
+	// from the former storage-volume-data-manager module into storage-foundation (d8-storage-foundation).
+	d8DataManagerNS = "d8-storage-foundation"
 )
 
 // phase5ImportNS is set by the phase-5 restore spec while it runs; diagnostics use it on failure.

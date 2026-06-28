@@ -54,7 +54,7 @@ func dumpFailedSpecDiagnostics(ctx context.Context) {
 		dumpPhase5ImportDiagnostics(ctx, phase5ImportNS)
 	}
 	dumpControllerLogs(ctx, d8ModuleNS)
-	dumpControllerLogs(ctx, d8SVDMModuleNS)
+	dumpControllerLogs(ctx, d8DataManagerNS)
 	GinkgoWriter.Printf("=======================================================\n\n")
 }
 
@@ -128,7 +128,7 @@ func dumpPhase5ImportDiagnostics(ctx context.Context, importNS string) {
 	dumpPVCsInNS(ctx, importNS)
 	dumpPodsInNS(ctx, importNS)
 	dumpFilteredControllerLogs(ctx, d8ModuleNS, importNS, "generic import", "DataImport", "Materialized import", "skipping")
-	dumpFilteredControllerLogs(ctx, d8SVDMModuleNS, importNS, "DataImport", "dataimport", "Awaiting target leaf")
+	dumpFilteredControllerLogs(ctx, d8DataManagerNS, importNS, "DataImport", "dataimport", "Awaiting target leaf")
 }
 
 // dumpImportRootSnapshotContents prints SnapshotContent objects belonging to the import-root tree only
