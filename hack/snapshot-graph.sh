@@ -407,7 +407,7 @@ csd_ready_status() {
 	jq -r '
 		(.status.conditions // []) as $conditions
 		| ($conditions | map(select(.type == "Accepted")) | last | .status // "Unknown") as $accepted
-		| ($conditions | map(select(.type == "SourceAccessGranted")) | last | .status // "Unknown") as $rbac
+		| ($conditions | map(select(.type == "AccessGranted")) | last | .status // "Unknown") as $rbac
 		| if $accepted == "True" and $rbac == "True" then "True"
 		  elif $accepted == "False" or $rbac == "False" then "False"
 		  else "Unknown"
@@ -427,8 +427,8 @@ csd_condition_reason() {
 	jq -r '
 		(.status.conditions // []) as $conditions
 		| ($conditions | map(select(.type == "Accepted")) | last | .status // "Unknown") as $accepted
-		| ($conditions | map(select(.type == "SourceAccessGranted")) | last | .status // "Unknown") as $rbac
-		| "Accepted=" + $accepted + "/SourceAccessGranted=" + $rbac
+		| ($conditions | map(select(.type == "AccessGranted")) | last | .status // "Unknown") as $rbac
+		| "Accepted=" + $accepted + "/AccessGranted=" + $rbac
 	'
 }
 

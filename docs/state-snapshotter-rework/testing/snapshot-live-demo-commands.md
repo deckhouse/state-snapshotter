@@ -345,7 +345,7 @@ done
 | `manifestcheckpoints`, chunks | **yes** | MCP |
 | `snapshots`, `snapshotcontents` (+ `/status`) | **yes** | unified + demo content |
 | `objectkeepers` create/patch | **yes**; delete **no** | по шаблону — OK |
-| `customsnapshotdefinitions/status` update | желательно **yes** | registry; для live D часто хватает ручного `SourceAccessGranted` |
+| `customsnapshotdefinitions/status` update | желательно **yes** | registry; для live D часто хватает ручного `AccessGranted` |
 | **webhook** `get/list/watch` `demovirtualmachines`, `demovirtualdisks` | **yes** | иначе MCR **denied** (`not found in namespace`) |
 
 Проверить, что в chart задеплоен `d8:state-snapshotter:controller` с demo rules (не только smoke CR):
@@ -445,14 +445,14 @@ done
 kubectl get customsnapshotdefinition "${CSD_NAME}" -o yaml | grep -A2 'type: Accepted'
 ```
 
-Пометить `SourceAccessGranted=True` (smoke/manual; в production — Deckhouse hook):
+Пометить `AccessGranted=True` (smoke/manual; в production — Deckhouse hook):
 
 ```bash
 kubectl get customsnapshotdefinition "${CSD_NAME}" -o json | jq \
   --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson gen "$(kubectl get customsnapshotdefinition "${CSD_NAME}" -o jsonpath='{.metadata.generation}')" \
-  '.status.conditions = ((.status.conditions // []) | map(select(.type != "SourceAccessGranted")) + [{
-    type: "SourceAccessGranted", status: "True", reason: "LiveDemo",
+  '.status.conditions = ((.status.conditions // []) | map(select(.type != "AccessGranted")) + [{
+    type: "AccessGranted", status: "True", reason: "LiveDemo",
     message: "manual live demo approval", lastTransitionTime: $now, observedGeneration: $gen
   }])' \
   | kubectl replace --subresource=status -f -
@@ -555,7 +555,7 @@ CHILD_SC=$(kubectl -n "$DEMO_NS" get demovirtualdisksnapshot -o jsonpath='{.item
 kubectl get snapshotcontents.storage.deckhouse.io "$CHILD_SC" -o jsonpath='mcp={.status.manifestCheckpointName} ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
 ```
 
-- CSD Accepted + SourceAccessGranted + Ready; VM/Disk на месте.
+- CSD Accepted + AccessGranted + Ready; VM/Disk на месте.
 - **MCR** в ns (хотя бы на время capture).
 - Child **SnapshotContent** → `manifestCheckpointName` set; MCP **Ready**.
 - Root `Ready=True`; `dataRefs` пусто (нет PVC).

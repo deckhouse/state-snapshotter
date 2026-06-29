@@ -94,7 +94,7 @@ func extractYAMLRuleBlock(content, resource string) string {
 
 // TestCoreRBACDoesNotGrantDemoDomainResources enforces rbac-source-of-truth: the controller SA static
 // RBAC (templates/controller/rbac-for-us.yaml) must stay domain-agnostic. Domain/demo rights are granted
-// externally by the Deckhouse RBAC controller/hook and signalled via CSD SourceAccessGranted=True.
+// externally by the Deckhouse RBAC controller/hook and signalled via CSD AccessGranted=True.
 //
 // Scope is deliberately the controller SA template only. The admin-kubeconfig template
 // (templates/rbac-for-us.yaml, manual kubectl / demo-e2e read path) and the webhook template
@@ -112,7 +112,7 @@ func TestCoreRBACDoesNotGrantDemoDomainResources(t *testing.T) {
 		"demovirtualdisks",
 	} {
 		if strings.Contains(content, forbidden) {
-			t.Fatalf("%s must not hardcode demo/domain RBAC resource %q (grant it externally via SourceAccessGranted)", controllerTemplate, forbidden)
+			t.Fatalf("%s must not hardcode demo/domain RBAC resource %q (grant it externally via AccessGranted)", controllerTemplate, forbidden)
 		}
 	}
 }

@@ -41,9 +41,9 @@ const (
 )
 
 const (
-	CSDConditionAccepted            = csd.CSDConditionAccepted
-	CSDConditionSourceAccessGranted = csd.CSDConditionSourceAccessGranted
-	CSDConditionReady               = csd.CSDConditionReady
+	CSDConditionAccepted      = csd.CSDConditionAccepted
+	CSDConditionAccessGranted = csd.CSDConditionAccessGranted
+	CSDConditionReady         = csd.CSDConditionReady
 )
 
 const (

@@ -26,12 +26,12 @@ import (
 )
 
 const (
-	conditionAccepted            = "Accepted"
-	conditionSourceAccessGranted = "SourceAccessGranted"
+	conditionAccepted      = "Accepted"
+	conditionAccessGranted = "AccessGranted"
 )
 
 // CSDWatchEligible implements the ADR activation predicate (same inputs as runtime watch formula):
-// Accepted=True, SourceAccessGranted=True, and both conditions have observedGeneration == metadata.generation.
+// Accepted=True, AccessGranted=True, and both conditions have observedGeneration == metadata.generation.
 // Ready is not read as an input.
 func CSDWatchEligible(d *storagev1alpha1.CustomSnapshotDefinition) bool {
 	if d == nil {
@@ -39,7 +39,7 @@ func CSDWatchEligible(d *storagev1alpha1.CustomSnapshotDefinition) bool {
 	}
 	gen := d.GetGeneration()
 	acc := meta.FindStatusCondition(d.Status.Conditions, conditionAccepted)
-	rbac := meta.FindStatusCondition(d.Status.Conditions, conditionSourceAccessGranted)
+	rbac := meta.FindStatusCondition(d.Status.Conditions, conditionAccessGranted)
 	if acc == nil || acc.Status != metav1.ConditionTrue || acc.ObservedGeneration != gen {
 		return false
 	}

@@ -22,7 +22,7 @@
 | Слой | Смысл | Пример источника |
 |------|--------|-------------------|
 | **desiredPairs** | Что хотим по политике | `bootstrap ∪ CSD` (CSD переопределяет snapshot GVK) |
-| **eligiblePairs** | Подмножество после формулы eligibility | `Accepted` + `SourceAccessGranted` + согласованные `observedGeneration`; `Ready` не в предикате watch |
+| **eligiblePairs** | Подмножество после формулы eligibility | `Accepted` + `AccessGranted` + согласованные `observedGeneration`; `Ready` не в предикате watch |
 | **resolvedPairs** | То, что реально есть в API | После RESTMapper / discovery (CRD есть, GVK валиден) |
 | **activeWatches** | Что уже подвешено в этом процессе | Фактически зарегистрированные watch в controller-runtime |
 
@@ -62,7 +62,7 @@
 
 | Сценарий | Статус | Как сделано / заметки |
 |----------|--------|------------------------|
-| CSD стал eligible после перехода **SourceAccessGranted=True** → `Sync` → layered state + оба watch зарегистрированы (`active` keys) | ✅ | `test/integration/unified_runtime_hot_add_test.go`, **`Serial`**. Маппинг на **RegistrationTestSnapshot** (изоляция от lifecycle-спек с прямым `Reconcile` на **TestSnapshot**; иначе глобальный watch + ручной Reconcile → 409). Перед тестом удаляются CSD `integration-unified-runtime-hot-add` и `integration-csd-smoke`, чтобы не было **KindConflict** на один snapshot kind. |
+| CSD стал eligible после перехода **AccessGranted=True** → `Sync` → layered state + оба watch зарегистрированы (`active` keys) | ✅ | `test/integration/unified_runtime_hot_add_test.go`, **`Serial`**. Маппинг на **RegistrationTestSnapshot** (изоляция от lifecycle-спек с прямым `Reconcile` на **TestSnapshot**; иначе глобальный watch + ручной Reconcile → 409). Перед тестом удаляются CSD `integration-unified-runtime-hot-add` и `integration-csd-smoke`, чтобы не было **KindConflict** на один snapshot kind. |
 | CSD появился **после** старта контроллера (новый тип без рестарта pod) | ✅ | Покрыто тем же hot-add сценарием относительно процесса envtest: manager уже поднят, CSD создаётся в тесте. |
 | Unit: слои merge / list CSD error → bootstrap-only | ✅ | `pkg/unifiedruntime/layers_test.go` |
 | CSD **потерял** eligibility → тип помечен inactive; процесс жив | ⬜ / частично | Выпадение из **resolved** логируется (`V(1)`). Если ранее оба watch успели подняться, ключ остаётся в monotonic **active** → считается **stale** (`stale_active_snapshot_gvk_count`, **Info**-лог + restart hint). Отдельного флага «inactive» в API и отдельного integration proof ещё нет. |

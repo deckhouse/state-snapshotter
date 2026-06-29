@@ -663,14 +663,14 @@ csd_accepted() {
 		| jq -e '[.status.conditions[]? | select(.type == "Accepted" and .status == "True")] | length >= 1' >/dev/null
 }
 
-# SourceAccessGranted is set by an external Deckhouse hook in production; demo/smoke sets it manually.
+# AccessGranted is set by an external Deckhouse hook in production; demo/smoke sets it manually.
 patch_csd_source_access_granted() {
 	local gen body
 	gen="$(kubectl get "${CSD_RES}" "${CSD_NAME}" -o jsonpath='{.metadata.generation}' 2>/dev/null || echo 0)"
 	body="$(get_json "${CSD_RES}" "" "${CSD_NAME}" | jq \
 		--arg now "$(now_rfc3339)" --argjson gen "${gen:-0}" \
-		'.status.conditions = ((.status.conditions // []) | map(select(.type != "SourceAccessGranted")) + [{
-			type: "SourceAccessGranted", status: "True", reason: "TreeDemoE2E",
+		'.status.conditions = ((.status.conditions // []) | map(select(.type != "AccessGranted")) + [{
+			type: "AccessGranted", status: "True", reason: "TreeDemoE2E",
 			message: "manual tree-demo approval", lastTransitionTime: $now, observedGeneration: $gen
 		}])')"
 	[[ -n "${body}" ]] || return 0
@@ -681,9 +681,9 @@ patch_csd_source_access_granted() {
 ensure_csd_eligible() {
 	wait_until "CSD ${CSD_NAME} Accepted=True" csd_accepted || die "CSD ${CSD_NAME} never Accepted"
 	patch_csd_source_access_granted
-	wait_until "CSD ${CSD_NAME} SourceAccessGranted=True" \
-		bash -c "kubectl get '${CSD_RES}' '${CSD_NAME}' -o json | jq -e '[.status.conditions[]?|select(.type==\"SourceAccessGranted\" and .status==\"True\")]|length>=1' >/dev/null" \
-		|| require "CSD ${CSD_NAME} SourceAccessGranted not True (manual patch did not stick / external hook owns it); tree cannot build"
+	wait_until "CSD ${CSD_NAME} AccessGranted=True" \
+		bash -c "kubectl get '${CSD_RES}' '${CSD_NAME}' -o json | jq -e '[.status.conditions[]?|select(.type==\"AccessGranted\" and .status==\"True\")]|length>=1' >/dev/null" \
+		|| require "CSD ${CSD_NAME} AccessGranted not True (manual patch did not stick / external hook owns it); tree cannot build"
 }
 
 # inversion_safe: priority inversion mutates the GLOBAL CSD priority, which affects every namespace

@@ -15,7 +15,7 @@ func TestCSDWatchEligible(t *testing.T) {
 		Status: storagev1alpha1.CustomSnapshotDefinitionStatus{
 			Conditions: []metav1.Condition{
 				{Type: "Accepted", Status: metav1.ConditionTrue, ObservedGeneration: gen},
-				{Type: "SourceAccessGranted", Status: metav1.ConditionTrue, ObservedGeneration: gen},
+				{Type: "AccessGranted", Status: metav1.ConditionTrue, ObservedGeneration: gen},
 			},
 		},
 	}
@@ -24,7 +24,7 @@ func TestCSDWatchEligible(t *testing.T) {
 	}
 	d.Status.Conditions[1].ObservedGeneration = 1
 	if CSDWatchEligible(d) {
-		t.Fatal("expected not eligible when SourceAccessGranted generation stale")
+		t.Fatal("expected not eligible when AccessGranted generation stale")
 	}
 }
 
@@ -45,6 +45,6 @@ func TestCSDWatchEligible_missingRBAC(t *testing.T) {
 		},
 	}
 	if CSDWatchEligible(d) {
-		t.Fatal("missing SourceAccessGranted")
+		t.Fatal("missing AccessGranted")
 	}
 }

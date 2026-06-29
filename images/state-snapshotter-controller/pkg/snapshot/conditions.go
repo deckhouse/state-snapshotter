@@ -153,7 +153,7 @@ const (
 	ReasonPriorityLayerPending = "PriorityLayerPending"
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
 	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
-	// CSD SourceAccessGranted); the planner must not treat a Forbidden source list as "no objects" (that would
+	// CSD AccessGranted); the planner must not treat a Forbidden source list as "no objects" (that would
 	// silently drop coverage). Instead it degrades the graph (PlanningReady=False) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"

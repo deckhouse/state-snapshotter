@@ -52,7 +52,7 @@ var _ = registry.RegisterFunc(
 //     ownerRef-patches one child snapshot per source), get + list on the source GVRs (list to enumerate
 //     sources during planning, get to capture each target's manifest), and get on the domain
 //     /manifests-with-data-restoration subresource.
-//  4. Writes SourceAccessGranted (True / Pending / ApplyFailed) on each eligible CSD.
+//  4. Writes AccessGranted (True / Pending / ApplyFailed) on each eligible CSD.
 func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	cl := input.DC.MustGetK8sClient(sdkk8s.WithSchemeBuilder(v1alpha1.SchemeBuilder))
 
@@ -92,20 +92,20 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 		var cond metav1.Condition
 		switch {
 		case pendingByName[csd.Name] != "":
-			cond = desiredSourceAccessGrantedCondition(csd.Generation,
-				metav1.ConditionFalse, consts.SourceAccessGrantedReasonPending,
+			cond = desiredAccessGrantedCondition(csd.Generation,
+				metav1.ConditionFalse, consts.AccessGrantedReasonPending,
 				pendingByName[csd.Name])
 		case applyErr != nil:
-			cond = desiredSourceAccessGrantedCondition(csd.Generation,
-				metav1.ConditionFalse, consts.SourceAccessGrantedReasonApplyFailed,
+			cond = desiredAccessGrantedCondition(csd.Generation,
+				metav1.ConditionFalse, consts.AccessGrantedReasonApplyFailed,
 				applyErr.Error())
 		default:
-			cond = desiredSourceAccessGrantedCondition(csd.Generation,
-				metav1.ConditionTrue, consts.SourceAccessGrantedReasonApplied,
+			cond = desiredAccessGrantedCondition(csd.Generation,
+				metav1.ConditionTrue, consts.AccessGrantedReasonApplied,
 				"domain RBAC applied for all source and snapshot GVRs")
 		}
-		if err := patchCSDSourceAccessGranted(ctx, cl, csd.Name, cond); err != nil {
-			input.Logger.Error("patch SourceAccessGranted on CSD", "name", csd.Name, "err", err)
+		if err := patchCSDAccessGranted(ctx, cl, csd.Name, cond); err != nil {
+			input.Logger.Error("patch AccessGranted on CSD", "name", csd.Name, "err", err)
 		}
 	}
 

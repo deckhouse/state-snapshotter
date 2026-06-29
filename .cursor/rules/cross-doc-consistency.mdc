@@ -14,7 +14,7 @@ When changing any of:
 
 check consistency (no contradiction) at least on:
 - registry state vs runtime watch activation
-- DSC conditions (`Accepted`, `SourceAccessGranted`, derived `Ready`) and watch activation formula
+- DSC conditions (`Accepted`, `AccessGranted`, derived `Ready`) and watch activation formula
 - optional unified CRD / bootstrap (S1–S2) vs future DSC-driven registry
 - manifest / MCR track vs unified snapshot registry (separate concerns)
 - stage / progress in `project-status.md` vs tables in `implementation-plan.md` and test IDs in `e2e-testing-strategy.md`

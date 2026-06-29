@@ -139,7 +139,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		if errors.IsNotFound(err) {
 			return nil, nil
 		}
-		// Forbidden is RBAC-driven (granted externally via CSD SourceAccessGranted). Treating it as "no objects"
+		// Forbidden is RBAC-driven (granted externally via CSD AccessGranted). Treating it as "no objects"
 		// would silently drop coverage, so degrade the graph instead of returning empty (fail-closed).
 		if errors.IsForbidden(err) {
 			return nil, &sourceListForbiddenError{msg: fmt.Sprintf("list source %s: %v", mapping.SourceGVK.String(), err)}
@@ -248,7 +248,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 }
 
 // sourceListForbiddenError signals that listing a mapped source kind was rejected with Forbidden.
-// RBAC for domain/custom sources is granted externally (CSD SourceAccessGranted), so the planner degrades the
+// RBAC for domain/custom sources is granted externally (CSD AccessGranted), so the planner degrades the
 // graph (PlanningReady=False/SourceListForbidden) and requeues instead of treating Forbidden as an empty
 // result (which would silently drop coverage) or as a hard reconcile error (noisy log spam while
 // waiting for RBAC to be granted).

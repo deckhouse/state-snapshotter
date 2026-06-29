@@ -60,14 +60,14 @@ func registryTestSnapshotSpec() ssv1alpha1.CustomSnapshotDefinitionSpec {
 	}
 }
 
-// markCSDSourceAccessGranted simulates the Deckhouse hook leg of CSD eligibility (SourceAccessGranted=True) for the
+// markCSDAccessGranted simulates the Deckhouse hook leg of CSD eligibility (AccessGranted=True) for the
 // current generation, so CSDWatchEligible becomes true once the reconciler has set Accepted=True.
-func markCSDSourceAccessGranted(ctx context.Context, name, message string) {
+func markCSDAccessGranted(ctx context.Context, name, message string) {
 	hook := &ssv1alpha1.CustomSnapshotDefinition{}
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, hook)).To(Succeed())
 	gen := hook.GetGeneration()
 	meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-		Type:               controllers.CSDConditionSourceAccessGranted,
+		Type:               controllers.CSDConditionAccessGranted,
 		Status:             metav1.ConditionTrue,
 		Reason:             "IntegrationHook",
 		Message:            message,
@@ -117,7 +117,7 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 		Expect(k8sClient.Create(testCtx, csd)).To(Succeed())
 
 		waitCSDAccepted(testCtx, csdName)
-		markCSDSourceAccessGranted(testCtx, csdName, "dynamic graph registry")
+		markCSDAccessGranted(testCtx, csdName, "dynamic graph registry")
 
 		Eventually(func(g Gomega) {
 			g.Expect(p.Refresh(testCtx)).To(Succeed())
@@ -155,7 +155,7 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 		Expect(k8sClient.Create(testCtx, csd)).To(Succeed())
 
 		waitCSDAccepted(testCtx, globalCSD)
-		markCSDSourceAccessGranted(testCtx, globalCSD, "global graph delete test")
+		markCSDAccessGranted(testCtx, globalCSD, "global graph delete test")
 
 		Eventually(func(g Gomega) {
 			kinds := integrationGraphRegProvider.Current().RegisteredSnapshotKinds()

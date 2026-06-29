@@ -36,7 +36,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// Smoke: CSD CRD + scheme + reconciler writes Accepted; status subresource + Ready after SourceAccessGranted handshake.
+// Smoke: CSD CRD + scheme + reconciler writes Accepted; status subresource + Ready after AccessGranted handshake.
 // Serial: same RegistrationTest snapshot kind as other CSD specs; avoids KindConflict with parallel nodes.
 var _ = Describe("Integration: CustomSnapshotDefinition API smoke", Serial, func() {
 	const smokeName = "integration-csd-smoke"
@@ -67,7 +67,7 @@ var _ = Describe("Integration: CustomSnapshotDefinition API smoke", Serial, func
 		}
 	})
 
-	It("reconciles Accepted from CRD resolution and supports Ready after SourceAccessGranted", func() {
+	It("reconciles Accepted from CRD resolution and supports Ready after AccessGranted", func() {
 		gvk := schema.GroupVersionKind{
 			Group:   storagev1alpha1.APIGroup,
 			Version: storagev1alpha1.APIVersion,
@@ -128,7 +128,7 @@ var _ = Describe("Integration: CustomSnapshotDefinition API smoke", Serial, func
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: csd.Name}, hookCSD)).To(Succeed())
 		gen := hookCSD.GetGeneration()
 		meta.SetStatusCondition(&hookCSD.Status.Conditions, metav1.Condition{
-			Type:               controllers.CSDConditionSourceAccessGranted,
+			Type:               controllers.CSDConditionAccessGranted,
 			Status:             metav1.ConditionTrue,
 			Reason:             "IntegrationHook",
 			Message:            "simulated hook",

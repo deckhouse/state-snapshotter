@@ -41,9 +41,9 @@ runtime migration is explicitly performed.
 
 **Common content contract:** snapshot/domain controllers create/bind `SnapshotContent` and publish durable result refs into `SnapshotContent.status` (`manifestCheckpointName`, future `dataRef`, `childrenSnapshotContentRefs`). `SnapshotContentController` is a validator/lifecycle controller: it validates persisted refs, performs artifact ownerRef handoff, and owns only content readiness conditions. It is not a domain planner/executor: MCR/VCR/DataExport/VolumeSnapshot request creation stays in snapshot/domain controllers. Domain modules register source resource and snapshot CRD through CSD; content GVK is fixed to `storage.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
 
-**Not owned by a domain controller:** CSD `SourceAccessGranted`, RBAC creation, and parent status. Child controllers do not patch parent status. `SnapshotContent.status` is field-owned: result refs are publisher-owned by snapshot/domain controllers; `Ready` is validator-owned by `SnapshotContentController`.
+**Not owned by a domain controller:** CSD `AccessGranted`, RBAC creation, and parent status. Child controllers do not patch parent status. `SnapshotContent.status` is field-owned: result refs are publisher-owned by snapshot/domain controllers; `Ready` is validator-owned by `SnapshotContentController`.
 
-**RBAC:** reference domain controllers intentionally omit kubebuilder RBAC markers. Required domain permissions are part of the controller contract, but they are granted externally by the Deckhouse RBAC controller/hook before CSD `SourceAccessGranted=True`, not generated from controller source comments.
+**RBAC:** reference domain controllers intentionally omit kubebuilder RBAC markers. Required domain permissions are part of the controller contract, but they are granted externally by the Deckhouse RBAC controller/hook before CSD `AccessGranted=True`, not generated from controller source comments.
 
 ## Examples
 

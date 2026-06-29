@@ -103,7 +103,7 @@ Parent/back-reference задаётся Kubernetes ownerRef child snapshot → pa
 ## Негативные сценарии (дополнительно)
 
 - Частичный провал disk → VM и root **`Ready=False`** с ожидаемым **`reason`**.
-- CSD без SourceAccessGranted → корректная деградация без panic.
+- CSD без AccessGranted → корректная деградация без panic.
 - Объект уже в API, но **ещё не** записан в **`children*Refs`** родителя → **не** считается обязательным ребёнком для **`Ready`** родителя (**INV-R2a**; согласованность с **1**, **2**).
 - Второй snapshot-run / VS в том же namespace **без** связи **refs** с текущим root → **не** влияет на dedup текущего run (**INV-S0**, стык с **3**).
 - **Несколько** одновременных поломок у детей с **разными** **`reason`** → на родителе/корне **`reason`** выбирается **детерминированно** по **INV-R5** ([`07`](../design/demo-domain-csd/07-ready-delete-matrix.md) §3).

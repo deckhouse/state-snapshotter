@@ -88,7 +88,7 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		}
 	}
 
-	It("does not add watches while CSD is Accepted but SourceAccessGranted is unset (T4)", func() {
+	It("does not add watches while CSD is Accepted but AccessGranted is unset (T4)", func() {
 		Expect(unifiedSyncer).NotTo(BeNil())
 		const name = "integration-t4-no-rbac"
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
@@ -110,12 +110,12 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 			st := unifiedSyncer.LastLayeredState()
 			for _, p := range st.EligibleFromCSD {
 				g.Expect(p.Snapshot).NotTo(Equal(regSnapGVK),
-					"Accepted without SourceAccessGranted must not contribute to eligible-from-CSD layer")
+					"Accepted without AccessGranted must not contribute to eligible-from-CSD layer")
 			}
 		}).WithTimeout(30 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 
-	It("drops resolved pair when SourceAccessGranted goes false but keeps monotonic active key", func() {
+	It("drops resolved pair when AccessGranted goes false but keeps monotonic active key", func() {
 		Expect(unifiedSyncer).NotTo(BeNil())
 		const name = "integration-eligibility-loss"
 		csd := &storagev1alpha1.CustomSnapshotDefinition{
@@ -136,7 +136,7 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, hook)).To(Succeed())
 		gen := hook.GetGeneration()
 		meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-			Type:               controllers.CSDConditionSourceAccessGranted,
+			Type:               controllers.CSDConditionAccessGranted,
 			Status:             metav1.ConditionTrue,
 			Reason:             "IntegrationHook",
 			Message:            "eligibility loss test",
@@ -161,7 +161,7 @@ var _ = Describe("Integration: unified runtime RBAC and eligibility", Serial, fu
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, hook)).To(Succeed())
 		gen = hook.GetGeneration()
 		meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-			Type:               controllers.CSDConditionSourceAccessGranted,
+			Type:               controllers.CSDConditionAccessGranted,
 			Status:             metav1.ConditionFalse,
 			Reason:             "IntegrationRevoke",
 			Message:            "simulate RBAC loss",

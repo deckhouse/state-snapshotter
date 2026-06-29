@@ -39,9 +39,9 @@ import (
 
 // CSD condition types (ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md).
 const (
-	CSDConditionAccepted            = "Accepted"
-	CSDConditionSourceAccessGranted = "SourceAccessGranted"
-	CSDConditionReady               = "Ready"
+	CSDConditionAccepted      = "Accepted"
+	CSDConditionAccessGranted = "AccessGranted"
+	CSDConditionReady         = "Ready"
 )
 
 const (
@@ -65,7 +65,7 @@ var requiredSnapshotStatusFields = []string{
 }
 
 // CustomSnapshotDefinitionReconciler resolves snapshotResourceMapping, detects cross-CSD
-// snapshot kind conflicts, writes Accepted and aggregated Ready. SourceAccessGranted is owned by Deckhouse hook.
+// snapshot kind conflicts, writes Accepted and aggregated Ready. AccessGranted is owned by Deckhouse hook.
 // Runtime watch activation is triggered after successful status reconciliation.
 //
 // Phase-1 trade-off: Reconcile ignores the triggering request and always List()s all CSDs, then fully
@@ -349,7 +349,7 @@ func (r *CustomSnapshotDefinitionReconciler) writeStatusIfNeeded(
 	gen := d.GetGeneration()
 
 	acceptedStatus, acceptedReason, acceptedMsg := r.computeAccepted(d.Name, res, conflicting)
-	rbac := meta.FindStatusCondition(d.Status.Conditions, CSDConditionSourceAccessGranted)
+	rbac := meta.FindStatusCondition(d.Status.Conditions, CSDConditionAccessGranted)
 	ready := computeCSDReady(acceptedStatus, rbac, gen)
 
 	desired := buildCSDStatusConditions(gen, acceptedStatus, acceptedReason, acceptedMsg, ready, d.Status.Conditions)
@@ -375,7 +375,7 @@ func (r *CustomSnapshotDefinitionReconciler) writeStatusIfNeeded(
 		gen = current.GetGeneration()
 		freshRes := freshResByName[current.Name]
 		acceptedStatus, acceptedReason, acceptedMsg := r.computeAccepted(current.Name, freshRes, freshConflicting)
-		rbac := meta.FindStatusCondition(current.Status.Conditions, CSDConditionSourceAccessGranted)
+		rbac := meta.FindStatusCondition(current.Status.Conditions, CSDConditionAccessGranted)
 		ready := computeCSDReady(acceptedStatus, rbac, gen)
 		desired := buildCSDStatusConditions(gen, acceptedStatus, acceptedReason, acceptedMsg, ready, current.Status.Conditions)
 		if csdConditionsSemanticallyEqual(current.Status.Conditions, desired) {
@@ -403,7 +403,7 @@ func (r *CustomSnapshotDefinitionReconciler) computeAccepted(
 	return metav1.ConditionTrue, "Resolved", "mapping resolved, content CRDs are cluster-scoped"
 }
 
-// computeCSDReady mirrors ADR: Ready=True iff Accepted=True, SourceAccessGranted=True, both observedGeneration == metadata.generation.
+// computeCSDReady mirrors ADR: Ready=True iff Accepted=True, AccessGranted=True, both observedGeneration == metadata.generation.
 func computeCSDReady(accepted metav1.ConditionStatus, rbac *metav1.Condition, gen int64) metav1.ConditionStatus {
 	if accepted != metav1.ConditionTrue {
 		return metav1.ConditionFalse
@@ -414,7 +414,7 @@ func computeCSDReady(accepted metav1.ConditionStatus, rbac *metav1.Condition, ge
 	return metav1.ConditionTrue
 }
 
-// buildCSDStatusConditions sets Accepted and Ready; copies SourceAccessGranted from existing if present.
+// buildCSDStatusConditions sets Accepted and Ready; copies AccessGranted from existing if present.
 func buildCSDStatusConditions(
 	gen int64,
 	acceptedStatus metav1.ConditionStatus,
@@ -434,7 +434,7 @@ func buildCSDStatusConditions(
 		LastTransitionTime: metav1.Now(),
 	})
 
-	if rbac := meta.FindStatusCondition(existing, CSDConditionSourceAccessGranted); rbac != nil {
+	if rbac := meta.FindStatusCondition(existing, CSDConditionAccessGranted); rbac != nil {
 		cp := *rbac
 		meta.SetStatusCondition(&conds, cp)
 	}
@@ -444,11 +444,11 @@ func buildCSDStatusConditions(
 	switch {
 	case readyStatus == metav1.ConditionTrue:
 		readyReason = "Active"
-		readyMsg = "Accepted and SourceAccessGranted are True for current generation"
+		readyMsg = "Accepted and AccessGranted are True for current generation"
 	case acceptedStatus != metav1.ConditionTrue:
 		readyMsg = "Ready=False because condition Accepted is not True; see Accepted for details"
 	default:
-		readyMsg = "Waiting for SourceAccessGranted=True with observedGeneration matching metadata.generation (Deckhouse hook)"
+		readyMsg = "Waiting for AccessGranted=True with observedGeneration matching metadata.generation (Deckhouse hook)"
 	}
 
 	meta.SetStatusCondition(&conds, metav1.Condition{

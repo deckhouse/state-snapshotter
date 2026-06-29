@@ -406,10 +406,10 @@ func moduleLabels() map[string]string {
 	}
 }
 
-// desiredSourceAccessGrantedCondition builds the SourceAccessGranted condition value to write on a CSD.
-func desiredSourceAccessGrantedCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
+// desiredAccessGrantedCondition builds the AccessGranted condition value to write on a CSD.
+func desiredAccessGrantedCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
 	return metav1.Condition{
-		Type:               consts.CSDConditionSourceAccessGranted,
+		Type:               consts.CSDConditionAccessGranted,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -418,16 +418,16 @@ func desiredSourceAccessGrantedCondition(generation int64, status metav1.Conditi
 	}
 }
 
-// patchCSDSourceAccessGranted performs a read-modify-update on the CSD status to set only
-// the SourceAccessGranted condition, preserving Accepted and Ready (owned by the controller).
+// patchCSDAccessGranted performs a read-modify-update on the CSD status to set only
+// the AccessGranted condition, preserving Accepted and Ready (owned by the controller).
 // Retries on conflict per the ADR ownership model.
-func patchCSDSourceAccessGranted(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
+func patchCSDAccessGranted(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := new(v1alpha1.CustomSnapshotDefinition)
 		if err := cl.Get(ctx, ctrlclient.ObjectKey{Name: name}, fresh); err != nil {
 			return err
 		}
-		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionSourceAccessGranted)
+		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionAccessGranted)
 		if existing != nil &&
 			existing.Status == cond.Status &&
 			existing.Reason == cond.Reason &&
