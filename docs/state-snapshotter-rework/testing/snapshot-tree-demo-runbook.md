@@ -108,19 +108,19 @@ until kubectl get customsnapshotdefinition "$CSD_NAME" -o json \
   echo "waiting CSD Accepted..."; sleep 2
 done
 
-# RBACReady=True (smoke/manual; в production ставит Deckhouse hook — см. notes)
+# SourceAccessGranted=True (smoke/manual; в production ставит Deckhouse hook — см. notes)
 kubectl get customsnapshotdefinition "$CSD_NAME" -o json | jq \
   --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson gen "$(kubectl get customsnapshotdefinition "$CSD_NAME" -o jsonpath='{.metadata.generation}')" \
-  '.status.conditions = ((.status.conditions // []) | map(select(.type != "RBACReady")) + [{
-    type: "RBACReady", status: "True", reason: "LiveDemo",
+  '.status.conditions = ((.status.conditions // []) | map(select(.type != "SourceAccessGranted")) + [{
+    type: "SourceAccessGranted", status: "True", reason: "LiveDemo",
     message: "manual live demo approval", lastTransitionTime: $now, observedGeneration: $gen
   }])' | kubectl replace --subresource=status -f -
 
 kubectl get customsnapshotdefinition "$CSD_NAME" -o json | jq '[.status.conditions[]?|{type,status}]'
 ```
 
-Ожидание: `Accepted`, `RBACReady`, `Ready` = True.
+Ожидание: `Accepted`, `SourceAccessGranted`, `Ready` = True.
 
 ---
 
@@ -329,7 +329,7 @@ kubectl delete namespace "$DEMO_NS" snapshot-demo-restored --ignore-not-found --
 | Симптом | Причина | Что делать |
 |---|---|---|
 | root `Ready=False` + `SubtreeManifestCapturePending`, MCR нет | webhook SA не читает demo inventory | redeploy RBAC модуля; см. §1 |
-| `childrenSnapshotRefs` пусто | CSD не Ready / не RBACReady | проверить §2; логи controller |
+| `childrenSnapshotRefs` пусто | CSD не Ready / не SourceAccessGranted | проверить §2; логи controller |
 | `dataRefs` пусто, VCR `PVC … is not bound` | PVC не Bound (WFFC без Pod) | дождаться Bound до Snapshot |
 | restore PVC `Pending`, `VolumeMismatch` | PV без `storageClassName` (старый образ) | обход `patch pv` (§5/notes); пересобрать executor |
 | `patch objectkeepers` forbidden | нет прав | дождаться естественного `1m` TTL |
@@ -359,7 +359,7 @@ cd /path/to/state-snapshotter
 | Стадия | Что проверяет |
 |---|---|
 | `00-preflight` | CRD/SC/контроллер; внешний demo-domain RBAC (webhook get inventory, controller create MCR); отсутствие старых условий |
-| `01-priority-vm-first` | регистрация CSD (GVK/priority), `Accepted`/`RBACReady`, VM priority > Disk |
+| `01-priority-vm-first` | регистрация CSD (GVK/priority), `Accepted`/`SourceAccessGranted`, VM priority > Disk |
 | `02-tree-ready` | форма дерева (root→VM→disk-vm; standalone disk как root child; covered disk не дублируется; ConfigMap в MCP, не child); happy-path `ManifestsReady/VolumesReady/ChildrenReady/Ready=True`; baseline mirror root `Snapshot.Ready == content.Ready` |
 | `03-priority-inverted` | инверсия priority (Disk>VM) в чистом namespace: форма меняется **или** fail-closed с явной причиной; CSD восстанавливается в VM-first. **Авто-skip**, если на кластере есть чужие demo-снапшоты/CSD вне этого прогона (глобальный CSD-priority flip их бы задел) |
 | `04-domainready-barrier` | **hard**: каждый domain snapshot `PlanningReady=True` и `observedGeneration == generation`; ни один `SnapshotContent` не несёт `PlanningReady` (нет self-publication common-слоя). **soft**: timeline (content не биндится до current-gen `PlanningReady`) |

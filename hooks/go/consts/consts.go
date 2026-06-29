@@ -104,12 +104,12 @@ const (
 	DomainSubresourcesGroupPrefix = "subresources."
 
 	// CSD condition types referenced by the domain-RBAC hook.
-	// Accepted is owned by the CSD reconciler; RBACReady is owned exclusively by this hook.
-	CSDConditionAccepted  = "Accepted"
-	CSDConditionRBACReady = "RBACReady"
+	// Accepted is owned by the CSD reconciler; SourceAccessGranted is owned exclusively by this hook.
+	CSDConditionAccepted            = "Accepted"
+	CSDConditionSourceAccessGranted = "SourceAccessGranted"
 
-	// RBACReady condition reasons per ADR snapshot-rework/2026-01-23-unified-snapshots-registry.md §2.
-	RBACReadyReasonPending     = "Pending"     // snapshot GVR not yet resolvable via discovery
-	RBACReadyReasonApplyFailed = "ApplyFailed" // ClusterRole/Binding creation or update failed
-	RBACReadyReasonApplied     = "Applied"     // RBAC successfully applied for all snapshot GVRs
+	// SourceAccessGranted condition reasons per ADR snapshot-rework/2026-01-23-unified-snapshots-registry.md §2.
+	SourceAccessGrantedReasonPending     = "Pending"     // snapshot GVR not yet resolvable via discovery
+	SourceAccessGrantedReasonApplyFailed = "ApplyFailed" // ClusterRole/Binding creation or update failed
+	SourceAccessGrantedReasonApplied     = "Applied"     // RBAC successfully applied for all snapshot GVRs
 )
