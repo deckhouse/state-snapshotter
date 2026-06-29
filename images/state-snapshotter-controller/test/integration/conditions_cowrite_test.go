@@ -36,7 +36,7 @@ import (
 
 // These tests validate the D4a co-write mechanism in isolation against a real apiserver: two
 // independent writers (e.g. core writing Ready, the demo domain controller writing
-// ChildrenSnapshotReady) mutate the SAME status.conditions array. JSON merge patch replaces the
+// PlanningReady) mutate the SAME status.conditions array. JSON merge patch replaces the
 // whole array, so a bare MergeFrom would let one writer silently drop the other's condition.
 // MergeFromWithOptimisticLock adds a resourceVersion precondition: a stale write gets 409 Conflict,
 // and RetryOnConflict re-reads the fresh object (already carrying the other condition) before
@@ -107,9 +107,9 @@ var _ = Describe("Integration: D4a conditions co-write", func() {
 		setCond(writerA, snapshot.ConditionReady)
 		Expect(k8sClient.Status().Patch(ctx, writerA, client.MergeFromWithOptions(baseA, client.MergeFromWithOptimisticLock{}))).To(Succeed())
 
-		// Writer B (demo) patches ChildrenSnapshotReady from the now-stale base: optimistic lock must 409.
+		// Writer B (demo) patches PlanningReady from the now-stale base: optimistic lock must 409.
 		writerBStale := stale.DeepCopy()
-		setCond(writerBStale, snapshot.ConditionChildrenSnapshotReady)
+		setCond(writerBStale, snapshot.ConditionPlanningReady)
 		err := k8sClient.Status().Patch(ctx, writerBStale, client.MergeFromWithOptions(staleBase, client.MergeFromWithOptimisticLock{}))
 		Expect(apierrors.IsConflict(err)).To(BeTrue(), "stale optimistic-lock status patch must be rejected with 409 Conflict")
 
@@ -121,7 +121,7 @@ var _ = Describe("Integration: D4a conditions co-write", func() {
 				return getErr
 			}
 			base := fresh.DeepCopy()
-			setCond(fresh, snapshot.ConditionChildrenSnapshotReady)
+			setCond(fresh, snapshot.ConditionPlanningReady)
 			return k8sClient.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 		})).To(Succeed())
 
@@ -129,7 +129,7 @@ var _ = Describe("Integration: D4a conditions co-write", func() {
 		final := &unstructured.Unstructured{}
 		final.SetGroupVersionKind(testContentGVK)
 		Expect(k8sClient.Get(ctx, key, final)).To(Succeed())
-		Expect(hasCond(final, snapshot.ConditionReady)).To(BeTrue(), "Ready (writer A) must survive the ChildrenSnapshotReady co-write")
-		Expect(hasCond(final, snapshot.ConditionChildrenSnapshotReady)).To(BeTrue(), "ChildrenSnapshotReady (writer B) must be present")
+		Expect(hasCond(final, snapshot.ConditionReady)).To(BeTrue(), "Ready (writer A) must survive the PlanningReady co-write")
+		Expect(hasCond(final, snapshot.ConditionPlanningReady)).To(BeTrue(), "PlanningReady (writer B) must be present")
 	})
 })

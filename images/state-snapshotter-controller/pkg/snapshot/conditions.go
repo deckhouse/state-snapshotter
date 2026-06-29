@@ -27,8 +27,8 @@ import (
 // keeps using snapshot.ConditionReady etc. unchanged, while the domain controller shares the same
 // definitions via api/. Core-internal leg conditions and the rest of the reason taxonomy stay below.
 const (
-	ConditionReady                 = storagev1alpha1.ConditionReady
-	ConditionChildrenSnapshotReady = storagev1alpha1.ConditionChildrenSnapshotReady
+	ConditionReady         = storagev1alpha1.ConditionReady
+	ConditionPlanningReady = storagev1alpha1.ConditionPlanningReady
 	// ConditionManifestsArchived is the subtree-latch contract condition (see api/storage). It is NOT
 	// part of the Ready formula; it signals that this node and all descendants have archived their
 	// manifests at least once and never re-opens once True.
@@ -47,7 +47,7 @@ const (
 )
 
 // Condition types: the public condition model
-// (ChildrenSnapshotReady, ManifestsReady, VolumesReady, ChildrenReady, Ready).
+// (PlanningReady, ManifestsReady, VolumesReady, ChildrenReady, Ready).
 const (
 	// ConditionManifestsReady reports this node's own manifest leg readiness: the manifest
 	// capture checkpoint (status.manifestCheckpointName) is published and Ready (empty archive counts).
@@ -140,21 +140,21 @@ const (
 	ReasonResidualVolumeCapturePending = storagev1alpha1.ReasonResidualVolumeCapturePending
 )
 
-// Reasons for ChildrenSnapshotReady=False.
+// Reasons for PlanningReady=False.
 const (
 	ReasonChildGraphPending = "ChildGraphPending"
 	ReasonListFailed        = "ListFailed"
 	// ReasonPriorityLayerPending is set on a parent Snapshot while a higher-priority child snapshot
-	// layer has not yet published a current ChildrenSnapshotReady=True. This is NOT a failure and has no deadline:
+	// layer has not yet published a current PlanningReady=True. This is NOT a failure and has no deadline:
 	// a child snapshot (e.g. a large-storage capture) may legitimately stay pending for hours. The
-	// parent holds ChildrenSnapshotReady=False/PriorityLayerPending (with the pending children listed in the
+	// parent holds PlanningReady=False/PriorityLayerPending (with the pending children listed in the
 	// message) and never starts capture until the layer is ready. Waiting is woken primarily by child
 	// watches; a RequeueAfter polling fallback covers a missed watch event.
 	ReasonPriorityLayerPending = "PriorityLayerPending"
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
 	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
 	// DSC RBACReady); the planner must not treat a Forbidden source list as "no objects" (that would
-	// silently drop coverage). Instead it degrades the graph (ChildrenSnapshotReady=False) and requeues so coverage
+	// silently drop coverage). Instead it degrades the graph (PlanningReady=False) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"
 )

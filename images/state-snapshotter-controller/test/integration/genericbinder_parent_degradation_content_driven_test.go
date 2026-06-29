@@ -89,7 +89,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		parent.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
 		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, parent)) })
-		setSnapshotChildrenSnapshotReadyCurrent(ctx, parent)
+		setSnapshotPlanningReadyCurrent(ctx, parent)
 
 		parentKey := types.NamespacedName{Namespace: "default", Name: "gen-parent-degrade"}
 		var parentContentName, parentContentUID string

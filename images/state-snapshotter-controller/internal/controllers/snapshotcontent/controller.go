@@ -514,7 +514,7 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 // blocks the FIRST Ready=True until the whole subtree's manifests are archived. The residual-sweep gate is
 // the LOWEST priority: on a namespace-root content it blocks the FIRST Ready=True until the residual/
 // orphan-PVC capture wave is latched Complete (fail-closed). Both are monotonic, so neither ever drags
-// Ready back down after the first Ready=True. ChildrenSnapshotReady is NOT part of this formula; it is
+// Ready back down after the first Ready=True. PlanningReady is NOT part of this formula; it is
 // only a gate/barrier upstream.
 func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
 	plan := commonContentStatusPlan{

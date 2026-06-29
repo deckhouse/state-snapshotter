@@ -65,7 +65,7 @@ func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
 //   - Ready: mirror the bound content's Ready (single-aggregator), exiting ImportPending.
 //
 // The Step-1 domain-planning barrier is intentionally bypassed: an import leaf has no domain capture
-// planning (the domain controller skips it), so there is no ChildrenSnapshotReady to wait on.
+// planning (the domain controller skips it), so there is no PlanningReady to wait on.
 func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	ctx context.Context,
 	obj *unstructured.Unstructured,

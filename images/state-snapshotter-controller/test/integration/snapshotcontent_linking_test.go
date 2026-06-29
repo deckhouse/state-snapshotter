@@ -98,8 +98,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 		}).WithTimeout(120 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 		Expect(mcpName).NotTo(BeEmpty())
 
-		// Simulate domain controller: publish ChildrenSnapshotReady=True for the current generation.
-		setChildrenSnapshotReadyCondition(snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration())
+		// Simulate domain controller: publish PlanningReady=True for the current generation.
+		setPlanningReadyCondition(snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration())
 		status, _ := snapshotObj.Object["status"].(map[string]interface{})
 		if status == nil {
 			status = map[string]interface{}{}

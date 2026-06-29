@@ -89,7 +89,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectPlanningReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionReady,
@@ -218,7 +218,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			Expect(err).NotTo(HaveOccurred())
 
 			// Snapshot is bound (boundSnapshotContentName set) but never Ready=True
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectPlanningReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			// NO Ready=True condition
 
 			// Set contentName to non-existent Content
@@ -291,7 +291,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectPlanningReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionReady,
@@ -381,7 +381,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectPlanningReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionReady,

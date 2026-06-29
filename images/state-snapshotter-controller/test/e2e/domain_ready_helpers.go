@@ -25,21 +25,21 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// injectChildrenSnapshotReadyCurrent sets ChildrenSnapshotReady=True with observedGeneration == generation on a
+// injectPlanningReadyCurrent sets PlanningReady=True with observedGeneration == generation on a
 // SnapshotLike (in memory). Use it inside blocks that already drive their own
 // SyncConditionsToUnstructured + Status().Update; SyncConditionsToUnstructured persists
 // observedGeneration so the condition stays current for the generic binder barrier.
-func injectChildrenSnapshotReadyCurrent(like snapshot.SnapshotLike, generation int64) {
+func injectPlanningReadyCurrent(like snapshot.SnapshotLike, generation int64) {
 	conds := like.GetStatusConditions()
 	kept := make([]metav1.Condition, 0, len(conds)+1)
 	for _, c := range conds {
-		if c.Type == snapshot.ConditionChildrenSnapshotReady {
+		if c.Type == snapshot.ConditionPlanningReady {
 			continue
 		}
 		kept = append(kept, c)
 	}
 	kept = append(kept, metav1.Condition{
-		Type:               snapshot.ConditionChildrenSnapshotReady,
+		Type:               snapshot.ConditionPlanningReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             snapshot.ReasonCompleted,
 		Message:            "domain planning complete",

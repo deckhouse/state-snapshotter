@@ -79,7 +79,7 @@ cd pkg/snapshotsdk && go list -deps ./... | rg "state-snapshotter"
 - `MarkPlanningFailed` **не** rollback-ает уже published legs;
 - `MarkNotReady` публикует `Ready=False` с корректным reason (Р30): source invalid → `Ready=False`
   (no requeue); artifact-missing → `Ready=False` + `Requeue=true` intent; (planning failure — отдельный
-  барьер `ChildrenSnapshotReady=False` через `MarkPlanningFailed`);
+  барьер `PlanningReady=False` через `MarkPlanningFailed`);
 - SDK facade **не читает и не требует** `SnapshotContent` (content-free invariant).
 
 ## 5. После миграции доменных контроллеров на SDK
@@ -92,7 +92,7 @@ cd pkg/snapshotsdk && go list -deps ./... | rg "state-snapshotter"
 
 ```bash
 # в reconcile demo не должно остаться прямой capture-механики:
-rg -n "MergeFromWithOptimisticLock|RetryOnConflict|meta.SetStatusCondition|ConditionChildrenSnapshotReady" \
+rg -n "MergeFromWithOptimisticLock|RetryOnConflict|meta.SetStatusCondition|ConditionPlanningReady" \
   images/domain-controller/internal/controllers/demo
 ```
 

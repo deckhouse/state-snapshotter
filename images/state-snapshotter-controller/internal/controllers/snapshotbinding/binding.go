@@ -62,7 +62,7 @@ func SnapshotSubjectRefMap(apiVersion, kind, name, namespace string, uid types.U
 }
 
 // PatchUnstructuredBoundContentName records status.boundSnapshotContentName on a generic snapshot.
-// It MUST NOT publish ChildrenSnapshotReady: ChildrenSnapshotReady is a domain-planning barrier owned exclusively by the
+// It MUST NOT publish PlanningReady: PlanningReady is a domain-planning barrier owned exclusively by the
 // domain/namespace controller (the generic binder only waits for it). Self-publishing it here would make
 // the common layer a second source of truth for planning completion (and, with observedGeneration=0,
 // previously deadlocked the binder's own barrier).

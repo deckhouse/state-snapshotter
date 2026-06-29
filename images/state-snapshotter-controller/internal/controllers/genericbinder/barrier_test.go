@@ -25,16 +25,16 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// snapshotLikeWithChildrenSnapshotReady builds a SnapshotLike at the given generation. When set is true it adds a
-// ChildrenSnapshotReady condition with the given status and observedGeneration.
-func snapshotLikeWithChildrenSnapshotReady(generation int64, set bool, status metav1.ConditionStatus, observedGeneration int64) snapshot.SnapshotLike {
+// snapshotLikeWithPlanningReady builds a SnapshotLike at the given generation. When set is true it adds a
+// PlanningReady condition with the given status and observedGeneration.
+func snapshotLikeWithPlanningReady(generation int64, set bool, status metav1.ConditionStatus, observedGeneration int64) snapshot.SnapshotLike {
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
 	obj.SetName("snap")
 	obj.SetGeneration(generation)
 	if set {
 		_ = unstructured.SetNestedSlice(obj.Object, []interface{}{
 			map[string]interface{}{
-				"type":               snapshot.ConditionChildrenSnapshotReady,
+				"type":               snapshot.ConditionPlanningReady,
 				"status":             string(status),
 				"reason":             snapshot.ReasonCompleted,
 				"observedGeneration": observedGeneration,
@@ -52,23 +52,23 @@ func TestIsDomainPlanningComplete(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "ChildrenSnapshotReady True for current generation passes",
-			like: snapshotLikeWithChildrenSnapshotReady(3, true, metav1.ConditionTrue, 3),
+			name: "PlanningReady True for current generation passes",
+			like: snapshotLikeWithPlanningReady(3, true, metav1.ConditionTrue, 3),
 			want: true,
 		},
 		{
-			name: "ChildrenSnapshotReady True with stale observedGeneration does not pass",
-			like: snapshotLikeWithChildrenSnapshotReady(3, true, metav1.ConditionTrue, 2),
+			name: "PlanningReady True with stale observedGeneration does not pass",
+			like: snapshotLikeWithPlanningReady(3, true, metav1.ConditionTrue, 2),
 			want: false,
 		},
 		{
-			name: "ChildrenSnapshotReady False does not pass",
-			like: snapshotLikeWithChildrenSnapshotReady(3, true, metav1.ConditionFalse, 3),
+			name: "PlanningReady False does not pass",
+			like: snapshotLikeWithPlanningReady(3, true, metav1.ConditionFalse, 3),
 			want: false,
 		},
 		{
-			name: "no ChildrenSnapshotReady condition does not pass",
-			like: snapshotLikeWithChildrenSnapshotReady(3, false, metav1.ConditionTrue, 0),
+			name: "no PlanningReady condition does not pass",
+			like: snapshotLikeWithPlanningReady(3, false, metav1.ConditionTrue, 0),
 			want: false,
 		},
 	}

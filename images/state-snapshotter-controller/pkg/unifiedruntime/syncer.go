@@ -161,7 +161,7 @@ func (s *Syncer) Sync(ctx context.Context) error {
 				continue
 			}
 			// Domain-capture kind (demo): the dedicated planning controller owns MCR/VCR/children +
-			// ChildrenSnapshotReady, while the generic binder owns its SnapshotContent. The binder uses
+			// PlanningReady, while the generic binder owns its SnapshotContent. The binder uses
 			// its own unstructured informer and registers no field index, so it can be wired
 			// independently of the planning controller — EXCEPT in a single manager that runs both: there
 			// the planning controller's typed informer + field index must be registered first to avoid an

@@ -1,4 +1,4 @@
-# ADR: модель conditions снапшота (ChildrenSnapshotReady / ManifestsReady / VolumesReady / ChildrenReady / Ready)
+# ADR: модель conditions снапшота (PlanningReady / ManifestsReady / VolumesReady / ChildrenReady / Ready)
 
 - **Дата:** 2026-06-03
 - **Статус:** Accepted — реализовано в PR2a–PR2c. **Update 2026-06-14:** единый `RequestsReady` разнесён на две публичные линии `ManifestsReady` + `VolumesReady` (см. §2.2); формула и инварианты обновлены ниже. Нормативные выдержки — в `docs/state-snapshotter-rework/spec/system-spec.md` §3.8 / §3.9.7 (INV-COND1..6, INV-FAIL1). Этот документ — long-form запись решения (почему), не текущая спецификация.
@@ -16,22 +16,22 @@
 
 ```go
 const (
-    ConditionReady                 = "Ready"                 // external aggregate: ManifestsReady && VolumesReady && ChildrenReady
-    ConditionChildrenSnapshotReady = "ChildrenSnapshotReady" // domain/custom controller завершил планирование (gate)
-    ConditionManifestsReady        = "ManifestsReady"        // манифестная линия узла: MCP/checkpoint опубликован и Ready
-    ConditionVolumesReady          = "VolumesReady"          // волюмная линия узла: все required dataRefs[] артефакты Ready
-    ConditionChildrenReady         = "ChildrenReady"         // все child SnapshotContent.Ready=True (нет детей → True)
+    ConditionReady          = "Ready"          // external aggregate: ManifestsReady && VolumesReady && ChildrenReady
+    ConditionPlanningReady  = "PlanningReady"  // domain/custom controller завершил планирование (gate)
+    ConditionManifestsReady = "ManifestsReady" // манифестная линия узла: MCP/checkpoint опубликован и Ready
+    ConditionVolumesReady   = "VolumesReady"   // волюмная линия узла: все required dataRefs[] артефакты Ready
+    ConditionChildrenReady  = "ChildrenReady"  // все child SnapshotContent.Ready=True (нет детей → True)
 )
 ```
 
 Семантика и последовательность (хэндофф между контроллерами):
 
-1. **`ChildrenSnapshotReady`** — доменный/snapshot-контроллер первым берётся за объект и выставляет `ChildrenSnapshotReady=True`, когда закончил планирование: дети созданы и опубликованы как `status.childrenSnapshotRefs`, свои `MCR`/`VCR`/иные requests созданы. Это **gate** для общего контроллера и **барьер волны** для родителя.
-2. **`ManifestsReady` / `VolumesReady`** — common/content-path вступает **после** `ChildrenSnapshotReady` (увидел, что requests созданы) и публикует durable refs в `SnapshotContent`: `status.manifestCheckpointName` (манифестная линия) и `status.dataRefs[]` (волюмная линия). `ManifestsReady=True`, когда MCP опубликован и `Ready=True`; `VolumesReady=True`, когда все required `dataRefs[]` артефакты `Ready`.
+1. **`PlanningReady`** — доменный/snapshot-контроллер первым берётся за объект и выставляет `PlanningReady=True`, когда закончил планирование: дети созданы и опубликованы как `status.childrenSnapshotRefs`, свои `MCR`/`VCR`/иные requests созданы. Это **gate** для общего контроллера и **барьер волны** для родителя.
+2. **`ManifestsReady` / `VolumesReady`** — common/content-path вступает **после** `PlanningReady` (увидел, что requests созданы) и публикует durable refs в `SnapshotContent`: `status.manifestCheckpointName` (манифестная линия) и `status.dataRefs[]` (волюмная линия). `ManifestsReady=True`, когда MCP опубликован и `Ready=True`; `VolumesReady=True`, когда все required `dataRefs[]` артефакты `Ready`.
 3. **`ChildrenReady`** — `True`, когда у всех дочерних `SnapshotContent` `Ready=True`. Нет детей (leaf) → `True` вакуумно.
 4. **`Ready`** — агрегат **на `SnapshotContent`**: `Ready = ManifestsReady && VolumesReady && ChildrenReady`. На `Snapshot` — **только mirror** `Content.Ready` (snapshot-контроллер не пересчитывает дерево).
 
-`SelfReady` намеренно **не вводим**: он эквивалентен `ManifestsReady && VolumesReady` (т.к. обе линии ⇒ `ChildrenSnapshotReady`) и не несёт новой информации.
+`SelfReady` намеренно **не вводим**: он эквивалентен `ManifestsReady && VolumesReady` (т.к. обе линии ⇒ `PlanningReady`) и не несёт новой информации.
 
 ### 2.1. Финальная формула
 
@@ -65,19 +65,19 @@ Snapshot.Ready        = mirror(SnapshotContent.Ready)   // НЕ локальны
 
 | Объект | Conditions | Кто пишет | Срок жизни |
 |---|---|---|---|
-| **`XxxxSnapshot`** (live) | `ChildrenSnapshotReady` (своё, барьер) и `Ready` (mirror `Content.Ready`) | доменный / snapshot-контроллер | live |
+| **`XxxxSnapshot`** (live) | `PlanningReady` (своё, барьер) и `Ready` (mirror `Content.Ready`) | доменный / snapshot-контроллер | live |
 | **`SnapshotContent`** (durable) | `ManifestsReady`, `VolumesReady`, `ChildrenReady`, `Ready` | `SnapshotContentController` | durable, SoT для restore |
 
-- На live `Snapshot` несём только `ChildrenSnapshotReady` (своё) и `Ready` (mirror контента). `ManifestsReady`/`VolumesReady`/`ChildrenReady` живут **только** на `SnapshotContent` и на `Snapshot` **не зеркалятся** (иначе появился бы второй контракт под-кондишинов на live-объекте).
-- `ChildrenSnapshotReady` осмыслен только в live-фазе; на `SnapshotContent` он вырожден (implied самим фактом существования контента), поэтому на контенте не хранится.
+- На live `Snapshot` несём только `PlanningReady` (своё) и `Ready` (mirror контента). `ManifestsReady`/`VolumesReady`/`ChildrenReady` живут **только** на `SnapshotContent` и на `Snapshot` **не зеркалятся** (иначе появился бы второй контракт под-кондишинов на live-объекте).
+- `PlanningReady` осмыслен только в live-фазе; на `SnapshotContent` он вырожден (implied самим фактом существования контента), поэтому на контенте не хранится.
 - **Один писатель на объект**: snapshot-контроллер пишет все snapshot-side conditions; `SnapshotContentController` — все content-side. `SnapshotContentController` по §3.8 не читает/не пишет live `Snapshot`.
 - Mirror на `Snapshot` приходит через content→snapshot watch (field-index `status.boundSnapshotContentName`); generic binder поллит (5s).
 
 ## 4. Инварианты (MUST)
 
-- **INV-COND1 (gate-импликация):** `ManifestsReady=True ⇒ ChildrenSnapshotReady=True` и `VolumesReady=True ⇒ ChildrenSnapshotReady=True`. Requests не появляются без планирования. Этот инвариант держит совпадение `Snapshot.Ready == Content.Ready` при том, что `ChildrenSnapshotReady` не входит в формулу `Ready`.
+- **INV-COND1 (gate-импликация):** `ManifestsReady=True ⇒ PlanningReady=True` и `VolumesReady=True ⇒ PlanningReady=True`. Requests не появляются без планирования. Этот инвариант держит совпадение `Snapshot.Ready == Content.Ready` при том, что `PlanningReady` не входит в формулу `Ready`.
 - **INV-COND2 (один агрегатор):** `Ready` вычисляется ровно в одном месте — на `SnapshotContent` (`ManifestsReady && VolumesReady && ChildrenReady`). Везде остальное — mirror. Запрещён локальный пересчёт `Ready` по mirror-копиям под-кондишинов (избегаем двойной агрегации и stale-гонок).
-- **INV-COND3 (generation-gating):** `ChildrenSnapshotReady` и `Ready` MUST нести `condition.observedGeneration == object.metadata.generation`. Без этого parent wave-barrier может принять устаревший `True`. Рекомендуется gen-gating и для `ManifestsReady`/`VolumesReady`/`ChildrenReady` (единообразие).
+- **INV-COND3 (generation-gating):** `PlanningReady` и `Ready` MUST нести `condition.observedGeneration == object.metadata.generation`. Без этого parent wave-barrier может принять устаревший `True`. Рекомендуется gen-gating и для `ManifestsReady`/`VolumesReady`/`ChildrenReady` (единообразие).
 - **INV-COND4 (mirror, не пересчёт):** `Snapshot.Ready := mirror(SnapshotContent.Ready)` (status/reason/message копируются). Snapshot-контроллер не вычисляет собственный alternative reason.
 - **INV-COND5 (well-defined legs):** линии узла определены, потому что на логический узел приходится **максимум один MCR + один VCR** (spec §3.9.5). `ManifestsReady = (MCR done|нет)`; `VolumesReady = (VCR done|нет)`.
 - **INV-COND6 (вырождения):** leaf без детей → `ChildrenReady=True`; пустой MCP (0 объектов, но `manifestCheckpointName` присутствует и MCP `Ready=True`) → `ManifestsReady=True`; пустой `dataRefs[]` → `VolumesReady=True`.
@@ -115,7 +115,7 @@ Failure поднимается как **терминальный** (`ChildrenFai
 ## 6. Минимальная reason-модель
 
 ```text
-ChildrenSnapshotReady:  True/Completed | False/Planning | False/PlanningFailed
+PlanningReady:  True/Completed | False/Planning | False/PlanningFailed
 ManifestsReady:         True/Completed | False/ManifestCapturePending | False/ManifestCheckpointFailed
 VolumesReady:           True/Completed | Unknown/ManifestCapturePending | False/DataCapturePending | False/<DataArtifact*|ArtifactMissing>
 ChildrenReady:          True/Completed | False/ChildrenPending | False/ChildrenFailed
@@ -182,7 +182,7 @@ child SnapshotContent <direct-child> failed: leaf=<failed-leaf> reason=<original
 - failure одного листа делает `Ready=False` только у самого leaf и всех его ancestors;
 - sibling-ветки остаются `Ready=True`;
 - root `Ready=False` содержит диагностически полезный путь/ID до failed leaf;
-- нет нового condition сверх `ChildrenSnapshotReady` / `ManifestsReady` / `VolumesReady` / `ChildrenReady` / `Ready`;
+- нет нового condition сверх `PlanningReady` / `ManifestsReady` / `VolumesReady` / `ChildrenReady` / `Ready`;
 - `Ready` вычисляется только на `SnapshotContent`, `Snapshot` — только mirror;
 - тесты покрывают минимум: broken data artifact, broken manifest artifact, propagation глубже одного уровня (depth ≥ 2), неаффектнутый sibling.
 
@@ -207,4 +207,4 @@ child SnapshotContent <direct-child> failed: leaf=<failed-leaf> reason=<original
   - PR2a: `GraphReady → DomainReady`; барьер binder'а — `DomainReady=True` (вместо `HandledByCustomSnapshotController`).
   - PR2b: введены `RequestsReady`/`ChildrenReady`; единственный агрегатор `Ready` — на `SnapshotContent`; `Snapshot.Ready` — mirror.
   - PR2c: удалены `Bound`/`InProgress`/`HandledByCustomSnapshotController`/`HandledByCommonController`/`ManifestsReady`/`DataReady`; reasons `ChildSnapshotPending/Failed → ChildrenPending/ChildrenFailed`; idempotency binder'а — структурная (`status.boundSnapshotContentName`); бывшая E6 priority-matrix удалена, для bridge оставлен узкий helper терминальных child-failure'ов.
-- **Позже: косметический rename `DomainReady → ChildrenSnapshotReady`** (только имя condition'а, без изменения семантики/формул/инвариантов). Причина: имя не должно «протекать» внутренней (бизнес-)логикой исполнителя наружу. Везде выше по тексту и в spec используется уже новое имя `ChildrenSnapshotReady`.
+- **Позже: косметические rename'ы имени condition'а: `DomainReady → ChildrenSnapshotReady → PlanningReady`** (только имя condition'а, без изменения семантики/формул/инвариантов). Причина: имя не должно «протекать» внутренней (бизнес-)логикой исполнителя наружу, а `ChildrenSnapshotReady` вводило в заблуждение («дети готовы» вместо «узел спланирован»). Везде выше по тексту и в spec используется уже финальное имя `PlanningReady` (бывш. `ChildrenSnapshotReady`).

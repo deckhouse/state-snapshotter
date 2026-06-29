@@ -25,10 +25,11 @@ const (
 	// aggregate; on Snapshot it mirrors the bound SnapshotContent.Ready.
 	ConditionReady = "Ready"
 
-	// ConditionChildrenSnapshotReady is the domain planning gate/barrier on a snapshot: the domain
-	// controller finished planning child snapshots. It is NOT part of the Ready formula; readers must
-	// require observedGeneration == generation.
-	ConditionChildrenSnapshotReady = "ChildrenSnapshotReady"
+	// ConditionPlanningReady is the planning gate/barrier on a snapshot: the node has been planned
+	// (its child snapshot refs and own MCR/VCR have been published). It is NOT a literal "children are
+	// ready" signal and is NOT part of the Ready formula; readers must require
+	// observedGeneration == generation.
+	ConditionPlanningReady = "PlanningReady"
 
 	// ConditionManifestsArchived is a subtree latch on SnapshotContent (mirrored onto Snapshot and
 	// domain XxxxSnapshot): the manifests for this node AND all descendant content nodes have been
@@ -57,13 +58,13 @@ const (
 	// ReasonArtifactMissing: a required data artifact is missing.
 	ReasonArtifactMissing = "ArtifactMissing"
 
-	// ReasonCompleted: terminal success reason (Ready=True / ChildrenSnapshotReady=True).
+	// ReasonCompleted: terminal success reason (Ready=True / PlanningReady=True).
 	ReasonCompleted = "Completed"
 
-	// ReasonCreateChildFailed: ChildrenSnapshotReady=False — creating a child snapshot failed.
+	// ReasonCreateChildFailed: PlanningReady=False — creating a child snapshot failed.
 	ReasonCreateChildFailed = "CreateChildFailed"
 
-	// ReasonGraphPlanningFailed: ChildrenSnapshotReady=False — graph planning failed.
+	// ReasonGraphPlanningFailed: PlanningReady=False — graph planning failed.
 	ReasonGraphPlanningFailed = "GraphPlanningFailed"
 
 	// ReasonManifestsArchived: ManifestsArchived=True — this node and its whole subtree have had

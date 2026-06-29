@@ -115,7 +115,7 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 //     parent-graph planner: it CREATES one parent-owned child snapshot per source object
 //     (parent_graph.go:ensureParentOwnedChildSnapshot → r.Client.Create) and PATCHes it to maintain the
 //     ownerRef back to the root Snapshot. Without create the planner fails with
-//     ChildrenSnapshotReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
+//     PlanningReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
 //     The ownerRef does not set blockOwnerDeletion, so no /finalizers permission is required on the owner.
 //   - status-write (get/update/patch on /status): binding BoundSnapshotContentName + volume-metadata
 //     projection, co-owned via D4a.
@@ -164,7 +164,7 @@ func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.Pol
 //   - list — the SnapshotReconciler enumerates the mapped source objects (e.g. DemoVirtualMachine,
 //     DemoVirtualDisk) to build the parent-owned child graph (parent_graph.go), one-shot
 //     r.Dynamic...List(namespace) per reconcile. Without it the root Snapshot degrades to
-//     ChildrenSnapshotReady=False/SourceListForbidden.
+//     PlanningReady=False/SourceListForbidden.
 //   - get — once the graph is planned, the ManifestCaptureRequest controller fetches each named source
 //     target by name to capture its manifest (checkpoint_controller.go: r.Get(target)). Without it the MCR
 //     terminates Ready=False/Failed ("cannot get demovirtualdisks ...") and the root Snapshot hangs on

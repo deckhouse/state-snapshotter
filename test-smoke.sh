@@ -342,12 +342,12 @@ EOF
         exit 1
     fi
     
-    # Test 2: Simulate the domain controller finishing planning (set ChildrenSnapshotReady condition).
-    # IMPORTANT: the generic binder waits for ChildrenSnapshotReady=True with observedGeneration == generation
+    # Test 2: Simulate the domain controller finishing planning (set PlanningReady condition).
+    # IMPORTANT: the generic binder waits for PlanningReady=True with observedGeneration == generation
     # before creating SnapshotContent (gen-gated barrier).
     log_info ""
     log_info "═══════════════════════════════════════════════════════════════"
-    log_info "Test 2: Simulate domain controller (ChildrenSnapshotReady)"
+    log_info "Test 2: Simulate domain controller (PlanningReady)"
     log_info "═══════════════════════════════════════════════════════════════"
     
     local snapshot_resource="${SNAPSHOT_KIND,,}s.${SNAPSHOT_API_GROUP}"
@@ -356,7 +356,7 @@ EOF
         log_warn "Skipping domain controller simulation (CRD does not support conditions)"
         log_warn "SnapshotContent will NOT be created - this is expected"
     else
-        log_info "Setting ChildrenSnapshotReady=True condition (observedGeneration == generation)..."
+        log_info "Setting PlanningReady=True condition (observedGeneration == generation)..."
         
         # CRITICAL: Must use --subresource=status to patch status subresource
         # Without --subresource=status, Kubernetes will reject status.conditions
@@ -369,7 +369,7 @@ EOF
             local patch_payload=$(jq -n --arg time "$transition_time" --argjson gen "${generation:-1}" '{
                 "status": {
                     "conditions": [{
-                        "type": "ChildrenSnapshotReady",
+                        "type": "PlanningReady",
                         "status": "True",
                         "reason": "Completed",
                         "message": "Domain controller finished planning",
@@ -393,9 +393,9 @@ EOF
             # Verify condition was set
             sleep 1  # Small delay for API to update
             local condition_status=$(kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" \
-                -o jsonpath='{.status.conditions[?(@.type=="ChildrenSnapshotReady")].status}' 2>/dev/null || echo "")
+                -o jsonpath='{.status.conditions[?(@.type=="PlanningReady")].status}' 2>/dev/null || echo "")
             if [[ "$condition_status" == "True" ]]; then
-                log_success "ChildrenSnapshotReady condition set and verified"
+                log_success "PlanningReady condition set and verified"
             else
                 log_error "Condition was not set correctly (status: $condition_status)"
                 log_info "Snapshot status:"

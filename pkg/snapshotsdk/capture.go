@@ -215,7 +215,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 }
 
 func (s *sdk) MarkPlanningReady(ctx context.Context, t SnapshotAdapter, message string) error {
-	return s.patchCondition(ctx, t, storagev1alpha1.ConditionChildrenSnapshotReady, metav1.ConditionTrue, storagev1alpha1.ReasonCompleted, message)
+	return s.patchCondition(ctx, t, storagev1alpha1.ConditionPlanningReady, metav1.ConditionTrue, storagev1alpha1.ReasonCompleted, message)
 }
 
 func (s *sdk) MarkPlanningFailed(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error {
@@ -223,7 +223,7 @@ func (s *sdk) MarkPlanningFailed(ctx context.Context, t SnapshotAdapter, reason 
 	if cause != nil {
 		message = cause.Error()
 	}
-	return s.patchCondition(ctx, t, storagev1alpha1.ConditionChildrenSnapshotReady, metav1.ConditionFalse, string(reason), message)
+	return s.patchCondition(ctx, t, storagev1alpha1.ConditionPlanningReady, metav1.ConditionFalse, string(reason), message)
 }
 
 func (s *sdk) MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadySpec) error {

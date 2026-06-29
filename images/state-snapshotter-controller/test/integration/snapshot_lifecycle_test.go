@@ -87,7 +87,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		//
 		// PRECONDITION:
 		// - Snapshot created by user
-		// - Snapshot has ChildrenSnapshotReady=True (simulated)
+		// - Snapshot has PlanningReady=True (simulated)
 		//
 		// ACTIONS:
 		// 1. GenericSnapshotBinderController.Reconcile creates SnapshotContent
@@ -145,8 +145,8 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish ChildrenSnapshotReady=True for the current generation.
-			setSnapshotChildrenSnapshotReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish PlanningReady=True for the current generation.
+			setSnapshotPlanningReadyCurrent(ctx, snapshotObj)
 
 			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			// Use Eventually to wait for the controller to process the snapshot
@@ -256,8 +256,8 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// INVARIANT: No orphans - root ObjectKeeper follows Snapshot and owns retained root SnapshotContent.
 		})
 
-		It("should NOT create SnapshotContent while ChildrenSnapshotReady is stale (observedGeneration < generation)", func() {
-			// The generic binder barrier is generation-gated: a ChildrenSnapshotReady=True whose observedGeneration
+		It("should NOT create SnapshotContent while PlanningReady is stale (observedGeneration < generation)", func() {
+			// The generic binder barrier is generation-gated: a PlanningReady=True whose observedGeneration
 			// is behind metadata.generation must not let the binder proceed (no SnapshotContent created).
 			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
 				k8sClient,
@@ -276,8 +276,8 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
 			Expect(snapshotObj.GetGeneration()).To(BeNumerically(">", int64(0)))
 
-			// Publish ChildrenSnapshotReady=True but for an older generation than the live spec.
-			setSnapshotChildrenSnapshotReady(ctx, snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration()-1)
+			// Publish PlanningReady=True but for an older generation than the live spec.
+			setSnapshotPlanningReady(ctx, snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration()-1)
 
 			req := ctrl.Request{NamespacedName: types.NamespacedName{
 				Name:      snapshotObj.GetName(),
@@ -298,22 +298,22 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 					return "extract-failed"
 				}
 				return like.GetStatusContentName()
-			}, "2s", "200ms").Should(BeEmpty(), "stale ChildrenSnapshotReady must not pass the generic binder barrier")
+			}, "2s", "200ms").Should(BeEmpty(), "stale PlanningReady must not pass the generic binder barrier")
 		})
 
 		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {
 			// Current contract: the bound common SnapshotContent is driven Ready=True by its controller
 			// (source of truth) and Snapshot.Ready is a verbatim mirror of it. This previously could not
-			// converge in envtest: the binder self-asserted ChildrenSnapshotReady with observedGeneration=0 inside the
+			// converge in envtest: the binder self-asserted PlanningReady with observedGeneration=0 inside the
 			// mirror step, which its own generation-gated Step-1 barrier then rejected on every subsequent
 			// reconcile, so the mirror never re-ran after the content became Ready. Fixed by no longer
-			// writing ChildrenSnapshotReady in the mirror step (genericbinder.checkConsistencyAndSetReady): ChildrenSnapshotReady
+			// writing PlanningReady in the mirror step (genericbinder.checkConsistencyAndSetReady): PlanningReady
 			// is owned upstream (bind-time publish for childless generic snapshots / the domain controller for
 			// subtree snapshots) and the Step-1 barrier already guarantees it before the mirror runs.
 			// INTERFACE: GenericSnapshotBinderController.checkConsistencyAndSetReady
 			//
 			// PRECONDITION:
-			// - Snapshot created with ChildrenSnapshotReady=True
+			// - Snapshot created with PlanningReady=True
 			// - SnapshotContent created and has finalizer
 			//
 			// ACTIONS:
@@ -383,8 +383,8 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish ChildrenSnapshotReady=True for the current generation.
-			setSnapshotChildrenSnapshotReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish PlanningReady=True for the current generation.
+			setSnapshotPlanningReadyCurrent(ctx, snapshotObj)
 
 			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			req := ctrl.Request{

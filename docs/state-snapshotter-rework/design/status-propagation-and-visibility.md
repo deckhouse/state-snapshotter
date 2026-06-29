@@ -81,7 +81,7 @@ manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPen
 ```
 
 Terminal own-leg failures win over child failures; terminal failures win over pending; own legs win over
-children at equal severity (manifest leg before volume leg). `ChildrenSnapshotReady` is a gate/barrier and is NOT part of this formula.
+children at equal severity (manifest leg before volume leg). `PlanningReady` is a gate/barrier and is NOT part of this formula.
 
 ## 3. Message formats
 
