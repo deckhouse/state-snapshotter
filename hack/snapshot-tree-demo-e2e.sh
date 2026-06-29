@@ -6,7 +6,7 @@
 #   - GVK/priority registration and priority-driven tree shape (+ inversion);
 #   - PlanningReady planning barrier (domain-owned, generation-gated);
 #   - artifacts born under execution ObjectKeeper and handed off to SnapshotContent;
-#   - ManifestsReady / VolumesReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
+#   - ManifestsReady / VolumeReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
 #   - damaged-leaf Ready=False propagation to root and recovery back to Ready=True;
 #   - sibling isolation;
 #   - both volume-capture data paths: an orphan/standalone PVC (demo-pvc) captured via a CSI
@@ -752,10 +752,10 @@ save_artifacts() {
 	printf 'namespace=%s\nrun_id=%s\nstage=%s\ncsd=%s\n' "${ns}" "${RUN_ID}" "${stage}" "${CSD_NAME}" >"${dir}/run-context.txt"
 }
 
-# condition_table <ns>: Ready/ManifestsReady/VolumesReady/ChildrenReady/PlanningReady for snapshots + contents.
+# condition_table <ns>: Ready/ManifestsReady/VolumeReady/ChildrenReady/PlanningReady for snapshots + contents.
 condition_table() {
 	local ns="$1"
-	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumesReady|ChildrenReady|PlanningReady(obsGen/gen)"
+	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumeReady|ChildrenReady|PlanningReady(obsGen/gen)"
 	local res
 	for res in "${SNAP_RES}" "${VMSNAP_RES}" "${DISKSNAP_RES}"; do
 		kubectl -n "${ns}" get "${res}" -o json 2>/dev/null | jq -r '
@@ -763,7 +763,7 @@ condition_table() {
 				.kind, .metadata.name,
 				(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
+				(([.status.conditions[]?|select(.type=="VolumeReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-") + "(" +
 				((([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0)|tostring) + "/" +
@@ -776,7 +776,7 @@ condition_table() {
 			"SnapshotContent", .metadata.name,
 			(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
+			(([.status.conditions[]?|select(.type=="VolumeReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-")
 		] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
@@ -1228,13 +1228,13 @@ note "contents: root=${ROOT_CONTENT} vm=${VM_CONTENT} leaf=${LEAF_CONTENT} sibli
 	echo "sibling_snapshot=${SIBLING_SNAP}"; echo "sibling_content=${SIBLING_CONTENT}"
 } >"$(stage_dir 02-tree-ready)/tree-handles.txt"
 
-# Happy-path conditions: every content ManifestsReady=VolumesReady=ChildrenReady=Ready=True.
+# Happy-path conditions: every content ManifestsReady=VolumeReady=ChildrenReady=Ready=True.
 for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}"; do
 	[[ -n "${c}" ]] || continue
 	wait_until "SnapshotContent ${c} Ready=True" content_ready_true "${c}" || die "content ${c} not Ready"
 	cj="$(get_json "${CONTENT_RES}" "" "${c}")"
 	[[ "$(cond_field "${cj}" ManifestsReady status)" == "True" ]] || die "content ${c} ManifestsReady != True while Ready=True (inconsistent aggregation)"
-	[[ "$(cond_field "${cj}" VolumesReady status)" == "True" ]] || die "content ${c} VolumesReady != True while Ready=True (inconsistent aggregation)"
+	[[ "$(cond_field "${cj}" VolumeReady status)" == "True" ]] || die "content ${c} VolumeReady != True while Ready=True (inconsistent aggregation)"
 	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || die "content ${c} ChildrenReady != True while Ready=True (inconsistent aggregation)"
 done
 
@@ -2108,10 +2108,10 @@ elif [[ -z "${DATA_VSC}" ]]; then
 else
 	if patch_vsc_ready_to_use "${DATA_VSC}" false; then
 		VSC_PENDING_DONE=1
-		wait_until "content ${DATA_CONTENT} VolumesReady=False (data pending)" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
-			|| die "content ${DATA_CONTENT} VolumesReady did not flip False on VSC readyToUse=false"
-		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumesReady reason)"
+		wait_until "content ${DATA_CONTENT} VolumeReady=False (data pending)" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumeReady\")][0].status)//\"\"') == False ]]" \
+			|| die "content ${DATA_CONTENT} VolumeReady did not flip False on VSC readyToUse=false"
+		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumeReady reason)"
 		[[ "${RR_REASON}" == "DataCapturePending" ]] || die "data pending reason=${RR_REASON} (expected DataCapturePending)"
 		wait_until "root Snapshot Ready=False mirror" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
@@ -2453,7 +2453,7 @@ log "15-chunk-deleted: done"
 # ---------------------------------------------------------------------------
 # The orphan demo-pvc data leg is durable via a retained VolumeSnapshotContent referenced by the root
 # content dataRefs[]; the CSI VolumeSnapshot is only a visibility leaf. Deleting the retained VSC is a
-# real data loss: the root content must flip VolumesReady=False/ArtifactMissing (no stale Ready=True
+# real data loss: the root content must flip VolumeReady=False/ArtifactMissing (no stale Ready=True
 # over a missing data artifact). Non-recoverable (Retain means CSI will not recreate it).
 begin_stage "16-orphan-vsc-deleted"
 resolve_main_tree_handles
@@ -2470,10 +2470,10 @@ else
 	VSC_DEL_OUT="$(kubectl delete "${VSC_RES}" "${ORPHAN_VSC}" --wait=false 2>&1)"; VSC_DEL_RC=$?
 	printf '%s\n' "${VSC_DEL_OUT}" >"${CDIR}/delete-stderr.txt"
 	if [[ "${VSC_DEL_RC}" -eq 0 ]]; then
-		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} VolumesReady=False after orphan VSC delete" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
-			|| die "16: root content VolumesReady did not flip False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (artifact wake-up + revalidation both failed to fire)"
-		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" VolumesReady reason)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} VolumeReady=False after orphan VSC delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumeReady\")][0].status)//\"\"') == False ]]" \
+			|| die "16: root content VolumeReady did not flip False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (artifact wake-up + revalidation both failed to fire)"
+		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" VolumeReady reason)"
 		[[ "${RR_REASON}" == "ArtifactMissing" ]] && note "16: orphan VSC deletion surfaced ArtifactMissing at root" \
 			|| die "16: orphan VSC missing reason=${RR_REASON} (expected ArtifactMissing)"
 		wait_until_to "${INVALIDATION_WAIT_SEC}" "root Snapshot ${SNAP} Ready=False after orphan VSC delete" \
@@ -2503,10 +2503,10 @@ elif [[ -z "${DATA_VSC}" ]]; then
 	note "no VSC dataRef to delete; skipped"
 	save_artifacts "10-vsc-missing" "${NS}"
 elif kubectl delete "${VSC_RES}" "${DATA_VSC}" --wait=false 2>/dev/null; then
-	wait_until_to "${INVALIDATION_WAIT_SEC}" "content ${DATA_CONTENT} VolumesReady=False (artifact missing)" \
-		bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
-		|| die "content ${DATA_CONTENT} VolumesReady did not flip False within ${INVALIDATION_WAIT_SEC}s after VSC delete (artifact-missing not detected)"
-	RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumesReady reason)"
+	wait_until_to "${INVALIDATION_WAIT_SEC}" "content ${DATA_CONTENT} VolumeReady=False (artifact missing)" \
+		bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumeReady\")][0].status)//\"\"') == False ]]" \
+		|| die "content ${DATA_CONTENT} VolumeReady did not flip False within ${INVALIDATION_WAIT_SEC}s after VSC delete (artifact-missing not detected)"
+	RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumeReady reason)"
 	[[ "${RR_REASON}" == "ArtifactMissing" ]] || die "missing-artifact reason=${RR_REASON} (expected ArtifactMissing)"
 	[[ -n "${SIBLING_CONTENT}" && "${SIBLING_CONTENT}" != "${DATA_CONTENT}" ]] && { content_ready_true "${SIBLING_CONTENT}" \
 		&& note "sibling isolation held under VSC delete" || die "sibling content ${SIBLING_CONTENT} not Ready under VSC delete (isolation broken)"; }

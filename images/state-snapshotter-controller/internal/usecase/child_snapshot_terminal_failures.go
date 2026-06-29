@@ -18,7 +18,7 @@ limitations under the License.
 // Each ref carries explicit apiVersion/kind/name; the child object is loaded with a single Get (no registry scan).
 //
 // This is NOT a Ready aggregator. Final readiness is owned by SnapshotContent
-// (Ready = ManifestsReady && VolumesReady && ChildrenReady) and Snapshot.Ready mirrors the bound SnapshotContent.Ready.
+// (Ready = ManifestsReady && VolumeReady && ChildrenReady) and Snapshot.Ready mirrors the bound SnapshotContent.Ready.
 // The helpers here serve two narrow purposes:
 //   - the priority-wave barrier (parent_graph.go), which must detect terminal child failures;
 //   - the single Snapshot.Ready bridge exception for child-Snapshot capture failures that no

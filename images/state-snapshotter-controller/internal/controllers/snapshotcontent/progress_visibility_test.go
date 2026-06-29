@@ -46,7 +46,7 @@ func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstru
 }
 
 // Phase 1 revalidation-without-watch: a SnapshotContent that was Ready=True must, on a later reconcile
-// that observes the published data artifact missing, recompute VolumesReady=False / Ready=False with
+// that observes the published data artifact missing, recompute VolumeReady=False / Ready=False with
 // reason ArtifactMissing and the artifact kind/name in the message. No watch is involved. The manifest
 // leg stays Ready=True (the failure is on the volume leg only).
 func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
@@ -65,8 +65,8 @@ func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True (manifest leg unaffected)", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionFalse || !plan.volumesFailed {
-		t.Fatalf("volumesReady=%s failed=%v, want False/terminal", plan.volumesReady, plan.volumesFailed)
+	if plan.volumeReady != metav1.ConditionFalse || !plan.volumeFailed {
+		t.Fatalf("volumeReady=%s failed=%v, want False/terminal", plan.volumeReady, plan.volumeFailed)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonArtifactMissing {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonArtifactMissing)
@@ -105,8 +105,8 @@ func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True (MCP ready)", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionFalse || plan.volumesFailed {
-		t.Fatalf("volumesReady=%s failed=%v, want False/non-terminal", plan.volumesReady, plan.volumesFailed)
+	if plan.volumeReady != metav1.ConditionFalse || plan.volumeFailed {
+		t.Fatalf("volumeReady=%s failed=%v, want False/non-terminal", plan.volumeReady, plan.volumeFailed)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonDataCapturePending {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonDataCapturePending)

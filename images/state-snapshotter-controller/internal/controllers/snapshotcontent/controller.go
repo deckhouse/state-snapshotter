@@ -336,7 +336,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Step 3: Content status aggregation and Ready condition.
 	// The common storage.deckhouse.io/SnapshotContent is the ONLY content carrier in the unified
 	// runtime (every snapshot kind maps to CommonSnapshotContentGVK), and it owns the aggregate
-	// condition model: ManifestsReady + VolumesReady + ChildrenReady + derived Ready
+	// condition model: ManifestsReady + VolumeReady + ChildrenReady + derived Ready
 	// (INV-COND2). No non-common SnapshotContent GVK is registered, so there is no other writer.
 	if !isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
 		logger.V(1).Info("non-common SnapshotContent GVK is not managed by the unified runtime; skipping",
@@ -366,19 +366,19 @@ func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
 }
 
 // commonContentStatusPlan is the SnapshotContent aggregation outcome. It carries the own-node legs
-// (ManifestsReady = own MCP; VolumesReady = own data refs; ChildrenReady = child SnapshotContents) and
+// (ManifestsReady = own MCP; VolumeReady = own data refs; ChildrenReady = child SnapshotContents) and
 // the derived Ready. Ready is the single aggregate on SnapshotContent:
-// Ready = ManifestsReady && VolumesReady && ChildrenReady (INV-COND2).
+// Ready = ManifestsReady && VolumeReady && ChildrenReady (INV-COND2).
 type commonContentStatusPlan struct {
 	manifestsReady   metav1.ConditionStatus
 	manifestsReason  string
 	manifestsMessage string
 	manifestsFailed  bool // terminal (vs pending) when manifestsReady != True
 
-	volumesReady   metav1.ConditionStatus
-	volumesReason  string
-	volumesMessage string
-	volumesFailed  bool // terminal (vs pending) when volumesReady != True
+	volumeReady   metav1.ConditionStatus
+	volumeReason  string
+	volumeMessage string
+	volumeFailed  bool // terminal (vs pending) when volumeReady != True
 
 	childrenReady   metav1.ConditionStatus
 	childrenReason  string
@@ -445,7 +445,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	gen := obj.GetGeneration()
 	desired := []metav1.Condition{
 		{Type: snapshot.ConditionManifestsReady, Status: plan.manifestsReady, Reason: plan.manifestsReason, Message: plan.manifestsMessage, ObservedGeneration: gen},
-		{Type: snapshot.ConditionVolumesReady, Status: plan.volumesReady, Reason: plan.volumesReason, Message: plan.volumesMessage, ObservedGeneration: gen},
+		{Type: snapshot.ConditionVolumeReady, Status: plan.volumeReady, Reason: plan.volumeReason, Message: plan.volumeMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionChildrenReady, Status: plan.childrenReady, Reason: plan.childrenReason, Message: plan.childrenMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionReady, Status: plan.readyStatus, Reason: plan.readyReason, Message: plan.readyMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionManifestsArchived, Status: plan.manifestsArchivedStatus, Reason: plan.manifestsArchivedReason, Message: plan.manifestsArchivedMessage, ObservedGeneration: gen},
@@ -503,11 +503,11 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 	return r.reconcileCommonSnapshotContentStatus(ctx, obj)
 }
 
-// buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumesReady, ChildrenReady, the
+// buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumeReady, ChildrenReady, the
 // ManifestsArchived subtree latch, the residual-sweep gate, and the derived Ready. Ready priority (single
 // reason when several legs are not satisfied):
 //
-//	manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > archivePending > residualSweepPending > Completed
+//	manifestsFailed > volumeFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > archivePending > residualSweepPending > Completed
 //
 // Terminal failures win over pending (actionable first); own-node legs win over children, and the
 // manifest leg wins over the volume leg at equal severity. ManifestsArchived is a low-priority gate: it
@@ -523,9 +523,9 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		manifestsMessage: "waiting for manifest capture",
 		// Volume leg is not evaluated until the manifest leg is Ready (kept sequencing, v1): Unknown,
 		// not False, so it does not look like a volume failure.
-		volumesReady:    metav1.ConditionUnknown,
-		volumesReason:   snapshot.ReasonManifestCapturePending,
-		volumesMessage:  "data leg not evaluated until manifest capture is ready",
+		volumeReady:     metav1.ConditionUnknown,
+		volumeReason:    snapshot.ReasonManifestCapturePending,
+		volumeMessage:   "data leg not evaluated until manifest capture is ready",
 		childrenReady:   metav1.ConditionTrue,
 		childrenReason:  snapshot.ReasonCompleted,
 		childrenMessage: "no child content",
@@ -568,10 +568,10 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = plan.manifestsReason
 		plan.readyMessage = plan.manifestsMessage
-	case plan.volumesReady != metav1.ConditionTrue && plan.volumesFailed:
+	case plan.volumeReady != metav1.ConditionTrue && plan.volumeFailed:
 		plan.readyStatus = metav1.ConditionFalse
-		plan.readyReason = plan.volumesReason
-		plan.readyMessage = plan.volumesMessage
+		plan.readyReason = plan.volumeReason
+		plan.readyMessage = plan.volumeMessage
 	case plan.childrenReady != metav1.ConditionTrue && plan.childrenFailed:
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = plan.childrenReason
@@ -580,10 +580,10 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = plan.manifestsReason
 		plan.readyMessage = plan.manifestsMessage
-	case plan.volumesReady != metav1.ConditionTrue:
+	case plan.volumeReady != metav1.ConditionTrue:
 		plan.readyStatus = metav1.ConditionFalse
-		plan.readyReason = plan.volumesReason
-		plan.readyMessage = plan.volumesMessage
+		plan.readyReason = plan.volumeReason
+		plan.readyMessage = plan.volumeMessage
 	case plan.childrenReady != metav1.ConditionTrue:
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = plan.childrenReason
@@ -917,8 +917,8 @@ func isTerminalDataFailure(reason string) bool {
 }
 
 // fillOwnLegs evaluates this node's own legs into plan: ManifestsReady from the ManifestCheckpoint and
-// VolumesReady from data artifacts. Children are not considered here. Sequencing (v1): the volume leg is
-// only evaluated once the manifest leg is Ready; until then VolumesReady stays at its initial
+// VolumeReady from data artifacts. Children are not considered here. Sequencing (v1): the volume leg is
+// only evaluated once the manifest leg is Ready; until then VolumeReady stays at its initial
 // Unknown/ManifestCapturePending (not evaluated yet — not a volume failure). Independent leg evaluation
 // is a future follow-up.
 func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
@@ -962,16 +962,16 @@ func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstru
 		return err
 	}
 	if !dataReady {
-		plan.volumesReady = metav1.ConditionFalse
-		plan.volumesReason = dataReason
-		plan.volumesMessage = dataMessage
-		plan.volumesFailed = isTerminalDataFailure(dataReason)
+		plan.volumeReady = metav1.ConditionFalse
+		plan.volumeReason = dataReason
+		plan.volumeMessage = dataMessage
+		plan.volumeFailed = isTerminalDataFailure(dataReason)
 		return nil
 	}
 
-	plan.volumesReady = metav1.ConditionTrue
-	plan.volumesReason = snapshot.ReasonCompleted
-	plan.volumesMessage = "data is ready"
+	plan.volumeReady = metav1.ConditionTrue
+	plan.volumeReason = snapshot.ReasonCompleted
+	plan.volumeMessage = "data is ready"
 	return nil
 }
 

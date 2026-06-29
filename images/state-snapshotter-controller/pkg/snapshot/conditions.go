@@ -47,17 +47,17 @@ const (
 )
 
 // Condition types: the public condition model
-// (PlanningReady, ManifestsReady, VolumesReady, ChildrenReady, Ready).
+// (PlanningReady, ManifestsReady, VolumeReady, ChildrenReady, Ready).
 const (
 	// ConditionManifestsReady reports this node's own manifest leg readiness: the manifest
 	// capture checkpoint (status.manifestCheckpointName) is published and Ready (empty archive counts).
 	// It does not consider the volume leg or children.
 	ConditionManifestsReady = "ManifestsReady"
 
-	// ConditionVolumesReady reports this node's own volume/data leg readiness: all required data
-	// artifacts (status.dataRefs[]) are Ready (an empty dataRefs[] is VolumesReady=True vacuously).
+	// ConditionVolumeReady reports this node's own volume/data leg readiness: the node's data
+	// artifact (status.dataRef) is Ready (a node with no dataRef is VolumeReady=True vacuously).
 	// It does not consider the manifest leg or children.
-	ConditionVolumesReady = "VolumesReady"
+	ConditionVolumeReady = "VolumeReady"
 
 	// ConditionChildrenReady reports that all child SnapshotContents are Ready=True
 	// (a leaf with no children is ChildrenReady=True vacuously).
@@ -69,7 +69,7 @@ const (
 	ReasonContentMissing       = "ContentMissing"
 	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
 	// ReasonArtifactNotReady is an internal/compat reason for "artifact exists but not ready yet".
-	// The data leg surfaces this state on VolumesReady/Ready as ReasonDataCapturePending (progress-aware);
+	// The data leg surfaces this state on VolumeReady/Ready as ReasonDataCapturePending (progress-aware);
 	// ReasonArtifactNotReady is retained for internal classification and backward compatibility.
 	ReasonArtifactNotReady = "ArtifactNotReady"
 	// ReasonDataCapturePending is the surfaced pending reason for the data leg: published data artifacts

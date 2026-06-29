@@ -104,13 +104,13 @@ const (
 )
 
 // Condition types. The Ready / PlanningReady contract constants come from api/storage; the leg
-// conditions (ManifestsReady / VolumesReady / ChildrenReady) live in the controller image's pkg/snapshot
+// conditions (ManifestsReady / VolumeReady / ChildrenReady) live in the controller image's pkg/snapshot
 // and are mirrored here as the stable public contract to keep the e2e module dependency-light.
 const (
 	condReady          = storagev1alpha1.ConditionReady
 	condPlanningReady  = storagev1alpha1.ConditionPlanningReady
 	condManifestsReady = "ManifestsReady"
-	condVolumesReady   = "VolumesReady"
+	condVolumeReady    = "VolumeReady"
 	condChildrenReady  = "ChildrenReady"
 )
 
@@ -547,7 +547,7 @@ func waitSnapshotReady(ctx context.Context, ns, name string, timeout time.Durati
 // True. The whole set shares a SINGLE timeout budget (one GET per poll checks every leg) rather than
 // granting each leg its own full timeout, so the caller's context can be sized to one `timeout`.
 func waitSnapshotContentReady(ctx context.Context, name string, timeout time.Duration) error {
-	required := []string{condManifestsReady, condVolumesReady, condChildrenReady, condReady}
+	required := []string{condManifestsReady, condVolumeReady, condChildrenReady, condReady}
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {

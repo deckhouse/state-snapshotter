@@ -136,7 +136,7 @@ func manifestCheckpointWithReady(name string, status metav1.ConditionStatus, rea
 	return mcp
 }
 
-// MCP ready, no data refs, no children -> ManifestsReady=True, VolumesReady=True, Ready=True/Completed.
+// MCP ready, no data refs, no children -> ManifestsReady=True, VolumeReady=True, Ready=True/Completed.
 func TestContentPlanAllReadyNoChildren(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -151,8 +151,8 @@ func TestContentPlanAllReadyNoChildren(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady = %s, want True", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionTrue {
-		t.Fatalf("volumesReady = %s, want True (no data refs)", plan.volumesReady)
+	if plan.volumeReady != metav1.ConditionTrue {
+		t.Fatalf("volumeReady = %s, want True (no data refs)", plan.volumeReady)
 	}
 	if plan.childrenReady != metav1.ConditionTrue {
 		t.Fatalf("childrenReady = %s, want True", plan.childrenReady)
@@ -176,8 +176,8 @@ func TestContentPlanManifestsPending(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionFalse || plan.manifestsFailed {
 		t.Fatalf("manifestsReady=%s failed=%v, want False/non-terminal", plan.manifestsReady, plan.manifestsFailed)
 	}
-	if plan.volumesReady != metav1.ConditionUnknown || plan.volumesReason != snapshot.ReasonManifestCapturePending {
-		t.Fatalf("volumesReady=%s/%s, want Unknown/%s", plan.volumesReady, plan.volumesReason, snapshot.ReasonManifestCapturePending)
+	if plan.volumeReady != metav1.ConditionUnknown || plan.volumeReason != snapshot.ReasonManifestCapturePending {
+		t.Fatalf("volumeReady=%s/%s, want Unknown/%s", plan.volumeReady, plan.volumeReason, snapshot.ReasonManifestCapturePending)
 	}
 	if plan.childrenReady != metav1.ConditionTrue {
 		t.Fatalf("childrenReady=%s, want True", plan.childrenReady)
@@ -187,7 +187,7 @@ func TestContentPlanManifestsPending(t *testing.T) {
 	}
 }
 
-// ManifestsReady=True, VolumesReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildrenPending.
+// ManifestsReady=True, VolumeReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildrenPending.
 func TestContentPlanChildrenPending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -203,8 +203,8 @@ func TestContentPlanChildrenPending(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionTrue {
-		t.Fatalf("volumesReady=%s, want True", plan.volumesReady)
+	if plan.volumeReady != metav1.ConditionTrue {
+		t.Fatalf("volumeReady=%s, want True", plan.volumeReady)
 	}
 	if plan.childrenReady != metav1.ConditionFalse || plan.childrenFailed {
 		t.Fatalf("childrenReady=%s failed=%v, want False/non-terminal", plan.childrenReady, plan.childrenFailed)
@@ -214,7 +214,7 @@ func TestContentPlanChildrenPending(t *testing.T) {
 	}
 }
 
-// ManifestsReady=True, VolumesReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildrenFailed.
+// ManifestsReady=True, VolumeReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildrenFailed.
 func TestContentPlanChildrenFailed(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -353,7 +353,7 @@ func TestComputeManifestsArchived_LeafLatchesWithSnapshotRef(t *testing.T) {
 	}
 }
 
-// reconcileCommonSnapshotContentStatus publishes all conditions (ManifestsReady/VolumesReady/ChildrenReady/Ready)
+// reconcileCommonSnapshotContentStatus publishes all conditions (ManifestsReady/VolumeReady/ChildrenReady/Ready)
 // gen-gated on a real status update.
 func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	ctx := context.Background()
@@ -385,7 +385,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumesReady, snapshot.ConditionChildrenReady, snapshot.ConditionManifestsArchived, snapshot.ConditionReady} {
+	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumeReady, snapshot.ConditionChildrenReady, snapshot.ConditionManifestsArchived, snapshot.ConditionReady} {
 		cond := snapshot.GetCondition(contentLike, ct)
 		if cond == nil {
 			t.Fatalf("condition %s missing", ct)
@@ -401,7 +401,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 
 // Ready must stay False while the ManifestsArchived subtree latch is still Capturing (here: a declared
 // child is not yet linked into childrenSnapshotContentRefs), EVEN THOUGH the live legs (ManifestsReady /
-// VolumesReady / ChildrenReady) are all satisfied. ManifestsArchived is the lowest-priority Ready gate, so
+// VolumeReady / ChildrenReady) are all satisfied. ManifestsArchived is the lowest-priority Ready gate, so
 // the first Ready=True is blocked until the whole subtree's manifests are archived. The resulting !ready is
 // what keeps the Reconcile loop requeuing until the archive wave converges.
 func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {

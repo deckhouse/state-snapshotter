@@ -23,8 +23,8 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="ManifestsReady")].status
       name: Manifests
       type: string
-    - jsonPath: .status.conditions[?(@.type=="VolumesReady")].status
-      name: Volumes
+    - jsonPath: .status.conditions[?(@.type=="VolumeReady")].status
+      name: Volume
       type: string
     - jsonPath: .status.conditions[?(@.type=="ChildrenReady")].status
       name: Children

@@ -56,7 +56,7 @@
 
 **Текущая runtime-модель** (нормативно — [`spec/system-spec.md`](../../spec/system-spec.md) §3.8 / §3.9.7):
 
-- Готовность вычисляется **ровно на `SnapshotContent`** (единственный агрегатор, INV-COND2): `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildrenReady`.
+- Готовность вычисляется **ровно на `SnapshotContent`** (единственный агрегатор, INV-COND2): `SnapshotContent.Ready = ManifestsReady && VolumeReady && ChildrenReady`.
 - `Snapshot.Ready` — **зеркало** bound `SnapshotContent.Ready` (status/reason/message копируются), без локального пересчёта дерева (INV-COND4).
 - Приоритет reason у `Ready` (один reason при нескольких упавших ногах): `manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed` — терминальные провалы первыми, свой узел перед детьми (manifest перед volume).
 - Failure листа поднимается **только** по ancestor-chain (INV-FAIL1): каждый предок получает `ChildrenReady=False` / `Ready=False` / reason `ChildrenFailed`, а `message` сохраняет имя failed-потомка и исходный reason/message (кумулятивно по глубине); sibling-ветки не затрагиваются.

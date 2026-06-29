@@ -37,8 +37,8 @@ func TestContentPlanMCPNotFoundPending(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionFalse || plan.manifestsFailed {
 		t.Fatalf("manifestsReady=%s failed=%v, want False/non-terminal", plan.manifestsReady, plan.manifestsFailed)
 	}
-	if plan.volumesReady != metav1.ConditionUnknown || plan.volumesReason != snapshot.ReasonManifestCapturePending {
-		t.Fatalf("volumesReady=%s/%s, want Unknown/%s (volume leg not evaluated yet)", plan.volumesReady, plan.volumesReason, snapshot.ReasonManifestCapturePending)
+	if plan.volumeReady != metav1.ConditionUnknown || plan.volumeReason != snapshot.ReasonManifestCapturePending {
+		t.Fatalf("volumeReady=%s/%s, want Unknown/%s (volume leg not evaluated yet)", plan.volumeReady, plan.volumeReason, snapshot.ReasonManifestCapturePending)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCapturePending {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonManifestCapturePending)
@@ -64,8 +64,8 @@ func TestContentPlanMCPFailedTerminal(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionFalse || !plan.manifestsFailed {
 		t.Fatalf("manifestsReady=%s failed=%v, want False/terminal", plan.manifestsReady, plan.manifestsFailed)
 	}
-	if plan.volumesReady != metav1.ConditionUnknown {
-		t.Fatalf("volumesReady=%s, want Unknown (volume leg not evaluated under manifest failure)", plan.volumesReady)
+	if plan.volumeReady != metav1.ConditionUnknown {
+		t.Fatalf("volumeReady=%s, want Unknown (volume leg not evaluated under manifest failure)", plan.volumeReady)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCheckpointFailed {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonManifestCheckpointFailed)
@@ -342,7 +342,7 @@ func TestSelfHealVSCDeletingNotPatched(t *testing.T) {
 
 // --- Propagation: terminal vs pending child classification, with sibling isolation ---
 
-// A leaf VolumesReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
+// A leaf VolumeReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
 // and only the failed child drives the failure (the ready sibling is untouched).
 func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	ctx := context.Background()
@@ -369,7 +369,7 @@ func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	}
 }
 
-// A leaf VolumesReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
+// A leaf VolumeReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
 // not ChildrenFailed (a transient child must not fail the tree).
 func TestPropagationDataCapturePendingToChildrenPending(t *testing.T) {
 	ctx := context.Background()

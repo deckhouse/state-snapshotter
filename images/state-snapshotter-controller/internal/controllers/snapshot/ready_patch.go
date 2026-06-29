@@ -43,7 +43,7 @@ import (
 //
 //   - PRE-BIND / PRE-PUBLISH PLANNING/CAPTURE FAILURES via failCapture(): these all happen before the root
 //     publishes its own truth refs (manifestCheckpointName / dataRefs), so SnapshotContent cannot yet carry
-//     them through ManifestsReady/VolumesReady:
+//     them through ManifestsReady/VolumeReady:
 //   - "ListFailed"                — building capture targets failed (capture.go);
 //   - "CapturePlanDrift"          — plain N2a MCR plan drift, terminal (capture.go);
 //   - "VolumeCaptureTargetsFailed"/"VolumeCaptureFailed" — volume capture planning/exec (volume_capture.go);
