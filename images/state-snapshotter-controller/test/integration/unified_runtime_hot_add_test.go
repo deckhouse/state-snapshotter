@@ -109,7 +109,7 @@ var _ = Describe("Integration: unified runtime hot-add (CSD → Sync)", Serial, 
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: hotCSDName}, hook)).To(Succeed())
 		gen := hook.GetGeneration()
 		meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-			Type:               controllers.CSDConditionRBACReady,
+			Type:               controllers.CSDConditionSourceAccessGranted,
 			Status:             metav1.ConditionTrue,
 			Reason:             "IntegrationHook",
 			Message:            "hot-add test",

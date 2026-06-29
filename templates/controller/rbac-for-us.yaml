@@ -164,10 +164,10 @@ rules:
 
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
 # Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
-# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD/DSC
-# condition RBACReady=True. See docs/state-snapshotter-rework/operations/project-status.md for the
+# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD
+# condition SourceAccessGranted=True. See docs/state-snapshotter-rework/operations/project-status.md for the
 # rollout dependency (live-demo requires the external demo-domain RBAC to be provisioned out-of-band
-# until the RBACReady hook lands).
+# until the SourceAccessGranted hook lands).
 
 ---
 # Transient per-namespace capture role (Phase 5.1). This wildcard read-only ClusterRole is deployed with

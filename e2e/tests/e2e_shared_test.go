@@ -75,7 +75,7 @@ const (
 
 	moduleName = "state-snapshotter"
 	// The demo domain ships two flat CSDs (one snapshot kind per object): the structural VM snapshot
-	// and the data-backed disk snapshot. Both must reach RBACReady before specs run.
+	// and the data-backed disk snapshot. Both must reach SourceAccessGranted before specs run.
 	demoVMCSDName   = "demo-virtual-machine"
 	demoDiskCSDName = "demo-virtual-disk"
 	d8ModuleNS      = "d8-state-snapshotter"
@@ -309,14 +309,14 @@ func cleanupNestedTestCluster() {
 // --- module / CSD readiness ------------------------------------------------
 
 // waitModuleAndCSDReady blocks until the state-snapshotter module is Ready and the demo CSD has reached
-// RBACReady=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
+// SourceAccessGranted=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
 func waitModuleAndCSDReady(ctx context.Context) error {
 	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO); err != nil {
 		return fmt.Errorf("module %s not Ready: %w", moduleName, err)
 	}
 	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
-		if err := waitObjectCondition(ctx, csdGVR, "", csd, "RBACReady", "True", suiteCfg.moduleReadyTO); err != nil {
-			return fmt.Errorf("demo CSD %s not RBACReady: %w", csd, err)
+		if err := waitObjectCondition(ctx, csdGVR, "", csd, "SourceAccessGranted", "True", suiteCfg.moduleReadyTO); err != nil {
+			return fmt.Errorf("demo CSD %s not SourceAccessGranted: %w", csd, err)
 		}
 	}
 	return nil

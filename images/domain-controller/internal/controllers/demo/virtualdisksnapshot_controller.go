@@ -50,7 +50,7 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 	// RBAC is not generated from kubebuilder markers in this module.
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
-	// before RBACReady=True is set on CSD.
+	// before SourceAccessGranted=True is set on CSD.
 	//
 	// Content-free for SNAPSHOT reconcilers: NO SnapshotContent watch/informer here. The core
 	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind

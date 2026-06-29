@@ -40,7 +40,7 @@ Legacy terms are allowed only in explicitly historical documents. Do not use his
 ### 4. Unified line + CSD (реестр типов и динамические watches)
 
 - **`CustomSnapshotDefinition` (CSD)** — кластерный объект: модуль декларирует, какие **CRD имёна** соответствуют паре snapshot / snapshot content.
-- После формулы **Accepted + RBACReady** (+ поколения) CSD участвует в **merge** с bootstrap; `pkg/unifiedruntime` делает **additive** watches без рестарта pod для новых eligible типов.
+- После формулы **Accepted + SourceAccessGranted** (+ поколения) CSD участвует в **merge** с bootstrap; `pkg/unifiedruntime` делает **additive** watches без рестарта pod для новых eligible типов.
 - **Bootstrap (R5):** env `STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS` и Helm values — см. [`operations/runbook-degraded-and-unified-runtime.md`](operations/runbook-degraded-and-unified-runtime.md) §4. Unified/generic runtime в v0 always-on.
 - Ограничения (unwatch, stale) — там же §1–§3.
 

@@ -406,10 +406,10 @@ func moduleLabels() map[string]string {
 	}
 }
 
-// desiredRBACReadyCondition builds the RBACReady condition value to write on a CSD.
-func desiredRBACReadyCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
+// desiredSourceAccessGrantedCondition builds the SourceAccessGranted condition value to write on a CSD.
+func desiredSourceAccessGrantedCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
 	return metav1.Condition{
-		Type:               consts.CSDConditionRBACReady,
+		Type:               consts.CSDConditionSourceAccessGranted,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -418,16 +418,16 @@ func desiredRBACReadyCondition(generation int64, status metav1.ConditionStatus, 
 	}
 }
 
-// patchCSDRBACReady performs a read-modify-update on the CSD status to set only
-// the RBACReady condition, preserving Accepted and Ready (owned by the controller).
+// patchCSDSourceAccessGranted performs a read-modify-update on the CSD status to set only
+// the SourceAccessGranted condition, preserving Accepted and Ready (owned by the controller).
 // Retries on conflict per the ADR ownership model.
-func patchCSDRBACReady(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
+func patchCSDSourceAccessGranted(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := new(v1alpha1.CustomSnapshotDefinition)
 		if err := cl.Get(ctx, ctrlclient.ObjectKey{Name: name}, fresh); err != nil {
 			return err
 		}
-		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionRBACReady)
+		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionSourceAccessGranted)
 		if existing != nil &&
 			existing.Status == cond.Status &&
 			existing.Reason == cond.Reason &&

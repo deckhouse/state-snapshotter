@@ -52,7 +52,7 @@ var _ = registry.RegisterFunc(
 //     ownerRef-patches one child snapshot per source), get + list on the source GVRs (list to enumerate
 //     sources during planning, get to capture each target's manifest), and get on the domain
 //     /manifests-with-data-restoration subresource.
-//  4. Writes RBACReady (True / Pending / ApplyFailed) on each eligible CSD.
+//  4. Writes SourceAccessGranted (True / Pending / ApplyFailed) on each eligible CSD.
 func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	cl := input.DC.MustGetK8sClient(sdkk8s.WithSchemeBuilder(v1alpha1.SchemeBuilder))
 
@@ -92,20 +92,20 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 		var cond metav1.Condition
 		switch {
 		case pendingByName[csd.Name] != "":
-			cond = desiredRBACReadyCondition(csd.Generation,
-				metav1.ConditionFalse, consts.RBACReadyReasonPending,
+			cond = desiredSourceAccessGrantedCondition(csd.Generation,
+				metav1.ConditionFalse, consts.SourceAccessGrantedReasonPending,
 				pendingByName[csd.Name])
 		case applyErr != nil:
-			cond = desiredRBACReadyCondition(csd.Generation,
-				metav1.ConditionFalse, consts.RBACReadyReasonApplyFailed,
+			cond = desiredSourceAccessGrantedCondition(csd.Generation,
+				metav1.ConditionFalse, consts.SourceAccessGrantedReasonApplyFailed,
 				applyErr.Error())
 		default:
-			cond = desiredRBACReadyCondition(csd.Generation,
-				metav1.ConditionTrue, consts.RBACReadyReasonApplied,
+			cond = desiredSourceAccessGrantedCondition(csd.Generation,
+				metav1.ConditionTrue, consts.SourceAccessGrantedReasonApplied,
 				"domain RBAC applied for all source and snapshot GVRs")
 		}
-		if err := patchCSDRBACReady(ctx, cl, csd.Name, cond); err != nil {
-			input.Logger.Error("patch RBACReady on CSD", "name", csd.Name, "err", err)
+		if err := patchCSDSourceAccessGranted(ctx, cl, csd.Name, cond); err != nil {
+			input.Logger.Error("patch SourceAccessGranted on CSD", "name", csd.Name, "err", err)
 		}
 	}
 

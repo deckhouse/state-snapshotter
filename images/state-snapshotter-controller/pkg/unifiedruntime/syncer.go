@@ -23,7 +23,7 @@ import (
 // DedicatedControllerActivator registers a dedicated snapshot controller (one that reconciles a
 // specific snapshot kind outside GenericSnapshotBinderController, e.g. the demo domain controllers)
 // on an already-running manager. It is invoked at most once per kind, only after the kind's CSD is
-// watch-eligible (Accepted=True && RBACReady=True), so the controller's informers start with the
+// watch-eligible (Accepted=True && SourceAccessGranted=True), so the controller's informers start with the
 // domain RBAC already granted by the Deckhouse hook — never at boot, which would deadlock cache sync.
 type DedicatedControllerActivator func(ctrl.Manager) error
 
