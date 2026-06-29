@@ -6,7 +6,7 @@
 #   - GVK/priority registration and priority-driven tree shape (+ inversion);
 #   - PlanningReady planning barrier (domain-owned, generation-gated);
 #   - artifacts born under execution ObjectKeeper and handed off to SnapshotContent;
-#   - ManifestsReady / VolumesReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
+#   - ManifestsReady / VolumesReady / ChildContentsReady / Ready aggregation on the SnapshotContent tree;
 #   - damaged-leaf Ready=False propagation to root and recovery back to Ready=True;
 #   - sibling isolation;
 #   - both volume-capture data paths: an orphan/standalone PVC (demo-pvc) captured via a CSI
@@ -752,10 +752,10 @@ save_artifacts() {
 	printf 'namespace=%s\nrun_id=%s\nstage=%s\ncsd=%s\n' "${ns}" "${RUN_ID}" "${stage}" "${CSD_NAME}" >"${dir}/run-context.txt"
 }
 
-# condition_table <ns>: Ready/ManifestsReady/VolumesReady/ChildrenReady/PlanningReady for snapshots + contents.
+# condition_table <ns>: Ready/ManifestsReady/VolumesReady/ChildContentsReady/PlanningReady for snapshots + contents.
 condition_table() {
 	local ns="$1"
-	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumesReady|ChildrenReady|PlanningReady(obsGen/gen)"
+	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumesReady|ChildContentsReady|PlanningReady(obsGen/gen)"
 	local res
 	for res in "${SNAP_RES}" "${VMSNAP_RES}" "${DISKSNAP_RES}"; do
 		kubectl -n "${ns}" get "${res}" -o json 2>/dev/null | jq -r '
@@ -764,7 +764,7 @@ condition_table() {
 				(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
+				(([.status.conditions[]?|select(.type=="ChildContentsReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-") + "(" +
 				((([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0)|tostring) + "/" +
 				((.metadata.generation//0)|tostring) + ")"
@@ -777,7 +777,7 @@ condition_table() {
 			(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
+			(([.status.conditions[]?|select(.type=="ChildContentsReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-")
 		] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
 		| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
@@ -1228,14 +1228,14 @@ note "contents: root=${ROOT_CONTENT} vm=${VM_CONTENT} leaf=${LEAF_CONTENT} sibli
 	echo "sibling_snapshot=${SIBLING_SNAP}"; echo "sibling_content=${SIBLING_CONTENT}"
 } >"$(stage_dir 02-tree-ready)/tree-handles.txt"
 
-# Happy-path conditions: every content ManifestsReady=VolumesReady=ChildrenReady=Ready=True.
+# Happy-path conditions: every content ManifestsReady=VolumesReady=ChildContentsReady=Ready=True.
 for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}"; do
 	[[ -n "${c}" ]] || continue
 	wait_until "SnapshotContent ${c} Ready=True" content_ready_true "${c}" || die "content ${c} not Ready"
 	cj="$(get_json "${CONTENT_RES}" "" "${c}")"
 	[[ "$(cond_field "${cj}" ManifestsReady status)" == "True" ]] || die "content ${c} ManifestsReady != True while Ready=True (inconsistent aggregation)"
 	[[ "$(cond_field "${cj}" VolumesReady status)" == "True" ]] || die "content ${c} VolumesReady != True while Ready=True (inconsistent aggregation)"
-	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || die "content ${c} ChildrenReady != True while Ready=True (inconsistent aggregation)"
+	[[ "$(cond_field "${cj}" ChildContentsReady status)" == "True" ]] || die "content ${c} ChildContentsReady != True while Ready=True (inconsistent aggregation)"
 done
 
 # --- no-double-reconcile contract (two-pod split) --------------------------
@@ -2023,14 +2023,14 @@ else
 		LEAF_RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" ManifestsReady reason)"
 		[[ "${LEAF_RR_REASON}" == "ManifestCheckpointFailed" ]] || die "leaf ManifestsReady reason=${LEAF_RR_REASON} (expected ManifestCheckpointFailed)"
 		wait_until "leaf content ${LEAF_CONTENT} Ready=False" content_ready_false "${LEAF_CONTENT}" || die "leaf content did not flip Ready=False after MCP failure"
-		[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content ${VM_CONTENT} ChildrenReady=False" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${VM_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			|| die "VM content ${VM_CONTENT} ChildrenReady did not flip False (propagation broken)"; }
-		wait_until "root content ${ROOT_CONTENT} ChildrenReady=False" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			|| die "root content ChildrenReady did not flip False (propagation broken)"
-		ROOT_CR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" ChildrenReady reason)"
-		[[ "${ROOT_CR_REASON}" == "ChildrenFailed" ]] || die "root ChildrenReady reason=${ROOT_CR_REASON} (expected ChildrenFailed)"
+		[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content ${VM_CONTENT} ChildContentsReady=False" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${VM_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildContentsReady\")][0].status)//\"\"') == False ]]" \
+			|| die "VM content ${VM_CONTENT} ChildContentsReady did not flip False (propagation broken)"; }
+		wait_until "root content ${ROOT_CONTENT} ChildContentsReady=False" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildContentsReady\")][0].status)//\"\"') == False ]]" \
+			|| die "root content ChildContentsReady did not flip False (propagation broken)"
+		ROOT_CR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" ChildContentsReady reason)"
+		[[ "${ROOT_CR_REASON}" == "ChildrenFailed" ]] || die "root ChildContentsReady reason=${ROOT_CR_REASON} (expected ChildrenFailed)"
 		wait_until "root Snapshot ${SNAP} Ready=False" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
 			|| die "root Snapshot did not flip Ready=False"
@@ -2260,13 +2260,13 @@ else
 	printf '%s\n' "${DEL_OUT}" >"${CDIR}/delete-stderr.txt"
 	if [[ "${DEL_RC}" -eq 0 ]]; then
 		# Transient invalidation observation only: the binder may recreate the child content so fast that
-		# the brief root ChildrenReady=False window is not caught by polling. This is NOT the invariant
+		# the brief root ChildContentsReady=False window is not caught by polling. This is NOT the invariant
 		# (the invariants — child recreated + tree recovers Ready=True — are asserted hard below), so a
 		# miss here is informational, never a verdict.
-		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} ChildrenReady=False after child content delete" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			&& note "13: root content ChildrenReady=False observed after child content deletion" \
-			|| note "13: transient root ChildrenReady=False not observed (recreation raced ahead; informational)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} ChildContentsReady=False after child content delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildContentsReady\")][0].status)//\"\"') == False ]]" \
+			&& note "13: root content ChildContentsReady=False observed after child content deletion" \
+			|| note "13: transient root ChildContentsReady=False not observed (recreation raced ahead; informational)"
 		# HARD invariant: the binder recreates the child content (new UID) and the tree recovers Ready=True.
 		wait_until_to "${INVALIDATION_WAIT_SEC}" "child content ${SIBLING_CONTENT} present again" \
 			bash -c "kubectl get '${CONTENT_RES}' '${SIBLING_CONTENT}' -o name >/dev/null 2>&1" \
@@ -2357,7 +2357,7 @@ else
 			kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o json >"${CDIR}/root-content.json" 2>&1 || true
 			kubectl -n "${NS}" get "${SNAP_RES}" "${SNAP}" -o json >"${CDIR}/root-snapshot.json" 2>&1 || true
 			log "17 DIAG: sibling=${SIBLING_CONTENT} ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/sibling-content.json" 2>/dev/null)"
-			log "17 DIAG: root content ChildrenReady=$(jq -r '([.status.conditions[]?|select(.type=="ChildrenReady")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null) Ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null)"
+			log "17 DIAG: root content ChildContentsReady=$(jq -r '([.status.conditions[]?|select(.type=="ChildContentsReady")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null) Ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null)"
 			log "17 DIAG: root content childrenSnapshotContentRefs=$(jq -c '[.status.childrenSnapshotContentRefs[]?.name]//[]' "${CDIR}/root-content.json" 2>/dev/null)"
 			log "17 DIAG: sibling tracked in root refs=$(jq -r --arg s "${SIBLING_CONTENT}" '([.status.childrenSnapshotContentRefs[]?|select(.name==$s)]|length)//0' "${CDIR}/root-content.json" 2>/dev/null)"
 			# restore the MCP before dying so we do not leave the tree wedged for SKIP_CLEANUP inspection.

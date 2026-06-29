@@ -446,7 +446,7 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 		// Set multiple conditions
 		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
 		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
-		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
+		SetCondition(obj, ConditionChildContentsReady, metav1.ConditionTrue, "Started", "Started")
 
 		// All conditions should exist
 		if GetCondition(obj, ConditionReady) == nil {
@@ -455,8 +455,8 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 		if GetCondition(obj, ConditionManifestsReady) == nil {
 			t.Error("Expected ManifestsReady condition to exist")
 		}
-		if GetCondition(obj, ConditionChildrenReady) == nil {
-			t.Error("Expected ChildrenReady condition to exist")
+		if GetCondition(obj, ConditionChildContentsReady) == nil {
+			t.Error("Expected ChildContentsReady condition to exist")
 		}
 
 		// Should have exactly 3 conditions
@@ -634,7 +634,7 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 		// Set multiple conditions
 		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
 		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
-		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
+		SetCondition(obj, ConditionChildContentsReady, metav1.ConditionTrue, "Started", "Started")
 
 		// Get Ready condition
 		readyCond := GetCondition(obj, ConditionReady)

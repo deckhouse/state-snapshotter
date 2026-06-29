@@ -47,7 +47,7 @@ const (
 )
 
 // Condition types: the public condition model
-// (PlanningReady, ManifestsReady, VolumesReady, ChildrenReady, Ready).
+// (PlanningReady, ManifestsReady, VolumesReady, ChildContentsReady, Ready).
 const (
 	// ConditionManifestsReady reports this node's own manifest leg readiness: the manifest
 	// capture checkpoint (status.manifestCheckpointName) is published and Ready (empty archive counts).
@@ -59,9 +59,9 @@ const (
 	// It does not consider the manifest leg or children.
 	ConditionVolumesReady = "VolumesReady"
 
-	// ConditionChildrenReady reports that all child SnapshotContents are Ready=True
-	// (a leaf with no children is ChildrenReady=True vacuously).
-	ConditionChildrenReady = "ChildrenReady"
+	// ConditionChildContentsReady reports that all child SnapshotContents are Ready=True
+	// (a leaf with no children is ChildContentsReady=True vacuously).
+	ConditionChildContentsReady = "ChildContentsReady"
 )
 
 // Reasons for Ready=False

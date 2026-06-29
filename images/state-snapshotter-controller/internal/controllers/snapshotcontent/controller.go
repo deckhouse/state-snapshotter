@@ -336,7 +336,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Step 3: Content status aggregation and Ready condition.
 	// The common storage.deckhouse.io/SnapshotContent is the ONLY content carrier in the unified
 	// runtime (every snapshot kind maps to CommonSnapshotContentGVK), and it owns the aggregate
-	// condition model: ManifestsReady + VolumesReady + ChildrenReady + derived Ready
+	// condition model: ManifestsReady + VolumesReady + ChildContentsReady + derived Ready
 	// (INV-COND2). No non-common SnapshotContent GVK is registered, so there is no other writer.
 	if !isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
 		logger.V(1).Info("non-common SnapshotContent GVK is not managed by the unified runtime; skipping",
@@ -366,9 +366,9 @@ func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
 }
 
 // commonContentStatusPlan is the SnapshotContent aggregation outcome. It carries the own-node legs
-// (ManifestsReady = own MCP; VolumesReady = own data refs; ChildrenReady = child SnapshotContents) and
+// (ManifestsReady = own MCP; VolumesReady = own data refs; ChildContentsReady = child SnapshotContents) and
 // the derived Ready. Ready is the single aggregate on SnapshotContent:
-// Ready = ManifestsReady && VolumesReady && ChildrenReady (INV-COND2).
+// Ready = ManifestsReady && VolumesReady && ChildContentsReady (INV-COND2).
 type commonContentStatusPlan struct {
 	manifestsReady   metav1.ConditionStatus
 	manifestsReason  string
@@ -446,7 +446,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	desired := []metav1.Condition{
 		{Type: snapshot.ConditionManifestsReady, Status: plan.manifestsReady, Reason: plan.manifestsReason, Message: plan.manifestsMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionVolumesReady, Status: plan.volumesReady, Reason: plan.volumesReason, Message: plan.volumesMessage, ObservedGeneration: gen},
-		{Type: snapshot.ConditionChildrenReady, Status: plan.childrenReady, Reason: plan.childrenReason, Message: plan.childrenMessage, ObservedGeneration: gen},
+		{Type: snapshot.ConditionChildContentsReady, Status: plan.childrenReady, Reason: plan.childrenReason, Message: plan.childrenMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionReady, Status: plan.readyStatus, Reason: plan.readyReason, Message: plan.readyMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionManifestsArchived, Status: plan.manifestsArchivedStatus, Reason: plan.manifestsArchivedReason, Message: plan.manifestsArchivedMessage, ObservedGeneration: gen},
 	}
@@ -503,7 +503,7 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 	return r.reconcileCommonSnapshotContentStatus(ctx, obj)
 }
 
-// buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumesReady, ChildrenReady, the
+// buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumesReady, ChildContentsReady, the
 // ManifestsArchived subtree latch, the residual-sweep gate, and the derived Ready. Ready priority (single
 // reason when several legs are not satisfied):
 //

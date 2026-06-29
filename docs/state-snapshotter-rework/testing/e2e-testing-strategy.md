@@ -78,7 +78,7 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 
 **CSD-gated demo activation:** graph registry built-ins содержат только `Snapshot`→`SnapshotContent`. Demo VM/Disk controllers стартуют в harness всегда, но demo resources входят в `Snapshot` tree только через eligible CSD. Integration покрывает три границы: без demo CSD нет demo children; после hot-add CSD новый `Snapshot` создаёт demo child; manual `DemoVirtualDiskSnapshot` materializes без CSD.
 
-**Domain controller status contract:** snapshot controllers set `status.conditions[type=PlanningReady]=True` with `observedGeneration == metadata.generation` before `GenericSnapshotBinderController` binds `SnapshotContent`. Tests and smoke must not use the superseded `GraphReady` / `HandledByCustomSnapshotController` / `HandledByDomainSpecificController` / `ChildrenSnapshotReady` condition names. Публичная модель условий — `PlanningReady`, `ManifestsReady`, `VolumesReady`, `ChildrenReady`, `Ready` (spec §3.8/§3.9.7).
+**Domain controller status contract:** snapshot controllers set `status.conditions[type=PlanningReady]=True` with `observedGeneration == metadata.generation` before `GenericSnapshotBinderController` binds `SnapshotContent`. Tests and smoke must not use the superseded `GraphReady` / `HandledByCustomSnapshotController` / `HandledByDomainSpecificController` / `ChildrenSnapshotReady` condition names. Публичная модель условий — `PlanningReady`, `ManifestsReady`, `VolumesReady`, `ChildContentsReady`, `Ready` (spec §3.8/§3.9.7).
 
 | Файл | Что проверяет |
 |------|----------------|

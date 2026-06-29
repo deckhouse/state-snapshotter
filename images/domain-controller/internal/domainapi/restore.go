@@ -104,7 +104,7 @@ func (s *RestoreService) ManifestsWithDataRestoration(ctx context.Context, resou
 // a straight apply. visited guards against a run-tree cycle.
 //
 // The readiness gate is fail-closed per node: a snapshot's Ready mirrors its bound SnapshotContent.Ready
-// (ManifestsReady && VolumesReady && ChildrenReady), so requiring each visited node Ready=True prevents
+// (ManifestsReady && VolumesReady && ChildContentsReady), so requiring each visited node Ready=True prevents
 // restoring stale data from a node that is mid-recapture.
 func (s *RestoreService) restoreNode(ctx context.Context, resource, namespace, name, targetNamespace string, visited map[string]struct{}) ([]unstructured.Unstructured, error) {
 	key := resource + "/" + name

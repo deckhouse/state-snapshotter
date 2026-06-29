@@ -181,7 +181,7 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 			// The child snapshot is bound but its SnapshotContent object is currently absent. Two cases:
 			//   - degradation (E3): the edge was already published while the content existed, then the content
 			//     was deleted. Preserve the edge so the parent keeps aggregating it as pending
-			//     (ChildrenReady=False) — that is how a degraded subtree reaches the root Snapshot.Ready
+			//     (ChildContentsReady=False) — that is how a degraded subtree reaches the root Snapshot.Ready
 			//     mirror. Dropping it (or hard-erroring) wedged the parent reconcile and froze Ready at its
 			//     last value (root stayed Ready=True even though its content went Ready=False).
 			//   - initial-bind / cache lag: the edge is NOT published yet. Do NOT introduce a dangling edge to

@@ -120,17 +120,17 @@ func snapshotReadyExtract(obj *unstructured.Unstructured) (string, string, bool)
 	return st, fmt.Sprintf("Ready=%s/%s", st, reason), st == "True"
 }
 
-// contentDiagExtract reports a SnapshotContent's Ready and ChildrenReady conditions together with the
+// contentDiagExtract reports a SnapshotContent's Ready and ChildContentsReady conditions together with the
 // residual-volume-capture latch phase. It never fires the ready signal (diagnostic recorder only); the
 // phase makes the gate's fail-closed -> Complete transition visible in the printed ledger on a flap.
 func contentDiagExtract(obj *unstructured.Unstructured) (string, string, bool) {
 	st, reason, _ := conditionStatus(obj, condReady)
-	childStatus, _, _ := conditionStatus(obj, condChildrenReady)
+	childStatus, _, _ := conditionStatus(obj, condChildContentsReady)
 	phase, _, _ := unstructured.NestedString(obj.Object, "status", "residualVolumeCapture", "phase")
 	if phase == "" {
 		phase = "<absent>"
 	}
-	desc := fmt.Sprintf("Ready=%s/%s ChildrenReady=%s residual.phase=%s", st, reason, childStatus, phase)
+	desc := fmt.Sprintf("Ready=%s/%s ChildContentsReady=%s residual.phase=%s", st, reason, childStatus, phase)
 	return st, desc, false
 }
 
@@ -339,7 +339,7 @@ func readyFlapSpecs() {
 
 			// Diagnostic recorder on the cluster-scoped root content (matched by its immutable back-reference
 			// to this Snapshot, since the content name is derived from the Snapshot UID). It records Ready +
-			// ChildrenReady + residualVolumeCapture.phase for the failure ledger and never fires a signal.
+			// ChildContentsReady + residualVolumeCapture.phase for the failure ledger and never fires a signal.
 			contentRec, contentStop, err := startObjStateRecorder(ctx, snapshotContentGVR, "",
 				rootContentMatch(srcNS, readyFlapRootSnapshot), contentDiagExtract)
 			Expect(err).NotTo(HaveOccurred(), "start SnapshotContent diagnostic recorder")
@@ -382,7 +382,7 @@ func readyFlapSpecs() {
 
 			By("Settling, then asserting detector A: Ready never flapped True->False")
 			// Give the controller a window to expose a late flap (an orphan child linked after a premature
-			// Ready=True would drop ChildrenReady) before reading the final ledger.
+			// Ready=True would drop ChildContentsReady) before reading the final ledger.
 			sleepCtx(ctx, 30*time.Second)
 			snapLedger := snapRec.ledger()
 			GinkgoWriter.Printf("%s\n", formatLedger("Snapshot "+srcNS+"/"+readyFlapRootSnapshot, snapLedger))
