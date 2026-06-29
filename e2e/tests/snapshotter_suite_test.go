@@ -126,7 +126,7 @@ func prepareSuite() {
 	suiteDyn, err = dynamic.NewForConfig(suiteRestCfg)
 	Expect(err).NotTo(HaveOccurred(), "build dynamic client")
 
-	// waitModuleAndCSDReady runs two sequential waits (module Ready, then CSD RBACReady), each bounded
+	// waitModuleAndCSDReady runs two sequential waits (module Ready, then CSD SourceAccessGranted), each bounded
 	// by moduleReadyTO, so the parent context budgets for both plus a buffer.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.moduleReadyTO+5*time.Minute)
 	defer cancel()

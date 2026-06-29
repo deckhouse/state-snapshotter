@@ -102,8 +102,8 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish ChildrenSnapshotReady=True for the current generation.
-			setSnapshotChildrenSnapshotReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish PlanningReady=True for the current generation.
+			setSnapshotPlanningReadyCurrent(ctx, snapshotObj)
 
 			contentCtrl, err := controllers.NewSnapshotContentController(
 				k8sClient,

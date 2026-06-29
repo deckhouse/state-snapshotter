@@ -97,7 +97,7 @@ func TestResolveDataReadinessOneVSCReady(t *testing.T) {
 
 // Variant A: a SnapshotContent carries ≤1 dataRef, so the multi-dataRef-on-one-content readiness cases
 // (former TestResolveDataReadinessTwoVSC*) are no longer representable — multi-volume aggregation is
-// covered by ChildrenReady over child volume content nodes, exercised in the content aggregation tests.
+// covered by ChildContentsReady over child volume content nodes, exercised in the content aggregation tests.
 
 // A VSC that is being deleted (deletionTimestamp set) must not keep the parent Ready=True even though
 // it still exists and reports readyToUse=true. Classified terminal ArtifactMissing (INV-FAIL-PROP).

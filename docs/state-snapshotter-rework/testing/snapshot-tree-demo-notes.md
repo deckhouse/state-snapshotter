@@ -131,12 +131,12 @@ kubectl patch pv "$PVNAME" --type merge -p '{"spec":{"storageClassName":"'"$STOR
 `restore-namespace-from-snapshot.sh` делает этот обход автоматически (отключается
 `--no-pv-fix`). После выката образа с фиксом обход не нужен.
 
-## CSD RBACReady (production vs demo)
+## CSD SourceAccessGranted (production vs demo)
 
-`RBACReady=True` на CSD в production ставит внешний Deckhouse RBAC controller/hook
+`SourceAccessGranted=True` на CSD в production ставит внешний Deckhouse RBAC controller/hook
 (в этом репозитории hook **не реализован**). Контроллер сам это условие не пишет,
-только читает для eligibility (`Accepted=True && RBACReady=True && observedGeneration совпадает`).
-В демо/smoke `RBACReady` выставляется вручную `kubectl replace --subresource=status`
+только читает для eligibility (`Accepted=True && SourceAccessGranted=True && observedGeneration совпадает`).
+В демо/smoke `SourceAccessGranted` выставляется вручную `kubectl replace --subresource=status`
 (нужны права на `customsnapshotdefinitions/status`).
 
 ## Forced TTL expiry (только cluster-admin)

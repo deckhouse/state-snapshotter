@@ -230,11 +230,11 @@ child_ref_name() {
     | head -n 1
 }
 
-# Apply test-only domain RBAC before setting RBACReady=True. If the
+# Apply test-only domain RBAC before setting SourceAccessGranted=True. If the
 # project/environment already has a helper or hook that makes a CSD
-# RBACReady/eligible, use that instead. This manual status replace is only
+# SourceAccessGranted/eligible, use that instead. This manual status replace is only
 # a smoke fallback and preserves existing conditions such as Accepted.
-mark_csd_rbac_ready() {
+mark_csd_source_access_granted() {
   local name="$1"
   local gen now
   gen=$(kubectl get customsnapshotdefinition "$name" -o jsonpath='{.metadata.generation}')
@@ -242,8 +242,8 @@ mark_csd_rbac_ready() {
   kubectl get customsnapshotdefinition "$name" -o json \
     | jq --argjson gen "$gen" --arg now "$now" '
         .status.conditions =
-          ((.status.conditions // []) | map(select(.type != "RBACReady")) + [{
-            "type": "RBACReady",
+          ((.status.conditions // []) | map(select(.type != "SourceAccessGranted")) + [{
+            "type": "SourceAccessGranted",
             "status": "True",
             "reason": "Smoke",
             "message": "manual smoke approval",
@@ -551,13 +551,13 @@ kubectl get --raw \
 
 Production target model: RBAC for domain/custom snapshot resources is granted by an external Deckhouse RBAC controller/hook. The state-snapshotter controller does not grant these permissions to itself, and static production RBAC stays domain-agnostic.
 
-In real-cluster smoke/e2e, apply explicit test-only RBAC before setting any CSD `RBACReady=True`. This emulates the external RBAC controller. If the controller is started or restarted during smoke, apply this RBAC before that start/restart whenever possible; otherwise cache sync for demo informers can fail with `forbidden` list/watch errors. Keep this RBAC applied until smoke is finished if the controller may restart.
+In real-cluster smoke/e2e, apply explicit test-only RBAC before setting any CSD `SourceAccessGranted=True`. This emulates the external RBAC controller. If the controller is started or restarted during smoke, apply this RBAC before that start/restart whenever possible; otherwise cache sync for demo informers can fail with `forbidden` list/watch errors. Keep this RBAC applied until smoke is finished if the controller may restart.
 
 ```shell
 apply_demo_domain_rbac "$CTRL_NS" controller
 ```
 
-Invariant for the rest of this smoke: `RBACReady=True` means the test-only RBAC above is already effective.
+Invariant for the rest of this smoke: `SourceAccessGranted=True` means the test-only RBAC above is already effective.
 
 ## 8. CSD eligibility: Disk-only CSD + ownerRef filtering
 
@@ -581,7 +581,7 @@ spec:
 EOF
 ```
 
-Дождитесь `Accepted=True`, затем выставьте `RBACReady=True` тем же способом, который используется в текущем окружении (hook/controller/manual patch для smoke). Перед этим test-only RBAC из раздела 7 уже должен быть применён. Manual patch должен сохранять существующие conditions, включая `Accepted`; не заменяйте массив `status.conditions` целиком.
+Дождитесь `Accepted=True`, затем выставьте `SourceAccessGranted=True` тем же способом, который используется в текущем окружении (hook/controller/manual patch для smoke). Перед этим test-only RBAC из раздела 7 уже должен быть применён. Manual patch должен сохранять существующие conditions, включая `Accepted`; не заменяйте массив `status.conditions` целиком.
 
 ```shell
 until kubectl get customsnapshotdefinition smoke-demo-disk-only -o json \
@@ -589,7 +589,7 @@ until kubectl get customsnapshotdefinition smoke-demo-disk-only -o json \
   sleep 2
 done
 
-mark_csd_rbac_ready smoke-demo-disk-only
+mark_csd_source_access_granted smoke-demo-disk-only
 ```
 
 Дождитесь, пока graph registry refresh увидит CSD (обычно через reconcile/logs; при необходимости перезапустите controller только если это предусмотрено текущим runbook). This is the CSD dynamic watch activation boundary: after eligibility, new root snapshots may see the newly registered snapshot kind without a controller restart.
@@ -696,7 +696,7 @@ spec:
 EOF
 ```
 
-Доведите CSD до eligible состояния (`Accepted=True`, `RBACReady=True` с актуальным `observedGeneration`) тем же способом, что в предыдущем разделе. Test-only RBAC из раздела 7 должен оставаться применённым до конца smoke:
+Доведите CSD до eligible состояния (`Accepted=True`, `SourceAccessGranted=True` с актуальным `observedGeneration`) тем же способом, что в предыдущем разделе. Test-only RBAC из раздела 7 должен оставаться применённым до конца smoke:
 
 ```shell
 until kubectl get customsnapshotdefinition smoke-demo-vm-disk -o json \
@@ -704,7 +704,7 @@ until kubectl get customsnapshotdefinition smoke-demo-vm-disk -o json \
   sleep 2
 done
 
-mark_csd_rbac_ready smoke-demo-vm-disk
+mark_csd_source_access_granted smoke-demo-vm-disk
 ```
 
 This step also validates CSD dynamic watch activation for the full demo graph: after VM+Disk CSD eligibility, newly created root snapshots discover VM children and VM snapshots discover Disk children through CSD-backed graph registry state.
@@ -1009,7 +1009,7 @@ kubectl logs -n "$CTRL_NS" deploy/"$CTRL_DEPLOY" --tail=500 \
 - CRD установлены.
 - Schema `childrenSnapshotRefs` не содержит `namespace`.
 - Без CSD `Snapshot` готов и не создаёт demo children.
-- Test-only domain RBAC applied before `RBACReady=True`; controller remains restart-safe during smoke.
+- Test-only domain RBAC applied before `SourceAccessGranted=True`; controller remains restart-safe during smoke.
 - Disk-only CSD: VM-owned disk не становится direct root child и не протекает в root aggregated read; standalone disk становится top-level child.
 - VM+Disk CSD: root создаёт VM child, VM создаёт disk child, generated names получены через refs.
 - Generated child snapshots have correct `spec.sourceRef`.

@@ -38,7 +38,7 @@ Legacy terms are allowed only in explicitly historical documents. Do not use his
 
 При смене контракта обновляй **`docs/state-snapshotter-rework/spec/system-spec.md`** и при необходимости соответствующий ADR в этом каталоге.
 
-**Conditions snapshot/SnapshotContent (ChildrenSnapshotReady / ManifestsReady / VolumesReady / ChildrenReady / Ready) + failure propagation:** draft ADR — [`2026-06-03-snapshot-conditions-model.md`](2026-06-03-snapshot-conditions-model.md). Нормативные выдержки переносятся в `spec/system-spec.md` §3.8 / §3.9.7.
+**Conditions snapshot/SnapshotContent (PlanningReady / ManifestsReady / VolumesReady / ChildrenReady / Ready) + failure propagation:** draft ADR — [`2026-06-03-snapshot-conditions-model.md`](2026-06-03-snapshot-conditions-model.md). Нормативные выдержки переносятся в `spec/system-spec.md` §3.8 / §3.9.7.
 
 **Orphan PVC root residual via standard CSI VolumeSnapshot (capture-side):** ADR — [`2026-06-09-orphan-pvc-csi-volumesnapshot.md`](2026-06-09-orphan-pvc-csi-volumesnapshot.md). Нормативная выдержка — `spec/system-spec.md` §3.9.11.
 

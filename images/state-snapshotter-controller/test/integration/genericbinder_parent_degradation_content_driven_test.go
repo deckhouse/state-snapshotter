@@ -48,7 +48,7 @@ import (
 // SnapshotContent aggregation only (INV-COND2/INV-COND4/INV-FAIL1):
 //
 //	child SnapshotContent Ready=False
-//	  -> parent SnapshotContent ChildrenReady=False
+//	  -> parent SnapshotContent ChildContentsReady=False
 //	  -> parent SnapshotContent Ready=False
 //	  -> parent Snapshot.Ready mirror=False
 //
@@ -59,7 +59,7 @@ import (
 // required before removing it. Note that deleting the child Snapshot object alone is intentionally NOT a
 // parent-degradation signal in the durable-content model (the child SnapshotContent survives via
 // ObjectKeeper TTL); the real degradation signal is durable artifact/content loss, exercised below.
-var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotContent ChildrenReady (content-driven)", Serial, func() {
+var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotContent ChildContentsReady (content-driven)", Serial, func() {
 	var (
 		ctx         context.Context
 		snapshotGVK schema.GroupVersionKind
@@ -80,7 +80,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		})
 	})
 
-	It("flips parent Snapshot.Ready False/True via child SnapshotContent ChildrenReady + mirror (no recursive patch, no manual reconcile)", func() {
+	It("flips parent Snapshot.Ready False/True via child SnapshotContent ChildContentsReady + mirror (no recursive patch, no manual reconcile)", func() {
 		// 1. Parent generic snapshot -> manager-driven binder creates and binds its parent common content.
 		parent := &unstructured.Unstructured{}
 		parent.SetGroupVersionKind(snapshotGVK)
@@ -89,7 +89,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		parent.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
 		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, parent)) })
-		setSnapshotChildrenSnapshotReadyCurrent(ctx, parent)
+		setSnapshotPlanningReadyCurrent(ctx, parent)
 
 		parentKey := types.NamespacedName{Namespace: "default", Name: "gen-parent-degrade"}
 		var parentContentName, parentContentUID string
@@ -201,7 +201,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		// 4. Both contents Ready=True -> parent content Ready=True -> parent Snapshot.Ready mirrors True.
 		flipMCP(parentMCP, parentContentName, parentContentUID, metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "checkpoint ready")
 		flipMCP(childMCP, childContentName, childContentUID, metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "checkpoint ready")
-		Eventually(parentContentConditionIs(snapshot.ConditionChildrenReady, metav1.ConditionTrue), 90*time.Second, 200*time.Millisecond).Should(Succeed())
+		Eventually(parentContentConditionIs(snapshot.ConditionChildContentsReady, metav1.ConditionTrue), 90*time.Second, 200*time.Millisecond).Should(Succeed())
 		Eventually(parentContentConditionIs(snapshot.ConditionReady, metav1.ConditionTrue), 90*time.Second, 200*time.Millisecond).Should(Succeed())
 		Eventually(parentSnapshotReadyIs(metav1.ConditionTrue), 90*time.Second, 200*time.Millisecond).
 			Should(Succeed(), "parent Snapshot.Ready must mirror content Ready=True")
@@ -209,14 +209,14 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		// 5. Degrade the child's durable artifact (terminal MCP failure). No manual reconcile.
 		flipMCP(childMCP, childContentName, childContentUID, metav1.ConditionFalse, ssv1alpha1.ManifestCheckpointConditionReasonFailed, "checkpoint corrupted")
 
-		// 6. Content-driven convergence: child Ready=False -> parent ChildrenReady=False -> parent Ready=False
+		// 6. Content-driven convergence: child Ready=False -> parent ChildContentsReady=False -> parent Ready=False
 		// -> parent Snapshot.Ready mirror=False, all event-driven through the SnapshotContent tree.
-		Eventually(parentContentConditionIs(snapshot.ConditionChildrenReady, metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
-			Should(Succeed(), "parent SnapshotContent.ChildrenReady must fall to False after the child content degrades")
+		Eventually(parentContentConditionIs(snapshot.ConditionChildContentsReady, metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
+			Should(Succeed(), "parent SnapshotContent.ChildContentsReady must fall to False after the child content degrades")
 		Eventually(parentContentConditionIs(snapshot.ConditionReady, metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
-			Should(Succeed(), "parent SnapshotContent.Ready must fall to False (Ready = ManifestsReady && VolumesReady && ChildrenReady)")
+			Should(Succeed(), "parent SnapshotContent.Ready must fall to False (Ready = ManifestsReady && VolumesReady && ChildContentsReady)")
 		Eventually(parentSnapshotReadyIs(metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
-			Should(Succeed(), "parent Snapshot.Ready must fall to False via SnapshotContent ChildrenReady + mirror, NOT via recursive snapshot patching")
+			Should(Succeed(), "parent Snapshot.Ready must fall to False via SnapshotContent ChildContentsReady + mirror, NOT via recursive snapshot patching")
 
 		// 7. Recovery: child artifact restored -> parent Snapshot.Ready rises back to True (both directions).
 		flipMCP(childMCP, childContentName, childContentUID, metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "checkpoint recovered")

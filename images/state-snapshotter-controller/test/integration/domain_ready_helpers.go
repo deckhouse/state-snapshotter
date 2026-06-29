@@ -31,21 +31,21 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// injectChildrenSnapshotReadyCurrent sets ChildrenSnapshotReady=True with observedGeneration == generation on a
+// injectPlanningReadyCurrent sets PlanningReady=True with observedGeneration == generation on a
 // SnapshotLike (in memory). Use it inside blocks that already drive their own
 // SyncConditionsToUnstructured + Status().Update; SyncConditionsToUnstructured persists
 // observedGeneration so the condition stays current for the generic binder barrier.
-func injectChildrenSnapshotReadyCurrent(like snapshot.SnapshotLike, generation int64) {
+func injectPlanningReadyCurrent(like snapshot.SnapshotLike, generation int64) {
 	conds := like.GetStatusConditions()
 	kept := make([]metav1.Condition, 0, len(conds)+1)
 	for _, c := range conds {
-		if c.Type == snapshot.ConditionChildrenSnapshotReady {
+		if c.Type == snapshot.ConditionPlanningReady {
 			continue
 		}
 		kept = append(kept, c)
 	}
 	kept = append(kept, metav1.Condition{
-		Type:               snapshot.ConditionChildrenSnapshotReady,
+		Type:               snapshot.ConditionPlanningReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             snapshot.ReasonCompleted,
 		Message:            "domain planning complete",
@@ -55,35 +55,35 @@ func injectChildrenSnapshotReadyCurrent(like snapshot.SnapshotLike, generation i
 	like.SetStatusConditions(kept)
 }
 
-// setSnapshotChildrenSnapshotReadyCurrent publishes ChildrenSnapshotReady=True with observedGeneration ==
+// setSnapshotPlanningReadyCurrent publishes PlanningReady=True with observedGeneration ==
 // metadata.generation — the planning-done signal the generic binder barrier requires. obj must
 // already carry a server-assigned generation (created or fetched).
-func setSnapshotChildrenSnapshotReadyCurrent(ctx context.Context, obj *unstructured.Unstructured) {
+func setSnapshotPlanningReadyCurrent(ctx context.Context, obj *unstructured.Unstructured) {
 	GinkgoHelper()
-	setSnapshotChildrenSnapshotReady(ctx, obj, metav1.ConditionTrue, obj.GetGeneration())
+	setSnapshotPlanningReady(ctx, obj, metav1.ConditionTrue, obj.GetGeneration())
 }
 
-// setSnapshotChildrenSnapshotReady publishes ChildrenSnapshotReady with an explicit status and observedGeneration so a
+// setSnapshotPlanningReady publishes PlanningReady with an explicit status and observedGeneration so a
 // test can exercise current vs stale-generation barrier behaviour, then updates the status
 // subresource via k8sClient.
-func setSnapshotChildrenSnapshotReady(ctx context.Context, obj *unstructured.Unstructured, status metav1.ConditionStatus, observedGeneration int64) {
+func setSnapshotPlanningReady(ctx context.Context, obj *unstructured.Unstructured, status metav1.ConditionStatus, observedGeneration int64) {
 	GinkgoHelper()
-	setChildrenSnapshotReadyCondition(obj, status, observedGeneration)
+	setPlanningReadyCondition(obj, status, observedGeneration)
 	Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 }
 
-// setChildrenSnapshotReadyCondition replaces any existing ChildrenSnapshotReady condition on obj (in memory only).
-func setChildrenSnapshotReadyCondition(obj *unstructured.Unstructured, status metav1.ConditionStatus, observedGeneration int64) {
+// setPlanningReadyCondition replaces any existing PlanningReady condition on obj (in memory only).
+func setPlanningReadyCondition(obj *unstructured.Unstructured, status metav1.ConditionStatus, observedGeneration int64) {
 	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	kept := make([]interface{}, 0, len(conds)+1)
 	for _, raw := range conds {
-		if m, ok := raw.(map[string]interface{}); ok && m["type"] == snapshot.ConditionChildrenSnapshotReady {
+		if m, ok := raw.(map[string]interface{}); ok && m["type"] == snapshot.ConditionPlanningReady {
 			continue
 		}
 		kept = append(kept, raw)
 	}
 	kept = append(kept, map[string]interface{}{
-		"type":               snapshot.ConditionChildrenSnapshotReady,
+		"type":               snapshot.ConditionPlanningReady,
 		"status":             string(status),
 		"reason":             snapshot.ReasonCompleted,
 		"message":            "domain planning complete",

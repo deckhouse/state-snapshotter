@@ -4,9 +4,9 @@
 # Goal: validate the current architecture end-to-end on a real cluster, from CSD priority
 # planning to Phase 2a / Slice 3 status propagation:
 #   - GVK/priority registration and priority-driven tree shape (+ inversion);
-#   - ChildrenSnapshotReady planning barrier (domain-owned, generation-gated);
+#   - PlanningReady planning barrier (domain-owned, generation-gated);
 #   - artifacts born under execution ObjectKeeper and handed off to SnapshotContent;
-#   - ManifestsReady / VolumesReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
+#   - ManifestsReady / VolumesReady / ChildContentsReady / Ready aggregation on the SnapshotContent tree;
 #   - damaged-leaf Ready=False propagation to root and recovery back to Ready=True;
 #   - sibling isolation;
 #   - both volume-capture data paths: an orphan/standalone PVC (demo-pvc) captured via a CSI
@@ -663,14 +663,14 @@ csd_accepted() {
 		| jq -e '[.status.conditions[]? | select(.type == "Accepted" and .status == "True")] | length >= 1' >/dev/null
 }
 
-# RBACReady is set by an external Deckhouse hook in production; demo/smoke sets it manually.
-patch_csd_rbac_ready() {
+# SourceAccessGranted is set by an external Deckhouse hook in production; demo/smoke sets it manually.
+patch_csd_source_access_granted() {
 	local gen body
 	gen="$(kubectl get "${CSD_RES}" "${CSD_NAME}" -o jsonpath='{.metadata.generation}' 2>/dev/null || echo 0)"
 	body="$(get_json "${CSD_RES}" "" "${CSD_NAME}" | jq \
 		--arg now "$(now_rfc3339)" --argjson gen "${gen:-0}" \
-		'.status.conditions = ((.status.conditions // []) | map(select(.type != "RBACReady")) + [{
-			type: "RBACReady", status: "True", reason: "TreeDemoE2E",
+		'.status.conditions = ((.status.conditions // []) | map(select(.type != "SourceAccessGranted")) + [{
+			type: "SourceAccessGranted", status: "True", reason: "TreeDemoE2E",
 			message: "manual tree-demo approval", lastTransitionTime: $now, observedGeneration: $gen
 		}])')"
 	[[ -n "${body}" ]] || return 0
@@ -680,10 +680,10 @@ patch_csd_rbac_ready() {
 
 ensure_csd_eligible() {
 	wait_until "CSD ${CSD_NAME} Accepted=True" csd_accepted || die "CSD ${CSD_NAME} never Accepted"
-	patch_csd_rbac_ready
-	wait_until "CSD ${CSD_NAME} RBACReady=True" \
-		bash -c "kubectl get '${CSD_RES}' '${CSD_NAME}' -o json | jq -e '[.status.conditions[]?|select(.type==\"RBACReady\" and .status==\"True\")]|length>=1' >/dev/null" \
-		|| require "CSD ${CSD_NAME} RBACReady not True (manual patch did not stick / external hook owns it); tree cannot build"
+	patch_csd_source_access_granted
+	wait_until "CSD ${CSD_NAME} SourceAccessGranted=True" \
+		bash -c "kubectl get '${CSD_RES}' '${CSD_NAME}' -o json | jq -e '[.status.conditions[]?|select(.type==\"SourceAccessGranted\" and .status==\"True\")]|length>=1' >/dev/null" \
+		|| require "CSD ${CSD_NAME} SourceAccessGranted not True (manual patch did not stick / external hook owns it); tree cannot build"
 }
 
 # inversion_safe: priority inversion mutates the GLOBAL CSD priority, which affects every namespace
@@ -752,10 +752,10 @@ save_artifacts() {
 	printf 'namespace=%s\nrun_id=%s\nstage=%s\ncsd=%s\n' "${ns}" "${RUN_ID}" "${stage}" "${CSD_NAME}" >"${dir}/run-context.txt"
 }
 
-# condition_table <ns>: Ready/ManifestsReady/VolumesReady/ChildrenReady/ChildrenSnapshotReady for snapshots + contents.
+# condition_table <ns>: Ready/ManifestsReady/VolumesReady/ChildContentsReady/PlanningReady for snapshots + contents.
 condition_table() {
 	local ns="$1"
-	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumesReady|ChildrenReady|ChildrenSnapshotReady(obsGen/gen)"
+	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumesReady|ChildContentsReady|PlanningReady(obsGen/gen)"
 	local res
 	for res in "${SNAP_RES}" "${VMSNAP_RES}" "${DISKSNAP_RES}"; do
 		kubectl -n "${ns}" get "${res}" -o json 2>/dev/null | jq -r '
@@ -764,9 +764,9 @@ condition_table() {
 				(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].status)//"-") + "(" +
-				((([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].observedGeneration)//0)|tostring) + "/" +
+				(([.status.conditions[]?|select(.type=="ChildContentsReady")][0].status)//"-") + "|" +
+				(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-") + "(" +
+				((([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0)|tostring) + "/" +
 				((.metadata.generation//0)|tostring) + ")"
 			] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
 			| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
@@ -777,8 +777,8 @@ condition_table() {
 			(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].status)//"-")
+			(([.status.conditions[]?|select(.type=="ChildContentsReady")][0].status)//"-") + "|" +
+			(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-")
 		] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
 		| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
 }
@@ -1228,14 +1228,14 @@ note "contents: root=${ROOT_CONTENT} vm=${VM_CONTENT} leaf=${LEAF_CONTENT} sibli
 	echo "sibling_snapshot=${SIBLING_SNAP}"; echo "sibling_content=${SIBLING_CONTENT}"
 } >"$(stage_dir 02-tree-ready)/tree-handles.txt"
 
-# Happy-path conditions: every content ManifestsReady=VolumesReady=ChildrenReady=Ready=True.
+# Happy-path conditions: every content ManifestsReady=VolumesReady=ChildContentsReady=Ready=True.
 for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}"; do
 	[[ -n "${c}" ]] || continue
 	wait_until "SnapshotContent ${c} Ready=True" content_ready_true "${c}" || die "content ${c} not Ready"
 	cj="$(get_json "${CONTENT_RES}" "" "${c}")"
 	[[ "$(cond_field "${cj}" ManifestsReady status)" == "True" ]] || die "content ${c} ManifestsReady != True while Ready=True (inconsistent aggregation)"
 	[[ "$(cond_field "${cj}" VolumesReady status)" == "True" ]] || die "content ${c} VolumesReady != True while Ready=True (inconsistent aggregation)"
-	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || die "content ${c} ChildrenReady != True while Ready=True (inconsistent aggregation)"
+	[[ "$(cond_field "${cj}" ChildContentsReady status)" == "True" ]] || die "content ${c} ChildContentsReady != True while Ready=True (inconsistent aggregation)"
 done
 
 # --- no-double-reconcile contract (two-pod split) --------------------------
@@ -1251,7 +1251,7 @@ done
 #  (b) no two demo snapshots share a content name — a clean 1:1 snapshot->content mapping (the tree-shape
 #      assertions above already pin the kind/count of each child).
 #  (c) the demo planning output exists on the domain-owned snapshots: VM snapshot has the domain
-#      ChildrenSnapshotReady barrier condition (only the domain reconciler sets it). The well-formed
+#      PlanningReady barrier condition (only the domain reconciler sets it). The well-formed
 #      VM->disk subtree resolved above is itself proof the single domain reconciler ran.
 # Note: a same-snapshot duplicate content is impossible by construction — the binder mints a deterministic
 # name (snapshotContentName: "ns-<uid>") and create-or-adopts on AlreadyExists — so (a)+(b) cannot be
@@ -1271,9 +1271,9 @@ while read -r ndr_c; do
 	kubectl get "${CONTENT_RES}" "${ndr_c}" >/dev/null 2>&1 \
 		|| die "no-double-reconcile: bound SnapshotContent ${ndr_c} does not exist (dangling binding / content not owned by the core binder)"
 done <<<"${NDR_BOUND}"
-VM_CSR="$(cond_field "$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")" ChildrenSnapshotReady status)"
-[[ -n "${VM_CSR}" ]] || die "no-double-reconcile: VM snapshot ${VM_SNAP} has no ChildrenSnapshotReady condition (domain reconciler did not handle it)"
-note "no-double-reconcile: ${NDR_DISTINCT} distinct SnapshotContent, all present (single common owner); VM snapshot ChildrenSnapshotReady=${VM_CSR} (domain reconciler)"
+VM_CSR="$(cond_field "$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")" PlanningReady status)"
+[[ -n "${VM_CSR}" ]] || die "no-double-reconcile: VM snapshot ${VM_SNAP} has no PlanningReady condition (domain reconciler did not handle it)"
+note "no-double-reconcile: ${NDR_DISTINCT} distinct SnapshotContent, all present (single common owner); VM snapshot PlanningReady=${VM_CSR} (domain reconciler)"
 
 # --- two-PVC capture paths -------------------------------------------------
 # demo-pvc       : orphan/standalone at root  -> CSI VolumeSnapshot visibility leaf + VSC in ROOT content dataRefs.
@@ -1903,26 +1903,26 @@ if grp domain; then
 # 04-domainready-barrier (domain-owned, generation-gated planning handoff)
 # ---------------------------------------------------------------------------
 begin_stage "04-domainready-barrier"
-# HARD final assertion: every domain snapshot is ChildrenSnapshotReady=True at its current generation.
+# HARD final assertion: every domain snapshot is PlanningReady=True at its current generation.
 for pair in "${SNAP_RES}|${SNAP}" "${VMSNAP_RES}|${VM_SNAP}" "${DISKSNAP_RES}|${LEAF_SNAP}" "${DISKSNAP_RES}|${SIBLING_SNAP}"; do
 	res="${pair%%|*}"; name="${pair##*|}"
 	[[ -n "${name}" ]] || die "domain snapshot handle empty (${res}); tree not resolved"
 	j="$(get_json "${res}" "${NS}" "${name}")"
-	dr_status="$(cond_field "${j}" ChildrenSnapshotReady status)"
-	[[ "${dr_status}" == "True" ]] || die "${res}/${name} ChildrenSnapshotReady=${dr_status:-<none>} (every domain snapshot must publish ChildrenSnapshotReady=True)"
-	obs="$(jq -r '([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].observedGeneration)//0' <<<"${j}")"
+	dr_status="$(cond_field "${j}" PlanningReady status)"
+	[[ "${dr_status}" == "True" ]] || die "${res}/${name} PlanningReady=${dr_status:-<none>} (every domain snapshot must publish PlanningReady=True)"
+	obs="$(jq -r '([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0' <<<"${j}")"
 	gen="$(jq -r '.metadata.generation//0' <<<"${j}")"
-	[[ "${obs}" == "${gen}" ]] || die "${res}/${name} ChildrenSnapshotReady observedGeneration(${obs}) != generation(${gen}) (stale barrier)"
-	note "${res}/${name} ChildrenSnapshotReady=True observedGeneration=${obs}==generation"
+	[[ "${obs}" == "${gen}" ]] || die "${res}/${name} PlanningReady observedGeneration(${obs}) != generation(${gen}) (stale barrier)"
+	note "${res}/${name} PlanningReady=True observedGeneration=${obs}==generation"
 done
-# HARD: ChildrenSnapshotReady is a Snapshot-like planning barrier only and must NEVER appear on a
-# SnapshotContent. A ChildrenSnapshotReady on content means the common/generic layer self-published it
-# (regression of the Slice 2 / snapshotbinding contract: ChildrenSnapshotReady is domain-owned).
+# HARD: PlanningReady is a Snapshot-like planning barrier only and must NEVER appear on a
+# SnapshotContent. A PlanningReady on content means the common/generic layer self-published it
+# (regression of the Slice 2 / snapshotbinding contract: PlanningReady is domain-owned).
 DR_ON_CONTENT="$(kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
-	| jq -r '[.items[]?|select(any(.status.conditions[]?; .type=="ChildrenSnapshotReady"))|.metadata.name]|join(",")' 2>/dev/null || true)"
-[[ -z "${DR_ON_CONTENT}" ]] || die "ChildrenSnapshotReady found on SnapshotContent(s) [${DR_ON_CONTENT}] — common-layer self-publication regression"
-note "no SnapshotContent carries ChildrenSnapshotReady (barrier remains domain/Snapshot-owned)"
-# Timeline probe: confirm content is not bound before current-gen ChildrenSnapshotReady on a fresh node.
+	| jq -r '[.items[]?|select(any(.status.conditions[]?; .type=="PlanningReady"))|.metadata.name]|join(",")' 2>/dev/null || true)"
+[[ -z "${DR_ON_CONTENT}" ]] || die "PlanningReady found on SnapshotContent(s) [${DR_ON_CONTENT}] — common-layer self-publication regression"
+note "no SnapshotContent carries PlanningReady (barrier remains domain/Snapshot-owned)"
+# Timeline probe: confirm content is not bound before current-gen PlanningReady on a fresh node.
 apply_source_namespace "${NS_DOMAIN_BARRIER}"
 wait_until "barrier demo-pvc Bound" pvc_bound "${NS_DOMAIN_BARRIER}" demo-pvc || true
 apply_root_snapshot "${NS_DOMAIN_BARRIER}"
@@ -1932,18 +1932,18 @@ deadline=$((SECONDS + 120)); dr_seen=0; bound_before_dr=0
 while ((SECONDS < deadline)); do
 	bj="$(get_json "${SNAP_RES}" "${NS_DOMAIN_BARRIER}" "${SNAP}")"
 	bound="$(jq -r '.status.boundSnapshotContentName // ""' <<<"${bj}")"
-	drs="$(cond_field "${bj}" ChildrenSnapshotReady status)"
-	dro="$(jq -r '([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].observedGeneration)//0' <<<"${bj}")"
+	drs="$(cond_field "${bj}" PlanningReady status)"
+	dro="$(jq -r '([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0' <<<"${bj}")"
 	bgen="$(jq -r '.metadata.generation//0' <<<"${bj}")"
-	printf '%s bound=%s ChildrenSnapshotReady=%s(obs=%s/gen=%s)\n' "$(now_rfc3339)" "${bound:-<none>}" "${drs:-<none>}" "${dro}" "${bgen}" >>"${TL}"
+	printf '%s bound=%s PlanningReady=%s(obs=%s/gen=%s)\n' "$(now_rfc3339)" "${bound:-<none>}" "${drs:-<none>}" "${dro}" "${bgen}" >>"${TL}"
 	if [[ -n "${bound}" && "${dr_seen}" == "0" && "${drs}" != "True" ]]; then bound_before_dr=1; fi
 	if [[ "${drs}" == "True" && "${dro}" == "${bgen}" ]]; then dr_seen=1; fi
 	[[ "${dr_seen}" == "1" && -n "${bound}" ]] && break
 	sleep 2
 done
-[[ "${bound_before_dr}" == "0" ]] || die "barrier: SnapshotContent bound BEFORE current-gen ChildrenSnapshotReady=True (planning barrier violated — content must not bind until domain is ready; see timeline.txt)"
-[[ "${dr_seen}" == "1" ]] && note "barrier: ChildrenSnapshotReady=True reached current generation" || die "barrier: ChildrenSnapshotReady=True at current generation not observed within 120s (barrier never satisfied; see timeline.txt)"
-note "stale-ChildrenSnapshotReady injection not performed (out of scope; documented limitation)"
+[[ "${bound_before_dr}" == "0" ]] || die "barrier: SnapshotContent bound BEFORE current-gen PlanningReady=True (planning barrier violated — content must not bind until domain is ready; see timeline.txt)"
+[[ "${dr_seen}" == "1" ]] && note "barrier: PlanningReady=True reached current generation" || die "barrier: PlanningReady=True at current generation not observed within 120s (barrier never satisfied; see timeline.txt)"
+note "stale-PlanningReady injection not performed (out of scope; documented limitation)"
 save_artifacts "04-domainready-barrier" "${NS_DOMAIN_BARRIER}"
 kubectl delete namespace "${NS_DOMAIN_BARRIER}" --ignore-not-found=true --wait=false 2>/dev/null || true
 log "04-domainready-barrier: done"
@@ -2023,14 +2023,14 @@ else
 		LEAF_RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${LEAF_CONTENT}")" ManifestsReady reason)"
 		[[ "${LEAF_RR_REASON}" == "ManifestCheckpointFailed" ]] || die "leaf ManifestsReady reason=${LEAF_RR_REASON} (expected ManifestCheckpointFailed)"
 		wait_until "leaf content ${LEAF_CONTENT} Ready=False" content_ready_false "${LEAF_CONTENT}" || die "leaf content did not flip Ready=False after MCP failure"
-		[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content ${VM_CONTENT} ChildrenReady=False" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${VM_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			|| die "VM content ${VM_CONTENT} ChildrenReady did not flip False (propagation broken)"; }
-		wait_until "root content ${ROOT_CONTENT} ChildrenReady=False" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			|| die "root content ChildrenReady did not flip False (propagation broken)"
-		ROOT_CR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" ChildrenReady reason)"
-		[[ "${ROOT_CR_REASON}" == "ChildrenFailed" ]] || die "root ChildrenReady reason=${ROOT_CR_REASON} (expected ChildrenFailed)"
+		[[ -n "${VM_CONTENT}" ]] && { wait_until "VM content ${VM_CONTENT} ChildContentsReady=False" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${VM_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildContentsReady\")][0].status)//\"\"') == False ]]" \
+			|| die "VM content ${VM_CONTENT} ChildContentsReady did not flip False (propagation broken)"; }
+		wait_until "root content ${ROOT_CONTENT} ChildContentsReady=False" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildContentsReady\")][0].status)//\"\"') == False ]]" \
+			|| die "root content ChildContentsReady did not flip False (propagation broken)"
+		ROOT_CR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" ChildContentsReady reason)"
+		[[ "${ROOT_CR_REASON}" == "ChildrenFailed" ]] || die "root ChildContentsReady reason=${ROOT_CR_REASON} (expected ChildrenFailed)"
 		wait_until "root Snapshot ${SNAP} Ready=False" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
 			|| die "root Snapshot did not flip Ready=False"
@@ -2260,13 +2260,13 @@ else
 	printf '%s\n' "${DEL_OUT}" >"${CDIR}/delete-stderr.txt"
 	if [[ "${DEL_RC}" -eq 0 ]]; then
 		# Transient invalidation observation only: the binder may recreate the child content so fast that
-		# the brief root ChildrenReady=False window is not caught by polling. This is NOT the invariant
+		# the brief root ChildContentsReady=False window is not caught by polling. This is NOT the invariant
 		# (the invariants — child recreated + tree recovers Ready=True — are asserted hard below), so a
 		# miss here is informational, never a verdict.
-		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} ChildrenReady=False after child content delete" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildrenReady\")][0].status)//\"\"') == False ]]" \
-			&& note "13: root content ChildrenReady=False observed after child content deletion" \
-			|| note "13: transient root ChildrenReady=False not observed (recreation raced ahead; informational)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} ChildContentsReady=False after child content delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"ChildContentsReady\")][0].status)//\"\"') == False ]]" \
+			&& note "13: root content ChildContentsReady=False observed after child content deletion" \
+			|| note "13: transient root ChildContentsReady=False not observed (recreation raced ahead; informational)"
 		# HARD invariant: the binder recreates the child content (new UID) and the tree recovers Ready=True.
 		wait_until_to "${INVALIDATION_WAIT_SEC}" "child content ${SIBLING_CONTENT} present again" \
 			bash -c "kubectl get '${CONTENT_RES}' '${SIBLING_CONTENT}' -o name >/dev/null 2>&1" \
@@ -2357,7 +2357,7 @@ else
 			kubectl get "${CONTENT_RES}" "${ROOT_CONTENT}" -o json >"${CDIR}/root-content.json" 2>&1 || true
 			kubectl -n "${NS}" get "${SNAP_RES}" "${SNAP}" -o json >"${CDIR}/root-snapshot.json" 2>&1 || true
 			log "17 DIAG: sibling=${SIBLING_CONTENT} ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/sibling-content.json" 2>/dev/null)"
-			log "17 DIAG: root content ChildrenReady=$(jq -r '([.status.conditions[]?|select(.type=="ChildrenReady")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null) Ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null)"
+			log "17 DIAG: root content ChildContentsReady=$(jq -r '([.status.conditions[]?|select(.type=="ChildContentsReady")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null) Ready=$(jq -r '([.status.conditions[]?|select(.type=="Ready")][0]|(.status+"/"+.reason))//""' "${CDIR}/root-content.json" 2>/dev/null)"
 			log "17 DIAG: root content childrenSnapshotContentRefs=$(jq -c '[.status.childrenSnapshotContentRefs[]?.name]//[]' "${CDIR}/root-content.json" 2>/dev/null)"
 			log "17 DIAG: sibling tracked in root refs=$(jq -r --arg s "${SIBLING_CONTENT}" '([.status.childrenSnapshotContentRefs[]?|select(.name==$s)]|length)//0' "${CDIR}/root-content.json" 2>/dev/null)"
 			# restore the MCP before dying so we do not leave the tree wedged for SKIP_CLEANUP inspection.

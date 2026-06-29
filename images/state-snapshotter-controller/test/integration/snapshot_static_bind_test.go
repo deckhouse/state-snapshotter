@@ -53,7 +53,7 @@ func newStaticBindNamespace(ctx context.Context, prefix string) string {
 
 // createStaticBindContent creates a cluster-scoped SnapshotContent whose spec.snapshotRef points back
 // at (refName, ns), backed by a Ready, manifest-only ManifestCheckpoint so the SnapshotContent
-// controller derives Ready=True (RequestsReady && ChildrenReady). refName overrides the back-reference
+// controller derives Ready=True (RequestsReady && ChildContentsReady). refName overrides the back-reference
 // name to exercise the misbound case.
 func createStaticBindContent(ctx context.Context, contentName, ns, refName string) {
 	mcp := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, contentName+"-mcp", ns, []map[string]interface{}{

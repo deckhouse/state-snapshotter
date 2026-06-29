@@ -40,7 +40,7 @@ import (
 // Demo reconcilers are content-free (commit 2 content-ownership, D1/D3): they validate the source, plan
 // the manifest-capture request (MCR), the data-leg volume-capture request (VCR) and the owned-disk child
 // graph, and publish results into demo.status (manifestCaptureRequestName, volumeCaptureRequestName,
-// childrenSnapshotRefs, ChildrenSnapshotReady). They never create/own/bind/mirror SnapshotContent;
+// childrenSnapshotRefs, PlanningReady). They never create/own/bind/mirror SnapshotContent;
 // GenericSnapshotBinderController owns all SnapshotContent work for demo kinds. These unit tests therefore
 // assert only the domain planning side; content creation/projection/Ready mirror is covered by the binder.
 
@@ -111,7 +111,7 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 }
 
 // A manifest-only disk snapshot plans its MCR (manifest target = the source disk), publishes the MCR name,
-// reaches ChildrenSnapshotReady=True (leaf planning barrier), and never creates SnapshotContent.
+// reaches PlanningReady=True (leaf planning barrier), and never creates SnapshotContent.
 func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t,
 		&demov1alpha1.DemoVirtualDisk{
@@ -152,9 +152,9 @@ func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 	if !equality.Semantic.DeepEqual(mcr.Spec.Targets, expectedTargets) {
 		t.Fatalf("unexpected MCR targets: %#v", mcr.Spec.Targets)
 	}
-	domainReady := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady)
+	domainReady := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionPlanningReady)
 	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected ChildrenSnapshotReady=True for leaf disk snapshot, got %#v", domainReady)
+		t.Fatalf("expected PlanningReady=True for leaf disk snapshot, got %#v", domainReady)
 	}
 	// Content ownership is the binder's job; the demo reconciler never creates SnapshotContent.
 	assertNoDemoDiskContents(t, cl)
@@ -283,7 +283,7 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 }
 
 // A VM snapshot plans its owned-disk child graph (only disks owned by the VM), publishes
-// childrenSnapshotRefs, plans the VM MCR, reaches ChildrenSnapshotReady=True, and never creates content.
+// childrenSnapshotRefs, plans the VM MCR, reaches PlanningReady=True, and never creates content.
 func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 	vmUID := types.UID("vm-uid")
 	cl := newDemoSourceRefFakeClient(t,
@@ -362,9 +362,9 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 	}}) {
 		t.Fatalf("unexpected VM child refs: %#v", vmSnap.Status.ChildrenSnapshotRefs)
 	}
-	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady)
+	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, storagev1alpha1.ConditionPlanningReady)
 	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected VM ChildrenSnapshotReady=True after writing child refs, got %#v", domainReady)
+		t.Fatalf("expected VM PlanningReady=True after writing child refs, got %#v", domainReady)
 	}
 	assertNoDemoVMContents(t, cl)
 	if vmSnap.Status.BoundSnapshotContentName != "" {
@@ -432,9 +432,9 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 	}
 	assertDemoSnapshotOwnedBy(t, child, conflictingOwner.APIVersion, conflictingOwner.Kind, conflictingOwner.Name)
 	vmSnap := getDemoVMSnapshot(t, cl)
-	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady)
+	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, storagev1alpha1.ConditionPlanningReady)
 	if domainReady == nil || domainReady.Status != metav1.ConditionFalse || domainReady.Reason != storagev1alpha1.ReasonCreateChildFailed {
-		t.Fatalf("expected ChildrenSnapshotReady=False CreateChildFailed, got %#v", domainReady)
+		t.Fatalf("expected PlanningReady=False CreateChildFailed, got %#v", domainReady)
 	}
 }
 

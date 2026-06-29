@@ -149,7 +149,7 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			// Since fake client doesn't fully support CRD operations for unstructured objects,
 			// we use a wrapper client to capture the Create call and verify the spec.
 
-			// PRECONDITION: Create Snapshot with ChildrenSnapshotReady=True
+			// PRECONDITION: Create Snapshot with PlanningReady=True
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-snapshot")
@@ -184,12 +184,12 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			_ = wrapperClient.Status().Update(ctx, snapshotObj)
 
 			// Pass the generation-gated binder barrier at reconcile time: the mocked Get returns a copy
-			// of snapshotObj, so set ChildrenSnapshotReady=True with observedGeneration == metadata.generation here
+			// of snapshotObj, so set PlanningReady=True with observedGeneration == metadata.generation here
 			// (after Create, which may reset generation). The barrier must accept current-generation only.
 			snapshotObj.SetGeneration(2)
 			Expect(unstructured.SetNestedSlice(snapshotObj.Object, []interface{}{
 				map[string]interface{}{
-					"type":               snapshot.ConditionChildrenSnapshotReady,
+					"type":               snapshot.ConditionPlanningReady,
 					"status":             string(metav1.ConditionTrue),
 					"reason":             snapshot.ReasonCompleted,
 					"message":            "domain planning complete",

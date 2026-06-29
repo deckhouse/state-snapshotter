@@ -72,21 +72,21 @@
 
 **Integration (CSD + unified runtime):** в `BeforeSuite` (`setup_test.go`) поднимаются CSD reconciler и **production-like** unified stack: resolve bootstrap ∪ eligible CSD на mapper → snapshot/content контроллеры на `mgr` → `unifiedruntime.Syncer` → `AddCustomSnapshotDefinitionControllerToManager(..., syncer.Sync, graphRegistryRefresh)` (как в `cmd/main.go`, без дублирования второго `SetupWithManager` для тех же имён контроллеров).
 
-Envtest integration не проверяет реальный Kubernetes RBAC enforcement: `RBACReady` в этих тестах симулирует handshake внешнего RBAC controller/hook. Real-cluster smoke/e2e должны явно применять test-only RBAC для domain resources до `RBACReady=True` (см. [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md)).
+Envtest integration не проверяет реальный Kubernetes RBAC enforcement: `SourceAccessGranted` в этих тестах симулирует handshake внешнего RBAC controller/hook. Real-cluster smoke/e2e должны явно применять test-only RBAC для domain resources до `SourceAccessGranted=True` (см. [`pre-e2e-smoke-validation.md`](pre-e2e-smoke-validation.md)).
 
 Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain RBAC, namespace-relative aggregated API output, and expected retained SnapshotContent/ObjectKeeper artifacts after cleanup. Non-blocking findings to keep visible in reports: transient `ObjectKeeper already exists` can appear on repeated runs with retained artifacts; Kubernetes warns that the current `Snapshot` finalizer name should include a path.
 
 **CSD-gated demo activation:** graph registry built-ins содержат только `Snapshot`→`SnapshotContent`. Demo VM/Disk controllers стартуют в harness всегда, но demo resources входят в `Snapshot` tree только через eligible CSD. Integration покрывает три границы: без demo CSD нет demo children; после hot-add CSD новый `Snapshot` создаёт demo child; manual `DemoVirtualDiskSnapshot` materializes без CSD.
 
-**Domain controller status contract:** snapshot controllers set `status.conditions[type=ChildrenSnapshotReady]=True` with `observedGeneration == metadata.generation` before `GenericSnapshotBinderController` binds `SnapshotContent`. Tests and smoke must not use the superseded `GraphReady` / `HandledByCustomSnapshotController` / `HandledByDomainSpecificController` condition names. Публичная модель условий — `ChildrenSnapshotReady`, `ManifestsReady`, `VolumesReady`, `ChildrenReady`, `Ready` (spec §3.8/§3.9.7).
+**Domain controller status contract:** snapshot controllers set `status.conditions[type=PlanningReady]=True` with `observedGeneration == metadata.generation` before `GenericSnapshotBinderController` binds `SnapshotContent`. Tests and smoke must not use the superseded `GraphReady` / `HandledByCustomSnapshotController` / `HandledByDomainSpecificController` / `ChildrenSnapshotReady` condition names. Публичная модель условий — `PlanningReady`, `ManifestsReady`, `VolumesReady`, `ChildContentsReady`, `Ready` (spec §3.8/§3.9.7).
 
 | Файл | Что проверяет |
 |------|----------------|
-| `csd_api_smoke_test.go` | Схема + CRD Established; `Accepted=True` после resolve; `Ready` после симуляции `RBACReady`. Маппинг на **RegistrationTest**\* CRD (не TestSnapshot), чтобы не пересекаться с lifecycle-спеками и hot-add по одному snapshot kind. |
+| `csd_api_smoke_test.go` | Схема + CRD Established; `Accepted=True` после resolve; `Ready` после симуляции `SourceAccessGranted`. Маппинг на **RegistrationTest**\* CRD (не TestSnapshot), чтобы не пересекаться с lifecycle-спеками и hot-add по одному snapshot kind. |
 | `csd_reconciler_kindconflict_test.go` | Два CSD → `KindConflict` |
 | `csd_reconciler_invalidspec_test.go` | Namespace-scoped content → `InvalidSpec`; дубликат snapshot kind в одном CSD → `InvalidSpec` |
-| `unified_runtime_hot_add_test.go` | **R3 proof:** CSD создаётся после старта manager; после `RBACReady` — `unifiedSyncer.ActiveSnapshotGVKKeys` и `LastLayeredState()` (resolved + eligible). **`Serial`**; очистка конфликтующих CSD (в т.ч. rbac/eligibility/smoke). |
-| `unified_runtime_rbac_eligibility_test.go` | **T4 + eligibility:** без RBACReady нет eligible-слоя для RegistrationTest; после снятия RBACReady resolved без пары, monotonic active сохраняет ключ. **`Serial`**; `AfterEach` чистит CSD. |
+| `unified_runtime_hot_add_test.go` | **R3 proof:** CSD создаётся после старта manager; после `SourceAccessGranted` — `unifiedSyncer.ActiveSnapshotGVKKeys` и `LastLayeredState()` (resolved + eligible). **`Serial`**; очистка конфликтующих CSD (в т.ч. rbac/eligibility/smoke). |
+| `unified_runtime_rbac_eligibility_test.go` | **T4 + eligibility:** без SourceAccessGranted нет eligible-слоя для RegistrationTest; после снятия SourceAccessGranted resolved без пары, monotonic active сохраняет ключ. **`Serial`**; `AfterEach` чистит CSD. |
 | `csd_gated_domain_activation_test.go` | Demo domain graph activation: without CSD → no demo children; hot-add CSD → new root sees demo child; manual demo snapshot works without CSD. |
 | `controller_registration_test.go` | Конструирование контроллеров как в production; **без** повторного `SetupWithManager` на общем `mgr` |
 | `snapshot_lifecycle_test.go` | **N1 skeleton:** `Snapshot` → `SnapshotContent`, `status.boundSnapshotContentName` (unified root bind field), Ready через conditions (без ObjectKeeper / полного N2) |
@@ -110,9 +110,9 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 | ID | Тест | Связь | Статус |
 |----|------|--------|--------|
 | T1 | Нет production unified CRD в API — wiring без ошибки, ноль watch | S1–S2 | ✅ `unified_bootstrap_t1_test.go`, `pkg/unifiedbootstrap/gvk_test.go` |
-| T2 | CSD + маппинг; **статусы** Accepted/RBACReady/Ready; **активация watch** по формуле (eligible → Sync → layered + active) | R1–R3 | ✅ `csd_api_smoke_test.go`, `unified_runtime_hot_add_test.go`, `unified_runtime_rbac_eligibility_test.go`. ⬜ расширение: T5 (spec/delete CSD) |
+| T2 | CSD + маппинг; **статусы** Accepted/SourceAccessGranted/Ready; **активация watch** по формуле (eligible → Sync → layered + active) | R1–R3 | ✅ `csd_api_smoke_test.go`, `unified_runtime_hot_add_test.go`, `unified_runtime_rbac_eligibility_test.go`. ⬜ расширение: T5 (spec/delete CSD) |
 | T3 | Два CSD, конфликт kind | R4 | ✅ `csd_reconciler_kindconflict_test.go` |
-| T4 | Без `RBACReady` пара не в `EligibleFromCSD` / не eligible для merge (не проверяем monotonic `active`) | R3 | ✅ `unified_runtime_rbac_eligibility_test.go` |
+| T4 | Без `SourceAccessGranted` пара не в `EligibleFromCSD` / не eligible для merge (не проверяем monotonic `active`) | R3 | ✅ `unified_runtime_rbac_eligibility_test.go` |
 | T5 | Декомпозиция update/delete CSD: смена desired GVK в spec, удаление CSD, смена поколения статуса, последовательные apply нескольких CSD | R2, spec | ⬜ |
 | T6 | MCR расширенный выбор | M1–M2 | ⬜ |
 | T7 | Только MCR, без unified | S1–S2 | ⬜ |

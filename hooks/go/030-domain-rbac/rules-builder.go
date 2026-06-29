@@ -115,7 +115,7 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 //     parent-graph planner: it CREATES one parent-owned child snapshot per source object
 //     (parent_graph.go:ensureParentOwnedChildSnapshot → r.Client.Create) and PATCHes it to maintain the
 //     ownerRef back to the root Snapshot. Without create the planner fails with
-//     ChildrenSnapshotReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
+//     PlanningReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
 //     The ownerRef does not set blockOwnerDeletion, so no /finalizers permission is required on the owner.
 //   - status-write (get/update/patch on /status): binding BoundSnapshotContentName + volume-metadata
 //     projection, co-owned via D4a.
@@ -164,7 +164,7 @@ func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.Pol
 //   - list — the SnapshotReconciler enumerates the mapped source objects (e.g. DemoVirtualMachine,
 //     DemoVirtualDisk) to build the parent-owned child graph (parent_graph.go), one-shot
 //     r.Dynamic...List(namespace) per reconcile. Without it the root Snapshot degrades to
-//     ChildrenSnapshotReady=False/SourceListForbidden.
+//     PlanningReady=False/SourceListForbidden.
 //   - get — once the graph is planned, the ManifestCaptureRequest controller fetches each named source
 //     target by name to capture its manifest (checkpoint_controller.go: r.Get(target)). Without it the MCR
 //     terminates Ready=False/Failed ("cannot get demovirtualdisks ...") and the root Snapshot hangs on
@@ -406,10 +406,10 @@ func moduleLabels() map[string]string {
 	}
 }
 
-// desiredRBACReadyCondition builds the RBACReady condition value to write on a CSD.
-func desiredRBACReadyCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
+// desiredSourceAccessGrantedCondition builds the SourceAccessGranted condition value to write on a CSD.
+func desiredSourceAccessGrantedCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
 	return metav1.Condition{
-		Type:               consts.CSDConditionRBACReady,
+		Type:               consts.CSDConditionSourceAccessGranted,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -418,16 +418,16 @@ func desiredRBACReadyCondition(generation int64, status metav1.ConditionStatus, 
 	}
 }
 
-// patchCSDRBACReady performs a read-modify-update on the CSD status to set only
-// the RBACReady condition, preserving Accepted and Ready (owned by the controller).
+// patchCSDSourceAccessGranted performs a read-modify-update on the CSD status to set only
+// the SourceAccessGranted condition, preserving Accepted and Ready (owned by the controller).
 // Retries on conflict per the ADR ownership model.
-func patchCSDRBACReady(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
+func patchCSDSourceAccessGranted(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := new(v1alpha1.CustomSnapshotDefinition)
 		if err := cl.Get(ctx, ctrlclient.ObjectKey{Name: name}, fresh); err != nil {
 			return err
 		}
-		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionRBACReady)
+		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionSourceAccessGranted)
 		if existing != nil &&
 			existing.Status == cond.Status &&
 			existing.Reason == cond.Reason &&

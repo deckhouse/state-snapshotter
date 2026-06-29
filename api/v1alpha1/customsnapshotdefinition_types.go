@@ -78,6 +78,6 @@ type SnapshotGVKRef struct {
 
 // +k8s:deepcopy-gen=true
 type CustomSnapshotDefinitionStatus struct {
-	// Conditions include Accepted, RBACReady, Ready (see ADR).
+	// Conditions include Accepted, SourceAccessGranted, Ready (see ADR).
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

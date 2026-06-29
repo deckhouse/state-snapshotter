@@ -21,7 +21,7 @@ leaf SnapshotContent
         │
         ▼
 parent SnapshotContent
-  ChildrenReady=False
+  ChildContentsReady=False
   Ready=False                  message: direct child + failed leaf + original reason/message
         │
         ▼
@@ -33,7 +33,7 @@ root Snapshot
   Ready := verbatim mirror(bound SnapshotContent.Ready)
 ```
 
-**Single aggregator (INV-COND2):** `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildrenReady`, computed only by
+**Single aggregator (INV-COND2):** `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildContentsReady`, computed only by
 `SnapshotContentController.buildCommonSnapshotContentStatusPlan`.
 
 **Mirror-only Snapshot (INV-COND4):** `Snapshot.Ready := mirror(SnapshotContent.Ready)` (status/reason/message
@@ -81,7 +81,7 @@ manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPen
 ```
 
 Terminal own-leg failures win over child failures; terminal failures win over pending; own legs win over
-children at equal severity (manifest leg before volume leg). `ChildrenSnapshotReady` is a gate/barrier and is NOT part of this formula.
+children at equal severity (manifest leg before volume leg). `PlanningReady` is a gate/barrier and is NOT part of this formula.
 
 ## 3. Message formats
 
@@ -117,7 +117,7 @@ Scope:
 
 - richer reason/message for `ManifestsReady=False` (`ManifestCapturePending`, `ManifestCheckpointFailed`) and
   `VolumesReady=False` (`DataCapturePending`, `ArtifactMissing`, `DataArtifactInvalid`/`NotSupported`);
-- richer reason/message for `ChildrenReady=False` (`ChildrenPending` with count, `ChildrenFailed` with leaf chain);
+- richer reason/message for `ChildContentsReady=False` (`ChildrenPending` with count, `ChildrenFailed` with leaf chain);
 - early `Ready=False` on SnapshotContent right after creation (no MCP name → `ManifestCapturePending`);
 - `Snapshot.Ready` verbatim mirror; pre-bind transitional `ContentBindingPending` only;
 - recompute degraded state correctly **if already woken** — e.g. SnapshotContent already `Ready=True`, a later

@@ -258,7 +258,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			// At this point the root SnapshotContent has no published manifestCheckpointName, so it cannot
 			// express the root's own manifest leg (ManifestsReady) terminal failure — hence the local failCapture bridge.
 			// The underlying descendant terminal failure is ALSO representable via the content tree
-			// (descendant content ManifestsReady=False -> ancestor ChildrenReady=False -> root content Ready
+			// (descendant content ManifestsReady=False -> ancestor ChildContentsReady=False -> root content Ready
 			// =False -> root Snapshot mirror) once child content refs are published; converting this to pure
 			// content-driven propagation is a deferred follow-up (out of scope for Slice 3), not a hidden
 			// post-publish recompute.

@@ -98,7 +98,7 @@ func IsDedicatedSnapshotControllerKind(kind string) bool {
 }
 
 // DomainCaptureSnapshotKinds lists dedicated Snapshot kinds whose domain controller plans capture
-// out-of-band (creates MCR/VCR/children, publishes demo.status, owns ChildrenSnapshotReady) but whose
+// out-of-band (creates MCR/VCR/children, publishes demo.status, owns PlanningReady) but whose
 // cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController (content-ownership
 // commit 2, D1). They are a strict subset of DedicatedSnapshotControllerKinds: the dedicated planning
 // controller is still activated for them, AND the generic binder additionally watches them (gated by

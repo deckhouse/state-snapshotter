@@ -187,7 +187,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Step 1.5: Simulate domain controller: publish ChildrenSnapshotReady=True (current generation) on Snapshot.
+			// Step 1.5: Simulate domain controller: publish PlanningReady=True (current generation) on Snapshot.
 			// GenericSnapshotBinderController waits for this condition before creating SnapshotContent
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
@@ -200,7 +200,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
+			injectPlanningReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
 			conditions := snapshotLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshSnapshot, conditions)
 			err = k8sClient.Status().Update(ctx, freshSnapshot)
@@ -424,7 +424,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Publish ChildrenSnapshotReady=True (current generation)
+			// Publish PlanningReady=True (current generation)
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
@@ -436,7 +436,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
+			injectPlanningReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
 			conditions := snapshotLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshSnapshot, conditions)
 			err = k8sClient.Status().Update(ctx, freshSnapshot)
@@ -688,7 +688,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred(), "Should be able to create Snapshot (no RBAC errors)")
 
-			// Step 2: publish ChildrenSnapshotReady=True (current generation)
+			// Step 2: publish PlanningReady=True (current generation)
 			// This verifies controller can update status subresource
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
@@ -701,7 +701,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 			snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
+			injectPlanningReadyCurrent(snapshotLike, freshSnapshot.GetGeneration())
 			conditions := snapshotLike.GetStatusConditions()
 			snapshot.SyncConditionsToUnstructured(freshSnapshot, conditions)
 			err = k8sClient.Status().Update(ctx, freshSnapshot)

@@ -79,7 +79,7 @@ func TestPatchUnstructuredBoundContentNameIsIdempotent(t *testing.T) {
 		t.Fatalf("unexpected bound content name: %q", got)
 	}
 
-	// The common binder must never self-publish ChildrenSnapshotReady: it is owned exclusively by the
+	// The common binder must never self-publish PlanningReady: it is owned exclusively by the
 	// domain/namespace controller and the binder only waits for it.
 	conditions, _, err := unstructured.NestedSlice(fresh.Object, "status", "conditions")
 	if err != nil {
@@ -90,8 +90,8 @@ func TestPatchUnstructuredBoundContentNameIsIdempotent(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if cond["type"] == snapshot.ConditionChildrenSnapshotReady {
-			t.Fatalf("PatchUnstructuredBoundContentName must not self-publish ChildrenSnapshotReady, got condition: %#v", cond)
+		if cond["type"] == snapshot.ConditionPlanningReady {
+			t.Fatalf("PatchUnstructuredBoundContentName must not self-publish PlanningReady, got condition: %#v", cond)
 		}
 	}
 }
