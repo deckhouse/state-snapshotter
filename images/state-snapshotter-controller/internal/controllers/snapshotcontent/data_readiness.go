@@ -150,7 +150,12 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 	artifactObj := &unstructured.Unstructured{}
 	artifactObj.SetGroupVersionKind(gvk)
 
-	err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj)
+	// Cached read: the VSC is under the artifact wake-up watch (datarefs_publish.go already reads it via
+	// the cache), so this forces no new watch. A stale/NotFound read is fail-closed (ArtifactMissing or
+	// NotReady -> data leg pending), and a non-NotFound error (e.g. the external CSI VSC CRD/informer not
+	// yet available) still propagates below as a reconcile error so the pass requeues instead of falsely
+	// passing the data leg.
+	err := r.Client.Get(ctx, client.ObjectKey{Name: name}, artifactObj)
 	if errors.IsNotFound(err) {
 		return false, snapshot.ReasonArtifactMissing,
 			fmt.Sprintf("VolumeSnapshotContent %s not found", name), nil

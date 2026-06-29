@@ -51,6 +51,7 @@ const (
 	envModuleReadyTO        = "E2E_MODULE_READY_TIMEOUT"
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
+	envGetLoad              = "E2E_GET_LOAD"
 	envStorageClass         = "E2E_STORAGE_CLASS"
 	envProbeImage           = "E2E_PROBE_IMAGE"
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
@@ -196,6 +197,7 @@ type e2eConfig struct {
 	moduleReadyTO     time.Duration
 	gcTTL             string
 	volumeData        bool
+	getLoad           bool
 	storageClass      string
 	probeImage        string
 	backupClientImage string
@@ -223,6 +225,7 @@ func loadConfig() e2eConfig {
 		probeImage:        strings.TrimSpace(os.Getenv(envProbeImage)),
 		backupClientImage: strings.TrimSpace(os.Getenv(envBackupClientImage)),
 		volumeData:        envBool(os.Getenv(envVolumeData)),
+		getLoad:           envBool(os.Getenv(envGetLoad)),
 		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
 		keepAlways:        envBool(os.Getenv(envKeepCluster)),
 		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
