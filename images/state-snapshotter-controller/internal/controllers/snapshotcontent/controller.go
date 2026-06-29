@@ -212,7 +212,12 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	for _, gvk := range gvksToCheck {
 		obj.SetGroupVersionKind(gvk)
-		err = r.APIReader.Get(ctx, contentKey, obj)
+		// Read the own object from the cache: gvksToCheck only holds content GVKs that already have a
+		// started For-informer (AddWatchForContent registers the GVK and its watch transactionally), so
+		// this never forces a new informer and a non-match returns a clean NotFound, same as the uncached
+		// reader did. Spec is immutable and conditions are written under a changed-gate, so the cached
+		// (eventually consistent) read cannot add reconcile churn.
+		err = r.Client.Get(ctx, contentKey, obj)
 		if err != nil {
 			if errors.IsNotFound(err) {
 				continue
@@ -430,6 +435,13 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		statusMap = map[string]interface{}{}
 	}
 
+	// base for the condition-only MergeFrom patch below, captured as-read BEFORE any condition mutation.
+	// upsertContentCondition writes conditions straight into obj.status.conditions (the SnapshotContentLike
+	// wrapper is a view over obj), so capturing base here - rather than just before the write - keeps the
+	// MergeFrom diff limited to status.conditions. selfHealDataArtifactOwnerRefs already ran above, so its
+	// effects are folded into base and never enter the patch.
+	base := obj.DeepCopy()
+
 	gen := obj.GetGeneration()
 	desired := []metav1.Condition{
 		{Type: snapshot.ConditionManifestsReady, Status: plan.manifestsReady, Reason: plan.manifestsReason, Message: plan.manifestsMessage, ObservedGeneration: gen},
@@ -453,10 +465,15 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	}
 	obj.Object["status"] = statusMap
 	snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
-	if err := r.Status().Update(ctx, obj); err != nil {
-		if errors.IsConflict(err) {
-			return false, nil
-		}
+	// Condition-only MergeFrom patch (not a full Status().Update). base vs obj differ only in
+	// status.conditions, so the JSON merge patch is {"status":{"conditions":[...]}} and leaves sibling
+	// status fields written by the snapshot reconciler (residualVolumeCapture, dataRefs, ...) untouched.
+	// conditions are the aggregator's exclusive domain (INV-COND2, single writer) and reconcile of one
+	// object is serialized, so no optimistic lock is needed: MergeFrom sends no resourceVersion, so a
+	// concurrent sibling-field write does not turn into a 409 (which the previous Status().Update would
+	// convert into an extra requeue). Staleness is still safe because the changed-gate above only fires when
+	// the monotonic-cache-derived desired conditions actually differ.
+	if err := r.Status().Patch(ctx, obj, client.MergeFrom(base)); err != nil {
 		return false, err
 	}
 	return ready, nil
@@ -749,7 +766,10 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		total++
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
+		// Cached read of the child content (same For-informer GVK). A just-created/not-yet-synced child
+		// missing from the cache is treated as pending (fail-closed), and ManifestsArchived is a one-way
+		// latch, so a stale read can only delay the archive, never falsely latch it True.
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
 				pendingNames = append(pendingNames, name)
 				continue
@@ -832,6 +852,13 @@ func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context
 
 	owner := &unstructured.Unstructured{}
 	owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(apiVersion, kind))
+	// Deliberately uncached (APIReader): this owning Snapshot's status.childrenSnapshotRefs is the
+	// AUTHORITATIVE declared-child set that fail-closes the one-way ManifestsArchived latch (see
+	// aggregateChildrenManifestsArchived). Unlike the cache-missing child CONTENT reads above - which only
+	// ever read as pending and therefore merely DELAY the latch - a stale owner can return a SMALLER
+	// declared set that omits a just-declared child while declaredComplete still reports true, letting the
+	// latch close True over an unlinked descendant subtree. Because the latch never re-opens, that is a
+	// permanent duplicate-root-capture. The declared set must be read fresh from the API server.
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
 		if errors.IsNotFound(err) {
 			return nil, false, nil
@@ -856,6 +883,9 @@ func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context
 		if snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
 			continue
 		}
+		// Uncached (APIReader) for the same reason as the owner GET above: resolving each declared child
+		// snapshot to its bound content name is part of building the authoritative declared set; a stale
+		// resolution would weaken the fail-closed declared-vs-linked guard on the one-way archive latch.
 		bound, rerr := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, r.APIReader, ref, namespace)
 		if rerr != nil {
 			if stderrors.Is(rerr, usecase.ErrRunGraphChildNotBound) ||
@@ -996,7 +1026,10 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		total++
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
-		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
+		// Cached read of the child content (same For-informer GVK). A cache-missing child is collected as
+		// pending (fail-closed -> ChildrenPending), so a stale read delays the parent's Ready rather than
+		// asserting it.
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
 				pendingNames = append(pendingNames, name)
 				continue
@@ -1085,15 +1118,16 @@ func (r *SnapshotContentController) validateCommonContentManifestCheckpoint(ctx 
 
 // firstMissingManifestCheckpointChunk validates chunk EXISTENCE by exact ref from MCP.status.chunks[].
 // It deliberately does NOT read/decode chunk content (.spec.data) or verify checksums — content/integrity
-// validation belongs to the explicit read/download/archive path, not to every reconcile. Each chunk is
-// fetched metadata-only (PartialObjectMetadata) so .spec.data is never transferred. It uses APIReader
-// (direct, uncached) on purpose: a cached Get would force the controller cache to start a
+// validation belongs to the explicit read/download/archive path, not to every reconcile. The MCP itself is
+// read from the cache (its informer is already running: ensureManifestCheckpointOwnedByContent does a
+// cached Get on it). Each chunk, however, is fetched metadata-only (PartialObjectMetadata) via the
+// APIReader (direct, uncached) on purpose: a cached chunk Get would force the controller cache to start a
 // ManifestCheckpointContentChunk informer (implicit list/watch), which Phase 2a avoids (chunks keep
 // get-only RBAC). It stops at the first chunk that is NotFound and returns its name; transient
 // (non-NotFound) errors are returned so reconcile requeues instead of falsely failing the tree.
 func (r *SnapshotContentController) firstMissingManifestCheckpointChunk(ctx context.Context, mcpName string) (string, error) {
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
 			// MCP vanished between checks; resolveManifestCheckpointReady reclassifies on the next reconcile.
 			return "", nil
@@ -1224,7 +1258,10 @@ func snapshotContentControllerOwnerRefsForHandoff(existing []metav1.OwnerReferen
 // Returns (resolvedName, ready, failed, message, error).
 func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.Context, mcpName string) (string, bool, bool, string, error) {
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+	// Cached read: the MCP informer is already started (ensureManifestCheckpointOwnedByContent reads it
+	// via the cache), so this forces no new watch. A stale/absent MCP keeps the manifest leg pending
+	// (fail-closed), which the self-requeue resolves once the cache catches up.
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
 			return mcpName, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcpName), nil
 		}

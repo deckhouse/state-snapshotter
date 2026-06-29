@@ -183,9 +183,13 @@ func TestMarkResidualVolumeCaptureCompletePreservesConditions(t *testing.T) {
 	}
 }
 
-// TestMarkResidualVolumeCaptureCompleteSurvivesAggregatorStatusUpdate: a subsequent full Status().Update
-// by the aggregator (which reads fresh, sets conditions, then updates) must preserve the latch field
-// (aggregator -> reconciler coexistence; no writer loses the other's subtree).
+// TestMarkResidualVolumeCaptureCompleteSurvivesAggregatorStatusUpdate models the OLD, more conservative
+// path where the aggregator wrote conditions with a FULL Status().Update (read fresh, set conditions,
+// update). The aggregator now writes conditions via a condition-only MergeFrom patch (see
+// reconcileCommonSnapshotContentStatus and
+// reconcile_count_e_mergefrom_test.go:TestConditionsMergeFromPatchPreservesWriterStatusFields). This case
+// is kept because a full update from a fresh read still must not drop the reconciler's latch field
+// (aggregator <-> reconciler coexistence; no writer loses the other's subtree).
 func TestMarkResidualVolumeCaptureCompleteSurvivesAggregatorStatusUpdate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
