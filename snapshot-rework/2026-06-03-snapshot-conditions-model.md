@@ -128,7 +128,7 @@ Ready:                  True/Completed | False/<manifest|data leg reason> | Fals
 manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > residualVolumeCapturePending > Completed
 ```
 
-(терминальные провалы первыми — actionable; свой узел перед детьми при равной тяжести; при сохранённом sequencing `volumesPending` выставляется только после готовности манифестной линии. `residualVolumeCapturePending` — низший по приоритету, **fail-closed** gate первого `Ready=True` только на namespace-root content (§2.3): любая обычная/терминальная нога его перекрывает.)
+(терминальные провалы первыми — actionable; свой узел перед детьми при равной тяжести; при сохранённом sequencing `volumesPending` выставляется только после готовности манифестной линии. `residualVolumeCapturePending` — низший по приоритету, **fail-closed** gate первого `Ready=True` только на namespace-root content (§2.3): любая обычная/терминальная линия его перекрывает.)
 
 **Фаза «до контента»:** пока bound `SnapshotContent` ещё не создан (или у него ещё нет `Ready`), `Snapshot.Ready = False/ContentBindingPending` (локальный transitional pre-bind). После bind — только mirror.
 

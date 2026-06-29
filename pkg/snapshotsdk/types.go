@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/storagefoundation"
 )
 
@@ -36,7 +37,7 @@ type SourceRef struct {
 // contract type, re-exported so domain controllers and adapters reference a single definition.
 type SnapshotChildRef = storagev1alpha1.SnapshotChildRef
 
-// Target is the single PVC capture target of a snapshot's data leg. The domain resolves its own PVC
+// Target is the single PVC the snapshot captures as its data. The domain resolves its own PVC
 // (including readiness/ArtifactMissing decisions) and hands the SDK the result; the SDK turns it into the
 // storage-foundation VolumeCaptureRequest.
 type Target = storagefoundation.Target
@@ -56,11 +57,11 @@ type DomainCaptureState struct {
 }
 
 // CoreCaptureState is the read-only, core-owned handoff the SDK consults to suppress re-creating capture
-// requests after the core controller has durably stamped a leg captured. It is never written by the SDK.
+// requests after the core controller has durably recorded a capture as done. It is never written by the SDK.
 type CoreCaptureState struct {
-	// ManifestCaptured is set by the core controller once the manifest leg is durably checkpointed.
+	// ManifestCaptured is set by the core controller once the manifest capture is durably checkpointed.
 	ManifestCaptured bool
-	// DataCaptured is set by the core controller once the data leg's content handoff is durable.
+	// DataCaptured is set by the core controller once the data capture's content handoff is durable.
 	DataCaptured bool
 }
 
@@ -73,34 +74,45 @@ type ChildSpec struct {
 	Object client.Object
 }
 
-// NotReadySpec describes a non-terminal-or-terminal Ready=False outcome the domain wants published
-// (invalid source, missing artifact, …). It generalizes the various Ready=False paths into one verb.
-type NotReadySpec struct {
+// NotReadyStatus describes a Ready=False outcome the domain wants published (invalid source, missing
+// artifact, …). It generalizes the various Ready=False paths into one verb. The SDK only publishes the
+// condition; whether and when to requeue is the controller's decision, expressed through its own
+// ctrl.Result (the SDK does not drive the reconcile loop).
+type NotReadyStatus struct {
 	// Reason is the machine-readable Ready=False reason (domain-chosen).
 	Reason Reason
 	// Message is an optional human-readable explanation.
 	Message string
-	// Cause, when set, is logged/returned so the manager can surface the underlying error.
+	// Cause, when set and Message is empty, is used as the human-readable condition message
+	// (Cause.Error()). It is not otherwise stored or returned by the SDK.
 	Cause error
-	// Requeue asks the caller to requeue (for example, an artifact that may appear later). When false the
-	// outcome is treated as terminal-until-spec-change and the SDK returns no error and no requeue intent.
-	Requeue bool
 }
 
-// VolumeCaptureSpec is the domain's data-leg intent: the single PVC to capture. A snapshot node binds at
-// most one data artifact (Variant A, cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
+// VolumeCaptureSpec is the domain's data-capture intent: the single PVC to capture. A snapshot node binds
+// at most one data artifact (Variant A, cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
 // multiple volumes are modeled as child snapshot nodes, never as several data refs on one node. A nil
 // DataRef means the snapshot is manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no
 // name.
+//
+// The domain is expected to resolve DataRef from the snapshot's immutable spec.sourceRef, so in practice it
+// does not flip between data capture and manifest-only across reconciles. Note this is a domain convention,
+// NOT an SDK-enforced barrier: unlike the child topology (which fails closed on post-barrier drift),
+// EnsureVolumeCapture does not enforce data-slot immutability. A nil DataRef is always a plain no-op — the
+// SDK ensures no VolumeCaptureRequest and, being delete-free, does not clear a name it published earlier
+// (so a published VCR survives a later nil; it is not failed closed and not cleared).
 type VolumeCaptureSpec struct {
-	// DataRef is the snapshot's single data-leg PVC, or nil for a manifest-only snapshot.
+	// DataRef is the single PVC the snapshot captures as its data, or nil for a manifest-only snapshot.
 	DataRef *Target
 }
 
-// ManifestCaptureSpec is the domain's manifest-leg intent: the single base manifest target (the source
-// object identity). The SDK merges any owned-PVC targets discovered from the data-leg VolumeCaptureRequest.
+// ManifestTarget identifies one namespaced object the domain wants captured in the snapshot node's
+// ManifestCaptureRequest. It is the shared API type re-exported through the SDK facade.
+type ManifestTarget = ssv1alpha1.ManifestTarget
+
+// ManifestCaptureSpec is the domain's manifest-capture intent: the complete desired set of manifest targets
+// for the snapshot node. The SDK turns this set into one ManifestCaptureRequest and merges any owned-PVC
+// target discovered from the data-capture VolumeCaptureRequest.
 type ManifestCaptureSpec struct {
-	TargetAPIVersion string
-	TargetKind       string
-	TargetName       string
+	// Targets is the complete domain-chosen manifest target set for this snapshot node.
+	Targets []ManifestTarget
 }

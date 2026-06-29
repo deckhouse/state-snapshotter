@@ -58,7 +58,7 @@
 
 - Готовность вычисляется **ровно на `SnapshotContent`** (единственный агрегатор, INV-COND2): `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildrenReady`.
 - `Snapshot.Ready` — **зеркало** bound `SnapshotContent.Ready` (status/reason/message копируются), без локального пересчёта дерева (INV-COND4).
-- Приоритет reason у `Ready` (один reason при нескольких упавших ногах): `manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed` — терминальные провалы первыми, свой узел перед детьми (manifest перед volume).
+- Приоритет reason у `Ready` (один reason при нескольких неудовлетворённых составляющих — manifests/volumes/children): `manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > Completed` — терминальные провалы первыми, свой узел перед детьми (manifest перед volume).
 - Failure листа поднимается **только** по ancestor-chain (INV-FAIL1): каждый предок получает `ChildrenReady=False` / `Ready=False` / reason `ChildrenFailed`, а `message` сохраняет имя failed-потомка и исходный reason/message (кумулятивно по глубине); sibling-ветки не затрагиваются.
 - Единственное не-mirror исключение для `Snapshot.Ready` — bridge терминального capture-failure дочернего **`Snapshot`**, который дерево контента ещё не может выразить (терминальные child-failure'ы вычисляет `usecase.SummarizeChildSnapshotTerminalFailures`, **без** pending-агрегации).
 - Для child selection используется strict ref (`apiVersion`/`kind`/`name`) и один `Get` в namespace родителя.

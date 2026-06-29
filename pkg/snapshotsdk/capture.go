@@ -18,6 +18,7 @@ package snapshotsdk
 
 import (
 	"context"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,32 +33,53 @@ import (
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/patch"
 )
 
-// Planning drives the three idempotent, restart-safe planning legs of a snapshot: its child snapshots, its
-// data-leg volume capture, and its manifest capture. Each method reconciles the cluster toward the desired
-// intent and publishes the resulting names/refs into the snapshot status.
+// Planning drives the three idempotent, restart-safe parts of a snapshot's planning: its child snapshots,
+// its volume (PVC) data capture, and its manifest capture. Each method reconciles the cluster toward the
+// desired intent and publishes the resulting names/refs into the snapshot status.
 type Planning interface {
-	// EnsureChildren makes the cluster match the desired set of child snapshots (create/adopt each under
-	// this snapshot) and publishes the resulting refs as status.childrenSnapshotRefs. It performs
-	// create/adopt + publication only and never deletes children (SDK v1 is delete-free). A nil or empty
-	// desired set publishes empty refs: a child no longer desired becomes detached from the snapshot graph
-	// but is left in the cluster for ownerRef GC / a future cleanup component to reclaim.
+	// EnsureChildren create/adopts the desired set of child snapshots under this snapshot and publishes
+	// the resulting refs as status.childrenSnapshotRefs. It performs create/adopt + publication only and
+	// never deletes children (SDK v1 is delete-free).
+	//
+	// The published child set becomes the authoritative, immutable snapshot topology once the planning
+	// barrier is committed (ChildrenSnapshotReady=True, written by MarkPlanningReady). Before commit the
+	// desired set may still converge to newly observed domain state; after commit it must match the
+	// published set by canonical identity (set equality on (apiVersion, kind, name), not count) — this
+	// also locks a committed EMPTY topology (a leaf can never grow a child). A differing set after commit
+	// is terminal topology drift: EnsureChildren fails closed with ErrTopologyDrift, creating nothing,
+	// deleting nothing, leaving the published refs untouched. The caller surfaces it via MarkPlanningFailed
+	// with ReasonTopologyDrift. It also fails (non-drift error) on a duplicate desired child.
 	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error
 
-	// EnsureVolumeCapture ensures the data-leg capture request for the given PVC targets and publishes its
-	// name. An empty target set is a manifest-only snapshot (no request, no published name). The operation
-	// is suppressed once the core controller has stamped the data leg captured.
+	// EnsureVolumeCapture ensures the volume capture request for the snapshot's single data-ref PVC and
+	// publishes its name. A nil DataRef is a manifest-only snapshot: the SDK ensures no request and, being
+	// delete-free, never clears a name it published earlier (so a published VCR survives a later nil). Unlike
+	// the child topology, the SDK does NOT enforce data-slot immutability or fail closed on a nil after a
+	// published VCR — keeping the slot stable is a domain convention (immutable spec.sourceRef), see
+	// VolumeCaptureSpec. The operation is suppressed once the core controller has stamped the data captured.
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
-	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (base target plus any owned-PVC
-	// targets discovered from the data leg) and publishes its name. The operation is suppressed once the
-	// core controller has stamped the manifest leg captured.
+	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the domain-chosen target set
+	// plus any owned-PVC target discovered from the data capture) and publishes its name. On the first call it
+	// creates the request; on later calls, if the request already exists, the desired target set must
+	// match the request's targets by canonical identity (set equality on (apiVersion, kind, name), order
+	// and duplicates ignored). A differing set is terminal manifest drift and EnsureManifestCapture fails
+	// closed with ErrManifestDrift — it does not update/patch/delete the request and leaves status
+	// untouched. The caller surfaces it via MarkPlanningFailed with ReasonManifestDrift. The operation is
+	// suppressed once the core controller has stamped the manifest captured.
+	//
+	// Cardinality invariant: the FINAL target set (domain targets plus any owned-PVC augmentation) must be
+	// non-empty. If it is empty, EnsureManifestCapture fails closed with ErrEmptyManifest before touching
+	// the cluster (no Get/Create, no status patch). The SDK does not inject the source object — supplying at
+	// least one manifest target is the domain's responsibility.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
 // PlanningBarrier publishes the derived planning-complete signal the core controller waits on before it
 // takes over snapshot content. It is the single place the legacy condition name is written.
 type PlanningBarrier interface {
-	// MarkPlanningReady declares all planning legs complete (planning barrier satisfied).
+	// MarkPlanningReady declares the snapshot's planning complete — manifest capture, data capture, and
+	// child snapshot planning are all done (planning barrier satisfied).
 	MarkPlanningReady(ctx context.Context, t SnapshotAdapter, message string) error
 	// MarkPlanningFailed declares planning blocked with a domain-chosen reason and underlying cause.
 	MarkPlanningFailed(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error
@@ -66,7 +88,7 @@ type PlanningBarrier interface {
 // ReadinessFault publishes a Ready=False outcome for a snapshot whose source or required artifact is not
 // (yet) usable.
 type ReadinessFault interface {
-	MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadySpec) error
+	MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadyStatus) error
 }
 
 // CaptureSDK is the capture-side protocol facade a domain snapshot controller drives. It hides all
@@ -79,7 +101,7 @@ type CaptureSDK interface {
 }
 
 // New returns a CaptureSDK bound to a client (for writes and cached reads), an API reader (for live,
-// TOCTOU-safe marker refreshes), and a data-leg provider (see NewStorageFoundationProvider).
+// TOCTOU-safe marker refreshes), and a volume-capture provider (see NewStorageFoundationProvider).
 func New(c client.Client, apiReader client.Reader, provider VolumeCaptureProvider) CaptureSDK {
 	return &sdk{client: c, apiReader: apiReader, provider: provider}
 }
@@ -97,19 +119,39 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 		return err
 	}
 	objs := make([]client.Object, 0, len(desired))
-	for _, d := range desired {
+	for i, d := range desired {
+		if d.Object == nil {
+			return fmt.Errorf("snapshotsdk: desired[%d].Object is nil; ChildSpec.Object must be a domain-built child object", i)
+		}
 		objs = append(objs, d.Object)
 	}
-	newRefs, err := children.Reconcile(ctx, s.client, s.client.Scheme(), owner, objs)
+	desiredRefs, err := children.DeriveRefs(s.client.Scheme(), objs)
 	if err != nil {
+		return err
+	}
+
+	// Topology is immutable once the planning barrier is committed. The commit marker is the durable
+	// ChildrenSnapshotReady=True condition (published by MarkPlanningReady), NOT "refs are non-empty" —
+	// otherwise a committed EMPTY topology (a leaf) could later grow a child unnoticed. After commit, the
+	// desired set must match the published set exactly (set equality on the canonical (apiVersion,kind,
+	// name) key, NOT count); a drifted set — e.g. a restart where discovery sees different children — is
+	// terminal: fail closed without creating, deleting, or republishing anything. Before commit, the set
+	// may still converge to newly observed desired (Р25).
+	published := t.GetDomainCaptureState().ChildrenSnapshotRefs
+	committed := conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady)
+	if committed && !children.RefsEqualIgnoreOrder(published, desiredRefs) {
+		return ErrTopologyDrift
+	}
+
+	if err := children.EnsureAll(ctx, s.client, owner, objs); err != nil {
 		return err
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
-		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, newRefs) {
+		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, desiredRefs) {
 			return false
 		}
-		st.ChildrenSnapshotRefs = newRefs
+		st.ChildrenSnapshotRefs = desiredRefs
 		t.SetDomainCaptureState(st)
 		return true
 	})
@@ -170,21 +212,30 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	namespace := obj.GetNamespace()
 	mcrName := manifest.RequestName(gvk.Kind, namespace, obj.GetName())
 
+	// Build the FULL desired target set exactly as on create — domain targets plus the owned-PVC target
+	// derived from the data-capture VCR — so the drift comparison below is apples-to-apples (the augmented
+	// PVC target must be part of desired, otherwise an existing MCR that legitimately carries it would
+	// be a false-positive drift).
+	ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
+	if err != nil {
+		return err
+	}
+	base := append([]ssv1alpha1.ManifestTarget(nil), in.Targets...)
+	desiredTargets := manifest.Targets(base, ownedPVC, namespace)
+
+	// Manifest capture cardinality invariant: the final target set (domain targets + owned-PVC augmentation)
+	// must be non-empty. Fail closed BEFORE any cluster mutation (no MCR Get/Create, no status patch) so an
+	// empty manifest capture can never be silently published as a valid request.
+	if len(desiredTargets) == 0 {
+		return ErrEmptyManifest
+	}
+
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
 	getErr := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}, existing)
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
 	}
 	if apierrors.IsNotFound(getErr) {
-		ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
-		if err != nil {
-			return err
-		}
-		base := []ssv1alpha1.ManifestTarget{{
-			APIVersion: in.TargetAPIVersion,
-			Kind:       in.TargetKind,
-			Name:       in.TargetName,
-		}}
 		owner, err := s.ownerRef(t)
 		if err != nil {
 			return err
@@ -196,12 +247,16 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 				OwnerReferences: []metav1.OwnerReference{owner},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
-				Targets: manifest.Targets(base, ownedPVC, namespace),
+				Targets: desiredTargets,
 			},
 		}
 		if err := s.client.Create(ctx, mcr); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
 		}
+	} else if !manifest.TargetsEqualIgnoreOrder(existing.Spec.Targets, desiredTargets) {
+		// Fail-closed manifest capture: the published MCR's targets diverge from the desired set. Do not
+		// update/patch/delete the request and do not touch status — surface terminal drift.
+		return ErrManifestDrift
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
@@ -226,7 +281,7 @@ func (s *sdk) MarkPlanningFailed(ctx context.Context, t SnapshotAdapter, reason 
 	return s.patchCondition(ctx, t, storagev1alpha1.ConditionChildrenSnapshotReady, metav1.ConditionFalse, string(reason), message)
 }
 
-func (s *sdk) MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadySpec) error {
+func (s *sdk) MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadyStatus) error {
 	message := in.Message
 	if message == "" && in.Cause != nil {
 		message = in.Cause.Error()

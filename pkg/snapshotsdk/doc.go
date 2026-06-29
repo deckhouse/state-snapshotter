@@ -18,31 +18,36 @@ limitations under the License.
 //
 // A domain snapshot controller (for example DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot)
 // owns three domain decisions and nothing more: what its source is, what child snapshots it implies,
-// and which PVCs make up its data leg. Everything else — talking to ManifestCaptureRequest, the
+// and which PVC it captures as its data. Everything else — talking to ManifestCaptureRequest, the
 // storage-foundation VolumeCaptureRequest, owner references, optimistic-locked status patches, and the
 // derived planning-barrier condition — is Kubernetes transport that this SDK hides behind a small set of
 // intent verbs.
 //
 // # Model
 //
-// The SDK models one snapshot as a manifest leg, a single logical data leg, and a set of child
+// The SDK models one snapshot as a manifest capture, a single logical data capture, and a set of child
 // snapshots. The domain expresses intent; the SDK makes the cluster match it, idempotently and
 // crash/restart-safely.
 //
-// SDK v1 is delete-free: EnsureChildren creates/adopts and publishes the desired child refs but never
-// deletes children. A child no longer desired drops out of status.childrenSnapshotRefs and is reclaimed
-// by ownerRef garbage collection (the parent owns each child) or a future cleanup component, not by the
-// SDK. This keeps the contract a pure publication layer with no risk of deleting a foreign object.
+// SDK v1 is delete-free and topology-immutable. EnsureChildren creates/adopts and publishes the desired
+// child refs but never deletes children. Once the planning barrier is committed (ChildrenSnapshotReady=
+// True), the published childrenSnapshotRefs are the authoritative snapshot topology: a later reconcile
+// that derives a different desired child set — including growing a committed empty (leaf) topology — is
+// rejected as terminal topology drift (ErrTopologyDrift / ReasonTopologyDrift) rather than repaired by
+// create/delete. Before commit the set may still converge to newly observed domain state. This keeps the
+// SDK a pure publication layer with no diff-based mutation — the dangerous case at restart, where
+// discovery may be incomplete or transitional. Any detached leftover is reclaimed by ownerRef garbage
+// collection (the parent owns each child) or a future cleanup component, not by the SDK.
 //
 // # Lifecycle (capture-only, v1)
 //
-// A typical domain Reconcile resolves its source, then drives the three planning legs and closes with
-// a barrier:
+// A typical domain Reconcile resolves its source, then drives child snapshot planning, data capture, and
+// manifest capture, and closes with a planning barrier:
 //
-//	if !valid { return sdk.MarkNotReady(ctx, t, NotReadySpec{Reason: "InvalidSourceRef"}) }
+//	if !valid { return sdk.MarkNotReady(ctx, t, NotReadyStatus{Reason: "InvalidSourceRef"}) }
 //	if err := sdk.EnsureChildren(ctx, t, children); err != nil { return sdk.MarkPlanningFailed(...) }
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
-//	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
+//	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{Targets: manifestTargets}); err != nil { ... }
 //	return sdk.MarkPlanningReady(ctx, t, "planning complete")
 //
 // # Restart-safe recipe

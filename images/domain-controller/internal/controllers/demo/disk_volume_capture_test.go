@@ -28,7 +28,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// The demo disk data leg is content-free (D3): the domain controller only resolves the source disk's PVC
+// The demo disk data capture is content-free (D3): the domain controller only resolves the source disk's PVC
 // into a capture target; the SDK turns it into the VolumeCaptureRequest (named by the disk snapshot UID,
 // owned by the disk snapshot) and the common controller owns reading the VCR result, the
 // VolumeSnapshotContent ownership handoff and dataRefs publication, and VCR deletion. These unit tests
@@ -62,7 +62,7 @@ func dataLegPVC() *corev1.PersistentVolumeClaim {
 	}
 }
 
-// A manifest-only disk (no spec.persistentVolumeClaimName) yields no data-leg ref and no terminal reason,
+// A manifest-only disk (no spec.persistentVolumeClaimName) yields no data-capture ref and no terminal reason,
 // so the SDK ensures no VolumeCaptureRequest.
 func TestDiskDataRef_NoPVC(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap())
@@ -77,7 +77,7 @@ func TestDiskDataRef_NoPVC(t *testing.T) {
 	}
 }
 
-// With a configured and present PVC the data leg resolves a single PVC capture ref.
+// With a configured and present PVC the data capture resolves a single PVC capture ref.
 func TestDiskDataRef_ResolvesPVCTarget(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap(), dataLegPVC())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
@@ -90,7 +90,7 @@ func TestDiskDataRef_ResolvesPVCTarget(t *testing.T) {
 		t.Fatalf("present PVC: want no terminal reason, got %q", reason)
 	}
 	if dataRef == nil || dataRef.UID != dataLegPVCUID || dataRef.Name != dataLegPVCName || dataRef.Kind != "PersistentVolumeClaim" {
-		t.Fatalf("unexpected data-leg ref: %#v", dataRef)
+		t.Fatalf("unexpected data-capture ref: %#v", dataRef)
 	}
 }
 

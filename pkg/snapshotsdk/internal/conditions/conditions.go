@@ -29,6 +29,13 @@ func Upsert(conds []metav1.Condition, cond metav1.Condition) []metav1.Condition 
 	return conds
 }
 
+// IsTrue reports whether the condition of condType is present with Status=True. It is used as the durable
+// commit marker for the child topology: once the planning barrier is True, the published child set is
+// frozen (see capture.EnsureChildren).
+func IsTrue(conds []metav1.Condition, condType string) bool {
+	return meta.IsStatusConditionTrue(conds, condType)
+}
+
 // Equal reports whether the existing condition of condType already matches the desired status/reason/
 // message at the given observedGeneration, so a no-op patch can be skipped.
 func Equal(conds []metav1.Condition, condType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) bool {
