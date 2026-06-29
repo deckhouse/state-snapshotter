@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
 // gvrResolver resolves a SnapshotGVKRef to a GVR.

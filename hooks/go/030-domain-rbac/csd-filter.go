@@ -1,10 +1,11 @@
 package domain_rbac
 
 import (
-	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 )
 
 // FilterAcceptedCSD returns items where Accepted=True at the current metadata.generation.
