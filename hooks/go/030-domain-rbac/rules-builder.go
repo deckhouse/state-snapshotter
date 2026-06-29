@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -14,6 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 )
 
 // buildRules builds a deterministic (sorted by group, resources within group)

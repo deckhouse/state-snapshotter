@@ -57,7 +57,7 @@ func commonContentWithStatus(name, mcpName string, childNames ...string) *unstru
 // contentWithSnapshotRef builds a common SnapshotContent unstructured carrying spec.snapshotRef (the
 // binding-subject back-reference used by the declared-children fail-closed check) plus optional
 // manifestCheckpointName and published child content edges.
-func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childContentNames ...string) *unstructured.Unstructured {
+func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childContentNames ...string) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
 	status := map[string]interface{}{}
 	if mcpName != "" {
 		status["manifestCheckpointName"] = mcpName
@@ -89,7 +89,7 @@ func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childConte
 
 // ownerSnapshotWithChildren builds a typed Snapshot that declares the given child Snapshots in
 // status.childrenSnapshotRefs (strict storage Snapshot refs).
-func ownerSnapshotWithChildren(ns, name string, childSnapshotNames ...string) *storagev1alpha1.Snapshot {
+func ownerSnapshotWithChildren(ns, name string, childSnapshotNames ...string) *storagev1alpha1.Snapshot { //nolint:unparam // test fixture keeps uniform signature
 	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(childSnapshotNames))
 	for _, cn := range childSnapshotNames {
 		refs = append(refs, storagev1alpha1.SnapshotChildRef{
@@ -105,7 +105,7 @@ func ownerSnapshotWithChildren(ns, name string, childSnapshotNames ...string) *s
 }
 
 // boundChildSnapshot builds a typed child Snapshot already bound to a content name.
-func boundChildSnapshot(ns, name, boundContentName string) *storagev1alpha1.Snapshot {
+func boundChildSnapshot(ns, name, boundContentName string) *storagev1alpha1.Snapshot { //nolint:unparam // test fixture keeps uniform signature
 	return &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: boundContentName},

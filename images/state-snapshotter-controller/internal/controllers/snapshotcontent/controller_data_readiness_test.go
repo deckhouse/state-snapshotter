@@ -200,7 +200,7 @@ func withVSCDeleting(name string) dataReadinessOption {
 	}
 }
 
-func dataBinding(targetUID, vscName string, includeArtifact bool) snapshot.DataBindingRef {
+func dataBinding(targetUID, vscName string, includeArtifact bool) snapshot.DataBindingRef { //nolint:unparam // test fixture keeps uniform signature
 	b := snapshot.DataBindingRef{TargetUID: targetUID}
 	if includeArtifact {
 		b.Artifact = snapshot.ObjectRef{

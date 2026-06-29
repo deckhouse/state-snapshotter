@@ -63,7 +63,7 @@ func (r *GenericSnapshotBinderController) mapMCRToOwningSnapshots(snapshotGVK sc
 		if mcrNS != "" {
 			opts = append(opts, client.InNamespace(mcrNS))
 		}
-		if err := r.Client.List(ctx, list, opts...); err != nil {
+		if err := r.List(ctx, list, opts...); err != nil {
 			log.FromContext(ctx).V(1).Info("mcr wake-up: failed to list snapshots",
 				"snapshotKind", snapshotGVK.Kind, "mcr", mcrName, "error", err.Error())
 			return nil

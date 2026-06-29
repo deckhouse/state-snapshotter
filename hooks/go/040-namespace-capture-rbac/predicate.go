@@ -17,9 +17,10 @@ limitations under the License.
 package namespace_capture_rbac
 
 import (
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // needsCaptureRBAC reports whether a Snapshot currently requires the transient per-namespace capture

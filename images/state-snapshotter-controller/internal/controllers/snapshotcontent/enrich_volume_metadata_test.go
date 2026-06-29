@@ -50,7 +50,7 @@ func fsMode() *corev1.PersistentVolumeMode    { m := corev1.PersistentVolumeFile
 func blockMode() *corev1.PersistentVolumeMode { m := corev1.PersistentVolumeBlock; return &m }
 func scPtr(s string) *string                  { return &s }
 
-func pvcTargetBinding(ns, name string) storagev1alpha1.SnapshotDataBinding {
+func pvcTargetBinding(ns, name string) storagev1alpha1.SnapshotDataBinding { //nolint:unparam // test fixture keeps uniform signature
 	return storagev1alpha1.SnapshotDataBinding{
 		TargetUID: "uid-" + name,
 		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "PersistentVolumeClaim", Namespace: ns, Name: name},
@@ -317,7 +317,7 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 	}
 
 	// Variant A: a content holds a single dataRef, so equality is per-binding (dataBindingEqual).
-	if !dataBindingEqual(base, mut(func(b *storagev1alpha1.SnapshotDataBinding) {})) {
+	if !dataBindingEqual(base, mut(func(_ *storagev1alpha1.SnapshotDataBinding) {})) {
 		t.Error("identical bindings must compare equal")
 	}
 	for name, f := range map[string]func(b *storagev1alpha1.SnapshotDataBinding){

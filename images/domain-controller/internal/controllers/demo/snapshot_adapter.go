@@ -25,7 +25,7 @@ import (
 )
 
 // demoVirtualDiskSnapshotAdapter maps a DemoVirtualDiskSnapshot to the generic capture protocol. The disk
-// snapshot is a leaf (no children); its data leg is a single optional PVC.
+// snapshot is a leaf (no children); it captures a single optional PVC as its data.
 type demoVirtualDiskSnapshotAdapter struct {
 	snap *demov1alpha1.DemoVirtualDiskSnapshot
 }
@@ -59,15 +59,8 @@ func (a demoVirtualDiskSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.Dom
 	a.snap.Status.VolumeCaptureRequestName = st.VolumeCaptureRequestName
 }
 
-func (a demoVirtualDiskSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState {
-	return snapshotsdk.CoreCaptureState{
-		ManifestCaptured: a.snap.Status.ManifestCaptured,
-		DataCaptured:     a.snap.Status.DataCaptured,
-	}
-}
-
 // demoVirtualMachineSnapshotAdapter maps a DemoVirtualMachineSnapshot to the generic capture protocol. The
-// VM snapshot is manifest-only (no data leg) and owns a set of child disk snapshots.
+// VM snapshot is manifest-only (captures no data) and owns a set of child disk snapshots.
 type demoVirtualMachineSnapshotAdapter struct {
 	snap *demov1alpha1.DemoVirtualMachineSnapshot
 }
@@ -99,8 +92,4 @@ func (a demoVirtualMachineSnapshotAdapter) GetDomainCaptureState() snapshotsdk.D
 func (a demoVirtualMachineSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.DomainCaptureState) {
 	a.snap.Status.ManifestCaptureRequestName = st.ManifestCaptureRequestName
 	a.snap.Status.ChildrenSnapshotRefs = st.ChildrenSnapshotRefs
-}
-
-func (a demoVirtualMachineSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState {
-	return snapshotsdk.CoreCaptureState{ManifestCaptured: a.snap.Status.ManifestCaptured}
 }

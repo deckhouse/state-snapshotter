@@ -69,7 +69,7 @@ func TestMissingSnapshotStatusContractFields(t *testing.T) {
 	})
 }
 
-func crdWithVersionSchema(version string, root *extv1.JSONSchemaProps) *extv1.CustomResourceDefinition {
+func crdWithVersionSchema(version string, root *extv1.JSONSchemaProps) *extv1.CustomResourceDefinition { //nolint:unparam // test fixture keeps uniform signature
 	var schema *extv1.CustomResourceValidation
 	if root != nil {
 		schema = &extv1.CustomResourceValidation{OpenAPIV3Schema: root}

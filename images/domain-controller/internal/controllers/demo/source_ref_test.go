@@ -18,6 +18,7 @@ package demo
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,10 +36,11 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
 // Demo reconcilers are content-free (commit 2 content-ownership, D1/D3): they validate the source, plan
-// the manifest-capture request (MCR), the data-leg volume-capture request (VCR) and the owned-disk child
+// the manifest-capture request (MCR), the data-capture volume-capture request (VCR) and the owned-disk child
 // graph, and publish results into demo.status (manifestCaptureRequestName, volumeCaptureRequestName,
 // childrenSnapshotRefs, ChildrenSnapshotReady). They never create/own/bind/mirror SnapshotContent;
 // GenericSnapshotBinderController owns all SnapshotContent work for demo kinds. These unit tests therefore
@@ -163,10 +165,11 @@ func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 	}
 }
 
-// Once the common controller stamps status.manifestCaptured (durable handoff) and deletes the MCR, the
-// demo reconciler must NOT re-create it. This is the domain-only suppression contract (no SnapshotContent
-// read on the demo side).
-func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *testing.T) {
+// Once planning is committed (ChildrenSnapshotReady=True) the SDK is inert: if the MCR is later deleted
+// (e.g. the common controller's TTL scanner reclaims it after a durable handoff), a subsequent reconcile
+// must NOT re-create it. Suppression is driven solely by the planning barrier — no execution-phase signal
+// and no SnapshotContent read on the demo side.
+func TestDemoVirtualDiskSnapshot_BarrierSuppressesMCRRecreation(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t,
 		&demov1alpha1.DemoVirtualDisk{
 			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
@@ -193,25 +196,105 @@ func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *test
 	if mcrName == "" {
 		t.Fatalf("expected published manifestCaptureRequestName after first reconcile")
 	}
+	// The first reconcile commits the planning barrier for this leaf disk snapshot.
+	committed := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady)
+	if committed == nil || committed.Status != metav1.ConditionTrue {
+		t.Fatalf("expected ChildrenSnapshotReady=True after first reconcile, got %#v", committed)
+	}
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
 		t.Fatalf("expected MCR %q after first reconcile: %v", mcrName, err)
 	}
 
-	// Common controller marks the leg captured and deletes the request.
-	base := snap.DeepCopy()
-	snap.Status.ManifestCaptured = true
-	if err := cl.Status().Patch(context.Background(), snap, client.MergeFrom(base)); err != nil {
-		t.Fatalf("patch manifestCaptured: %v", err)
-	}
+	// The common controller reclaims the MCR after a durable handoff.
 	if err := cl.Delete(context.Background(), mcr); err != nil {
 		t.Fatalf("delete MCR: %v", err)
 	}
 
+	// With the barrier committed the reconcile is inert and must NOT re-create the MCR.
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("second reconcile failed: %v", err)
 	}
 	assertNoDemoMCRs(t, cl)
+}
+
+// A published ManifestCaptureRequest whose targets diverge from what the snapshot now derives, while the
+// planning barrier is NOT yet committed (State 2: published artifact before commit — e.g. a stale request
+// surviving a restart that interrupted planning), is terminal manifest drift: the demo reconciler must
+// surface MarkPlanningFailed(ManifestDrift) on ChildrenSnapshotReady and must NOT mutate the request
+// (fail-closed, no self-heal — symmetric with child snapshots and data capture). After the barrier is
+// committed the SDK is inert and no longer detects drift, so this scenario is exercised pre-commit.
+func TestDemoVirtualDiskSnapshot_ManifestDriftFailsPlanning(t *testing.T) {
+	cl := newDemoSourceRefFakeClient(t,
+		&demov1alpha1.DemoVirtualDisk{
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
+		},
+		&demov1alpha1.DemoVirtualDiskSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
+			Spec: demov1alpha1.DemoVirtualDiskSnapshotSpec{
+				SourceRef: &demov1alpha1.SnapshotSourceRef{
+					APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+					Kind:       controllercommon.KindDemoVirtualDisk,
+					Name:       "disk-a",
+				},
+			},
+		},
+	)
+	reconciler := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "snap"}}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+	snap := getDemoDiskSnapshot(t, cl)
+	mcrName := snap.Status.ManifestCaptureRequestName
+	if mcrName == "" {
+		t.Fatalf("expected published manifestCaptureRequestName after first reconcile")
+	}
+
+	// Reopen planning (State 2: the published artifact predates a committed barrier) and overwrite the
+	// published MCR's targets with a different set — a stale request surviving an interrupted restart.
+	base := snap.DeepCopy()
+	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{
+		Type:    storagev1alpha1.ConditionChildrenSnapshotReady,
+		Status:  metav1.ConditionFalse,
+		Reason:  storagev1alpha1.ReasonManifestsCapturing,
+		Message: "planning reopened after restart",
+	})
+	if err := cl.Status().Patch(context.Background(), snap, client.MergeFrom(base)); err != nil {
+		t.Fatalf("reopen planning barrier: %v", err)
+	}
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, mcr); err != nil {
+		t.Fatalf("get MCR: %v", err)
+	}
+	stale := mcr.DeepCopy()
+	stale.Spec.Targets = []ssv1alpha1.ManifestTarget{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       controllercommon.KindDemoVirtualDisk,
+		Name:       "disk-other",
+	}}
+	if err := cl.Update(context.Background(), stale); err != nil {
+		t.Fatalf("update MCR targets: %v", err)
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if !errors.Is(err, snapshotsdk.ErrManifestDrift) {
+		t.Fatalf("expected ErrManifestDrift from second reconcile, got %v", err)
+	}
+	snap = getDemoDiskSnapshot(t, cl)
+	cond := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionChildrenSnapshotReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != storagev1alpha1.ReasonManifestDrift {
+		t.Fatalf("expected ChildrenSnapshotReady=False/ManifestDrift, got %#v", cond)
+	}
+
+	after := &ssv1alpha1.ManifestCaptureRequest{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: mcrName}, after); err != nil {
+		t.Fatalf("get MCR after drift: %v", err)
+	}
+	if len(after.Spec.Targets) != 1 || after.Spec.Targets[0].Name != "disk-other" {
+		t.Fatalf("drifted MCR must be left untouched (no self-heal), got %#v", after.Spec.Targets)
+	}
 }
 
 func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChildren(t *testing.T) {

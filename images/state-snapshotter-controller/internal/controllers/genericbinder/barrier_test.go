@@ -27,7 +27,7 @@ import (
 
 // snapshotLikeWithChildrenSnapshotReady builds a SnapshotLike at the given generation. When set is true it adds a
 // ChildrenSnapshotReady condition with the given status and observedGeneration.
-func snapshotLikeWithChildrenSnapshotReady(generation int64, set bool, status metav1.ConditionStatus, observedGeneration int64) snapshot.SnapshotLike {
+func snapshotLikeWithChildrenSnapshotReady(generation int64, set bool, status metav1.ConditionStatus, observedGeneration int64) snapshot.SnapshotLike { //nolint:unparam // test fixture keeps uniform signature
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
 	obj.SetName("snap")
 	obj.SetGeneration(generation)

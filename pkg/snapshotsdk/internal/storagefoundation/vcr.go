@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package storagefoundation implements the storage-foundation VolumeCaptureRequest mechanics behind the
-// SDK's data leg. The SDK talks to the foundation only through unstructured objects, so there is no Go
+// SDK's data capture. The SDK talks to the foundation only through unstructured objects, so there is no Go
 // dependency on the foundation API module.
 package storagefoundation
 
@@ -50,13 +50,13 @@ type Target struct {
 	Namespace  string
 }
 
-// VCRName returns the deterministic data-leg VolumeCaptureRequest name owned by a snapshot, keyed by the
+// VCRName returns the deterministic data-capture VolumeCaptureRequest name owned by a snapshot, keyed by the
 // snapshot UID. The name is derivable from the snapshot alone, without reading SnapshotContent.
 func VCRName(snapshotUID types.UID) string {
 	return fmt.Sprintf("snap-owned-vcr-%s", snapshotUID)
 }
 
-// Provider creates and reads storage-foundation VolumeCaptureRequests on behalf of the SDK data leg.
+// Provider creates and reads storage-foundation VolumeCaptureRequests on behalf of the SDK's data capture.
 type Provider struct {
 	client client.Client
 }
@@ -68,9 +68,12 @@ func NewProvider(c client.Client) *Provider { return &Provider{client: c} }
 func (p *Provider) VCRName(snapshotUID types.UID) string { return VCRName(snapshotUID) }
 
 // EnsureVCR reconciles the snapshot's VolumeCaptureRequest toward the desired owner reference and single
-// data-leg PVC target. It creates the request when absent, adopts it (adds the owner reference) when
-// present but unowned, and fails closed if an existing request's target differs from the desired one. The
-// request is keyed by the snapshot UID, so the operation is idempotent and restart-safe.
+// data-capture PVC target. It creates the request when absent, fails closed if an existing request's target
+// differs from the desired one, and only then adopts it (adds the owner reference) when present but
+// unowned. The request is keyed by the snapshot UID, so the operation is idempotent and restart-safe.
+//
+// Order matters: targets are compared BEFORE adoption, so a data-capture drift is diagnosed without first
+// mutating (adopting) the foreign/stale request. This keeps the fail-closed path side-effect-free.
 //
 // A snapshot node binds at most one data artifact, so this takes a single target. The foundation
 // VolumeCaptureRequest CRD models spec.targets as a list, so the single target is written as a one-element
@@ -91,19 +94,21 @@ func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerR
 		return err
 	}
 
-	if !hasOwnerRef(existing.GetOwnerReferences(), ownerRef) {
-		base := existing.DeepCopy()
-		existing.SetOwnerReferences(append(existing.GetOwnerReferences(), ownerRef))
-		if patchErr := p.client.Patch(ctx, existing, client.MergeFrom(base)); patchErr != nil {
-			return patchErr
-		}
-	}
+	// Diagnose drift first (read-only), fail closed before any mutation.
 	existingTargets, parseErr := parseTargets(existing)
 	if parseErr != nil {
 		return parseErr
 	}
 	if !targetsEqual(existingTargets, desired) {
 		return fmt.Errorf("VolumeCaptureRequest %s/%s spec.targets differ from desired PVC target", namespace, name)
+	}
+
+	if !hasOwnerRef(existing.GetOwnerReferences(), ownerRef) {
+		base := existing.DeepCopy()
+		existing.SetOwnerReferences(append(existing.GetOwnerReferences(), ownerRef))
+		if patchErr := p.client.Patch(ctx, existing, client.MergeFrom(base)); patchErr != nil {
+			return patchErr
+		}
 	}
 	return nil
 }
@@ -138,7 +143,7 @@ func sortByUID(ts []Target) {
 	sort.Slice(ts, func(i, j int) bool { return ts[i].UID < ts[j].UID })
 }
 
-// OwnedPVCTarget reads the snapshot's single data-leg PVC target from its VolumeCaptureRequest. A missing
+// OwnedPVCTarget reads the snapshot's single data-capture PVC target from its VolumeCaptureRequest. A missing
 // request (or one with no target) yields nil (manifest-only or not yet created).
 func (p *Provider) OwnedPVCTarget(ctx context.Context, namespace, vcrName string) (*Target, error) {
 	if vcrName == "" {

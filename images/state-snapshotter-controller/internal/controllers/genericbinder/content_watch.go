@@ -63,7 +63,7 @@ func (r *GenericSnapshotBinderController) mapBoundContentToSnapshots(snapshotGVK
 		contentName := obj.GetName()
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(listGVK)
-		if err := r.Client.List(ctx, list); err != nil {
+		if err := r.List(ctx, list); err != nil {
 			log.FromContext(ctx).V(1).Info("content wake-up: failed to list snapshots",
 				"snapshotKind", snapshotGVK.Kind, "content", contentName, "error", err.Error())
 			return nil
@@ -130,7 +130,7 @@ func (r *GenericSnapshotBinderController) mapParentContentToChildSnapshots(child
 		if parentNS != "" {
 			opts = append(opts, client.InNamespace(parentNS))
 		}
-		if err := r.Client.List(ctx, list, opts...); err != nil {
+		if err := r.List(ctx, list, opts...); err != nil {
 			log.FromContext(ctx).V(1).Info("parent-content wake-up: failed to list child snapshots",
 				"childKind", childGVK.Kind, "content", content.GetName(), "error", err.Error())
 			return nil

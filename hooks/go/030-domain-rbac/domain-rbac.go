@@ -20,13 +20,14 @@ import (
 	"context"
 	"fmt"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/deckhouse/module-sdk/pkg"
 	sdkk8s "github.com/deckhouse/module-sdk/pkg/dependency/k8s"
 	"github.com/deckhouse/module-sdk/pkg/registry"
 	"github.com/deckhouse/module-sdk/pkg/utils/ptr"
 	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var _ = registry.RegisterFunc(

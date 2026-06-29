@@ -154,19 +154,19 @@ func TestApplyTransform_DiskLeaf_CoversPVCAndSetsDataSource(t *testing.T) {
 
 func TestApplyTransform_UnownedDiskWithPVCFailsClosed(t *testing.T) {
 	svc := NewRestoreService(nil, nil, nil)
-	// disk-x has a PVC data leg (pvc-x, dropped as covered) but no owning disk snapshot (empty
+	// disk-x captures a PVC as data (pvc-x, dropped as covered) but has no owning disk snapshot (empty
 	// ownerSnapshotName). Emitting it would silently restore an empty volume, so the transform must fail
 	// closed. This is unreachable in the per-CR model (a disk node always passes its own name as owner)
 	// but the guard is kept defensively.
 	base := []unstructured.Unstructured{demoDiskObj("disk-x", "pvc-x"), pvcObj("pvc-x")}
 	if _, err := svc.applyTransform(base, "ns1", "", ""); err == nil {
-		t.Fatalf("expected fail-closed error for an unowned disk with a PVC data leg")
+		t.Fatalf("expected fail-closed error for an unowned disk that captures a PVC as data")
 	}
 }
 
 func TestApplyTransform_UnownedDiskWithoutPVCEmitted(t *testing.T) {
 	svc := NewRestoreService(nil, nil, nil)
-	// A disk with no PVC has no data leg, so it is safe to emit untouched even without an owner.
+	// A disk with no PVC captures no data, so it is safe to emit untouched even without an owner.
 	base := []unstructured.Unstructured{demoDiskObj("disk-x", "")}
 	out, err := svc.applyTransform(base, "ns1", "", "")
 	if err != nil {

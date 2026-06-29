@@ -35,7 +35,10 @@ section_end() {
 }
 
 linter_version="v1.64.5"
-linter_toolchain="${GOLANGCI_LINT_GOTOOLCHAIN:-go1.25.9}"
+# golangci-lint must be built with a Go toolchain >= the modules' `go` directive
+# (go.mod targets 1.26.x); otherwise it refuses to load with "the Go language
+# version used to build golangci-lint is lower than the targeted Go version".
+linter_toolchain="${GOLANGCI_LINT_GOTOOLCHAIN:-go1.26.4}"
 linter_cache_root="${GOLANGCI_LINT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/state-snapshotter/golangci-lint}"
 linter_bin_dir="$linter_cache_root/$linter_toolchain/$linter_version"
 linter_bin="$linter_bin_dir/golangci-lint"

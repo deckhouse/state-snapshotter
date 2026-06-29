@@ -19,9 +19,10 @@ package namespace_capture_rbac
 import (
 	"testing"
 
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 func snapshotWithArchived(ns string, status metav1.ConditionStatus, reason string) *storagev1alpha1.Snapshot {

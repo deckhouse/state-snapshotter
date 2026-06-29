@@ -69,7 +69,7 @@ func ListOwnedPVCTargetsForSnapshotContent(
 	return listDomainNodeOwnedPVCTargets(ctx, c, namespace, content)
 }
 
-func snapshotNamespaceForOwnedTargets(snap *storagev1alpha1.Snapshot, content *storagev1alpha1.SnapshotContent) (string, error) {
+func snapshotNamespaceForOwnedTargets(snap *storagev1alpha1.Snapshot, _ *storagev1alpha1.SnapshotContent) (string, error) {
 	if snap != nil && snap.Namespace != "" {
 		return snap.Namespace, nil
 	}

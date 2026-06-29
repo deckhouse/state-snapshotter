@@ -5,8 +5,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
 // stubResolver returns a GVR per apiVersion/kind from the table, or an error if the
@@ -27,7 +28,7 @@ func stubResolver(table map[string]schema.GroupVersionResource, failKinds map[st
 }
 
 // csd builds a flat-schema CSD: one snapshot kind (snapAPI/snapKind) for one source (srcAPI/srcKind).
-func csd(name, srcAPI, srcKind, snapAPI, snapKind string) v1alpha1.CustomSnapshotDefinition {
+func csd(name, srcAPI, srcKind, snapAPI, snapKind string) v1alpha1.CustomSnapshotDefinition { //nolint:unparam // test fixture keeps uniform signature
 	c := v1alpha1.CustomSnapshotDefinition{}
 	c.Name = name
 	c.Spec.APIVersion = snapAPI

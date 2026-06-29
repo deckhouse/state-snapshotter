@@ -15,7 +15,7 @@
 - **Доменные контроллеры → на SDK (MUST).** Используют только публичный root `pkg/snapshotsdk` и
   `pkg/snapshotsdk/transform`; прямые patch/condition/ownerRef-хелперы capture-протокола из reconcile уходят.
 
-> Терминология синхронизирована с дизайн-планом: `MarkNotReady`/`NotReadySpec` (Р30), delete-free children
+> Терминология синхронизирована с дизайн-планом: `MarkNotReady`/`NotReadyStatus` (Р30), delete-free children
 > (Р23; orphan-diff Р29 в v1 не применяется), `ChildSpec{Object}` child-builder seam (Р17.5).
 
 ## 1. Baseline (до любых изменений) — no-op refactor reference
@@ -76,7 +76,7 @@ cd pkg/snapshotsdk && go list -deps ./... | rg "state-snapshotter"
 - partial progress после restart сходится из **durable state** (Р19/Р25);
 - desired changed before `MarkPlanningReady`: `[A,B]` → restart → `[A,C]` сходится к `[A,C]` (Р25);
 - `MarkPlanningReady` **не** создаёт MCR/VCR и **не** меняет child refs (barrier, не planning);
-- `MarkPlanningFailed` **не** rollback-ает уже published legs;
+- `MarkPlanningFailed` **не** rollback-ает уже опубликованное планирование;
 - `MarkNotReady` публикует `Ready=False` с корректным reason (Р30): source invalid → `Ready=False`
   (no requeue); artifact-missing → `Ready=False` + `Requeue=true` intent; (planning failure — отдельный
   барьер `ChildrenSnapshotReady=False` через `MarkPlanningFailed`);

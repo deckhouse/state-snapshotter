@@ -146,7 +146,7 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 	ctx context.Context,
 	name string,
 ) (bool, string, string, error) {
-	gvk := artifactGVK(volumeSnapshotContentAPIVersion, kindVolumeSnapshotContent)
+	gvk := artifactGVK()
 	artifactObj := &unstructured.Unstructured{}
 	artifactObj.SetGroupVersionKind(gvk)
 
@@ -187,7 +187,9 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 	return true, "", "", nil
 }
 
-func artifactGVK(apiVersion, kind string) schema.GroupVersionKind {
+func artifactGVK() schema.GroupVersionKind {
+	apiVersion := volumeSnapshotContentAPIVersion
+	kind := kindVolumeSnapshotContent
 	if idx := strings.Index(apiVersion, "/"); idx != -1 {
 		return schema.GroupVersionKind{
 			Group:   apiVersion[:idx],

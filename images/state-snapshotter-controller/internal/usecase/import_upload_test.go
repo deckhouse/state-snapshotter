@@ -47,7 +47,7 @@ func uploadTestClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
-func importModeSnapshot(name, ns string, uid types.UID) *storagev1alpha1.Snapshot {
+func importModeSnapshot(name, ns string, uid types.UID) *storagev1alpha1.Snapshot { //nolint:unparam // test fixture keeps uniform signature
 	return &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: uid},
 		Spec:       storagev1alpha1.SnapshotSpec{Source: &storagev1alpha1.SnapshotSource{Import: &storagev1alpha1.SnapshotImportSource{}}},

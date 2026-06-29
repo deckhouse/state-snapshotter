@@ -8,10 +8,11 @@ alwaysApply: false
 
 Demo (`images/domain-controller`) and the snapshot SDK (`pkg/snapshotsdk`) are **executable architecture
 documentation / reference implementation**. New engineers read them instead of ADRs, and copy-paste them
-into new domain controllers. A reader must understand the architecture from this code alone, in ~30
-minutes, without opening any ADR or design doc. "It works" is not enough — it must be **impossible to
-misread**. These standards are therefore *stricter than production*: demo code must be cleaner than prod,
-because prod may carry legacy / compat hacks and demo never may.
+into new domain controllers. A reader must, from this code alone and in ~30 minutes (no ADR / design doc),
+be able to explain the **happy path, the failure paths, the ownership boundaries, and the lifecycle** (the
+measurable bar — see §8). "It works" is not enough — it must be **impossible to misread**. These standards
+are therefore *stricter than production*: demo code must be cleaner than prod, because prod may carry
+legacy / compat hacks and demo never may.
 
 ## 1. Naming is architecture-grade (MUST)
 
@@ -19,11 +20,16 @@ A name must, on its own, reveal: who owns the logic, the entity lifecycle, persi
 domain-vs-infrastructure. If a name needs a verbal explanation, it is wrong.
 
 - **Litmus:** if a function/type name cannot be explained in one domain sentence without the words
-  `generic` / `raw` / `scratch` / `temp` / `dynamic` / `somehow`, the name is bad — rename it.
-- **Banned vague words in identifiers** (unless explicitly justified by a comment, or a real upstream type
-  name like `genericapiserver`): `scratch`, `temp`/`tmp`/`temporary`, `generic`, `raw`, `helper`, `util`,
-  `misc`, `stuff`, `object`, `resource`, `data` (without a qualifier), `manager` (unless it truly owns a
-  lifecycle), `blob`.
+  `raw` / `scratch` / `temp` / `dynamic` / `somehow`, the name is bad — rename it.
+- **Banned outright in identifiers** (unless a real upstream type name like `genericapiserver`):
+  `scratch`, `temp`/`tmp`/`temporary`, `raw`, `helper`, `util`, `misc`, `stuff`, `blob`, `manager`
+  (unless it truly owns a lifecycle).
+- **Banned only as a bare, unqualified token** — these words are legitimate in this storage/snapshot
+  domain when they **qualify a concrete noun**; the ban is on the *vague usage*, not the word:
+  `data`, `object`, `resource`, `generic`.
+  - Bad (vague): `Data`, `processObject`, `handleResource`, `ResourceManager`, `generic helper`.
+  - Good (qualified): `SnapshotDataBinding`, `dataRef`, `resourceVersion`, `GenericSnapshotBinderController`,
+    `generic snapshot controller`.
 - **Banned magic verbs** unless the contract is obvious from the name: `do`, `handle`, `process`,
   `manage`, `execute`.
 - `scratch` is banned repo-wide unless the code literally models CDI scratch-space (it does not): an
@@ -74,7 +80,27 @@ Do not introduce abstractions ahead of need. Forbidden: types like `ResourceMana
 `ControllerHelper` that are just a renamed util bag. Every abstraction MUST have a clear owner, an
 invariant, and a contract.
 
-## 7. Litmus
+## 7. Capture invariants (MUST)
 
-A new engineer opens the demo controller, reads no ADR, and understands the architecture (happy path and
-failure paths, domain vs SDK boundary) within 30 minutes. If not, the demo is not done.
+Capture cardinality is a contract, not a convention; code MUST NOT allow a degenerate capture to be planned
+successfully.
+
+- **Data capture:** at most one PVC per node (`VolumeCaptureSpec.DataRef` is a single optional pointer — never
+  a slice). Multiple volumes are modeled as child snapshot nodes, never as several data refs on one node.
+- **Manifest capture — forbidden state:** `ManifestCaptureRequest.spec.targets == []`. The final manifest set
+  (domain targets + owned-PVC augmentation) MUST contain at least one target. If any code path lets planning
+  succeed (or a barrier be raised) with an empty MCR, that is a **bug** — the SDK fails closed with
+  `ErrEmptyManifest` before any cluster mutation. The SDK does NOT inject the source object; supplying ≥1
+  manifest target is the domain's responsibility.
+
+## 8. Litmus
+
+A new engineer opens the demo controller, reads no ADR, and within 30 minutes can explain **all four** of:
+- the **happy path** — how a snapshot node is normally planned (manifest capture, data capture, and child
+  snapshot planning, then the planning barrier);
+- the **failure paths** — not-ready (`MarkNotReady`), planning-failed, and drift (topology/manifest);
+- the **ownership boundaries** — domain vs SDK vs core (who writes what);
+- the **lifecycle** — create/adopt, barrier commit, and suppression after the core handoff.
+
+If any of the four is not clear from the code alone, the demo is not done. "Understand the architecture" is
+not measurable; these four are.

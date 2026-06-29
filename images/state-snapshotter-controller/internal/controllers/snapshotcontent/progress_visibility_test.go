@@ -18,7 +18,7 @@ import (
 // commonContentReadyWithMCPAndDataRefs builds a common SnapshotContent that already carries Ready=True
 // conditions and references a ready MCP plus a single VSC data artifact. It models a node that was
 // previously Ready=True; the aggregation recompute does not depend on the stored conditions.
-func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstructured.Unstructured {
+func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
 		"kind":       "SnapshotContent",

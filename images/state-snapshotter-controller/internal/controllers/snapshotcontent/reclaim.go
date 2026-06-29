@@ -65,8 +65,8 @@ func (r *SnapshotContentController) reclaimVolumeSnapshotContent(ctx context.Con
 	logger := log.FromContext(ctx)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vsc := &unstructured.Unstructured{}
-		vsc.SetGroupVersionKind(artifactGVK(volumeSnapshotContentAPIVersion, kindVolumeSnapshotContent))
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: vscName}, vsc); err != nil {
+		vsc.SetGroupVersionKind(artifactGVK())
+		if err := r.Get(ctx, client.ObjectKey{Name: vscName}, vsc); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
 			}
@@ -83,15 +83,15 @@ func (r *SnapshotContentController) reclaimVolumeSnapshotContent(ctx context.Con
 		if serr := unstructured.SetNestedField(vsc.Object, volumeSnapshotContentDeletePolicy, "spec", "deletionPolicy"); serr != nil {
 			return fmt.Errorf("set VolumeSnapshotContent %s deletionPolicy=Delete: %w", vscName, serr)
 		}
-		return r.Client.Patch(ctx, vsc, client.MergeFrom(base))
+		return r.Patch(ctx, vsc, client.MergeFrom(base))
 	}); err != nil {
 		return fmt.Errorf("reclaim VolumeSnapshotContent %s (flip to Delete): %w", vscName, err)
 	}
 
 	vsc := &unstructured.Unstructured{}
-	vsc.SetGroupVersionKind(artifactGVK(volumeSnapshotContentAPIVersion, kindVolumeSnapshotContent))
+	vsc.SetGroupVersionKind(artifactGVK())
 	vsc.SetName(vscName)
-	if err := r.Client.Delete(ctx, vsc); err != nil && !errors.IsNotFound(err) {
+	if err := r.Delete(ctx, vsc); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("reclaim VolumeSnapshotContent %s (delete): %w", vscName, err)
 	}
 	logger.Info("Reclaiming data artifact on SnapshotContent teardown (flipped Retain->Delete + delete)", "vsc", vscName)
