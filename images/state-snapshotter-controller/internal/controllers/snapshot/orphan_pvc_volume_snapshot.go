@@ -796,6 +796,7 @@ func (r *SnapshotReconciler) orphanPVCVolumeSnapshotBinding(
 				APIVersion: snapshotpkg.CSISnapshotAPIVersion,
 				Kind:       snapshotpkg.KindVolumeSnapshotContent,
 				Name:       boundName,
+				UID:        vsc.GetUID(),
 			},
 			// TODO: later add snapshotRef to dataRefs:
 			// snapshotRef:

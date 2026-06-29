@@ -119,6 +119,7 @@ func ParseVolumeCaptureDataRefs(obj *unstructured.Unstructured) ([]vcpkg.DataBin
 			APIVersion: nestedString(artifactMap, "apiVersion"),
 			Kind:       nestedString(artifactMap, "kind"),
 			Name:       nestedString(artifactMap, "name"),
+			UID:        nestedString(artifactMap, "uid"),
 		},
 	}}, nil
 }
@@ -169,6 +170,7 @@ func SnapshotDataBindingsFromVCRStatus(refs []vcpkg.DataBinding) []storagev1alph
 				APIVersion: ref.Artifact.APIVersion,
 				Kind:       ref.Artifact.Kind,
 				Name:       ref.Artifact.Name,
+				UID:        types.UID(ref.Artifact.UID),
 			},
 		})
 	}

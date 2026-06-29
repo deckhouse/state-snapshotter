@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -58,10 +59,18 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 		// on the source PVC: it is the real allocated size the snapshot can be restored to and outlives
 		// the PVC. Read it for every artifact-bearing binding (domain data leaves too, which have no PVC
 		// target). A not-yet-populated restoreSize is left empty (best-effort) rather than blocking.
-		if size, serr := readArtifactRestoreSize(ctx, c, b.Artifact); serr != nil {
+		// The same VSC read also backfills the durable artifact uid when an upstream producer (e.g. the
+		// import path) referenced the artifact by name only; producers that already know the uid (VCR /
+		// orphan paths) keep theirs.
+		size, uid, serr := readArtifactRestoreSizeAndUID(ctx, c, b.Artifact)
+		if serr != nil {
 			return bindings, serr
-		} else if size != "" {
+		}
+		if size != "" {
 			b.Size = size
+		}
+		if b.Artifact.UID == "" && uid != "" {
+			b.Artifact.UID = uid
 		}
 		if b.Target.Kind != "PersistentVolumeClaim" || b.Target.Name == "" {
 			continue
@@ -111,32 +120,42 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 // (no error) when the artifact is not a VSC, is unnamed, is being deleted, or has not published its
 // restoreSize yet; a transient read error is returned so the caller can requeue.
 func readArtifactRestoreSize(ctx context.Context, c client.Client, artifact storagev1alpha1.SnapshotDataArtifactRef) (string, error) {
+	size, _, err := readArtifactRestoreSizeAndUID(ctx, c, artifact)
+	return size, err
+}
+
+// readArtifactRestoreSizeAndUID reads the durable VolumeSnapshotContent once and returns both its
+// restoreSize (see readArtifactRestoreSize) and its uid. The uid is best-effort: it is empty (no error)
+// whenever the artifact is not a readable, live VSC, mirroring the size semantics. A single read backs
+// both values so enrichment does not double-GET the VSC.
+func readArtifactRestoreSizeAndUID(ctx context.Context, c client.Client, artifact storagev1alpha1.SnapshotDataArtifactRef) (string, types.UID, error) {
 	if artifact.Kind != "VolumeSnapshotContent" || artifact.Name == "" {
-		return "", nil
+		return "", "", nil
 	}
 	vsc := &unstructured.Unstructured{}
 	vsc.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
 	if err := c.Get(ctx, client.ObjectKey{Name: artifact.Name}, vsc); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", nil
+			return "", "", nil
 		}
-		return "", fmt.Errorf("read VolumeSnapshotContent %s for restoreSize: %w", artifact.Name, err)
+		return "", "", fmt.Errorf("read VolumeSnapshotContent %s for restoreSize: %w", artifact.Name, err)
 	}
 	if !vsc.GetDeletionTimestamp().IsZero() {
-		return "", nil
+		return "", "", nil
 	}
+	uid := vsc.GetUID()
 	bytes, found, err := unstructured.NestedInt64(vsc.Object, "status", "restoreSize")
 	if err != nil {
 		// restoreSize present but not an int64 (decoder/schema drift). Leave Size empty (best-effort) but
 		// surface it at debug so an unexpected type is observable instead of silently swallowed.
 		logf.FromContext(ctx).V(1).Info("VolumeSnapshotContent status.restoreSize is present but not int64; leaving Size empty",
 			"vsc", artifact.Name, "error", err.Error())
-		return "", nil
+		return "", uid, nil
 	}
 	if !found || bytes <= 0 {
-		return "", nil
+		return "", uid, nil
 	}
-	return resource.NewQuantity(bytes, resource.BinarySI).String(), nil
+	return resource.NewQuantity(bytes, resource.BinarySI).String(), uid, nil
 }
 
 // PublishSnapshotContentDataRefs copies the durable data binding onto a logical SnapshotContent (N5 PR-4).

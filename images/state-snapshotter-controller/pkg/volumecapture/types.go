@@ -55,4 +55,6 @@ type ArtifactRef struct {
 	APIVersion string
 	Kind       string
 	Name       string
+	// UID is the durable artifact UID (best-effort: empty when not yet known upstream).
+	UID string
 }

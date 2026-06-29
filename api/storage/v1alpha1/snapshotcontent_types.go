@@ -91,6 +91,11 @@ type SnapshotDataArtifactRef struct {
 	Kind string `json:"kind"`
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+	// artifact reference self-contained, symmetric with target.uid. Optional: the artifact may be
+	// referenced before its UID is known, so producers fill it best-effort.
+	// +optional
+	UID types.UID `json:"uid,omitempty"`
 }
 
 // SnapshotDataBinding associates the single PVC target of a logical snapshot node with its captured
