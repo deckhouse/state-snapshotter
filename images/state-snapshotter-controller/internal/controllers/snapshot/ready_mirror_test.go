@@ -122,7 +122,7 @@ func TestMirrorSnapshotManifestsArchivedCopiesContentLatch(t *testing.T) {
 	}
 
 	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
+	if err := cl.Get(ctx, key, fresh); err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
 	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
@@ -163,7 +163,7 @@ func TestMirrorSnapshotManifestsArchivedLatchNeverDowngrades(t *testing.T) {
 	}
 
 	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
+	if err := cl.Get(ctx, key, fresh); err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
 	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
@@ -189,7 +189,7 @@ func TestMirrorSnapshotManifestsArchivedNoopWhenContentHasNone(t *testing.T) {
 	}
 
 	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
+	if err := cl.Get(ctx, key, fresh); err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
 	if got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived); got != nil {

@@ -290,8 +290,8 @@ func TestEnsureChildrenRejectsDuplicateDesired(t *testing.T) {
 // duplicate-insensitive. These tests use a two-step create-then-re-call shape so the deterministic MCR name
 // stays internal to the SDK (the SDK publishes it on the adapter's domain state).
 
-func mt(apiVersion, kind, name string) snapshotsdk.ManifestTarget {
-	return snapshotsdk.ManifestTarget{APIVersion: apiVersion, Kind: kind, Name: name}
+func mt(kind, name string) snapshotsdk.ManifestTarget {
+	return snapshotsdk.ManifestTarget{APIVersion: "v1", Kind: kind, Name: name}
 }
 
 func manifestAdapter() *captureAdapter { return &captureAdapter{obj: parentObj()} }
@@ -332,7 +332,7 @@ func TestEnsureManifestCaptureCreatePublishesTargets(t *testing.T) {
 	sdk, cl := newCaptureSDK(t, scheme, parentObj())
 	adapter := manifestAdapter()
 
-	a, b := mt("v1", "DemoThing", "a"), mt("v1", "DemoThing", "b")
+	a, b := mt("DemoThing", "a"), mt("DemoThing", "b")
 	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{a, b}}); err != nil {
 		t.Fatalf("create path must succeed: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestEnsureManifestCaptureRestartSameTargets(t *testing.T) {
 	sdk, cl := newCaptureSDK(t, scheme, parentObj())
 	adapter := manifestAdapter()
 
-	a, b := mt("v1", "DemoThing", "a"), mt("v1", "DemoThing", "b")
+	a, b := mt("DemoThing", "a"), mt("DemoThing", "b")
 	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{a, b}}); err != nil {
 		t.Fatalf("create path must succeed: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestEnsureManifestCaptureDriftCountChanged(t *testing.T) {
 	sdk, cl := newCaptureSDK(t, scheme, parentObj())
 	adapter := manifestAdapter()
 
-	a, b := mt("v1", "DemoThing", "a"), mt("v1", "DemoThing", "b")
+	a, b := mt("DemoThing", "a"), mt("DemoThing", "b")
 	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{a, b}}); err != nil {
 		t.Fatalf("create path must succeed: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestEnsureManifestCaptureDriftSameCountDifferentTarget(t *testing.T) {
 	sdk, cl := newCaptureSDK(t, scheme, parentObj())
 	adapter := manifestAdapter()
 
-	a, b, c := mt("v1", "DemoThing", "a"), mt("v1", "DemoThing", "b"), mt("v1", "DemoThing", "c")
+	a, b, c := mt("DemoThing", "a"), mt("DemoThing", "b"), mt("DemoThing", "c")
 	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{a, b}}); err != nil {
 		t.Fatalf("create path must succeed: %v", err)
 	}
@@ -430,12 +430,12 @@ func TestEnsureManifestCaptureOwnedPVCAugmentationNoFalseDrift(t *testing.T) {
 	adapter := manifestAdapter()
 	adapter.state.VolumeCaptureRequestName = "vcr-x" // non-empty so the provider's owned-PVC target is consulted
 
-	domain := mt("v1", "DemoThing", "a")
+	domain := mt("DemoThing", "a")
 	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{domain}}); err != nil {
 		t.Fatalf("create path must succeed: %v", err)
 	}
 	name := adapter.state.ManifestCaptureRequestName
-	if !sameTargetSet(mcrTargets(t, cl, name), domain, mt("v1", "PersistentVolumeClaim", "data-pvc")) {
+	if !sameTargetSet(mcrTargets(t, cl, name), domain, mt("PersistentVolumeClaim", "data-pvc")) {
 		t.Fatalf("MCR must carry domain + owned-PVC targets, got %#v", mcrTargets(t, cl, name))
 	}
 
@@ -491,7 +491,7 @@ func TestEnsureManifestCaptureEmptyInputRescuedByOwnedPVC(t *testing.T) {
 		t.Fatal("expected published ManifestCaptureRequestName")
 	}
 	got := mcrTargets(t, cl, name)
-	if len(got) != 1 || !sameTargetSet(got, mt("v1", "PersistentVolumeClaim", "data-pvc")) {
+	if len(got) != 1 || !sameTargetSet(got, mt("PersistentVolumeClaim", "data-pvc")) {
 		t.Fatalf("MCR must carry exactly the owned-PVC target, got %#v", got)
 	}
 }
@@ -504,7 +504,7 @@ func TestEnsureManifestCaptureCommittedIsInert(t *testing.T) {
 	adapter := manifestAdapter()
 	adapter.commitBarrier()
 
-	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{mt("v1", "DemoThing", "a")}}); err != nil {
+	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{mt("DemoThing", "a")}}); err != nil {
 		t.Fatalf("committed snapshot must be inert (nil), got %v", err)
 	}
 	if n := countMCRs(t, cl); n != 0 {

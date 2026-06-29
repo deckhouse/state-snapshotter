@@ -170,10 +170,24 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              dataCaptured:
+                description: |-
+                  DataCaptured is set by the common controller once this disk snapshot's data leg has been durably
+                  handed off to SnapshotContent (dataRefs published and the VolumeSnapshotContent owned by the content).
+                  Domain-only suppression signal: the domain controller reads it to stop re-creating the VCR after the
+                  common controller deletes it. Always considered captured for a manifest-only disk (no data leg).
+                type: boolean
               manifestCaptureRequestName:
                 description: ManifestCaptureRequestName is the temporary MCR owned
                   by this snapshot while own-scope capture runs.
                 type: string
+              manifestCaptured:
+                description: |-
+                  ManifestCaptured is set by the common controller once this snapshot's manifest capture has been
+                  durably handed off to SnapshotContent (manifestCheckpointName published and the ManifestCheckpoint
+                  owned by the content). It is a domain-only suppression signal: the domain controller reads it to
+                  stop re-creating the MCR after the common controller deletes it, without ever reading SnapshotContent.
+                type: boolean
               size:
                 description: |-
                   Size mirrors the real allocated volume size (e.g. "10Gi"): the bound dataRef.size on capture, or the

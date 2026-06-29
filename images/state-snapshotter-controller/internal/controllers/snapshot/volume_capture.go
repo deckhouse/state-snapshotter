@@ -79,11 +79,11 @@ func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 
 	vcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}
 
-	if done, _, err := r.reconcileVolumeCaptureSteadyState(ctx, nsSnap, content, vcrKey, targets); done {
+	if done, err := r.reconcileVolumeCaptureSteadyState(ctx, nsSnap, content, vcrKey, targets); done {
 		return err
 	}
 
-	if _, _, err := r.ensureVolumeCaptureRequest(ctx, nsSnap, content, targets); err != nil {
+	if _, err := r.ensureVolumeCaptureRequest(ctx, nsSnap, content, targets); err != nil {
 		return err
 	}
 	return r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, vcrKey.Name)
@@ -128,8 +128,8 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 
 	vcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}
 
-	if done, res, err := r.reconcileVolumeCaptureSteadyState(ctx, nsSnap, content, vcrKey, targets); done {
-		return res, err
+	if done, err := r.reconcileVolumeCaptureSteadyState(ctx, nsSnap, content, vcrKey, targets); done {
+		return ctrl.Result{}, err
 	}
 
 	vcr := &unstructured.Unstructured{}
@@ -223,41 +223,41 @@ func (r *SnapshotReconciler) reconcileVolumeCaptureSteadyState(
 	content *storagev1alpha1.SnapshotContent,
 	vcrKey types.NamespacedName,
 	targets []vcpkg.Target,
-) (done bool, res ctrl.Result, err error) {
+) (done bool, err error) {
 	if !volumecapturectrl.ContentDataRefsCoverExpectedTargets(content.DataRefList(), targets) {
-		return false, ctrl.Result{}, nil
+		return false, nil
 	}
 
 	vcr := &unstructured.Unstructured{}
 	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
 	if err := r.Client.Get(ctx, vcrKey, vcr); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return true, ctrl.Result{}, err
+			return true, err
 		}
 		if allVSCsOwnedByContent(ctx, r.Client, content) {
 			if nsSnap.Status.VolumeCaptureRequestName != "" {
 				if err := r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, ""); err != nil {
-					return true, ctrl.Result{}, err
+					return true, err
 				}
 			}
 		}
-		return true, ctrl.Result{}, nil
+		return true, nil
 	}
 
 	safe, err := volumecapturectrl.VolumeCaptureRequestSafeToDeleteWithHandoff(ctx, r.Client, vcrKey, content.Name)
 	if err != nil {
-		return true, ctrl.Result{}, err
+		return true, err
 	}
 	if !safe {
-		return false, ctrl.Result{}, nil
+		return false, nil
 	}
 	if err := r.deleteSnapshotVolumeCaptureRequest(ctx, vcrKey); err != nil {
-		return true, ctrl.Result{}, err
+		return true, err
 	}
 	if err := r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, ""); err != nil {
-		return true, ctrl.Result{}, err
+		return true, err
 	}
-	return true, ctrl.Result{}, nil
+	return true, nil
 }
 
 func allVSCsOwnedByContent(ctx context.Context, c client.Reader, content *storagev1alpha1.SnapshotContent) bool {
@@ -278,7 +278,7 @@ func (r *SnapshotReconciler) ensureVolumeCaptureRequest(
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 	targets []vcpkg.Target,
-) (*unstructured.Unstructured, ctrl.Result, error) {
+) (*unstructured.Unstructured, error) {
 	name := vcpkg.SnapshotContentVCRName(content.UID)
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: name}
 
@@ -286,7 +286,7 @@ func (r *SnapshotReconciler) ensureVolumeCaptureRequest(
 	existing.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
 	err := r.Client.Get(ctx, key, existing)
 	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, ctrl.Result{}, fmt.Errorf("get VolumeCaptureRequest %s: %w", key, err)
+		return nil, fmt.Errorf("get VolumeCaptureRequest %s: %w", key, err)
 	}
 
 	ownerRef := volumeCaptureRequestOwnerReferenceForSnapshot(nsSnap)
@@ -294,30 +294,30 @@ func (r *SnapshotReconciler) ensureVolumeCaptureRequest(
 	if apierrors.IsNotFound(err) {
 		vcr := volumecapturectrl.NewVolumeCaptureRequestObject(nsSnap.Namespace, name, ownerRef, targets)
 		if err := r.Client.Create(ctx, vcr); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("create VolumeCaptureRequest %s: %w", key, err)
+			return nil, fmt.Errorf("create VolumeCaptureRequest %s: %w", key, err)
 		}
-		return vcr, ctrl.Result{}, nil
+		return vcr, nil
 	}
 
 	if volumeCaptureRequestConflictingSnapshotOwner(existing.GetOwnerReferences(), nsSnap) {
-		return nil, ctrl.Result{}, fmt.Errorf("VolumeCaptureRequest %s owned by another Snapshot", key)
+		return nil, fmt.Errorf("VolumeCaptureRequest %s owned by another Snapshot", key)
 	}
 	if !volumeCaptureRequestHasOwnerRefToSnapshot(existing.GetOwnerReferences(), nsSnap) {
 		base := existing.DeepCopy()
 		refs := append(existing.GetOwnerReferences(), ownerRef)
 		existing.SetOwnerReferences(refs)
 		if err := r.Client.Patch(ctx, existing, client.MergeFrom(base)); err != nil {
-			return nil, ctrl.Result{}, err
+			return nil, err
 		}
 	}
 	existingTargets, err := volumecapturectrl.ParseVolumeCaptureTargets(existing)
 	if err != nil {
-		return nil, ctrl.Result{}, err
+		return nil, err
 	}
 	if !volumecapturectrl.VolumeCaptureTargetsEqual(existingTargets, targets) {
-		return nil, ctrl.Result{}, fmt.Errorf("VolumeCaptureRequest %s spec.targets differ from resolved owned PVC targets", key)
+		return nil, fmt.Errorf("VolumeCaptureRequest %s spec.targets differ from resolved owned PVC targets", key)
 	}
-	return existing, ctrl.Result{}, nil
+	return existing, nil
 }
 
 func volumeCaptureRequestOwnerReferenceForSnapshot(ns *storagev1alpha1.Snapshot) metav1.OwnerReference {

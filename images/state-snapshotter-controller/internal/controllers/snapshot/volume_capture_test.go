@@ -23,9 +23,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -242,7 +241,7 @@ func TestReconcileVolumeCaptureSteadyState_staleTargetUIDNotComplete(t *testing.
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 	vcrKey := types.NamespacedName{Namespace: ns, Name: vcpkg.SnapshotContentVCRName(content.UID)}
 
-	done, _, err := r.reconcileVolumeCaptureSteadyState(ctx, snap, content, vcrKey, targets)
+	done, err := r.reconcileVolumeCaptureSteadyState(ctx, snap, content, vcrKey, targets)
 	if err != nil {
 		t.Fatalf("steady: %v", err)
 	}
@@ -469,7 +468,7 @@ func volumeSnapshotClass(name, driver string) *unstructured.Unstructured {
 
 // orphanCaptureFixtures returns the PVC/StorageClass/PV/VolumeSnapshotClass objects that let the orphan
 // VS create path resolve a valid, driver-matching VolumeSnapshotClass for the given PVC.
-func orphanCaptureFixtures(ns, pvcName, uid string) []client.Object {
+func orphanCaptureFixtures(ns, pvcName, uid string) []client.Object { //nolint:unparam // test fixture keeps uniform signature
 	pvName := "pv-" + pvcName
 	return []client.Object{
 		boundPVC(ns, pvcName, uid, testSCName, pvName),
@@ -479,7 +478,7 @@ func orphanCaptureFixtures(ns, pvcName, uid string) []client.Object {
 	}
 }
 
-func volumeSnapshotContent(name string, ready bool) *unstructured.Unstructured {
+func volumeSnapshotContent(name string, ready bool) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
 	obj.SetName(name)
@@ -488,7 +487,7 @@ func volumeSnapshotContent(name string, ready bool) *unstructured.Unstructured {
 	return obj
 }
 
-func readyVolumeSnapshot(ns, name, pvcName, vscName string, owner *storagev1alpha1.Snapshot) *unstructured.Unstructured {
+func readyVolumeSnapshot(ns, name, pvcName, vscName string, owner *storagev1alpha1.Snapshot) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
 		"kind":       "VolumeSnapshot",
@@ -579,7 +578,7 @@ func erroredVolumeSnapshot(ns, name, pvcName, errMsg string, owner *storagev1alp
 	return obj
 }
 
-func pvcTarget(ns, name, uid string) vcpkg.Target {
+func pvcTarget(ns, name, uid string) vcpkg.Target { //nolint:unparam // test fixture keeps uniform signature
 	return vcpkg.Target{UID: uid, APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: name, Namespace: ns}
 }
 
@@ -892,7 +891,6 @@ func TestEnsureOrphanPVCVolumeSnapshots_ExistingUnboundWrongClassIsTerminal(t *t
 		{name: "mismatched class", existingClass: "some-other-class"},
 		{name: "legacy no class", existingClass: ""},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
@@ -1061,7 +1059,7 @@ func csiVolumeSnapshotStatusStub() client.Object {
 // standing in for the manifest-capture controllers that do not run in these unit tests. With these in
 // place, ensureOrphanVolumeChildManifestCheckpoint finds the MCR, publishes the MCP name onto the child
 // volume node, and observes it Ready — letting the orphan publish path reach completion.
-func seedOrphanChildManifest(ns string, snapUID types.UID, target vcpkg.Target) []client.Object {
+func seedOrphanChildManifest(ns string, snapUID types.UID, target vcpkg.Target) []client.Object { //nolint:unparam // test fixture keeps uniform signature
 	mcrName := namespacemanifest.SnapshotVolumeMCRName(snapUID, target.UID)
 	mcrUID := types.UID("mcr-uid-" + target.UID)
 	mcr := &ssv1alpha1.ManifestCaptureRequest{

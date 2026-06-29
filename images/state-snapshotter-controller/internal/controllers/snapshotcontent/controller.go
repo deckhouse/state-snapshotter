@@ -20,7 +20,6 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +43,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -1046,7 +1046,7 @@ func childTerminalLeafInfo(childName string, readyCond *metav1.Condition) (leaf,
 func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx context.Context, childName string, parentContentObj *unstructured.Unstructured) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		child := &storagev1alpha1.SnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: childName}, child); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: childName}, child); err != nil {
 			return err
 		}
 		parent := &storagev1alpha1.SnapshotContent{}
@@ -1124,7 +1124,7 @@ func (r *SnapshotContentController) firstMissingManifestCheckpointChunk(ctx cont
 func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx context.Context, mcpName string, contentObj *unstructured.Unstructured) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 			return err
 		}
 		ownerRef := metav1.OwnerReference{
@@ -1143,7 +1143,7 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 		}
 		base := mcp.DeepCopy()
 		mcp.OwnerReferences = refs
-		return r.Client.Patch(ctx, mcp, client.MergeFrom(base))
+		return r.Patch(ctx, mcp, client.MergeFrom(base))
 	})
 }
 
@@ -1168,8 +1168,8 @@ func (r *SnapshotContentController) selfHealDataArtifactOwnerRefs(ctx context.Co
 			continue
 		}
 		vsc := &unstructured.Unstructured{}
-		vsc.SetGroupVersionKind(artifactGVK(volumeSnapshotContentAPIVersion, kindVolumeSnapshotContent))
-		if getErr := r.Client.Get(ctx, client.ObjectKey{Name: art.Name}, vsc); getErr != nil {
+		vsc.SetGroupVersionKind(artifactGVK())
+		if getErr := r.Get(ctx, client.ObjectKey{Name: art.Name}, vsc); getErr != nil {
 			if !errors.IsNotFound(getErr) {
 				logger.V(1).Info("self-heal: failed to get VolumeSnapshotContent; revalidation will backstop",
 					"vsc", art.Name, "err", getErr.Error())

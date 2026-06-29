@@ -23,9 +23,10 @@ import (
 	"net/http"
 	"testing"
 
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // perCRNodeFixture installs a root SnapshotContent (with one child) whose own MCP holds a single object,

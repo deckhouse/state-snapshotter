@@ -45,15 +45,15 @@ func owner() metav1.OwnerReference {
 	return metav1.OwnerReference{APIVersion: "demo/v1", Kind: "Parent", Name: "p", UID: "p-uid", Controller: &controller}
 }
 
-func childCM(name string) client.Object {
-	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: childNS}}
+func childCM() client.Object {
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS}}
 }
 
 func TestEnsureAllCreatesChildrenAndDeriveRefs(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	desired := []client.Object{childCM("a")}
+	desired := []client.Object{childCM()}
 	if err := EnsureAll(context.Background(), cl, owner(), desired); err != nil {
 		t.Fatalf("ensure all: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestEnsureAllDoesNotMutateCallerTemplate(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	template := childCM("a")
+	template := childCM()
 	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{template}); err != nil {
 		t.Fatalf("ensure all: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestEnsureAllFailsClosedOnConflictingOwner(t *testing.T) {
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS, OwnerReferences: []metav1.OwnerReference{conflicting}}}).
 		Build()
 
-	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{childCM("a")}); err == nil {
+	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{childCM()}); err == nil {
 		t.Fatal("expected conflict error when adopting a child owned by another parent")
 	}
 	got := &corev1.ConfigMap{}
@@ -139,7 +139,7 @@ func TestEnsureAllAdoptsUnownedChild(t *testing.T) {
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS}}).
 		Build()
 
-	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{childCM("a")}); err != nil {
+	if err := EnsureAll(context.Background(), cl, owner(), []client.Object{childCM()}); err != nil {
 		t.Fatalf("ensure all: %v", err)
 	}
 	got := &corev1.ConfigMap{}
