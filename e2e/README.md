@@ -115,6 +115,19 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `E2E_GC_TTL`: `snapshotRootOkTtl` applied for the GC spec. Defaults to `60s`.
 - `E2E_VOLUME_DATA`: when truthy (`true`/`1`/`yes`), runs phases 3-5 (full
   volume-data flow, backup download, and backup restore). Off by default (phases 1-2 only).
+- `E2E_GET_LOAD`: when truthy, runs the opt-in GET-load measurement spec (REST
+  GET-load delta across the capture wave, scraped from the leader controller's
+  `/metrics`). Off by default even when `E2E_VOLUME_DATA` is set, because the
+  repeat-and-average run adds several minutes. It provisions its own thin
+  StorageClass, so it does not need `E2E_VOLUME_DATA`, but it does need the same
+  base-cluster knobs (`TEST_CLUSTER_NAMESPACE` / `TEST_CLUSTER_STORAGE_CLASS`).
+  Tuning knobs:
+  - `E2E_GET_LOAD_ITERATIONS`: capture waves to run back-to-back over a shared
+    source (default `5`).
+  - `E2E_GET_LOAD_WARMUP`: leading waves run but excluded from the mean to drop
+    cold-cache bias (default `1`).
+  - `E2E_GET_LOAD_MAX_PER_SEC`: when set, hard-bound the MEAN GET/sec (leave unset
+    for the baseline run; set it to the baseline figure for the new run).
 - `E2E_STORAGE_CLASS`: the thin, snapshot-capable StorageClass the suite
   provisions/uses for phase 3. Defaults to `e2e-thin`.
 - `E2E_PROBE_IMAGE`: container image (must ship `sh` + `cat`) for the PVC
@@ -158,6 +171,11 @@ make test
 
 # Phases 3-5 (volume-data + backup download + backup restore) as well:
 E2E_VOLUME_DATA=true make test
+
+# Opt-in GET-load measurement only (provisions its own SC; baseline = log only):
+E2E_GET_LOAD=true make test-focus FOCUS="GET-load measurement"
+# New image, hard-bound the mean against the baseline figure:
+E2E_GET_LOAD=true E2E_GET_LOAD_MAX_PER_SEC=<baseline> make test-focus FOCUS="GET-load measurement"
 ```
 
 Run a subset:

@@ -297,10 +297,12 @@ func measureGetLoadWave(ctx context.Context, srcNS, snapName string, iter int) (
 	}, nil
 }
 
-// getLoadSpecs registers the GET-load measurement spec (env-gated by E2E_VOLUME_DATA). It repeats the
-// vol-tree capture wave (root Snapshot create -> first Ready=True) E2E_GET_LOAD_ITERATIONS times over a
-// SHARED source and reports the per-second rest_client_requests_total{method="GET"} delta, averaged across
-// the measured waves (the first E2E_GET_LOAD_WARMUP waves are run but excluded from the mean).
+// getLoadSpecs registers the GET-load measurement spec. It is OPT-IN via E2E_GET_LOAD (off by default even
+// when E2E_VOLUME_DATA is set, because the repeat-and-average run adds several minutes); it provisions its
+// own thin StorageClass, so it does not piggyback on the phase-3 volume-data flow. It repeats the vol-tree
+// capture wave (root Snapshot create -> first Ready=True) E2E_GET_LOAD_ITERATIONS times over a SHARED source
+// and reports the per-second rest_client_requests_total{method="GET"} delta, averaged across the measured
+// waves (the first E2E_GET_LOAD_WARMUP waves are run but excluded from the mean).
 //
 // Methodology (see the APIReader->cache batch plan): the controller exposes a PER-PROCESS client-go GET
 // counter (every controller in the leader pod, not just SnapshotContent), so the absolute number includes a
@@ -319,8 +321,8 @@ func getLoadSpecs() {
 		)
 
 		BeforeAll(func() {
-			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the GET-load measurement (needs the real capture wave)")
+			if !suiteCfg.getLoad {
+				Skip("E2E_GET_LOAD not set: skipping the GET-load measurement (opt-in; run with E2E_GET_LOAD=true). It provisions its own thin StorageClass, so it does NOT need E2E_VOLUME_DATA, but it does need the base-cluster knobs TEST_CLUSTER_NAMESPACE / TEST_CLUSTER_STORAGE_CLASS that the volume-data flow also uses.")
 			}
 			sc = suiteCfg.storageClass
 			srcNS = uniqueNS("getload")
