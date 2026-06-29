@@ -106,7 +106,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .Chart.Name }}-domain-controller-auth-reader
+  name: d8:{{ .Chart.Name }}:domain-controller-auth-reader
   namespace: kube-system
   {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
 roleRef:
