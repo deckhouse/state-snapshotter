@@ -46,7 +46,7 @@ type CustomSnapshotDefinitionList struct {
 // One CSD registers exactly one snapshot kind (flat schema): the snapshot apiVersion/kind live at the
 // top level, the domain resource being snapshotted is referenced by Source.
 type CustomSnapshotDefinitionSpec struct {
-	// Priority orders universal traversal across snapshot kinds. Higher values run first.
+	// Priority orders universal traversal across snapshot kinds. Lower values run first.
 	// +kubebuilder:validation:Minimum=0
 	Priority int32 `json:"priority,omitempty"`
 	// APIVersion is the apiVersion of the snapshot resource that materializes Source.

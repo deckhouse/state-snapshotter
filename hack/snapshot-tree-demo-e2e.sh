@@ -1149,7 +1149,7 @@ if need_main_tree; then
 # 01-priority-vm-first  (GVK/priority registration)
 # ---------------------------------------------------------------------------
 begin_stage "01-priority-vm-first"
-apply_csd 100 10
+apply_csd 10 100
 ensure_csd_eligible
 CSD_JSON="$(get_json "${CSD_RES}" "" "${CSD_NAME}")"
 echo "${CSD_JSON}" | jq '.' >"$(stage_dir 01-priority-vm-first)/csd.json"
@@ -1159,11 +1159,11 @@ echo "${CSD_JSON}" | jq -r '
 	(.spec.snapshotResourceMapping[]? | "  source=\(.source.kind) snapshot=\(.snapshot.kind) priority=\(.priority)"),
 	"== status (resolved) ==",
 	(.status // {} | tojson)' >"$(stage_dir 01-priority-vm-first)/priority-order.txt"
-# Assert VM priority strictly higher than Disk in the registered spec.
+# Assert VM priority strictly lower than Disk in the registered spec (lower number = planned first).
 VMP="$(echo "${CSD_JSON}" | jq -r '[.spec.snapshotResourceMapping[]?|select(.source.kind=="DemoVirtualMachine")][0].priority // 0')"
 DISKP="$(echo "${CSD_JSON}" | jq -r '[.spec.snapshotResourceMapping[]?|select(.source.kind=="DemoVirtualDisk")][0].priority // 0')"
-[[ "${VMP}" -gt "${DISKP}" ]] || die "expected VM priority > Disk priority, got VM=${VMP} Disk=${DISKP}"
-note "registered priority VM=${VMP} > Disk=${DISKP}"
+[[ "${VMP}" -lt "${DISKP}" ]] || die "expected VM priority < Disk priority, got VM=${VMP} Disk=${DISKP}"
+note "registered priority VM=${VMP} < Disk=${DISKP}"
 save_artifacts "01-priority-vm-first" "${NS}"
 log "01-priority-vm-first: PASS"
 
@@ -1833,7 +1833,7 @@ elif ! inversion_safe; then
 	kubectl get "${VMSNAP_RES},${DISKSNAP_RES}" -A -o wide >"$(stage_dir 03-priority-inverted)/demo-snapshots-all-namespaces.txt" 2>/dev/null || true
 	kubectl get "${CSD_RES}" -o yaml >"$(stage_dir 03-priority-inverted)/customsnapshotdefinitions.yaml" 2>/dev/null || true
 else
-	apply_csd 10 100
+	apply_csd 100 10
 	ensure_csd_eligible
 	apply_source_namespace "${NS_PRIORITY_INV}"
 	wait_until "demo-pvc Bound in ${NS_PRIORITY_INV}" pvc_bound "${NS_PRIORITY_INV}" demo-pvc || require "inverted demo-pvc never Bound within ${WAIT_SEC}s"
@@ -1890,7 +1890,7 @@ else
 	save_graph "03-priority-inverted" "${NS_PRIORITY_INV}" "${SNAP}" "inverted" "logical"
 	save_artifacts "03-priority-inverted" "${NS_PRIORITY_INV}"
 	# Restore vm-first priority so the main tree (case 02) stays consistent for later stages.
-	apply_csd 100 10
+	apply_csd 10 100
 	ensure_csd_eligible
 	wait_snapshot_ready "${NS}" "${SNAP}" || die "main tree did not reconverge to Ready after CSD priority restore"
 fi

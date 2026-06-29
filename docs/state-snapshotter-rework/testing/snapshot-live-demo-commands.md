@@ -427,14 +427,14 @@ spec:
     snapshot:
       apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
       kind: DemoVirtualMachineSnapshot
-    priority: 100
+    priority: 10
   - source:
       apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
       kind: DemoVirtualDisk
     snapshot:
       apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
       kind: DemoVirtualDiskSnapshot
-    priority: 10
+    priority: 100
 EOF
 
 until kubectl get customsnapshotdefinition "${CSD_NAME}" -o json \

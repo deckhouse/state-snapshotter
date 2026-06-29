@@ -116,9 +116,11 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader, mapp
 			DataBacked:      d.Spec.DataBacked,
 		})
 	}
+	// Ascending by Priority: lower numeric priority runs first (earlier traversal wave).
+	// Tie-break by SourceGVK for a stable, deterministic order within a priority layer.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Priority != out[j].Priority {
-			return out[i].Priority > out[j].Priority
+			return out[i].Priority < out[j].Priority
 		}
 		return out[i].SourceGVK.String() < out[j].SourceGVK.String()
 	})

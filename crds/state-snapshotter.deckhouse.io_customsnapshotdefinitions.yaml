@@ -68,7 +68,7 @@ spec:
                 type: string
               priority:
                 description: Priority orders universal traversal across snapshot kinds.
-                  Higher values run first.
+                  Lower values run first.
                 format: int32
                 minimum: 0
                 type: integer

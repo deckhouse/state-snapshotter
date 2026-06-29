@@ -691,16 +691,16 @@ func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 }
 
 // coverageRootsForNextWave returns the snapshot refs used to seed the coverage checker for the next
-// (lower) priority wave during child-graph recompute. It intentionally returns ONLY the refs
+// (higher-numeric) priority wave during child-graph recompute. It intentionally returns ONLY the refs
 // planned/confirmed in the current recompute pass and NEVER the parent's own
 // status.childrenSnapshotRefs.
 //
-// Seeding from parent status is the self-coverage idempotency bug: a generated lower-priority child
-// carried in status would be visited by the coverage checker, which reads its own spec.sourceRef
+// Seeding from parent status is the self-coverage idempotency bug: a generated child from another
+// wave carried in status would be visited by the coverage checker, which reads its own spec.sourceRef
 // and marks that source covered. The same source is then skipped this pass, omitted from
 // desiredRefs, and finally stripped by mergeSnapshotManagedChildRefs — so the standalone child ref
 // silently disappears from the root on every subsequent reconcile. Planning must be a full recompute:
-// coverage between waves flows only from higher-priority subtrees planned in this pass.
+// coverage between waves flows only from earlier (lower-numeric-priority) subtrees planned in this pass.
 func coverageRootsForNextWave(plannedThisPass []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
 	return append([]storagev1alpha1.SnapshotChildRef{}, plannedThisPass...)
 }

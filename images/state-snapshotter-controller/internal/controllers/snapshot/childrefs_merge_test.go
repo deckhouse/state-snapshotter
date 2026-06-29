@@ -90,7 +90,7 @@ func TestPriorityLayerPlanningReady(t *testing.T) {
 		}
 	})
 
-	t.Run("pending blocks lower priority without terminal message", func(t *testing.T) {
+	t.Run("pending blocks the next priority layer without terminal message", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(pendingChild).Build()}
 		ready, terminal, pending, err := r.priorityLayerPlanningReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
@@ -407,7 +407,7 @@ func TestParentStatusSeedWouldSelfCoverStandalone(t *testing.T) {
 }
 
 // TestRecomputeChildGraphKeepsLowerPriorityStandalone reconstructs a two-wave recompute
-// (VM priority 100 -> Disk priority 10) using the production coverage checker and merge, and proves
+// (VM priority 10 -> Disk priority 100) using the production coverage checker and merge, and proves
 // the deterministic idempotency invariant: on a repeated reconcile where the root status already
 // carries both generated refs, the lower-priority standalone disk ref survives, the disk-vm covered
 // by the VM subtree is not re-added (no duplicate), and the VM ref is kept.
@@ -429,12 +429,12 @@ func TestRecomputeChildGraphKeepsLowerPriorityStandalone(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).
 		WithObjects(vmChild, diskVMChild, diskStandaloneChild).Build()
 
-	// Wave 1 (VM, priority 100): the highest-priority wave seeds from nil, so the VM source is always
-	// re-planned and kept in the current pass.
+	// Wave 1 (VM, priority 10): the first (lowest-numeric-priority) wave seeds from nil, so the VM source
+	// is always re-planned and kept in the current pass.
 	vmRef := childRef("nss-child-vm")
 	desiredRefs := []storagev1alpha1.SnapshotChildRef{vmRef}
 
-	// Wave 2 (Disk, priority 10): coverage seeded ONLY from this pass (the fix). disk-vm is covered by
+	// Wave 2 (Disk, priority 100): coverage seeded ONLY from this pass (the fix). disk-vm is covered by
 	// the VM subtree; disk-standalone is not covered despite a stale status ref existing.
 	coverage := newSnapshotCoverageChecker(cl, "ns1", coverageRootsForNextWave(desiredRefs))
 
