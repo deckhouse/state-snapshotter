@@ -252,7 +252,7 @@ SDK проектируется как **domain-agnostic integration layer** ме
 ## 3. Форма SDK v1 (единый namespace, capture-only реализация)
 
 Идея: **library-first** — набор хелперов поверх `controller-runtime`. Domain-специфика подаётся
-через узкие accessor-интерфейсы и коллбэки. Каркас-framework НЕ вводим в v1 (см. Р1).
+через единый `SnapshotAdapter` seam (узких per-method targets/коллбэков нет — Р27-вердикт). Каркас-framework НЕ вводим в v1 (см. Р1).
 
 Раскладка пакетов v1 (после арх-аудита ревью 3 и **ревью 4b: true facade, Р26**). SDK — **отдельный
 shared-модуль** в корне репо `pkg/snapshotsdk` (Р2; модуль `…/pkg/snapshotsdk`, свой `go.mod`, подключается
