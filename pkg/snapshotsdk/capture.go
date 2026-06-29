@@ -36,37 +36,40 @@ import (
 // Planning drives the three idempotent, restart-safe parts of a snapshot's planning: its child snapshots,
 // its volume (PVC) data capture, and its manifest capture. Each method reconciles the cluster toward the
 // desired intent and publishes the resulting names/refs into the snapshot status.
+//
+// Lifecycle model (all three methods): the planning barrier (ChildrenSnapshotReady=True, written by
+// MarkPlanningReady) is the final commit point of the planning phase; an individual planning artifact
+// becomes immutable the moment it is published, even before the barrier. This yields three states:
+//   - State 1 (nothing published, barrier not committed): converge — create/reuse freely.
+//   - State 2 (published, barrier not committed): fail closed if the desired artifact diverges from the
+//     published one, so a restart with non-deterministic discovery cannot silently rewrite planning intent.
+//   - State 3 (barrier committed): the SDK is INERT — every Ensure* returns nil immediately, creating,
+//     reusing, and validating nothing. Ownership has passed to the core controller.
+//
+// The SDK is delete-free throughout and consults no execution-phase signal (it does not wait on the core
+// controller); suppression after the barrier is the domain-owned condition alone.
 type Planning interface {
-	// EnsureChildren create/adopts the desired set of child snapshots under this snapshot and publishes
-	// the resulting refs as status.childrenSnapshotRefs. It performs create/adopt + publication only and
-	// never deletes children (SDK v1 is delete-free).
-	//
-	// The published child set becomes the authoritative, immutable snapshot topology once the planning
-	// barrier is committed (ChildrenSnapshotReady=True, written by MarkPlanningReady). Before commit the
-	// desired set may still converge to newly observed domain state; after commit it must match the
-	// published set by canonical identity (set equality on (apiVersion, kind, name), not count) — this
-	// also locks a committed EMPTY topology (a leaf can never grow a child). A differing set after commit
-	// is terminal topology drift: EnsureChildren fails closed with ErrTopologyDrift, creating nothing,
-	// deleting nothing, leaving the published refs untouched. The caller surfaces it via MarkPlanningFailed
-	// with ReasonTopologyDrift. It also fails (non-drift error) on a duplicate desired child.
+	// EnsureChildren create/adopts the desired child snapshots and publishes their refs as
+	// status.childrenSnapshotRefs (create/adopt + publication only; never deletes). Per the lifecycle
+	// model: inert once the barrier is committed; before commit, a published non-empty set that diverges
+	// from desired (set equality on (apiVersion,kind,name), not count) is terminal topology drift —
+	// ErrTopologyDrift, creating/deleting nothing — surfaced via MarkPlanningFailed(ReasonTopologyDrift).
+	// An empty published set still converges. A duplicate desired child is a non-drift error.
 	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error
 
 	// EnsureVolumeCapture ensures the volume capture request for the snapshot's single data-ref PVC and
-	// publishes its name. A nil DataRef is a manifest-only snapshot: the SDK ensures no request and, being
-	// delete-free, never clears a name it published earlier (so a published VCR survives a later nil). Unlike
-	// the child topology, the SDK does NOT enforce data-slot immutability or fail closed on a nil after a
-	// published VCR — keeping the slot stable is a domain convention (immutable spec.sourceRef), see
-	// VolumeCaptureSpec. The operation is suppressed once the core controller has stamped the data captured.
+	// publishes its name. A nil DataRef is a manifest-only snapshot (no request, delete-free: a previously
+	// published name is never cleared). Per the lifecycle model: inert once the barrier is committed;
+	// before commit it create-or-reuses the VCR (a missing VCR is recreated), while an existing VCR
+	// targeting a different PVC fails closed (per-artifact immutability of the data capture).
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
 	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the domain-chosen target set
-	// plus any owned-PVC target discovered from the data capture) and publishes its name. On the first call it
-	// creates the request; on later calls, if the request already exists, the desired target set must
-	// match the request's targets by canonical identity (set equality on (apiVersion, kind, name), order
-	// and duplicates ignored). A differing set is terminal manifest drift and EnsureManifestCapture fails
-	// closed with ErrManifestDrift — it does not update/patch/delete the request and leaves status
-	// untouched. The caller surfaces it via MarkPlanningFailed with ReasonManifestDrift. The operation is
-	// suppressed once the core controller has stamped the manifest captured.
+	// plus any owned-PVC target discovered from the data capture) and publishes its name. Per the lifecycle
+	// model: inert once the barrier is committed; before commit it creates the request when absent and,
+	// when the request already exists, requires the desired target set to match its targets by canonical
+	// identity (set equality on (apiVersion,kind,name), order and duplicates ignored) — a differing set is
+	// terminal ErrManifestDrift (no update/patch/delete), surfaced via MarkPlanningFailed(ReasonManifestDrift).
 	//
 	// Cardinality invariant: the FINAL target set (domain targets plus any owned-PVC augmentation) must be
 	// non-empty. If it is empty, EnsureManifestCapture fails closed with ErrEmptyManifest before touching
@@ -100,24 +103,26 @@ type CaptureSDK interface {
 	ReadinessFault
 }
 
-// New returns a CaptureSDK bound to a client (for writes and cached reads), an API reader (for live,
-// TOCTOU-safe marker refreshes), and a volume-capture provider (see NewStorageFoundationProvider).
-func New(c client.Client, apiReader client.Reader, provider VolumeCaptureProvider) CaptureSDK {
-	return &sdk{client: c, apiReader: apiReader, provider: provider}
+// New returns a CaptureSDK bound to a client (for writes and cached reads) and a volume-capture provider
+// (see NewStorageFoundationProvider). Suppression is driven by the planning barrier condition read from
+// the adapter's in-memory state, so no separate API reader is needed.
+func New(c client.Client, provider VolumeCaptureProvider) CaptureSDK {
+	return &sdk{client: c, provider: provider}
 }
 
 type sdk struct {
-	client    client.Client
-	apiReader client.Reader
-	provider  VolumeCaptureProvider
+	client   client.Client
+	provider VolumeCaptureProvider
 }
 
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error {
-	obj := t.Object()
-	owner, err := s.ownerRef(t)
-	if err != nil {
-		return err
+	// After the planning barrier is committed the planning phase is immutable and the SDK is inert:
+	// ownership has passed to the core controller, so EnsureChildren neither creates, adopts, nor
+	// validates anything. A post-commit divergence is an invalid state the SDK does not repair or report.
+	if conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady) {
+		return nil
 	}
+	obj := t.Object()
 	objs := make([]client.Object, 0, len(desired))
 	for i, d := range desired {
 		if d.Object == nil {
@@ -130,19 +135,21 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 		return err
 	}
 
-	// Topology is immutable once the planning barrier is committed. The commit marker is the durable
-	// ChildrenSnapshotReady=True condition (published by MarkPlanningReady), NOT "refs are non-empty" —
-	// otherwise a committed EMPTY topology (a leaf) could later grow a child unnoticed. After commit, the
-	// desired set must match the published set exactly (set equality on the canonical (apiVersion,kind,
-	// name) key, NOT count); a drifted set — e.g. a restart where discovery sees different children — is
-	// terminal: fail closed without creating, deleting, or republishing anything. Before commit, the set
-	// may still converge to newly observed desired (Р25).
+	// Per-artifact immutability: a planning artifact becomes immutable the moment it is published, even
+	// before the barrier, so a restart whose discovery yields a different set cannot silently rewrite
+	// already-published planning intent. A published, non-empty child set that diverges from desired (set
+	// equality on the canonical (apiVersion,kind,name) key, NOT count) is terminal topology drift — fail
+	// closed without creating, deleting, or republishing anything. An empty published set is State 1
+	// (nothing published yet): the set may still converge to newly observed desired (Р25).
 	published := t.GetDomainCaptureState().ChildrenSnapshotRefs
-	committed := conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady)
-	if committed && !children.RefsEqualIgnoreOrder(published, desiredRefs) {
+	if len(published) > 0 && !children.RefsEqualIgnoreOrder(published, desiredRefs) {
 		return ErrTopologyDrift
 	}
 
+	owner, err := s.ownerRef(t)
+	if err != nil {
+		return err
+	}
 	if err := children.EnsureAll(ctx, s.client, owner, objs); err != nil {
 		return err
 	}
@@ -161,18 +168,13 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 	if in.DataRef == nil {
 		return nil
 	}
-	obj := t.Object()
-	if !t.CoreCaptureState().DataCaptured {
-		if err := s.refresh(ctx, obj); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}
-	}
-	if t.CoreCaptureState().DataCaptured {
+	// Inert after the planning barrier (see EnsureChildren). Before the barrier this create-or-reuses the
+	// VCR; a missing VCR is (re)created, while an existing VCR targeting a different PVC fails closed inside
+	// EnsureVCR (per-artifact immutability for the data capture).
+	if conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady) {
 		return nil
 	}
+	obj := t.Object()
 	owner, err := s.ownerRef(t)
 	if err != nil {
 		return err
@@ -193,18 +195,11 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 }
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
-	obj := t.Object()
-	if !t.CoreCaptureState().ManifestCaptured {
-		if err := s.refresh(ctx, obj); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}
-	}
-	if t.CoreCaptureState().ManifestCaptured {
+	// Inert after the planning barrier (see EnsureChildren).
+	if conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady) {
 		return nil
 	}
+	obj := t.Object()
 	gvk, err := apiutil.GVKForObject(obj, s.client.Scheme())
 	if err != nil {
 		return err
@@ -319,8 +314,4 @@ func (s *sdk) ownerRef(t SnapshotAdapter) (metav1.OwnerReference, error) {
 		UID:        obj.GetUID(),
 		Controller: &controller,
 	}, nil
-}
-
-func (s *sdk) refresh(ctx context.Context, obj client.Object) error {
-	return s.apiReader.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 }

@@ -59,7 +59,6 @@ func (f fakeProvider) OwnedPVCTarget(_ context.Context, _, _ string) (*snapshots
 type captureAdapter struct {
 	obj   *corev1.ConfigMap
 	state snapshotsdk.DomainCaptureState
-	core  snapshotsdk.CoreCaptureState
 	conds []metav1.Condition
 }
 
@@ -69,7 +68,6 @@ func (a *captureAdapter) GetConditions() []metav1.Condition                     
 func (a *captureAdapter) SetConditions(c []metav1.Condition)                     { a.conds = c }
 func (a *captureAdapter) GetDomainCaptureState() snapshotsdk.DomainCaptureState  { return a.state }
 func (a *captureAdapter) SetDomainCaptureState(s snapshotsdk.DomainCaptureState) { a.state = s }
-func (a *captureAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState         { return a.core }
 
 // commitBarrier stamps ChildrenSnapshotReady=True, the durable marker that freezes the child topology.
 func (a *captureAdapter) commitBarrier() *captureAdapter {
@@ -109,7 +107,7 @@ func newCaptureSDK(t *testing.T, scheme *runtime.Scheme, seed ...client.Object) 
 func newCaptureSDKWithProvider(t *testing.T, scheme *runtime.Scheme, provider snapshotsdk.VolumeCaptureProvider, seed ...client.Object) (snapshotsdk.CaptureSDK, client.Client) {
 	t.Helper()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.ConfigMap{}).WithObjects(seed...).Build()
-	return snapshotsdk.New(cl, cl, provider), cl
+	return snapshotsdk.New(cl, provider), cl
 }
 
 func parentObj() *corev1.ConfigMap {
@@ -147,36 +145,38 @@ func TestEnsureChildrenFirstPlanningPublishes(t *testing.T) {
 	}
 }
 
-// TestEnsureChildrenRestartSameTopology: a committed snapshot re-deriving the SAME child set after a
-// restart is a no-op success — no error, no duplicate children, published refs unchanged.
-func TestEnsureChildrenRestartSameTopology(t *testing.T) {
+// TestEnsureChildrenState2SameSetReEnsures: State 2 (published non-empty, barrier NOT committed). The same
+// published set re-derived after a restart is not drift; a child missing from the cluster (e.g. crash
+// before it was created) is (re)created, and the published refs stay put.
+func TestEnsureChildrenState2SameSetReEnsures(t *testing.T) {
 	scheme := captureScheme(t)
+	// Only child "a" exists; "b" is missing.
 	sdk, cl := newCaptureSDK(t, scheme, parentObj(),
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: captureNS}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: captureNS}},
 	)
-	adapter := parentAdapter(childRef("a"), childRef("b")).commitBarrier()
+	adapter := parentAdapter(childRef("a"), childRef("b")) // published [a,b], NOT committed
 
 	if err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("b"), childSpec("a")}); err != nil {
-		t.Fatalf("same topology after restart must succeed: %v", err)
+		t.Fatalf("equal published set before the barrier must succeed: %v", err)
 	}
-	if !childExists(t, cl, "a") || !childExists(t, cl, "b") {
-		t.Fatal("expected children a and b to remain")
+	if !childExists(t, cl, "b") {
+		t.Fatal("missing child b must be (re)created before the barrier")
 	}
 	if !sameRefSet(adapter.state.ChildrenSnapshotRefs, childRef("a"), childRef("b")) {
 		t.Fatalf("published refs must stay [a,b], got %#v", adapter.state.ChildrenSnapshotRefs)
 	}
 }
 
-// TestEnsureChildrenTopologyDriftCountChanged: committed [a,b], desired [a] → fail closed; refs unchanged,
-// nothing deleted.
-func TestEnsureChildrenTopologyDriftCountChanged(t *testing.T) {
+// TestEnsureChildrenState2DriftCountChanged: State 2 (published [a,b], barrier NOT committed). A published
+// artifact is immutable even before the barrier, so desired [a] is terminal drift — refs unchanged, nothing
+// deleted. This closes the pre-commit silent-rewrite hole (publish-gated, not barrier-gated).
+func TestEnsureChildrenState2DriftCountChanged(t *testing.T) {
 	scheme := captureScheme(t)
 	sdk, cl := newCaptureSDK(t, scheme, parentObj(),
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: captureNS}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: captureNS}},
 	)
-	adapter := parentAdapter(childRef("a"), childRef("b")).commitBarrier()
+	adapter := parentAdapter(childRef("a"), childRef("b")) // published, NOT committed
 
 	err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("a")})
 	if !errors.Is(err, snapshotsdk.ErrTopologyDrift) {
@@ -190,15 +190,15 @@ func TestEnsureChildrenTopologyDriftCountChanged(t *testing.T) {
 	}
 }
 
-// TestEnsureChildrenTopologyDriftSameCountDifferentChild is the critical case a len()-only comparison would
-// wrongly accept: committed [a,b], desired [a,c] (same count) → fail closed; no new child c created.
-func TestEnsureChildrenTopologyDriftSameCountDifferentChild(t *testing.T) {
+// TestEnsureChildrenState2DriftSameCountDifferentChild is the critical case a len()-only comparison would
+// wrongly accept: published [a,b] (barrier NOT committed), desired [a,c] (same count) → drift; no c created.
+func TestEnsureChildrenState2DriftSameCountDifferentChild(t *testing.T) {
 	scheme := captureScheme(t)
 	sdk, cl := newCaptureSDK(t, scheme, parentObj(),
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: captureNS}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: captureNS}},
 	)
-	adapter := parentAdapter(childRef("a"), childRef("b")).commitBarrier()
+	adapter := parentAdapter(childRef("a"), childRef("b")) // published, NOT committed
 
 	err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("a"), childSpec("c")})
 	if !errors.Is(err, snapshotsdk.ErrTopologyDrift) {
@@ -212,41 +212,57 @@ func TestEnsureChildrenTopologyDriftSameCountDifferentChild(t *testing.T) {
 	}
 }
 
-// TestEnsureChildrenCommittedEmptyTopologyRejectsNewChild guards the empty-set hole: a committed leaf
-// (published [], ChildrenSnapshotReady=True) that later derives [a] must fail closed — a len(published)>0
-// guard would miss this.
-func TestEnsureChildrenCommittedEmptyTopologyRejectsNewChild(t *testing.T) {
+// TestEnsureChildrenState1EmptyPublishedConverges: State 1 (nothing published yet, barrier NOT committed).
+// An empty published set is not frozen — the desired set may still converge.
+func TestEnsureChildrenState1EmptyPublishedConverges(t *testing.T) {
+	scheme := captureScheme(t)
+	sdk, cl := newCaptureSDK(t, scheme, parentObj())
+	adapter := parentAdapter() // published empty, NOT committed
+
+	if err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("a")}); err != nil {
+		t.Fatalf("State 1 convergence must succeed, got %v", err)
+	}
+	if !childExists(t, cl, "a") || !sameRefSet(adapter.state.ChildrenSnapshotRefs, childRef("a")) {
+		t.Fatalf("State 1 set must converge to [a], got %#v", adapter.state.ChildrenSnapshotRefs)
+	}
+}
+
+// TestEnsureChildrenState3InertAfterBarrier: State 3 (barrier committed). The SDK is inert — a divergent
+// desired set is neither created nor reported as drift; the published refs are untouched.
+func TestEnsureChildrenState3InertAfterBarrier(t *testing.T) {
+	scheme := captureScheme(t)
+	sdk, cl := newCaptureSDK(t, scheme, parentObj(),
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: captureNS}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: captureNS}},
+	)
+	adapter := parentAdapter(childRef("a"), childRef("b")).commitBarrier()
+
+	if err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("a"), childSpec("c")}); err != nil {
+		t.Fatalf("committed snapshot must be inert (nil), got %v", err)
+	}
+	if childExists(t, cl, "c") {
+		t.Fatal("inert: drifted child c must NOT be created after the barrier")
+	}
+	if !sameRefSet(adapter.state.ChildrenSnapshotRefs, childRef("a"), childRef("b")) {
+		t.Fatalf("published refs must stay [a,b], got %#v", adapter.state.ChildrenSnapshotRefs)
+	}
+}
+
+// TestEnsureChildrenState3InertEmptyLeafStaysEmpty: a committed leaf (published []) stays a leaf — a later
+// desired [a] is ignored (inert), never grown.
+func TestEnsureChildrenState3InertEmptyLeafStaysEmpty(t *testing.T) {
 	scheme := captureScheme(t)
 	sdk, cl := newCaptureSDK(t, scheme, parentObj())
 	adapter := parentAdapter().commitBarrier() // committed with an empty child set
 
-	err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("a")})
-	if !errors.Is(err, snapshotsdk.ErrTopologyDrift) {
-		t.Fatalf("committed empty topology growing a child must be ErrTopologyDrift, got %v", err)
+	if err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("a")}); err != nil {
+		t.Fatalf("committed empty leaf must be inert (nil), got %v", err)
 	}
 	if len(adapter.state.ChildrenSnapshotRefs) != 0 {
 		t.Fatalf("published refs must stay empty, got %#v", adapter.state.ChildrenSnapshotRefs)
 	}
 	if childExists(t, cl, "a") {
-		t.Fatal("fail-closed: child a must NOT be created on a committed empty topology")
-	}
-}
-
-// TestEnsureChildrenUncommittedAllowsConvergence: before the barrier is committed, the child set may still
-// converge to a newly observed desired set (Р25) — no drift error.
-func TestEnsureChildrenUncommittedAllowsConvergence(t *testing.T) {
-	scheme := captureScheme(t)
-	sdk, _ := newCaptureSDK(t, scheme, parentObj(),
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: captureNS}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: captureNS}},
-	)
-	adapter := parentAdapter(childRef("a"), childRef("b")) // NOT committed
-
-	if err := sdk.EnsureChildren(context.Background(), adapter, []snapshotsdk.ChildSpec{childSpec("a")}); err != nil {
-		t.Fatalf("pre-commit convergence must succeed, got %v", err)
-	}
-	if !sameRefSet(adapter.state.ChildrenSnapshotRefs, childRef("a")) {
-		t.Fatalf("pre-commit set must converge to [a], got %#v", adapter.state.ChildrenSnapshotRefs)
+		t.Fatal("inert: child a must NOT be created on a committed empty leaf")
 	}
 }
 
@@ -477,6 +493,25 @@ func TestEnsureManifestCaptureEmptyInputRescuedByOwnedPVC(t *testing.T) {
 	got := mcrTargets(t, cl, name)
 	if len(got) != 1 || !sameTargetSet(got, mt("v1", "PersistentVolumeClaim", "data-pvc")) {
 		t.Fatalf("MCR must carry exactly the owned-PVC target, got %#v", got)
+	}
+}
+
+// TestEnsureManifestCaptureCommittedIsInert: State 3 (barrier committed) — EnsureManifestCapture is inert:
+// it creates no MCR, publishes no name, and does not even reach the cardinality check.
+func TestEnsureManifestCaptureCommittedIsInert(t *testing.T) {
+	scheme := captureScheme(t)
+	sdk, cl := newCaptureSDK(t, scheme, parentObj())
+	adapter := manifestAdapter()
+	adapter.commitBarrier()
+
+	if err := sdk.EnsureManifestCapture(context.Background(), adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{mt("v1", "DemoThing", "a")}}); err != nil {
+		t.Fatalf("committed snapshot must be inert (nil), got %v", err)
+	}
+	if n := countMCRs(t, cl); n != 0 {
+		t.Fatalf("inert: no MCR must be created after the barrier, found %d", n)
+	}
+	if adapter.state.ManifestCaptureRequestName != "" {
+		t.Fatalf("inert: no MCR name must be published after the barrier, got %q", adapter.state.ManifestCaptureRequestName)
 	}
 }
 

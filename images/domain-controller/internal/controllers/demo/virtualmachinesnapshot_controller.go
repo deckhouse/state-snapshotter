@@ -71,7 +71,7 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 }
 
 func (r *DemoVirtualMachineSnapshotReconciler) capture() snapshotsdk.CaptureSDK {
-	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client))
+	return snapshotsdk.New(r.Client, snapshotsdk.NewStorageFoundationProvider(r.Client))
 }
 
 func demoVirtualMachineDiskSnapshotName(namespace, vmSnapshotName, sourceDiskName string) string {

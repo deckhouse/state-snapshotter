@@ -29,15 +29,26 @@ limitations under the License.
 // snapshots. The domain expresses intent; the SDK makes the cluster match it, idempotently and
 // crash/restart-safely.
 //
-// SDK v1 is delete-free and topology-immutable. EnsureChildren creates/adopts and publishes the desired
-// child refs but never deletes children. Once the planning barrier is committed (ChildrenSnapshotReady=
-// True), the published childrenSnapshotRefs are the authoritative snapshot topology: a later reconcile
-// that derives a different desired child set — including growing a committed empty (leaf) topology — is
-// rejected as terminal topology drift (ErrTopologyDrift / ReasonTopologyDrift) rather than repaired by
-// create/delete. Before commit the set may still converge to newly observed domain state. This keeps the
-// SDK a pure publication layer with no diff-based mutation — the dangerous case at restart, where
-// discovery may be incomplete or transitional. Any detached leftover is reclaimed by ownerRef garbage
-// collection (the parent owns each child) or a future cleanup component, not by the SDK.
+// SDK v1 is delete-free and follows a publish-gated immutability model. EnsureChildren creates/adopts and
+// publishes the desired child refs but never deletes children; EnsureVolumeCapture and EnsureManifestCapture
+// likewise create/reuse and publish, never delete. The planning barrier (ChildrenSnapshotReady=True, written
+// by MarkPlanningReady) is the final commit point of the planning phase, but each individual planning
+// artifact becomes immutable the moment it is published — even before the barrier. This yields three states
+// for every Ensure* method:
+//
+//   - State 1 — nothing published, barrier not committed: the SDK converges freely (create/reuse).
+//   - State 2 — published, barrier not committed: a desired artifact that diverges from the published one is
+//     terminal drift (ErrTopologyDrift / ErrManifestDrift, or a fail-closed VCR error), so a restart with
+//     non-deterministic discovery cannot silently rewrite already-published planning intent.
+//   - State 3 — barrier committed: the SDK is inert — every Ensure* returns nil, creating, reusing, and
+//     validating nothing. Ownership has passed to the core controller; a post-commit divergence is an
+//     invalid state the SDK neither repairs nor reports.
+//
+// Suppression after the barrier is driven solely by the durable ChildrenSnapshotReady condition: the SDK
+// consults no execution-phase signal and never waits on the core controller. This keeps the SDK a pure
+// publication layer with no diff-based mutation — the dangerous case at restart, where discovery may be
+// incomplete or transitional. Any detached leftover is reclaimed by ownerRef garbage collection (the parent
+// owns each child) or a future cleanup component, not by the SDK.
 //
 // # Lifecycle (capture-only, v1)
 //
@@ -52,10 +63,10 @@ limitations under the License.
 //
 // # Restart-safe recipe
 //
-// Every Ensure* method is a restart-safe recipe: it reads durable cluster/status state (refreshing the
-// snapshot via the API reader to avoid TOCTOU on the captured markers), reconciles the cluster toward
-// the desired set, and publishes the resulting names/refs into the snapshot status. Re-running after a
-// crash converges to the same result and never duplicates or strands child resources.
+// Every Ensure* method is a restart-safe recipe: it reads durable cluster/status state (the published
+// names/refs and the barrier condition), reconciles the cluster toward the desired set, and publishes the
+// resulting names/refs into the snapshot status. Re-running after a crash converges to the same result and
+// never duplicates or strands child resources; once the barrier is committed it is inert (see Model).
 //
 // # Boundaries
 //

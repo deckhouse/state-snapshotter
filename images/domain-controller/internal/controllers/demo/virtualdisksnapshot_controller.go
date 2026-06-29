@@ -67,7 +67,7 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) capture() snapshotsdk.CaptureSDK {
-	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client))
+	return snapshotsdk.New(r.Client, snapshotsdk.NewStorageFoundationProvider(r.Client))
 }
 
 func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

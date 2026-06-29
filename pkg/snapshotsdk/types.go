@@ -56,15 +56,6 @@ type DomainCaptureState struct {
 	ChildrenSnapshotRefs       []SnapshotChildRef
 }
 
-// CoreCaptureState is the read-only, core-owned handoff the SDK consults to suppress re-creating capture
-// requests after the core controller has durably recorded a capture as done. It is never written by the SDK.
-type CoreCaptureState struct {
-	// ManifestCaptured is set by the core controller once the manifest capture is durably checkpointed.
-	ManifestCaptured bool
-	// DataCaptured is set by the core controller once the data capture's content handoff is durable.
-	DataCaptured bool
-}
-
 // ChildSpec is the child-builder seam: the domain constructs the fully-formed child snapshot object
 // (kind, name, spec.sourceRef, labels) and hands it to the SDK, which owns adoption (owner reference),
 // create-or-validate, and SnapshotChildRef derivation. The SDK never authors domain child spec fields.
@@ -95,11 +86,11 @@ type NotReadyStatus struct {
 // name.
 //
 // The domain is expected to resolve DataRef from the snapshot's immutable spec.sourceRef, so in practice it
-// does not flip between data capture and manifest-only across reconciles. Note this is a domain convention,
-// NOT an SDK-enforced barrier: unlike the child topology (which fails closed on post-barrier drift),
-// EnsureVolumeCapture does not enforce data-slot immutability. A nil DataRef is always a plain no-op — the
-// SDK ensures no VolumeCaptureRequest and, being delete-free, does not clear a name it published earlier
-// (so a published VCR survives a later nil; it is not failed closed and not cleared).
+// does not flip between data capture and manifest-only across reconciles. Per the SDK lifecycle model
+// (see the Planning interface), the data capture follows per-artifact immutability: before the planning
+// barrier an existing VCR targeting a different PVC fails closed, and after the barrier EnsureVolumeCapture
+// is inert. A nil DataRef is always a plain no-op — the SDK ensures no VolumeCaptureRequest and, being
+// delete-free, does not clear a name it published earlier (so a published VCR survives a later nil).
 type VolumeCaptureSpec struct {
 	// DataRef is the single PVC the snapshot captures as its data, or nil for a manifest-only snapshot.
 	DataRef *Target

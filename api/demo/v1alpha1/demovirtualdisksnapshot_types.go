@@ -72,18 +72,6 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// the domain controller never touches SnapshotContent itself.
 	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
 
-	// ManifestCaptured is set by the common controller once this snapshot's manifest capture has been
-	// durably handed off to SnapshotContent (manifestCheckpointName published and the ManifestCheckpoint
-	// owned by the content). It is a domain-only suppression signal: the domain controller reads it to
-	// stop re-creating the MCR after the common controller deletes it, without ever reading SnapshotContent.
-	ManifestCaptured bool `json:"manifestCaptured,omitempty"`
-
-	// DataCaptured is set by the common controller once this disk snapshot's data leg has been durably
-	// handed off to SnapshotContent (dataRefs published and the VolumeSnapshotContent owned by the content).
-	// Domain-only suppression signal: the domain controller reads it to stop re-creating the VCR after the
-	// common controller deletes it. Always considered captured for a manifest-only disk (no data leg).
-	DataCaptured bool `json:"dataCaptured,omitempty"`
-
 	// StorageClassName mirrors this data leaf's volume StorageClass for d8 export: the bound
 	// SnapshotContent.status.dataRef.storageClassName on capture, or DataImport.spec.storageClassName on
 	// import (the import dataRef carries no storageClassName). Populated by the common controller.

@@ -34,6 +34,11 @@ type SnapshotAdapter interface {
 	Object() client.Object
 
 	// SourceRef returns the snapshot's source identity (spec.sourceRef).
+	//
+	// NOTE: not consumed by the SDK in v1 — no Ensure*/Mark* path reads it. It is part of the adapter
+	// contract as identity exposure (logging/diagnostics/future source-aware logic). The domain itself
+	// resolves DataRef, manifest targets and children from spec.sourceRef; the SDK does not re-resolve
+	// from this getter.
 	SourceRef() SourceRef
 
 	// GetConditions / SetConditions bridge the snapshot's status.conditions. The SDK merges a single
@@ -45,8 +50,4 @@ type SnapshotAdapter interface {
 	// SDK publishes (manifest/volume capture request names, child refs).
 	GetDomainCaptureState() DomainCaptureState
 	SetDomainCaptureState(DomainCaptureState)
-
-	// CoreCaptureState returns the read-only core handoff the SDK consults for suppression. The SDK never
-	// writes it.
-	CoreCaptureState() CoreCaptureState
 }
