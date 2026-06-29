@@ -360,11 +360,11 @@ cd /path/to/state-snapshotter
 |---|---|
 | `00-preflight` | CRD/SC/контроллер; внешний demo-domain RBAC (webhook get inventory, controller create MCR); отсутствие старых условий |
 | `01-priority-vm-first` | регистрация CSD (GVK/priority), `Accepted`/`SourceAccessGranted`, VM priority > Disk |
-| `02-tree-ready` | форма дерева (root→VM→disk-vm; standalone disk как root child; covered disk не дублируется; ConfigMap в MCP, не child); happy-path `ManifestsReady/VolumesReady/ChildrenReady/Ready=True`; baseline mirror root `Snapshot.Ready == content.Ready` |
+| `02-tree-ready` | форма дерева (root→VM→disk-vm; standalone disk как root child; covered disk не дублируется; ConfigMap в MCP, не child); happy-path `ManifestsReady/VolumesReady/ChildContentsReady/Ready=True`; baseline mirror root `Snapshot.Ready == content.Ready` |
 | `03-priority-inverted` | инверсия priority (Disk>VM) в чистом namespace: форма меняется **или** fail-closed с явной причиной; CSD восстанавливается в VM-first. **Авто-skip**, если на кластере есть чужие demo-снапшоты/CSD вне этого прогона (глобальный CSD-priority flip их бы задел) |
 | `04-domainready-barrier` | **hard**: каждый domain snapshot `PlanningReady=True` и `observedGeneration == generation`; ни один `SnapshotContent` не несёт `PlanningReady` (нет self-publication common-слоя). **soft**: timeline (content не биндится до current-gen `PlanningReady`) |
 | `05-ownership-handoff` | MCP/VSC `ownerRef -> SnapshotContent` после handoff (steady-state); execution `ObjectKeeper ret-mcr-*`; `dataRefs` после handoff. **Limitation:** окно «born under execution OK» в live может быть пропущено — birth-семантика покрыта integration-тестами (записано в `notes.txt`) |
-| `06-mcp-failure` | leaf MCP `Ready=False` → leaf `ManifestsReady=False/ManifestCheckpointFailed` → parent/root `ChildrenReady=False/ChildrenFailed` → root `Snapshot Ready=False` (verbatim mirror); sibling `Ready=True` |
+| `06-mcp-failure` | leaf MCP `Ready=False` → leaf `ManifestsReady=False/ManifestCheckpointFailed` → parent/root `ChildContentsReady=False/ChildrenFailed` → root `Snapshot Ready=False` (verbatim mirror); sibling `Ready=True` |
 | `07-mcp-recovery` | возврат MCP `Ready=True` → дерево/root recover `Ready=True`; mirror совпадает |
 | `08-vsc-pending` | VSC `readyToUse=false` → `VolumesReady=False/DataCapturePending` (non-terminal) → root mirror |
 | `09-vsc-recovery` | VSC `readyToUse=true` → recovery |

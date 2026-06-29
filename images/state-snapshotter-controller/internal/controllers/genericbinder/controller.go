@@ -209,7 +209,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	// Deleting a child Snapshot OBJECT is NOT a parent-degradation signal: in the durable-content model the
 	// child's SnapshotContent (and its artifacts) survives Snapshot deletion via ObjectKeeper TTL, so the
 	// parent's data is intact and the parent must stay Ready=True. Real degradation (durable artifact/content
-	// loss) propagates UP through SnapshotContent.ChildrenReady aggregation and is mirrored onto parent
+	// loss) propagates UP through SnapshotContent.ChildContentsReady aggregation and is mirrored onto parent
 	// Snapshots by the content->Snapshot watch (INV-COND2/INV-COND4/INV-FAIL1) — proven by
 	// genericbinder_parent_degradation_content_driven_test. The previous recursive propagateReadyFalseToParent
 	// (direct Status().Update walk onto ancestor Snapshots) was a pre-conditions-model remnant and has been

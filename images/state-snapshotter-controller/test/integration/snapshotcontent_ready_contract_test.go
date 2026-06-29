@@ -41,7 +41,7 @@ import (
 )
 
 // Ready Contract on the current condition model: SnapshotContent owns Ready, derived from
-// ManifestsReady (its own ManifestCheckpoint) AND VolumesReady (its own data refs) AND ChildrenReady (direct child SnapshotContents).
+// ManifestsReady (its own ManifestCheckpoint) AND VolumesReady (its own data refs) AND ChildContentsReady (direct child SnapshotContents).
 // The controller only manages the common SnapshotContent GVK, so these specs operate on the common type and
 // drive readiness through a real Ready ManifestCheckpoint (never force-writing the content Ready condition).
 var _ = Describe("Integration: SnapshotContentController - Ready Contract", Serial, func() {
@@ -137,7 +137,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 
-		// ChildrenReady gate: parent must stay Ready=False while the child is not Ready, even though the
+		// ChildContentsReady gate: parent must stay Ready=False while the child is not Ready, even though the
 		// parent's own ManifestsReady/VolumesReady are satisfied.
 		Consistently(func(g Gomega) {
 			reconcile(childName)
@@ -168,7 +168,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 			g.Expect(meta.IsStatusConditionTrue(c.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed(), "child should become Ready=True")
 
-		// With the child Ready, the parent's only remaining gate (ChildrenReady) is satisfied -> Ready=True.
+		// With the child Ready, the parent's only remaining gate (ChildContentsReady) is satisfied -> Ready=True.
 		Eventually(func(g Gomega) {
 			reconcile(childName)
 			reconcile(parentName)

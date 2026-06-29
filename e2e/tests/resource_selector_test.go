@@ -248,10 +248,10 @@ func resourceSelectorSpecs() {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 				defer cancel()
 
-				// Gate on the definitive completion signal (SnapshotContent ChildrenReady=True) before
+				// Gate on the definitive completion signal (SnapshotContent ChildContentsReady=True) before
 				// asserting an exact count. A plain Eventually(==1) could latch onto a transient partial
 				// tree of a broken capture-all controller (keep expanded, drop/no-label not yet), masking
-				// the bug. After ChildrenReady the expansion set is final, so the count is stable.
+				// the bug. After ChildContentsReady the expansion set is final, so the count is stable.
 				content, err := waitSnapshotReady(ctx, ns, rsRootInclude, suiteCfg.captureReadyTO)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
@@ -260,7 +260,7 @@ func resourceSelectorSpecs() {
 				Eventually(func(g Gomega) {
 					nodes, err = walkSnapshotTree(ctx, ns, rsRootInclude)
 					g.Expect(err).NotTo(HaveOccurred())
-					g.Expect(nodes).NotTo(BeEmpty(), "root Snapshot should publish childrenSnapshotRefs once ChildrenReady")
+					g.Expect(nodes).NotTo(BeEmpty(), "root Snapshot should publish childrenSnapshotRefs once ChildContentsReady")
 				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 				Consistently(func(g Gomega) {
 					nodes, err = walkSnapshotTree(ctx, ns, rsRootInclude)
@@ -340,7 +340,7 @@ func resourceSelectorSpecs() {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 				defer cancel()
 
-				// Gate on ChildrenReady=True before asserting the exact count so a transient partial tree
+				// Gate on ChildContentsReady=True before asserting the exact count so a transient partial tree
 				// cannot satisfy Equal(2) early (see the include leg for the rationale).
 				content, err := waitSnapshotReady(ctx, ns, rsRootExclude, suiteCfg.captureReadyTO)
 				Expect(err).NotTo(HaveOccurred())
@@ -350,7 +350,7 @@ func resourceSelectorSpecs() {
 				Eventually(func(g Gomega) {
 					nodes, err = walkSnapshotTree(ctx, ns, rsRootExclude)
 					g.Expect(err).NotTo(HaveOccurred())
-					g.Expect(nodes).NotTo(BeEmpty(), "root Snapshot should publish childrenSnapshotRefs once ChildrenReady")
+					g.Expect(nodes).NotTo(BeEmpty(), "root Snapshot should publish childrenSnapshotRefs once ChildContentsReady")
 				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 				Consistently(func(g Gomega) {
 					nodes, err = walkSnapshotTree(ctx, ns, rsRootExclude)
