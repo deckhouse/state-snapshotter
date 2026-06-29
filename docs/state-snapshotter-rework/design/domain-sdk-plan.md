@@ -812,34 +812,21 @@ desired отвязываются (ownerRef GC), а не удаляются.
 GC, не `EnsureChildren`. См. также Р29 (механика orphan-diff более не нужна в v1).
 
 **Дополнение (топология иммутабельна + fail-closed на drift — действующее решение).** Раз orphan-deletion
-снят, у `EnsureChildren` остаётся **две** обязанности: (1) create/adopt desired и (2) проверка инварианта
-«топология иммутабельна после **коммита барьера**».
+снят, у `EnsureChildren` две обязанности: (1) create/adopt desired и (2) проверка инварианта «топология
+иммутабельна после коммита барьера».
 
-**Маркер коммита — durable `ChildrenSnapshotReady=True`** (его пишет `MarkPlanningReady`), а НЕ
-«`childrenSnapshotRefs` непустой». Это закрывает дыру с **пустой топологией**: если бы маркером был
-`len(published)>0`, то лист, опубликовавший пустой набор и закоммитивший барьер, мог бы после рестарта
-незаметно отрастить ребёнка (`[] → [A]`). С маркером `ChildrenSnapshotReady=True` пустая топология тоже
-заморожена. Поведение:
-- **до коммита** (барьер ещё не `True`): desired-set MAY сходиться к заново наблюдаемому состоянию (Р25),
-  drift не диагностируется;
-- **после коммита**: desired-set обязан **совпасть** с опубликованным по канонической идентичности —
-  **множественное равенство по `(apiVersion, kind, name)`, НЕ по count** (случай `[A,B] → [A,C]` при равном
-  count обязан падать; `[] → [A]` для закоммиченного листа — тоже drift);
-- расхождение — **терминальный topology drift**: `EnsureChildren` возвращает `ErrTopologyDrift`, ничего не
-  создаёт, ничего не удаляет, опубликованные refs не трогает; домен публикует исход через
-  `MarkPlanningFailed(ReasonTopologyDrift)`.
+- **Freeze point — durable `ChildrenSnapshotReady=True`** (его пишет `MarkPlanningReady`), а НЕ «`childrenSnapshotRefs`
+  непустой»: иначе закоммиченный **пустой** лист мог бы после рестарта незаметно отрастить ребёнка (`[] → [A]`).
+- **До коммита:** desired-set MAY сходиться к заново наблюдаемому состоянию (Р25); drift не диагностируется.
+- **После коммита:** desired обязан совпасть с опубликованным по **множественному равенству `(apiVersion, kind, name)`,
+  НЕ по count** (равный count с другим членом — тоже drift). Расхождение — **терминальный** `ErrTopologyDrift`:
+  ничего не создаёт/не удаляет, refs не трогает; домен публикует `MarkPlanningFailed(ReasonTopologyDrift)`.
+- `DeriveRefs` дополнительно **fail-fast на дубликат** desired-ребёнка (доменный баг планирования, не drift).
 
-`DeriveRefs` дополнительно **fail-fast на дубликат** desired-ребёнка (две спеки с одним каноническим ключом)
-— это доменный баг планирования, не drift; молчаливый dedup скрыл бы баг и сломал сравнение множеств.
-
-Почему так лучше: при рестарте diff топологии скользкий (source мог измениться, discovery мог быть неполным,
-контроллер мог видеть transitional state). SDK **не чинит** топологию мутацией на основе diff — он только
-проверяет инвариант и **fail-closed**. Это упрощает `internal/children` (нет diff/delete) и убирает риск
-снести объект из-за неполного discovery. Тот же принцип применён к data-слоту (Major 4): он фиксируется на
-первом planning из иммутабельного `spec.sourceRef`, `EnsureVolumeCapture(nil)` ничего не чистит. Тесты
-(root-level, `pkg/snapshotsdk`): restart+та же топология → OK; до коммита смена набора → convergence (OK);
-после коммита изменился count → fail; после коммита тот же count, но другой ребёнок → fail (ловит сравнение
-по set, а не len); закоммиченный пустой лист `[] → [A]` → fail; дубликат desired → non-drift error.
+SDK **не чинит** топологию мутацией на основе diff (рестартный diff скользкий: source/discovery/transitional) —
+только проверяет инвариант и **fail-closed**. Тот же принцип — на data-слоте (Major 4): он фиксируется на первом
+planning из иммутабельного `spec.sourceRef`, `EnsureVolumeCapture(nil)` ничего не чистит. Полный набор drift-сценариев
+(set-equality, `[] → [A]`, дубликаты) — в `domain-sdk-test-plan.md` и тестах `pkg/snapshotsdk`.
 
 **Захват манифестов — симметрично fail-closed.** Тот же инвариант распространён на MCR: после первой публикации
 `EnsureManifestCapture` сравнивает desired target-set с уже опубликованным MCR по множеству
@@ -862,9 +849,10 @@ source object** — обязанность передать хотя бы оди
 ответственности домена. (Wiring `ErrEmptyManifest` в condition reason и опциональный CRD `MinItems=1` — это
 public-surface change и вынесены в post-demo follow-up.)
 
-### Р24. Interface segregation для тестируемости (РЕШЕНО, nice-to-have)
+### Р24. Narrow roles for testing (evaluated, deferred)
 `CaptureSDK` из 8 методов тяжело мокать целиком. Реализация — **одна struct**, но публично выставляем и
-**узкие роли**, которые доменный reconciler потребляет по месту (depend on the narrow interface):
+**композируемые роли** facade. Roles retained as conceptual decomposition and for focused mocks; v1 consumers
+normally depend on the full `CaptureSDK` (не делают DI отдельных ролей по месту):
 ```go
 type ReadinessFault  interface { MarkNotReady(...) }        // общий Ready=False (Р30); ValidateSource убран (Р28)
 type Planning        interface { EnsureChildren(...); EnsureVolumeCapture(...); EnsureManifestCapture(...) }
@@ -1337,8 +1325,9 @@ SDK и доменные контроллеры — потребители это
     реклеймится ownerRef GC / будущим cleanup-компонентом, не SDK. `nil`/empty = «детей нет» (публикует пустой
     список), теперь безопасно; при сбое discovery — `MarkPlanningFailed`. Убирает unstructured-delete и риск
     снести чужой объект. Отражено в godoc (Р18). (Исходно было full-reconciliation incl. orphan-deletion.)
-  - Р24 (**РЕШЕНО, nice-to-have**): interface segregation — `CaptureSDK` = композиция узких ролей
-    (`ReadinessFault`/`Planning`/`PlanningBarrier`); одна реализация, доменный тест мокает только нужную роль.
+  - Р24 (**evaluated, deferred**): narrow roles for testing — `CaptureSDK` = композиция ролей
+    (`ReadinessFault`/`Planning`/`PlanningBarrier`); одна реализация, роли — для focused-mocks. v1-потребители
+    зависят от полного `CaptureSDK` (DI отдельных ролей по месту не используется).
   - Р25 (**РЕШЕНО**): публичный flow — **restart-safe recipe, НЕ linear workflow**. Каждый `Ensure*` —
     самостоятельный idempotent checkpoint (читает durable state, сверяет desired, дообеспечивает недостающее,
     безопасен после рестарта между любыми двумя шагами). Контроллер MAY restart between calls и MUST
