@@ -56,7 +56,7 @@ func childSnapshotRef(name string) storagev1alpha1.SnapshotChildRef {
 // TestPublishSnapshotContentChildrenFromSnapshotRefsKeepsDegradedChildWhenContentMissing asserts that an
 // ALREADY-PUBLISHED child edge whose bound SnapshotContent has since been deleted (E3 degradation) does NOT
 // hard-error the parent publish: the publish must succeed (ok=true, no err) and PRESERVE the degraded child
-// ref so the parent content keeps aggregating it as pending (ChildContentsReady=False). Previously this returned
+// ref so the parent content keeps aggregating it as pending (ChildrenReady=False). Previously this returned
 // a hard error, wedging the root Snapshot reconcile before its Ready mirror so the root stayed Ready=True.
 func TestPublishSnapshotContentChildrenFromSnapshotRefsKeepsDegradedChildWhenContentMissing(t *testing.T) {
 	t.Parallel()

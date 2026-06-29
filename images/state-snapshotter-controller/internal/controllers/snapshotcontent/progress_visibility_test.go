@@ -155,10 +155,10 @@ func TestChildrenFailedLeafChainThreeLevels(t *testing.T) {
 	}
 }
 
-// ChildContentsReady=True message must reflect the actual node state: a leaf with no children says
+// ChildrenReady=True message must reflect the actual node state: a leaf with no children says
 // "no child content"; a parent with all children ready says "<ready>/<total> child content ready"
 // (not a generic ambiguous phrase).
-func TestChildContentsReadySuccessMessageReflectsState(t *testing.T) {
+func TestChildrenReadySuccessMessageReflectsState(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	childA := contentWithReadyCond("child-a", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")

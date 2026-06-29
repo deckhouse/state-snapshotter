@@ -21,7 +21,7 @@ leaf SnapshotContent
         │
         ▼
 parent SnapshotContent
-  ChildContentsReady=False
+  ChildrenReady=False
   Ready=False                  message: direct child + failed leaf + original reason/message
         │
         ▼
@@ -33,7 +33,7 @@ root Snapshot
   Ready := verbatim mirror(bound SnapshotContent.Ready)
 ```
 
-**Single aggregator (INV-COND2):** `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildContentsReady`, computed only by
+**Single aggregator (INV-COND2):** `SnapshotContent.Ready = ManifestsReady && VolumesReady && ChildrenReady`, computed only by
 `SnapshotContentController.buildCommonSnapshotContentStatusPlan`.
 
 **Mirror-only Snapshot (INV-COND4):** `Snapshot.Ready := mirror(SnapshotContent.Ready)` (status/reason/message
@@ -117,7 +117,7 @@ Scope:
 
 - richer reason/message for `ManifestsReady=False` (`ManifestCapturePending`, `ManifestCheckpointFailed`) and
   `VolumesReady=False` (`DataCapturePending`, `ArtifactMissing`, `DataArtifactInvalid`/`NotSupported`);
-- richer reason/message for `ChildContentsReady=False` (`ChildrenPending` with count, `ChildrenFailed` with leaf chain);
+- richer reason/message for `ChildrenReady=False` (`ChildrenPending` with count, `ChildrenFailed` with leaf chain);
 - early `Ready=False` on SnapshotContent right after creation (no MCP name → `ManifestCapturePending`);
 - `Snapshot.Ready` verbatim mirror; pre-bind transitional `ContentBindingPending` only;
 - recompute degraded state correctly **if already woken** — e.g. SnapshotContent already `Ready=True`, a later

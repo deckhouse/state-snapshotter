@@ -26,7 +26,7 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="VolumesReady")].status
       name: Volumes
       type: string
-    - jsonPath: .status.conditions[?(@.type=="ChildContentsReady")].status
+    - jsonPath: .status.conditions[?(@.type=="ChildrenReady")].status
       name: Children
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].reason

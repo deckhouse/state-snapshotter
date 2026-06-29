@@ -50,7 +50,7 @@ import (
 //   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (capture.go);
 //   - "SubtreeManifestFailed"     — PRE-PUBLISH BRIDGE: a descendant MCP is terminally Failed so the root
 //     exclude set / plan cannot be computed and the root MCR/MCP is not created yet. The descendant failure
-//     is also representable via content ChildContentsReady once child refs are published (deferred conversion).
+//     is also representable via content ChildrenReady once child refs are published (deferred conversion).
 //   - NamespaceNotFound (no namespace, so no content can be produced) — documented exception;
 //   - the child-Snapshot terminal capture-failure bridge below (patchSnapshotChildSnapshotFailedBridge);
 //   - the mirrorSnapshotReadyFromBoundContent fallback to ContentBindingPending (pre-publish pending window).

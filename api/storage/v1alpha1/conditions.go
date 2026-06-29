@@ -19,7 +19,7 @@ package v1alpha1
 // Contract conditions and reasons shared across the snapshot graph boundary (core planner <-> domain
 // snapshot controllers). These are the canonical definitions: core pkg/snapshot aliases them so both
 // sides reference one definition via api/. Core-internal leg conditions
-// (ManifestsReady/VolumesReady/ChildContentsReady) and the broader reason taxonomy stay in core pkg/snapshot.
+// (ManifestsReady/VolumesReady/ChildrenReady) and the broader reason taxonomy stay in core pkg/snapshot.
 const (
 	// ConditionReady indicates the object is ready for use. On SnapshotContent it is the single
 	// aggregate; on Snapshot it mirrors the bound SnapshotContent.Ready.
@@ -34,7 +34,7 @@ const (
 	// ConditionManifestsArchived is a subtree latch on SnapshotContent (mirrored onto Snapshot and
 	// domain XxxxSnapshot): the manifests for this node AND all descendant content nodes have been
 	// captured into their ManifestCheckpoints at least once. It is a precursor/contract signal, NOT a
-	// leg of the Ready formula (Ready = ManifestsReady && VolumesReady && ChildContentsReady).
+	// leg of the Ready formula (Ready = ManifestsReady && VolumesReady && ChildrenReady).
 	//
 	// Latch semantics (lifelong, never re-opens):
 	//   - True  / ReasonManifestsArchived  — own manifest leg reached readiness once AND every child

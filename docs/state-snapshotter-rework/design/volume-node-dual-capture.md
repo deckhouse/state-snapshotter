@@ -235,12 +235,12 @@ status:
 SnapshotContent Ready =
   ManifestsReady (MCP Ready)
 ∧ VolumesReady   (the single dataRef.artifact is Ready, or no dataRef)
-∧ ChildContentsReady  (∀ child SnapshotContent are Ready)
+∧ ChildrenReady  (∀ child SnapshotContent are Ready)
 ```
 
 - **Manifest-only node:** no `dataRef` (data leg N/A).
 - **Child volume node:** becomes Ready when **its own** MCP is Ready **and** its single `dataRef` VSC is Ready.
-- **Aggregator root/VM (dataRef=nil):** Ready via **ManifestsReady** (own MCP, possibly an empty archive) **+ ChildContentsReady** over `childrenSnapshotContentRefs` (the orphan/disk volume nodes). A single pending `dataRef` surfaces `DataCapturePending` as "0/1 ready".
+- **Aggregator root/VM (dataRef=nil):** Ready via **ManifestsReady** (own MCP, possibly an empty archive) **+ ChildrenReady** over `childrenSnapshotContentRefs` (the orphan/disk volume nodes). A single pending `dataRef` surfaces `DataCapturePending` as "0/1 ready".
 
 `SnapshotContentController` order remains: manifest → data (the single ref) → children.
 
