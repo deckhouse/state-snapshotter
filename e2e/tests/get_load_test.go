@@ -20,8 +20,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,9 +37,9 @@ import (
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
-// getLoadRootSnapshot is the root Snapshot for the GET-load run. It reuses the shared vol-tree fixture
-// (buildVolumeSource) but lives in its own namespace/name so it does not collide with the phase-3 or
-// flap-detector runs over the same fixture.
+// getLoadRootSnapshot is the base name of the root Snapshot for the GET-load run. Each iteration appends its
+// index ("-1", "-2", ...). It reuses the shared vol-tree fixture (buildVolumeSource) but lives in its own
+// namespace/name so it does not collide with the phase-3 or flap-detector runs over the same fixture.
 const getLoadRootSnapshot = "vol-tree-getload"
 
 // controllerLeaseName is the controller-runtime leader-election Lease (LeaderElectionID = "controller")
@@ -44,10 +47,40 @@ const getLoadRootSnapshot = "vol-tree-getload"
 // actually runs reconciliation.
 const controllerLeaseName = "controller"
 
-// getLoadMaxPerSecEnv optionally enforces an upper bound on GET/sec across the capture wave. It is left
-// UNSET for the baseline run (log only) and set to the baseline figure for the new run, so the same spec
+// getLoadMaxPerSecEnv optionally enforces an upper bound on the MEAN GET/sec across the measured waves. It is
+// left UNSET for the baseline run (log only) and set to the baseline figure for the new run, so the same spec
 // hard-asserts the improvement only when the operator opts in (the counter is process-wide; see the spec).
 const getLoadMaxPerSecEnv = "E2E_GET_LOAD_MAX_PER_SEC"
+
+// getLoadIterationsEnv / getLoadWarmupEnv tune the repeat-and-average protocol; see getLoadSpecs.
+//   - ITERATIONS: how many capture waves to run back-to-back over the shared source (default 5).
+//   - WARMUP: how many leading waves to MEASURE but EXCLUDE from the mean (default 1). The first wave after a
+//     deploy is dearer (cold informer caches, lazy first LIST), so dropping it removes that bias.
+const (
+	getLoadIterationsEnv     = "E2E_GET_LOAD_ITERATIONS"
+	getLoadWarmupEnv         = "E2E_GET_LOAD_WARMUP"
+	getLoadDefaultIterations = 5
+	getLoadDefaultWarmup     = 1
+)
+
+// getLoadInterIterationSettle is a brief quiesce between iterations so the next wave's BEFORE scrape is not
+// polluted by the tail GETs of the wave that just finished.
+const getLoadInterIterationSettle = 10 * time.Second
+
+// errGetLoadSampleInvalid marks a wave whose per-pod GET delta cannot be trusted (leader election moved to a
+// different pod, or the leader process restarted mid-wave, so the pinned counter is discontinuous). Such a
+// wave is skipped rather than failing the whole run.
+var errGetLoadSampleInvalid = errors.New("GET-load sample invalid (leader moved or process restarted mid-wave)")
+
+// getLoadSample is one capture wave's GET-load measurement.
+type getLoadSample struct {
+	iter      int
+	deltaGet  float64
+	windowDur time.Duration
+	waveDur   time.Duration
+	perSec    float64
+	warmup    bool
+}
 
 // sumRestClientGETs parses a Prometheus text exposition body and sums every rest_client_requests_total
 // series carrying method="GET". client-go splits the counter by code/host/method, so all GET series are
@@ -152,17 +185,132 @@ func scrapeRestClientGETs(ctx context.Context, metricsPath string) (float64, err
 	return sumRestClientGETs(body)
 }
 
-// getLoadSpecs registers the GET-load measurement spec (env-gated by E2E_VOLUME_DATA). It captures the
-// vol-tree fixture and reports the delta of rest_client_requests_total{method="GET"} over the capture wave
-// (root Snapshot create -> first Ready=True), normalized per second.
+// getLoadIntEnv reads a non-negative integer tuning knob from env, falling back to def when unset/blank. A
+// malformed or negative value fails loudly rather than silently reverting to the default.
+func getLoadIntEnv(name string, def int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s=%q: %w", name, raw, err)
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("%s=%d must be >= 0", name, v)
+	}
+	return v, nil
+}
+
+// summarize returns the mean, median, sample standard deviation, min and max of xs (which must be non-empty).
+func summarize(xs []float64) (mean, median, stddev, lo, hi float64) {
+	n := len(xs)
+	sorted := append([]float64(nil), xs...)
+	sort.Float64s(sorted)
+	lo, hi = sorted[0], sorted[n-1]
+	var sum float64
+	for _, x := range sorted {
+		sum += x
+	}
+	mean = sum / float64(n)
+	if n%2 == 1 {
+		median = sorted[n/2]
+	} else {
+		median = (sorted[n/2-1] + sorted[n/2]) / 2
+	}
+	if n > 1 {
+		var ss float64
+		for _, x := range sorted {
+			d := x - mean
+			ss += d * d
+		}
+		stddev = math.Sqrt(ss / float64(n-1))
+	}
+	return
+}
+
+// measureGetLoadWave runs one capture wave (create root Snapshot -> first Ready=True) and measures the
+// per-pod rest_client_requests_total{GET} delta over the scrape-to-scrape window, pinned to the current
+// reconciliation leader. It returns errGetLoadSampleInvalid (a soft, skippable error) when the leader moves
+// or the counter goes backwards mid-wave; any other error is hard.
+func measureGetLoadWave(ctx context.Context, srcNS, snapName string, iter int) (getLoadSample, error) {
+	leaderPod, err := leaderControllerPod(ctx)
+	if err != nil {
+		return getLoadSample{}, fmt.Errorf("resolve controller leader pod: %w", err)
+	}
+	metricsPort, err := controllerMetricsPort(ctx, leaderPod)
+	if err != nil {
+		return getLoadSample{}, fmt.Errorf("resolve controller metrics container port: %w", err)
+	}
+	metricsPath := podMetricsPath(leaderPod, metricsPort)
+	GinkgoWriter.Printf("GET-load[iter %d]: pinning /metrics scrapes to leader pod %q (numeric metrics port %d)\n", iter, leaderPod, metricsPort)
+
+	before, err := scrapeRestClientGETs(ctx, metricsPath)
+	if err != nil {
+		return getLoadSample{}, fmt.Errorf("scrape baseline rest_client_requests_total{GET}: %w", err)
+	}
+	// windowStart anchors the rate denominator to the SAME scrape-to-scrape window the counter delta spans,
+	// so GET/sec is not skewed by GETs accrued outside the create->Ready interval.
+	windowStart := time.Now()
+
+	// Background timeline: surfaces where the capture wave spends time alongside the GET-load figure.
+	tl := startCaptureTimeline(srcNS)
+	defer tl.stop()
+
+	start := time.Now()
+	if err := createRootSnapshot(ctx, srcNS, snapName); err != nil {
+		return getLoadSample{}, fmt.Errorf("create root Snapshot %s/%s: %w", srcNS, snapName, err)
+	}
+	if _, err := waitSnapshotReady(ctx, srcNS, snapName, 4*suiteCfg.captureReadyTO+10*time.Minute); err != nil {
+		return getLoadSample{}, fmt.Errorf("root Snapshot %s reach Ready=True: %w", snapName, err)
+	}
+	waveDur := time.Since(start)
+
+	leaderAfter, err := leaderControllerPod(ctx)
+	if err != nil {
+		return getLoadSample{}, fmt.Errorf("re-resolve controller leader pod: %w", err)
+	}
+	if leaderAfter != leaderPod {
+		return getLoadSample{}, fmt.Errorf("%w: leader %q -> %q", errGetLoadSampleInvalid, leaderPod, leaderAfter)
+	}
+
+	after, err := scrapeRestClientGETs(ctx, metricsPath)
+	if err != nil {
+		return getLoadSample{}, fmt.Errorf("scrape post-wave rest_client_requests_total{GET}: %w", err)
+	}
+	windowDur := time.Since(windowStart)
+	if after < before {
+		return getLoadSample{}, fmt.Errorf("%w: per-pod GET counter dropped %.0f -> %.0f (leader pod %q restarted?)", errGetLoadSampleInvalid, before, after, leaderPod)
+	}
+
+	deltaGet := after - before
+	perSec := 0.0
+	if s := windowDur.Seconds(); s > 0 {
+		perSec = deltaGet / s
+	}
+	return getLoadSample{
+		iter:      iter,
+		deltaGet:  deltaGet,
+		windowDur: windowDur,
+		waveDur:   waveDur,
+		perSec:    perSec,
+	}, nil
+}
+
+// getLoadSpecs registers the GET-load measurement spec (env-gated by E2E_VOLUME_DATA). It repeats the
+// vol-tree capture wave (root Snapshot create -> first Ready=True) E2E_GET_LOAD_ITERATIONS times over a
+// SHARED source and reports the per-second rest_client_requests_total{method="GET"} delta, averaged across
+// the measured waves (the first E2E_GET_LOAD_WARMUP waves are run but excluded from the mean).
 //
 // Methodology (see the APIReader->cache batch plan): the controller exposes a PER-PROCESS client-go GET
 // counter (every controller in the leader pod, not just SnapshotContent), so the absolute number includes a
-// constant background. Both scrapes are pinned to the leader pod (reconciliation runs only there), so the
-// delta is well-defined even with HA replicas. Compare the SAME scenario across two deployed images —
-// baseline (main) vs new (swap branch) — and attribute the delta-of-deltas to the cache swaps; the
-// background cancels. The spec always LOGS the figure; it hard-asserts an upper bound only when
-// E2E_GET_LOAD_MAX_PER_SEC is set (the new run).
+// constant background. Both scrapes of each wave are pinned to the leader pod (reconciliation runs only
+// there), so the delta is well-defined even with HA replicas. A single wave is noisy because its duration
+// varies run to run; averaging several waves and reporting stddev/CV separates signal from that noise.
+// Compare the MEAN across the SAME scenario for two deployed images - baseline (main) vs new (swap branch) -
+// and attribute the difference to the cache swaps; the constant background (and any identical residual from
+// not-yet-GC'd trees) cancels because the protocol is identical on both sides. The spec always LOGS the
+// figures; it hard-asserts an upper bound on the mean only when E2E_GET_LOAD_MAX_PER_SEC is set (the new run).
 func getLoadSpecs() {
 	Context("GET-load measurement (vol-tree capture wave)", func() {
 		var (
@@ -210,75 +358,108 @@ func getLoadSpecs() {
 			Expect(waitPodRunning(ctx, srcNS, vdProbePod, 10*time.Minute)).To(Succeed())
 		})
 
-		It("reports REST GET load across the capture wave (log; optional hard bound via E2E_GET_LOAD_MAX_PER_SEC)", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*suiteCfg.captureReadyTO+15*time.Minute)
-			defer cancel()
-
-			By("Resolving the reconciliation leader pod and pinning both scrapes to it")
-			leaderPod, err := leaderControllerPod(ctx)
-			Expect(err).NotTo(HaveOccurred(), "resolve controller leader pod")
-			metricsPort, err := controllerMetricsPort(ctx, leaderPod)
-			Expect(err).NotTo(HaveOccurred(), "resolve controller metrics container port")
-			metricsPath := podMetricsPath(leaderPod, metricsPort)
-			GinkgoWriter.Printf("GET-load: pinning /metrics scrapes to leader pod %q (numeric metrics port %d)\n", leaderPod, metricsPort)
-
-			By("Scraping the leader /metrics counter BEFORE creating the root Snapshot")
-			before, err := scrapeRestClientGETs(ctx, metricsPath)
-			Expect(err).NotTo(HaveOccurred(), "scrape baseline rest_client_requests_total{GET}")
-			// windowStart anchors the rate denominator to the SAME scrape-to-scrape window the counter delta
-			// spans, so GET/sec is not skewed by GETs accrued outside the create->Ready interval.
-			windowStart := time.Now()
-
-			// Background timeline: surfaces where the capture wave spends time alongside the GET-load figure.
-			tl := startCaptureTimeline(srcNS)
-			defer tl.stop()
-
-			By("Creating the root Snapshot and timing the wave to the FIRST Ready=True")
-			start := time.Now()
-			Expect(createRootSnapshot(ctx, srcNS, getLoadRootSnapshot)).To(Succeed())
-			_, err = waitSnapshotReady(ctx, srcNS, getLoadRootSnapshot, 4*suiteCfg.captureReadyTO+10*time.Minute)
-			Expect(err).NotTo(HaveOccurred(), "root Snapshot reached Ready=True")
-			waveDur := time.Since(start)
-
-			By("Confirming the reconciliation leader did not move during the wave (else the per-pod delta is invalid)")
-			leaderAfter, err := leaderControllerPod(ctx)
-			Expect(err).NotTo(HaveOccurred(), "re-resolve controller leader pod")
-			Expect(leaderAfter).To(Equal(leaderPod),
-				"controller leader moved %q -> %q during the capture wave: the pinned-pod GET delta would read a flat standby counter (false low). Re-run the measurement.",
-				leaderPod, leaderAfter)
-
-			By("Scraping the SAME leader pod's counter immediately AFTER the first Ready=True")
-			after, err := scrapeRestClientGETs(ctx, metricsPath)
-			Expect(err).NotTo(HaveOccurred(), "scrape post-wave rest_client_requests_total{GET}")
-			windowDur := time.Since(windowStart)
-			Expect(after).To(BeNumerically(">=", before),
-				"per-pod GET counter must be monotonic non-decreasing (if it dropped, the leader changed pods mid-wave: %q)", leaderPod)
-
-			deltaGet := after - before
-			// Normalize over the scrape-to-scrape window (matches the counter delta exactly); waveDur is logged
-			// separately as the create->first-Ready capture duration for context.
-			perSec := 0.0
-			if s := windowDur.Seconds(); s > 0 {
-				perSec = deltaGet / s
+		It("reports mean REST GET load over N capture waves (log; optional hard bound via E2E_GET_LOAD_MAX_PER_SEC)", func() {
+			iterations, err := getLoadIntEnv(getLoadIterationsEnv, getLoadDefaultIterations)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(iterations).To(BeNumerically(">=", 1), "%s must be >= 1", getLoadIterationsEnv)
+			warmup, err := getLoadIntEnv(getLoadWarmupEnv, getLoadDefaultWarmup)
+			Expect(err).NotTo(HaveOccurred())
+			if warmup > iterations-1 {
+				// Always leave at least one measured wave (e.g. iterations=1 -> warmup=0 = old single-shot mode).
+				clamped := iterations - 1
+				if clamped < 0 {
+					clamped = 0
+				}
+				GinkgoWriter.Printf("GET-load: warm-up=%d >= iterations=%d; clamping warm-up to %d so at least one wave is measured\n", warmup, iterations, clamped)
+				warmup = clamped
 			}
 
-			GinkgoWriter.Printf("\n==== GET-load measurement (vol-tree capture wave) ====\n")
-			GinkgoWriter.Printf("  rest_client_requests_total{method=GET}: before=%.0f after=%.0f\n", before, after)
-			GinkgoWriter.Printf("  measured window (scrape -> scrape): %s\n", windowDur.Round(time.Millisecond))
-			GinkgoWriter.Printf("  capture wave (create -> first Ready=True): %s\n", waveDur.Round(time.Millisecond))
-			GinkgoWriter.Printf("  Δget=%.0f  (%.2f GET/sec over the measured window)\n", deltaGet, perSec)
-			GinkgoWriter.Printf("  leader pod: %s (both scrapes pinned here)\n", leaderPod)
-			GinkgoWriter.Printf("  NOTE: counter is PER-PROCESS (all controllers in the leader pod). Compare the SAME\n")
-			GinkgoWriter.Printf("        scenario baseline(main image) vs new(swap image); the constant background cancels.\n")
-			GinkgoWriter.Printf("======================================================\n\n")
-			AddReportEntry("get-load",
-				fmt.Sprintf("Δget=%.0f perSec=%.2f windowDur=%s waveDur=%s before=%.0f after=%.0f", deltaGet, perSec, windowDur.Round(time.Millisecond), waveDur.Round(time.Millisecond), before, after))
+			// One generous deadline for the whole repeat loop: per-wave Ready wait cap times iterations, plus
+			// setup/cleanup slack. The waves themselves finish in well under the cap; this is only a ceiling.
+			perWaveCap := 4*suiteCfg.captureReadyTO + 10*time.Minute
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(iterations)*perWaveCap+10*time.Minute)
+			defer cancel()
 
-			if raw := os.Getenv(getLoadMaxPerSecEnv); raw != "" {
+			var samples []getLoadSample
+			for i := 1; i <= iterations; i++ {
+				// Quiesce between waves so the next wave's BEFORE scrape is not polluted by the tail GETs of
+				// the previous wave. Placed at the top (not after the body) so it applies even when the prior
+				// iteration was SKIPPED via continue - a skipped wave still ran a full capture.
+				if i > 1 {
+					time.Sleep(getLoadInterIterationSettle)
+				}
+
+				isWarmup := i <= warmup
+				label := "measured"
+				if isWarmup {
+					label = "warm-up, excluded from mean"
+				}
+				snapName := fmt.Sprintf("%s-%d", getLoadRootSnapshot, i)
+
+				By(fmt.Sprintf("Iteration %d/%d (%s): capture wave over the shared source", i, iterations, label))
+				s, werr := measureGetLoadWave(ctx, srcNS, snapName, i)
+
+				// Best-effort cleanup: delete this iteration's root Snapshot so completed trees do not pile
+				// reconcile background onto later iterations. Content GC is TTL-based and async; we do NOT wait
+				// for it - the protocol is identical across baseline/new, so any residual background cancels in
+				// the mean-vs-mean comparison.
+				_ = suiteDyn.Resource(snapshotGVR).Namespace(srcNS).Delete(ctx, snapName, metav1.DeleteOptions{})
+
+				if werr != nil {
+					if errors.Is(werr, errGetLoadSampleInvalid) {
+						GinkgoWriter.Printf("GET-load[iter %d]: SKIPPED - %v\n", i, werr)
+						continue
+					}
+					Expect(werr).NotTo(HaveOccurred(), "iteration %d capture wave", i)
+				}
+				s.warmup = isWarmup
+				samples = append(samples, s)
+				GinkgoWriter.Printf("GET-load[iter %d]: Δget=%.0f window=%s wave=%s -> %.2f GET/sec (%s)\n",
+					i, s.deltaGet, s.windowDur.Round(time.Millisecond), s.waveDur.Round(time.Millisecond), s.perSec, label)
+			}
+
+			var measuredPerSec, measuredDelta []float64
+			for _, s := range samples {
+				if s.warmup {
+					continue
+				}
+				measuredPerSec = append(measuredPerSec, s.perSec)
+				measuredDelta = append(measuredDelta, s.deltaGet)
+			}
+			Expect(measuredPerSec).NotTo(BeEmpty(),
+				"no valid measured (non-warm-up) GET-load samples: ran %d iteration(s), warm-up=%d, valid total=%d (leader churn?). Re-run the measurement.", iterations, warmup, len(samples))
+
+			meanPS, medianPS, stddevPS, minPS, maxPS := summarize(measuredPerSec)
+			meanDelta, _, _, _, _ := summarize(measuredDelta)
+			cv := 0.0
+			if meanPS > 0 {
+				cv = stddevPS / meanPS * 100
+			}
+
+			GinkgoWriter.Printf("\n==== GET-load measurement (vol-tree capture wave; %d iter, warm-up=%d) ====\n", iterations, warmup)
+			for _, s := range samples {
+				tag := ""
+				if s.warmup {
+					tag = "  (warm-up, excluded)"
+				}
+				GinkgoWriter.Printf("  iter %d: Δget=%.0f  window=%s  wave=%s  %.2f GET/sec%s\n",
+					s.iter, s.deltaGet, s.windowDur.Round(time.Millisecond), s.waveDur.Round(time.Millisecond), s.perSec, tag)
+			}
+			GinkgoWriter.Printf("  ---- summary over %d measured wave(s) ----\n", len(measuredPerSec))
+			GinkgoWriter.Printf("  GET/sec: mean=%.2f  median=%.2f  stddev=%.2f  CV=%.1f%%  min=%.2f  max=%.2f\n", meanPS, medianPS, stddevPS, cv, minPS, maxPS)
+			GinkgoWriter.Printf("  Δget:    mean=%.0f\n", meanDelta)
+			GinkgoWriter.Printf("  NOTE: counter is PER-PROCESS (all controllers in the leader pod). Compare mean(baseline,\n")
+			GinkgoWriter.Printf("        main image) vs mean(new, swap image) for the SAME scenario; the constant background cancels.\n")
+			GinkgoWriter.Printf("==========================================================================\n\n")
+			AddReportEntry("get-load",
+				fmt.Sprintf("iters=%d warmup=%d measured=%d meanPerSec=%.2f medianPerSec=%.2f stddev=%.2f cv=%.1f%% meanDelta=%.0f",
+					iterations, warmup, len(measuredPerSec), meanPS, medianPS, stddevPS, cv, meanDelta))
+
+			if raw := strings.TrimSpace(os.Getenv(getLoadMaxPerSecEnv)); raw != "" {
 				maxPerSec, perr := strconv.ParseFloat(raw, 64)
 				Expect(perr).NotTo(HaveOccurred(), "parse %s=%q", getLoadMaxPerSecEnv, raw)
-				Expect(perSec).To(BeNumerically("<=", maxPerSec),
-					"GET/sec across the capture wave (%.2f) exceeded %s=%.2f", perSec, getLoadMaxPerSecEnv, maxPerSec)
+				Expect(meanPS).To(BeNumerically("<=", maxPerSec),
+					"mean GET/sec over %d measured wave(s) (%.2f) exceeded %s=%.2f", len(measuredPerSec), meanPS, getLoadMaxPerSecEnv, maxPerSec)
 			}
 		})
 	})
