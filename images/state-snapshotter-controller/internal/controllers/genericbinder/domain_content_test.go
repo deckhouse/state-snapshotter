@@ -109,18 +109,16 @@ func domainTestReadyVCR(withDataRefs bool) *unstructured.Unstructured {
 				"reason": vcpkg.ConditionReasonCompleted,
 			},
 		}, "status", "conditions")
-		_ = unstructured.SetNestedSlice(obj.Object, []interface{}{
-			map[string]interface{}{
-				"targetUID": domainTestPVCUID,
-				"target": map[string]interface{}{
-					"uid": domainTestPVCUID, "apiVersion": corev1.SchemeGroupVersion.String(), "kind": "PersistentVolumeClaim",
-					"name": domainTestPVCName, "namespace": domainTestNS,
-				},
-				"artifact": map[string]interface{}{
-					"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": domainTestVSCName,
-				},
+		_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{
+			"targetUID": domainTestPVCUID,
+			"target": map[string]interface{}{
+				"uid": domainTestPVCUID, "apiVersion": corev1.SchemeGroupVersion.String(), "kind": "PersistentVolumeClaim",
+				"name": domainTestPVCName, "namespace": domainTestNS,
 			},
-		}, "status", "dataRefs")
+			"artifact": map[string]interface{}{
+				"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": domainTestVSCName,
+			},
+		}, "status", "dataRef")
 	}
 	return obj
 }

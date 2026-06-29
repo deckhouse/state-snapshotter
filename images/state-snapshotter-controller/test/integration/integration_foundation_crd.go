@@ -66,16 +66,16 @@ func integrationResolveFoundationCRDDir(crdsPath string) (dir string, source str
 }
 
 func integrationMinimalVolumeCaptureRequestCRD() *apiextensionsv1.CustomResourceDefinition {
-	targetItem := apiextensionsv1.JSONSchemaProps{
+	// spec.target omits namespace (the captured PVC lives in the VCR namespace).
+	specTarget := apiextensionsv1.JSONSchemaProps{
 		Type: "object",
 		Properties: map[string]apiextensionsv1.JSONSchemaProps{
 			"uid":        {Type: "string", MinLength: ptrInt64(1)},
 			"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
 			"kind":       {Type: "string", MinLength: ptrInt64(1)},
 			"name":       {Type: "string", MinLength: ptrInt64(1)},
-			"namespace":  {Type: "string", MinLength: ptrInt64(1)},
 		},
-		Required: []string{"uid", "apiVersion", "kind", "name", "namespace"},
+		Required: []string{"uid", "apiVersion", "kind", "name"},
 	}
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: volumeCaptureRequestCRDName},
@@ -100,8 +100,8 @@ func integrationMinimalVolumeCaptureRequestCRD() *apiextensionsv1.CustomResource
 								"spec": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"mode":    {Type: "string"},
-										"targets": {Type: "array", Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &targetItem}},
+										"mode":   {Type: "string"},
+										"target": specTarget,
 									},
 								},
 								"status": {Type: "object"},

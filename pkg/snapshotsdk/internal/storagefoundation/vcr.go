@@ -73,8 +73,8 @@ func (p *Provider) VCRName(snapshotUID types.UID) string { return VCRName(snapsh
 // request is keyed by the snapshot UID, so the operation is idempotent and restart-safe.
 //
 // A snapshot node binds at most one data artifact, so this takes a single target. The foundation
-// VolumeCaptureRequest CRD models spec.targets as a list, so the single target is written as a one-element
-// list here (the list shape is confined to this foundation boundary).
+// VolumeCaptureRequest CRD models spec.target as a single object (namespace omitted: the PVC lives in the
+// VCR namespace). The 0-or-1 slice shape is confined to this foundation boundary.
 func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerRef metav1.OwnerReference, dataRef Target) error {
 	desired := []Target{dataRef}
 	existing := &unstructured.Unstructured{}
@@ -103,7 +103,7 @@ func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerR
 		return parseErr
 	}
 	if !targetsEqual(existingTargets, desired) {
-		return fmt.Errorf("VolumeCaptureRequest %s/%s spec.targets differ from desired PVC target", namespace, name)
+		return fmt.Errorf("VolumeCaptureRequest %s/%s spec.target differs from desired PVC target", namespace, name)
 	}
 	return nil
 }
@@ -163,15 +163,18 @@ func (p *Provider) OwnedPVCTarget(ctx context.Context, namespace, vcrName string
 }
 
 func newVolumeCaptureRequestObject(namespace, name string, ownerRef metav1.OwnerReference, targets []Target) *unstructured.Unstructured {
-	specTargets := make([]interface{}, 0, len(targets))
-	for _, t := range targets {
-		specTargets = append(specTargets, map[string]interface{}{
+	spec := map[string]interface{}{
+		"mode": volumeCaptureModeSnapshot,
+	}
+	if len(targets) > 0 {
+		t := targets[0]
+		// spec.target carries no namespace: the captured PVC always lives in the VCR namespace.
+		spec["target"] = map[string]interface{}{
 			"uid":        t.UID,
 			"apiVersion": t.APIVersion,
 			"kind":       t.Kind,
 			"name":       t.Name,
-			"namespace":  t.Namespace,
-		})
+		}
 	}
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": VolumeCaptureRequestGVK.Group + "/" + VolumeCaptureRequestGVK.Version,
@@ -181,10 +184,7 @@ func newVolumeCaptureRequestObject(namespace, name string, ownerRef metav1.Owner
 			"namespace":       namespace,
 			"ownerReferences": []interface{}{ownerRefToMap(ownerRef)},
 		},
-		"spec": map[string]interface{}{
-			"mode":    volumeCaptureModeSnapshot,
-			"targets": specTargets,
-		},
+		"spec": spec,
 	}}
 	obj.SetGroupVersionKind(VolumeCaptureRequestGVK)
 	return obj
@@ -204,28 +204,25 @@ func ownerRefToMap(ref metav1.OwnerReference) map[string]interface{} {
 }
 
 func parseTargets(obj *unstructured.Unstructured) ([]Target, error) {
-	raw, found, err := unstructured.NestedSlice(obj.Object, "spec", "targets")
+	m, found, err := unstructured.NestedMap(obj.Object, "spec", "target")
 	if err != nil {
 		return nil, err
 	}
-	if !found || len(raw) == 0 {
+	if !found || len(m) == 0 {
 		return nil, nil
 	}
-	out := make([]Target, 0, len(raw))
-	for i, item := range raw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("spec.targets[%d]: expected object", i)
-		}
-		out = append(out, Target{
-			UID:        nestedString(m, "uid"),
-			APIVersion: nestedString(m, "apiVersion"),
-			Kind:       nestedString(m, "kind"),
-			Name:       nestedString(m, "name"),
-			Namespace:  nestedString(m, "namespace"),
-		})
+	// spec.target omits namespace; the captured PVC lives in the VCR namespace.
+	namespace := nestedString(m, "namespace")
+	if namespace == "" {
+		namespace = obj.GetNamespace()
 	}
-	return out, nil
+	return []Target{{
+		UID:        nestedString(m, "uid"),
+		APIVersion: nestedString(m, "apiVersion"),
+		Kind:       nestedString(m, "kind"),
+		Name:       nestedString(m, "name"),
+		Namespace:  namespace,
+	}}, nil
 }
 
 func nestedString(m map[string]interface{}, key string) string {

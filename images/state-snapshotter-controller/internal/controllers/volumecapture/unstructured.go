@@ -17,8 +17,6 @@ limitations under the License.
 package volumecapture
 
 import (
-	"fmt"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -27,17 +25,21 @@ import (
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// NewVolumeCaptureRequestObject builds an unstructured VCR for create.
+// NewVolumeCaptureRequestObject builds an unstructured VCR for create. A snapshot node binds at most one
+// data artifact, so at most the first target is written as the single spec.target (namespace omitted: the
+// captured PVC always lives in the VCR namespace).
 func NewVolumeCaptureRequestObject(namespace, name string, ownerRef metav1.OwnerReference, targets []vcpkg.Target) *unstructured.Unstructured {
-	specTargets := make([]interface{}, 0, len(targets))
-	for _, t := range targets {
-		specTargets = append(specTargets, map[string]interface{}{
+	spec := map[string]interface{}{
+		"mode": vcpkg.VolumeCaptureModeSnapshot,
+	}
+	if len(targets) > 0 {
+		t := targets[0]
+		spec["target"] = map[string]interface{}{
 			"uid":        t.UID,
 			"apiVersion": t.APIVersion,
 			"kind":       t.Kind,
 			"name":       t.Name,
-			"namespace":  t.Namespace,
-		})
+		}
 	}
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": vcpkg.VolumeCaptureRequestGVK.Group + "/" + vcpkg.VolumeCaptureRequestGVK.Version,
@@ -49,10 +51,7 @@ func NewVolumeCaptureRequestObject(namespace, name string, ownerRef metav1.Owner
 				ownerRefToMap(ownerRef),
 			},
 		},
-		"spec": map[string]interface{}{
-			"mode":    vcpkg.VolumeCaptureModeSnapshot,
-			"targets": specTargets,
-		},
+		"spec": spec,
 	}}
 	obj.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
 	return obj
@@ -71,66 +70,57 @@ func ownerRefToMap(ref metav1.OwnerReference) map[string]interface{} {
 	return m
 }
 
-// ParseVolumeCaptureTargets reads spec.targets[] from a VCR object.
+// ParseVolumeCaptureTargets reads the single spec.target from a VCR object and returns it as a 0-or-1
+// element slice. spec.target omits namespace; the captured PVC lives in the VCR namespace, so the parsed
+// target's namespace is backfilled from the object's metadata.namespace.
 func ParseVolumeCaptureTargets(obj *unstructured.Unstructured) ([]vcpkg.Target, error) {
-	raw, found, err := unstructured.NestedSlice(obj.Object, "spec", "targets")
+	m, found, err := unstructured.NestedMap(obj.Object, "spec", "target")
 	if err != nil {
 		return nil, err
 	}
-	if !found || len(raw) == 0 {
+	if !found || len(m) == 0 {
 		return nil, nil
 	}
-	out := make([]vcpkg.Target, 0, len(raw))
-	for i, item := range raw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("spec.targets[%d]: expected object", i)
-		}
-		out = append(out, vcpkg.Target{
-			UID:        nestedString(m, "uid"),
-			APIVersion: nestedString(m, "apiVersion"),
-			Kind:       nestedString(m, "kind"),
-			Name:       nestedString(m, "name"),
-			Namespace:  nestedString(m, "namespace"),
-		})
+	namespace := nestedString(m, "namespace")
+	if namespace == "" {
+		namespace = obj.GetNamespace()
 	}
-	return out, nil
+	return []vcpkg.Target{{
+		UID:        nestedString(m, "uid"),
+		APIVersion: nestedString(m, "apiVersion"),
+		Kind:       nestedString(m, "kind"),
+		Name:       nestedString(m, "name"),
+		Namespace:  namespace,
+	}}, nil
 }
 
-// ParseVolumeCaptureDataRefs reads status.dataRefs[] from a VCR object.
+// ParseVolumeCaptureDataRefs reads the single status.dataRef from a VCR object and returns it as a 0-or-1
+// element slice. The foundation fills status.dataRef.target.namespace from the VCR namespace.
 func ParseVolumeCaptureDataRefs(obj *unstructured.Unstructured) ([]vcpkg.DataBinding, error) {
-	raw, found, err := unstructured.NestedSlice(obj.Object, "status", "dataRefs")
+	m, found, err := unstructured.NestedMap(obj.Object, "status", "dataRef")
 	if err != nil {
 		return nil, err
 	}
-	if !found || len(raw) == 0 {
+	if !found || len(m) == 0 {
 		return nil, nil
 	}
-	out := make([]vcpkg.DataBinding, 0, len(raw))
-	for i, item := range raw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("status.dataRefs[%d]: expected object", i)
-		}
-		targetMap, _ := m["target"].(map[string]interface{})
-		artifactMap, _ := m["artifact"].(map[string]interface{})
-		out = append(out, vcpkg.DataBinding{
-			TargetUID: nestedString(m, "targetUID"),
-			Target: vcpkg.Target{
-				UID:        nestedString(targetMap, "uid"),
-				APIVersion: nestedString(targetMap, "apiVersion"),
-				Kind:       nestedString(targetMap, "kind"),
-				Name:       nestedString(targetMap, "name"),
-				Namespace:  nestedString(targetMap, "namespace"),
-			},
-			Artifact: vcpkg.ArtifactRef{
-				APIVersion: nestedString(artifactMap, "apiVersion"),
-				Kind:       nestedString(artifactMap, "kind"),
-				Name:       nestedString(artifactMap, "name"),
-			},
-		})
-	}
-	return out, nil
+	targetMap, _ := m["target"].(map[string]interface{})
+	artifactMap, _ := m["artifact"].(map[string]interface{})
+	return []vcpkg.DataBinding{{
+		TargetUID: nestedString(m, "targetUID"),
+		Target: vcpkg.Target{
+			UID:        nestedString(targetMap, "uid"),
+			APIVersion: nestedString(targetMap, "apiVersion"),
+			Kind:       nestedString(targetMap, "kind"),
+			Name:       nestedString(targetMap, "name"),
+			Namespace:  nestedString(targetMap, "namespace"),
+		},
+		Artifact: vcpkg.ArtifactRef{
+			APIVersion: nestedString(artifactMap, "apiVersion"),
+			Kind:       nestedString(artifactMap, "kind"),
+			Name:       nestedString(artifactMap, "name"),
+		},
+	}}, nil
 }
 
 func parseReadyCondition(obj *unstructured.Unstructured) (status, reason, message string, ok bool) {

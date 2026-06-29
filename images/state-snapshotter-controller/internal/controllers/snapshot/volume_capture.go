@@ -315,7 +315,7 @@ func (r *SnapshotReconciler) ensureVolumeCaptureRequest(
 		return nil, ctrl.Result{}, err
 	}
 	if !volumecapturectrl.VolumeCaptureTargetsEqual(existingTargets, targets) {
-		return nil, ctrl.Result{}, fmt.Errorf("VolumeCaptureRequest %s spec.targets differ from resolved owned PVC targets", key)
+		return nil, ctrl.Result{}, fmt.Errorf("VolumeCaptureRequest %s spec.target differs from resolved owned PVC target", key)
 	}
 	return existing, ctrl.Result{}, nil
 }

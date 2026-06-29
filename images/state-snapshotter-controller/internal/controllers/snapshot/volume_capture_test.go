@@ -386,13 +386,14 @@ func readyVCR(ns, name string, targets []vcpkg.Target, refs []vcpkg.DataBinding)
 	for _, t := range targets {
 		byUID[t.UID] = t
 	}
-	dataRefs := make([]interface{}, 0, len(refs))
-	for _, r := range refs {
+	// A snapshot node binds at most one data artifact, so status.dataRef is a single object.
+	if len(refs) > 0 {
+		r := refs[0]
 		tgt := r.Target
 		if tgt.UID == "" {
 			tgt = byUID[r.TargetUID]
 		}
-		dataRefs = append(dataRefs, map[string]interface{}{
+		_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{
 			"targetUID": r.TargetUID,
 			"target": map[string]interface{}{
 				"uid": tgt.UID, "apiVersion": tgt.APIVersion, "kind": tgt.Kind,
@@ -401,9 +402,8 @@ func readyVCR(ns, name string, targets []vcpkg.Target, refs []vcpkg.DataBinding)
 			"artifact": map[string]interface{}{
 				"apiVersion": r.Artifact.APIVersion, "kind": r.Artifact.Kind, "name": r.Artifact.Name,
 			},
-		})
+		}, "status", "dataRef")
 	}
-	_ = unstructured.SetNestedSlice(obj.Object, dataRefs, "status", "dataRefs")
 	return obj
 }
 
