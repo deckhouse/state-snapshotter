@@ -335,8 +335,12 @@ func createVolumeRestoreRequest(ctx context.Context, restoreNS, targetPVC, vsc, 
 				"kind": "VolumeSnapshotContent",
 				"name": vsc,
 			},
-			"targetNamespace":  restoreNS,
-			"targetPVCName":    targetPVC,
+			// targetRef carries only kind+name: restore is never cross-namespace, so the foundation VRR
+			// controller derives the target namespace from metadata.namespace (set to restoreNS above).
+			"targetRef": map[string]interface{}{
+				"kind": "PersistentVolumeClaim",
+				"name": targetPVC,
+			},
 			"storageClassName": sc,
 			"volumeMode":       volumeMode,
 		},

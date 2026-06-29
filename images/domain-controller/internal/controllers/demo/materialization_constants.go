@@ -44,6 +44,7 @@ const (
 	vrrKind       = "VolumeRestoreRequest"
 
 	vscKind = "VolumeSnapshotContent"
+	pvcKind = "PersistentVolumeClaim"
 
 	objectKeeperKind       = "ObjectKeeper"
 	objectKeeperAPIVersion = "deckhouse.io/v1alpha1"

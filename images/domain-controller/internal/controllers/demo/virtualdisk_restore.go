@@ -214,8 +214,13 @@ func buildDemoDiskVRR(disk *demov1alpha1.DemoVirtualDisk, resolution demoRestore
 			"kind": vscKind,
 			"name": resolution.VSCName,
 		},
-		"targetNamespace":  disk.Namespace,
-		"targetPVCName":    disk.Spec.PersistentVolumeClaimName,
+		// targetRef carries only kind+name: restore is never cross-namespace, so the foundation VRR
+		// controller derives the target namespace from metadata.namespace (set to disk.Namespace below).
+		// Only kind=PersistentVolumeClaim is supported for now.
+		"targetRef": map[string]interface{}{
+			"kind": pvcKind,
+			"name": disk.Spec.PersistentVolumeClaimName,
+		},
 		"storageClassName": resolution.StorageClassName,
 		"volumeMode":       string(resolution.VolumeMode),
 	}
