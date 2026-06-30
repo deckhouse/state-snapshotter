@@ -68,7 +68,7 @@ type DemoVirtualDiskSnapshotStatus struct {
 	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
 
 	// VolumeCaptureRequestName is the temporary VCR owned by this disk snapshot while data-leg capture runs.
-	// The common controller reads this VCR's result to enrich and publish SnapshotContent.status.dataRefs;
+	// The common controller reads this VCR's result to enrich and publish SnapshotContent.status.dataRef;
 	// the domain controller never touches SnapshotContent itself.
 	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
 

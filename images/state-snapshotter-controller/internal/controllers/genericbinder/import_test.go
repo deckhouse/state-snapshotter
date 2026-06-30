@@ -70,6 +70,9 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	// carry it because the leaf-targeted dataRef cannot be enriched from a live PVC and downstream restore
 	// fails closed on an empty volumeMode.
 	_ = unstructured.SetNestedField(di.Object, "Block", "status", "volumeMode")
+	// DataImport fills the durable artifact uid best-effort (from the VCR artifact uid); it must flow
+	// through into the published dataRef.artifact.uid.
+	_ = unstructured.SetNestedField(di.Object, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", "status", "dataArtifactRef", "uid")
 	leaf := importLeafObject()
 
 	binding, ready, reason, _ := buildImportDataBinding(di, leaf)
@@ -84,6 +87,9 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	}
 	if binding.Artifact.APIVersion != "snapshot.storage.k8s.io/v1" {
 		t.Fatalf("unexpected artifact apiVersion: %q", binding.Artifact.APIVersion)
+	}
+	if binding.Artifact.UID != "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a" {
+		t.Fatalf("expected artifact uid propagated from DataImport.status.dataArtifactRef.uid, got %q", binding.Artifact.UID)
 	}
 	if binding.TargetUID != "leaf-uid-1" {
 		t.Fatalf("expected TargetUID from leaf UID, got %q", binding.TargetUID)

@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -286,6 +287,9 @@ func buildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "kind")
 	name, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "name")
+	// uid is best-effort (DataImport fills it from the VCR artifact uid). When empty, the dataRef
+	// enricher backfills it from the live VolumeSnapshotContent; when present, it is preserved.
+	uid, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "uid")
 	if apiVersion == "" || kind == "" || name == "" {
 		return nil, false, "", ""
 	}
@@ -320,6 +324,7 @@ func buildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 			APIVersion: apiVersion,
 			Kind:       kind,
 			Name:       name,
+			UID:        types.UID(uid),
 		},
 		VolumeMode: volumeMode,
 	}, true, "", ""
