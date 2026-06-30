@@ -65,7 +65,7 @@ export VSC_NAME=$(kubectl get storageclass "$STORAGE_CLASS" \
 echo "VolumeSnapshotClass=$VSC_NAME"
 kubectl get volumesnapshotclass "$VSC_NAME"
 
-kubectl -n "$DEMO_NS" get volumecapturerequests.storage.deckhouse.io
+kubectl -n "$DEMO_NS" get volumecapturerequests.storage-foundation.deckhouse.io
 # ожидание: пусто или только заголовок таблицы
 ```
 
@@ -122,37 +122,37 @@ kubectl -n "$DEMO_NS" get pvc "$PVC" -o jsonpath='{.status.phase}{"\n"}'
 
 ```bash
 kubectl -n "$DEMO_NS" apply -f - <<EOF
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: ${SNAP}
 spec: {}
 EOF
 
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -w
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -w
 # Ctrl+C когда Ready=True
 ```
 
 ### 6. Happy path — чеклист
 
 ```bash
-export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" \
+export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" \
   -o jsonpath='{.status.boundSnapshotContentName}')
-export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" \
+export MCP=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" \
   -o jsonpath='{.status.manifestCheckpointName}')
 export OK_NAME="ret-snap-${DEMO_NS}-${SNAP}"
 
 echo "BOUND=$BOUND MCP=$MCP OK=$OK_NAME"
 
 # Snapshot
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o json | jq '{
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o json | jq '{
   ready: (.status.conditions[]|select(.type=="Ready")),
   vcr: .status.volumeCaptureRequestName,
   bound: .status.boundSnapshotContentName
 }'
 
 # SnapshotContent
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o json | jq '{
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o json | jq '{
   ready: (.status.conditions[]|select(.type=="Ready")),
   mcp: .status.manifestCheckpointName,
   dataRefs: .status.dataRefs
@@ -163,10 +163,10 @@ kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "$MCP" -o json | 
   '.status.conditions[]|select(.type=="Ready")'
 
 # VCR — должно быть пусто
-kubectl -n "$DEMO_NS" get volumecapturerequests.storage.deckhouse.io
+kubectl -n "$DEMO_NS" get volumecapturerequests.storage-foundation.deckhouse.io
 
 # VolumeSnapshotContent
-export VSC=$(kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" \
+export VSC=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" \
   -o jsonpath='{.status.dataRefs[0].artifact.name}')
 kubectl get volumesnapshotcontents.snapshot.storage.k8s.io "$VSC" -o jsonpath='readyToUse={.status.readyToUse}{"\n"}'
 
@@ -238,10 +238,10 @@ grep -E 'status\.dataRefs|VolumeSnapshotContent|status\.chunks' /tmp/snapshot-gr
 ### 8. Retain (опционально, в конце показа)
 
 ```bash
-kubectl -n "$DEMO_NS" delete snapshots.storage.deckhouse.io "$SNAP" --wait=true
+kubectl -n "$DEMO_NS" delete snapshots.state-snapshotter.deckhouse.io "$SNAP" --wait=true
 
 # сразу после delete — content и read ещё живы
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND"
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND"
 kubectl get objectkeepers.deckhouse.io "$OK_NAME"
 kubectl get --raw \
   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/${DEMO_NS}/snapshots/${SNAP}/manifests" \
@@ -333,8 +333,8 @@ for v in get list watch create update patch delete; do
 done
 for v in get list watch create update patch; do can_ctrl $v objectkeepers.deckhouse.io; done
 for v in get list watch create update patch delete; do
-  can_ctrl $v snapshots.storage.deckhouse.io "$DEMO_NS"
-  can_ctrl $v snapshotcontents.storage.deckhouse.io
+  can_ctrl $v snapshots.state-snapshotter.deckhouse.io "$DEMO_NS"
+  can_ctrl $v snapshotcontents.state-snapshotter.deckhouse.io
 done
 ```
 
@@ -462,14 +462,14 @@ kubectl get customsnapshotdefinition "${CSD_NAME}" -o json | jq \
 
 ```bash
 kubectl -n "$DEMO_NS" apply -f - <<EOF
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: ${SNAP}
 spec: {}
 EOF
 
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -w
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -w
 ```
 
 ### 6. D0 чеклист (один проход, без долгого wait)
@@ -493,19 +493,19 @@ kubectl logs -n "$CTRL_NS" -l app=controller --tail=120 \
 ### 7. D0/D1 чеклист (demo tree + chunks)
 
 ```bash
-export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" \
+export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" \
   -o jsonpath='{.status.boundSnapshotContentName}')
-export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" \
+export MCP=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" \
   -o jsonpath='{.status.manifestCheckpointName}')
 
 # Root: demo children (имена из status, не угадывать)
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o json | jq '{
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o json | jq '{
   ready: (.status.conditions[]|select(.type=="Ready")),
   children: .status.childrenSnapshotRefs,
   vcr: .status.volumeCaptureRequestName
 }'
 
-CHILD_VM=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o json \
+CHILD_VM=$(kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o json \
   | jq -r '.status.childrenSnapshotRefs[]? | select(.kind=="DemoVirtualMachineSnapshot") | .name')
 echo "CHILD_VM=$CHILD_VM"
 kubectl -n "$DEMO_NS" get demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io "$CHILD_VM" -o json | jq \
@@ -516,7 +516,7 @@ CHILD_DISK=$(kubectl -n "$DEMO_NS" get demovirtualmachinesnapshots.demo.state-sn
 echo "CHILD_DISK=$CHILD_DISK"
 
 # Standalone disk может быть direct child root (без ownerRef на VM)
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o json \
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o json \
   | jq -r '.status.childrenSnapshotRefs[]? | select(.kind=="DemoVirtualDiskSnapshot") | .name'
 
 # Chunks: root MCP
@@ -527,13 +527,13 @@ kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io "${MC
 # Chunks: child VM MCP (если есть bound content)
 VM_CONTENT=$(kubectl -n "$DEMO_NS" get demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io "$CHILD_VM" \
   -o jsonpath='{.status.boundSnapshotContentName}')
-VM_MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "$VM_CONTENT" -o jsonpath='{.status.manifestCheckpointName}')
+VM_MCP=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$VM_CONTENT" -o jsonpath='{.status.manifestCheckpointName}')
 echo "VM_MCP=$VM_MCP"
 kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io "${VM_MCP}-0" \
   -o jsonpath='vmChunkObjects={.spec.objectsCount}{"\n"}' 2>/dev/null || echo "no VM chunk yet"
 
 # D0: volume leg на root должен быть пуст (нет PVC в ns)
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o json | jq '.status.dataRefs'
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o json | jq '.status.dataRefs'
 
 # Aggregated root subtree (CM + demo; без PVC на D0)
 kubectl get --raw \
@@ -552,7 +552,7 @@ kubectl get --raw \
 kubectl get customsnapshotdefinition "$CSD_NAME" -o json | jq '[.status.conditions[]?|{type,status}]'
 kubectl -n "$DEMO_NS" get mcr
 CHILD_SC=$(kubectl -n "$DEMO_NS" get demovirtualdisksnapshot -o jsonpath='{.items[0].status.boundSnapshotContentName}')
-kubectl get snapshotcontents.storage.deckhouse.io "$CHILD_SC" -o jsonpath='mcp={.status.manifestCheckpointName} ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$CHILD_SC" -o jsonpath='mcp={.status.manifestCheckpointName} ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
 ```
 
 - CSD Accepted + AccessGranted + Ready; VM/Disk на месте.
@@ -611,9 +611,9 @@ kubectl delete namespace "$DEMO_NS" --wait=true
 ```bash
 export DEMO_NS=snapshot-demo-volume
 export SNAP=demo-volume
-export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" \
+export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" \
   -o jsonpath='{.status.boundSnapshotContentName}')
-export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" \
+export MCP=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" \
   -o jsonpath='{.status.manifestCheckpointName}')
 
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "$MCP" -o json | jq \
@@ -647,22 +647,22 @@ kubectl -n "$DEMO_NS" get pvc
 # ожидание: No resources found
 
 kubectl -n "$DEMO_NS" apply -f - <<EOF
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: ${SNAP}
 spec: {}
 EOF
 
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -w
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -w
 
-export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" \
+export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" \
   -o jsonpath='{.status.boundSnapshotContentName}')
 
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o json | jq \
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o json | jq \
   '{ready: (.status.conditions[]|select(.type=="Ready")), vcr: .status.volumeCaptureRequestName}'
 
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o json | jq \
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o json | jq \
   '{ready: (.status.conditions[]|select(.type=="Ready")), dataRefs: .status.dataRefs}'
 
 kubectl get --raw \
@@ -687,11 +687,11 @@ DEMO_E2E_SKIP_CLEANUP=1 bash hack/demo-e2e.sh
 export E2E_NS=demo-e2e-20260525-163832
 
 kubectl -n "$E2E_NS" get snap,pvc
-kubectl -n "$E2E_NS" get snapshots.storage.deckhouse.io demo-root -o json | jq '.status.childrenSnapshotRefs'
+kubectl -n "$E2E_NS" get snapshots.state-snapshotter.deckhouse.io demo-root -o json | jq '.status.childrenSnapshotRefs'
 
-export BOUND=$(kubectl -n "$E2E_NS" get snapshots.storage.deckhouse.io demo-root \
+export BOUND=$(kubectl -n "$E2E_NS" get snapshots.state-snapshotter.deckhouse.io demo-root \
   -o jsonpath='{.status.boundSnapshotContentName}')
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o json | jq \
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o json | jq \
   '{children: .status.childrenSnapshotContentRefs, dataRefs: .status.dataRefs}'
 
 # готовый SVG
@@ -710,7 +710,7 @@ kubectl logs -n d8-state-snapshotter -l app=controller --tail=200
 kubectl get ns | grep -E 'snapshot-demo|demo-e2e'
 
 # красные VCR в ns
-kubectl -n "$DEMO_NS" get volumecapturerequests.storage.deckhouse.io -o wide
+kubectl -n "$DEMO_NS" get volumecapturerequests.storage-foundation.deckhouse.io -o wide
 
 # Pending PVC
 kubectl -n "$DEMO_NS" get pvc

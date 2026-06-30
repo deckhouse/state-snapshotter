@@ -25,7 +25,7 @@ require (
 ```go
 // Уже используется в namespace_archive.go
 namespaced := []schema.GroupVersionResource{
-    {Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "virtualdisks"},
+    {Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "virtualdisks"},
     {Group: "virtualization.deckhouse.io", Version: "v1alpha2", Resource: "virtualmachines"},
     {Group: "deckhouse.io", Version: "v1alpha1", Resource: "authorizationrules"},
     {Group: "deckhouse.io", Version: "v1alpha1", Resource: "podloggingconfigs"},

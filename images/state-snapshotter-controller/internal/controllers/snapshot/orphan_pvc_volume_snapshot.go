@@ -228,7 +228,7 @@ func (r *SnapshotReconciler) directReader() client.Reader {
 }
 
 // orphanPVCVolumeSnapshotClass resolves the VolumeSnapshotClass for an orphan PVC the same way the VCR
-// path does: PVC -> StorageClass -> storage.deckhouse.io/volumesnapshotclass annotation ->
+// path does: PVC -> StorageClass -> state-snapshotter.deckhouse.io/volumesnapshotclass annotation ->
 // VolumeSnapshotClass, then validates the class driver against the bound PV CSI driver.
 //
 // Returns (className, "", "", nil) on success. A non-empty terminalReason means the configuration can
@@ -328,7 +328,7 @@ func orphanPVCVolumeSnapshotObject(nsSnap *storagev1alpha1.Snapshot, target vcpk
 			},
 		},
 		// volumeSnapshotClassName is resolved explicitly from the PVC StorageClass
-		// storage.deckhouse.io/volumesnapshotclass annotation (validated against the PV CSI driver),
+		// state-snapshotter.deckhouse.io/volumesnapshotclass annotation (validated against the PV CSI driver),
 		// mirroring the VCR path rather than relying on the cluster default class / mutating webhook.
 		// Durability still does not depend on the class deletionPolicy: the bound VSC is forced to Retain
 		// during handoff (ensureVolumeSnapshotContentRetain), so a Delete-policy class cannot drop the

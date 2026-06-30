@@ -26,7 +26,7 @@ const (
 	stateSnapshotterCertsSecretName = consts.ModuleName + "-certs"
 	DeleteReconcile                 = "Delete"
 	UpdateReconcile                 = "Update"
-	StorageManagedLabelKey          = "storage.deckhouse.io/managed-by"
+	StorageManagedLabelKey          = "state-snapshotter.deckhouse.io/managed-by"
 
 	PhaseFailed  = "Failed"
 	PhaseCreated = "Created"

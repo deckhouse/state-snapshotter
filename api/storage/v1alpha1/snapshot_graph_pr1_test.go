@@ -29,7 +29,7 @@ func TestSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T) {
 		Status: SnapshotStatus{
 			BoundSnapshotContentName: "parent-content",
 			ChildrenSnapshotRefs: []SnapshotChildRef{
-				{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child1"},
+				{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child1"},
 			},
 		},
 	}
@@ -48,7 +48,7 @@ func TestSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("ChildrenSnapshotRefs len: got %d want 1 (full %#v)", len(got), got)
 	}
 	if got := out.Status.ChildrenSnapshotRefs[0]; got.Name != "child1" ||
-		got.APIVersion != "storage.deckhouse.io/v1alpha1" || got.Kind != "Snapshot" {
+		got.APIVersion != "state-snapshotter.deckhouse.io/v1alpha1" || got.Kind != "Snapshot" {
 		t.Fatalf("ChildrenSnapshotRefs[0]: got %#v", got)
 	}
 
@@ -67,7 +67,7 @@ func TestSnapshotStatus_ChildrenSnapshotRefs_JSONRoundTrip(t *testing.T) {
 	}
 	item := refs[0].(map[string]interface{})
 	if item["name"] != "child1" ||
-		item["apiVersion"] != "storage.deckhouse.io/v1alpha1" || item["kind"] != "Snapshot" {
+		item["apiVersion"] != "state-snapshotter.deckhouse.io/v1alpha1" || item["kind"] != "Snapshot" {
 		t.Fatalf("expected JSON keys apiVersion/kind/name, got %#v", item)
 	}
 	if _, ok := item["namespace"]; ok {

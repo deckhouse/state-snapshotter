@@ -44,10 +44,10 @@ var _ = Describe("Integration T1: unified bootstrap without optional snapshot CR
 		)
 		Expect(available).To(HaveLen(1))
 		Expect(available[0].Snapshot).To(Equal(schema.GroupVersionKind{
-			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot",
+			Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot",
 		}))
 		Expect(available[0].SnapshotContent).To(Equal(schema.GroupVersionKind{
-			Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent",
+			Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent",
 		}))
 
 		snapshotController, err := controllers.NewGenericSnapshotBinderController(

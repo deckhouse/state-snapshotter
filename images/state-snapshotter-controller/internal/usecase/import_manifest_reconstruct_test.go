@@ -63,7 +63,7 @@ func TestReconstructManifestCheckpoint_BuildsReadyCheckpoint(t *testing.T) {
 	cl := newReconstructClient(t)
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--snap")
 	captureRef := &ssv1alpha1.ObjectReference{Name: "imp", Namespace: "ns1", UID: "import-uid"}
-	ownerRefs := []metav1.OwnerReference{{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "imp", UID: "import-uid"}}
+	ownerRefs := []metav1.OwnerReference{{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "imp", UID: "import-uid"}}
 
 	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", captureRef, ownerRefs, sampleManifests(t)); err != nil {
 		t.Fatalf("reconstruct: %v", err)

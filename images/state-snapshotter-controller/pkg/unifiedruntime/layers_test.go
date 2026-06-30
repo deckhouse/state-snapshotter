@@ -55,11 +55,11 @@ func TestBuildLayeredGVKState_CSDListErrorFallsBackToBootstrap(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	bootstrap := []unifiedbootstrap.UnifiedGVKPair{
 		{
-			Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-			SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+			Snapshot:        schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+			SnapshotContent: schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 		},
 	}
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	mapper.Add(bootstrap[0].Snapshot, meta.RESTScopeNamespace)
 	mapper.Add(bootstrap[0].SnapshotContent, meta.RESTScopeRoot)
@@ -85,7 +85,7 @@ func TestBuildLayeredGVKState_EmptyCSDListMergesBootstrap(t *testing.T) {
 	_ = storagev1alpha1.AddToScheme(scheme)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	bootstrap := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}

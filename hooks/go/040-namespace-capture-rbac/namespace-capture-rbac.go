@@ -64,7 +64,7 @@ var _ = registry.RegisterFunc(
 		Kubernetes: []pkg.KubernetesConfig{
 			{
 				Name:                         "snapshots",
-				APIVersion:                   "storage.deckhouse.io/v1alpha1",
+				APIVersion:                   "state-snapshotter.deckhouse.io/v1alpha1",
 				Kind:                         "Snapshot",
 				ExecuteHookOnSynchronization: ptr.Bool(true),
 				ExecuteHookOnEvents:          ptr.Bool(true),

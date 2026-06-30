@@ -60,7 +60,7 @@ import (
 var (
 	resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
-		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (Snapshot, SnapshotContent, ...)
+		storagev1alpha1.AddToScheme,   // state-snapshotter.deckhouse.io (Snapshot, SnapshotContent, ...)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
 		extv1.AddToScheme,
@@ -185,7 +185,7 @@ func main() {
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
 	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
-	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (Snapshot, SnapshotContent)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // state-snapshotter.deckhouse.io (Snapshot, SnapshotContent)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
 	// Create controller manager with full scheme (for informers)

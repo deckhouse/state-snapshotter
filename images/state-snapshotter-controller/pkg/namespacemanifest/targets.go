@@ -39,10 +39,10 @@ import (
 // (snapshot-kind set from the live GVKRegistry); these are the remaining request/transfer objects.
 const (
 	ownMachineryGroupStateSnapshotter = "state-snapshotter.deckhouse.io"
-	ownMachineryGroupStorage          = "storage.deckhouse.io"
+	ownMachineryGroupStorage          = "state-snapshotter.deckhouse.io"
 )
 
-// storageMachineryKinds are the storage.deckhouse.io kinds that are state-snapshotter machinery
+// storageMachineryKinds are the state-snapshotter.deckhouse.io kinds that are state-snapshotter machinery
 // (not user desired-state). The Snapshot kind from the same group is excluded by mechanism 1.
 var storageMachineryKinds = map[string]struct{}{
 	"VolumeCaptureRequest": {},
@@ -327,7 +327,7 @@ func isSnapshotMachineryKind(gvk schema.GroupVersionKind, snapshotKinds Snapshot
 }
 
 // isOwnMachineryKind reports state-snapshotter request/transfer objects that discovery enumerates in
-// the namespace. Snapshot (storage.deckhouse.io) is handled by mechanism 1, not here.
+// the namespace. Snapshot (state-snapshotter.deckhouse.io) is handled by mechanism 1, not here.
 func isOwnMachineryKind(gvk schema.GroupVersionKind) bool {
 	if gvk.Group == ownMachineryGroupStateSnapshotter {
 		return true

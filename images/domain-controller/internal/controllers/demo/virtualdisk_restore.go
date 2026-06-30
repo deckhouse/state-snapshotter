@@ -249,7 +249,7 @@ func buildDemoDiskVRR(disk *demov1alpha1.DemoVirtualDisk, resolution demoRestore
 		"spec": spec,
 	}}
 	obj.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "storage.deckhouse.io",
+		Group:   "storage-foundation.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    vrrKind,
 	})
@@ -320,7 +320,7 @@ func adoptDemoDiskPVC(ctx context.Context, c client.Client, disk *demov1alpha1.D
 func deleteDemoDiskVRR(ctx context.Context, c client.Client, disk *demov1alpha1.DemoVirtualDisk) error {
 	vrr := &unstructured.Unstructured{}
 	vrr.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "storage.deckhouse.io",
+		Group:   "storage-foundation.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    vrrKind,
 	})

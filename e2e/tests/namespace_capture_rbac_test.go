@@ -148,13 +148,13 @@ func captureRBACHookSpecs() {
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
 			importSnap := &unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": "storage.deckhouse.io/v1alpha1",
+				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 				"kind":       "Snapshot",
 				"metadata":   map[string]interface{}{"name": "e1-import", "namespace": ns},
 				"spec":       map[string]interface{}{"source": map[string]interface{}{"import": map[string]interface{}{}}},
 			}}
 			staticSnap := &unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": "storage.deckhouse.io/v1alpha1",
+				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 				"kind":       "Snapshot",
 				"metadata":   map[string]interface{}{"name": "e1-static", "namespace": ns},
 				"spec":       map[string]interface{}{"source": map[string]interface{}{"snapshotContentName": "no-such-content"}},

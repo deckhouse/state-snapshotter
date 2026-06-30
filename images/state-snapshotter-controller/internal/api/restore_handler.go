@@ -28,7 +28,7 @@ import (
 // above realistic per-node sizes.
 const maxManifestsUploadBytes = 64 << 20 // 64 MiB
 
-// storageSnapshotGVK returns the GVK of the core Snapshot kind (storage.deckhouse.io/v1alpha1).
+// storageSnapshotGVK returns the GVK of the core Snapshot kind (state-snapshotter.deckhouse.io/v1alpha1).
 func storageSnapshotGVK() schema.GroupVersionKind {
 	return storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
 }

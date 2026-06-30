@@ -30,7 +30,7 @@ import (
 
 // dataImportListGVK is the SVDM DataImportList resource. State-snapshotter reads DataImport cross-service
 // via the dynamic/unstructured client, so it takes no Go-module dependency on SVDM.
-var dataImportListGVK = schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataImportList"}
+var dataImportListGVK = schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImportList"}
 
 // FindDataImportForLeaf reverse-looks-up the DataImport that materializes the data leg for an import-mode
 // snapshot leaf. The leaf↔DataImport link is single-directional: only DataImport.spec.targetRef points at

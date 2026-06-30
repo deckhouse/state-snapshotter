@@ -27,7 +27,7 @@ Legacy terms are allowed only in explicitly historical documents. Do not use his
 - Работа с томами через **Kubernetes VolumeSnapshot** / драйвер хранилища — это **другая ось**, чем «какие *Snapshot CRD* модуль регистрирует в API Deckhouse».
 - State-snapshotter как продукт **соприкасается** с бэкапом/томами на уровне доменных сценариев, но **unified registry** в первую очередь про **собственные и модульные CRD** снимков состояния приложений, а не про замену CSI.
 
-### 2. Группа `storage.deckhouse.io` (unified «родные» типы)
+### 2. Группа `state-snapshotter.deckhouse.io` (unified «родные» типы)
 
 - Типовые ресурсы модуля: **Snapshot**, **SnapshotContent**, **CustomSnapshotDefinition**, **ManifestCaptureRequest**, **ManifestCheckpoint** и связанные artifact-ресурсы. Bootstrap-набор snapshot/content пар задаётся в `pkg/unifiedbootstrap`, пока CSD не расширяет набор.
 - Эта линия — **опорная** для единого контроллера снимков в кластере Deckhouse.

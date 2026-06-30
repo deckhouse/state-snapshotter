@@ -39,7 +39,7 @@ func importLeafObject() *unstructured.Unstructured {
 
 func dataImportWithArtifact(apiVersion, kind, name string) *unstructured.Unstructured {
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
 		"metadata": map[string]interface{}{
 			"name":      "di-1",

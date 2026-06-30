@@ -34,7 +34,7 @@ import (
 
 // VolumeCaptureRequestGVK is the storage-foundation VolumeCaptureRequest GVK.
 var VolumeCaptureRequestGVK = schema.GroupVersionKind{
-	Group:   "storage.deckhouse.io",
+	Group:   "storage-foundation.deckhouse.io",
 	Version: "v1alpha1",
 	Kind:    "VolumeCaptureRequest",
 }

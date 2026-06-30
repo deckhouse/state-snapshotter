@@ -176,16 +176,16 @@ RUN_ARTIFACT_DIR="${ARTIFACTS_ROOT}/tree-demo-${RUN_ID}"
 
 # API groups / resources.
 DEMO_API="demo.state-snapshotter.deckhouse.io/v1alpha1"
-STORAGE_API="storage.deckhouse.io/v1alpha1"
+STORAGE_API="state-snapshotter.deckhouse.io/v1alpha1"
 SS_API="state-snapshotter.deckhouse.io/v1alpha1"
 
-SNAP_RES="snapshots.storage.deckhouse.io"
-CONTENT_RES="snapshotcontents.storage.deckhouse.io"
+SNAP_RES="snapshots.state-snapshotter.deckhouse.io"
+CONTENT_RES="snapshotcontents.state-snapshotter.deckhouse.io"
 MCR_RES="manifestcapturerequests.state-snapshotter.deckhouse.io"
 MCP_RES="manifestcheckpoints.state-snapshotter.deckhouse.io"
 CHUNK_RES="manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io"
 CSD_RES="customsnapshotdefinitions.state-snapshotter.deckhouse.io"
-VCR_RES="volumecapturerequests.storage.deckhouse.io"
+VCR_RES="volumecapturerequests.storage-foundation.deckhouse.io"
 VS_RES="volumesnapshots.snapshot.storage.k8s.io"
 VSC_RES="volumesnapshotcontents.snapshot.storage.k8s.io"
 VSCLASS_RES="volumesnapshotclasses.snapshot.storage.k8s.io"
@@ -946,10 +946,10 @@ Immediate | WaitForFirstConsumer)
 	;;
 esac
 kubectl get crd \
-	snapshots.storage.deckhouse.io snapshotcontents.storage.deckhouse.io \
+	snapshots.state-snapshotter.deckhouse.io snapshotcontents.state-snapshotter.deckhouse.io \
 	manifestcheckpoints.state-snapshotter.deckhouse.io manifestcapturerequests.state-snapshotter.deckhouse.io \
 	customsnapshotdefinitions.state-snapshotter.deckhouse.io \
-	volumecapturerequests.storage.deckhouse.io \
+	volumecapturerequests.storage-foundation.deckhouse.io \
 	volumesnapshots.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io \
 	volumesnapshotclasses.snapshot.storage.k8s.io \
 	demovirtualmachines.demo.state-snapshotter.deckhouse.io \
@@ -1411,7 +1411,7 @@ jq -e --arg name "${SNAP}" --arg uid "${ROOT_UID}" '
 	|| die "orphan-pvc-vs: VolumeSnapshot must have non-controller ownerRef to root Snapshot and no controller=true ownerRef"
 ORPHAN_VS_CLASS="$(jq -r '.spec.volumeSnapshotClassName // ""' "$(stage_dir orphan-pvc-vs)/orphan-vs.json")"
 [[ -n "${ORPHAN_VS_CLASS}" ]] || die "orphan-pvc-vs: VolumeSnapshot spec.volumeSnapshotClassName must be explicitly set"
-SC_VS_CLASS="$(kubectl get storageclass "${STORAGE_CLASS}" -o json 2>/dev/null | jq -r '.metadata.annotations["storage.deckhouse.io/volumesnapshotclass"] // ""' || true)"
+SC_VS_CLASS="$(kubectl get storageclass "${STORAGE_CLASS}" -o json 2>/dev/null | jq -r '.metadata.annotations["state-snapshotter.deckhouse.io/volumesnapshotclass"] // ""' || true)"
 [[ -z "${SC_VS_CLASS}" || "${ORPHAN_VS_CLASS}" == "${SC_VS_CLASS}" ]] \
 	|| die "orphan-pvc-vs: VolumeSnapshotClass ${ORPHAN_VS_CLASS} does not match StorageClass annotation ${SC_VS_CLASS}"
 kubectl get "${VSCLASS_RES}" "${ORPHAN_VS_CLASS}" -o yaml >"$(stage_dir orphan-pvc-vs)/orphan-vsclass.yaml" 2>/dev/null || true

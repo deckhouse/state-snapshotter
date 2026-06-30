@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: snapshots.storage.deckhouse.io
+  name: snapshots.state-snapshotter.deckhouse.io
 spec:
-  group: storage.deckhouse.io
+  group: state-snapshotter.deckhouse.io
   names:
     kind: Snapshot
     listKind: SnapshotList

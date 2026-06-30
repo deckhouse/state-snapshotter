@@ -100,31 +100,31 @@ rules:
 # Note: Kubernetes RBAC does NOT support wildcards in resource names
 # We need to list all snapshot resource types explicitly
 
-# storage.deckhouse.io group (Snapshot, SnapshotContent)
-- apiGroups: ["storage.deckhouse.io"]
+# state-snapshotter.deckhouse.io group (Snapshot, SnapshotContent)
+- apiGroups: ["state-snapshotter.deckhouse.io"]
   resources:
   - "snapshots"                    # Snapshot kind
   - "snapshotcontents"            # SnapshotContent kind
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-# Unified Snapshots status subresources for storage.deckhouse.io
-- apiGroups: ["storage.deckhouse.io"]
+# Unified Snapshots status subresources for state-snapshotter.deckhouse.io
+- apiGroups: ["state-snapshotter.deckhouse.io"]
   resources:
   - "snapshots/status"
   - "snapshotcontents/status"
   verbs: ["get", "update", "patch"]
 
 # VolumeCaptureRequest (storage-foundation): N5 PR-4 ensure/publish/delete per SnapshotContent
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
 # DataImport (storage-foundation): the import binder (C5) reads a leaf's DataImport
 # status.dataArtifactRef to populate SnapshotContent.dataRef on import. Read-only (the controller never
 # writes DataImport); the import-safe RBAC gate for *creating* DataImports lives on d8/user roles.
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["dataimports"]
   verbs: ["get", "list", "watch"]
 

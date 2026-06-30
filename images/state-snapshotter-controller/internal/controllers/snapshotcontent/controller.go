@@ -334,7 +334,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Step 3: Content status aggregation and Ready condition.
-	// The common storage.deckhouse.io/SnapshotContent is the ONLY content carrier in the unified
+	// The common state-snapshotter.deckhouse.io/SnapshotContent is the ONLY content carrier in the unified
 	// runtime (every snapshot kind maps to CommonSnapshotContentGVK), and it owns the aggregate
 	// condition model: ManifestsReady + VolumeReady + ChildrenReady + derived Ready
 	// (INV-COND2). No non-common SnapshotContent GVK is registered, so there is no other writer.
@@ -684,7 +684,7 @@ func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context
 //
 // Discriminator (all from this content's OWN object, no owner GET):
 //   - A child-volume-node content (LabelChildVolumeNode) models a single PVC and has no residual wave -> open.
-//   - Only a namespace-root content (spec.snapshotRef -> a core storage.deckhouse.io Snapshot) carries the
+//   - Only a namespace-root content (spec.snapshotRef -> a core state-snapshotter.deckhouse.io Snapshot) carries the
 //     residual wave; domain XxxxSnapshot / orphan-VolumeSnapshot-bound contents are never gated -> open.
 //   - Upgrade-guard (monotonicity): if Ready is ALREADY persisted True, never re-gate. The gate blocks only
 //     the FIRST Ready=True (like ManifestsArchived); on a controller rollout this prevents an already-ready

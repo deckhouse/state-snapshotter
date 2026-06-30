@@ -57,7 +57,7 @@
 
 **RBAC (три роли, см. `templates/controller/rbac-for-us.yaml` vs `templates/rbac-for-us.yaml`):** (1) controller SA — create/patch ObjectKeeper, MCR/MCP, VCR, SnapshotContent status; **без** `delete` ObjectKeeper; (2) admin-kubeconfig — Snapshots + aggregated read + read-only MCR/MCP/OK; (3) forced TTL — **не** в admin-kubeconfig: stage `08-forced-ttl-gc` **SKIP** по умолчанию, если caller не может `patch objectkeepers.deckhouse.io`; скрипт может поставить временный `demo-e2e-objectkeeper-patcher-<run-id>` или нужен cluster-admin. `DEMO_E2E_REQUIRE_FORCED_TTL=1` — fail вместо skip. Перед smoke: `bash hack/rbac-can-i-audit.sh`.
 
-**Зависимости:** `d8-state-snapshotter`, `d8-storage-foundation`, Deckhouse ObjectKeeper controller, RBAC create на `snapshots.storage.deckhouse.io` в smoke-namespace.
+**Зависимости:** `d8-state-snapshotter`, `d8-storage-foundation`, Deckhouse ObjectKeeper controller, RBAC create на `snapshots.state-snapshotter.deckhouse.io` в smoke-namespace.
 
 **Forced TTL (replaces PR4_SMOKE_REQUIRE_TTL):** тестовый патч `ObjectKeeper.spec.ttl=0s` из скрипта (не production controller); ожидание GC до `DEMO_E2E_GC_WAIT_SEC`.
 

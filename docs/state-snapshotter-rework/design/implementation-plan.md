@@ -68,7 +68,7 @@
 
 | # | Задача | Документ / примечание | Статус |
 |---|--------|------------------------|--------|
-| N0 | **Gate:** **Chosen option** в [`snapshot-scope.md`](decisions/snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `Snapshot` / `SnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`snapshot-controller.md`](snapshot-controller.md) §13–§16 | ✅ (scope resolved; group `storage.deckhouse.io/v1alpha1` на этапе N1) |
+| N0 | **Gate:** **Chosen option** в [`snapshot-scope.md`](decisions/snapshot-scope.md) ≠ TBD. Сверка **apiVersion/group** для `Snapshot` / `SnapshotContent` между ТЗ в `snapshot-rework` и фактическими CRD в репозитории (привести к одному). | [`snapshot-controller.md`](snapshot-controller.md) §13–§16 | ✅ (scope resolved; group `state-snapshotter.deckhouse.io/v1alpha1` на этапе N1) |
 | N1 | **API + lifecycle skeleton (завершённый подготовительный слой, код не откатывается):** типы `Snapshot`, `SnapshotContent`, codegen, OpenAPI; **убрать** generic `SnapshotContent` как носитель root; bind + delete; integration (lifecycle, deletion, mismatch, recovery). **В N1 намеренно нет:** ObjectKeeper, реального manifest capture, дочернего дерева. | decision + design §14–§16 | ✅ |
 | N2 | **Manifests-only snapshot path** (без data-layer), в два подэтапа — **§2.4.1:** **N2a** — первый рабочий снимок манифестов одного root (OK + MCR→ManifestCheckpoint + статус на SnapshotContent + download одного снимка); **N2b** — дерево манифест-only снимков (дети, refs на graph, агрегированный Ready, aggregated download). | [`snapshot-controller.md`](snapshot-controller.md) + §2.4.1 | ⬜ |
 | N3 | **Интеграция / hardening:** envtest — recovery после **рестарта** контроллера; доп. негативные кейсы; политика по §15. Базовые mismatch/recovery/status уже в N1 (`snapshot_n1_boundary_test.go`). | design §15 | ⬜ |
@@ -389,7 +389,7 @@ Use as PR description / review gate. Check only items for that PR.
 
 | # | Задача | Статус |
 |---|--------|--------|
-| D1 | README: зависимости, CSI vs storage.deckhouse.io, manifest vs unified | ✅ [`../README.md`](../README.md) |
+| D1 | README: зависимости, CSI vs state-snapshotter.deckhouse.io, manifest vs unified | ✅ [`../README.md`](../README.md) |
 | D2 | RBAC из CSD + hook; CSD vs MCR | ✅ [`../operations/csd-rbac-and-mcr.md`](../operations/csd-rbac-and-mcr.md) |
 | D3 | Runbook: исчезновение CRD (degraded / fail-open); unified runtime: метрики stale/resolved/active, рестарт pod | ✅ [`../operations/runbook-degraded-and-unified-runtime.md`](../operations/runbook-degraded-and-unified-runtime.md) |
 

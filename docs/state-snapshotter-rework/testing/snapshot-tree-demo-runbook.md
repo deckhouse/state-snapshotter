@@ -35,7 +35,7 @@ export STORAGE_CLASS=local-thin MOD_NS=d8-state-snapshotter
 
 # контроллер Running + нужные CRD
 kubectl get pods -n "$MOD_NS" -l app=controller
-kubectl get crd snapshots.storage.deckhouse.io snapshotcontents.storage.deckhouse.io \
+kubectl get crd snapshots.state-snapshotter.deckhouse.io snapshotcontents.state-snapshotter.deckhouse.io \
   objectkeepers.deckhouse.io \
   demovirtualmachines.demo.state-snapshotter.deckhouse.io \
   customsnapshotdefinitions.state-snapshotter.deckhouse.io
@@ -128,11 +128,11 @@ kubectl get customsnapshotdefinition "$CSD_NAME" -o json | jq '[.status.conditio
 
 ```bash
 kubectl apply -f "$MANIFEST_DIR/03-root-snapshot.yaml"
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -w   # Ctrl+C на Ready=True
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -w   # Ctrl+C на Ready=True
 
 # имена один раз
-export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o jsonpath='{.status.boundSnapshotContentName}')
-export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o jsonpath='{.status.manifestCheckpointName}')
+export BOUND=$(kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o jsonpath='{.status.boundSnapshotContentName}')
+export MCP=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o jsonpath='{.status.manifestCheckpointName}')
 export OK_NAME="ret-snap-${DEMO_NS}-${SNAP}"
 echo "BOUND=$BOUND MCP=$MCP OK=$OK_NAME"
 ```
@@ -140,14 +140,14 @@ echo "BOUND=$BOUND MCP=$MCP OK=$OK_NAME"
 Дерево (root → дочерние, спуск VM → его Disk):
 
 ```bash
-kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o json | jq '{
+kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o json | jq '{
   ready: (.status.conditions[]|select(.type=="Ready")),
   children: .status.childrenSnapshotRefs, vcr: .status.volumeCaptureRequestName }'
 
-export CHILD_VM=$(kubectl -n "$DEMO_NS" get snapshots.storage.deckhouse.io "$SNAP" -o json \
+export CHILD_VM=$(kubectl -n "$DEMO_NS" get snapshots.state-snapshotter.deckhouse.io "$SNAP" -o json \
   | jq -r '.status.childrenSnapshotRefs[]?|select(.kind=="DemoVirtualMachineSnapshot")|.name')
 export VM_CONTENT=$(kubectl -n "$DEMO_NS" get demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io "$CHILD_VM" -o jsonpath='{.status.boundSnapshotContentName}')
-export VM_MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "$VM_CONTENT" -o jsonpath='{.status.manifestCheckpointName}')
+export VM_MCP=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$VM_CONTENT" -o jsonpath='{.status.manifestCheckpointName}')
 echo "CHILD_VM=$CHILD_VM VM_CONTENT=$VM_CONTENT VM_MCP=$VM_MCP"
 ```
 
@@ -168,7 +168,7 @@ kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io "${MC
 ```bash
 # собрать content дерева (root + children + content дочерних demo-снапшотов)
 {
-  kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o json \
+  kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o json \
     | jq -r '.metadata.name, (.status.childrenSnapshotContentRefs[]?.name)'
   kubectl -n "$DEMO_NS" get demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io,demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io \
     -o jsonpath='{range .items[*]}{.status.boundSnapshotContentName}{"\n"}{end}' 2>/dev/null
@@ -179,7 +179,7 @@ kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io "${MC
 export VSC_NAME=""
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  v=$(kubectl get snapshotcontents.storage.deckhouse.io "$c" -o jsonpath='{.status.dataRefs[0].artifact.name}' 2>/dev/null)
+  v=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$c" -o jsonpath='{.status.dataRefs[0].artifact.name}' 2>/dev/null)
   if [ -n "$v" ] && [ -z "$VSC_NAME" ]; then export VSC_NAME="$v"; echo "VSC on $c: $VSC_NAME"; break; fi
 done < /tmp/tree-contents.txt
 [ -n "$VSC_NAME" ] || echo "WARN: VSC не найден — data leg не готов или PVC не Bound"
@@ -221,8 +221,8 @@ Preflight executor (нужен только для частей 5/6):
 
 ```bash
 export CSI_NS=d8-sds-local-volume
-kubectl get crd volumerestorerequests.storage.deckhouse.io
-kubectl auth can-i list volumerestorerequests.storage.deckhouse.io \
+kubectl get crd volumerestorerequests.storage-foundation.deckhouse.io
+kubectl auth can-i list volumerestorerequests.storage-foundation.deckhouse.io \
   --as="system:serviceaccount:${CSI_NS}:csi"      # yes
 ```
 Если `no` или executor не выкачен — **пропустить** части 5/6.
@@ -232,7 +232,7 @@ kubectl auth can-i list volumerestorerequests.storage.deckhouse.io \
 envsubst < "$MANIFEST_DIR/04-volumerestorerequest.template.yaml" | kubectl apply -f -
 
 kubectl -n "$DEMO_NS" get pvc demo-pvc-restored
-kubectl -n "$DEMO_NS" get volumerestorerequests.storage.deckhouse.io restore-demo \
+kubectl -n "$DEMO_NS" get volumerestorerequests.storage-foundation.deckhouse.io restore-demo \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
 ```
 
@@ -269,7 +269,7 @@ PVC → ждёт `Bound`+`Ready` → печатает `RESULT: SUCCESS`. PV-об
 ```bash
 export RESTORE_NS=snapshot-demo-restored
 kubectl -n "$RESTORE_NS" get cm,demovirtualmachines.demo.state-snapshotter.deckhouse.io,demovirtualdisks.demo.state-snapshotter.deckhouse.io,pvc
-kubectl -n "$RESTORE_NS" get volumerestorerequests.storage.deckhouse.io
+kubectl -n "$RESTORE_NS" get volumerestorerequests.storage-foundation.deckhouse.io
 ```
 
 Ожидание: demo-объекты в `$RESTORE_NS`; restored PVC `Bound`; VRR `Ready=True`.
@@ -283,23 +283,23 @@ kubectl -n "$RESTORE_NS" get volumerestorerequests.storage.deckhouse.io
 
 ```bash
 # сохранить список дерева ДО удаления
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o json \
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o json \
   | jq -r '.metadata.name, (.status.childrenSnapshotContentRefs[]?.name)' | tee /tmp/${SNAP}-tree.txt
 
 # удалить root Snapshot — content retained
-kubectl -n "$DEMO_NS" delete snapshots.storage.deckhouse.io "$SNAP" --wait=true
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" -o wide   # ещё жив
+kubectl -n "$DEMO_NS" delete snapshots.state-snapshotter.deckhouse.io "$SNAP" --wait=true
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" -o wide   # ещё жив
 
 # подождать ~1.5 мин (естественный TTL ObjectKeeper) и наблюдать каскад
 # watch -n3 '
-#  echo "== SnapshotContents (ns-*) =="; kubectl get snapshotcontents.storage.deckhouse.io | grep -E "ns-" || echo none
+#  echo "== SnapshotContents (ns-*) =="; kubectl get snapshotcontents.state-snapshotter.deckhouse.io | grep -E "ns-" || echo none
 #  echo "== ManifestCheckpoints ==";     kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io 2>/dev/null | tail -n +2 || echo none
 #'   # Ctrl+C когда пусто - не работает на маке
 
 while true; do
   clear
   echo "== SnapshotContents (ns-*) =="
-  kubectl get snapshotcontents.storage.deckhouse.io | grep -E "ns-" || echo none
+  kubectl get snapshotcontents.state-snapshotter.deckhouse.io | grep -E "ns-" || echo none
 
   echo
   echo "== ManifestCheckpoints =="
@@ -308,7 +308,7 @@ while true; do
   sleep 3
 done
 
-kubectl get snapshotcontents.storage.deckhouse.io "$BOUND" 2>&1 || echo "root content удалён"
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$BOUND" 2>&1 || echo "root content удалён"
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "$MCP" 2>&1 || echo "root MCP удалён"
 ```
 

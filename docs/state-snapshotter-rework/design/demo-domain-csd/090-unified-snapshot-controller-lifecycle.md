@@ -21,7 +21,7 @@ A snapshot with no children is valid. Its `Ready` depends only on its own materi
 
 v0 content migration note: steps that mention `SnapshotContent` describe the current runtime.
 The target model moves content creation/lifecycle to the common state-snapshotter layer and a single
-cluster-scoped `storage.deckhouse.io/SnapshotContent`. Domain controllers keep ownership of
+cluster-scoped `state-snapshotter.deckhouse.io/SnapshotContent`. Domain controllers keep ownership of
 `XxxSnapshot` validation, `sourceRef`, child snapshot creation, and `Ready` aggregation until the
 runtime migration is explicitly performed.
 
@@ -39,7 +39,7 @@ runtime migration is explicitly performed.
 
 **Reference domain controller contract (current runtime):** a domain snapshot controller validates its own `spec.sourceRef`, creates its own cluster-scoped `SnapshotContent`, creates an MCR for its own source object, publishes request names / `PlanningReady`, and mirrors bound content `Ready`. A domain parent controller (for example VM) also creates child snapshots for nested domain resources, sets ownerRefs on them, and publishes its own `status.childrenSnapshotRefs`. User spec errors are represented as `Ready=False` conditions (for example `InvalidSourceRef`) rather than reconcile errors, and must not create content, MCR, or child snapshots.
 
-**Common content contract:** snapshot/domain controllers create/bind `SnapshotContent` and publish durable result refs into `SnapshotContent.status` (`manifestCheckpointName`, future `dataRef`, `childrenSnapshotContentRefs`). `SnapshotContentController` is a validator/lifecycle controller: it validates persisted refs, performs artifact ownerRef handoff, and owns only content readiness conditions. It is not a domain planner/executor: MCR/VCR/DataExport/VolumeSnapshot request creation stays in snapshot/domain controllers. Domain modules register source resource and snapshot CRD through CSD; content GVK is fixed to `storage.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
+**Common content contract:** snapshot/domain controllers create/bind `SnapshotContent` and publish durable result refs into `SnapshotContent.status` (`manifestCheckpointName`, future `dataRef`, `childrenSnapshotContentRefs`). `SnapshotContentController` is a validator/lifecycle controller: it validates persisted refs, performs artifact ownerRef handoff, and owns only content readiness conditions. It is not a domain planner/executor: MCR/VCR/DataExport/VolumeSnapshot request creation stays in snapshot/domain controllers. Domain modules register source resource and snapshot CRD through CSD; content GVK is fixed to `state-snapshotter.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
 
 **Not owned by a domain controller:** CSD `AccessGranted`, RBAC creation, and parent status. Child controllers do not patch parent status. `SnapshotContent.status` is field-owned: result refs are publisher-owned by snapshot/domain controllers; `Ready` is validator-owned by `SnapshotContentController`.
 

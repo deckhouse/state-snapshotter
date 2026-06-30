@@ -37,14 +37,14 @@ type UnifiedGVKPair struct {
 
 // CommonSnapshotContentGVK returns the common storage SnapshotContent GVK used by every snapshot kind.
 func CommonSnapshotContentGVK() schema.GroupVersionKind {
-	return schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"}
+	return schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"}
 }
 
 // DefaultSnapshotPair returns the built-in Snapshot pair used
 // by graph registry defaults and generic runtime bootstrap.
 func DefaultSnapshotPair() UnifiedGVKPair {
 	return UnifiedGVKPair{
-		Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		Snapshot:        schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 		SnapshotContent: CommonSnapshotContentGVK(),
 	}
 }

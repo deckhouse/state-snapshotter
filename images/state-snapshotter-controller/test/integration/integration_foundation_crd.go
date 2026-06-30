@@ -36,7 +36,7 @@ import (
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-const volumeCaptureRequestCRDName = "volumecapturerequests.storage.deckhouse.io"
+const volumeCaptureRequestCRDName = "volumecapturerequests.storage-foundation.deckhouse.io"
 
 // integrationVolumeCaptureRequestAPIAvailable is true when envtest serves VolumeCaptureRequest
 // (from storage-foundation CRD dir and/or minimal fallback CRD installed in BeforeSuite).
@@ -80,7 +80,7 @@ func integrationMinimalVolumeCaptureRequestCRD() *apiextensionsv1.CustomResource
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: volumeCaptureRequestCRDName},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: "storage.deckhouse.io",
+			Group: "storage-foundation.deckhouse.io",
 			Scope: apiextensionsv1.NamespaceScoped,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Plural:     "volumecapturerequests",

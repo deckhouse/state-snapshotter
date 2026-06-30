@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package snapshotbinding contains shared helpers for binding a snapshot object
-// to the common storage.deckhouse.io SnapshotContent carrier.
+// to the common state-snapshotter.deckhouse.io SnapshotContent carrier.
 package snapshotbinding
 
 import (

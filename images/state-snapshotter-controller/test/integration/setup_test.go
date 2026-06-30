@@ -665,8 +665,8 @@ var _ = BeforeSuite(func() {
 		"registrationtestsnapshotcontents.test.deckhouse.io",
 		"namespacedtestsnapshotcontents.test.deckhouse.io",
 		"graphregistrytestsnapshots.test.deckhouse.io",
-		"snapshots.storage.deckhouse.io",
-		"snapshotcontents.storage.deckhouse.io",
+		"snapshots.state-snapshotter.deckhouse.io",
+		"snapshotcontents.state-snapshotter.deckhouse.io",
 		"volumesnapshots.snapshot.storage.k8s.io",
 	}
 	Eventually(func() bool {

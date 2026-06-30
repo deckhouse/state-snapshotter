@@ -66,15 +66,15 @@ PVC_A="pvc-a"
 PVC_B="pvc-b"
 BIND_IMAGE="${DEMO_E2E_BIND_IMAGE:-registry.k8s.io/pause:3.9}"
 
-SNAP_RES="snapshots.storage.deckhouse.io"
-CONTENT_RES="snapshotcontents.storage.deckhouse.io"
-VCR_RES="volumecapturerequests.storage.deckhouse.io"
+SNAP_RES="snapshots.state-snapshotter.deckhouse.io"
+CONTENT_RES="snapshotcontents.state-snapshotter.deckhouse.io"
+VCR_RES="volumecapturerequests.storage-foundation.deckhouse.io"
 VSC_RES="volumesnapshotcontents.snapshot.storage.k8s.io"
 CSI_VS_RES="volumesnapshots.snapshot.storage.k8s.io"
 MCR_RES="manifestcapturerequests.state-snapshotter.deckhouse.io"
 MCP_RES="manifestcheckpoints.state-snapshotter.deckhouse.io"
 OK_RES="objectkeepers.deckhouse.io"
-STORAGE_API="storage.deckhouse.io/v1alpha1"
+STORAGE_API="state-snapshotter.deckhouse.io/v1alpha1"
 STUB_ANN="state-snapshotter.deckhouse.io/volume-capture-stub-pvcs"
 SUBAPI="subresources.state-snapshotter.deckhouse.io"
 SUBVER="v1alpha1"
@@ -582,7 +582,7 @@ assert_vsc_owned_by_content() {
 	cuid="$(content_uid "$2")"
 	kubectl get "${VSC_RES}" "$1" -o json | jq -e --arg cn "$2" --arg cu "${cuid}" \
 		'[.metadata.ownerReferences[]?
-			| select(.apiVersion == "storage.deckhouse.io/v1alpha1" and .kind == "SnapshotContent"
+			| select(.apiVersion == "state-snapshotter.deckhouse.io/v1alpha1" and .kind == "SnapshotContent"
 				and .name == $cn and .uid == $cu)] | length >= 1' >/dev/null
 }
 
@@ -815,8 +815,8 @@ log "Artifacts: ${RUN_ARTIFACT_DIR}"
 # --- 00-preflight ---
 begin_stage "00-preflight"
 kubectl get storageclass "${STORAGE_CLASS}" >/dev/null
-kubectl get crd snapshots.storage.deckhouse.io snapshotcontents.storage.deckhouse.io >/dev/null
-kubectl get crd volumecapturerequests.storage.deckhouse.io >/dev/null
+kubectl get crd snapshots.state-snapshotter.deckhouse.io snapshotcontents.state-snapshotter.deckhouse.io >/dev/null
+kubectl get crd volumecapturerequests.storage-foundation.deckhouse.io >/dev/null
 kubectl get crd volumesnapshots.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io >/dev/null
 if kubectl get crd objectkeepers.deckhouse.io >/dev/null 2>&1; then
 	HAS_OBJECTKEEPER=1

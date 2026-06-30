@@ -42,7 +42,7 @@ func (c *countingLive) Current() *snapshot.GVKRegistry {
 func (c *countingLive) TryRefresh(context.Context) error {
 	atomic.AddInt32(&c.refreshCalls, 1)
 	r := snapshot.NewGVKRegistry()
-	gv := "storage.deckhouse.io/v1alpha1"
+	gv := "state-snapshotter.deckhouse.io/v1alpha1"
 	if err := r.RegisterSnapshotContentMapping("Snapshot", gv, "SnapshotContent", gv); err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func TestResolveChildSnapshotRefToBoundContentName_Snapshot(t *testing.T) {
 	scheme := rootCaptureTestScheme(t)
 	child := &unstructured.Unstructured{}
 	child.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot",
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot",
 	})
 	child.SetNamespace("ns1")
 	child.SetName("child1")

@@ -72,7 +72,7 @@ func TestImportUpload_ReconstructsMCPAndWritesChildRefs(t *testing.T) {
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
-	child := UploadChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
+	child := UploadChildRef{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
 	cpName, err := svc.Upload(ctx, storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"), "ns1", "snap", uploadPayload(t, child))
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
@@ -187,7 +187,7 @@ func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 			SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 				if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "Snapshot" {
 					return apierrors.NewConflict(
-						schema.GroupResource{Group: "storage.deckhouse.io", Resource: "snapshots"},
+						schema.GroupResource{Group: "state-snapshotter.deckhouse.io", Resource: "snapshots"},
 						u.GetName(), fmt.Errorf("status writer race"))
 				}
 				return c.SubResource(subResourceName).Update(ctx, obj, opts...)
@@ -201,7 +201,7 @@ func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 		t.Fatalf("leaf upload must succeed despite a status-write conflict: %v", err)
 	}
 
-	child := UploadChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
+	child := UploadChildRef{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
 	_, err := svc.Upload(ctx, gvk, "ns1", "snap", uploadPayload(t, child))
 	assertAggStatus(t, err, http.StatusConflict)
 }

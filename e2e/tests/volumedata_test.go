@@ -52,13 +52,13 @@ const (
 
 	// localCSIDriver is the sds-local-volume CSI driver; used to create a VolumeSnapshotClass when the
 	// module does not ship a default one. Confirmed against the plan; provisioned SC uses this driver.
-	localCSIDriver = "local.csi.storage.deckhouse.io"
+	localCSIDriver = "local.csi.state-snapshotter.deckhouse.io"
 
 	// annStorageClassVSC is the StorageClass annotation the capture path resolves the VolumeSnapshotClass
 	// through (PVC -> StorageClass -> annotation -> VolumeSnapshotClass), mirroring
 	// pkg/snapshot.AnnotationStorageClassVolumeSnapshotClass. The cluster default class is NOT consulted,
 	// so the provisioned SC MUST carry this annotation for the data leg to capture.
-	annStorageClassVSC = "storage.deckhouse.io/volumesnapshotclass"
+	annStorageClassVSC = "state-snapshotter.deckhouse.io/volumesnapshotclass"
 
 	vdMarkerFile = "marker"
 )
@@ -324,7 +324,7 @@ func createVolumeRestoreRequest(ctx context.Context, restoreNS, targetPVC, vsc, 
 		volumeMode = "Filesystem"
 	}
 	vrr := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "VolumeRestoreRequest",
 		"metadata": map[string]interface{}{
 			"name":      "restore-" + targetPVC,
@@ -375,7 +375,7 @@ func resolveLocalVolumeSnapshotClass(ctx context.Context) (string, error) {
 }
 
 // ensureStorageClassVolumeSnapshotClass guarantees the provisioned StorageClass carries the
-// storage.deckhouse.io/volumesnapshotclass annotation pointing at an existing, driver-matching
+// state-snapshotter.deckhouse.io/volumesnapshotclass annotation pointing at an existing, driver-matching
 // VolumeSnapshotClass. The capture path resolves the class exclusively through this annotation (never the
 // cluster default), so without it the data leg fails even though a default class exists.
 func ensureStorageClassVolumeSnapshotClass(ctx context.Context, scName string) error {

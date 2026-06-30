@@ -22,7 +22,7 @@ import (
 
 // GVK for storage-foundation VolumeCaptureRequest (no foundation/api Go dependency in controller).
 var VolumeCaptureRequestGVK = schema.GroupVersionKind{
-	Group:   "storage.deckhouse.io",
+	Group:   "storage-foundation.deckhouse.io",
 	Version: "v1alpha1",
 	Kind:    "VolumeCaptureRequest",
 }

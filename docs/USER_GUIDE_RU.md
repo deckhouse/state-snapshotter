@@ -7,13 +7,13 @@ weight: 20
 
 ## Что такое Snapshot?
 
-`Snapshot` (`storage.deckhouse.io/v1alpha1`, короткое имя `snap`) — это namespaced-ресурс, **снимок desired-state namespace на определённый момент времени**. Вы создаёте `Snapshot` в namespace, и модуль захватывает манифесты пользовательских объектов этого namespace в неизменяемый, надёжно сохранённый артефакт, который позже можно прочитать или восстановить в другой namespace.
+`Snapshot` (`state-snapshotter.deckhouse.io/v1alpha1`, короткое имя `snap`) — это namespaced-ресурс, **снимок desired-state namespace на определённый момент времени**. Вы создаёте `Snapshot` в namespace, и модуль захватывает манифесты пользовательских объектов этого namespace в неизменяемый, надёжно сохранённый артефакт, который позже можно прочитать или восстановить в другой namespace.
 
 `Snapshot` — **одноразовый и неизменяемый**: спека замораживается при создании, namespace захватывается ровно один раз, повторного захвата нет. Чтобы сделать новый снимок, создайте новый `Snapshot`.
 
 | Свойство | Значение |
 |----------|----------|
-| API-группа / версия | `storage.deckhouse.io/v1alpha1` |
+| API-группа / версия | `state-snapshotter.deckhouse.io/v1alpha1` |
 | Kind | `Snapshot` (короткое имя `snap`) |
 | Scope | Namespaced (захватывает свой namespace) |
 | Спека | Неизменяема после создания |
@@ -49,7 +49,7 @@ weight: 20
 | Control-plane noise | `Event`, `Endpoints`, `Lease`, `CiliumEndpoint`, `ConfigMap/kube-root-ca.crt`, `ServiceAccount/default`, service-account-token `Secret` | регенерируется контрол-плейном / CNI, не пользовательский desired-state |
 | Виртуальные / вычисляемые | `metrics.k8s.io` (`PodMetrics`/`NodeMetrics`), `custom`/`external.metrics.k8s.io` | не хранятся (нет verb `watch`), невосстановимы |
 | Снапшотная машинерия | CSI `VolumeSnapshot`, snapshot/content-виды, создаваемые самим модулем | self-referential |
-| Машинерия модуля | вся группа `state-snapshotter.deckhouse.io` и request/transfer-виды `storage.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`) | внутренние execution-объекты |
+| Машинерия модуля | вся группа `state-snapshotter.deckhouse.io` и request/transfer-виды `state-snapshotter.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`) | внутренние execution-объекты |
 
 > Специального правила «исключать объекты, управляемые Deckhouse» нет. Deckhouse-managed объекты отсекаются теми же общими сигналами (controller-owned, control-plane noise или машинерия модуля). Всё остальное в namespace — в том числе ресурсы, которые вы лишь *настроили* поверх модулей, — считается desired-state и попадает в снимок.
 
@@ -61,7 +61,7 @@ weight: 20
 
 ```yaml
 d8 k apply -f - <<EOF
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: my-namespace-snapshot

@@ -53,9 +53,9 @@ ALLOW_EXISTING_EMPTY=false
 FIX_PV_SC=true
 KEEP_TMP=false
 AGG="subresources.state-snapshotter.deckhouse.io/v1alpha1"
-SNAP_GROUP="storage.deckhouse.io"
-VRR_RES="volumerestorerequests.storage.deckhouse.io"
-SC_RES="snapshotcontents.storage.deckhouse.io"
+SNAP_GROUP="state-snapshotter.deckhouse.io"
+VRR_RES="volumerestorerequests.storage-foundation.deckhouse.io"
+SC_RES="snapshotcontents.state-snapshotter.deckhouse.io"
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo ">> $*" >&2; }
@@ -191,7 +191,7 @@ while IFS=$'\t' read -r pvc mfsc; do
   [ -n "$sc" ] || die "PVC '$pvc' has no storageClassName and no --storage-class fallback"
   info "creating VRR restore-$pvc (VSC=$vsc, sc=$sc)"
   cat <<EOF | kubectl apply -f - >&2
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: VolumeRestoreRequest
 metadata:
   name: restore-${pvc}

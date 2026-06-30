@@ -61,15 +61,15 @@ var _ = Describe("Integration: Controller Registration", func() {
 		snapshotGVKs := []schema.GroupVersionKind{
 			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"},
 			// In production (main.go), these would be:
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+			// {Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+			// {Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 			// {Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
 		}
 		snapshotContentGVKs := []schema.GroupVersionKind{
 			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshotContent"},
 			// In production (main.go), these would be:
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+			// {Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+			// {Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 			// {Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshotContent"},
 		}
 

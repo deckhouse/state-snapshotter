@@ -56,7 +56,8 @@ DemoVirtualDisk disk-standalone                                          PVC dem
 
 | Объект | Группа |
 |---|---|
-| `Snapshot`, `SnapshotContent`, `VolumeCaptureRequest`, `VolumeRestoreRequest` | `storage.deckhouse.io` |
+| `Snapshot`, `SnapshotContent` | `state-snapshotter.deckhouse.io` |
+| `VolumeCaptureRequest`, `VolumeRestoreRequest` | `storage-foundation.deckhouse.io` |
 | `ManifestCaptureRequest`, `ManifestCheckpoint`, `ManifestCheckpointContentChunk`, `CustomSnapshotDefinition` | `state-snapshotter.deckhouse.io` |
 | `DemoVirtual*` | `demo.state-snapshotter.deckhouse.io` |
 | `VolumeSnapshotContent` | `snapshot.storage.k8s.io` |

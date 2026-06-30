@@ -217,7 +217,7 @@ func createDataImport(ctx context.Context, ns, name, group, kind, leafName, stor
 		spec["volumeMode"] = volumeMode
 	}
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
 		"metadata": map[string]interface{}{
 			"name":      name,
@@ -319,7 +319,7 @@ func ensureUploadRBAC(ctx context.Context, importNS, clientSANamespace, clientSA
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: bkBackupClientSA, Namespace: importNS},
 		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{"storage.deckhouse.io"},
+			APIGroups: []string{"state-snapshotter.deckhouse.io"},
 			Resources: []string{"dataimports/download"},
 			Verbs:     []string{"create"},
 		}},
@@ -562,7 +562,7 @@ func materializeImportNode(ctx context.Context, ns string, node *importNode, par
 
 func materializeImportTree(ctx context.Context, ns, rootName string, rootUID types.UID, children []*importNode) error {
 	for _, child := range children {
-		parentRef := importNodeOwnerRef("storage.deckhouse.io/v1alpha1", "Snapshot", rootName, rootUID, child.kind == "VolumeSnapshot")
+		parentRef := importNodeOwnerRef("state-snapshotter.deckhouse.io/v1alpha1", "Snapshot", rootName, rootUID, child.kind == "VolumeSnapshot")
 		if err := materializeImportNode(ctx, ns, child, &parentRef); err != nil {
 			return err
 		}

@@ -87,7 +87,7 @@ func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 // createRootSnapshot creates the empty-spec root Snapshot (dynamic discovery of manifests + demo tree).
 func createRootSnapshot(ctx context.Context, ns, name string) error {
 	snap := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
 			"name":      name,

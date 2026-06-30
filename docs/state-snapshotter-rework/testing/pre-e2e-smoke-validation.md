@@ -113,12 +113,12 @@ kubectl get crd domainspecificsnapshotcontrollers.state-snapshotter.deckhouse.io
 - demo VM/Disk resources and snapshots.
 
 Dedicated SnapshotContent / Demo*SnapshotContent CRDs are not expected in the cluster.
-Only common `storage.deckhouse.io/SnapshotContent` is expected:
+Only common `state-snapshotter.deckhouse.io/SnapshotContent` is expected:
 
 ```shell
-kubectl get crd snapshotcontents.storage.deckhouse.io
+kubectl get crd snapshotcontents.state-snapshotter.deckhouse.io
 
-kubectl get crd snapshotcontents.storage.deckhouse.io 2>/dev/null && {
+kubectl get crd snapshotcontents.state-snapshotter.deckhouse.io 2>/dev/null && {
   echo "unexpected legacy SnapshotContent CRD exists" >&2
   exit 1
 } || true
@@ -457,10 +457,10 @@ EOF
 
 PVC/VCR в этот smoke не добавляйте.
 
-v0 common-content note: this smoke validates only `storage.deckhouse.io/SnapshotContent`
+v0 common-content note: this smoke validates only `state-snapshotter.deckhouse.io/SnapshotContent`
 as the active content resource. Dedicated `SnapshotContent` /
 `Demo*SnapshotContent` CRDs are not expected in the cluster. Only common
-`storage.deckhouse.io/SnapshotContent` is expected.
+`state-snapshotter.deckhouse.io/SnapshotContent` is expected.
 
 Для повторного прогона с теми же именами учитывайте Retain/ObjectKeeper модель: старые `SnapshotContent` и `ObjectKeeper` могут ещё существовать в `Expiring`. Execution ObjectKeepers for MCR are UID-aware: recreating an MCR with the same name creates a different `ret-mcr-*` ObjectKeeper, so stale request keepers should not block the new request. Это допустимо, если новый run сходится и в логах нет устойчивого error loop. Возможен transient reconcile error вида `ObjectKeeper ... already exists` для `ret-snap-nss-smoke-*`; фиксируйте его в отчёте, но не считайте блокером без повторяющейся деградации.
 
@@ -470,7 +470,7 @@ as the active content resource. Dedicated `SnapshotContent` /
 
 ```shell
 cat <<EOF | kubectl apply -f -
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: root-no-csd
@@ -598,7 +598,7 @@ mark_csd_source_access_granted smoke-demo-disk-only
 
 ```shell
 cat <<EOF | kubectl apply -f -
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: root-disk-only
@@ -713,7 +713,7 @@ This step also validates CSD dynamic watch activation for the full demo graph: a
 
 ```shell
 cat <<EOF | kubectl apply -f -
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: root-full

@@ -339,8 +339,8 @@ func TestGVKRegistry_MultipleRegistrations(t *testing.T) {
 			Version: "v1alpha1",
 			Kind:    "VirtualMachineSnapshot",
 		}},
-		{"VolumeSnapshot", "storage.deckhouse.io/v1alpha1", schema.GroupVersionKind{
-			Group:   "storage.deckhouse.io",
+		{"VolumeSnapshot", "state-snapshotter.deckhouse.io/v1alpha1", schema.GroupVersionKind{
+			Group:   "state-snapshotter.deckhouse.io",
 			Version: "v1alpha1",
 			Kind:    "VolumeSnapshot",
 		}},
@@ -408,7 +408,7 @@ func TestResolveSnapshotKindByContentGVK_FallbackRequiresRegisteredSnapshot(t *t
 	registry := NewGVKRegistry()
 
 	contentGVK := schema.GroupVersionKind{
-		Group:   "storage.deckhouse.io",
+		Group:   "state-snapshotter.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    "GhostSnapshotContent",
 	}
@@ -428,7 +428,7 @@ func TestResolveSnapshotKindByContentGVK_FallbackGroupMismatch(t *testing.T) {
 	}
 
 	contentGVK := schema.GroupVersionKind{
-		Group:   "storage.deckhouse.io",
+		Group:   "state-snapshotter.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    "GhostSnapshotContent",
 	}
@@ -443,7 +443,7 @@ func TestResolveSnapshotKindByContentGVK_NoContentSuffix(t *testing.T) {
 	registry := NewGVKRegistry()
 
 	contentGVK := schema.GroupVersionKind{
-		Group:   "storage.deckhouse.io",
+		Group:   "state-snapshotter.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    "CustomArchive",
 	}

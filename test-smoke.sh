@@ -19,11 +19,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configuration (updated for storage.deckhouse.io cluster)
+# Configuration (updated for state-snapshotter.deckhouse.io cluster)
 NAMESPACE="${1:-default}"
 SNAPSHOT_KIND="${2:-Snapshot}"
 SNAPSHOT_NAME="test-smoke-$(date +%s)"
-SNAPSHOT_API_GROUP="storage.deckhouse.io"
+SNAPSHOT_API_GROUP="state-snapshotter.deckhouse.io"
 SNAPSHOT_API_VERSION="v1alpha1"
 CONTENT_KIND="${SNAPSHOT_KIND}Content"
 CONTROLLER_NAMESPACE="d8-state-snapshotter"
@@ -333,7 +333,7 @@ EOF
     # Alternative: using short name
     # kubectl create $SNAPSHOT_SHORT $SNAPSHOT_NAME -n $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
     
-    # Check using full resource name (e.g., snapshots.storage.deckhouse.io)
+    # Check using full resource name (e.g., snapshots.state-snapshotter.deckhouse.io)
     local snapshot_resource="${SNAPSHOT_KIND,,}s.${SNAPSHOT_API_GROUP}"
     if check_resource_exists "$snapshot_resource" $SNAPSHOT_NAME $NAMESPACE; then
         log_success "Snapshot created"

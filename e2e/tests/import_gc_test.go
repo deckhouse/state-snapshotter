@@ -39,7 +39,7 @@ const importRootSnapshotName = "import-root"
 // holds it pending until the per-node manifests are uploaded, then materializes its SnapshotContent.
 func createImportRootSnapshot(ctx context.Context, ns, name string) error {
 	snap := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
 			"name":      name,

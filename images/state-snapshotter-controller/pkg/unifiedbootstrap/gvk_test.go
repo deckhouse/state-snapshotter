@@ -32,7 +32,7 @@ func assertEqualSliceLens(t *testing.T, snaps, contents []schema.GroupVersionKin
 }
 
 func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testing.T) {
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}
@@ -59,10 +59,10 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 }
 
 func TestResolveAvailableUnifiedGVKPairs_emptyWhenNothingMaps(t *testing.T) {
-	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "storage.deckhouse.io", Version: "v1alpha1"}})
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}})
 	pair := UnifiedGVKPair{
-		Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		Snapshot:        schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		SnapshotContent: schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 	}
 	snaps, contents := ResolveAvailableUnifiedGVKPairs(mapper, []UnifiedGVKPair{pair}, logr.Discard())
 	assertEqualSliceLens(t, snaps, contents)
@@ -72,7 +72,7 @@ func TestResolveAvailableUnifiedGVKPairs_emptyWhenNothingMaps(t *testing.T) {
 }
 
 func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T) {
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}
@@ -93,7 +93,7 @@ func TestFilterGenericSnapshotGVKPairs_skipsDedicatedKinds(t *testing.T) {
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 		genericSnap,
 	}
 	commonContent := CommonSnapshotContentGVK()
@@ -113,12 +113,12 @@ func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing
 	// Root Snapshot is dedicated (SnapshotReconciler), so its content side must be
 	// dropped; only the non-dedicated kind's content survives.
 	snapGVKs := []schema.GroupVersionKind{
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
 	}
 	contentGVKs := []schema.GroupVersionKind{
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 	}
 	out := FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
 	if len(out) != 1 || out[0].Kind != "SnapshotContent" {
@@ -167,7 +167,7 @@ func TestDefaultUnifiedRuntimeBootstrapPairs_remainsSeparateFromGraphBuiltIns(t 
 }
 
 func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotContentMaps(t *testing.T) {
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}

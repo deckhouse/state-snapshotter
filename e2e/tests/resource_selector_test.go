@@ -112,7 +112,7 @@ func createRootSnapshotWithSelector(ctx context.Context, ns, name string, matchL
 		selector["matchExpressions"] = matchExpressions
 	}
 	snap := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
 			"name":      name,

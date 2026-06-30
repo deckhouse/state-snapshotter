@@ -170,7 +170,7 @@ func TestDemoVirtualDiskRestoreVRRHasNoSize(t *testing.T) {
 	}
 
 	vrr := &unstructured.Unstructured{}
-	vrr.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: vrrKind})
+	vrr.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: vrrKind})
 	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: matNS, Name: demoDiskVRRName(disk.UID)}, vrr); err != nil {
 		t.Fatalf("get vrr: %v", err)
 	}

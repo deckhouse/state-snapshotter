@@ -120,10 +120,10 @@ var demoGroupVersion = demov1alpha1.SchemeGroupVersion.String()
 // GVRs used across the suite (all CRD access goes through the dynamic client).
 var (
 	snapshotGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshots",
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots",
 	}
 	snapshotContentGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents",
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents",
 	}
 	demoVMGVR = schema.GroupVersionResource{
 		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines",
@@ -158,13 +158,13 @@ var (
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots",
 	}
 	volumeRestoreRequestGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests",
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests",
 	}
 	dataExportGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataexports",
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataexports",
 	}
 	dataImportGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataimports",
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataimports",
 	}
 )
 

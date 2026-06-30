@@ -34,7 +34,7 @@ import (
 // List them cross-service exactly as the controller does at runtime (no Go-module dependency on SVDM).
 func lookupScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
-	diGVK := schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"}
+	diGVK := schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"}
 	scheme.AddKnownTypeWithName(diGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: diGVK.Group, Version: diGVK.Version, Kind: "DataImportList"}, &unstructured.UnstructuredList{})
 	return scheme
@@ -43,7 +43,7 @@ func lookupScheme() *runtime.Scheme {
 // dataImportTargeting builds a DataImport whose spec.targetRef points at a leaf by GroupKind+name.
 func dataImportTargeting(name, namespace, group, kind, targetName string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
 		"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
 		"spec": map[string]interface{}{
@@ -60,7 +60,7 @@ func dataImportTargeting(name, namespace, group, kind, targetName string) *unstr
 // (plural) is set and spec.targetRef.kind is absent. The kind-based matcher must ignore it.
 func dataImportLegacyResourceTargeting(name, namespace, group, resource, targetName string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
 		"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
 		"spec": map[string]interface{}{

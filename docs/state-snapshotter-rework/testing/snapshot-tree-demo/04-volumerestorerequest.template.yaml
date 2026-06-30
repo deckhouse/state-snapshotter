@@ -5,7 +5,7 @@
 #   export VSC_NAME=<vsc-from-dataRefs>
 #   export STORAGE_CLASS=local-thin
 #   envsubst < 04-volumerestorerequest.template.yaml | kubectl apply -f -
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: storage-foundation.deckhouse.io/v1alpha1
 kind: VolumeRestoreRequest
 metadata:
   name: restore-demo

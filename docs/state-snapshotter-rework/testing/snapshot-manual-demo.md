@@ -31,7 +31,7 @@ kubectl -n default create configmap demo-ns-snapshot-cm --from-literal=demo=snap
 
 ```bash
 kubectl apply -f - <<'EOF'
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: demo-ns-snap
@@ -49,12 +49,12 @@ EOF
 ```bash
 deadline=$((SECONDS + 600))
 while (( SECONDS < deadline )); do
-  kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o json 2>/dev/null | jq -e \
+  kubectl -n default get snapshots.state-snapshotter.deckhouse.io demo-ns-snap -o json 2>/dev/null | jq -e \
     '.status.boundSnapshotContentName != null and (.status.boundSnapshotContentName | length > 0) and
      (.status.conditions // [] | map(select(.type == "Ready")) | .[0].status == "True")' >/dev/null 2>&1 && break
   sleep 3
 done
-kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o wide
+kubectl -n default get snapshots.state-snapshotter.deckhouse.io demo-ns-snap -o wide
 ```
 
 Если зависло — `kubectl describe` на снимок и логи контроллера в `d8-state-snapshotter`.
@@ -64,10 +64,10 @@ kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o wide
 ## Шаг 4 — выписать имена (один блок, потом все команды ниже без правок)
 
 ```bash
-export BOUND=$(kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.status.boundSnapshotContentName}')
-export MCP=$(kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}')
+export BOUND=$(kubectl -n default get snapshots.state-snapshotter.deckhouse.io demo-ns-snap -o jsonpath='{.status.boundSnapshotContentName}')
+export MCP=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "${BOUND}" -o jsonpath='{.status.manifestCheckpointName}')
 export OK_NAME=ret-snap-default-demo-ns-snap
-export SNAP_UID=$(kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o jsonpath='{.metadata.uid}')
+export SNAP_UID=$(kubectl -n default get snapshots.state-snapshotter.deckhouse.io demo-ns-snap -o jsonpath='{.metadata.uid}')
 export MCR_NAME="snap-${SNAP_UID}"
 echo "BOUND=${BOUND}  MCP=${MCP}  OK=${OK_NAME}  MCR(ожидаемо нет)=${MCR_NAME}"
 ```
@@ -79,14 +79,14 @@ echo "BOUND=${BOUND}  MCP=${MCP}  OK=${OK_NAME}  MCR(ожидаемо нет)=${
 **5a. Корень**
 
 ```bash
-kubectl -n default get snapshots.storage.deckhouse.io demo-ns-snap -o yaml
+kubectl -n default get snapshots.state-snapshotter.deckhouse.io demo-ns-snap -o yaml
 ```
 
 **5b. Cluster content + кто владелец (SnapshotContent → OK)**
 
 ```bash
-kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
-kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o jsonpath='{.metadata.ownerReferences}' | jq .
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "${BOUND}" -o wide
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "${BOUND}" -o jsonpath='{.metadata.ownerReferences}' | jq .
 ```
 
 **5c. ObjectKeeper (follow на Snapshot, TTL)**
@@ -140,8 +140,8 @@ kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/na
 Снимок из API уходит; **SnapshotContent** и **MCP** остаются; aggregated по **тому же URL** обычно ещё отвечает.
 
 ```bash
-kubectl -n default delete snapshots.storage.deckhouse.io demo-ns-snap --wait=true
-kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" -o wide
+kubectl -n default delete snapshots.state-snapshotter.deckhouse.io demo-ns-snap --wait=true
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "${BOUND}" -o wide
 kubectl get --raw "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/default/snapshots/demo-ns-snap/manifests" | jq 'length'
 ```
 
@@ -162,7 +162,7 @@ kubectl get objectkeepers.deckhouse.io "${OK_NAME}" -o jsonpath='{.spec.ttl}{"\n
 ```bash
 sleep 90
 kubectl get objectkeepers.deckhouse.io "${OK_NAME}" 2>&1 || echo "OK удалён"
-kubectl get snapshotcontents.storage.deckhouse.io "${BOUND}" 2>&1 || echo "SnapshotContent удалён"
+kubectl get snapshotcontents.state-snapshotter.deckhouse.io "${BOUND}" 2>&1 || echo "SnapshotContent удалён"
 kubectl get manifestcheckpoints.state-snapshotter.deckhouse.io "${MCP}" 2>&1 || echo "MCP удалён"
 ```
 
@@ -190,8 +190,8 @@ kubectl -n default delete configmap demo-ns-snapshot-cm --ignore-not-found
 
 | Ресурс | `kubectl` group |
 |--------|-----------------|
-| Snapshot | `snapshots.storage.deckhouse.io` |
-| SnapshotContent | `snapshotcontents.storage.deckhouse.io` |
+| Snapshot | `snapshots.state-snapshotter.deckhouse.io` |
+| SnapshotContent | `snapshotcontents.state-snapshotter.deckhouse.io` |
 | ObjectKeeper | `objectkeepers.deckhouse.io` |
 | ManifestCheckpoint | `manifestcheckpoints.state-snapshotter.deckhouse.io` |
 | ManifestCaptureRequest | `manifestcapturerequests.state-snapshotter.deckhouse.io` |

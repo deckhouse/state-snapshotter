@@ -6,7 +6,7 @@
 
 ## CustomSnapshotDefinition (CSD)
 
-**Назначение:** модуль (через свой hook/оператор) создаёт кластерный объект CSD и указывает **маппинг GVK**: какой source resource обслуживает какой `*Snapshot` тип. CSD mapping использует только `source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind` и `priority`; content side всегда общий cluster-scoped `storage.deckhouse.io/SnapshotContent`.
+**Назначение:** модуль (через свой hook/оператор) создаёт кластерный объект CSD и указывает **маппинг GVK**: какой source resource обслуживает какой `*Snapshot` тип. CSD mapping использует только `source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind` и `priority`; content side всегда общий cluster-scoped `state-snapshotter.deckhouse.io/SnapshotContent`.
 
 **Что делает reconciler state-snapshotter**
 

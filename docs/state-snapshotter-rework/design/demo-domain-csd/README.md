@@ -16,7 +16,7 @@ This package explains the current work around:
 
 Content model migration note: the current runtime still uses dedicated `SnapshotContent`,
 `SnapshotContent`, and `SnapshotContent` objects. The target model
-is a single common cluster-scoped `storage.deckhouse.io/SnapshotContent` owned by the state-snapshotter
+is a single common cluster-scoped `state-snapshotter.deckhouse.io/SnapshotContent` owned by the state-snapshotter
 common layer. v0 prepares API/adapters only; it does not change the smoke/runtime expectations.
 
 Some documents in this directory are historical design notes. Treat them as context for implementation, not as the source of implementable contract when they disagree with `spec/`.
@@ -57,7 +57,7 @@ Reference для **heterogeneous** доменного дерева под **те
 
 **Reference controller contract (current runtime):** a demo domain snapshot controller owns validation of `sourceRef`, creation of its own common `SnapshotContent`, creation of an MCR for its own source object, publication of request names / `PlanningReady`, and mirroring bound content `Ready`. A domain parent controller also owns child snapshot creation for nested resources, child ownerRefs, and its own `childrenSnapshotRefs`. It does **not** own root/parent refs, `AccessGranted`, RBAC creation, parent content status, or content-level Ready aggregation. Invalid user spec is reported as `Ready=False` and must not create content, MCR, or child snapshots.
 
-**Content ownership:** domain controllers own `XxxSnapshot` behavior, `sourceRef` validation, child snapshot refs, and request lifecycle. The common state-snapshotter layer owns common `SnapshotContent`, ObjectKeeper/Retain, MCP refs, child content refs, and content-tree aggregation. CSD mapping uses explicit `source` / `snapshot` GVK refs plus `priority`; content GVK is fixed to `storage.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
+**Content ownership:** domain controllers own `XxxSnapshot` behavior, `sourceRef` validation, child snapshot refs, and request lifecycle. The common state-snapshotter layer owns common `SnapshotContent`, ObjectKeeper/Retain, MCP refs, child content refs, and content-tree aggregation. CSD mapping uses explicit `source` / `snapshot` GVK refs plus `priority`; content GVK is fixed to `state-snapshotter.deckhouse.io/v1alpha1, Kind=SnapshotContent`.
 
 **Reference RBAC model:** demo/domain controllers intentionally omit kubebuilder RBAC markers. Required permissions are documented as contract and granted externally by the Deckhouse RBAC controller/hook before CSD `AccessGranted=True`; they are not generated from controller code comments.
 

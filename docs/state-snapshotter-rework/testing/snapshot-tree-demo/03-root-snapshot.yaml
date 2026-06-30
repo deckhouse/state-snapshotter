@@ -2,7 +2,7 @@
 # spec is intentionally empty: the controller discovers allowlisted manifests,
 # residual PVCs (data leg), and demo-domain inventory (child tree via CSD)
 # automatically. Create ONLY after demo-pvc is Bound and CSD is eligible.
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: demo-tree

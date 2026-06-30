@@ -609,7 +609,7 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 
 func createDataExport(ctx context.Context, ns string, target dataExportTarget) error {
 	de := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "DataExport",
 		"metadata": map[string]interface{}{
 			"name":      target.exportName,
@@ -674,7 +674,7 @@ func ensureBackupClientRBAC(ctx context.Context, ns string) error {
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: bkBackupClientSA, Namespace: ns},
 		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{"storage.deckhouse.io"},
+			APIGroups: []string{"state-snapshotter.deckhouse.io"},
 			Resources: []string{"dataexports/download"},
 			Verbs:     []string{"create"},
 		}},
