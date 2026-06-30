@@ -54,9 +54,6 @@ type SnapshotList struct {
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.source) == has(oldSelf.source)",message="spec.source cannot be added or removed after creation"
 type SnapshotSpec struct {
-	// SnapshotClassName optionally selects class/policy (aligned with unified snapshot model; resolution is N2+).
-	SnapshotClassName string `json:"snapshotClassName,omitempty"`
-
 	// Source optionally selects how this Snapshot obtains its content instead of dynamic capture.
 	// When omitted, the controller performs dynamic namespace capture (default behaviour).
 	// When set, exactly one member selects the mode (CEL one-of) and the whole source is immutable:

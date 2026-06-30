@@ -118,10 +118,6 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-              snapshotClassName:
-                description: SnapshotClassName optionally selects class/policy (aligned
-                  with unified snapshot model; resolution is N2+).
-                type: string
               source:
                 description: |-
                   Source optionally selects how this Snapshot obtains its content instead of dynamic capture.

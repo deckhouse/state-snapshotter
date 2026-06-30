@@ -449,11 +449,11 @@ func specImmutabilitySpecs() {
 
 			Expect(createRootSnapshot(ctx, ns, "e6-snap")).To(Succeed())
 
-			By("Attempting to mutate spec.snapshotClassName -> rejected by the CEL immutability rule")
+			By("Attempting to mutate spec.resourceSelector -> rejected by the CEL immutability rule")
 			Eventually(func(g Gomega) {
 				cur, err := getResource(ctx, snapshotGVR, ns, "e6-snap")
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(unstructured.SetNestedField(cur.Object, "some-class", "spec", "snapshotClassName")).To(Succeed())
+				g.Expect(unstructured.SetNestedStringMap(cur.Object, map[string]string{"app": "mutated"}, "spec", "resourceSelector", "matchLabels")).To(Succeed())
 				_, updErr := suiteDyn.Resource(snapshotGVR).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{})
 				g.Expect(updErr).To(HaveOccurred(), "spec update must be rejected (immutable)")
 			}).WithTimeout(30 * time.Second).WithPolling(3 * time.Second).Should(Succeed())

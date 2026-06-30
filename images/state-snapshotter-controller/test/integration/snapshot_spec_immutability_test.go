@@ -44,8 +44,8 @@ var _ = Describe("Integration: Snapshot spec immutability", func() {
 		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: ns},
 			Spec: storagev1alpha1.SnapshotSpec{
-				SnapshotClassName: "class-a",
-				Source:            &storagev1alpha1.SnapshotSource{SnapshotContentName: "no-such-content-" + ns},
+				ResourceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "a"}},
+				Source:           &storagev1alpha1.SnapshotSource{SnapshotContentName: "no-such-content-" + ns},
 			},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
@@ -57,11 +57,11 @@ var _ = Describe("Integration: Snapshot spec immutability", func() {
 		snap.Status.ManifestCaptureRequestName = "mcr-immutable"
 		Expect(k8sClient.Status().Update(ctx, snap)).To(Succeed())
 
-		By("rejecting a scalar spec field change (snapshotClassName)")
+		By("rejecting a scalar spec field change (resourceSelector)")
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: snapName}, snap)).To(Succeed())
-		classPatch := snap.DeepCopy()
-		classPatch.Spec.SnapshotClassName = "class-b"
-		Expect(k8sClient.Update(ctx, classPatch)).NotTo(Succeed())
+		selectorPatch := snap.DeepCopy()
+		selectorPatch.Spec.ResourceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "b"}}
+		Expect(k8sClient.Update(ctx, selectorPatch)).NotTo(Succeed())
 
 		By("rejecting a spec.source change")
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: snapName}, snap)).To(Succeed())

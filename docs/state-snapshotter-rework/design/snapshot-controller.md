@@ -51,7 +51,6 @@
 **Spec (логически):**
 
 - Источник namespace для capture: resolved target namespace; сейчас это `metadata.namespace` root (расширение через отдельное поле — позже, если понадобится продуктово).
-- Класс/политика: `snapshotClassName` / `className` (как в продуктовой модели unified snapshots).
 - Опционально: include/exclude групп ресурсов (MVP — минимальный набор или фиксированный профиль).
 - Опционально позже: `capturePolicy` (см. §9); в MVP допустимо заложить поле, но **выставить только fail-closed**.
 
