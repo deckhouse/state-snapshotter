@@ -17,6 +17,24 @@
 >   plumbing; L5 and L7 are load-only and L5's 500ms self-requeue is a deliberate drop-safe
 >   archive-wave driver — both are best validated against the reconcile-count harness once a baseline
 >   exists, to avoid muddying the L1/L2 latency attribution.
+> - **L8 — done:** MCR controller now watches `ManifestCheckpoint` via
+>   `spec.manifestCaptureRequestRef` (`mapManifestCheckpointToMCR`), removing the 500ms poll gap in
+>   `finalizeMCRIfCheckpointHandedOff` while it waits for the SnapshotContent ownerRef handoff. See
+>   "L8 — Manifest-leg checkpoint watch" below. Needs redeploy to re-measure on cluster.
+>
+> **Cluster measurement update (post-L1/L2, ms timeline via `kubectl logs --timestamps`):**
+> - The original "45–60s" premise was **not reproducible** on the current cluster. Real numbers:
+>   single **manifest-only** leaf ≈ **2s**, single **PVC-backed** leaf ≈ **3.5s**, full **VM tree**
+>   (VM owning a PVC disk + child manifests) ≈ **10–17s**.
+> - CSI is **not** the bottleneck here: `VSC created → readyToUse` was ≈0s. After L1 the 5s VCR poll
+>   gap is gone; the remaining leaf time is genuine event-driven cross-pod work + redundant re-mirror
+>   passes (load, not latency).
+> - **Tree latency root cause = the manifest leg**, not data/mirror: `ManifestsArchived` took ~5–6s on
+>   the critical path. The MCR controller created the `ManifestCheckpoint` with `Ready=True`
+>   synchronously but then **polled at 500ms** waiting for SnapshotContent to adopt it (ownerRef
+>   handoff), and `snapshotcontent` polls at its own 500ms self-requeue to adopt/aggregate — a
+>   two-controller 500ms handshake that multiplies with tree depth/manifest count. L8 removes the MCR
+>   side of that handshake; the `snapshotcontent` adoption-poll side remains (harder, deferred).
 
 ## Goal
 
@@ -266,6 +284,38 @@ regression in envtest; `reconcile_count_*` harness confirms the read moved to th
 path; ~0 latency by itself but meaningful steady-state load reduction and decoupling.
 
 **Cluster:** local envtest sufficient.
+
+---
+
+### L8 — Manifest-leg checkpoint watch  *(main tree fix — done)*
+
+**Why:** for the **tree** scheme, the dominant cost is the manifest leg reaching `ManifestsArchived`
+(~5–6s on the critical path), not the data leg or the Ready mirror (those were the leaf-only costs
+L1 addressed). The `ManifestCheckpointController` watched only `For(&ManifestCaptureRequest{})` and
+**not** the `ManifestCheckpoint` it manages, so `finalizeMCRIfCheckpointHandedOff` polled at a fixed
+`RequeueAfter: 500ms` while waiting for `SnapshotContent` to adopt the checkpoint (ownerRef handoff).
+That 500ms gap multiplies with manifest count / tree depth.
+
+**Change:** add a reverse watch on `ManifestCheckpoint` keyed by `spec.manifestCaptureRequestRef`
+(`mapManifestCheckpointToMCR`) in `SetupWithManager`. The checkpoint is controller-owned by the
+execution `ObjectKeeper` (not the MCR), so `Owns()` cannot route it — the spec back-reference is the
+stable link. The handler only enqueues; the reconcile recomputes from truth refs, so a stale ref
+simply yields no enqueue and the 500ms self-requeue still converges (safety net retained). This is the
+exact L1 pattern applied to the manifest leg.
+
+**Acceptance:** MCR finalizes within one watch hop of the SnapshotContent ownerRef handoff instead of
+up to 500ms later; tree `ManifestsArchived` wall-clock drops proportionally to manifest count.
+
+**Tests:** `TestMapManifestCheckpointToMCR` (valid back-ref enqueues; nil/missing-name/missing-ns/wrong
+type yield no enqueue). Cluster re-measure of the VM tree after redeploy.
+
+**Cluster:** local unit sufficient for the mapper; **YES** for the latency re-measure.
+
+**Open follow-up (deferred):** the symmetric 500ms gap is on the `snapshotcontent` side — it adopts
+the checkpoint and aggregates `ManifestsReady/Archived` off its own 500ms self-requeue because the MCP
+is `ObjectKeeper`-owned (not content-owned) until adoption, so the existing artifact wake-up watch
+does not fire pre-adoption. Making that event-driven is riskier (touches the adoption/aggregation
+path) and is tracked separately, to be validated against the reconcile-count harness.
 
 ---
 

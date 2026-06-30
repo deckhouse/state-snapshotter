@@ -43,7 +43,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -1299,6 +1301,23 @@ func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.Man
 	mcr.Annotations[controllercommon.AnnotationKeyTTL] = ttlStr
 }
 
+// mapManifestCheckpointToMCR routes a ManifestCheckpoint event back to the owning ManifestCaptureRequest
+// via spec.manifestCaptureRequestRef. This makes the MCR controller event-driven on the checkpoint's
+// Ready flip and on the SnapshotContent ownerRef handoff, removing the 500ms poll gap in
+// finalizeMCRIfCheckpointHandedOff. The handler only enqueues a request; the reconcile recomputes state
+// from truth refs, so a stale/garbled ref simply yields no enqueue (the self-requeue still converges).
+func mapManifestCheckpointToMCR(_ context.Context, obj client.Object) []reconcile.Request {
+	checkpoint, ok := obj.(*storagev1alpha1.ManifestCheckpoint)
+	if !ok {
+		return nil
+	}
+	ref := checkpoint.Spec.ManifestCaptureRequestRef
+	if ref == nil || ref.Name == "" || ref.Namespace == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}}}
+}
+
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {
 	// Runtime assertion: ensure required dependencies are set (fail-fast on incorrect wiring)
 	if r.APIReader == nil {
@@ -1312,6 +1331,11 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).
+		// Wake the MCR on its ManifestCheckpoint's events (Ready flip and the SnapshotContent ownerRef
+		// handoff) instead of polling at the 500ms self-requeue in finalizeMCRIfCheckpointHandedOff. The
+		// checkpoint is controller-owned by the execution ObjectKeeper, not the MCR, so Owns() cannot route
+		// it; the stable link is checkpoint.spec.manifestCaptureRequestRef (mapManifestCheckpointToMCR).
+		Watches(&storagev1alpha1.ManifestCheckpoint{}, handler.EnqueueRequestsFromMapFunc(mapManifestCheckpointToMCR)).
 		WithOptions(controller.Options{
 			// Bound the per-item retry backoff so transient chunk-creation requeues (apiserver/network
 			// blips) re-run quickly instead of backing off to the controller-runtime default (~16min),
