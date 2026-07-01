@@ -93,6 +93,11 @@ type SnapshotContentController struct {
 
 const defaultSnapshotContentRequeueAfter = 500 * time.Millisecond
 
+// indexKeyManifestCheckpointName is the cache field-index key on SnapshotContent.status.manifestCheckpointName.
+// It backs the pre-adoption reverse-lookup path of mapManifestCheckpointToContent (L9a): before the MCP is
+// adopted (ownerRef handoff), the only stable MCP→content link is this deterministic 1:1 name.
+const indexKeyManifestCheckpointName = ".status.manifestCheckpointName"
+
 // snapshotContentControllerOptions tunes every controller instance that drives this reconciler (the
 // per-GVK content controllers and the Snapshot-status wake-up controllers all share r). With the default
 // MaxConcurrentReconciles=1 a single worker per instance starved individual content nodes during the
@@ -265,6 +270,17 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
 			logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
 			if err := r.Update(ctx, obj); err != nil {
+				// L9c: a 409 here is benign. The same SnapshotContent is reconciled by multiple
+				// controller instances that share this Reconciler (the For-content controller and the
+				// per-snapshot status-watch controllers), so two workers can race on this finalizer
+				// Update. Surfacing the conflict as a Reconciler error backs the item off on the
+				// rate limiter (200ms→10s) for nothing; instead requeue and re-read. AddFinalizer is
+				// idempotent, so whichever writer lands first wins and the next pass is a no-op.
+				if errors.IsConflict(err) {
+					logger.V(1).Info("Finalizer add conflicted with a concurrent update; requeueing (benign)",
+						"finalizer", snapshot.FinalizerParentProtect)
+					return ctrl.Result{Requeue: true}, nil
+				}
 				logger.Error(err, "Failed to add finalizer")
 				return ctrl.Result{}, err
 			}
@@ -1549,6 +1565,12 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(gvk)
+		// L9a: index this content GVK by status.manifestCheckpointName so the ManifestCheckpoint
+		// wake-up can reverse-resolve the owning content before adoption (pre-ownerRef). Registered
+		// once per GVK (the activeContentWatchSet guard above makes this body run once).
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyManifestCheckpointName, extractManifestCheckpointNameIndex); err != nil {
+			return fmt.Errorf("failed to register manifestCheckpointName index for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			WithOptions(snapshotContentControllerOptions()).
@@ -1581,7 +1603,13 @@ func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder)
 		}
 		artifactObj := &unstructured.Unstructured{}
 		artifactObj.SetGroupVersionKind(gvk)
-		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapArtifactToOwningSnapshotContent))
+		// ManifestCheckpoint uses the dual-path resolver (ownerRef + pre-adoption name reverse-lookup,
+		// L9a); other artifacts (VolumeSnapshotContent) keep the ownerRef-only resolver.
+		mapper := mapArtifactToOwningSnapshotContent
+		if gvk.Kind == "ManifestCheckpoint" {
+			mapper = r.mapManifestCheckpointToContent
+		}
+		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapper))
 	}
 	return b
 }
@@ -1641,6 +1669,18 @@ func artifactWakeUpGVKs() []schema.GroupVersionKind {
 	}
 }
 
+// ownerRefToContentRequests returns the enqueue request for the SnapshotContent that controller-owns the
+// artifact via ownerRef, or nil if the artifact carries no SnapshotContent ownerRef yet. Read-only; never
+// writes. Tombstone/last-known objects on delete still carry ownerRefs, so routing works.
+func ownerRefToContentRequests(obj client.Object) []reconcile.Request {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
+		}
+	}
+	return nil
+}
+
 // mapArtifactToOwningSnapshotContent routes a durable-artifact event (ManifestCheckpoint /
 // VolumeSnapshotContent) to its owning SnapshotContent by ownerRef only. It NEVER writes conditions or
 // patches status — it only enqueues a reconcile.Request. If the ownerRef chain is missing or broken it
@@ -1650,10 +1690,8 @@ func mapArtifactToOwningSnapshotContent(ctx context.Context, obj client.Object) 
 	if obj == nil {
 		return nil
 	}
-	for _, ref := range obj.GetOwnerReferences() {
-		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
-		}
+	if reqs := ownerRefToContentRequests(obj); reqs != nil {
+		return reqs
 	}
 	log.FromContext(ctx).V(1).Info(
 		"artifact event has no owning SnapshotContent ownerRef; dropping (revalidation backstops on next reconcile)",
@@ -1661,4 +1699,82 @@ func mapArtifactToOwningSnapshotContent(ctx context.Context, obj client.Object) 
 		"artifact", obj.GetName(),
 	)
 	return nil
+}
+
+// mapManifestCheckpointToContent is the dual-path artifact resolver for ManifestCheckpoint wake-up. It
+// only enqueues reconciles; it NEVER changes ownership or state.
+//
+//	path 1 (ownerRef): once a SnapshotContent has adopted the MCP (handoff added the SnapshotContent
+//	  ownerRef), route by that ownerRef — same as every other artifact.
+//	path 2 (pre-adoption reverse lookup): before adoption the MCP is controller-owned by the execution
+//	  ObjectKeeper, so path 1 finds nothing. Resolve the owning content by the deterministic 1:1 link
+//	  content.status.manifestCheckpointName == mcp.Name (field index indexKeyManifestCheckpointName).
+//
+// This breaks the wake-up⇄adoption cycle that previously forced the content to discover a Ready MCP only
+// on its 500ms self-requeue. Safety: a stale/missing index entry can only mis-time a wake-up (spurious
+// enqueue → idempotent no-op reconcile, or missed enqueue → the 500ms self-requeue still backstops); it
+// can never produce a wrong owner because adoption logic is untouched.
+func (r *SnapshotContentController) mapManifestCheckpointToContent(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil {
+		return nil
+	}
+	if reqs := ownerRefToContentRequests(obj); reqs != nil {
+		return reqs
+	}
+	if reqs := r.lookupContentsByManifestCheckpointName(ctx, obj.GetName()); len(reqs) > 0 {
+		return reqs
+	}
+	log.FromContext(ctx).V(1).Info(
+		"ManifestCheckpoint event resolved to no SnapshotContent (no ownerRef, no name match); dropping (self-requeue backstops)",
+		"manifestCheckpoint", obj.GetName(),
+	)
+	return nil
+}
+
+// lookupContentsByManifestCheckpointName resolves the SnapshotContent(s) whose published
+// status.manifestCheckpointName equals mcpName, via the cache field index. The link is 1:1 (the name is
+// derived from the per-content MCR UID), so this normally returns a single request. Read-only; a List
+// error degrades to the self-requeue backstop rather than failing the wake-up.
+func (r *SnapshotContentController) lookupContentsByManifestCheckpointName(ctx context.Context, mcpName string) []reconcile.Request {
+	if mcpName == "" {
+		return nil
+	}
+	var out []reconcile.Request
+	seen := make(map[string]struct{})
+	for _, gvk := range r.SnapshotContentGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+		if err := r.Client.List(ctx, list, client.MatchingFields{indexKeyManifestCheckpointName: mcpName}); err != nil {
+			log.FromContext(ctx).V(1).Info("reverse lookup of SnapshotContent by manifestCheckpointName failed; self-requeue backstops",
+				"manifestCheckpoint", mcpName, "gvk", gvk.String(), "err", err.Error())
+			continue
+		}
+		for i := range list.Items {
+			name := list.Items[i].GetName()
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		}
+	}
+	return out
+}
+
+// extractManifestCheckpointNameIndex is the field-index extractor for indexKeyManifestCheckpointName: it
+// projects a SnapshotContent's status.manifestCheckpointName so the MCP reverse-lookup (path 2) can find
+// the owning content before adoption. Empty/absent yields no index entry.
+func extractManifestCheckpointNameIndex(obj client.Object) []string {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	name, found, err := unstructured.NestedString(u.Object, "status", "manifestCheckpointName")
+	if err != nil || !found || name == "" {
+		return nil
+	}
+	return []string{name}
 }

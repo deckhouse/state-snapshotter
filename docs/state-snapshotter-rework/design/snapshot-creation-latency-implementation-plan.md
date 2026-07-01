@@ -21,6 +21,14 @@
 >   `spec.manifestCaptureRequestRef` (`mapManifestCheckpointToMCR`), removing the 500ms poll gap in
 >   `finalizeMCRIfCheckpointHandedOff` while it waits for the SnapshotContent ownerRef handoff. See
 >   "L8 — Manifest-leg checkpoint watch" below. Needs redeploy to re-measure on cluster.
+> - **L9a — done:** the symmetric `snapshotcontent` side of L8. The MCP wake-up mapper is now dual-path
+>   (`mapManifestCheckpointToContent`): ownerRef when adopted, else a pre-adoption reverse lookup by
+>   `status.manifestCheckpointName` via a new cache field index. Removes the 500ms adoption-poll gap
+>   without touching the ownership model. See "L9a — Dual-path artifact routing" below. Needs redeploy
+>   to re-measure on cluster.
+> - **L9c — done:** finalizer-add 409 conflicts in `snapshotcontent` are treated as benign (requeue,
+>   not `Reconciler error`), removing rate-limited backoff from concurrent-reconcile races.
+> - **L9b — deferred:** lengthen the `snapshotcontent` 500ms self-requeue once L9a is validated.
 >
 > **Cluster measurement update (post-L1/L2, ms timeline via `kubectl logs --timestamps`):**
 > - The original "45–60s" premise was **not reproducible** on the current cluster. Real numbers:
@@ -311,11 +319,67 @@ type yield no enqueue). Cluster re-measure of the VM tree after redeploy.
 
 **Cluster:** local unit sufficient for the mapper; **YES** for the latency re-measure.
 
-**Open follow-up (deferred):** the symmetric 500ms gap is on the `snapshotcontent` side — it adopts
-the checkpoint and aggregates `ManifestsReady/Archived` off its own 500ms self-requeue because the MCP
-is `ObjectKeeper`-owned (not content-owned) until adoption, so the existing artifact wake-up watch
-does not fire pre-adoption. Making that event-driven is riskier (touches the adoption/aggregation
-path) and is tracked separately, to be validated against the reconcile-count harness.
+**Open follow-up (addressed by L9a below):** the symmetric 500ms gap is on the `snapshotcontent` side —
+it adopts the checkpoint and aggregates `ManifestsReady/Archived` off its own 500ms self-requeue because
+the MCP is `ObjectKeeper`-owned (not content-owned) until adoption, so the existing artifact wake-up
+watch (routed by ownerRef only) does not fire pre-adoption.
+
+---
+
+### L9a — Dual-path artifact routing for the MCP wake-up  *(snapshotcontent side — done)*
+
+**Why:** this is the symmetric half of L8. The `snapshotcontent` artifact wake-up watch routes a
+`ManifestCheckpoint` event to its owning content **by ownerRef only**. Before adoption the MCP is
+controller-owned by the execution `ObjectKeeper`, not by the `SnapshotContent`, so that watch finds no
+SnapshotContent ownerRef and **drops** the event — the content only discovers a `Ready` MCP on its own
+500ms self-requeue. This is the classic wake-up⇄adoption cycle: the watch needs an ownerRef to wake the
+content, but the ownerRef is only added once the content wakes up and adopts.
+
+**Change (routing only — ownership model unchanged):** make the MCP mapper *dual-path*.
+
+- *path 1 (ownerRef):* unchanged — once adopted, route by the SnapshotContent ownerRef like every other
+  artifact.
+- *path 2 (pre-adoption reverse lookup):* when there is no SnapshotContent ownerRef yet, resolve the
+  owning content via the deterministic **1:1** link `content.status.manifestCheckpointName == mcp.Name`,
+  backed by a new cache field index (`indexKeyManifestCheckpointName` =
+  `.status.manifestCheckpointName`, registered per content GVK in `SetupWithManager`).
+
+Adoption logic is untouched: the MCP is still `ObjectKeeper`-owned before adoption and SnapshotContent-
+owned after. Only the *resolver* gains a second path. Safety rests on two verified invariants:
+`status.manifestCheckpointName` is set-once (derived from the per-content MCR UID, immutable after
+publish) and globally 1:1, so the reverse lookup can only ever mis-*time* a wake-up (spurious enqueue →
+idempotent no-op reconcile, or a missed enqueue → the 500ms self-requeue still backstops) — never pick a
+wrong owner. The mapper is read-only and never writes status/ownership.
+
+**Acceptance:** content wakes within one watch hop of the MCP becoming `Ready` instead of up to 500ms
+later; combined with L8 the manifest-leg 500ms handshake is removed on both sides.
+
+**Tests:** `TestExtractManifestCheckpointNameIndex` (index projection) and
+`TestMapManifestCheckpointToContent_DualPath` (ownerRef path wins when present; reverse-lookup resolves
+pre-adoption; unknown name and nil object resolve to nothing). Cluster re-measure of the VM tree after
+redeploy.
+
+**Cluster:** local unit sufficient for mapper + index; **YES** for the latency re-measure.
+
+### L9c — Benign finalizer-add conflicts  *(contention noise — done)*
+
+**Why:** the same `SnapshotContent` is reconciled by several controller instances that share one
+`Reconciler` (the `For`-content controller and the per-snapshot status-watch controllers). Two workers
+can race on the parent-protection finalizer `Update`, and the loser surfaced a 409 as a `Reconciler
+error` → rate-limited backoff (200ms→10s) for nothing, adding latency variance under concurrency.
+
+**Change:** in the finalizer-add path, treat `errors.IsConflict` as **benign** — log at V(1) and
+`Requeue` to re-read instead of returning the error. `AddFinalizer` is idempotent, so whichever writer
+lands first wins and the next pass is a no-op. Non-conflict errors are still surfaced.
+
+**Acceptance:** no `Reconciler error` / backoff from finalizer races; finalizer still converges.
+
+**Tests:** covered by the existing `snapshotcontent` reconcile suite (no behavior change on the
+non-conflict path).
+
+**Open follow-up (L9b, deferred):** once L9a makes the manifest leg reliably event-driven, lengthen the
+`snapshotcontent` 500ms self-requeue to a 5–10s safety-net interval to cut steady-state reconcile load.
+Validate against the reconcile-count harness before changing.
 
 ---
 
