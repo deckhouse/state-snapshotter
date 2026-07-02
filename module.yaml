@@ -1,5 +1,7 @@
 name: state-snapshotter
 stage: "Experimental"
+subsystems:
+  - storage
 descriptions:
   en: "State snapshotter module"
   ru: "Модуль State snapshotter"
