@@ -659,3 +659,144 @@ developable and testable via unit/envtest.
   keep it revertable (single option flag).
 - L4 interval cuts are config-only and trivially revertable.
 - L1/L3 add watches (additive); risk is a dead/incorrect mapper — covered by envtest.
+
+---
+
+## Canonical scalability benchmark — one namespace snapshot over N independent standard sets
+
+**Why:** earlier scale runs created N parallel VM-snapshot trees over the *same* source PVC (`vm-1`),
+which serializes at the CSI driver (same-source VolumeSnapshot serialization) and pollutes the signal.
+The canonical benchmark scales by **namespace contents**, not by number of root snapshots:
+
+- one namespace, one namespace-wide root `storage.deckhouse.io/v1alpha1 Snapshot` (`spec: {}`);
+- namespace holds **N independent "standard sets"**; set `i` = `vm-i` (owns `disk-i`), `disk-i`/`pvc-i`
+  (vm-owned blank disk + its own PVC), `sdisk-i`/`spvc-i` (standalone blank disk + its own PVC);
+- every disk provisions its **own** PVC → independent source volumes, **no CSI same-source serialization**;
+- measures scaling from tree/namespace size (the real production shape).
+
+Parallel snapshots of the *same* source object are a separate stress case and must **not** be used as
+the primary scalability signal.
+
+**Harness:** `storage-e2e` → `tests/snapshot-latency/namespace_scale_test.go` (spec "Namespace snapshot
+scalability (independent standard sets)"), `SNAP_SETS=1|5|10`. It builds the sets, waits for all PVCs to
+bind (setup, unmeasured; bind pods trigger the WaitForFirstConsumer StorageClass), then creates the root
+Snapshot and records time-to-`Ready`, `status.childrenSnapshotRefs` count, and the sorted first-Ready
+offsets of the leaf `DemoVirtualDiskSnapshot`s (flat = parallel, staircase = serialized).
+
+> Note: `storage-e2e`'s Go SSH client did not present the adjacent OpenSSH certificate (`<key>-cert.pub`,
+> e.g. Vault-issued), so connecting to a cert-only cluster failed even with a valid cert. Fixed in
+> `internal/infrastructure/ssh/client.go` (`loadCertSigner` → `ssh.NewCertSigner`, offered first).
+
+**Results (existing cluster, local-thin CSI, foundation VCR = 4 workers):**
+
+| SETS | children in tree | leaf Ready spread (first→last) | ChildrenSnapshotReady | root `Ready` |
+|---:|---:|---|---:|---:|
+| 1  | 2  | 1.8 → 2.2s  | 0.9s  | **3.2s**  |
+| 5  | 10 | 4.1 → 10.8s | 6.2s  | **17.1s** |
+| 10 | 20 | 4.2 → 22.8s | 13.8s | **30.2s** |
+
+**Finding:** removing same-source CSI serialization did **not** flatten scaling — wall-clock still grows
+roughly linearly (3→17→30s, ≈5×/10× of the single-set baseline). Two components:
+
+1. **Leaf/children readiness** grows in ~4-wide waves → bounded by foundation VCR `MaxConcurrentReconciles=4`
+   and per-node CSI snapshot throughput on `local-thin` (single-node local driver), not by same-source.
+2. **Aggregation tail** (ChildrenSnapshotReady → root `Ready`) grows 2.3 → 11 → 16s with the tree size —
+   the manifest archive latch + Ready mirror over a larger subtree.
+
+Same-source CSI was therefore **not** the dominant artifact at this scale; the remaining growth sits in our
+own controller/CSI throughput.
+
+### Per-object trace decomposition (SETS=10)
+
+`storage-e2e` → `tests/snapshot-latency/trace_scale_test.go` (spec "TRACE …", `SNAP_TRACE=1`) records, per
+object, first-seen offsets from root-create: CSI `VolumeSnapshotContent.readyToUse`, `VolumeCaptureRequest`
+`Ready`, and the whole cluster-scoped subtree of state-snapshotter `SnapshotContent` conditions
+(`VolumesReady`/`ManifestsReady`/`Ready`/`ManifestsArchived`) via a baseline diff (the tree fans out as
+cluster-scoped SnapshotContents, not namespaced child Snapshots). Representative SETS=10 run (31 subtree
+SnapshotContents = 20 leaf + 10 VM + 1 root):
+
+| phase | signal | offsets |
+|---|---|---|
+| data path | CSI VSC `readyToUse` | 1.9 → **14.6s** (waves of ~4) |
+| data path | VCR `Ready` | 1.7 → **14.4s** (tracks readyToUse within ~0.3s) |
+| aggregation | content `VolumesReady` | 2.1 → 21.4s, **+1 straggler @ 33.3s** |
+| aggregation | content `Ready` | 4.5 → 21.4s, **+1 straggler @ 33.3s** |
+| root | `ChildrenSnapshotReady` | 13.2s |
+| root | `ManifestsArchived` | 34.7s |
+| root | `Ready` | **36.3s** |
+
+**Verdict on the hypotheses:**
+
+- **A (CSI staircase) — present but secondary.** `readyToUse` is a staircase but bounded at ~14.6s; the
+  ~4-wide waves match foundation VCR `MaxConcurrentReconciles=4`, not same-source.
+- **B (foundation adds delay) — NO.** VCR `Ready` trails `readyToUse` by only ~0.3s; the foundation
+  controller is not a bottleneck.
+- **C (state-snapshotter aggregation) — YES, dominant.** The ~23s tail after `ChildrenSnapshotReady`
+  splits into:
+  1. **~7s SnapshotContent-controller throughput lag** — content `VolumesReady` tail (21.4s) trails the VCR
+     `Ready` tail (14.4s); the lag grows toward the end (early nodes track within ~0.4s), i.e. a processing
+     backlog, not data latency. The CSI `VolumeSnapshotContent` wake-up watch is **ownerRef-only**
+     (`addArtifactWakeUpWatches`); if the CSI content carries no ownerRef back to the state-snapshotter
+     SnapshotContent, `readyToUse` does not wake it and `VolumesReady` advances only on the 500ms
+     self-requeue — a candidate cause to confirm.
+  2. **~12s root archive-latch straggler** — 30 of 31 contents reach `Ready` by 21.4s; exactly **one**
+     top-of-tree (root) content flips at 33.3s. `ManifestsArchived` is a subtree latch driven by a **500ms
+     self-requeue "archive wave"** (`defaultSnapshotContentRequeueAfter`, `snapshotcontent/controller.go`);
+     the code comment already notes "one node could wait tens of seconds". This poll-propagated bottom-up
+     latch is the single biggest lever.
+  3. **~2s Snapshot mirror** — root content `Ready` 33.3s → root Snapshot `ManifestsArchived` 34.7s →
+     `Ready` 36.3s.
+
+**Next-step priority (measurement-driven, not blind concurrency=8):**
+
+1. **Archive-latch (C-2, biggest single lever):** make `ManifestsArchived` propagate event-driven on child
+   SnapshotContent status change instead of the 500ms self-requeue wave (this is the L9b/latch area);
+   re-measure the root straggler gap.
+2. **VolumesReady wake-up (C-1):** confirm whether the CSI `VolumeSnapshotContent` carries an ownerRef to
+   the SnapshotContent (so `readyToUse` wakes it) — if not, add a reverse-lookup wake-up (dual-path, like
+   L9a for ManifestCheckpoint) so `VolumesReady` is event-driven rather than poll-gated.
+3. **Only then** consider foundation VCR concurrency 4→8 to shrink the ~14.6s leaf staircase — the smaller
+   half of the wall-clock.
+
+Cluster runs are gated on a valid SSH cert (~1h Vault cert); the third trace run was cut off by cert expiry
+mid-poll (`http2: client connection lost`) — the two completed runs above are the source of these numbers.
+
+### C-2 — event-driven archive-latch propagation (implemented, cluster-validation pending)
+
+**Root cause confirmed in code.** A child→parent wake-up watch already exists
+(`mapSnapshotContentToParentContent`, routed by the child's `SnapshotContent` ownerRef), and the child→parent
+ownerRef is set by `ensureChildSnapshotContentOwnedByParentContent`. But `Reconcile` still returns
+`RequeueAfter: 500ms` while not `Ready`, and the code comment there is explicit about *why*: wake-up events are
+**droppable** — "a declared-but-unlinked child, or a same-binary artifact event seen before its ownerRef
+handoff". The ownerRef child→parent handoff can land **after** the child already reached its terminal
+`ManifestsArchived=True`, so that transition's event maps to no parent and is dropped; the parent then only
+rediscovers the archived child on its next 500ms self-requeue. Across a 3-level tree this poll handshake is the
+**~12s root straggler** measured above (30/31 contents `Ready` by 21.4s, root flips at 33.3s).
+
+**Fix (SnapshotContent controller only, contract unchanged).** Add a **forward-edge reverse-lookup** wake-up as
+a *second* routing path (dual-path, mirroring L9a for ManifestCheckpoint):
+
+- New cache field index `indexKeyChildContentName` = `.status.childrenSnapshotContentRefs.name`
+  (`extractChildContentNamesIndex`), registered per SnapshotContent GVK in `SetupWithManager`.
+- New mapper `mapChildContentToParentContentsByEdge`: on **any** SnapshotContent event, enqueue every parent
+  whose published `status.childrenSnapshotContentRefs` includes the changed object's name. Registered as a
+  second `Watches(...)` alongside the existing ownerRef mapper.
+
+Why this closes the gap the ownerRef path leaves open: the published child edge is written by the parent when it
+**links** the child (early, during binding via `PublishSnapshotContentChildrenFromSnapshotRefs`) and is stable
+through the child's *later* archive transition — so when the child flips `ManifestsArchived`/`Ready`/any leg, the
+reverse-lookup finds the parent even if the child→parent ownerRef event was dropped/late. Aggregation reads the
+**same** `childrenSnapshotContentRefs` set, so the wake is precise.
+
+Safety: the mapper only enqueues `reconcile.Request`s and never writes state; a stale/missing index entry can only
+mis-time a wake-up (spurious enqueue → idempotent no-op, or missed enqueue → the 500ms self-requeue still
+backstops), never change the aggregation result (recomputed from truth every reconcile). The 500ms self-requeue is
+**kept as a backstop** in this change; lengthening it (L9b) is a separate follow-up now unblocked by the reliable
+event path.
+
+Acceptance to validate on cluster (SETS=10): data path still closes ~14–15s or faster; root `Ready` tail after the
+last child `Ready` drops from ~23s to ≤3–5s; no post-`Ready` storm; reconcile count/tree does not grow.
+
+**C-1 (checklist, not the primary fix):** separately confirm whether the CSI `VolumeSnapshotContent` carries an
+ownerRef to its SnapshotContent so `readyToUse` wakes `VolumesReady` event-driven; if not, add an analogous
+reverse-lookup wake-up. Secondary by impact — do not start here.

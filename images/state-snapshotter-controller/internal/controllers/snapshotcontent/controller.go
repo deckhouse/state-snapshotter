@@ -98,6 +98,16 @@ const defaultSnapshotContentRequeueAfter = 500 * time.Millisecond
 // adopted (ownerRef handoff), the only stable MCP→content link is this deterministic 1:1 name.
 const indexKeyManifestCheckpointName = ".status.manifestCheckpointName"
 
+// indexKeyChildContentName is the cache field-index key on SnapshotContent.status.childrenSnapshotContentRefs[].name.
+// It backs the forward-edge reverse-lookup wake-up (C-2): a parent's ManifestsArchived subtree latch aggregates
+// its published child content edges, so when a CHILD content's status changes (ManifestsArchived / Ready / any
+// leg) the parent(s) that reference it by name must be enqueued to re-evaluate immediately — event-driven —
+// instead of waiting for the parent's 500ms self-requeue archive wave. This complements the ownerRef path
+// (mapSnapshotContentToParentContent): the ownerRef child→parent handoff can be set after the child already
+// reached its terminal state, so the ownerRef event is droppable/late; the published-edge index is populated
+// when the parent links the child and is stable through the child's later archive transition.
+const indexKeyChildContentName = ".status.childrenSnapshotContentRefs.name"
+
 // snapshotContentControllerOptions tunes every controller instance that drives this reconciler (the
 // per-GVK content controllers and the Snapshot-status wake-up controllers all share r). With the default
 // MaxConcurrentReconciles=1 a single worker per instance starved individual content nodes during the
@@ -1615,10 +1625,21 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyManifestCheckpointName, extractManifestCheckpointNameIndex); err != nil {
 			return fmt.Errorf("failed to register manifestCheckpointName index for SnapshotContent GVK %s: %w", gvk.String(), err)
 		}
+		// C-2: index published child content edges so a child status change can reverse-resolve and wake
+		// its parent(s) event-driven (mapChildContentToParentContentsByEdge), removing the archive wave's
+		// dependence on the parent's 500ms self-requeue.
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyChildContentName, extractChildContentNamesIndex); err != nil {
+			return fmt.Errorf("failed to register childrenSnapshotContentRefs index for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			WithOptions(snapshotContentControllerOptions()).
+			// Dual-path child→parent wake-up: ownerRef handoff (mapSnapshotContentToParentContent) PLUS the
+			// forward-edge reverse-lookup (mapChildContentToParentContentsByEdge). The ownerRef event is
+			// droppable/late (set after the child may already be terminal); the published-edge index closes
+			// that gap so parent archive re-evaluation is event-driven, not 500ms-poll-driven (C-2).
 			Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotContentToParentContent)).
+			Watches(obj, handler.EnqueueRequestsFromMapFunc(r.mapChildContentToParentContentsByEdge)).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
 		// Damaged-artifact wake-up (Phase 2a): enqueue the owning SnapshotContent when its durable
 		// MCP/VSC artifacts change. Guarded by RESTMapping so a not-yet-installed CRD (e.g.
@@ -1821,4 +1842,67 @@ func extractManifestCheckpointNameIndex(obj client.Object) []string {
 		return nil
 	}
 	return []string{name}
+}
+
+// extractChildContentNamesIndex is the field-index extractor for indexKeyChildContentName: it projects every
+// name in a SnapshotContent's status.childrenSnapshotContentRefs so the forward-edge reverse-lookup (C-2) can
+// find the PARENT content(s) that aggregate a given child. A parent with no published child edges yields no
+// index entry.
+func extractChildContentNamesIndex(obj client.Object) []string {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	refs, found, err := unstructured.NestedSlice(u.Object, "status", "childrenSnapshotContentRefs")
+	if err != nil || !found || len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	for _, raw := range refs {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := m["name"].(string); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// mapChildContentToParentContentsByEdge is the forward-edge reverse-lookup wake-up (C-2). On any
+// SnapshotContent event it enqueues every parent content whose published status.childrenSnapshotContentRefs
+// includes the changed object's name, so a child's ManifestsArchived/Ready/leg transition wakes its parent
+// immediately (event-driven) rather than waiting for the parent's 500ms self-requeue archive wave. It only
+// enqueues reconcile.Requests; it never writes state. A stale/missing index entry can only mis-time a
+// wake-up (spurious enqueue → idempotent no-op reconcile, or missed enqueue → the 500ms self-requeue still
+// backstops); it can never change the aggregation result, which is recomputed from truth on every reconcile.
+func (r *SnapshotContentController) mapChildContentToParentContentsByEdge(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil || obj.GetName() == "" {
+		return nil
+	}
+	childName := obj.GetName()
+	var out []reconcile.Request
+	seen := make(map[string]struct{})
+	for _, gvk := range r.SnapshotContentGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+		if err := r.Client.List(ctx, list, client.MatchingFields{indexKeyChildContentName: childName}); err != nil {
+			log.FromContext(ctx).V(1).Info("forward-edge reverse lookup of parent SnapshotContent failed; self-requeue backstops",
+				"childContent", childName, "gvk", gvk.String(), "err", err.Error())
+			continue
+		}
+		for i := range list.Items {
+			parentName := list.Items[i].GetName()
+			if parentName == "" || parentName == childName {
+				continue
+			}
+			if _, dup := seen[parentName]; dup {
+				continue
+			}
+			seen[parentName] = struct{}{}
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: parentName}})
+		}
+	}
+	return out
 }
