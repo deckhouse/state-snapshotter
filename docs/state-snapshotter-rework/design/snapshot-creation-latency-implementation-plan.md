@@ -945,6 +945,70 @@ lag toward a single reconcile cycle.
 `0` when own manifest is pending, `0` when a linked child is pending, and `≥1` (latch closes True) on the pass where own
 manifest is Ready and the linked child is archived. Existing archive-aggregation/latch tests unchanged.
 
-Acceptance (cluster, SETS=10, pending redeploy): root MCR created closer to the last child `ManifestsArchived`; MCP
-Ready → root `ManifestsReady` drops from ~4.3s toward one event/reconcile cycle; no post-Ready storm; latch correctness
-unchanged. T-dedup remains the next lever if a residual gap persists.
+##### T-cost cluster validation (SETS=10, 3 runs, post-deploy 9b2dbdd)
+
+| metric | baseline | run1 | run2 | run3 |
+|---|---|---|---|---|
+| observe lag (MCP Ready → root `ManifestsReady`) | ~4.3s | 3.11s | 4.11s | 3.05s |
+| root MCR created | 25.88s | 30.07s | 22.03s | 31.45s |
+| root MCP Ready | 28.35s | 31.51s | 23.56s | 33.06s |
+| ROOT `Ready` | 34.65s | 37.84s | 36.12s | 38.29s |
+
+**T-cost delivered its narrow target and nothing more.** The observe lag it was designed to cut (MCP Ready → root
+`ManifestsReady`) dropped from ~4.3s to a consistent **~3.1s** across all three runs (cheaper root reconciles observe
+the ready MCP faster); latch correctness unchanged, no post-Ready storm. But **overall ROOT `Ready` did not move**
+(~36–38s) because it is now dominated by **when the root MCR is created** — 22–31s, ~9s run-to-run variance — and MCR
+creation is NOT on the `snapshotcontent` path that T-cost touched.
+
+**Newly-dominant lever — root MCR creation is 500ms-poll-gated in the capture controller.** The root MCR is created by
+the snapshot/capture controller (`reconcileCaptureN2a` → `BuildRootNamespaceManifestCaptureTargets`,
+`internal/usecase/root_capture_run_exclude.go`), which fail-closes with `ErrSubtreeManifestCapturePending` and
+**self-requeues every 500ms** until every descendant SnapshotContent is archived (so children's manifests can be
+excluded). It is NOT woken by the child-content `ManifestsArchived` transition. In run2 it happened to catch the
+transition immediately (MCR@22.03 ≈ children-archived → Ready 36.1s); in run1/run3 it slept 8–9 poll cycles
+(MCR@30–31s). This 8–9s variable gap between "last child archived" (~22s) and "root MCR created" is the biggest
+remaining reducible chunk and the analogue of L8, but on the MCR *producer* side (capture controller) rather than the
+MCR controller side.
+
+**Next lever (revised):** make root MCR creation **event-driven** off descendant `ManifestsArchived` (wake
+`reconcileCaptureN2a` when the subtree archive latch advances) instead of the 500ms self-requeue — same pattern as L8/C-2,
+applied to the capture path. T-dedup (coalesce the two non-serialised snapshotcontent reconcilers) and L9b remain lower
+priority; they trim the already-small ~3.1s observe lag, not the ~9s MCR gate.
+
+##### T-mcr-wake — event-driven root MCR planning off child-content archive (implemented, cluster-validation pending)
+
+The exact gate signal is `usecase.requireContentManifestsArchived` (`root_capture_run_exclude.go`): the root Snapshot's
+MCR plan fail-closes (`ErrSubtreeManifestCapturePending` → 500ms self-requeue) until every DIRECT child content is
+`ManifestsArchived=True` (a direct child's True transitively implies its whole subtree archived + edge-linked). So the
+one edge that changes the gate is a **direct-child SnapshotContent flipping `ManifestsArchived` True** — and the gate
+reads that content DIRECTLY, not the child Snapshot's mirror of it.
+
+Before this change the capture controller was woken toward the root only indirectly: `content archived` → wake the
+content's BOUND owner Snapshot S (`status.boundSnapshotContentName` index) → S reconcile mirrors archived onto its own
+status → S status event → `nssChildSnapshotWatchRelay` → wake root R. That extra "S mirror hop" is the 8–9s variable
+gap (each hop carries its own observe/500ms latency), even though R's gate already reads the content directly.
+
+**Change (wake-up only, gate/contract untouched):** the snapshot controller's existing `Watches(&SnapshotContent{}, …)`
+handler (`content_watch.go`) now, in addition to waking the bound owner, wakes the **gated parent(s)** on the
+`ManifestsArchived` False→True transition. Link (identical to the child-Snapshot relay, but keyed off the content):
+`content.spec.snapshotRef` (immutable owning child Snapshot S) → `findParentsReferencingChildSnapshot(S)` (the
+Snapshots that list S in `status.childrenSnapshotRefs`, namespace-local, matched by apiVersion/kind/name). New helpers:
+`gatedParentRequestsFromContent`, `snapshotContentManifestsArchivedTrue`, and `enqueueContentDrivenSnapshots`
+(dedups the bound-owner + gated-parent requests per event).
+
+Safety:
+- **Precise blast radius:** only Snapshots that reference the owning child are woken (no namespace-wide wake); parent
+  wake fires only on the monotonic True transition (`UpdateFunc`) or on an already-archived content at
+  create/resync (`CreateFunc`) — at most one parent wake per direct child.
+- **No cycle:** a root's reconcile does not write child contents; the root's OWN content maps to no parent
+  (`spec.snapshotRef` = the root, which no Snapshot lists as a child), so a root-content archive cannot self-wake.
+- **500ms self-requeue kept** as the backstop; the gate logic (`requireContentManifestsArchived` /
+  `BuildRootNamespaceManifestCaptureTargets`) is unchanged — fail-close is not weakened.
+
+**Tests (unit, green + `-race`):** `content_watch_gated_parent_test.go` — direct-child content maps to the parent;
+root content and missing `snapshotRef` map to nothing; the archived predicate + False→True transition; the
+gated-parent toggle; and request dedup when owner and parent resolve to the same key.
+
+Acceptance (cluster, SETS=10, pending redeploy): root MCR created ≤1–2s after the last direct-child
+`ManifestsArchived`; root `Ready` wall below the current ~33–38s; no post-Ready storm; child/root content reconcile
+count not increased.
