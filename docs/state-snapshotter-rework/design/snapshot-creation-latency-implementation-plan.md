@@ -415,6 +415,109 @@ single worker); no rise in conflicts/errors. If effect holds and no conflicts ap
 
 **Tests:** all `manifestcapture` unit tests green under `-race`; full controller unit suite green.
 
+**Cluster result (deployed `latency-cut` @ 1ddcea9):**
+- `SNAP_TREES=1`: leaf 2.0–2.6s; single tree 14–15s — no regression (prior variance 12–18s).
+- `SNAP_TREES=5`: wall 63.9s, per-tree min 47.4 / p50 52.2 / avg 53.9 / p90 56.5 / max 63.9s —
+  **essentially unchanged vs baseline (~60s wall / ~52s avg).**
+- Conflicts/errors: only benign L9c "Finalizer add conflicted … (benign)" at DEBUG; no real errors,
+  no stuck MCR/MCP.
+- Single-tree per-hop breakdown: bound content @ ~1s; `content/ManifestsReady`+`VolumesReady` @ ~6–10s
+  (the CSI/VCR **capture leg**); `content/ManifestsArchived`+`Ready` @ ~13–14s (the archived latch tail).
+
+**Conclusion:** the manifest/MCR path is **not** the concurrency gate — manifests become ready *together
+with* volumes and the tail is the archived latch, not checkpoint creation. Parallelizing the MCR
+controller is therefore safe and correct but does not move the 5-tree wall clock. The remaining
+serialization is downstream: the **storage-foundation VCR / data-leg still runs single-worker**
+(`MaxConcurrentReconciles=1`) and gates the capture leg under concurrency — exactly the predicted
+"bottleneck moves to foundation/VCR" outcome. Next lever: **L2b-foundation** (raise VCR concurrency in
+storage-foundation), tracked separately since it is out of this state-snapshotter-only iteration.
+
+---
+
+### L2b-foundation — Parallelize the VolumeCaptureRequest controller  *(scalability — storage-foundation)*
+
+Raise the storage-foundation **VolumeCaptureRequest** controller concurrency from implicit 1 to 4 with a
+bounded rate limiter. This targets the capture-leg serialization that L2b-ssc showed to be the real gate
+under concurrent tree creation. Scoped to the VCR controller only — no VSC-watch changes, no edits to the
+other storage-foundation controllers.
+
+**Change:** `images/controller/internal/controllers/volumecapturerequest_controller.go` —
+`WithOptions(controller.Options{ MaxConcurrentReconciles: 4, RateLimiter: 200ms→10s })`.
+
+**Pre-change safety checks (all cleared):**
+- No shared mutable state in the reconciler struct (`Client`, `APIReader`, `Scheme`, `Config`); `Config`
+  is set at startup and never rewritten in reconcile (unlike the ssc checkpoint controller — no config
+  guard needed).
+- No package-level or shared caches/maps/slices; only function-local maps (e.g. `validateSnapshotTargets`
+  `seen`).
+- Deterministic per-VCR names: `objectKeeperNameForVCR(vcr.UID)`, `snapshotVSCName(vcr.UID, hash(targetUID))`
+  — different VCRs never collide.
+- Idempotent create/patch: VSC uses Get-before-Create on a deterministic name; status uses
+  `RetryOnConflict` + re-Get + `MergeFrom` patch.
+- `RetryOnConflict` on status/finalize (bulk progress patch and `finalizeVCR`).
+- No assumption that a single VCR reconcile runs globally alone; controller-runtime still serializes
+  reconciles of the same VCR, and parallelism only spans distinct VCRs.
+
+**Acceptance:** `SNAP_TREES=1` no worse than current; `SNAP_TREES=5` wall clock notably lower;
+`SNAP_TREES=10` degradation sub-linear; no rise in conflicts/errors/stuck VCR.
+
+**Tests:** storage-foundation controller unit suite green under `-race`.
+
+**Cluster result (deployed foundation `controller-799cd99d8`):**
+- `SNAP_TREES=1`: leaf 2.1s, tree 15.4s — no regression.
+- `SNAP_TREES=5`: wall 63.3s, avg 57.0s — **still unchanged.** VCR concurrency did not move the wall.
+- Foundation log evidence: the 5 burst VCRs created their VSCs within ~1.7s of each other **and all 5
+  logged `VolumeCaptureRequest completed` within ~4s** (11:13:05→11:13:09). Only 2 benign cleanup-race
+  errors, no stuck VCR.
+
+**Decisive finding:** VCR concurrency now works (5 capture legs finish in ~4s), so the **capture leg is not
+the gate** either. Both capture legs (manifest via L2b-ssc, volume via L2b-foundation) complete within
+seconds for all 5 trees, yet trees only reach Ready ~50s later. The remaining ~50s is **entirely
+downstream in state-snapshotter**: the `SnapshotContent` `ManifestsArchived` subtree latch + re-mirror
+propagation, which produced ~1400 reconciles in the 4-min window. This is the archived-latch tail flagged
+for last — it is now the dominant and only remaining lever. `SNAP_TREES=10` was not run because VCR is
+demonstrably not the bottleneck.
+
+**Next:** investigate the `ManifestsArchived` archive-wave / re-mirror burst in `snapshotcontent` +
+`genericbinder` (500ms self-requeue waves, redundant enqueues) — see re-mirror dedup and L9b notes above.
+
+---
+
+### L3b — SnapshotContent archived-latch tail (diagnose → fix)  *(state-snapshotter only)*
+
+**Status:** trace instrumentation landed; cluster measurement pending.
+
+**Context (from L2b-foundation):** both capture legs finish in ~4s for all 5 trees, but trees reach Ready
+~50s later. The tail lives entirely in `snapshotcontent` Ready aggregation. Propagation is *already*
+event-driven bottom-up (child ManifestsArchived → parent via `mapSnapshotContentToParentContent` ownerRef
+watch; MCP via dual-path L9a; VSC via ownerRef), and the 500ms self-requeue is only a backstop — so the
+tail is **not** explained by a missing watch. It must be measured before touching logic.
+
+**Step 1 — trace only (no logic change), DONE:** `reconcileCommonSnapshotContentStatus` emits one
+structured line per reconcile — `snapshotcontent trace` — with: `content`, `uid`, `gen`, `childRefs`
+(declared child count), the five leg statuses (`manifestsReady`/`volumesReady`/`childrenReady`/
+`manifestsArchived`/`ready` as T/F/U), `gate` (`plan.readyReason` — exactly which leg still blocks Ready),
+`patch` (`changed`/`noop`/`conflict`/`patch-error`), and `durMs`. This lets a TREES=5 burst be reduced to
+a per-content timeline: leaf archived → parent sees child archived → parent patches archived → snapshot
+mirror Ready, plus the noop-spin and conflict counts.
+
+**Main hypothesis to confirm/refute:** capture done ~4s, but the bottom-up archive latch is driven mostly
+by 500ms self-requeue (event wakeups arriving as no-ops before the child transition is observable), and/or
+`genericbinder` re-wakes already-mirrored snapshots, so the queue/conflicts stretch Ready to ~50s.
+
+**Candidate fixes (only after the trace confirms which one), by priority:**
+- **A.** event-driven wakeup from child SnapshotContent status update (verify the child→parent watch
+  actually fires on the ManifestsArchived transition, not just on create).
+- **B.** changed-gate/dedup for ManifestsArchived/Ready — do not requeue when already final.
+- **C.** `genericbinder`: dedup re-mirror enqueue — do not re-wake bound snapshots once Ready is mirrored.
+- **D.** if a tail remains: raise/verify snapshotcontent concurrency + conflict retry.
+  - Note: `aggregateChildrenManifestsArchived → declaredNonLeafChildContentNames` does an **uncached
+    `APIReader.Get`** on the owning Snapshot *every* non-leaf reconcile (controller.go ~878). Under the
+    500ms wave × 8 workers × N trees this is a per-reconcile direct-API cost worth quantifying from `durMs`.
+
+**Acceptance:** TREES=1 ≤ ~15s; TREES=5 wall well below 60s; capture-done ~4s must not carry a +50s Ready
+tail; snapshotcontent reconcile count drops multiplicatively.
+
 ---
 
 ### L6 — e2e latency assertion / report  *(validation)*

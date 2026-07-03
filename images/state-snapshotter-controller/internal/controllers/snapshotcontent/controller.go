@@ -431,6 +431,7 @@ type commonContentStatusPlan struct {
 // re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
 // a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
 func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
+	start := time.Now() // L3b trace: per-reconcile wall time (see traceSnapshotContent).
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -477,6 +478,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	}
 
 	if !changed {
+		r.traceSnapshotContent(ctx, obj, plan, "noop", start)
 		return ready, nil
 	}
 	obj.Object["status"] = statusMap
@@ -490,9 +492,51 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	// convert into an extra requeue). Staleness is still safe because the changed-gate above only fires when
 	// the monotonic-cache-derived desired conditions actually differ.
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(base)); err != nil {
+		outcome := "patch-error"
+		if errors.IsConflict(err) {
+			outcome = "conflict"
+		}
+		r.traceSnapshotContent(ctx, obj, plan, outcome, start)
 		return false, err
 	}
+	r.traceSnapshotContent(ctx, obj, plan, "changed", start)
 	return ready, nil
+}
+
+// traceSnapshotContent emits a single structured per-reconcile diagnostic line for the SnapshotContent
+// aggregation (L3b archived-latch tail investigation). It NEVER changes state or control flow; it exists
+// only to build the TREES=N burst timeline: which leg still gates Ready, whether the status patch
+// changed / was a no-op / conflicted, the declared child count, and the reconcile wall time. The archive
+// wave is bottom-up (leaf ManifestsArchived -> parent aggregation via mapSnapshotContentToParentContent),
+// so overlaying these lines by content name/timestamp shows exactly where the ~50s tail is spent.
+func (r *SnapshotContentController) traceSnapshotContent(ctx context.Context, obj *unstructured.Unstructured, plan commonContentStatusPlan, patch string, start time.Time) {
+	childRefs, _, _ := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotContentRefs")
+	log.FromContext(ctx).Info("snapshotcontent trace",
+		"content", obj.GetName(),
+		"uid", string(obj.GetUID()),
+		"gen", obj.GetGeneration(),
+		"childRefs", len(childRefs),
+		"manifestsReady", condShort(plan.manifestsReady),
+		"volumesReady", condShort(plan.volumesReady),
+		"childrenReady", condShort(plan.childrenReady),
+		"manifestsArchived", condShort(plan.manifestsArchivedStatus),
+		"ready", condShort(plan.readyStatus),
+		"gate", plan.readyReason,
+		"patch", patch,
+		"durMs", time.Since(start).Milliseconds(),
+	)
+}
+
+// condShort renders a condition status as a single greppable character (T/F/U) for the trace line.
+func condShort(s metav1.ConditionStatus) string {
+	switch s {
+	case metav1.ConditionTrue:
+		return "T"
+	case metav1.ConditionFalse:
+		return "F"
+	default:
+		return "U"
+	}
 }
 
 // upsertContentCondition sets desired (type/status/reason/message + observedGeneration) on contentLike
