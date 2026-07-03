@@ -119,6 +119,13 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
+	// Demo-only planning-throughput knob: raise the client from the client-go default (QPS 5 / Burst 10).
+	// The demo domain-controller is the tree PLANNING layer (it materializes each snapshot tree's child
+	// snapshots and capture requests); at the default rate it serializes multi-tree bursts and paces the
+	// whole content-creation staircase upstream of capture. This mirrors the state-snapshotter/foundation
+	// clients. It is NOT a contract: a production domain controller must provision its own concurrency/QPS.
+	kConfig.QPS = 50
+	kConfig.Burst = 100
 	log.Info("[domain-main] kubernetes config has been successfully created.")
 
 	scheme := runtime.NewScheme()

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -51,6 +52,7 @@ func AddDemoVirtualMachineControllerToManager(mgr ctrl.Manager, cfg *config.Opti
 		For(&demov1alpha1.DemoVirtualMachine{}).
 		Owns(&corev1.Pod{}).
 		Watches(&demov1alpha1.DemoVirtualDisk{}, handler.EnqueueRequestsFromMapFunc(mapDemoVirtualDiskToVMs(mgr.GetClient()))).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Complete(&DemoVirtualMachineReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
