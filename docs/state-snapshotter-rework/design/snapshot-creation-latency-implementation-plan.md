@@ -800,3 +800,151 @@ last child `Ready` drops from ~23s to ≤3–5s; no post-`Ready` storm; reconcil
 **C-1 (checklist, not the primary fix):** separately confirm whether the CSI `VolumeSnapshotContent` carries an
 ownerRef to its SnapshotContent so `readyToUse` wakes `VolumesReady` event-driven; if not, add an analogous
 reverse-lookup wake-up. Secondary by impact — do not start here.
+
+#### C-2 cluster validation (SETS=10, post-deploy)
+
+**C-2 fixed exactly its target, and is kept.** The "last child archived → root archived" gap collapsed from
+**~12s** (baseline 21.4s→33.3s) to **~2.4s** (30.5s→32.9s): the root archive latch no longer rides the 500ms
+self-requeue wave; the forward-edge wake is confirmed event-driven. Infra clean: rate-limiter waits = 0, no
+post-`Ready` storm; the only errors in the window were benign teardown races of the prior run's terminating
+namespace.
+
+**But the overall root `Ready` wall-clock did NOT improve** (~32.9s, aggregation tail ~17s) — the dominant gate
+**moved off the archive latch**. Per-object trace (SETS=10):
+
+| phase | value |
+|---|---|
+| data path (VCR `Ready` max / CSI `readyToUse` max) | ~15.4s / ~15.8s |
+| ROOT `ChildrenSnapshotReady` | 15.9s |
+| straggler child content own `VolumesReady`/`ManifestsReady`/`Ready` | **30.5s** |
+| ROOT `ManifestsArchived` = ROOT `Ready` | 32.9s |
+
+The tail is now a **content-own artifact-readiness wake-up / throughput lag**: a child content flips its own
+`VolumesReady`/`ManifestsReady` at 30.5s although its CSI VSC `readyToUse` ≤15.8s and VCR `Ready` ≤15.4s — a
+~15s gap on the content's OWN legs (systemic: several contents flip `VolumesReady` at 18–21s vs artifacts ready
+by 15.8s). That is C-1 territory (VSC→content wake-up) + content-controller throughput, not the archive latch.
+
+**A 15s gap is too large for the 500ms backstop, so the mechanism must be pinned before C-1.** Candidate causes:
+(A) VSC event does not wake the content; (B) VSC ownerRef→SnapshotContent absent/late/wrong; (C) content-controller
+queue saturated by extra enqueues; (D) cached VSC read lags badly; (E) the specific content is not reconciled at
+all until ~30s (workqueue starvation).
+
+##### Diagnostic result — C-1 hypothesis REFUTED; the tail is the ROOT content's own manifest leg + reconcile cost
+
+A CSI-VSC poll during a fresh SETS=10 run plus the controller reconcile trace of the straggler settle it:
+
+- **B facts:** across 248 sampled CSI `VolumeSnapshotContent`s, **zero** carry a `SnapshotContent` ownerRef (7170
+  samples had no ownerRefs, 270 were `ObjectKeeper`-owned). So the VSC→content wake IS ownerRef-dropped — but that
+  is not what gates the tail.
+- **The straggler is the ROOT content, not a leaf, and it is gated on `ManifestsReady`, not `VolumesReady`.** Its 67
+  reconciles all show `gate=ManifestCapturePending`, `manifestsReady=F`, `volumesReady=U` (volumes never even
+  evaluated) until it flips everything to `Completed` at ~30s (≈9s AFTER all 20 children were ready). VolumesReady /
+  VSC wake-up is irrelevant to this straggler; **C-1 would not have moved it.**
+- **Root reconcile cost is a real throughput sink.** durMs for the root content: p50=50ms, p90≈1960ms, **max=6806ms**,
+  ~40s of reconcile CPU on a single object; 9 reconciles ≥1s. The heavy passes appear once all 20 children are linked
+  (`childRefs=20`) — i.e. the `declaredNonLeafChildContentNames` uncached APIReader walk (owner Snapshot + resolve 20
+  non-leaf children) plus the 20-child aggregation. A multi-second reconcile means the root cannot *observe* its own
+  ready manifest leg until a ≥6s pass completes.
+- **Duplicate reconciles of the same object.** The root content is reconciled by TWO controller instances that share
+  the reconciler and are NOT serialized against each other: `snapshotcontent-storage.deckhouse.io-SnapshotContent`
+  (main `For`) 35× and `snapshotcontent-snapshot-storage.deckhouse.io-Snapshot` (Snapshot-status wake-up) 32×. The
+  expensive root reconcile runs concurrently/redundantly across both, and C-2's child-edge wake adds enqueue pressure
+  (one per child transition) on the expensive root pass.
+
+**Revised next levers (NOT C-1):**
+
+1. **T-cost — cut the root reconcile cost:** the ≥6s passes are the `declaredNonLeafChildContentNames` uncached walk
+   (O(children) APIReader round-trips every reconcile) + 20-child aggregation. Memoize the declared-children
+   resolution within a reconcile / across a generation, and/or add a cheap changed-gate short-circuit before the walk
+   so redundant passes are ~ms. (The owner's declared set must stay fresh for the archive-latch correctness, so cache
+   carefully — resolve once per reconcile, do not re-read per child.)
+2. **T-dedup — collapse duplicate reconciles:** the main content controller and the Snapshot-status wake-up controller
+   both drive the same content key concurrently. Coalesce, or make the non-owning path a cheap enqueue-only wake so
+   only one instance does the heavy work.
+3. **T-manifest — confirm the root MCP timing:** root `ManifestsReady` flips ~9s after children ready; determine
+   whether the namespace-root ManifestCheckpoint is produced late (manifest capture genuinely slow for the whole
+   namespace) or ready early but observed late behind the 6s reconciles / a wake gap.
+
+C-1 (VSC→content dual-path wake) is de-prioritised: correct in principle (VSC is ownerRef-dropped) but it does not
+touch the measured tail, which is the root content's manifest leg + reconcile-cost/duplication.
+
+##### T-manifest diagnostic result — manifest capture is FAST; the leg is late by dependency + reconcile cost, NOT capture cost
+
+A fresh SETS=10 trace instrumented the root manifest leg on one clock (offsets from root Snapshot creation). Root
+content `ns-…`, its `ManifestCheckpoint` `mcp-…` (**totalObjects=10, chunks=1**), its `ManifestCaptureRequest`:
+
+| step | offset |
+|---|---|
+| ROOT `ChildrenSnapshotReady` (planning barrier) | 13.82s |
+| last real leaf child content `ManifestsArchived` | ~22.67s |
+| 1. root **MCR created** | **25.88s** |
+| 3. root MCP created | 26.88s |
+| 4. root **MCP Ready** | **28.35s** |
+| 5. root content `ManifestsReady` observed | 32.67s |
+| ROOT `ManifestsArchived` / `Ready` | 32.55s / **34.65s** |
+
+Findings:
+
+- **The manifest capture itself is fast:** MCR created 25.88s → MCP Ready 28.35s ≈ **2.5s** for a 10-object /
+  1-chunk namespace. "namespace-wide capture is too expensive/slow" is **refuted**. T-manifest as *capture
+  optimisation* is not the lever.
+- **The root MCR is not even created until 25.88s**, ~3.2s after the last leaf child is `ManifestsArchived`
+  (~22.67s). This is a real data dependency, by design: `BuildRootNamespaceManifestCaptureTargets`
+  (`internal/usecase/root_capture_run_exclude.go`) fail-closes with `ErrSubtreeManifestCapturePending` until every
+  descendant SnapshotContent has published a Ready `ManifestCheckpoint`, because the root must subtract
+  (exclude) manifest objects already captured by children to avoid double-capture / co-ownership violation
+  (spec §3.9.2). So `reconcileCaptureN2a` requeues 500ms without creating the MCR while any child is not archived.
+  This gate cannot be removed; it only shrinks when children archive faster.
+- **~4.3s observe lag** after MCP Ready (28.35s) before the root content flips `ManifestsReady` (32.67s) — the
+  expensive/starved root reconcile (T-cost/T-dedup), same as the earlier straggler finding.
+
+Tail decomposition (last real child archived 22.67s → root `Ready` 34.65s ≈ 12s):
+`+3.2s` root reconcile latency to plan+create MCR (gate release → MCR), `+2.5s` capture (fine),
+`+4.3s` observe lag (root sees MCP Ready), `+2s` archive/mirror. On top, children themselves lag ~7s from
+data-ready (~15s) to `ManifestsArchived` (~22.67s) — child-content throughput + archive latch (C-2 already helped).
+
+**Verdict / next lever:** T-manifest (optimise the capture) is NOT worthwhile — capture is 2.5s. The reducible
+latency is root/child **reconcile cost + scheduling**:
+- **T-cost**: short-circuit the per-reconcile `declaredNonLeafChildContentNames` uncached APIReader walk +
+  20-child aggregation (drives the 4.3s observe lag and the 3.2s plan latency; ≥6s heavy passes observed earlier).
+- **T-dedup**: the root content key is reconciled by two non-serialised controller instances (`For` +
+  Snapshot-status wake), each running the heavy pass; coalesce so only one does the work.
+- Faster child archiving (child-level T-cost + C-2) shrinks the ~7s data-ready→archived child lag and thus the
+  gate-release time.
+
+Proceed with T-cost first (short-circuit before the declared-children walk), then T-dedup.
+
+##### T-cost — defer the declared-children walk to the only latch-True pass (implemented, cluster-validation pending)
+
+The expensive leg is `declaredNonLeafChildContentNames` (`snapshotcontent/controller.go`): an **uncached** `APIReader.Get`
+of the owning Snapshot **plus one uncached resolve per declared non-leaf child** (O(children) round-trips). It was
+called **unconditionally** on every reconcile from `aggregateChildrenManifestsArchived`, so during the whole
+convergence window the root ran the full ~20-child uncached walk on each of its ~67 reconciles — the source of the
+≥6s passes, the workqueue saturation, and hence the 4.3s observe lag.
+
+**Change (surgical, no new state, correctness-preserving):** the declared-vs-linked fail-close is only ever
+*required* on the single pass that can actually latch `ManifestsArchived=True`. `computeManifestsArchived` sets True
+**only** when this node's own manifest leg is Ready **AND** every linked child is archived. So the walk is now gated on
+exactly that precondition:
+
+- `aggregateChildrenManifestsArchived` takes `ownManifestReady` (from `plan.manifestsReady == True`).
+- The linked-children walk (cached reads) still runs every pass and still detects a terminally-failed child.
+- The uncached declared-vs-linked walk runs **only** when `ownManifestReady && pendingNames == 0` (own manifest Ready
+  and all linked children archived). In every other state the subtree cannot be archived regardless of the declared
+  set, so skipping the walk cannot produce a false `True` latch — the one-way invariant is preserved. (This does **not**
+  cache the declared set; the doc's "do not cache `declaredNonLeafChildContentNames`" rule stands. The read still goes
+  through the uncached `APIReader` on the latch-True pass.)
+
+**Effect on the root:** during `[children archiving]` and `[all children archived → own MCP Ready]`
+(the 22.67s→28.35s window) the root's own manifest leg is not yet Ready, so the walk is skipped and those reconciles
+become ~ms. The uncached walk only runs from ~28.35s (MCP Ready + children archived) until the latch closes — removing
+the pre-MCP-Ready walk churn frees the shared client so the latch-True passes are fast, collapsing the ~4.3s observe
+lag toward a single reconcile cycle.
+
+**Tests (unit, green + `-race`):** `t_cost_archive_walk_gate_test.go` pins the gate — owner-Snapshot APIReader GET is
+`0` when own manifest is pending, `0` when a linked child is pending, and `≥1` (latch closes True) on the pass where own
+manifest is Ready and the linked child is archived. Existing archive-aggregation/latch tests unchanged.
+
+Acceptance (cluster, SETS=10, pending redeploy): root MCR created closer to the last child `ManifestsArchived`; MCP
+Ready → root `ManifestsReady` drops from ~4.3s toward one event/reconcile cycle; no post-Ready storm; latch correctness
+unchanged. T-dedup remains the next lever if a residual gap persists.

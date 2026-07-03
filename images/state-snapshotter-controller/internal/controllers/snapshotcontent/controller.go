@@ -718,7 +718,7 @@ func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context
 		return nil
 	}
 
-	childrenArchived, anyChildFailed, childMessage, err := r.aggregateChildrenManifestsArchived(ctx, obj)
+	childrenArchived, anyChildFailed, childMessage, err := r.aggregateChildrenManifestsArchived(ctx, obj, plan.manifestsReady == metav1.ConditionTrue)
 	if err != nil {
 		return err
 	}
@@ -812,7 +812,12 @@ func (r *SnapshotContentController) computeResidualSweepGate(obj *unstructured.U
 // archived; any unresolved/unbound/unlinked declared child is pending (not a failure). Because the latch
 // is one-way (never re-opens), this declared-vs-linked check is the only way to guarantee True implies a
 // complete, fully linked subtree.
-func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, bool, string, error) {
+//
+// T-cost: ownManifestReady tells the aggregator whether this node's own manifest leg is Ready. The expensive
+// declared-vs-linked walk (uncached owner GET + one uncached resolve per declared child) is deferred until the
+// only pass that could actually latch True (ownManifestReady && every linked child archived); see the gate
+// below for why deferring it is safe.
+func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx context.Context, parentContentObj *unstructured.Unstructured, ownManifestReady bool) (bool, bool, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
 		return false, false, "", err
@@ -861,8 +866,24 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		pendingNames = append(pendingNames, name)
 	}
 
-	// Fail-closed: every declared non-leaf child must be linked into the published edge set before the
-	// subtree can be considered archived.
+	// T-cost short-circuit: the expensive declared-vs-linked fail-close (uncached owner GET + one uncached
+	// APIReader resolve per declared child) is only ever REQUIRED on the single pass that could latch
+	// ManifestsArchived=True — computeManifestsArchived sets True only when this node's own manifest leg is
+	// Ready AND every linked child is archived. In any other state (own manifest not yet Ready, or a linked
+	// child still pending) the subtree is not archived regardless of the declared set, so skipping the walk
+	// cannot produce a false True latch (the one-way invariant is preserved); it only avoids O(children)
+	// uncached reads on the many convergence-window reconciles that dominate the tail. Terminal child failure
+	// is already detected by the linked-children walk above, independent of this gate.
+	if !ownManifestReady || len(pendingNames) > 0 {
+		if len(pendingNames) > 0 {
+			return false, false, "waiting for child manifests archive: " + formatReadyProgress(archivedCount, total, pendingNames), nil
+		}
+		return false, false, "", nil
+	}
+
+	// Own manifest leg Ready and all linked children archived: run the authoritative declared-vs-linked
+	// fail-close (uncached) before latching True — every declared non-leaf child must be linked into the
+	// published edge set.
 	declaredNames, declaredComplete, err := r.declaredNonLeafChildContentNames(ctx, parentContentObj)
 	if err != nil {
 		return false, false, "", err
@@ -878,10 +899,6 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 	}
 	if len(unlinked) > 0 {
 		return false, false, "waiting for declared child content to be linked: " + strings.Join(unlinked, ", "), nil
-	}
-
-	if len(pendingNames) > 0 {
-		return false, false, "waiting for child manifests archive: " + formatReadyProgress(archivedCount, total, pendingNames), nil
 	}
 	return true, false, "", nil
 }
