@@ -197,6 +197,73 @@ func TestMirrorSnapshotManifestsArchivedNoopWhenContentHasNone(t *testing.T) {
 	}
 }
 
+// L4-load: the Ready mirror reads the bound SnapshotContent through the cached Client, not the uncached
+// APIReader. Split clients pin the routing — the content lives only in the cache while the APIReader is
+// empty. If the mirror regressed to getSnapshotContentFresh (APIReader) it would observe NotFound and fall
+// back to ContentBindingPending/False instead of mirroring the cached Ready=True.
+func TestMirrorSnapshotReadyFromBoundContentReadsFromCacheNotAPIReader(t *testing.T) {
+	ctx := context.Background()
+
+	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+		Type:    snapshotpkg.ConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  snapshotpkg.ReasonCompleted,
+		Message: "manifests (archived), data, and child content are ready",
+	})
+	parent := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 7}}
+
+	cacheCl := readyMirrorScheme(t).WithObjects(content, parent).WithStatusSubresource(parent).Build()
+	apiReaderCl := readyMirrorScheme(t).Build() // deliberately empty of the content
+	r := &SnapshotReconciler{Client: cacheCl, APIReader: apiReaderCl}
+
+	if err := r.mirrorSnapshotReadyFromBoundContent(ctx, parent, content, errors.New("subtree pending")); err != nil {
+		t.Fatalf("mirror: %v", err)
+	}
+
+	fresh := &storagev1alpha1.Snapshot{}
+	if err := cacheCl.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "root"}, fresh); err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady)
+	if got == nil || got.Status != metav1.ConditionTrue || got.Reason != snapshotpkg.ReasonCompleted {
+		t.Fatalf("mirror did not read content from cache: Ready=%#v, want True/%s", got, snapshotpkg.ReasonCompleted)
+	}
+}
+
+// L4-load: the ManifestsArchived mirror likewise reads the bound SnapshotContent from the cache, not the
+// APIReader. Same split-client pin as the Ready mirror above.
+func TestMirrorSnapshotManifestsArchivedReadsFromCacheNotAPIReader(t *testing.T) {
+	ctx := context.Background()
+
+	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+		Type:    snapshotpkg.ConditionManifestsArchived,
+		Status:  metav1.ConditionTrue,
+		Reason:  snapshotpkg.ReasonManifestsArchived,
+		Message: "subtree manifests archived",
+	})
+	parent := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 8}}
+
+	cacheCl := readyMirrorScheme(t).WithObjects(content, parent).WithStatusSubresource(parent).Build()
+	apiReaderCl := readyMirrorScheme(t).Build() // deliberately empty of the content
+	r := &SnapshotReconciler{Client: cacheCl, APIReader: apiReaderCl}
+
+	key := types.NamespacedName{Namespace: "ns", Name: "root"}
+	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, key, content.Name); err != nil {
+		t.Fatalf("mirror: %v", err)
+	}
+
+	fresh := &storagev1alpha1.Snapshot{}
+	if err := cacheCl.Get(ctx, key, fresh); err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
+	if got == nil || got.Status != metav1.ConditionTrue || got.Reason != snapshotpkg.ReasonManifestsArchived {
+		t.Fatalf("archived mirror did not read content from cache: ManifestsArchived=%#v, want True/%s", got, snapshotpkg.ReasonManifestsArchived)
+	}
+}
+
 // The bridge is the single non-mirror writer: Ready=False/ChildrenFailed.
 func TestPatchSnapshotChildSnapshotFailedBridge(t *testing.T) {
 	ctx := context.Background()

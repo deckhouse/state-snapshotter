@@ -568,11 +568,38 @@ reconciles/tree, flat across scale) and **no post-Ready storm**. Target (15–25
 (T=10 wall 12s). No changes to the archive-wave / re-mirror / self-requeue logic were required — A/B/C
 were symptoms, not the cause. The per-reconcile diagnostic trace is retained at V(1) (debug), not INFO.
 
-**Optional L4-load (separate future item, do NOT mix with the latency fix):**
-- reduce benign conflicts observed at N≥10 (0→4→22 across T=1/5/10);
-- changed-gate/dedup on ManifestsArchived/Ready to trim no-op passes;
-- cache the uncached owner read in `declaredNonLeafChildContentNames`;
-- validate at TREES=20/50.
+### L4-load — mirror-path cached reads *(separate future item, do NOT mix with the latency fix)*
+
+**Scope (only these two — both are hot mirror-path reads of a *watched* SnapshotContent):**
+- `genericbinder/controller.go:673`
+- `snapshot/content_reader.go:30-34` (`snapshotContentReader`)
+
+**Change:** `APIReader.Get(SnapshotContent)` → `Client.Get(SnapshotContent)`.
+
+**Rationale:**
+- SnapshotContent is watched (content watch enqueues the bound snapshot on Ready/ManifestsArchived change);
+- stale cache is safe: at most one extra reconcile before convergence;
+- the Ready mirror is event-driven;
+- INV-RECONCILE-TRUTH remains the backstop;
+- removes a direct apiserver GET on every mirror pass (~30 mirror reconciles/tree at scale).
+
+**Acceptance:**
+- APIReader call count on the mirror path drops (unit test asserts the read routes to Client, not APIReader);
+- TREES=1/5/10 do not regress;
+- post-Ready storm stays 0;
+- Ready mirror does not stall;
+- conflicts/errors do not grow.
+
+**Explicitly out of scope (do NOT change):**
+- `genericbinder/controller.go:822` (child Snapshot existence) and `snapshot/parent_graph.go:328` (graph child
+  walk): higher risk of delaying planning/binding on cache lag, smaller payoff.
+- **Do NOT cache `declaredNonLeafChildContentNames` owner reads (`snapshotcontent:922,949`): they are
+  correctness-critical for the one-way `ManifestsArchived` latch** — a stale, smaller declared set could
+  permanently mislatch the archive over an unlinked subtree (duplicate-root-capture). Pinned by
+  `TestOwnerSnapshotReadStaysOnAPIReaderForDeclaredChildren`.
+
+**Other load-shaving (independent, later):** reduce benign conflicts observed at N≥10 (0→4→22 across
+T=1/5/10); changed-gate/dedup on ManifestsArchived/Ready to trim no-op passes; validate at TREES=20/50.
 
 ---
 

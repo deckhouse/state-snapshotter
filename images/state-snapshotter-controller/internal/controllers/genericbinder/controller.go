@@ -670,7 +670,11 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	contentObj.SetGroupVersionKind(contentGVK)
 	contentKey := client.ObjectKey{Name: contentName}
 
-	if err := r.APIReader.Get(ctx, contentKey, contentObj); err != nil {
+	// Cached read (r.Client, L4-load): SnapshotContent is watched (content_watch enqueues the bound
+	// snapshot on Ready/ManifestsArchived change), so this Ready mirror is event-driven and a stale cache
+	// costs at most one extra reconcile before convergence (INV-RECONCILE-TRUTH backstops). Using the
+	// cache avoids a direct apiserver GET on every mirror pass.
+	if err := r.Client.Get(ctx, contentKey, contentObj); err != nil {
 		if errors.IsNotFound(err) {
 			return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
 		}

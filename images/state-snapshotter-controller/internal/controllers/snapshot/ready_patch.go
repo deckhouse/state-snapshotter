@@ -106,7 +106,7 @@ func (r *SnapshotReconciler) mirrorSnapshotManifestsArchivedFromBoundContent(
 	parentKey types.NamespacedName,
 	contentName string,
 ) error {
-	fresh, err := r.getSnapshotContentFresh(ctx, contentName)
+	fresh, err := r.getSnapshotContentCached(ctx, contentName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
@@ -160,7 +160,7 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 	if transientErr != nil {
 		message = transientErr.Error()
 	}
-	if fresh, err := r.getSnapshotContentFresh(ctx, content.Name); err == nil {
+	if fresh, err := r.getSnapshotContentCached(ctx, content.Name); err == nil {
 		if cond := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady); cond != nil {
 			status = cond.Status
 			reason = cond.Reason
