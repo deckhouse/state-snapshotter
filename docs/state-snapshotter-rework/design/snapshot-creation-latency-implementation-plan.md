@@ -518,6 +518,28 @@ by 500ms self-requeue (event wakeups arriving as no-ops before the child transit
 **Acceptance:** TREES=1 ≤ ~15s; TREES=5 wall well below 60s; capture-done ~4s must not carry a +50s Ready
 tail; snapshotcontent reconcile count drops multiplicatively.
 
+**Step 2 — TREES=5 burst measured (trace deployed), DONE.** Wall ~57s (matches baseline). The trace
+**refutes hypotheses A/B/C**: only **79** `snapshotcontent trace` lines for the whole 5-tree burst (40
+`noop` / 39 `changed`) — there is **no 500ms self-requeue storm and no re-mirror flood**. Instead the
+reconcile *itself* is slow: **durMs mean 4.5s, median 3.0s, max 14.8s**, summing to ~355s of reconcile
+wall-time; divided by the 8 workers that is ~44s ≈ the observed tail. Every ~14s reconcile is a **non-leaf
+(parent) content** (`gate=ChildrenPending`/`Completed`); leaf disk contents are fast.
+
+**Confirmed root cause (not A/B/C/archive-wave):** the shared manager client uses the client-go **default
+rate limit QPS 5 / Burst 10** (`kubutils.KubernetesDefaultConfigCreate` sets neither, and `main.go` passes
+it straight to `manager.New`). Every controller sharing `mgr.GetClient()`/`mgr.GetAPIReader()` draws on
+that one 5 QPS limiter. A parent SnapshotContent reconcile does an **uncached `APIReader.Get`** on the
+owning Snapshot (declared-child set, controller.go ~878) plus a status patch; under a concurrent
+multi-tree burst those requests queue behind the 5 QPS token bucket, inflating a single reconcile to
+4–15s and serializing the tree-Ready tail regardless of `MaxConcurrentReconciles=8`. This is the same
+limiter the `Snapshot` capture path already bypasses with a `QPS 100 / Burst 200` config copy.
+
+**Fix applied (cmd/main.go):** raise the shared manager client to **`QPS=50 / Burst=100`** before
+`manager.New`. Low-risk, in-repo precedent (capture clients use 100/200), single-line lever. Redeploy +
+re-measure pending: expect per-reconcile durMs to collapse to ms and the TREES=5 tail to fall well below
+60s. If a residual tail remains after this, revisit B (changed-gate/dedup) and the uncached owner read
+(cache it once the declared-child invariant allows).
+
 ---
 
 ### L6 — e2e latency assertion / report  *(validation)*

@@ -167,6 +167,15 @@ func main() {
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
+	// Raise the shared manager client rate limit from the client-go default (QPS 5 / Burst 10). That
+	// default throttles every controller sharing mgr.GetClient()/mgr.GetAPIReader() - notably the
+	// SnapshotContent aggregator, whose non-leaf reconciles each do uncached APIReader reads (owning
+	// Snapshot for the declared-child set) plus a status patch. Under a concurrent multi-tree snapshot
+	// burst those requests queue behind the 5 QPS limiter, inflating a single reconcile to 4-15s and
+	// serializing the whole tree-Ready tail regardless of MaxConcurrentReconciles. (The capture path in
+	// the Snapshot controller already copies the config to QPS 100 / Burst 200 for the same reason.)
+	kConfig.QPS = 50
+	kConfig.Burst = 100
 	log.Info("[main] kubernetes config has been successfully created.")
 
 	// Create scheme for controller manager (includes all CRD types for informers)
