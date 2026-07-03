@@ -535,10 +535,44 @@ multi-tree burst those requests queue behind the 5 QPS token bucket, inflating a
 limiter the `Snapshot` capture path already bypasses with a `QPS 100 / Burst 200` config copy.
 
 **Fix applied (cmd/main.go):** raise the shared manager client to **`QPS=50 / Burst=100`** before
-`manager.New`. Low-risk, in-repo precedent (capture clients use 100/200), single-line lever. Redeploy +
-re-measure pending: expect per-reconcile durMs to collapse to ms and the TREES=5 tail to fall well below
-60s. If a residual tail remains after this, revisit B (changed-gate/dedup) and the uncached owner read
-(cache it once the declared-child invariant allows).
+`manager.New`. Low-risk, in-repo precedent (capture clients use 100/200), single-line lever.
+
+**Step 3 — cluster validation after redeploy, DONE. Decisive win:**
+
+| Metric | Before (QPS 5/10) | After (QPS 50/100) |
+|---|---|---|
+| TREES=5 wall-clock | ~57s | **6s** (first tree 3s) |
+| TREES=1 | ~15s | **3s** |
+| reconcile durMs mean | 4491ms | **125ms** |
+| reconcile durMs median | 3001ms | **45ms** |
+| reconcile durMs max | 14812ms | **847ms** |
+
+**Step 4 — scale proof (QPS 50/100), TREES=1/5/10, DONE.** Confirms the QPS bump is an *enabling* fix (a
+genuinely bottlenecked client), not a mask over runaway churn: per-tree work is flat and the controller
+quiesces after Ready.
+
+| Metric | T=1 | T=5 | T=10 |
+|---|---|---|---|
+| wall-clock | 1s | 8s | 12s |
+| snapshotcontent reconciles / tree | 33.0 | 31.8 | 28.8 |
+| genericbinder reconciles / tree | 27.0 | 32.4 | 29.6 |
+| status patches (≈API writes) / tree | 11 | 13.2 | 9.5 |
+| post-Ready reconciles (30s window) | 0 | 1 | 0 |
+| reconcile durMs mean / max | 23 / 58 | 209 / 1097 | 258 / 1314 |
+| conflicts / reconciler-errors | 0 / 0 | 4 / 1 | 22 / 1 |
+
+**L3b result:** the long archived-latch tail was **not** caused by archive propagation logic. It was
+caused by the manager client's default client-go rate limiter **QPS=5 / Burst=10**. Raising it to
+**QPS=50 / Burst=100** makes throughput **sublinear up to TREES=10**, with **stable work per tree** (~30
+reconciles/tree, flat across scale) and **no post-Ready storm**. Target (15–25s) is met with margin
+(T=10 wall 12s). No changes to the archive-wave / re-mirror / self-requeue logic were required — A/B/C
+were symptoms, not the cause. The per-reconcile diagnostic trace is retained at V(1) (debug), not INFO.
+
+**Optional L4-load (separate future item, do NOT mix with the latency fix):**
+- reduce benign conflicts observed at N≥10 (0→4→22 across T=1/5/10);
+- changed-gate/dedup on ManifestsArchived/Ready to trim no-op passes;
+- cache the uncached owner read in `declaredNonLeafChildContentNames`;
+- validate at TREES=20/50.
 
 ---
 

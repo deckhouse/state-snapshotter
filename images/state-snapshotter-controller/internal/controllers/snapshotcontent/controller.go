@@ -504,14 +504,14 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 }
 
 // traceSnapshotContent emits a single structured per-reconcile diagnostic line for the SnapshotContent
-// aggregation (L3b archived-latch tail investigation). It NEVER changes state or control flow; it exists
-// only to build the TREES=N burst timeline: which leg still gates Ready, whether the status patch
-// changed / was a no-op / conflicted, the declared child count, and the reconcile wall time. The archive
-// wave is bottom-up (leaf ManifestsArchived -> parent aggregation via mapSnapshotContentToParentContent),
-// so overlaying these lines by content name/timestamp shows exactly where the ~50s tail is spent.
+// aggregation. It NEVER changes state or control flow. It is logged at V(1) (debug), not INFO, so it does
+// not spam production at the default verbosity; raise verbosity to rebuild a TREES=N burst timeline
+// (which leg still gates Ready, whether the status patch changed / was a no-op / conflicted, the declared
+// child count, and the reconcile wall time). Used to prove L3b: the long tree-Ready tail was the manager
+// client's default rate limiter (QPS 5 / Burst 10) inflating reconcile durMs, not archive-wave logic.
 func (r *SnapshotContentController) traceSnapshotContent(ctx context.Context, obj *unstructured.Unstructured, plan commonContentStatusPlan, patch string, start time.Time) {
 	childRefs, _, _ := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotContentRefs")
-	log.FromContext(ctx).Info("snapshotcontent trace",
+	log.FromContext(ctx).V(1).Info("snapshotcontent trace",
 		"content", obj.GetName(),
 		"uid", string(obj.GetUID()),
 		"gen", obj.GetGeneration(),
