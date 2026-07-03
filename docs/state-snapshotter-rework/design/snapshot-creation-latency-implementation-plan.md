@@ -383,6 +383,40 @@ Validate against the reconcile-count harness before changing.
 
 ---
 
+### L2b-ssc — Parallelize manifestcapture controller  *(scalability — done)*
+
+Raise ManifestCaptureRequest/checkpoint controller concurrency from implicit 1 to 4 with a bounded rate
+limiter. This targets the state-snapshotter-only bottleneck observed in parallel tree creation. It is
+intentionally scoped to state-snapshotter; storage-foundation VCR concurrency remains unchanged and may
+become the next bottleneck after this change.
+
+**Why:** with `SNAP_TREES=5` concurrent VM-snapshot trees, per-tree time-to-Ready grew almost linearly
+(~12s solo → ~52s avg / ~60s wall). The `ManifestCaptureRequest` (checkpoint) controller ran with the
+implicit `MaxConcurrentReconciles=1`, so independent MCRs queued behind one worker.
+
+**Pre-change safety checks (all cleared):**
+- No global mutex / singleflight inside the checkpoint controller.
+- MCP / chunk / ObjectKeeper names are deterministic per MCR (`GenerateManifestCheckpointNameFromUID`,
+  UID-aware `ManifestCaptureRequestObjectKeeperName`); different MCRs never collide, and the already-exists
+  path rejects a keeper owned by another MCR (UID mismatch).
+- MCR/MCP status writes are idempotent `Patch`/`Update`-with-retry; controller-runtime still serializes
+  reconciles of the *same* object.
+- OwnerRef handoff uses per-object refs, no shared mutable state — **except** `loadConfigFromConfigMap`,
+  which rewrote the shared `*config.Options` manifest fields (`MaxChunkSizeBytes`, `DefaultTTL`,
+  `DefaultTTLStr`) on every reconcile. Under concurrency this is a data race, so those fields are now
+  guarded by a `configMu` RWMutex with small accessor helpers; readers snapshot the value once.
+
+**Change:** `manifestcapture/checkpoint_controller.go` — `controller.Options{ MaxConcurrentReconciles: 4,
+RateLimiter: 200ms→10s }` (rate limiter already present); add `configMu` guard around the config fields.
+
+**Validation:** `SNAP_TREES=1` must not regress; `SNAP_TREES=5` wall-clock should drop off the linear
+~52–60s (realistically ~30–45s, not necessarily 15–25s, because the foundation VCR/data-leg is still a
+single worker); no rise in conflicts/errors. If effect holds and no conflicts appear, try 8.
+
+**Tests:** all `manifestcapture` unit tests green under `-race`; full controller unit suite green.
+
+---
+
 ### L6 — e2e latency assertion / report  *(validation)*
 
 **Change:** an e2e test that creates the standard scheme and asserts wall-clock to `Snapshot.Ready`
