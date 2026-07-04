@@ -46,22 +46,74 @@ type Target = storagefoundation.Target
 // never invents domain semantics.
 type Reason string
 
-// DomainCaptureState is the durable, domain-owned planning result the SDK publishes into snapshot status:
-// the names of the manifest- and volume-capture requests it created and the set of child snapshot refs.
+// Phase is the domain-owned capture lifecycle carried on
+// status.captureState.domainSpecificController.phase. Re-exported from the api module so domain
+// controllers and adapters reference one definition.
+type Phase = storagev1alpha1.SnapshotCapturePhase
+
+// Phase values (re-exported).
+const (
+	PhasePlanning = storagev1alpha1.SnapshotCapturePhasePlanning
+	PhasePlanned  = storagev1alpha1.SnapshotCapturePhasePlanned
+	PhaseFinished = storagev1alpha1.SnapshotCapturePhaseFinished
+	PhaseFailed   = storagev1alpha1.SnapshotCapturePhaseFailed
+)
+
+// SnapshotSource is the full reference to the captured live source object, published by the SDK into the
+// top-level status.snapshotSource. It is self-contained for import-mode recreation. Re-exported api type.
+type SnapshotSource = storagev1alpha1.SnapshotSourceObjectRef
+
+// DomainCaptureState is the durable, domain-owned planning result the SDK publishes into snapshot status
+// under status.captureState.domainSpecificController: the names of the manifest- and volume-capture
+// requests it created, the lifecycle phase/reason/message, and the top-level set of child snapshot refs.
 // Adapters map it to and from the concrete snapshot status fields.
 type DomainCaptureState struct {
 	ManifestCaptureRequestName string
 	VolumeCaptureRequestName   string
 	ChildrenSnapshotRefs       []SnapshotChildRef
+	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+	Phase Phase
+	// Reason/Message carry the failure detail when Phase=Failed.
+	Reason  string
+	Message string
 }
 
-// CoreCaptureState is the read-only, core-owned handoff the SDK consults to suppress re-creating capture
-// requests after the core controller has durably stamped a leg captured. It is never written by the SDK.
+// CoreCaptureState is the read-only, core-owned handoff (captureState.commonController leg latches) the
+// SDK consults to suppress re-creating capture requests and to compute CoreCaptureOutcome. It is never
+// written by the SDK. Each leg is a *bool success latch: nil = no such leg on this node; false = leg
+// declared but not captured yet; true = captured.
 type CoreCaptureState struct {
-	// ManifestCaptured is set by the core controller once the manifest leg is durably checkpointed.
-	ManifestCaptured bool
-	// DataCaptured is set by the core controller once the data leg's content handoff is durable.
-	DataCaptured bool
+	// ManifestCaptured is the manifest-leg latch (declared on every capture node).
+	ManifestCaptured *bool
+	// DataCaptured is the data-leg latch (declared only where a data line exists).
+	DataCaptured *bool
+}
+
+// manifestCaptured reports whether the manifest leg is captured (nil latch => not captured).
+func (c CoreCaptureState) manifestCaptured() bool { return c.ManifestCaptured != nil && *c.ManifestCaptured }
+
+// dataCaptured reports whether the data leg is captured (nil latch => not captured).
+func (c CoreCaptureState) dataCaptured() bool { return c.DataCaptured != nil && *c.DataCaptured }
+
+// AllLegsCaptured reports whether every declared (non-nil) leg is captured. It requires at least one
+// declared leg: with no leg declared yet (both nil) capture has not started, so it returns false — this
+// distinguishes "nothing to wait for" (never happens; the core always declares the manifest leg) from
+// "not started yet". The core eager-initializes applicable legs to false, so the domain stays leg-agnostic.
+func (c CoreCaptureState) AllLegsCaptured() bool {
+	declared := false
+	if c.ManifestCaptured != nil {
+		declared = true
+		if !*c.ManifestCaptured {
+			return false
+		}
+	}
+	if c.DataCaptured != nil {
+		declared = true
+		if !*c.DataCaptured {
+			return false
+		}
+	}
+	return declared
 }
 
 // ChildSpec is the child-builder seam: the domain constructs the fully-formed child snapshot object
@@ -73,10 +125,12 @@ type ChildSpec struct {
 	Object client.Object
 }
 
-// NotReadySpec describes a non-terminal-or-terminal Ready=False outcome the domain wants published
-// (invalid source, missing artifact, …). It generalizes the various Ready=False paths into one verb.
-type NotReadySpec struct {
-	// Reason is the machine-readable Ready=False reason (domain-chosen).
+// FailSpec describes a Phase=Failed outcome the domain wants published (invalid source, missing
+// artifact, …). It generalizes the various failure paths into one verb (Reject). The failure surfaces to
+// users through the core-derived Ready (the core mirrors domain phase=Failed into Ready=False).
+type FailSpec struct {
+	// Reason is the machine-readable failure reason (domain-chosen), stored on
+	// captureState.domainSpecificController.reason.
 	Reason Reason
 	// Message is an optional human-readable explanation.
 	Message string
@@ -85,6 +139,27 @@ type NotReadySpec struct {
 	// Requeue asks the caller to requeue (for example, an artifact that may appear later). When false the
 	// outcome is treated as terminal-until-spec-change and the SDK returns no error and no requeue intent.
 	Requeue bool
+}
+
+// CaptureOutcome is the tri-state the SDK derives for the domain from the core's leg latches plus the
+// terminal Ready reason. The domain switches its wait loop on it (Captured -> ConfirmConsistent,
+// Failed -> Fail/Reject, Capturing -> wait).
+type CaptureOutcome int
+
+const (
+	// CaptureOutcomeCapturing: the core is still capturing (some declared leg not captured, no terminal Ready).
+	CaptureOutcomeCapturing CaptureOutcome = iota
+	// CaptureOutcomeCaptured: every declared leg is captured and Ready is not terminal.
+	CaptureOutcomeCaptured
+	// CaptureOutcomeFailed: the core surfaced a terminal Ready reason (own manifests/volumes or child failure).
+	CaptureOutcomeFailed
+)
+
+// CaptureOutcomeResult carries the tri-state plus, for Failed, the terminal Ready reason/message.
+type CaptureOutcomeResult struct {
+	Outcome CaptureOutcome
+	Reason  string
+	Message string
 }
 
 // VolumeCaptureSpec is the domain's data-leg intent: the single PVC to capture. A snapshot node binds at

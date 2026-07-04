@@ -20,6 +20,12 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Accepted")].status
       name: Accepted
       type: string
+    - jsonPath: .status.conditions[?(@.type=="AccessGranted")].status
+      name: AccessGranted
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -93,8 +99,13 @@ spec:
           status:
             properties:
               conditions:
-                description: Conditions include Accepted, AccessGranted, Ready (see
-                  ADR).
+                description: |-
+                  Conditions carry three distinct signals, each with a single writer:
+                    - Accepted — the spec is valid and registrable (written by the CSD reconciler);
+                    - AccessGranted — the domain RBAC has been applied (written by the 030-domain-rbac hook);
+                    - Ready — the aggregate Ready = Accepted && AccessGranted.
+                  Accepted and Ready diverge when Accepted=True but AccessGranted=False (spec accepted, RBAC not yet
+                  applied) → Ready=False; the printer columns surface all three so this is visible at a glance.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

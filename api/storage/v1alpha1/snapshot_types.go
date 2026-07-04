@@ -44,27 +44,45 @@ type SnapshotList struct {
 	Items           []Snapshot `json:"items"`
 }
 
+// SnapshotMode selects how a snapshot object (root Snapshot or a domain XxxxSnapshot) obtains its
+// content. The three values are mutually exclusive content sources: a live cluster (Capture), an
+// uploaded payload (Import), or an existing pre-provisioned SnapshotContent (StaticBind). It replaces
+// the former spec.source.import marker and the "presence of snapshotContentName" static-bind signal.
+// +kubebuilder:validation:Enum=Capture;Import;StaticBind
+type SnapshotMode string
+
+const (
+	// SnapshotModeCapture: dynamic capture from the live cluster (default).
+	SnapshotModeCapture SnapshotMode = "Capture"
+	// SnapshotModeImport: materialize from an uploaded payload (+ DataImport for data leaves); no live capture.
+	SnapshotModeImport SnapshotMode = "Import"
+	// SnapshotModeStaticBind: bind to an existing pre-provisioned SnapshotContent (spec.source.snapshotContentName).
+	SnapshotModeStaticBind SnapshotMode = "StaticBind"
+)
+
 // +k8s:deepcopy-gen=true
-// SnapshotSpec is the capture/import mode selector and is fully immutable after creation. A snapshot
-// is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the spec
-// must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
+// SnapshotSpec is the capture/import/static-bind mode selector and is fully immutable after creation. A
+// snapshot is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the
+// spec must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
 // UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
-// no recapture (a new capture requires a new Snapshot). The narrower spec.source rules below are now
-// subsumed by this rule but kept for clearer, field-scoped admission messages.
+// no recapture (a new capture requires a new Snapshot).
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
-// +kubebuilder:validation:XValidation:rule="has(self.source) == has(oldSelf.source)",message="spec.source cannot be added or removed after creation"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'StaticBind' ? (has(self.source) && has(self.source.snapshotContentName)) : (!has(self.source) || !has(self.source.snapshotContentName))",message="spec.source.snapshotContentName is required when mode is StaticBind and forbidden otherwise"
 type SnapshotSpec struct {
-	// Source optionally selects how this Snapshot obtains its content instead of dynamic capture.
-	// When omitted, the controller performs dynamic namespace capture (default behaviour).
-	// When set, exactly one member selects the mode (CEL one-of) and the whole source is immutable:
-	//   - import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
+	// Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
+	//   - Capture (default): dynamic namespace capture from the live cluster.
+	//   - Import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
 	//     plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
-	//   - snapshotContentName: CSI-like static binding to existing pre-provisioned content; the controller
-	//     does not create MCR/VCR and validates that the referenced SnapshotContent points back at this
-	//     Snapshot via spec.snapshotRef.
+	//   - StaticBind: CSI-like static binding to an existing pre-provisioned SnapshotContent; the controller
+	//     does not create MCR/VCR and validates that spec.source.snapshotContentName points back at this
+	//     Snapshot via SnapshotContent.spec.snapshotRef.
+	// +kubebuilder:default=Capture
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="has(self.import) != has(self.snapshotContentName)",message="exactly one of spec.source.import or spec.source.snapshotContentName must be set"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.source is immutable"
+	Mode SnapshotMode `json:"mode,omitempty"`
+
+	// Source carries mode-specific source parameters. In StaticBind mode source.snapshotContentName is
+	// required (and forbidden in every other mode); Capture and Import take no source parameters.
+	// +optional
 	Source *SnapshotSource `json:"source,omitempty"`
 
 	// ResourceSelector optionally restricts which namespace resources are captured. It is applied to the
@@ -77,43 +95,31 @@ type SnapshotSpec struct {
 	// matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
 	// When omitted, all resources are captured (no filtering).
 	//
-	// Ignored for spec.source modes (import / snapshotContentName): those do not list the live namespace.
+	// Ignored for non-Capture modes (Import / StaticBind): those do not list the live namespace.
 	// +optional
 	ResourceSelector *metav1.LabelSelector `json:"resourceSelector,omitempty"`
 }
 
-// SnapshotSource selects how a Snapshot obtains its content, mirroring VolumeSnapshot.spec.source.
-// It is a CEL one-of: exactly one of Import or SnapshotContentName is set (enforced on SnapshotSpec.Source).
+// SnapshotSource carries mode-specific source parameters. Only StaticBind uses it (snapshotContentName).
 // +k8s:deepcopy-gen=true
 type SnapshotSource struct {
-	// Import, when present, marks this Snapshot as an import target. It is an empty marker object —
-	// its mere presence selects import mode (content is materialized from an uploaded payload, not
-	// captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
-	// source members and to allow future import options without another union rewrite.
-	// +optional
-	Import *SnapshotImportSource `json:"import,omitempty"`
-
 	// SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-	// (static pre-provisioning, analogous to volumeSnapshotContentName).
+	// (static pre-provisioning, analogous to volumeSnapshotContentName). Required when mode is StaticBind.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	SnapshotContentName string `json:"snapshotContentName,omitempty"`
 }
 
-// SnapshotImportSource is an empty marker: its presence in spec.source selects import mode.
-// +k8s:deepcopy-gen=true
-type SnapshotImportSource struct{}
-
-// IsImportMode reports whether this Snapshot is an import target (spec.source.import set). Import-mode
+// IsImportMode reports whether this Snapshot is an import target (spec.mode == Import). Import-mode
 // snapshots are materialized from an uploaded payload and MUST NOT trigger dynamic namespace capture.
 func (s *Snapshot) IsImportMode() bool {
-	return s != nil && s.Spec.Source != nil && s.Spec.Source.Import != nil
+	return s != nil && s.Spec.Mode == SnapshotModeImport
 }
 
 // IsStaticBind reports whether this Snapshot statically binds to pre-provisioned content
-// (spec.source.snapshotContentName set).
+// (spec.mode == StaticBind).
 func (s *Snapshot) IsStaticBind() bool {
-	return s != nil && s.Spec.Source != nil && s.Spec.Source.SnapshotContentName != ""
+	return s != nil && s.Spec.Mode == SnapshotModeStaticBind
 }
 
 // ResolveResourceSelector converts spec.resourceSelector into a labels.Selector used by the dynamic
@@ -130,21 +136,17 @@ func (s *Snapshot) ResolveResourceSelector() (labels.Selector, error) {
 
 // +k8s:deepcopy-gen=true
 type SnapshotStatus struct {
-	// ObservedGeneration is the metadata.generation the controller last reconciled into this status.
-	// +optional
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-
 	// BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
 	// The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
-	// ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
-	// Snapshot controllers use it as execution state and clear it after the result is published to SnapshotContent.
-	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
-
-	// VolumeCaptureRequestName is the temporary bulk VCR owned by this snapshot while the volume leg runs.
-	// Cleared after VCR.status.dataRefs[] is published to bound SnapshotContent and artifacts are handed off.
-	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
+	// CaptureState collects internal capture signals. On the namespace-root Snapshot only the
+	// core-written commonController.manifestCaptured is present (read by the RBAC hook); there is no
+	// domainSpecificController (the root has no domain writer in wave3). The root's own execution
+	// handles (root MCR + residual orphan-PVC VS/per-PVC MCR) are core-internal — tracked by
+	// ownerRef/label, deterministic name — and are NOT surfaced in the public status.
+	// +optional
+	CaptureState *CaptureStateStatus `json:"captureState,omitempty"`
 
 	// ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
 	// in the N2b run tree. Generic reconcile resolves each child with one Get by ref GVK (no demo-kind

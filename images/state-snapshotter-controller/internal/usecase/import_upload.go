@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
@@ -101,7 +102,7 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	}
 	if !uploadTargetIsImportMode(cr) {
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
-			fmt.Sprintf("%s %s/%s is not in import mode (no spec.source.import marker): refusing manifests upload", snapshotGVK.String(), namespace, name))
+			fmt.Sprintf("%s %s/%s is not in import mode (neither spec.mode: Import nor spec.source.import marker): refusing manifests upload", snapshotGVK.String(), namespace, name))
 	}
 	uid := cr.GetUID()
 	if uid == "" {
@@ -187,11 +188,23 @@ func childRefSlicesEqual(current, desired []interface{}) bool {
 	return reflect.DeepEqual(current, desired)
 }
 
-// uploadTargetIsImportMode reports whether a snapshot CR is an import target, signalled by the unified
-// import marker spec.source.import: {}. Every state-snapshotter snapshot kind carries it in import mode —
-// core/structural nodes, domain data leaves, and the generic-PVC extended VolumeSnapshot (F1/F2) alike —
-// so a single check covers them all. This keeps the upload endpoint from clobbering a live-capture snapshot.
+// uploadTargetIsImportMode reports whether a snapshot CR is an import target. It accepts either family's
+// import marker so a single check covers every kind the upload endpoint sees: our snapshot CRDs
+// (core/structural nodes, domain data leaves) use the enum spec.mode: Import, while the generic-PVC
+// extended VolumeSnapshot (F1/F2) is a CSI-shaped fork that keeps the spec.source.import: {} marker.
+// This keeps the upload endpoint from clobbering a live-capture snapshot.
 func uploadTargetIsImportMode(obj *unstructured.Unstructured) bool {
+	return IsUnstructuredImportMode(obj)
+}
+
+// IsUnstructuredImportMode reports whether an unstructured snapshot object is in import mode, tolerating
+// both marker families: the enum spec.mode: Import used by our snapshot CRDs (root Snapshot and domain
+// XxxxSnapshot) and the legacy spec.source.import: {} marker kept by the CSI-shaped extended VolumeSnapshot
+// leaf (its structural CSI schema cannot host a top-level spec.mode). A live-capture snapshot has neither.
+func IsUnstructuredImportMode(obj *unstructured.Unstructured) bool {
+	if mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode"); mode == string(storagev1alpha1.SnapshotModeImport) {
+		return true
+	}
 	_, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
 	return found
 }

@@ -105,6 +105,56 @@ spec:
               rule: self == oldSelf
           status:
             properties:
+              captureState:
+                description: |-
+                  CaptureState optionally carries core-written suppression leaves for a domain reader; on a
+                  core-owned SnapshotContent aggregator this is normally unset.
+                properties:
+                  commonController:
+                    description: 'CommonController holds the core-written capture-leg
+                      success latches. Single writer: core.'
+                    properties:
+                      dataCaptured:
+                        description: |-
+                          DataCaptured is the data-leg success latch, declared only where a data line exists (absent = nil on
+                          nodes without data, e.g. the namespace root or a manifest-only aggregate). The parent reads a
+                          child's dataCaptured to time freeze/unfreeze.
+                        type: boolean
+                      manifestCaptured:
+                        description: |-
+                          ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
+                          false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
+                        type: boolean
+                    type: object
+                  domainSpecificController:
+                    description: 'DomainSpecificController holds the domain-written
+                      planning refs and lifecycle. Single writer: domain (SDK).'
+                    properties:
+                      manifestCaptureRequestName:
+                        description: ManifestCaptureRequestName is the temporary MCR
+                          owned by the domain node while own-scope capture runs.
+                        type: string
+                      message:
+                        description: Message is a human-readable detail for Phase=Failed.
+                        type: string
+                      phase:
+                        description: Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        enum:
+                        - Planning
+                        - Planned
+                        - Finished
+                        - Failed
+                        type: string
+                      reason:
+                        description: Reason is a short, machine-readable reason for
+                          Phase=Failed (free-form domain string).
+                        type: string
+                      volumeCaptureRequestName:
+                        description: VolumeCaptureRequestName is the temporary VCR
+                          owned by a data-leaf domain node while the data leg runs.
+                        type: string
+                    type: object
+                type: object
               childrenSnapshotContentRefs:
                 description: ChildrenSnapshotContentRefs lists direct child SnapshotContent
                   objects in the snapshot tree.
@@ -275,6 +325,13 @@ spec:
                 description: ManifestCheckpointName is the cluster-scoped ManifestCheckpoint
                   name once manifest capture has persisted.
                 type: string
+              parentDeleted:
+                description: |-
+                  ParentDeleted is a one-shot internal latch set by the binder when the parent Snapshot is deleted
+                  while this cluster-scoped SnapshotContent survives. Once true, the SnapshotContent controller no
+                  longer re-adds the parent-protect finalizer (the parent is gone) and GC may proceed. Monotonic
+                  (false -> true only); it replaces the former snapshot.deckhouse.io/parent-deleted annotation.
+                type: boolean
               residualVolumeCapture:
                 description: |-
                   ResidualVolumeCapture latches completion of the final residual/orphan-PVC capture wave on a
@@ -304,6 +361,16 @@ spec:
                       type: string
                     type: array
                 type: object
+              subtreeManifestsPersisted:
+                description: |-
+                  SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own
+                  ManifestCheckpoint is Ready AND every declared child SnapshotContent has subtreeManifestsPersisted=true,
+                  fail-closed). It replaces the former ManifestsArchived condition (user-facing objects no longer carry
+                  it). It serves three purposes not reducible to per-node manifestCaptured: (1) gate the FIRST Ready=True
+                  against declared-but-unlinked children, (2) drive the wave-barrier exclude-set of the root MCR (subtree
+                  completeness + linkage => no 409 double-capture), (3) monotonicity (never re-opens after the first Ready).
+                  It never expresses failure — a terminal manifest failure surfaces via the Ready reason (IsReasonTerminal).
+                type: boolean
             type: object
         type: object
     served: true

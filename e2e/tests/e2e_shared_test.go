@@ -103,12 +103,13 @@ const (
 	subManifestsUpload   = "manifests-and-children-refs-upload"
 )
 
-// Condition types. The Ready / PlanningReady contract constants come from api/storage; the leg
-// conditions (ManifestsReady / VolumeReady / ChildrenReady) live in the controller image's pkg/snapshot
-// and are mirrored here as the stable public contract to keep the e2e module dependency-light.
+// Condition types. Ready is the ONLY user-facing contract condition (from api/storage); the former
+// PlanningReady/ManifestsArchived conditions were replaced by internal status fields
+// (captureState.domainSpecificController.phase, captureState.commonController.*). The leg conditions
+// (ManifestsReady / VolumeReady / ChildrenReady) live in the controller image's pkg/snapshot and are
+// mirrored here as the stable public contract to keep the e2e module dependency-light.
 const (
 	condReady          = storagev1alpha1.ConditionReady
-	condPlanningReady  = storagev1alpha1.ConditionPlanningReady
 	condManifestsReady = "ManifestsReady"
 	condVolumeReady    = "VolumeReady"
 	condChildrenReady  = "ChildrenReady"

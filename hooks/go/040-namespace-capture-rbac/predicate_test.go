@@ -24,10 +24,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func snapshotWithArchived(ns string, status metav1.ConditionStatus, reason string) *storagev1alpha1.Snapshot {
+// snapshotWithManifestCaptured builds a Snapshot whose root manifest-leg latch
+// (captureState.commonController.manifestCaptured) is set to captured. This is the monotonic signal the
+// hook reads to release the transient capture RoleBinding.
+func snapshotWithManifestCaptured(ns string, captured bool) *storagev1alpha1.Snapshot {
+	c := captured
+	return &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "snap"},
+		Status: storagev1alpha1.SnapshotStatus{
+			CaptureState: &storagev1alpha1.CaptureStateStatus{
+				CommonController: &storagev1alpha1.CommonControllerCaptureState{ManifestCaptured: &c},
+			},
+		},
+	}
+}
+
+// snapshotWithReady builds a Snapshot carrying a Ready condition (used to model terminal capture failure).
+func snapshotWithReady(ns string, status metav1.ConditionStatus, reason string) *storagev1alpha1.Snapshot {
 	s := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "snap"}}
 	apimeta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
-		Type:   storagev1alpha1.ConditionManifestsArchived,
+		Type:   storagev1alpha1.ConditionReady,
 		Status: status,
 		Reason: reason,
 	})
@@ -47,42 +63,42 @@ func TestNeedsCaptureRBAC(t *testing.T) {
 		},
 		{
 			name: "import mode never captures live namespace",
-			snap: &storagev1alpha1.Snapshot{Spec: storagev1alpha1.SnapshotSpec{Source: &storagev1alpha1.SnapshotSource{Import: &storagev1alpha1.SnapshotImportSource{}}}},
+			snap: &storagev1alpha1.Snapshot{Spec: storagev1alpha1.SnapshotSpec{Mode: storagev1alpha1.SnapshotModeImport}},
 			want: false,
 		},
 		{
 			name: "static bind never captures live namespace",
-			snap: &storagev1alpha1.Snapshot{Spec: storagev1alpha1.SnapshotSpec{Source: &storagev1alpha1.SnapshotSource{SnapshotContentName: "preprovisioned"}}},
+			snap: &storagev1alpha1.Snapshot{Spec: storagev1alpha1.SnapshotSpec{Mode: storagev1alpha1.SnapshotModeStaticBind}},
 			want: false,
 		},
 		{
-			name: "no ManifestsArchived condition yet -> grant (capture about to start)",
+			name: "no captureState yet -> grant (capture about to start)",
 			snap: &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}},
 			want: true,
 		},
 		{
-			name: "Capturing -> grant",
-			snap: snapshotWithArchived("ns", metav1.ConditionFalse, storagev1alpha1.ReasonManifestsCapturing),
+			name: "manifest leg declared but not captured -> grant",
+			snap: snapshotWithManifestCaptured("ns", false),
 			want: true,
 		},
 		{
-			name: "Archived -> release",
-			snap: snapshotWithArchived("ns", metav1.ConditionTrue, storagev1alpha1.ReasonManifestsArchived),
+			name: "manifestCaptured=true -> release",
+			snap: snapshotWithManifestCaptured("ns", true),
 			want: false,
 		},
 		{
-			name: "Failed -> release",
-			snap: snapshotWithArchived("ns", metav1.ConditionFalse, storagev1alpha1.ReasonManifestsArchiveFailed),
+			name: "Ready=False terminal reason -> release",
+			snap: snapshotWithReady("ns", metav1.ConditionFalse, storagev1alpha1.ReasonGraphPlanningFailed),
 			want: false,
 		},
 		{
-			name: "Unknown status -> grant (fail-open, only True/Failed release)",
-			snap: snapshotWithArchived("ns", metav1.ConditionUnknown, ""),
+			name: "Ready=False non-terminal reason -> grant (capture still in progress)",
+			snap: snapshotWithReady("ns", metav1.ConditionFalse, storagev1alpha1.ReasonResidualVolumeCapturePending),
 			want: true,
 		},
 		{
-			name: "False with unexpected non-Failed reason -> grant (fail-open)",
-			snap: snapshotWithArchived("ns", metav1.ConditionFalse, "SomethingUnexpected"),
+			name: "Ready=Unknown -> grant (fail-open, only manifestCaptured/terminal release)",
+			snap: snapshotWithReady("ns", metav1.ConditionUnknown, ""),
 			want: true,
 		},
 	}
@@ -97,19 +113,19 @@ func TestNeedsCaptureRBAC(t *testing.T) {
 
 func TestNamespacesNeedingCaptureRBAC(t *testing.T) {
 	snaps := []storagev1alpha1.Snapshot{
-		*snapshotWithArchived("ns-capturing", metav1.ConditionFalse, storagev1alpha1.ReasonManifestsCapturing),
-		*snapshotWithArchived("ns-archived", metav1.ConditionTrue, storagev1alpha1.ReasonManifestsArchived),
-		*snapshotWithArchived("ns-failed", metav1.ConditionFalse, storagev1alpha1.ReasonManifestsArchiveFailed),
-		// Second snapshot in ns-archived still capturing -> namespace must stay in the desired set.
-		*snapshotWithArchived("ns-archived", metav1.ConditionFalse, storagev1alpha1.ReasonManifestsCapturing),
+		*snapshotWithManifestCaptured("ns-capturing", false),
+		*snapshotWithManifestCaptured("ns-captured", true),
+		*snapshotWithReady("ns-failed", metav1.ConditionFalse, storagev1alpha1.ReasonGraphPlanningFailed),
+		// Second snapshot in ns-captured still capturing -> namespace must stay in the desired set.
+		*snapshotWithManifestCaptured("ns-captured", false),
 	}
 	desired := namespacesNeedingCaptureRBAC(snaps)
 
 	if _, ok := desired["ns-capturing"]; !ok {
 		t.Fatalf("ns-capturing must be in desired set")
 	}
-	if _, ok := desired["ns-archived"]; !ok {
-		t.Fatalf("ns-archived must be in desired set (one snapshot still capturing)")
+	if _, ok := desired["ns-captured"]; !ok {
+		t.Fatalf("ns-captured must be in desired set (one snapshot still capturing)")
 	}
 	if _, ok := desired["ns-failed"]; ok {
 		t.Fatalf("ns-failed must NOT be in desired set")

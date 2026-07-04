@@ -272,54 +272,8 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 	// ============================================================================
 	// TTL-related tests
 	// ============================================================================
-	// These tests verify TTL annotation management and TTL scanner behavior.
-	// TTL enforcement is centralized in the background scanner, not in reconcile loop.
-
-	Describe("setTTLAnnotation", func() {
-		It("should set TTL annotation when not exists", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-				},
-			}
-
-			ctrl.setTTLAnnotation(mcr)
-
-			Expect(mcr.Annotations).ToNot(BeNil())
-			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("168h"))
-		})
-
-		It("should not overwrite existing TTL annotation", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-					Annotations: map[string]string{
-						controllercommon.AnnotationKeyTTL: "24h",
-					},
-				},
-			}
-
-			ctrl.setTTLAnnotation(mcr)
-
-			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("24h"))
-		})
-
-		It("should use config TTL when available", func() {
-			cfg.DefaultTTLStr = "72h"
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-				},
-			}
-
-			ctrl.setTTLAnnotation(mcr)
-
-			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("72h"))
-		})
-	})
+	// These tests verify TTL scanner behavior. TTL enforcement is centralized in the
+	// background scanner (config.DefaultTTL), not in the reconcile loop.
 
 	Describe("TTL Scanner", func() {
 		var (
@@ -712,8 +666,6 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
-			Expect(updatedMCR.Annotations).ToNot(BeNil())
-			Expect(updatedMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
 		})
 	})
 })
@@ -1071,16 +1023,19 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 
-			// Update metadata (TTL annotation)
+			// Update metadata (a plain annotation) via a separate metadata patch.
 			base2 := updatedMCR.DeepCopy()
-			ctrl.setTTLAnnotation(updatedMCR)
+			if updatedMCR.Annotations == nil {
+				updatedMCR.Annotations = map[string]string{}
+			}
+			updatedMCR.Annotations["state-snapshotter.deckhouse.io/test"] = "meta"
 			Expect(client.Patch(ctx, updatedMCR, ctrlclient.MergeFrom(base2))).To(Succeed())
 
 			// Verify metadata was updated
 			finalMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, finalMCR)).To(Succeed())
 			Expect(finalMCR.Annotations).ToNot(BeNil())
-			Expect(finalMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("10m"))
+			Expect(finalMCR.Annotations["state-snapshotter.deckhouse.io/test"]).To(Equal("meta"))
 			// Verify status is still intact
 			ready = meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())

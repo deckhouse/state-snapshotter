@@ -21,7 +21,7 @@
 
 | Где | Что является контрактом |
 |-----|-------------------------|
-| **Integration** | Структура и поведение **этого модуля**: `ownerReferences` (**root SnapshotContent→ObjectKeeper** для retained TTL-якоря, **MCR→Snapshot** на время capture, MCP→SnapshotContent, child SnapshotContent→parent SnapshotContent), снятие `snapshot.deckhouse.io/parent-protect` у дочернего SnapshotContent при удалении parent content (без `Client.Delete` детей), ручное удаление SnapshotContent после удаления root snapshot не блокируется финализаторами. **Не** требовать TTL Deckhouse ObjectKeeper или полного GC MCP/chunks как обязательный проход envtest. |
+| **Integration** | Структура и поведение **этого модуля**: `ownerReferences` (**root SnapshotContent→ObjectKeeper** для retained TTL-якоря, **MCR→Snapshot** на время capture, MCP→SnapshotContent, child SnapshotContent→parent SnapshotContent), снятие `state-snapshotter.deckhouse.io/parent-protect` у дочернего SnapshotContent при удалении parent content (без `Client.Delete` детей), ручное удаление SnapshotContent после удаления root snapshot не блокируется финализаторами. **Не** требовать TTL Deckhouse ObjectKeeper или полного GC MCP/chunks как обязательный проход envtest. |
 | **Real cluster** | **`hack/demo-e2e.sh`** (main): manifest + volume + retained + aggregated + forced ObjectKeeper TTL/GC (`08-forced-ttl-gc`); staged artifacts under `artifacts/<run-id>/`. |
 
 Продуктовую модель удаления не менять ради ограничений envtest (см. также `.cursor/rules/controller-envtest-local.mdc`).
@@ -78,7 +78,7 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 
 **CSD-gated demo activation:** graph registry built-ins содержат только `Snapshot`→`SnapshotContent`. Demo VM/Disk controllers стартуют в harness всегда, но demo resources входят в `Snapshot` tree только через eligible CSD. Integration покрывает три границы: без demo CSD нет demo children; после hot-add CSD новый `Snapshot` создаёт demo child; manual `DemoVirtualDiskSnapshot` materializes без CSD.
 
-**Domain controller status contract:** snapshot controllers set `status.conditions[type=PlanningReady]=True` with `observedGeneration == metadata.generation` before `GenericSnapshotBinderController` binds `SnapshotContent`. Tests and smoke must not use the superseded `GraphReady` / `HandledByCustomSnapshotController` / `HandledByDomainSpecificController` / `ChildrenSnapshotReady` condition names. Публичная модель условий — `PlanningReady`, `ManifestsReady`, `VolumeReady`, `ChildrenReady`, `Ready` (spec §3.8/§3.9.7).
+**Domain controller status contract:** snapshot controllers publish `status.captureState.domainSpecificController.phase=Planned` (via the SDK) before `GenericSnapshotBinderController` binds `SnapshotContent`. The spec is immutable, so there is no `observedGeneration` gate. Tests and smoke must not use the superseded `PlanningReady` / `Consistent` / `ManifestsArchived` / `GraphReady` / `HandledByCustomSnapshotController` / `HandledByDomainSpecificController` / `ChildrenSnapshotReady` condition names. `Ready` is the only user-facing condition on every snapshot object (root `Snapshot`, `SnapshotContent`, domain CRs); the former planning/consistency conditions are collapsed into the domain-owned `phase` enum, and the manifest-archived latch survives only as the core-internal `SnapshotContent.status.subtreeManifestsPersisted` (spec §3.8/§3.9.7).
 
 | Файл | Что проверяет |
 |------|----------------|

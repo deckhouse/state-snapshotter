@@ -35,11 +35,6 @@ const (
 	ObjectKeeperModeFollowObjectWithTTL = common.ObjectKeeperModeFollowObjectWithTTL
 )
 
-// Annotation key constants
-const (
-	AnnotationKeyTTL = common.AnnotationKeyTTL // TTL annotation for automatic deletion
-)
-
 const (
 	CSDConditionAccepted      = csd.CSDConditionAccepted
 	CSDConditionAccessGranted = csd.CSDConditionAccessGranted

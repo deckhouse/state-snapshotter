@@ -157,7 +157,7 @@ func TestMarkResidualVolumeCaptureCompletePreservesConditions(t *testing.T) {
 			Conditions: []metav1.Condition{{
 				Type:               storagev1alpha1.ConditionReady,
 				Status:             metav1.ConditionFalse,
-				Reason:             storagev1alpha1.ReasonManifestsCapturing,
+				Reason:             storagev1alpha1.ReasonResidualVolumeCapturePending,
 				Message:            "capturing",
 				LastTransitionTime: metav1.Now(),
 			}},
@@ -178,7 +178,7 @@ func TestMarkResidualVolumeCaptureCompletePreservesConditions(t *testing.T) {
 		t.Fatalf("latch must be set, got %#v", got.Status.ResidualVolumeCapture)
 	}
 	cond := meta.FindStatusCondition(got.Status.Conditions, storagev1alpha1.ConditionReady)
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != storagev1alpha1.ReasonManifestsCapturing {
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != storagev1alpha1.ReasonResidualVolumeCapturePending {
 		t.Fatalf("aggregator-owned conditions must be preserved by the latch patch, got %#v", cond)
 	}
 }

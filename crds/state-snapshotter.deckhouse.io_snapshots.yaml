@@ -54,13 +54,27 @@ spec:
             type: object
           spec:
             description: |-
-              SnapshotSpec is the capture/import mode selector and is fully immutable after creation. A snapshot
-              is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the spec
-              must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
+              SnapshotSpec is the capture/import/static-bind mode selector and is fully immutable after creation. A
+              snapshot is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the
+              spec must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
               UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
-              no recapture (a new capture requires a new Snapshot). The narrower spec.source rules below are now
-              subsumed by this rule but kept for clearer, field-scoped admission messages.
+              no recapture (a new capture requires a new Snapshot).
             properties:
+              mode:
+                default: Capture
+                description: |-
+                  Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
+                    - Capture (default): dynamic namespace capture from the live cluster.
+                    - Import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
+                      plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
+                    - StaticBind: CSI-like static binding to an existing pre-provisioned SnapshotContent; the controller
+                      does not create MCR/VCR and validates that spec.source.snapshotContentName points back at this
+                      Snapshot via SnapshotContent.spec.snapshotRef.
+                enum:
+                - Capture
+                - Import
+                - StaticBind
+                type: string
               resourceSelector:
                 description: |-
                   ResourceSelector optionally restricts which namespace resources are captured. It is applied to the
@@ -73,7 +87,7 @@ spec:
                   matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
                   When omitted, all resources are captured (no filtering).
 
-                  Ignored for spec.source modes (import / snapshotContentName): those do not list the live namespace.
+                  Ignored for non-Capture modes (Import / StaticBind): those do not list the live namespace.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -120,41 +134,24 @@ spec:
                 x-kubernetes-map-type: atomic
               source:
                 description: |-
-                  Source optionally selects how this Snapshot obtains its content instead of dynamic capture.
-                  When omitted, the controller performs dynamic namespace capture (default behaviour).
-                  When set, exactly one member selects the mode (CEL one-of) and the whole source is immutable:
-                    - import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
-                      plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
-                    - snapshotContentName: CSI-like static binding to existing pre-provisioned content; the controller
-                      does not create MCR/VCR and validates that the referenced SnapshotContent points back at this
-                      Snapshot via spec.snapshotRef.
+                  Source carries mode-specific source parameters. In StaticBind mode source.snapshotContentName is
+                  required (and forbidden in every other mode); Capture and Import take no source parameters.
                 properties:
-                  import:
-                    description: |-
-                      Import, when present, marks this Snapshot as an import target. It is an empty marker object —
-                      its mere presence selects import mode (content is materialized from an uploaded payload, not
-                      captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
-                      source members and to allow future import options without another union rewrite.
-                    type: object
                   snapshotContentName:
                     description: |-
                       SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-                      (static pre-provisioning, analogous to volumeSnapshotContentName).
+                      (static pre-provisioning, analogous to volumeSnapshotContentName). Required when mode is StaticBind.
                     minLength: 1
                     type: string
                 type: object
-                x-kubernetes-validations:
-                - message: exactly one of spec.source.import or spec.source.snapshotContentName
-                    must be set
-                  rule: has(self.import) != has(self.snapshotContentName)
-                - message: spec.source is immutable
-                  rule: self == oldSelf
             type: object
             x-kubernetes-validations:
             - message: spec is immutable
               rule: self == oldSelf
-            - message: spec.source cannot be added or removed after creation
-              rule: has(self.source) == has(oldSelf.source)
+            - message: spec.source.snapshotContentName is required when mode is StaticBind
+                and forbidden otherwise
+              rule: 'self.mode == ''StaticBind'' ? (has(self.source) && has(self.source.snapshotContentName))
+                : (!has(self.source) || !has(self.source.snapshotContentName))'
           status:
             properties:
               boundSnapshotContentName:
@@ -162,6 +159,59 @@ spec:
                   BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
                   The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
                 type: string
+              captureState:
+                description: |-
+                  CaptureState collects internal capture signals. On the namespace-root Snapshot only the
+                  core-written commonController.manifestCaptured is present (read by the RBAC hook); there is no
+                  domainSpecificController (the root has no domain writer in wave3). The root's own execution
+                  handles (root MCR + residual orphan-PVC VS/per-PVC MCR) are core-internal — tracked by
+                  ownerRef/label, deterministic name — and are NOT surfaced in the public status.
+                properties:
+                  commonController:
+                    description: 'CommonController holds the core-written capture-leg
+                      success latches. Single writer: core.'
+                    properties:
+                      dataCaptured:
+                        description: |-
+                          DataCaptured is the data-leg success latch, declared only where a data line exists (absent = nil on
+                          nodes without data, e.g. the namespace root or a manifest-only aggregate). The parent reads a
+                          child's dataCaptured to time freeze/unfreeze.
+                        type: boolean
+                      manifestCaptured:
+                        description: |-
+                          ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
+                          false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
+                        type: boolean
+                    type: object
+                  domainSpecificController:
+                    description: 'DomainSpecificController holds the domain-written
+                      planning refs and lifecycle. Single writer: domain (SDK).'
+                    properties:
+                      manifestCaptureRequestName:
+                        description: ManifestCaptureRequestName is the temporary MCR
+                          owned by the domain node while own-scope capture runs.
+                        type: string
+                      message:
+                        description: Message is a human-readable detail for Phase=Failed.
+                        type: string
+                      phase:
+                        description: Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        enum:
+                        - Planning
+                        - Planned
+                        - Finished
+                        - Failed
+                        type: string
+                      reason:
+                        description: Reason is a short, machine-readable reason for
+                          Phase=Failed (free-form domain string).
+                        type: string
+                      volumeCaptureRequestName:
+                        description: VolumeCaptureRequestName is the temporary VCR
+                          owned by a data-leaf domain node while the data leg runs.
+                        type: string
+                    type: object
+                type: object
               childrenSnapshotRefs:
                 description: |-
                   ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
@@ -249,21 +299,6 @@ spec:
                   - type
                   type: object
                 type: array
-              manifestCaptureRequestName:
-                description: |-
-                  ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
-                  Snapshot controllers use it as execution state and clear it after the result is published to SnapshotContent.
-                type: string
-              observedGeneration:
-                description: ObservedGeneration is the metadata.generation the controller
-                  last reconciled into this status.
-                format: int64
-                type: integer
-              volumeCaptureRequestName:
-                description: |-
-                  VolumeCaptureRequestName is the temporary bulk VCR owned by this snapshot while the volume leg runs.
-                  Cleared after VCR.status.dataRefs[] is published to bound SnapshotContent and artifacts are handed off.
-                type: string
             type: object
         type: object
     served: true

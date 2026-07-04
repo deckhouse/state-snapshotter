@@ -35,7 +35,10 @@ const (
 	// AnnotationStorageClassVolumeSnapshotClass is the StorageClass annotation that names the
 	// VolumeSnapshotClass to use for volumes provisioned by that StorageClass. The orphan-PVC data leg
 	// resolves the class through this annotation (PVC -> StorageClass -> annotation), mirroring the VCR path.
-	AnnotationStorageClassVolumeSnapshotClass = "state-snapshotter.deckhouse.io/volumesnapshotclass"
+	// This is an external CSI contract owned by the SDS modules (NOT the state-snapshotter API group): the
+	// SDS modules write the key on the StorageClass and storage-foundation reads it (ADR
+	// 2025-06-24-auto-add-volumesnapshotclass). It MUST stay on storage.deckhouse.io.
+	AnnotationStorageClassVolumeSnapshotClass = "storage.deckhouse.io/volumesnapshotclass"
 
 	// ChildVolumeContentInfix is the deterministic infix in a child volume-node SnapshotContent name
 	// (<rootContentName>-vol-<hash>, Variant A). It only affects naming determinism; child-volume-node

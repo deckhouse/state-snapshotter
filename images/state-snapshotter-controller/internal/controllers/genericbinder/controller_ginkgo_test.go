@@ -30,7 +30,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -41,8 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // TestGenericSnapshotBinderControllerGinkgo is the entry point for GenericSnapshotBinderController Ginkgo tests
@@ -149,7 +148,7 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			// Since fake client doesn't fully support CRD operations for unstructured objects,
 			// we use a wrapper client to capture the Create call and verify the spec.
 
-			// PRECONDITION: Create Snapshot with PlanningReady=True
+			// PRECONDITION: Create Snapshot with domain phase=Planned
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
 			snapshotObj.SetName("test-snapshot")
@@ -183,19 +182,11 @@ var _ = Describe("GenericSnapshotBinderController - SnapshotContent Creation", f
 			// Status update may fail with fake client, but that's ok - we're only interested in Create call
 			_ = wrapperClient.Status().Update(ctx, snapshotObj)
 
-			// Pass the generation-gated binder barrier at reconcile time: the mocked Get returns a copy
-			// of snapshotObj, so set PlanningReady=True with observedGeneration == metadata.generation here
-			// (after Create, which may reset generation). The barrier must accept current-generation only.
-			snapshotObj.SetGeneration(2)
-			Expect(unstructured.SetNestedSlice(snapshotObj.Object, []interface{}{
-				map[string]interface{}{
-					"type":               snapshot.ConditionPlanningReady,
-					"status":             string(metav1.ConditionTrue),
-					"reason":             snapshot.ReasonCompleted,
-					"message":            "domain planning complete",
-					"observedGeneration": int64(2),
-				},
-			}, "status", "conditions")).To(Succeed())
+			// Pass the binder barrier at reconcile time: the mocked Get returns a copy of snapshotObj, so
+			// publish the domain planning-done signal here. The spec is immutable, so the barrier is a plain
+			// phase check (no observedGeneration gate): captureState.domainSpecificController.phase=Planned.
+			Expect(unstructured.SetNestedField(snapshotObj.Object, string(storagev1alpha1.SnapshotCapturePhasePlanned),
+				"status", "captureState", "domainSpecificController", "phase")).To(Succeed())
 
 			// ACTIONS: Trigger reconciliation
 			req := ctrl.Request{

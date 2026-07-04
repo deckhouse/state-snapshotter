@@ -81,7 +81,6 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		Expect(mergeChildGraphIntoRoot(ctx, k8sClient, nsName, rootName, childName, childContentName)).To(Succeed())
 		rootSnap := pr7WaitSnapshotBound(ctx, rootKey)
 		pr7KickSnapshot(ctx, rootKey)
-		pr7AssertSnapshotDoesNotUseStubAnnotation(rootSnap)
 
 		Eventually(func(g Gomega) {
 			mcr, err := pr7GetMCR(ctx, nsName, rootSnap)
@@ -147,7 +146,6 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		Expect(mergeChildGraphIntoRoot(ctx, k8sClient, nsName, rootName, childName, childContent.Name)).To(Succeed())
 		rootSnap := pr7WaitSnapshotBound(ctx, rootKey)
 		pr7KickSnapshot(ctx, rootKey)
-		pr7AssertSnapshotDoesNotUseStubAnnotation(rootSnap)
 
 		Eventually(func(g Gomega) {
 			mcr, err := pr7GetMCR(ctx, nsName, rootSnap)
@@ -202,7 +200,6 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 			g.Expect(rc.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(rc.Reason).To(Equal("DuplicateCoveredPVCUID"))
 			g.Expect(rc.Message).To(ContainSubstring(string(pvcA.UID)))
-			pr7AssertSnapshotDoesNotUseStubAnnotation(root)
 			mcr, err := pr7GetMCR(ctx, nsName, root)
 			if err == nil {
 				g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "invalid root MCR must not plan pvc-a after duplicate failure")

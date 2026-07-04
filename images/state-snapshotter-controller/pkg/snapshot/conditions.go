@@ -26,25 +26,22 @@ import (
 // Contract conditions/reasons are defined canonically in api/storage and aliased here so core code
 // keeps using snapshot.ConditionReady etc. unchanged, while the domain controller shares the same
 // definitions via api/. Core-internal leg conditions and the rest of the reason taxonomy stay below.
+//
+// Ready is the ONLY user-facing condition. The former PlanningReady/Consistent conditions were
+// replaced by status.captureState.domainSpecificController.phase, and the ManifestsArchived latch
+// condition by SnapshotContent.status.subtreeManifestsPersisted (a core-internal bool).
 const (
-	ConditionReady         = storagev1alpha1.ConditionReady
-	ConditionPlanningReady = storagev1alpha1.ConditionPlanningReady
-	// ConditionManifestsArchived is the subtree-latch contract condition (see api/storage). It is NOT
-	// part of the Ready formula; it signals that this node and all descendants have archived their
-	// manifests at least once and never re-opens once True.
-	ConditionManifestsArchived = storagev1alpha1.ConditionManifestsArchived
+	ConditionReady = storagev1alpha1.ConditionReady
 
 	ReasonArtifactMissing     = storagev1alpha1.ReasonArtifactMissing
 	ReasonCompleted           = storagev1alpha1.ReasonCompleted
 	ReasonCreateChildFailed   = storagev1alpha1.ReasonCreateChildFailed
 	ReasonGraphPlanningFailed = storagev1alpha1.ReasonGraphPlanningFailed
-
-	// ManifestsArchived reasons (subtree latch): Archived (True, lifelong), Capturing (False,
-	// transient), Failed (False, terminal). Defined canonically in api/storage.
-	ReasonManifestsArchived      = storagev1alpha1.ReasonManifestsArchived
-	ReasonManifestsCapturing     = storagev1alpha1.ReasonManifestsCapturing
-	ReasonManifestsArchiveFailed = storagev1alpha1.ReasonManifestsArchiveFailed
 )
+
+// IsReasonTerminal reports whether a Ready=False reason is terminal. Re-exported from api/storage so
+// core code and the wave-barrier reference the single canonical classifier.
+var IsReasonTerminal = storagev1alpha1.IsReasonTerminal
 
 // Condition types: the public condition model
 // (PlanningReady, ManifestsReady, VolumeReady, ChildrenReady, Ready).
@@ -140,21 +137,18 @@ const (
 	ReasonResidualVolumeCapturePending = storagev1alpha1.ReasonResidualVolumeCapturePending
 )
 
-// Reasons for PlanningReady=False.
+// Graph/capture-planning reasons surfaced on the root Snapshot Ready condition. The parent no longer
+// carries a separate PlanningReady condition: waiting on an earlier weight layer folds into
+// Ready=False/ChildrenPending (with the pending children listed in the message).
 const (
+	// ReasonChildGraphPending is a non-terminal reason while the child graph is still being expanded.
 	ReasonChildGraphPending = "ChildGraphPending"
-	ReasonListFailed        = "ListFailed"
-	// ReasonPriorityLayerPending is set on a parent Snapshot while an earlier (lower-numeric-priority)
-	// child snapshot layer has not yet published a current PlanningReady=True. This is NOT a failure and has no deadline:
-	// a child snapshot (e.g. a large-storage capture) may legitimately stay pending for hours. The
-	// parent holds PlanningReady=False/PriorityLayerPending (with the pending children listed in the
-	// message) and never starts capture until the layer is ready. Waiting is woken primarily by child
-	// watches; a RequeueAfter polling fallback covers a missed watch event.
-	ReasonPriorityLayerPending = "PriorityLayerPending"
+	// ReasonListFailed is a terminal reason when listing a mapped source kind fails (in TerminalReadyReasons).
+	ReasonListFailed = "ListFailed"
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
 	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
 	// CSD AccessGranted); the planner must not treat a Forbidden source list as "no objects" (that would
-	// silently drop coverage). Instead it degrades the graph (PlanningReady=False) and requeues so coverage
+	// silently drop coverage). Instead it degrades Ready (non-terminal) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"
 )

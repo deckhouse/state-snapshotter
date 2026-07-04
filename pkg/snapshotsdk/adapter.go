@@ -17,17 +17,21 @@ limitations under the License.
 package snapshotsdk
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // SnapshotAdapter is the single seam between a concrete domain snapshot and the generic capture protocol.
 // A domain package implements it next to its snapshot type; the SDK never references the domain type
-// directly. It is the only place metav1.Condition and client.Object cross the boundary — the domain's
-// Reconcile body uses the intent verbs (Ensure*/Mark*) and never these mapping methods.
+// directly. It is the only place client.Object crosses the boundary — the domain's Reconcile body uses
+// the intent verbs (Ensure*/Mark*/Confirm*/Fail) and never these mapping methods.
 //
 // Implementations are thin: each method maps one generic concept to a concrete status field. They must be
 // free of side effects (no API calls); the SDK owns all reads, writes, and patching.
+//
+// Writer discipline: the SDK writes ONLY status.captureState.domainSpecificController (via
+// Get/SetDomainCaptureState), status.childrenSnapshotRefs (via the same), and status.snapshotSource (via
+// Get/SetSnapshotSource). It NEVER writes the Ready condition and NEVER writes the core-owned
+// captureState.commonController — it only reads them (CoreCaptureState, ReadyReason/ReadyMessage).
 type SnapshotAdapter interface {
 	// Object returns the live snapshot object. The SDK refreshes it via the API reader and patches it; it
 	// must be the same pointer the other accessors read from and write to.
@@ -36,17 +40,24 @@ type SnapshotAdapter interface {
 	// SourceRef returns the snapshot's source identity (spec.sourceRef).
 	SourceRef() SourceRef
 
-	// GetConditions / SetConditions bridge the snapshot's status.conditions. The SDK merges a single
-	// condition at a time (preserving co-owned conditions) and stamps observedGeneration itself.
-	GetConditions() []metav1.Condition
-	SetConditions([]metav1.Condition)
-
-	// GetDomainCaptureState / SetDomainCaptureState bridge the durable planning-result status fields the
-	// SDK publishes (manifest/volume capture request names, child refs).
+	// GetDomainCaptureState / SetDomainCaptureState bridge the domain-written status fields the SDK
+	// publishes: status.captureState.domainSpecificController (MCR/VCR names, phase, reason, message) plus
+	// the top-level status.childrenSnapshotRefs.
 	GetDomainCaptureState() DomainCaptureState
 	SetDomainCaptureState(DomainCaptureState)
 
-	// CoreCaptureState returns the read-only core handoff the SDK consults for suppression. The SDK never
-	// writes it.
+	// GetSnapshotSource / SetSnapshotSource bridge the top-level status.snapshotSource (full ref to the
+	// captured live source object). nil means unset. The SDK publishes it via PublishSnapshotSource.
+	GetSnapshotSource() *SnapshotSource
+	SetSnapshotSource(*SnapshotSource)
+
+	// CoreCaptureState returns the read-only core handoff (captureState.commonController leg latches) the
+	// SDK consults for suppression and for computing CoreCaptureOutcome. The SDK never writes it.
 	CoreCaptureState() CoreCaptureState
+
+	// ReadyReason / ReadyMessage return the reason/message of the core-written status.conditions[Ready].
+	// They are the domain's failure channel: a terminal Ready reason (IsReasonTerminal) drives
+	// CoreCaptureOutcome=Failed. Empty when no Ready condition is present yet.
+	ReadyReason() string
+	ReadyMessage() string
 }

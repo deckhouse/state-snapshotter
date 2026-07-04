@@ -137,7 +137,13 @@ func domainTestDemoSnapshotUnstructured(t *testing.T, vcrName string) *unstructu
 	t.Helper()
 	snap := &demov1alpha1.DemoVirtualDiskSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: domainTestNS, Name: domainTestSnap, UID: types.UID(domainTestSnapUID)},
-		Status:     demov1alpha1.DemoVirtualDiskSnapshotStatus{VolumeCaptureRequestName: vcrName},
+		Status: demov1alpha1.DemoVirtualDiskSnapshotStatus{
+			CaptureState: &storagev1alpha1.CaptureStateStatus{
+				DomainSpecificController: &storagev1alpha1.DomainSpecificControllerCaptureState{
+					VolumeCaptureRequestName: vcrName,
+				},
+			},
+		},
 	}
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(snap)
 	if err != nil {
@@ -228,11 +234,14 @@ func TestEnsureDomainContentLinks_DataLegHandoff(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
 		t.Fatalf("get demo snapshot: %v", err)
 	}
-	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "dataCaptured"); !captured {
-		t.Fatalf("expected status.dataCaptured=true after durable handoff")
+	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "dataCaptured"); !captured {
+		t.Fatalf("expected status.captureState.commonController.dataCaptured=true after durable handoff")
 	}
-	if name, _, _ := unstructured.NestedString(fresh.Object, "status", "volumeCaptureRequestName"); name != "" {
-		t.Fatalf("expected status.volumeCaptureRequestName cleared after handoff, got %q", name)
+	// Single-writer discipline: the binder owns commonController (the dataCaptured latch) but must NOT
+	// clear the domain-owned domainSpecificController.volumeCaptureRequestName. Suppression of VCR
+	// re-creation is driven by the latch, not by clearing the name; the domain owns that field.
+	if name, _, _ := unstructured.NestedString(fresh.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName"); name != domainTestVCRName() {
+		t.Fatalf("binder must not touch domain-owned volumeCaptureRequestName, got %q", name)
 	}
 	if domainTestVCRExists(t, cl) {
 		t.Fatalf("expected the transient VCR to be deleted after durable handoff")
@@ -276,8 +285,8 @@ func TestEnsureDomainContentLinks_DataLegPendingRequeues(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
 		t.Fatalf("get demo snapshot: %v", err)
 	}
-	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "dataCaptured"); captured {
-		t.Fatalf("pending VCR must not set status.dataCaptured")
+	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "dataCaptured"); captured {
+		t.Fatalf("pending VCR must not set status.captureState.commonController.dataCaptured")
 	}
 	if !domainTestVCRExists(t, cl) {
 		t.Fatalf("pending VCR must not be deleted")

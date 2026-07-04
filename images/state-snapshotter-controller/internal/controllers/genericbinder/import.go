@@ -43,13 +43,14 @@ import (
 // or content not yet Ready). The binder takes no watch on DataImport, so this poll drives convergence.
 const importContentPollInterval = 5 * time.Second
 
-// snapshotIsImportMode reports whether a generic/domain snapshot leaf is in IMPORT mode, signalled by the
-// unified empty marker spec.source.import: {} (parity with Snapshot.IsImportMode / domain IsImportMode).
-// An import leaf is materialized from the uploaded payload and — for dataBacked kinds — the matching
-// DataImport found by reverse-lookup (DataImport.spec.targetRef), not from a name carried on the leaf.
+// snapshotIsImportMode reports whether a generic/domain snapshot leaf is in IMPORT mode. Our domain
+// snapshot CRDs signal it with the enum spec.mode: Import (parity with Snapshot.IsImportMode / domain
+// IsImportMode); the shared helper also tolerates the legacy spec.source.import marker kept by the
+// CSI-shaped VolumeSnapshot fork. An import leaf is materialized from the uploaded payload and — for
+// dataBacked kinds — the matching DataImport found by reverse-lookup (DataImport.spec.targetRef), not
+// from a name carried on the leaf.
 func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
-	_, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
-	return found
+	return usecase.IsUnstructuredImportMode(obj)
 }
 
 // reconcileGenericImport materializes the SnapshotContent that backs an import-mode generic/domain leaf

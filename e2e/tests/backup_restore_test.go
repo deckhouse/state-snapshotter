@@ -137,9 +137,7 @@ func createImportVMSnapshot(ctx context.Context, ns, name string, ownerRefs []me
 		"kind":       "DemoVirtualMachineSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"import": map[string]interface{}{},
-			},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(demoVMSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
@@ -150,8 +148,8 @@ func createImportVMSnapshot(ctx context.Context, ns, name string, ownerRefs []me
 }
 
 // createImportDiskSnapshot creates an import-mode DemoVirtualDiskSnapshot. Import is signalled by the
-// unified empty marker spec.source.import: {} — no sourceRef (the live disk is absent on import) and no
-// DataImport name on the leaf: the binder finds the DataImport by reverse-lookup on spec.targetRef.
+// enum marker spec.mode: Import — no sourceRef (the live disk is absent on import) and no DataImport name
+// on the leaf: the binder finds the DataImport by reverse-lookup on spec.targetRef.
 func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
 	meta := map[string]interface{}{
 		"name":      name,
@@ -165,9 +163,7 @@ func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"import": map[string]interface{}{},
-			},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(demoDiskSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})

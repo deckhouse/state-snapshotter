@@ -70,16 +70,12 @@ func fixtureContent(name, mcpName string, children ...string) *storagev1alpha1.S
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName:      mcpName,
 			ChildrenSnapshotContentRefs: refs,
+			// Direct children of the root must have subtreeManifestsPersisted=true for the root-capture wave
+			// barrier (requireContentManifestsArchived) to proceed. Fixture direct children represent a fully
+			// persisted subtree.
+			SubtreeManifestsPersisted: true,
 		},
 	}
-	// Direct children of the root must be ManifestsArchived=True for the root-capture wave barrier
-	// (requireContentManifestsArchived) to proceed. Fixture direct children represent a fully archived
-	// subtree.
-	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-		Type:   snapshot.ConditionManifestsArchived,
-		Status: metav1.ConditionTrue,
-		Reason: snapshot.ReasonManifestsArchived,
-	})
 	return c
 }
 
@@ -224,14 +220,12 @@ func TestCollectRunSubtreeManifestExcludeKeys_ExcludesOnlyDescendantMCP(t *testi
 		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-child",
+			// Direct child of the root: must have subtreeManifestsPersisted=true for the wave barrier to proceed.
+			SubtreeManifestsPersisted: true,
 		},
 	}
 	meta.SetStatusCondition(&childContentObj.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
-	})
-	// Direct child of the root: must be ManifestsArchived=True for the wave barrier to proceed.
-	meta.SetStatusCondition(&childContentObj.Status.Conditions, metav1.Condition{
-		Type: snapshot.ConditionManifestsArchived, Status: metav1.ConditionTrue, Reason: snapshot.ReasonManifestsArchived,
 	})
 
 	childSnap := &storagev1alpha1.Snapshot{
@@ -479,8 +473,8 @@ func TestCollectRunSubtreeManifestExcludeKeys_DirectChildNotArchivedPends(t *tes
 	}
 }
 
-// Wave barrier: a direct child terminally ManifestsArchived=False/ManifestsArchiveFailed makes root
-// capture terminally fail (the subtree can never be archived), not merely pend.
+// Wave barrier: a direct child that can never persist its subtree (subtreeManifestsPersisted=false with a
+// terminal Ready reason) makes root capture terminally fail, not merely pend.
 func TestCollectRunSubtreeManifestExcludeKeys_DirectChildArchiveFailedFails(t *testing.T) {
 	scheme := rootCaptureTestScheme(t)
 	log, _ := logger.NewLogger("error")
@@ -497,14 +491,16 @@ func TestCollectRunSubtreeManifestExcludeKeys_DirectChildArchiveFailedFails(t *t
 			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "disk-content"}},
 		},
 	}
+	// Terminal signal: subtreeManifestsPersisted stays false (success-only latch) AND the child's Ready is
+	// False with a terminal reason (IsReasonTerminal) -> the wave barrier fails instead of pending.
 	diskContent := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},
 		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-d"},
 	}
 	meta.SetStatusCondition(&diskContent.Status.Conditions, metav1.Condition{
-		Type:    snapshot.ConditionManifestsArchived,
+		Type:    snapshot.ConditionReady,
 		Status:  metav1.ConditionFalse,
-		Reason:  snapshot.ReasonManifestsArchiveFailed,
+		Reason:  snapshot.ReasonManifestCheckpointFailed,
 		Message: "descendant capture failed",
 	})
 	disk := fixtureSnapshotUnstructured("disk-content")

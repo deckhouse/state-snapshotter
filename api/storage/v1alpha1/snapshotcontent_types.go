@@ -168,6 +168,28 @@ type SnapshotContentStatus struct {
 	// +optional
 	ResidualVolumeCapture *ResidualVolumeCaptureStatus `json:"residualVolumeCapture,omitempty"`
 
+	// ParentDeleted is a one-shot internal latch set by the binder when the parent Snapshot is deleted
+	// while this cluster-scoped SnapshotContent survives. Once true, the SnapshotContent controller no
+	// longer re-adds the parent-protect finalizer (the parent is gone) and GC may proceed. Monotonic
+	// (false -> true only); it replaces the former snapshot.deckhouse.io/parent-deleted annotation.
+	// +optional
+	ParentDeleted bool `json:"parentDeleted,omitempty"`
+
+	// SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own
+	// ManifestCheckpoint is Ready AND every declared child SnapshotContent has subtreeManifestsPersisted=true,
+	// fail-closed). It replaces the former ManifestsArchived condition (user-facing objects no longer carry
+	// it). It serves three purposes not reducible to per-node manifestCaptured: (1) gate the FIRST Ready=True
+	// against declared-but-unlinked children, (2) drive the wave-barrier exclude-set of the root MCR (subtree
+	// completeness + linkage => no 409 double-capture), (3) monotonicity (never re-opens after the first Ready).
+	// It never expresses failure — a terminal manifest failure surfaces via the Ready reason (IsReasonTerminal).
+	// +optional
+	SubtreeManifestsPersisted bool `json:"subtreeManifestsPersisted,omitempty"`
+
+	// CaptureState optionally carries core-written suppression leaves for a domain reader; on a
+	// core-owned SnapshotContent aggregator this is normally unset.
+	// +optional
+	CaptureState *CaptureStateStatus `json:"captureState,omitempty"`
+
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

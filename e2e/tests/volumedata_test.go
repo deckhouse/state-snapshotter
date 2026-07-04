@@ -58,7 +58,7 @@ const (
 	// through (PVC -> StorageClass -> annotation -> VolumeSnapshotClass), mirroring
 	// pkg/snapshot.AnnotationStorageClassVolumeSnapshotClass. The cluster default class is NOT consulted,
 	// so the provisioned SC MUST carry this annotation for the data leg to capture.
-	annStorageClassVSC = "state-snapshotter.deckhouse.io/volumesnapshotclass"
+	annStorageClassVSC = "storage.deckhouse.io/volumesnapshotclass"
 
 	vdMarkerFile = "marker"
 )
@@ -375,7 +375,7 @@ func resolveLocalVolumeSnapshotClass(ctx context.Context) (string, error) {
 }
 
 // ensureStorageClassVolumeSnapshotClass guarantees the provisioned StorageClass carries the
-// state-snapshotter.deckhouse.io/volumesnapshotclass annotation pointing at an existing, driver-matching
+// storage.deckhouse.io/volumesnapshotclass annotation pointing at an existing, driver-matching
 // VolumeSnapshotClass. The capture path resolves the class exclusively through this annotation (never the
 // cluster default), so without it the data leg fails even though a default class exists.
 func ensureStorageClassVolumeSnapshotClass(ctx context.Context, scName string) error {

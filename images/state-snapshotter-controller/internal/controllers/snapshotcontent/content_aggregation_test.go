@@ -112,16 +112,14 @@ func boundChildSnapshot(ns, name, boundContentName string) *storagev1alpha1.Snap
 	}
 }
 
-// contentWithManifestsArchived builds a typed SnapshotContent carrying a single ManifestsArchived
-// condition (read back as a child content under CommonSnapshotContentGVK).
-func contentWithManifestsArchived(name string, status metav1.ConditionStatus, reason string) *storagev1alpha1.SnapshotContent {
-	c := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-		Type:   snapshot.ConditionManifestsArchived,
-		Status: status,
-		Reason: reason,
-	})
-	return c
+// contentWithSubtreeManifestsPersisted builds a typed SnapshotContent carrying the core-internal
+// status.subtreeManifestsPersisted latch (the successor of the former ManifestsArchived condition),
+// read back as a child content under CommonSnapshotContentGVK.
+func contentWithSubtreeManifestsPersisted(name string, persisted bool) *storagev1alpha1.SnapshotContent {
+	return &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status:     storagev1alpha1.SnapshotContentStatus{SubtreeManifestsPersisted: persisted},
+	}
 }
 
 func manifestCheckpointWithReady(name string, status metav1.ConditionStatus, reason, message string) *ssv1alpha1.ManifestCheckpoint {
@@ -283,10 +281,10 @@ func TestContentPlanReadyPriorityChildrenFailedOverManifestsPending(t *testing.T
 	}
 }
 
-// ManifestsArchived must NOT latch True while the owning snapshot declares a child that is not yet linked
-// into status.childrenSnapshotContentRefs, even when this node's own manifest leg is ready. This is the
-// fail-closed guard against premature subtree-latch (root cause of the 409 duplicate root capture).
-func TestComputeManifestsArchived_DeclaredButUnlinkedChildPends(t *testing.T) {
+// subtreeManifestsPersisted must NOT latch True while the owning snapshot declares a child that is not yet
+// linked into status.childrenSnapshotContentRefs, even when this node's own manifest leg is ready. This is
+// the fail-closed guard against premature subtree-latch (root cause of the 409 duplicate root capture).
+func TestComputeSubtreeManifestsPersisted_DeclaredButUnlinkedChildPends(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
@@ -304,21 +302,20 @@ func TestComputeManifestsArchived_DeclaredButUnlinkedChildPends(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True (precondition)", plan.manifestsReady)
 	}
-	if plan.manifestsArchivedStatus == metav1.ConditionTrue {
-		t.Fatalf("manifestsArchived must NOT be True while a declared child is unlinked, got %s/%s",
-			plan.manifestsArchivedStatus, plan.manifestsArchivedReason)
+	if plan.subtreeManifestsPersisted {
+		t.Fatalf("subtreeManifestsPersisted must NOT be true while a declared child is unlinked")
 	}
 }
 
-// Once the declared child is both linked into childrenSnapshotContentRefs AND ManifestsArchived=True, the
-// node latches ManifestsArchived=True.
-func TestComputeManifestsArchived_DeclaredChildLinkedAndArchivedLatches(t *testing.T) {
+// Once the declared child is both linked into childrenSnapshotContentRefs AND its own
+// subtreeManifestsPersisted latch is true, the node latches subtreeManifestsPersisted=true.
+func TestComputeSubtreeManifestsPersisted_DeclaredChildLinkedAndPersistedLatches(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
 	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
 	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
-	childContent := contentWithManifestsArchived("child-content", metav1.ConditionTrue, snapshot.ReasonManifestsArchived)
+	childContent := contentWithSubtreeManifestsPersisted("child-content", true)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, owner, childSnap, childContent).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
@@ -327,15 +324,14 @@ func TestComputeManifestsArchived_DeclaredChildLinkedAndArchivedLatches(t *testi
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.manifestsArchivedStatus != metav1.ConditionTrue || plan.manifestsArchivedReason != snapshot.ReasonManifestsArchived {
-		t.Fatalf("manifestsArchived=%s/%s, want True/%s",
-			plan.manifestsArchivedStatus, plan.manifestsArchivedReason, snapshot.ReasonManifestsArchived)
+	if !plan.subtreeManifestsPersisted {
+		t.Fatalf("subtreeManifestsPersisted=%v, want true", plan.subtreeManifestsPersisted)
 	}
 }
 
-// A leaf node (owning snapshot declares no children) latches ManifestsArchived=True from its own MCP,
-// even with spec.snapshotRef set (no regression for the common no-children case).
-func TestComputeManifestsArchived_LeafLatchesWithSnapshotRef(t *testing.T) {
+// A leaf node (owning snapshot declares no children) latches subtreeManifestsPersisted=true from its own
+// MCP, even with spec.snapshotRef set (no regression for the common no-children case).
+func TestComputeSubtreeManifestsPersisted_LeafLatchesWithSnapshotRef(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
@@ -348,8 +344,8 @@ func TestComputeManifestsArchived_LeafLatchesWithSnapshotRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.manifestsArchivedStatus != metav1.ConditionTrue {
-		t.Fatalf("leaf manifestsArchived=%s/%s, want True", plan.manifestsArchivedStatus, plan.manifestsArchivedReason)
+	if !plan.subtreeManifestsPersisted {
+		t.Fatalf("leaf subtreeManifestsPersisted=%v, want true", plan.subtreeManifestsPersisted)
 	}
 }
 
@@ -385,7 +381,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumeReady, snapshot.ConditionChildrenReady, snapshot.ConditionManifestsArchived, snapshot.ConditionReady} {
+	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumeReady, snapshot.ConditionChildrenReady, snapshot.ConditionReady} {
 		cond := snapshot.GetCondition(contentLike, ct)
 		if cond == nil {
 			t.Fatalf("condition %s missing", ct)
@@ -396,6 +392,15 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 		if cond.ObservedGeneration != 7 {
 			t.Fatalf("condition %s observedGeneration=%d, want 7", ct, cond.ObservedGeneration)
 		}
+	}
+
+	// The former ManifestsArchived condition was replaced by the core-internal status.subtreeManifestsPersisted
+	// bool latch; it must be persisted true here and must NOT resurface as a condition.
+	if persisted, _, _ := unstructured.NestedBool(fresh.Object, "status", "subtreeManifestsPersisted"); !persisted {
+		t.Fatalf("status.subtreeManifestsPersisted = false, want true")
+	}
+	if cond := snapshot.GetCondition(contentLike, "ManifestsArchived"); cond != nil {
+		t.Fatalf("legacy ManifestsArchived condition must no longer be published, got %#v", cond)
 	}
 }
 
@@ -442,19 +447,21 @@ func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 	if readyCond == nil || readyCond.Status != metav1.ConditionFalse {
 		t.Fatalf("Ready = %#v, want False", readyCond)
 	}
-	if readyCond.Reason != snapshot.ReasonManifestsCapturing {
-		t.Fatalf("Ready reason = %q, want %q (archive gate)", readyCond.Reason, snapshot.ReasonManifestsCapturing)
+	if readyCond.Reason != snapshot.ReasonSubtreeManifestCapturePending {
+		t.Fatalf("Ready reason = %q, want %q (subtree-persist gate)", readyCond.Reason, snapshot.ReasonSubtreeManifestCapturePending)
 	}
 }
 
-// A terminal subtree-archive failure must propagate up the tree as a ChildrenFailed: a child whose subtree
-// can never be archived makes the parent terminally failed too. ManifestsCapturing is transient (pending),
-// not terminal. This guards the terminal-reason set against a future Ready-priority change that could let a
-// child surface ManifestsArchiveFailed on Ready.
-func TestManifestsArchiveFailedIsTerminalChildFailure(t *testing.T) {
+// A terminal child-content failure must propagate up the tree as a ChildrenFailed: a child whose subtree
+// can never be captured makes the parent terminally failed too. The subtree-persist pending reason is
+// transient (pending), not terminal. This guards the terminal-reason set against a future Ready-priority
+// change that could let a transient child surface as a terminal failure on Ready.
+func TestTerminalChildContentFailureClassification(t *testing.T) {
 	terminal := []string{
-		snapshot.ReasonManifestsArchiveFailed,
 		snapshot.ReasonManifestCheckpointFailed,
+		snapshot.ReasonDataArtifactInvalid,
+		snapshot.ReasonDataArtifactNotSupported,
+		snapshot.ReasonArtifactMissing,
 		snapshot.ReasonChildrenFailed,
 	}
 	for _, reason := range terminal {
@@ -462,7 +469,7 @@ func TestManifestsArchiveFailedIsTerminalChildFailure(t *testing.T) {
 			t.Fatalf("isTerminalChildContentFailure(%q) = false, want true", reason)
 		}
 	}
-	if isTerminalChildContentFailure(snapshot.ReasonManifestsCapturing) {
-		t.Fatalf("isTerminalChildContentFailure(%q) = true, want false (transient)", snapshot.ReasonManifestsCapturing)
+	if isTerminalChildContentFailure(snapshot.ReasonSubtreeManifestCapturePending) {
+		t.Fatalf("isTerminalChildContentFailure(%q) = true, want false (transient)", snapshot.ReasonSubtreeManifestCapturePending)
 	}
 }

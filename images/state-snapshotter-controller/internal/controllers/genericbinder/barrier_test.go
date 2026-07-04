@@ -19,62 +19,39 @@ package genericbinder
 import (
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// snapshotLikeWithPlanningReady builds a SnapshotLike at the given generation. When set is true it adds a
-// PlanningReady condition with the given status and observedGeneration.
-func snapshotLikeWithPlanningReady(generation int64, set bool, status metav1.ConditionStatus, observedGeneration int64) snapshot.SnapshotLike {
+// snapshotWithDomainPhase builds a domain snapshot unstructured carrying
+// status.captureState.domainSpecificController.phase. An empty phase leaves the block unset.
+func snapshotWithDomainPhase(phase storagev1alpha1.SnapshotCapturePhase) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
 	obj.SetName("snap")
-	obj.SetGeneration(generation)
-	if set {
-		_ = unstructured.SetNestedSlice(obj.Object, []interface{}{
-			map[string]interface{}{
-				"type":               snapshot.ConditionPlanningReady,
-				"status":             string(status),
-				"reason":             snapshot.ReasonCompleted,
-				"observedGeneration": observedGeneration,
-			},
-		}, "status", "conditions")
+	if phase != "" {
+		_ = unstructured.SetNestedField(obj.Object, string(phase), "status", "captureState", "domainSpecificController", "phase")
 	}
-	like, _ := snapshot.ExtractSnapshotLike(obj)
-	return like
+	return obj
 }
 
+// isDomainPlanningComplete gates content takeover on the domain reaching barrier 1 (phase Planned or
+// Finished); Planning/Failed/absent must not pass.
 func TestIsDomainPlanningComplete(t *testing.T) {
 	tests := []struct {
-		name string
-		like snapshot.SnapshotLike
-		want bool
+		name  string
+		phase storagev1alpha1.SnapshotCapturePhase
+		want  bool
 	}{
-		{
-			name: "PlanningReady True for current generation passes",
-			like: snapshotLikeWithPlanningReady(3, true, metav1.ConditionTrue, 3),
-			want: true,
-		},
-		{
-			name: "PlanningReady True with stale observedGeneration does not pass",
-			like: snapshotLikeWithPlanningReady(3, true, metav1.ConditionTrue, 2),
-			want: false,
-		},
-		{
-			name: "PlanningReady False does not pass",
-			like: snapshotLikeWithPlanningReady(3, true, metav1.ConditionFalse, 3),
-			want: false,
-		},
-		{
-			name: "no PlanningReady condition does not pass",
-			like: snapshotLikeWithPlanningReady(3, false, metav1.ConditionTrue, 0),
-			want: false,
-		},
+		{name: "phase Planned passes", phase: storagev1alpha1.SnapshotCapturePhasePlanned, want: true},
+		{name: "phase Finished passes (already past barrier 1)", phase: storagev1alpha1.SnapshotCapturePhaseFinished, want: true},
+		{name: "phase Planning does not pass", phase: storagev1alpha1.SnapshotCapturePhasePlanning, want: false},
+		{name: "phase Failed does not pass", phase: storagev1alpha1.SnapshotCapturePhaseFailed, want: false},
+		{name: "no phase does not pass", phase: "", want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isDomainPlanningComplete(tc.like); got != tc.want {
+			if got := isDomainPlanningComplete(snapshotWithDomainPhase(tc.phase)); got != tc.want {
 				t.Fatalf("isDomainPlanningComplete = %v, want %v", got, tc.want)
 			}
 		})

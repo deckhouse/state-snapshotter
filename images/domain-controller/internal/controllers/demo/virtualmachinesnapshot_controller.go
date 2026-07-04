@@ -116,17 +116,29 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
+		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
 	}
 	source := &demov1alpha1.DemoVirtualMachine{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: resolution.Name}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
 			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
 			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualMachine, resolution.Name),
 		})
+	}
+
+	// Publish the captured live source's full reference (top-level status.snapshotSource). d8-cli reads it
+	// as a self-contained block to rebuild the import-mode source. Not part of the readiness formula.
+	if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       controllercommon.KindDemoVirtualMachine,
+		Name:       source.Name,
+		Namespace:  source.Namespace,
+		UID:        source.UID,
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Children planning: the domain decides which disks the VM owns and builds the desired child snapshot
@@ -136,7 +148,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	if err := sdk.EnsureChildren(ctx, adapter, children); err != nil {
-		if perr := sdk.MarkPlanningFailed(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed), err); perr != nil {
+		if perr := sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed), err); perr != nil {
 			return ctrl.Result{}, perr
 		}
 		return ctrl.Result{}, err
@@ -151,9 +163,66 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 
-	// Planning barrier: children planned/published and MCR created. The common controller waits on this
-	// before taking over SnapshotContent (creation, children/MCP projection, Ready mirror).
-	return ctrl.Result{}, sdk.MarkPlanningReady(ctx, adapter, "child planning complete")
+	// Barrier 1 (Planned): children planned/published and the VM MCR created. The common controller waits
+	// on phase>=Planned before taking over SnapshotContent (creation, children/MCP projection, Ready mirror).
+	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Barrier 2 (Finished): switch on the SDK-derived capture outcome for the VM's own (manifest-only) leg.
+	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
+	case snapshotsdk.CaptureOutcomeFailed:
+		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
+			Reason:  snapshotsdk.Reason(outcome.Reason),
+			Message: outcome.Message,
+		})
+	case snapshotsdk.CaptureOutcomeCaptured:
+		// The VM's own manifest leg is captured. A VM aggregator additionally waits for every child disk's
+		// data leg to be captured before confirming consistency: this showcases fs freeze/unfreeze — the
+		// guest is unfrozen only after the disk snapshots are actually taken. Timing is driven off the
+		// fine-grained per-child dataCaptured latch, not a coarse child Ready rollup.
+		allCaptured, err := r.allChildrenCaptured(ctx, s)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !allCaptured {
+			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+		}
+		// (Showcase) the VM filesystem would be unfrozen here now that all disk data is captured.
+		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+	default:
+		// Capturing: wait for the core to finish; woken by the status watch, poll as a fallback.
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+}
+
+// allChildrenCaptured reports whether every child disk snapshot has all its declared capture legs
+// captured (per-child captureState.commonController). It reads the fine-grained latch rather than the
+// child's Ready rollup, so the VM can time consistency (fs unfreeze) precisely against disk data capture.
+// A missing/unstamped child counts as not-yet-captured to avoid a premature confirm.
+func (r *DemoVirtualMachineSnapshotReconciler) allChildrenCaptured(ctx context.Context, s *demov1alpha1.DemoVirtualMachineSnapshot) (bool, error) {
+	for i := range s.Status.ChildrenSnapshotRefs {
+		ref := s.Status.ChildrenSnapshotRefs[i]
+		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != controllercommon.KindDemoVirtualDisk {
+			continue
+		}
+		child := &demov1alpha1.DemoVirtualDiskSnapshot{}
+		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: ref.Name}, child); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if !childCoreCaptureState(child).AllLegsCaptured() {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// childCoreCaptureState reads a child disk snapshot's core-written leg latches into the SDK view.
+func childCoreCaptureState(child *demov1alpha1.DemoVirtualDiskSnapshot) snapshotsdk.CoreCaptureState {
+	return coreCaptureStateFrom(child.Status.CaptureState)
 }
 
 // planDemoVirtualMachineChildren builds the desired set of child DemoVirtualDiskSnapshot objects for the

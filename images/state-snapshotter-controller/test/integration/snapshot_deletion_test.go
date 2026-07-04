@@ -105,8 +105,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish PlanningReady=True for the current generation.
-			setSnapshotPlanningReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish phase=Planned.
+			setSnapshotDomainPlannedCurrent(ctx, snapshotObj)
 
 			// Create controllers
 			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
@@ -283,8 +283,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish PlanningReady=True for the current generation.
-			setSnapshotPlanningReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish phase=Planned.
+			setSnapshotDomainPlannedCurrent(ctx, snapshotObj)
 
 			// Create SnapshotContent manually with deterministic name (status.boundSnapshotContentName is missing)
 			contentName := snapshot.GenerateSnapshotContentName(snapshotObj.GetName(), string(snapshotObj.GetUID()))

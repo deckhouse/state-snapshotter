@@ -99,101 +99,87 @@ func TestMirrorSnapshotReadyFromBoundContentFallbackNoContentReady(t *testing.T)
 	}
 }
 
-// ManifestsArchived is mirrored verbatim from the bound SnapshotContent onto the root Snapshot,
-// gen-gated on the Snapshot. This is the latch the e2e (E1/E3/E6) and the capture RBAC hook read.
-func TestMirrorSnapshotManifestsArchivedCopiesContentLatch(t *testing.T) {
+// stampRootManifestCaptured flips the root Snapshot's captureState.commonController.manifestCaptured leg
+// latch to true once the bound content's subtree manifests are persisted. This is the monotonic latch the
+// capture RBAC hook (040) reads; it replaced the former ManifestsArchived condition mirror.
+func TestStampRootManifestCapturedSetsLatch(t *testing.T) {
 	ctx := context.Background()
 
-	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    snapshotpkg.ConditionManifestsArchived,
-		Status:  metav1.ConditionTrue,
-		Reason:  snapshotpkg.ReasonManifestsArchived,
-		Message: "subtree manifests archived",
-	})
 	parent := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 4}}
-
-	cl := readyMirrorScheme(t).WithObjects(content, parent).WithStatusSubresource(parent).Build()
+	cl := readyMirrorScheme(t).WithObjects(parent).WithStatusSubresource(parent).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
 	key := types.NamespacedName{Namespace: "ns", Name: "root"}
-	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, key, content.Name); err != nil {
-		t.Fatalf("mirror: %v", err)
+	if err := r.stampRootManifestCaptured(ctx, key, true); err != nil {
+		t.Fatalf("stamp: %v", err)
 	}
 
 	fresh := &storagev1alpha1.Snapshot{}
 	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
-	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
-	if got == nil || got.Status != metav1.ConditionTrue || got.Reason != snapshotpkg.ReasonManifestsArchived {
-		t.Fatalf("ManifestsArchived = %#v, want True/%s", got, snapshotpkg.ReasonManifestsArchived)
-	}
-	if got.ObservedGeneration != 4 {
-		t.Fatalf("observedGeneration=%d, want 4", got.ObservedGeneration)
+	cs := fresh.Status.CaptureState
+	if cs == nil || cs.CommonController == nil || cs.CommonController.ManifestCaptured == nil || !*cs.CommonController.ManifestCaptured {
+		t.Fatalf("manifestCaptured latch = %#v, want true", cs)
 	}
 }
 
-// Latch: once the Snapshot's ManifestsArchived is True it is never downgraded, even if the bound content
-// momentarily reports a non-True status (e.g. transient child-content degradation — E3).
-func TestMirrorSnapshotManifestsArchivedLatchNeverDowngrades(t *testing.T) {
+// Latch: once manifestCaptured is true it is never downgraded, even if a later stamp reports false (e.g. a
+// transient content read that momentarily lost the subtreeManifestsPersisted signal).
+func TestStampRootManifestCapturedNeverDowngrades(t *testing.T) {
 	ctx := context.Background()
 
-	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    snapshotpkg.ConditionManifestsArchived,
-		Status:  metav1.ConditionFalse,
-		Reason:  snapshotpkg.ReasonManifestsCapturing,
-		Message: "recomputing after child degradation",
-	})
-	parent := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 2}}
-	meta.SetStatusCondition(&parent.Status.Conditions, metav1.Condition{
-		Type:    snapshotpkg.ConditionManifestsArchived,
-		Status:  metav1.ConditionTrue,
-		Reason:  snapshotpkg.ReasonManifestsArchived,
-		Message: "subtree manifests archived",
-	})
-
-	cl := readyMirrorScheme(t).WithObjects(content, parent).WithStatusSubresource(parent).Build()
+	captured := true
+	parent := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 2},
+		Status: storagev1alpha1.SnapshotStatus{
+			CaptureState: &storagev1alpha1.CaptureStateStatus{
+				CommonController: &storagev1alpha1.CommonControllerCaptureState{ManifestCaptured: &captured},
+			},
+		},
+	}
+	cl := readyMirrorScheme(t).WithObjects(parent).WithStatusSubresource(parent).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
 	key := types.NamespacedName{Namespace: "ns", Name: "root"}
-	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, key, content.Name); err != nil {
-		t.Fatalf("mirror: %v", err)
+	if err := r.stampRootManifestCaptured(ctx, key, false); err != nil {
+		t.Fatalf("stamp: %v", err)
 	}
 
 	fresh := &storagev1alpha1.Snapshot{}
 	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
-	got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
-	if got == nil || got.Status != metav1.ConditionTrue {
-		t.Fatalf("latch broken: ManifestsArchived = %#v, want still True", got)
+	cs := fresh.Status.CaptureState
+	if cs == nil || cs.CommonController == nil || cs.CommonController.ManifestCaptured == nil || !*cs.CommonController.ManifestCaptured {
+		t.Fatalf("latch broken: manifestCaptured = %#v, want still true", cs)
 	}
 }
 
-// If the bound content has no ManifestsArchived condition yet, the mirror is a no-op (capture has not
-// archived for the first time): the Snapshot must not gain a ManifestsArchived condition.
-func TestMirrorSnapshotManifestsArchivedNoopWhenContentHasNone(t *testing.T) {
+// Eager-init: stamping captured=false on a fresh root declares the manifest leg (field present, value
+// false) so the SDK/hook can distinguish "not captured yet" from "no such leg".
+func TestStampRootManifestCapturedEagerInitFalse(t *testing.T) {
 	ctx := context.Background()
 
-	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
 	parent := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 1}}
-
-	cl := readyMirrorScheme(t).WithObjects(content, parent).WithStatusSubresource(parent).Build()
+	cl := readyMirrorScheme(t).WithObjects(parent).WithStatusSubresource(parent).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
 	key := types.NamespacedName{Namespace: "ns", Name: "root"}
-	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, key, content.Name); err != nil {
-		t.Fatalf("mirror: %v", err)
+	if err := r.stampRootManifestCaptured(ctx, key, false); err != nil {
+		t.Fatalf("stamp: %v", err)
 	}
 
 	fresh := &storagev1alpha1.Snapshot{}
 	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
-	if got := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived); got != nil {
-		t.Fatalf("expected no ManifestsArchived on Snapshot, got %#v", got)
+	cs := fresh.Status.CaptureState
+	if cs == nil || cs.CommonController == nil || cs.CommonController.ManifestCaptured == nil {
+		t.Fatalf("manifest leg must be declared (field present), got %#v", cs)
+	}
+	if *cs.CommonController.ManifestCaptured {
+		t.Fatalf("eager-init must leave manifestCaptured=false, got true")
 	}
 }
 

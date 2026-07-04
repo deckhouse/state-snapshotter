@@ -228,7 +228,7 @@ func (r *SnapshotReconciler) directReader() client.Reader {
 }
 
 // orphanPVCVolumeSnapshotClass resolves the VolumeSnapshotClass for an orphan PVC the same way the VCR
-// path does: PVC -> StorageClass -> state-snapshotter.deckhouse.io/volumesnapshotclass annotation ->
+// path does: PVC -> StorageClass -> storage.deckhouse.io/volumesnapshotclass annotation ->
 // VolumeSnapshotClass, then validates the class driver against the bound PV CSI driver.
 //
 // Returns (className, "", "", nil) on success. A non-empty terminalReason means the configuration can
@@ -317,18 +317,19 @@ func orphanPVCVolumeSnapshotObject(nsSnap *storagev1alpha1.Snapshot, target vcpk
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": snapshotpkg.CSISnapshotAPIVersion,
 		"kind":       snapshotpkg.KindVolumeSnapshot,
+		// No labelSnapshotUID on the orphan-PVC VolumeSnapshot: the VS is always resolved by its
+		// deterministic name (orphanPVCVolumeSnapshotName) and its lifecycle/GC hangs off the ownerRef to
+		// the Snapshot; the label was observability-only, never read, and only introduced drift. (The same
+		// label REMAINS a functional ownership/anti-spoof guard on the root MCR — see capture.go.)
 		"metadata": map[string]interface{}{
 			"name":      name,
 			"namespace": nsSnap.Namespace,
-			"labels": map[string]interface{}{
-				labelSnapshotUID: string(nsSnap.UID),
-			},
 			"ownerReferences": []interface{}{
 				ownerRefToMap(volumeSnapshotOwnerReferenceForSnapshot(nsSnap)),
 			},
 		},
 		// volumeSnapshotClassName is resolved explicitly from the PVC StorageClass
-		// state-snapshotter.deckhouse.io/volumesnapshotclass annotation (validated against the PV CSI driver),
+		// storage.deckhouse.io/volumesnapshotclass annotation (validated against the PV CSI driver),
 		// mirroring the VCR path rather than relying on the cluster default class / mutating webhook.
 		// Durability still does not depend on the class deletionPolicy: the bound VSC is forced to Retain
 		// during handoff (ensureVolumeSnapshotContentRetain), so a Delete-policy class cannot drop the
@@ -400,7 +401,7 @@ func volumeSnapshotConflictingSnapshotOwner(refs []metav1.OwnerReference, ns *st
 
 // reconcileOrphanPVCVolumeSnapshotChildLeaves rewrites the VolumeSnapshot visibility leaves on
 // Snapshot.status.childrenSnapshotRefs[] to exactly the desired set, preserving real domain child refs.
-// It does not touch observedGeneration (this is a status-refs-only write, not a generation observation).
+// This is a status-refs-only write; it touches no conditions.
 func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotChildLeaves(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -704,19 +705,15 @@ func (r *SnapshotReconciler) bindOrphanVSToChildContent(
 	})
 }
 
-// clearOrphanPVCStaleVCR removes any leftover root VCR (the orphan path never creates one) and clears
-// the snapshot's volumeCaptureRequestName so a prior VCR-based run does not leave dangling state.
+// clearOrphanPVCStaleVCR removes any leftover root VCR (the orphan path never creates one) so a prior
+// VCR-based run does not leave dangling state. The VCR name is a deterministic core-internal handle
+// (not tracked in status), so only the object itself needs removing.
 func (r *SnapshotReconciler) clearOrphanPVCStaleVCR(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 ) (ctrl.Result, error) {
 	_ = r.deleteSnapshotVolumeCaptureRequest(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)})
-	if nsSnap.Status.VolumeCaptureRequestName != "" {
-		if err := r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, ""); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
 	return ctrl.Result{}, nil
 }
 

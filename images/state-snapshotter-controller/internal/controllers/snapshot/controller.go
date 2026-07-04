@@ -217,7 +217,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var ns corev1.Namespace
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Namespace}, &ns); err != nil {
 		if errors.IsNotFound(err) {
-			nsSnap.Status.ObservedGeneration = nsSnap.Generation
 			meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 				Type:               snapshotpkg.ConditionReady,
 				Status:             metav1.ConditionFalse,
@@ -270,7 +269,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if nsSnap.Status.BoundSnapshotContentName != "" {
 			nsSnap.Status.BoundSnapshotContentName = ""
 			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
-			nsSnap.Status.ObservedGeneration = nsSnap.Generation
 			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -290,7 +288,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, err
 		}
 		nsSnap.Status.BoundSnapshotContentName = expectedName
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -302,7 +299,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		nsSnap.Status.BoundSnapshotContentName = expectedName
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -314,7 +310,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
 	if err != nil {
-		if patchErr := r.patchSnapshotPlanningReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
+		if patchErr := r.patchSnapshotReadyLocal(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
 		return ctrl.Result{}, err
@@ -332,10 +328,10 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return r.reconcileCaptureN2a(ctx, nsSnap, content)
 }
 
-// snapshotChildGraphPollInterval is the polling fallback cadence used while a priority layer is
-// pending PlanningReady. It is NOT a deadline: child snapshots may stay pending for hours. Child watches
-// are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does not
-// stall if a child-kind notification is dropped.
+// snapshotChildGraphPollInterval is the polling fallback cadence used while a weight layer is
+// pending capture phase Planned. It is NOT a deadline: child snapshots may stay pending for hours. Child
+// watches are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does
+// not stall if a child-kind notification is dropped.
 const snapshotChildGraphPollInterval = 30 * time.Second
 
 // childGraphCaptureGate decides how reconcile proceeds after child-graph planning and reports whether
@@ -361,7 +357,6 @@ func (r *SnapshotReconciler) finishReconcileWithExistingContent(ctx context.Cont
 		return ctrl.Result{}, err
 	}
 	nsSnap.Status.BoundSnapshotContentName = expectedName
-	nsSnap.Status.ObservedGeneration = nsSnap.Generation
 	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}

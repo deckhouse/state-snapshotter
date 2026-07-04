@@ -35,7 +35,7 @@ import (
 
 const importRootSnapshotName = "import-root"
 
-// createImportRootSnapshot creates an import-mode root Snapshot (spec.source.import: {}). The controller
+// createImportRootSnapshot creates an import-mode root Snapshot (spec.mode: Import). The controller
 // holds it pending until the per-node manifests are uploaded, then materializes its SnapshotContent.
 func createImportRootSnapshot(ctx context.Context, ns, name string) error {
 	snap := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -46,9 +46,7 @@ func createImportRootSnapshot(ctx context.Context, ns, name string) error {
 			"namespace": ns,
 		},
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"import": map[string]interface{}{},
-			},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
@@ -74,7 +72,7 @@ func buildUploadBody(ownManifests []byte, childRefs []childRef) ([]byte, error) 
 //
 // Scope note: this spec reconstructs only a structural root node (empty childRefs) as a minimal
 // upload-transport + import-orchestrator contract test. Full multi-node demo tree import (including
-// DemoVirtualMachineSnapshot as a structural intermediate node via spec.source.import) is client-drivable
+// DemoVirtualMachineSnapshot as a structural intermediate node via spec.mode: Import) is client-drivable
 // and covered by phase-5 importVariantsSpecs in backup_restore_test.go.
 func importSpecs() {
 	Context("Export -> import round-trip", func() {

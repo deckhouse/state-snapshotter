@@ -20,64 +20,31 @@ package v1alpha1
 // snapshot controllers). These are the canonical definitions: core pkg/snapshot aliases them so both
 // sides reference one definition via api/. Core-internal leg conditions
 // (ManifestsReady/VolumeReady/ChildrenReady) and the broader reason taxonomy stay in core pkg/snapshot.
+//
+// Ready is the ONLY user-facing condition on every snapshot object (root Snapshot, SnapshotContent,
+// domain CR); it is always derived by the core. The former planning/consistency conditions
+// (PlanningReady, Consistent) and the ManifestsArchived latch condition were replaced by internal
+// status fields: captureState.domainSpecificController.phase, captureState.commonController.*,
+// and SnapshotContent.status.subtreeManifestsPersisted.
 const (
 	// ConditionReady indicates the object is ready for use. On SnapshotContent it is the single
-	// aggregate; on Snapshot it mirrors the bound SnapshotContent.Ready.
+	// aggregate; on Snapshot and domain CRs it mirrors the bound SnapshotContent.Ready plus a bubbled
+	// domain phase=Failed reason/message.
 	ConditionReady = "Ready"
-
-	// ConditionPlanningReady is the planning gate/barrier on a snapshot: the node has been planned
-	// (its child snapshot refs and own MCR/VCR have been published). It is NOT a literal "children are
-	// ready" signal and is NOT part of the Ready formula; readers must require
-	// observedGeneration == generation.
-	ConditionPlanningReady = "PlanningReady"
-
-	// ConditionManifestsArchived is a subtree latch on SnapshotContent (mirrored onto Snapshot and
-	// domain XxxxSnapshot): the manifests for this node AND all descendant content nodes have been
-	// captured into their ManifestCheckpoints at least once. It is a precursor/contract signal, NOT a
-	// leg of the Ready formula (Ready = ManifestsReady && VolumeReady && ChildrenReady).
-	//
-	// Latch semantics (lifelong, never re-opens):
-	//   - True  / ReasonManifestsArchived  — own manifest leg reached readiness once AND every child
-	//     content is ManifestsArchived=True. Once True it stays True forever, immune to later
-	//     ManifestsReady/Ready degradation or to a child disappearing (the fact "namespace was read
-	//     and stored in a checkpoint" is irreversible). Snapshot.spec is immutable, so there is no
-	//     recapture: observedGeneration is still stamped on the condition (like every other condition,
-	//     for gen-gated readers) but the latch state never depends on a generation change.
-	//   - False / ReasonManifestsCapturing — transient: not archived yet and not failed (includes the
-	//     fail-closed NamespaceCaptureIncomplete wait for RBAC).
-	//   - False / ReasonManifestsArchiveFailed — terminal: own manifest leg failed terminally BEFORE
-	//     archiving, or a child is ManifestsArchived=Failed (the subtree can never be archived). With
-	//     an immutable spec this state is unrecoverable for that Snapshot (a new one is required).
-	//
-	// Primary consumer: the namespace-capture RBAC hook, which grants the transient per-namespace
-	// RoleBinding while a Snapshot still needs to read the live namespace (not yet Archived/Failed).
-	ConditionManifestsArchived = "ManifestsArchived"
 )
 
 const (
 	// ReasonArtifactMissing: a required data artifact is missing.
 	ReasonArtifactMissing = "ArtifactMissing"
 
-	// ReasonCompleted: terminal success reason (Ready=True / PlanningReady=True).
+	// ReasonCompleted: terminal success reason (Ready=True).
 	ReasonCompleted = "Completed"
 
-	// ReasonCreateChildFailed: PlanningReady=False — creating a child snapshot failed.
+	// ReasonCreateChildFailed: terminal Ready=False — creating a child snapshot failed.
 	ReasonCreateChildFailed = "CreateChildFailed"
 
-	// ReasonGraphPlanningFailed: PlanningReady=False — graph planning failed.
+	// ReasonGraphPlanningFailed: terminal Ready=False — graph planning failed.
 	ReasonGraphPlanningFailed = "GraphPlanningFailed"
-
-	// ReasonManifestsArchived: ManifestsArchived=True — this node and its whole subtree have had
-	// their manifests captured into checkpoints at least once (lifelong latch).
-	ReasonManifestsArchived = "Archived"
-
-	// ReasonManifestsCapturing: ManifestsArchived=False (transient) — the subtree is not archived
-	// yet and has not failed; capture is still in progress (or waiting for capture RBAC).
-	ReasonManifestsCapturing = "Capturing"
-
-	// ReasonManifestsArchiveFailed: ManifestsArchived=False (terminal) — the own manifest leg failed
-	// terminally before archiving, or a descendant's manifests can never be archived.
-	ReasonManifestsArchiveFailed = "Failed"
 
 	// ReasonResidualVolumeCapturePending: Ready=False (non-terminal) — the namespace-root content has
 	// finished its domain children but the final residual/orphan-PVC capture wave has not completed yet
@@ -85,3 +52,35 @@ const (
 	// consumer never observes the first Ready=True before the orphan data is captured (fail-closed gate).
 	ReasonResidualVolumeCapturePending = "ResidualVolumeCapturePending"
 )
+
+// TerminalReadyReasons is the canonical set of Ready=False reasons treated as terminal capture failure
+// across all snapshot kinds. It is the single source of truth consumed by the core planner, the
+// wave-barrier, the namespace-capture RBAC hook, the domain SDK (CoreCaptureOutcome), and tests.
+//
+// It includes the manifest-phase terminals (ManifestCheckpointFailed, ChildrenFailed,
+// GraphPlanningFailed, CreateChildFailed, SnapshotContentMisbound) — a manifest-phase failure surfaces
+// on the root Ready as one of these, NOT via a latch condition. The reason string values are defined
+// canonically in core pkg/snapshot; they are listed here as literals to keep the api module
+// dependency-free. Domain-supplied reasons (e.g. SourceNotFound) are free-form and NOT in this set.
+var TerminalReadyReasons = map[string]struct{}{
+	"ListFailed":                 {},
+	"NoCaptureTargets":           {},
+	"CapturePlanDrift":           {},
+	"ManifestCheckpointFailed":   {},
+	"ContentRefMismatch":         {},
+	"NamespaceNotFound":          {},
+	"VolumeCaptureTargetsFailed": {},
+	"VolumeCaptureFailed":        {},
+	"DuplicateCoveredPVCUID":     {},
+	"ChildrenFailed":             {},
+	ReasonGraphPlanningFailed:    {},
+	ReasonCreateChildFailed:      {},
+	"SnapshotContentMisbound":    {},
+}
+
+// IsReasonTerminal reports whether a Ready=False reason is terminal (unrecoverable for this snapshot;
+// spec is immutable, so a new snapshot is required). It is the canonical terminal classifier.
+func IsReasonTerminal(reason string) bool {
+	_, ok := TerminalReadyReasons[reason]
+	return ok
+}

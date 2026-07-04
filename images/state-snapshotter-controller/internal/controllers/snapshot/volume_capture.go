@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -86,7 +85,9 @@ func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 	if _, _, err := r.ensureVolumeCaptureRequest(ctx, nsSnap, content, targets); err != nil {
 		return err
 	}
-	return r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, vcrKey.Name)
+	// The root VCR name is a core-internal execution handle (deterministic SnapshotContentVCRName +
+	// ownerRef) and is not published in the public status.
+	return nil
 }
 
 // reconcileVolumeCapturePublish validates VCR output, hands off VSC ownerRefs, publishes dataRefs, and deletes the VCR.
@@ -183,9 +184,6 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 	if err := r.deleteSnapshotVolumeCaptureRequest(ctx, vcrKey); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, ""); err != nil {
-		return ctrl.Result{}, err
-	}
 	return ctrl.Result{}, nil
 }
 
@@ -234,13 +232,8 @@ func (r *SnapshotReconciler) reconcileVolumeCaptureSteadyState(
 		if !apierrors.IsNotFound(err) {
 			return true, ctrl.Result{}, err
 		}
-		if allVSCsOwnedByContent(ctx, r.Client, content) {
-			if nsSnap.Status.VolumeCaptureRequestName != "" {
-				if err := r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, ""); err != nil {
-					return true, ctrl.Result{}, err
-				}
-			}
-		}
+		// VCR already gone: nothing to clean up (the name is a deterministic core-internal handle, not
+		// tracked in status).
 		return true, ctrl.Result{}, nil
 	}
 
@@ -254,23 +247,7 @@ func (r *SnapshotReconciler) reconcileVolumeCaptureSteadyState(
 	if err := r.deleteSnapshotVolumeCaptureRequest(ctx, vcrKey); err != nil {
 		return true, ctrl.Result{}, err
 	}
-	if err := r.patchSnapshotVolumeCaptureRequestName(ctx, nsSnap, ""); err != nil {
-		return true, ctrl.Result{}, err
-	}
 	return true, ctrl.Result{}, nil
-}
-
-func allVSCsOwnedByContent(ctx context.Context, c client.Reader, content *storagev1alpha1.SnapshotContent) bool {
-	for _, b := range content.DataRefList() {
-		if b.Artifact.Kind != "VolumeSnapshotContent" || b.Artifact.Name == "" {
-			continue
-		}
-		ok, err := volumecapturectrl.VolumeSnapshotContentOwnedByContent(ctx, c, b.Artifact.Name, content)
-		if err != nil || !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func (r *SnapshotReconciler) ensureVolumeCaptureRequest(
@@ -368,18 +345,3 @@ func (r *SnapshotReconciler) deleteSnapshotVolumeCaptureRequest(ctx context.Cont
 	return nil
 }
 
-func (r *SnapshotReconciler) patchSnapshotVolumeCaptureRequestName(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, name string) error {
-	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		fresh := &storagev1alpha1.Snapshot{}
-		if err := r.Client.Get(ctx, key, fresh); err != nil {
-			return err
-		}
-		if fresh.Status.VolumeCaptureRequestName == name {
-			return nil
-		}
-		base := fresh.DeepCopy()
-		fresh.Status.VolumeCaptureRequestName = name
-		return r.Client.Status().Patch(ctx, fresh, client.MergeFrom(base))
-	})
-}

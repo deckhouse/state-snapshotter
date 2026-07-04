@@ -71,10 +71,11 @@ type GenericSnapshotBinderController struct {
 	activeSnapshotWatchSet map[string]struct{} // snapshot GVK String() -> watch registered with manager
 
 	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
-	// (creates MCR/VCR/children, publishes demo.status, owns PlanningReady) while this binder owns
-	// all SnapshotContent work for them: children/dataRefs projection, VSC ownership handoff, MCR/VCR
-	// cleanup and the domain-only capture markers (status.manifestCaptured / status.dataCaptured). Generic
-	// (non-domain) kinds keep the MCP-only projection and are never in this set. Guarded by domainCaptureMu.
+	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase) while this
+	// binder owns all SnapshotContent work for them: children/dataRefs projection, VSC ownership handoff,
+	// MCR/VCR cleanup and the core-owned capture-leg latches
+	// (status.captureState.commonController.manifestCaptured/dataCaptured). Generic (non-domain) kinds keep
+	// the MCP-only projection and are never in this set. Guarded by domainCaptureMu.
 	domainCaptureMu   sync.RWMutex
 	domainCaptureGVKs map[string]struct{}
 }
@@ -131,8 +132,9 @@ func NewGenericSnapshotBinderController(
 }
 
 // MarkDomainCaptureKind records that snapshot GVK is reconciled by a dedicated domain controller for
-// planning (MCR/VCR/children + PlanningReady), while this binder owns all SnapshotContent work
-// for it (children/dataRefs projection, VSC handoff, MCR/VCR cleanup, capture markers). Idempotent.
+// planning (MCR/VCR/children + captureState.domainSpecificController.phase), while this binder owns all
+// SnapshotContent work for it (children/dataRefs projection, VSC handoff, MCR/VCR cleanup, core-owned
+// capture-leg latches). Idempotent.
 func (r *GenericSnapshotBinderController) MarkDomainCaptureKind(gvk schema.GroupVersionKind) {
 	r.domainCaptureMu.Lock()
 	defer r.domainCaptureMu.Unlock()
@@ -158,11 +160,12 @@ func (r *GenericSnapshotBinderController) MarkDataBacked(snapshotKind string, da
 	r.GVKRegistry.MarkDataBacked(snapshotKind, dataBacked)
 }
 
-// isDomainPlanningComplete reports whether the domain controller finished planning for the snapshot's
-// current generation: PlanningReady=True with observedGeneration == metadata.generation.
-func isDomainPlanningComplete(snapshotLike snapshot.SnapshotLike) bool {
-	c := snapshot.GetCondition(snapshotLike, snapshot.ConditionPlanningReady)
-	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == snapshotLike.GetGeneration()
+// isDomainPlanningComplete reports whether the domain controller reached capture barrier 1
+// (status.captureState.domainSpecificController.phase >= Planned), i.e. all objects created and refs
+// published. It replaces the former PlanningReady=True gate. Spec is immutable, so no observedGeneration
+// gate is needed.
+func isDomainPlanningComplete(obj *unstructured.Unstructured) bool {
+	return domainCaptureAtLeastPlanned(obj)
 }
 
 // Reconcile processes a Snapshot resource
@@ -241,11 +244,18 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return r.reconcileGenericImport(ctx, obj, snapshotLike)
 	}
 
-	// Step 1: Barrier - wait until the domain controller finished planning (publish child snapshot
-	// refs, create MCR/VCR) for the current generation.
-	if !isDomainPlanningComplete(snapshotLike) {
-		logger.V(1).Info("Waiting for domain controller to finish planning (PlanningReady)")
+	// Step 1: Barrier - wait until the domain controller reached capture barrier 1 (phase>=Planned:
+	// published child snapshot refs, created MCR/VCR).
+	if !isDomainPlanningComplete(obj) {
+		logger.V(1).Info("Waiting for domain controller to reach capture phase Planned")
 		return ctrl.Result{}, nil
+	}
+	// Declare the applicable core-owned capture legs (commonController.manifestCaptured/dataCaptured=false)
+	// once the domain takes over, so the SDK sees them and can compute CoreCaptureOutcome. Idempotent.
+	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
+		if err := r.eagerInitCaptureLegs(ctx, obj); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Idempotency is structural, not condition-based: the steps below (ensure ObjectKeeper/ownerRef,
@@ -422,7 +432,7 @@ func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
 	obj *unstructured.Unstructured,
 	contentName string,
 ) (requeue bool, terminalReason string, terminalMessage string, err error) {
-	mcrName, _, err := unstructured.NestedString(obj.Object, "status", "manifestCaptureRequestName")
+	mcrName, _, err := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "manifestCaptureRequestName")
 	if err != nil {
 		return false, "", "", err
 	}
@@ -481,24 +491,23 @@ func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
 		return err
 	}
 
-	updated := false
-	annotations := contentObj.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
+	// Latch status.parentDeleted=true (status subresource) so the SnapshotContent controller stops
+	// re-adding the parent-protect finalizer once the parent Snapshot is gone. Idempotent (false->true).
+	if latched, _, _ := unstructured.NestedBool(contentObj.Object, "status", "parentDeleted"); !latched {
+		if err := unstructured.SetNestedField(contentObj.Object, true, "status", "parentDeleted"); err != nil {
+			return err
+		}
+		if err := r.Status().Update(ctx, contentObj); err != nil {
+			return err
+		}
 	}
-	if annotations[snapshot.AnnotationParentDeleted] != "true" {
-		annotations[snapshot.AnnotationParentDeleted] = "true"
-		contentObj.SetAnnotations(annotations)
-		updated = true
-	}
+
+	// Remove the parent-protect finalizer via a separate metadata update.
 	if snapshot.RemoveFinalizer(contentObj, snapshot.FinalizerParentProtect) {
-		updated = true
-		log.FromContext(ctx).Info("Removed finalizer from SnapshotContent after Snapshot deletion", "content", contentName)
-	}
-	if updated {
 		if err := r.Update(ctx, contentObj); err != nil {
 			return err
 		}
+		log.FromContext(ctx).Info("Removed finalizer from SnapshotContent after Snapshot deletion", "content", contentName)
 	}
 
 	return nil
@@ -648,13 +657,10 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 ) error {
 	logger := log.FromContext(ctx)
 	contentName := snapshotLike.GetStatusContentName()
-	// PlanningReady is intentionally NOT written here. This function is a pure Ready mirror and is only
-	// reached after the Step-1 barrier (isDomainPlanningComplete) has already confirmed PlanningReady=True
-	// for the current generation. PlanningReady is owned exclusively by the domain/namespace controller that
-	// plans the snapshot; the common layer (this binder and the shared binding helpers) only waits on the
-	// barrier and MUST NOT self-publish it (Slice 2). Re-asserting it here previously clobbered that owner:
-	// with observedGeneration=0 it deadlocked this very barrier (mirror never re-ran), and stamping the
-	// current generation would instead overwrite the domain controller's PlanningReady.
+	// The domain phase is intentionally NOT written here. This function derives the user-facing Ready and
+	// is only reached after the Step-1 barrier (isDomainPlanningComplete) confirmed phase>=Planned. The
+	// phase is owned exclusively by the domain controller (via the SDK); the core only reads it — mirroring
+	// the bound SnapshotContent.Ready and bubbling a domain phase=Failed into Ready=False.
 	if contentName == "" {
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}
@@ -691,21 +697,19 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		reason = readyCond.Reason
 		message = readyCond.Message
 	}
-	logger.V(1).Info("Mirroring SnapshotContent Ready", "content", contentName, "status", status, "reason", reason)
-	if err := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message); err != nil {
-		return err
+	// Bubble a domain-reported terminal failure (captureState.domainSpecificController.phase=Failed) into
+	// the user-facing Ready: a content mirror cannot express a domain planning/consistency failure.
+	if failed, freason, fmsg := domainCaptureFailed(obj); failed {
+		status = metav1.ConditionFalse
+		if freason != "" {
+			reason = freason
+		}
+		if fmsg != "" {
+			message = fmsg
+		}
 	}
-
-	// Mirror the ManifestsArchived subtree latch (NOT part of the Ready formula). The RBAC hook reads it
-	// off the root Snapshot to drop the transient capture RoleBinding once the subtree is archived. The
-	// content-side latch never re-opens, so this verbatim mirror is also monotone. If the content has no
-	// ManifestsArchived condition yet, skip (absent == still capturing for downstream readers).
-	if archivedCond := snapshot.GetCondition(contentLike, snapshot.ConditionManifestsArchived); archivedCond != nil {
-		logger.V(1).Info("Mirroring SnapshotContent ManifestsArchived", "content", contentName, "status", archivedCond.Status, "reason", archivedCond.Reason)
-		return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionManifestsArchived,
-			archivedCond.Status, archivedCond.Reason, archivedCond.Message)
-	}
-	return nil
+	logger.V(1).Info("Deriving Snapshot Ready", "content", contentName, "status", status, "reason", reason)
+	return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message)
 }
 
 func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
@@ -719,15 +723,15 @@ func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
 	return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionReady, status, reason, message)
 }
 
-// patchSnapshotConditionFromContent mirrors a single condition type (Ready or ManifestsArchived) from
-// the bound SnapshotContent onto the Snapshot, gen-stamped under an optimistic-lock merge patch.
+// patchSnapshotConditionFromContent mirrors the Ready condition from the bound SnapshotContent onto the
+// Snapshot, gen-stamped under an optimistic-lock merge patch.
 //
-// D4a: read-modify-write only the target condition. The demo domain controller co-writes
-// PlanningReady (and an early validation Ready=False) into the same conditions array; a bare
-// Status().Update / MergeFrom would replace the whole list and could silently drop the other writer's
-// entry. MergeFromWithOptimisticLock turns a concurrent write into a 409 so RetryOnConflict re-reads the
-// fresh object (already carrying the other condition) and re-applies only this condition, stamping
-// observedGeneration for gen-gated readers (INV-DOMAIN-GEN).
+// D4a: read-modify-write only the target condition. The domain controller co-writes
+// captureState.domainSpecificController into the same status; a bare Status().Update / MergeFrom would
+// replace the whole status and could silently drop the other writer's entry. MergeFromWithOptimisticLock
+// turns a concurrent write into a 409 so RetryOnConflict re-reads the fresh object (already carrying the
+// other writer's state) and re-applies only this condition, stamping observedGeneration for gen-gated
+// readers (INV-DOMAIN-GEN).
 func (r *GenericSnapshotBinderController) patchSnapshotConditionFromContent(
 	ctx context.Context,
 	obj *unstructured.Unstructured,

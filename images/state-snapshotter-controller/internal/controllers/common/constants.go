@@ -29,8 +29,3 @@ const (
 	ObjectKeeperModeFollowObject        = "FollowObject"
 	ObjectKeeperModeFollowObjectWithTTL = "FollowObjectWithTTL"
 )
-
-// Annotation key constants.
-const (
-	AnnotationKeyTTL = "state-snapshotter.deckhouse.io/ttl"
-)

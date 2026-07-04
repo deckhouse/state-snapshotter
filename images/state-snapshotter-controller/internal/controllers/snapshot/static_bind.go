@@ -75,7 +75,6 @@ func (r *SnapshotReconciler) reconcileStaticBind(ctx context.Context, nsSnap *st
 				return err
 			}
 			cur.Status.BoundSnapshotContentName = contentName
-			cur.Status.ObservedGeneration = cur.Generation
 			return r.Client.Status().Update(ctx, cur)
 		}); err != nil {
 			return ctrl.Result{}, err

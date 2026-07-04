@@ -342,40 +342,32 @@ EOF
         exit 1
     fi
     
-    # Test 2: Simulate the domain controller finishing planning (set PlanningReady condition).
-    # IMPORTANT: the generic binder waits for PlanningReady=True with observedGeneration == generation
-    # before creating SnapshotContent (gen-gated barrier).
+    # Test 2: Simulate the domain controller finishing planning (set phase=Planned).
+    # IMPORTANT: the generic binder waits for status.captureState.domainSpecificController.phase=Planned
+    # before creating SnapshotContent (barrier 1). The spec is immutable, so no observedGeneration gate.
     log_info ""
     log_info "═══════════════════════════════════════════════════════════════"
-    log_info "Test 2: Simulate domain controller (PlanningReady)"
+    log_info "Test 2: Simulate domain controller (phase=Planned)"
     log_info "═══════════════════════════════════════════════════════════════"
     
     local snapshot_resource="${SNAPSHOT_KIND,,}s.${SNAPSHOT_API_GROUP}"
     
     if [[ "${SKIP_DOMAIN_SIMULATION:-false}" == "true" ]]; then
-        log_warn "Skipping domain controller simulation (CRD does not support conditions)"
+        log_warn "Skipping domain controller simulation (CRD does not support captureState)"
         log_warn "SnapshotContent will NOT be created - this is expected"
     else
-        log_info "Setting PlanningReady=True condition (observedGeneration == generation)..."
+        log_info "Setting captureState.domainSpecificController.phase=Planned..."
         
-        # CRITICAL: Must use --subresource=status to patch status subresource
-        # Without --subresource=status, Kubernetes will reject status.conditions
-        # because status is declared as a subresource in the CRD
-        local transition_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        local generation=$(kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.generation}' 2>/dev/null || echo "1")
-        
+        # CRITICAL: Must use --subresource=status to patch the status subresource, which is declared
+        # as a subresource in the CRD.
         if command -v jq &>/dev/null; then
-            # The barrier is gen-gated: observedGeneration must equal metadata.generation.
-            local patch_payload=$(jq -n --arg time "$transition_time" --argjson gen "${generation:-1}" '{
+            local patch_payload=$(jq -n '{
                 "status": {
-                    "conditions": [{
-                        "type": "PlanningReady",
-                        "status": "True",
-                        "reason": "Completed",
-                        "message": "Domain controller finished planning",
-                        "observedGeneration": $gen,
-                        "lastTransitionTime": $time
-                    }]
+                    "captureState": {
+                        "domainSpecificController": {
+                            "phase": "Planned"
+                        }
+                    }
                 }
             }')
             
@@ -384,20 +376,20 @@ EOF
                 --subresource=status \
                 --type=merge \
                 --patch="$patch_payload" || {
-                log_error "Failed to set condition via kubectl patch --subresource=status"
+                log_error "Failed to set phase via kubectl patch --subresource=status"
                 log_info "Current snapshot status:"
                 kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" -o jsonpath='{.status}' | jq '.' 2>/dev/null || echo "Status is empty"
                 exit 1
             }
             
-            # Verify condition was set
+            # Verify phase was set
             sleep 1  # Small delay for API to update
-            local condition_status=$(kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" \
-                -o jsonpath='{.status.conditions[?(@.type=="PlanningReady")].status}' 2>/dev/null || echo "")
-            if [[ "$condition_status" == "True" ]]; then
-                log_success "PlanningReady condition set and verified"
+            local phase_value=$(kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" \
+                -o jsonpath='{.status.captureState.domainSpecificController.phase}' 2>/dev/null || echo "")
+            if [[ "$phase_value" == "Planned" ]]; then
+                log_success "phase=Planned set and verified"
             else
-                log_error "Condition was not set correctly (status: $condition_status)"
+                log_error "phase was not set correctly (phase: $phase_value)"
                 log_info "Snapshot status:"
                 kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" -o jsonpath='{.status}' | jq '.' 2>/dev/null || kubectl get "$snapshot_resource" "$SNAPSHOT_NAME" -n "$NAMESPACE" -o yaml
                 exit 1
@@ -406,7 +398,7 @@ EOF
             # Wait a bit for controller to receive the update event
             sleep 2
         else
-            log_error "jq is required for setting conditions. Please install jq."
+            log_error "jq is required for setting the phase. Please install jq."
             exit 1
         fi
     fi
@@ -497,10 +489,10 @@ EOF
     
     local content_resource="${CONTENT_KIND,,}s.${SNAPSHOT_API_GROUP}"
     local finalizers=$(kubectl get "$content_resource" $CONTENT_NAME -o jsonpath='{.metadata.finalizers[*]}' 2>/dev/null || echo "")
-    if echo "$finalizers" | grep -q "snapshot.deckhouse.io/parent-protect"; then
-        log_success "Finalizer 'snapshot.deckhouse.io/parent-protect' found"
+    if echo "$finalizers" | grep -q "state-snapshotter.deckhouse.io/parent-protect"; then
+        log_success "Finalizer 'state-snapshotter.deckhouse.io/parent-protect' found"
     else
-        log_error "Finalizer 'snapshot.deckhouse.io/parent-protect' not found (finalizers: $finalizers)"
+        log_error "Finalizer 'state-snapshotter.deckhouse.io/parent-protect' not found (finalizers: $finalizers)"
     fi
     
     # Test 6: Simulate SnapshotContent Ready (set Ready=True on SnapshotContent)
@@ -651,7 +643,7 @@ EOF
         fi
         if [[ "$finalizer_removed" != "true" ]]; then
             local finalizers_after=$(kubectl get "$content_resource" $CONTENT_NAME -o jsonpath='{.metadata.finalizers[*]}' 2>/dev/null || echo "")
-            if ! echo "$finalizers_after" | grep -q "snapshot.deckhouse.io/parent-protect"; then
+            if ! echo "$finalizers_after" | grep -q "state-snapshotter.deckhouse.io/parent-protect"; then
                 finalizer_removed=true
             fi
         fi

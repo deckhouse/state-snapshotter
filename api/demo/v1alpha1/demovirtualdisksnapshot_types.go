@@ -34,27 +34,29 @@ type DemoVirtualDiskSnapshot struct {
 	Status DemoVirtualDiskSnapshotStatus `json:"status,omitempty"`
 }
 
-// DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot. Exactly one of
-// SourceRef (capture) or Source (import) is set.
+// DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot. spec.mode selects
+// the content source: Capture (sourceRef), Import (no source), or StaticBind (source.snapshotContentName).
 // +k8s:deepcopy-gen=true
-// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) != has(self.source)",message="exactly one of spec.sourceRef (capture) or spec.source (import) must be set"
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Capture' ? has(self.sourceRef) : !has(self.sourceRef)",message="spec.sourceRef is required in Capture mode and forbidden otherwise"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'StaticBind' ? (has(self.source) && has(self.source.snapshotContentName)) : (!has(self.source) || !has(self.source.snapshotContentName))",message="spec.source.snapshotContentName is required when mode is StaticBind and forbidden otherwise"
 type DemoVirtualDiskSnapshotSpec struct {
-	// SourceRef identifies the DemoVirtualDisk captured by this snapshot in CAPTURE mode. It is the
-	// single source-of-truth for what the snapshot captures and is immutable once set. It is a pointer so
-	// its presence unambiguously selects capture mode for the exactly-one-of rule; an IMPORT-mode snapshot
-	// (spec.source.import) has no live source disk and omits it.
+	// Mode selects how this disk snapshot obtains its content (Capture|Import|StaticBind), immutable.
+	// Capture: capture the live source disk (spec.sourceRef). Import: materialize from an uploaded payload
+	// plus the matching DataImport (no live capture). StaticBind: bind an existing SnapshotContent
+	// (spec.source.snapshotContentName) — used for restore from the retained-content "bin" (wave4B).
+	// +kubebuilder:default=Capture
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
+	Mode storagev1alpha1.SnapshotMode `json:"mode,omitempty"`
+
+	// SourceRef identifies the DemoVirtualDisk captured by this snapshot in Capture mode. It is the
+	// single source-of-truth for what the snapshot captures and is immutable once set. Required in Capture
+	// mode and forbidden otherwise.
+	// +optional
 	SourceRef *SnapshotSourceRef `json:"sourceRef,omitempty"`
 
-	// Source, when set, switches this disk snapshot into IMPORT mode. Only the import marker is allowed on
-	// a demo snapshot leaf (no static pre-provisioning), so spec.source.import: {} is the sole valid form.
-	// In import mode the domain controller does NO capture planning (no source-disk lookup, no MCR/VCR):
-	// the common controller materializes the backing SnapshotContent from the uploaded manifests and the
-	// data leg from the matching DataImport (reverse-lookup by DataImport.spec.targetRef). Immutable once set.
+	// Source carries mode-specific source parameters. Required (snapshotContentName) only in StaticBind mode.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="has(self.import) && !has(self.snapshotContentName)",message="only spec.source.import: {} is supported on a demo snapshot leaf"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.source is immutable"
 	Source *storagev1alpha1.SnapshotSource `json:"source,omitempty"`
 }
 
@@ -64,25 +66,23 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// BoundSnapshotContentName is the cluster-scoped SnapshotContent name, once created.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
-	// ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
-	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
+	// SnapshotSource is the full reference to the captured live source object (top-level, written by the
+	// domain controller via PublishSnapshotSource). Self-contained for import-mode recreation.
+	// +optional
+	SnapshotSource *storagev1alpha1.SnapshotSourceObjectRef `json:"snapshotSource,omitempty"`
 
-	// VolumeCaptureRequestName is the temporary VCR owned by this disk snapshot while data-leg capture runs.
-	// The common controller reads this VCR's result to enrich and publish SnapshotContent.status.dataRef;
-	// the domain controller never touches SnapshotContent itself.
-	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
+	// CaptureState collects internal capture signals: commonController (core-written leg latches
+	// manifestCaptured/dataCaptured) and domainSpecificController (domain-written MCR/VCR refs + phase).
+	// +optional
+	CaptureState *storagev1alpha1.CaptureStateStatus `json:"captureState,omitempty"`
 
-	// ManifestCaptured is set by the common controller once this snapshot's manifest capture has been
-	// durably handed off to SnapshotContent (manifestCheckpointName published and the ManifestCheckpoint
-	// owned by the content). It is a domain-only suppression signal: the domain controller reads it to
-	// stop re-creating the MCR after the common controller deletes it, without ever reading SnapshotContent.
-	ManifestCaptured bool `json:"manifestCaptured,omitempty"`
-
-	// DataCaptured is set by the common controller once this disk snapshot's data leg has been durably
-	// handed off to SnapshotContent (dataRefs published and the VolumeSnapshotContent owned by the content).
-	// Domain-only suppression signal: the domain controller reads it to stop re-creating the VCR after the
-	// common controller deletes it. Always considered captured for a manifest-only disk (no data leg).
-	DataCaptured bool `json:"dataCaptured,omitempty"`
+	// ChildrenSnapshotRefs is empty on a data-leaf disk snapshot (kept for uniformity across snapshot kinds).
+	// +optional
+	// +listType=map
+	// +listMapKey=apiVersion
+	// +listMapKey=kind
+	// +listMapKey=name
+	ChildrenSnapshotRefs []storagev1alpha1.SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 
 	// StorageClassName mirrors this data leaf's volume StorageClass for d8 export: the bound
 	// SnapshotContent.status.dataRef.storageClassName on capture, or DataImport.spec.storageClassName on
@@ -99,18 +99,24 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// +optional
 	VolumeMode string `json:"volumeMode,omitempty"`
 
-	// Conditions report readiness (e.g. Ready=True for generic parent children-readiness aggregation).
+	// Conditions report readiness. Ready is the single user-facing condition, always derived by the core.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// IsImportMode reports whether this disk snapshot is an import target (spec.source.import set). Import
+// IsImportMode reports whether this disk snapshot is an import target (spec.mode == Import). Import
 // leaves are materialized from an uploaded payload plus the matching DataImport and MUST NOT trigger
 // live capture (parity with Snapshot.IsImportMode).
 func (s *DemoVirtualDiskSnapshot) IsImportMode() bool {
-	return s != nil && s.Spec.Source != nil && s.Spec.Source.Import != nil
+	return s != nil && s.Spec.Mode == storagev1alpha1.SnapshotModeImport
+}
+
+// IsStaticBind reports whether this disk snapshot statically binds to pre-provisioned content
+// (spec.mode == StaticBind).
+func (s *DemoVirtualDiskSnapshot) IsStaticBind() bool {
+	return s != nil && s.Spec.Mode == storagev1alpha1.SnapshotModeStaticBind
 }
 
 // +kubebuilder:object:root=true

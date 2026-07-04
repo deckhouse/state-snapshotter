@@ -193,7 +193,7 @@ func withVSCNoReadyToUse(name string) dataReadinessOption {
 func withVSCDeleting(name string) dataReadinessOption {
 	return func(s *dataReadinessFixtureState) {
 		obj := volumeSnapshotContentObject(name, true)
-		obj.SetFinalizers([]string{"state-snapshotter.deckhouse.io/artifact-protect"})
+		obj.SetFinalizers([]string{snapshot.FinalizerArtifactProtect})
 		now := metav1.NewTime(time.Now())
 		obj.SetDeletionTimestamp(&now)
 		s.vscs = append(s.vscs, obj)

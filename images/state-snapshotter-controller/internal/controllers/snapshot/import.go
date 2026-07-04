@@ -166,7 +166,6 @@ func (r *SnapshotReconciler) bindImportSnapshotContent(ctx context.Context, nsSn
 			return nil
 		}
 		cur.Status.BoundSnapshotContentName = contentName
-		cur.Status.ObservedGeneration = cur.Generation
 		return r.Client.Status().Update(ctx, cur)
 	})
 }

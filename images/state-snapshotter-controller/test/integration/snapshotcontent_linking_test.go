@@ -98,14 +98,11 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 		}).WithTimeout(120 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 		Expect(mcpName).NotTo(BeEmpty())
 
-		// Simulate domain controller: publish PlanningReady=True for the current generation.
-		setPlanningReadyCondition(snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration())
-		status, _ := snapshotObj.Object["status"].(map[string]interface{})
-		if status == nil {
-			status = map[string]interface{}{}
-		}
-		status["manifestCaptureRequestName"] = mcr.GetName()
-		snapshotObj.Object["status"] = status
+		// Simulate domain controller: publish phase=Planned + the MCR name under
+		// captureState.domainSpecificController (the domain-written half of captureState).
+		injectDomainPlanned(snapshotObj)
+		Expect(unstructured.SetNestedField(snapshotObj.Object, mcr.GetName(),
+			"status", "captureState", "domainSpecificController", "manifestCaptureRequestName")).To(Succeed())
 		Expect(k8sClient.Status().Update(ctx, snapshotObj)).To(Succeed())
 
 		snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
@@ -180,7 +177,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
 			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshSnapshot)).To(Succeed())
-			mcrName, _, err := unstructured.NestedString(freshSnapshot.Object, "status", "manifestCaptureRequestName")
+			mcrName, _, err := unstructured.NestedString(freshSnapshot.Object,
+				"status", "captureState", "domainSpecificController", "manifestCaptureRequestName")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(mcrName).To(Equal(mcr.Name))
 

@@ -32,7 +32,7 @@ import (
 )
 
 // residualContentOpts builds a SnapshotContent unstructured tailored for residual-gate tests. By default
-// it pre-latches ManifestsArchived=True so that the only Ready gate left to exercise is the residual one.
+// it pre-latches subtreeManifestsPersisted=true so that the only Ready gate left to exercise is the residual one.
 type residualContentOpts struct {
 	name            string
 	mcpName         string
@@ -63,6 +63,8 @@ func residualGateContent(t *testing.T, o residualContentOpts) *unstructured.Unst
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: o.mcpName,
+			// Pre-latch subtreeManifestsPersisted=true so the archive gate is satisfied and the residual gate is isolated.
+			SubtreeManifestsPersisted: true,
 		},
 	}
 	if o.leaf {
@@ -75,14 +77,6 @@ func residualGateContent(t *testing.T, o residualContentOpts) *unstructured.Unst
 	if o.residualPhase != "" {
 		c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{Phase: o.residualPhase}
 	}
-	// Pre-latch ManifestsArchived=True so the archive gate is satisfied and the residual gate is isolated.
-	c.Status.Conditions = append(c.Status.Conditions, metav1.Condition{
-		Type:               snapshot.ConditionManifestsArchived,
-		Status:             metav1.ConditionTrue,
-		Reason:             snapshot.ReasonManifestsArchived,
-		Message:            "archived",
-		LastTransitionTime: metav1.Now(),
-	})
 	if o.readyTrue {
 		c.Status.Conditions = append(c.Status.Conditions, metav1.Condition{
 			Type:               snapshot.ConditionReady,
@@ -115,8 +109,8 @@ func TestResidualGate_RootAbsentLatchHoldsReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.manifestsArchivedStatus != metav1.ConditionTrue {
-		t.Fatalf("precondition: archive latch must be True, got %s", plan.manifestsArchivedStatus)
+	if !plan.subtreeManifestsPersisted {
+		t.Fatalf("precondition: subtree-persist latch must be true, got %v", plan.subtreeManifestsPersisted)
 	}
 	if plan.residualSweepStatus != metav1.ConditionFalse {
 		t.Fatalf("residual gate must be False (latch absent), got %s", plan.residualSweepStatus)

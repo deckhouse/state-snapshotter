@@ -30,12 +30,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// condManifestsArchived is the subtree-latch contract condition (Commit 3), mirrored onto Snapshot.
-const condManifestsArchived = storagev1alpha1.ConditionManifestsArchived
+// rootManifestCaptured reads the root Snapshot's manifest-leg latch
+// (status.captureState.commonController.manifestCaptured), the core-internal monotonic bool that replaced
+// the former ManifestsArchived condition. Returns (value, found).
+func rootManifestCaptured(obj *unstructured.Unstructured) (captured bool, found bool) {
+	v, ok, _ := unstructured.NestedBool(obj.Object, "status", "captureState", "commonController", "manifestCaptured")
+	return v, ok
+}
 
 // Hook-managed capture RBAC identifiers — MUST match hooks/go/040-namespace-capture-rbac and
 // templates/controller/rbac-for-us.yaml.
@@ -71,9 +74,29 @@ func getRootOwnManifests(ctx context.Context, ns, snap string) ([]unstructured.U
 	return decodeManifestArray(body)
 }
 
-// waitRootArchived waits until the root Snapshot mirrors ManifestsArchived=True.
+// waitRootArchived waits until the root Snapshot's manifest-leg latch
+// (status.captureState.commonController.manifestCaptured) flips to true.
 func waitRootArchived(ctx context.Context, ns, snap string, timeout time.Duration) error {
-	return waitObjectCondition(ctx, snapshotGVR, ns, snap, condManifestsArchived, "True", timeout)
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		obj, err := getResource(ctx, snapshotGVR, ns, snap)
+		if err == nil {
+			if captured, found := rootManifestCaptured(obj); found && captured {
+				return nil
+			} else {
+				last = fmt.Sprintf("found=%v captured=%v", found, captured)
+			}
+		} else {
+			last = fmt.Sprintf("get err=%v", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for Snapshot %s/%s manifestCaptured=true; last: %s", ns, snap, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
 }
 
 // applyConfigMap returns a simple namespaced ConfigMap (a guaranteed-included root manifest target).
@@ -151,7 +174,7 @@ func captureRBACHookSpecs() {
 				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 				"kind":       "Snapshot",
 				"metadata":   map[string]interface{}{"name": "e1-import", "namespace": ns},
-				"spec":       map[string]interface{}{"source": map[string]interface{}{"import": map[string]interface{}{}}},
+				"spec":       map[string]interface{}{"mode": "Import"},
 			}}
 			staticSnap := &unstructured.Unstructured{Object: map[string]interface{}{
 				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
@@ -573,9 +596,9 @@ func childDegradationSpecs() {
 			Consistently(func(g Gomega) {
 				root, err := getResource(ctx, snapshotGVR, ns, "e3-snap")
 				g.Expect(err).NotTo(HaveOccurred())
-				st, _, found := conditionStatus(root, condManifestsArchived)
+				captured, found := rootManifestCaptured(root)
 				g.Expect(found).To(BeTrue())
-				g.Expect(st).To(Equal("True"), "ManifestsArchived must remain latched True through degradation")
+				g.Expect(captured).To(BeTrue(), "manifestCaptured must remain latched true through degradation")
 			}).WithTimeout(30 * time.Second).WithPolling(5 * time.Second).Should(Succeed())
 
 			By("Asserting the capture RoleBinding is NOT re-created (RBAC keyed on the latch, not Ready)")

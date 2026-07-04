@@ -152,10 +152,11 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	// Mirror the bound content's ManifestsArchived subtree-latch onto the root Snapshot on every capture
-	// reconcile (incl. steady-state and child degradation): the content owns the latch, the Snapshot mirrors
-	// it. Runs before the steady-state short-circuit below so the mirror still fires once capture completes.
-	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, content.Name); err != nil {
+	// Maintain the root Snapshot's captureState.commonController.manifestCaptured leg latch on every
+	// capture reconcile (incl. steady-state and child degradation): eager-init false, then monotonically
+	// true once the bound content's subtree manifests are persisted. The RBAC hook (040) reads it. Runs
+	// before the steady-state short-circuit below so the flip still fires once capture completes.
+	if err := r.stampRootManifestCaptured(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, content.Status.SubtreeManifestsPersisted); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.ensureVolumeCaptureLeg(ctx, nsSnap, content); err != nil {
@@ -430,7 +431,6 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 			if err := r.Client.Get(ctx, nsKey, cur); err != nil {
 				return err
 			}
-			cur.Status.ObservedGeneration = cur.Generation
 			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 				Type:               snapshotpkg.ConditionReady,
 				Status:             metav1.ConditionFalse,
@@ -451,7 +451,6 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 			if err := r.Client.Get(ctx, nsKey, cur); err != nil {
 				return err
 			}
-			cur.Status.ObservedGeneration = cur.Generation
 			meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 				Type:               snapshotpkg.ConditionReady,
 				Status:             contentReady.Status,
@@ -478,9 +477,8 @@ func (r *SnapshotReconciler) reconcileN2aRootReadyAfterManifestCapture(
 	if err := r.deleteSnapshotManifestCaptureRequest(ctx, post); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.patchSnapshotManifestCaptureRequestName(ctx, post, ""); err != nil {
-		return ctrl.Result{}, err
-	}
+	// The root MCR name is a core-internal execution handle (deterministic SnapshotMCRName + ownerRef +
+	// labelSnapshotUID), not published in the public status, so there is nothing to clear here.
 	// Content Ready=True now implies its ManifestsArchived subtree latch is True (the archive latch is a gate
 	// of the content Ready formula), and that latch was mirrored onto the Snapshot earlier in this reconcile
 	// (mirrorSnapshotManifestsArchivedFromBoundContent). No extra archive-wave polling is needed here: while
@@ -544,7 +542,6 @@ func (r *SnapshotReconciler) setSnapshotReadyFalse(ctx context.Context, nsSnap *
 		if err := r.Client.Get(ctx, nsKey, fresh); err != nil {
 			return err
 		}
-		fresh.Status.ObservedGeneration = fresh.Generation
 		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,
@@ -713,9 +710,8 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 		if err := r.Client.Get(ctx, key, created); err != nil {
 			return nil, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 		}
-		if err := r.patchSnapshotManifestCaptureRequestName(ctx, nsSnap, name); err != nil {
-			return nil, ctrl.Result{}, err
-		}
+		// The root MCR name is deterministic (SnapshotMCRName) and tracked by ownerRef + labelSnapshotUID;
+		// it is a core-internal execution handle and is intentionally NOT published in the public status.
 		return created, ctrl.Result{}, nil
 	case err != nil:
 		return nil, ctrl.Result{}, err
@@ -737,26 +733,8 @@ func (r *SnapshotReconciler) ensureManifestCaptureRequest(ctx context.Context, n
 		// A namespace snapshot is point-in-time: an existing, owned MCR's spec.targets are frozen and never
 		// rewritten or compared against the live namespace (no drift recompute). Ownership checks above are
 		// the only validity gate; the MCR-gate in reconcileCaptureN2a means we normally never reach this
-		// branch via a fresh list, but it stays idempotent for the AlreadyExists retry.
-		if err := r.patchSnapshotManifestCaptureRequestName(ctx, nsSnap, name); err != nil {
-			return nil, ctrl.Result{}, err
-		}
+		// branch via a fresh list, but it stays idempotent for the AlreadyExists retry. The MCR name is a
+		// core-internal execution handle (deterministic + ownerRef/label), not published in the status.
 		return existing, ctrl.Result{}, nil
 	}
-}
-
-func (r *SnapshotReconciler) patchSnapshotManifestCaptureRequestName(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, name string) error {
-	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		fresh := &storagev1alpha1.Snapshot{}
-		if err := r.Client.Get(ctx, key, fresh); err != nil {
-			return err
-		}
-		if fresh.Status.ManifestCaptureRequestName == name {
-			return nil
-		}
-		base := fresh.DeepCopy()
-		fresh.Status.ManifestCaptureRequestName = name
-		return r.Client.Status().Patch(ctx, fresh, client.MergeFrom(base))
-	})
 }

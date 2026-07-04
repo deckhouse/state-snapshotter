@@ -89,7 +89,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		parent.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
 		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, parent)) })
-		setSnapshotPlanningReadyCurrent(ctx, parent)
+		setSnapshotDomainPlannedCurrent(ctx, parent)
 
 		parentKey := types.NamespacedName{Namespace: "default", Name: "gen-parent-degrade"}
 		var parentContentName, parentContentUID string
@@ -141,7 +141,20 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 
 		// 3. Truth refs: parent content references the child (childrenSnapshotContentRefs) and its own MCP;
 		// child content references its own MCP. The generic binder leaves manifestCheckpointName untouched
-		// while manifestCaptureRequestName is empty, so these links are stable across the flips below.
+		// while captureState.domainSpecificController.manifestCaptureRequestName is empty, so these links are stable across the flips below.
+		//
+		// This content-driven test fabricates the content tree directly, without a real owning Snapshot
+		// graph (the child content's spec.snapshotRef points at a Snapshot that is never created here). Two
+		// core-internal, lowest-priority Ready legs therefore cannot latch on their own and must be seeded:
+		//   - subtreeManifestsPersisted: the monotonic recursive manifest latch. Its declared-vs-linked
+		//     fail-closed check resolves the owning Snapshot's childrenSnapshotRefs, which is absent here, so
+		//     it would pin Ready=False (SubtreeManifestCapturePending) forever.
+		//   - residualVolumeCapture.phase: the residual/orphan-PVC sweep gate. It fires on any content whose
+		//     spec.snapshotRef is a core Snapshot (as retainContentSpec's ref is), and only the snapshot
+		//     reconciler (absent here) ever latches it Complete, so it would pin Ready=False
+		//     (ResidualVolumeCapturePending) forever.
+		// This spec exercises Ready mirror/degradation via child ChildrenReady, not those gates, so we seed
+		// both to their satisfied (monotonic) values; the reconciler then holds them.
 		parentMCP := "mcp-parent-degrade"
 		childMCP := "mcp-child-degrade"
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -151,6 +164,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 			}
 			c.Status.ManifestCheckpointName = parentMCP
 			c.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.SnapshotContentChildRef{{Name: childContentName}}
+			c.Status.SubtreeManifestsPersisted = true
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -159,6 +173,10 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 				return err
 			}
 			c.Status.ManifestCheckpointName = childMCP
+			c.Status.SubtreeManifestsPersisted = true
+			c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
+				Phase: storagev1alpha1.ResidualVolumeCapturePhaseComplete,
+			}
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 

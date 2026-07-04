@@ -54,7 +54,7 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 	// 3. Check SnapshotContent finalizers
 	//
 	// EXPECTED BEHAVIOR:
-	// - SnapshotContent.finalizers does NOT contain "snapshot.deckhouse.io/parent-protect"
+	// - SnapshotContent.finalizers does NOT contain "state-snapshotter.deckhouse.io/parent-protect"
 	// - SnapshotContent becomes orphaned
 	//
 	// POSTCONDITION:
@@ -102,8 +102,8 @@ var _ = Describe("Integration: SnapshotContentController - Orphaning", func() {
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish PlanningReady=True for the current generation.
-			setSnapshotPlanningReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish phase=Planned.
+			setSnapshotDomainPlannedCurrent(ctx, snapshotObj)
 
 			contentCtrl, err := controllers.NewSnapshotContentController(
 				k8sClient,

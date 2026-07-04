@@ -25,8 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func TestStableContentName(t *testing.T) {
@@ -79,19 +77,12 @@ func TestPatchUnstructuredBoundContentNameIsIdempotent(t *testing.T) {
 		t.Fatalf("unexpected bound content name: %q", got)
 	}
 
-	// The common binder must never self-publish PlanningReady: it is owned exclusively by the
-	// domain/namespace controller and the binder only waits for it.
-	conditions, _, err := unstructured.NestedSlice(fresh.Object, "status", "conditions")
-	if err != nil {
-		t.Fatalf("read conditions: %v", err)
-	}
-	for _, raw := range conditions {
-		cond, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if cond["type"] == snapshot.ConditionPlanningReady {
-			t.Fatalf("PatchUnstructuredBoundContentName must not self-publish PlanningReady, got condition: %#v", cond)
-		}
+	// The common binder must never self-publish the domain lifecycle: captureState.domainSpecificController
+	// (phase and friends) is owned exclusively by the domain/namespace controller and the binder only waits
+	// for it. Patching boundSnapshotContentName must not materialize a domainSpecificController block.
+	if _, found, err := unstructured.NestedMap(fresh.Object, "status", "captureState", "domainSpecificController"); err != nil {
+		t.Fatalf("read domainSpecificController: %v", err)
+	} else if found {
+		t.Fatalf("PatchUnstructuredBoundContentName must not self-publish captureState.domainSpecificController")
 	}
 }

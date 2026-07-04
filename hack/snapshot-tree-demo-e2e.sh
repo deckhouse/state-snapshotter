@@ -4,7 +4,7 @@
 # Goal: validate the current architecture end-to-end on a real cluster, from CSD priority
 # planning to Phase 2a / Slice 3 status propagation:
 #   - GVK/priority registration and priority-driven tree shape (+ inversion);
-#   - PlanningReady planning barrier (domain-owned, generation-gated);
+#   - domain capture-phase planning barrier (status.captureState.domainSpecificController.phase, domain-owned);
 #   - artifacts born under execution ObjectKeeper and handed off to SnapshotContent;
 #   - ManifestsReady / VolumeReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
 #   - damaged-leaf Ready=False propagation to root and recovery back to Ready=True;
@@ -752,10 +752,11 @@ save_artifacts() {
 	printf 'namespace=%s\nrun_id=%s\nstage=%s\ncsd=%s\n' "${ns}" "${RUN_ID}" "${stage}" "${CSD_NAME}" >"${dir}/run-context.txt"
 }
 
-# condition_table <ns>: Ready/ManifestsReady/VolumeReady/ChildrenReady/PlanningReady for snapshots + contents.
+# condition_table <ns>: Ready/ManifestsReady/VolumeReady/ChildrenReady for snapshots + contents, plus the
+# domain-owned capture phase (status.captureState.domainSpecificController.phase) for snapshots.
 condition_table() {
 	local ns="$1"
-	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumeReady|ChildrenReady|PlanningReady(obsGen/gen)"
+	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumeReady|ChildrenReady|phase"
 	local res
 	for res in "${SNAP_RES}" "${VMSNAP_RES}" "${DISKSNAP_RES}"; do
 		kubectl -n "${ns}" get "${res}" -o json 2>/dev/null | jq -r '
@@ -765,9 +766,7 @@ condition_table() {
 				(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="VolumeReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-") + "(" +
-				((([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0)|tostring) + "/" +
-				((.metadata.generation//0)|tostring) + ")"
+				((.status.captureState.domainSpecificController.phase)//"-")
 			] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
 			| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
 	done
@@ -777,8 +776,7 @@ condition_table() {
 			(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="VolumeReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="PlanningReady")][0].status)//"-")
+			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|-"
 		] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
 		| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
 }
@@ -1047,7 +1045,7 @@ DISK_ONLY_CHILD_NAMES="$(echo "${DISK_ONLY_ROOT_JSON}" | jq -r '.status.children
 DISK_ONLY_SOURCES="$(
 	for child in ${DISK_ONLY_CHILD_NAMES}; do
 		kubectl -n "${NS_TOPO_DISK_ONLY}" get "${DISKSNAP_RES}" "${child}" -o json 2>/dev/null \
-			| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+			| jq -r '.spec.sourceRef.name // empty'
 	done | sort
 )"
 printf '%s\n' "${DISK_ONLY_SOURCES}" >"$(stage_dir topology-disk-only)/disk-child-source-names.txt"
@@ -1250,9 +1248,9 @@ done
 #      Any of those failing means the core binder never took ownership of a demo content.
 #  (b) no two demo snapshots share a content name — a clean 1:1 snapshot->content mapping (the tree-shape
 #      assertions above already pin the kind/count of each child).
-#  (c) the demo planning output exists on the domain-owned snapshots: VM snapshot has the domain
-#      PlanningReady barrier condition (only the domain reconciler sets it). The well-formed
-#      VM->disk subtree resolved above is itself proof the single domain reconciler ran.
+#  (c) the demo planning output exists on the domain-owned snapshots: VM snapshot carries the domain
+#      capture phase (status.captureState.domainSpecificController.phase; only the domain reconciler sets
+#      it). The well-formed VM->disk subtree resolved above is itself proof the single domain reconciler ran.
 # Note: a same-snapshot duplicate content is impossible by construction — the binder mints a deterministic
 # name (snapshotContentName: "ns-<uid>") and create-or-adopts on AlreadyExists — so (a)+(b) cannot be
 # defeated by a second binder racing the same snapshot.
@@ -1271,9 +1269,9 @@ while read -r ndr_c; do
 	kubectl get "${CONTENT_RES}" "${ndr_c}" >/dev/null 2>&1 \
 		|| die "no-double-reconcile: bound SnapshotContent ${ndr_c} does not exist (dangling binding / content not owned by the core binder)"
 done <<<"${NDR_BOUND}"
-VM_CSR="$(cond_field "$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")" PlanningReady status)"
-[[ -n "${VM_CSR}" ]] || die "no-double-reconcile: VM snapshot ${VM_SNAP} has no PlanningReady condition (domain reconciler did not handle it)"
-note "no-double-reconcile: ${NDR_DISTINCT} distinct SnapshotContent, all present (single common owner); VM snapshot PlanningReady=${VM_CSR} (domain reconciler)"
+VM_CSR="$(jq -r '.status.captureState.domainSpecificController.phase // ""' <<<"$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")")"
+[[ -n "${VM_CSR}" ]] || die "no-double-reconcile: VM snapshot ${VM_SNAP} has no domain capture phase (domain reconciler did not handle it)"
+note "no-double-reconcile: ${NDR_DISTINCT} distinct SnapshotContent, all present (single common owner); VM snapshot phase=${VM_CSR} (domain reconciler)"
 
 # --- two-PVC capture paths -------------------------------------------------
 # demo-pvc       : orphan/standalone at root  -> CSI VolumeSnapshot visibility leaf + VSC in ROOT content dataRefs.
@@ -1360,11 +1358,11 @@ VM_JSON="$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")"
 	|| die "vm+disk topology: root must contain only standalone DemoVirtualDiskSnapshot"
 ROOT_DISK_SOURCE="$(
 	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o json 2>/dev/null \
-		| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+		| jq -r '.spec.sourceRef.name // empty'
 )"
 VM_DISK_SOURCE="$(
 	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${LEAF_SNAP}" -o json 2>/dev/null \
-		| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+		| jq -r '.spec.sourceRef.name // empty'
 )"
 [[ "${ROOT_DISK_SOURCE}" == "disk-standalone" ]] || die "vm+disk topology: root disk child source=${ROOT_DISK_SOURCE}, expected disk-standalone"
 [[ "${VM_DISK_SOURCE}" == "disk-vm" ]] || die "vm+disk topology: VM disk child source=${VM_DISK_SOURCE}, expected disk-vm"
@@ -1411,7 +1409,7 @@ jq -e --arg name "${SNAP}" --arg uid "${ROOT_UID}" '
 	|| die "orphan-pvc-vs: VolumeSnapshot must have non-controller ownerRef to root Snapshot and no controller=true ownerRef"
 ORPHAN_VS_CLASS="$(jq -r '.spec.volumeSnapshotClassName // ""' "$(stage_dir orphan-pvc-vs)/orphan-vs.json")"
 [[ -n "${ORPHAN_VS_CLASS}" ]] || die "orphan-pvc-vs: VolumeSnapshot spec.volumeSnapshotClassName must be explicitly set"
-SC_VS_CLASS="$(kubectl get storageclass "${STORAGE_CLASS}" -o json 2>/dev/null | jq -r '.metadata.annotations["state-snapshotter.deckhouse.io/volumesnapshotclass"] // ""' || true)"
+SC_VS_CLASS="$(kubectl get storageclass "${STORAGE_CLASS}" -o json 2>/dev/null | jq -r '.metadata.annotations["storage.deckhouse.io/volumesnapshotclass"] // ""' || true)"
 [[ -z "${SC_VS_CLASS}" || "${ORPHAN_VS_CLASS}" == "${SC_VS_CLASS}" ]] \
 	|| die "orphan-pvc-vs: VolumeSnapshotClass ${ORPHAN_VS_CLASS} does not match StorageClass annotation ${SC_VS_CLASS}"
 kubectl get "${VSCLASS_RES}" "${ORPHAN_VS_CLASS}" -o yaml >"$(stage_dir orphan-pvc-vs)/orphan-vsclass.yaml" 2>/dev/null || true
@@ -1437,10 +1435,9 @@ echo "${ROOT_CONTENT_JSON}" | jq -e --arg vs "${ORPHAN_VS}" \
 	'([.status.childrenSnapshotContentRefs[]?|select(.name==$vs)]|length)==0' >/dev/null \
 	|| die "orphan-pvc-vs: childrenSnapshotContentRefs must not reference the orphan VolumeSnapshot"
 kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
-	| jq -e --arg vs "${ORPHAN_VS}" --arg ns "${NS}" '
+	| jq -e --arg vs "${ORPHAN_VS}" '
 		[.items[]?|select(
 			(any(.metadata.ownerReferences[]?; .kind=="VolumeSnapshot" and .name==$vs))
-			or ((.metadata.annotations["state-snapshotter.deckhouse.io/source-ref"] // "{}" | fromjson?) as $src | $src.kind == "VolumeSnapshot" and $src.name == $vs and $src.namespace == $ns)
 		)]|length==0' >/dev/null \
 	|| die "orphan-pvc-vs: no SnapshotContent may be materialized for the VolumeSnapshot visibility leaf"
 note "orphan-pvc-vs: demo-pvc uses CSI VolumeSnapshot visibility leaf + root dataRefs, with no namespace VCR"
@@ -1848,7 +1845,7 @@ else
 		echo "  EITHER root child set changes (covered VM disk no longer hidden under VM:"
 		echo "         root Disksnap increases, or VM disk-child count changes),"
 		echo "  OR controller publishes an explicit fail-closed reason"
-		echo "         (PriorityLayerPending / GraphPlanningFailed / ChildGraphPending / SourceIdentity*)"
+		echo "         (ChildrenPending / GraphPlanningFailed / ChildGraphPending / SourceIdentity*)"
 		echo "         explaining the ambiguous/invalid coverage order."
 	} >"${EXP}"
 	if wait_until "inverted root Snapshot bound" snap_bound "${NS_PRIORITY_INV}" "${SNAP}"; then
@@ -1878,7 +1875,7 @@ else
 		[[ "${INV_VM_DISK}" != "-" && "${INV_VM_DISK}" != "${N_VM_DISK}" ]] && shape_changed=1
 		if [[ "${shape_changed}" == "1" ]]; then
 			note "PASS: disk-first changed planned tree vs vm-first (root VM=${N_ROOT_VMSNAP}->${INV_VM}, Disk=${N_ROOT_DISKSNAP}->${INV_DISK}, VMdisk=${N_VM_DISK}->${INV_VM_DISK}); priority influences the planner"
-		elif echo "${INV_READY}" | grep -qE 'PriorityLayerPending|GraphPlanningFailed|ChildGraphPending|SourceIdentity'; then
+		elif echo "${INV_READY}" | grep -qE 'ChildrenPending|GraphPlanningFailed|ChildGraphPending|SourceIdentity'; then
 			note "PASS (fail-closed): inverted priority produced explicit planner refusal: [${INV_READY}]"
 		else
 			die "priority inversion did NOT change the planner decision and gave no fail-closed reason: baseline root(VM=${N_ROOT_VMSNAP},Disk=${N_ROOT_DISKSNAP}) VMdisk=${N_VM_DISK} == inverted root(VM=${INV_VM},Disk=${INV_DISK}) VMdisk=${INV_VM_DISK} (priority does NOT affect planning — see expected-vs-actual.txt)"
@@ -1900,29 +1897,28 @@ fi # end GROUP priority
 # ===== GROUP domain (part 2/2): 04-domainready-barrier + 05-ownership-handoff =====
 if grp domain; then
 # ---------------------------------------------------------------------------
-# 04-domainready-barrier (domain-owned, generation-gated planning handoff)
+# 04-domainready-barrier (domain-owned planning handoff via capture phase)
 # ---------------------------------------------------------------------------
 begin_stage "04-domainready-barrier"
-# HARD final assertion: every domain snapshot is PlanningReady=True at its current generation.
+# HARD final assertion: every domain snapshot has published the domain capture phase (Planned/Finished)
+# at status.captureState.domainSpecificController.phase. The spec is immutable, so there is no
+# observedGeneration gate.
 for pair in "${SNAP_RES}|${SNAP}" "${VMSNAP_RES}|${VM_SNAP}" "${DISKSNAP_RES}|${LEAF_SNAP}" "${DISKSNAP_RES}|${SIBLING_SNAP}"; do
 	res="${pair%%|*}"; name="${pair##*|}"
 	[[ -n "${name}" ]] || die "domain snapshot handle empty (${res}); tree not resolved"
 	j="$(get_json "${res}" "${NS}" "${name}")"
-	dr_status="$(cond_field "${j}" PlanningReady status)"
-	[[ "${dr_status}" == "True" ]] || die "${res}/${name} PlanningReady=${dr_status:-<none>} (every domain snapshot must publish PlanningReady=True)"
-	obs="$(jq -r '([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0' <<<"${j}")"
-	gen="$(jq -r '.metadata.generation//0' <<<"${j}")"
-	[[ "${obs}" == "${gen}" ]] || die "${res}/${name} PlanningReady observedGeneration(${obs}) != generation(${gen}) (stale barrier)"
-	note "${res}/${name} PlanningReady=True observedGeneration=${obs}==generation"
+	dr_phase="$(jq -r '.status.captureState.domainSpecificController.phase // ""' <<<"${j}")"
+	[[ "${dr_phase}" == "Planned" || "${dr_phase}" == "Finished" ]] || die "${res}/${name} domain phase=${dr_phase:-<none>} (every domain snapshot must reach phase=Planned)"
+	note "${res}/${name} domain phase=${dr_phase}"
 done
-# HARD: PlanningReady is a Snapshot-like planning barrier only and must NEVER appear on a
-# SnapshotContent. A PlanningReady on content means the common/generic layer self-published it
-# (regression of the Slice 2 / snapshotbinding contract: PlanningReady is domain-owned).
+# HARD: the domain capture phase is a Snapshot-owned planning barrier only and must NEVER appear on a
+# SnapshotContent. A domainSpecificController.phase on content means the common/generic layer
+# self-published it (regression of the snapshotbinding contract: the phase is domain-owned).
 DR_ON_CONTENT="$(kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
-	| jq -r '[.items[]?|select(any(.status.conditions[]?; .type=="PlanningReady"))|.metadata.name]|join(",")' 2>/dev/null || true)"
-[[ -z "${DR_ON_CONTENT}" ]] || die "PlanningReady found on SnapshotContent(s) [${DR_ON_CONTENT}] — common-layer self-publication regression"
-note "no SnapshotContent carries PlanningReady (barrier remains domain/Snapshot-owned)"
-# Timeline probe: confirm content is not bound before current-gen PlanningReady on a fresh node.
+	| jq -r '[.items[]?|select((.status.captureState.domainSpecificController.phase // "")!="")|.metadata.name]|join(",")' 2>/dev/null || true)"
+[[ -z "${DR_ON_CONTENT}" ]] || die "domain phase found on SnapshotContent(s) [${DR_ON_CONTENT}] — common-layer self-publication regression"
+note "no SnapshotContent carries a domain capture phase (barrier remains domain/Snapshot-owned)"
+# Timeline probe: confirm content is not bound before the domain reaches phase=Planned on a fresh node.
 apply_source_namespace "${NS_DOMAIN_BARRIER}"
 wait_until "barrier demo-pvc Bound" pvc_bound "${NS_DOMAIN_BARRIER}" demo-pvc || true
 apply_root_snapshot "${NS_DOMAIN_BARRIER}"
@@ -1932,18 +1928,16 @@ deadline=$((SECONDS + 120)); dr_seen=0; bound_before_dr=0
 while ((SECONDS < deadline)); do
 	bj="$(get_json "${SNAP_RES}" "${NS_DOMAIN_BARRIER}" "${SNAP}")"
 	bound="$(jq -r '.status.boundSnapshotContentName // ""' <<<"${bj}")"
-	drs="$(cond_field "${bj}" PlanningReady status)"
-	dro="$(jq -r '([.status.conditions[]?|select(.type=="PlanningReady")][0].observedGeneration)//0' <<<"${bj}")"
+	drp="$(jq -r '.status.captureState.domainSpecificController.phase // ""' <<<"${bj}")"
 	bgen="$(jq -r '.metadata.generation//0' <<<"${bj}")"
-	printf '%s bound=%s PlanningReady=%s(obs=%s/gen=%s)\n' "$(now_rfc3339)" "${bound:-<none>}" "${drs:-<none>}" "${dro}" "${bgen}" >>"${TL}"
-	if [[ -n "${bound}" && "${dr_seen}" == "0" && "${drs}" != "True" ]]; then bound_before_dr=1; fi
-	if [[ "${drs}" == "True" && "${dro}" == "${bgen}" ]]; then dr_seen=1; fi
+	printf '%s bound=%s phase=%s(gen=%s)\n' "$(now_rfc3339)" "${bound:-<none>}" "${drp:-<none>}" "${bgen}" >>"${TL}"
+	if [[ -n "${bound}" && "${dr_seen}" == "0" && "${drp}" != "Planned" && "${drp}" != "Finished" ]]; then bound_before_dr=1; fi
+	if [[ "${drp}" == "Planned" || "${drp}" == "Finished" ]]; then dr_seen=1; fi
 	[[ "${dr_seen}" == "1" && -n "${bound}" ]] && break
 	sleep 2
 done
-[[ "${bound_before_dr}" == "0" ]] || die "barrier: SnapshotContent bound BEFORE current-gen PlanningReady=True (planning barrier violated — content must not bind until domain is ready; see timeline.txt)"
-[[ "${dr_seen}" == "1" ]] && note "barrier: PlanningReady=True reached current generation" || die "barrier: PlanningReady=True at current generation not observed within 120s (barrier never satisfied; see timeline.txt)"
-note "stale-PlanningReady injection not performed (out of scope; documented limitation)"
+[[ "${bound_before_dr}" == "0" ]] || die "barrier: SnapshotContent bound BEFORE domain phase=Planned (planning barrier violated — content must not bind until domain is ready; see timeline.txt)"
+[[ "${dr_seen}" == "1" ]] && note "barrier: domain phase reached Planned" || die "barrier: domain phase=Planned not observed within 120s (barrier never satisfied; see timeline.txt)"
 save_artifacts "04-domainready-barrier" "${NS_DOMAIN_BARRIER}"
 kubectl delete namespace "${NS_DOMAIN_BARRIER}" --ignore-not-found=true --wait=false 2>/dev/null || true
 log "04-domainready-barrier: done"

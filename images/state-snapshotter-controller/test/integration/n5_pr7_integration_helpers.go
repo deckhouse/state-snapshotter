@@ -36,7 +36,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
-	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -240,10 +239,6 @@ func pr7MCRHasPVCTarget(mcr *ssv1alpha1.ManifestCaptureRequest, pvc *corev1.Pers
 		}
 	}
 	return false
-}
-
-func pr7AssertSnapshotDoesNotUseStubAnnotation(snap *storagev1alpha1.Snapshot) {
-	Expect(snap.Annotations).NotTo(HaveKey(volumecaptureuc.AnnotationStubVolumeCapturePVCs))
 }
 
 func pr7KickSnapshot(ctx context.Context, key types.NamespacedName) {

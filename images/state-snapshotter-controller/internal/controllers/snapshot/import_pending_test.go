@@ -32,7 +32,7 @@ import (
 func importSnapshot() *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "imp", Namespace: "ns", UID: types.UID("imp-uid")},
-		Spec:       storagev1alpha1.SnapshotSpec{Source: &storagev1alpha1.SnapshotSource{Import: &storagev1alpha1.SnapshotImportSource{}}},
+		Spec:       storagev1alpha1.SnapshotSpec{Mode: storagev1alpha1.SnapshotModeImport},
 	}
 }
 
@@ -60,9 +60,10 @@ func TestReconcileImportPending_SetsPendingAndRequeues(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != snapshotpkg.ReasonImportPending {
 		t.Fatalf("want Ready=False/ImportPending, got %#v", cond)
 	}
-	// Import mode must NOT trigger any capture artifacts.
-	if got.Status.BoundSnapshotContentName != "" || got.Status.ManifestCaptureRequestName != "" {
-		t.Fatalf("import snapshot must not capture: bound=%q mcr=%q", got.Status.BoundSnapshotContentName, got.Status.ManifestCaptureRequestName)
+	// Import mode must NOT trigger any capture artifacts. The root MCR name is core-internal (no longer a
+	// status field); capture materialization would show up as a bound content or a captureState block.
+	if got.Status.BoundSnapshotContentName != "" || got.Status.CaptureState != nil {
+		t.Fatalf("import snapshot must not capture: bound=%q captureState=%#v", got.Status.BoundSnapshotContentName, got.Status.CaptureState)
 	}
 }
 

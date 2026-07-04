@@ -257,8 +257,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Step 1: Ensure finalizer (manual deletion protection)
 	if obj.GetDeletionTimestamp().IsZero() {
-		annotations := obj.GetAnnotations()
-		if annotations != nil && annotations[snapshot.AnnotationParentDeleted] == "true" {
+		if parentDeleted, _, _ := unstructured.NestedBool(obj.Object, "status", "parentDeleted"); parentDeleted {
 			// Parent Snapshot is gone; don't re-add finalizer.
 			return ctrl.Result{}, nil
 		}
@@ -389,14 +388,14 @@ type commonContentStatusPlan struct {
 	readyReason  string
 	readyMessage string
 
-	// ManifestsArchived is the subtree latch AND the second-lowest-priority Ready leg (the residual-sweep
-	// gate is below it): it gates the first Ready=True; True once this node's own manifest leg reached
-	// readiness AND every child content is ManifestsArchived=True; it never re-opens. Failed is terminal
-	// (own manifest leg failed before archive, or a child can never be archived). Being monotonic, it gates
-	// the first Ready=True without ever dragging Ready back down afterwards. See pkg/snapshot ConditionManifestsArchived.
-	manifestsArchivedStatus  metav1.ConditionStatus
-	manifestsArchivedReason  string
-	manifestsArchivedMessage string
+	// subtreeManifestsPersisted is the core-internal monotonic recursive latch AND the second-lowest-priority
+	// Ready leg (the residual-sweep gate is below it): it gates the first Ready=True; true once this node's
+	// own manifest leg reached readiness AND every declared child content has subtreeManifestsPersisted=true;
+	// it never re-opens. It is success-only (no Failed value): a terminal subtree failure surfaces on the
+	// Ready reason (manifestsFailed/childrenFailed), not here. Persisted to status.subtreeManifestsPersisted
+	// (a bool field), not a condition. subtreeManifestsPersistedMessage carries the pending gate message.
+	subtreeManifestsPersisted        bool
+	subtreeManifestsPersistedMessage string
 
 	// ResidualSweep gates the FIRST Ready=True on a namespace-root content until the reconciler latches
 	// status.residualVolumeCapture.phase=Complete (the residual/orphan-PVC capture wave has finished). It
@@ -448,7 +447,6 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		{Type: snapshot.ConditionVolumeReady, Status: plan.volumeReady, Reason: plan.volumeReason, Message: plan.volumeMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionChildrenReady, Status: plan.childrenReady, Reason: plan.childrenReason, Message: plan.childrenMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionReady, Status: plan.readyStatus, Reason: plan.readyReason, Message: plan.readyMessage, ObservedGeneration: gen},
-		{Type: snapshot.ConditionManifestsArchived, Status: plan.manifestsArchivedStatus, Reason: plan.manifestsArchivedReason, Message: plan.manifestsArchivedMessage, ObservedGeneration: gen},
 	}
 
 	ready = plan.readyStatus == metav1.ConditionTrue
@@ -458,6 +456,14 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		if upsertContentCondition(contentLike, d) {
 			changed = true
 		}
+	}
+
+	// Persist the core-internal subtreeManifestsPersisted latch (monotonic bool status field, not a
+	// condition). Written into obj.status so the MergeFrom diff below includes it alongside conditions.
+	curPersisted, _, _ := unstructured.NestedBool(obj.Object, "status", "subtreeManifestsPersisted")
+	if plan.subtreeManifestsPersisted != curPersisted {
+		statusMap["subtreeManifestsPersisted"] = plan.subtreeManifestsPersisted
+		changed = true
 	}
 
 	if !changed {
@@ -548,11 +554,11 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.childrenMessage = childMessage
 	}
 
-	// ManifestsArchived gates Ready: a node cannot reach its FIRST Ready=True until its own and all
-	// descendant manifests are archived. The latch is monotonic (computeManifestsArchived holds True once
-	// True), so after the first Ready=True the gate stays satisfied and Ready is free to flap on the live
-	// legs. Computed before the switch so it can participate as the lowest-priority Ready leg.
-	if err := r.computeManifestsArchived(ctx, obj, &plan); err != nil {
+	// subtreeManifestsPersisted gates Ready: a node cannot reach its FIRST Ready=True until its own and all
+	// descendant manifests are persisted. The latch is monotonic (computeSubtreeManifestsPersisted holds
+	// true once true), so after the first Ready=True the gate stays satisfied and Ready is free to flap on
+	// the live legs. Computed before the switch so it can participate as the lowest-priority Ready leg.
+	if err := r.computeSubtreeManifestsPersisted(ctx, obj, &plan); err != nil {
 		return plan, err
 	}
 
@@ -588,17 +594,16 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = plan.childrenReason
 		plan.readyMessage = plan.childrenMessage
-	case plan.manifestsArchivedStatus != metav1.ConditionTrue:
-		// Subtree archive gate (lowest priority): blocks the first Ready=True until own + all-descendant
-		// manifests are archived. Reached only when every live leg is already satisfied (the cases above did
-		// not fire), so in practice archived here is the transient ManifestsCapturing state — the fail-closed
-		// declared-but-unlinked-child wait. A terminal ManifestsArchiveFailed cannot reach this case: it
-		// implies a not-Ready linked child (archived also gates the child's Ready), which trips
+	case !plan.subtreeManifestsPersisted:
+		// Subtree persist gate (lowest priority): blocks the first Ready=True until own + all-descendant
+		// manifests are persisted. Reached only when every live leg is already satisfied (the cases above did
+		// not fire), so in practice this is the transient fail-closed declared-but-unlinked-child wait. A
+		// terminal subtree failure cannot reach this case: it implies a not-Ready linked child, which trips
 		// ChildrenFailed/ChildrenPending above, and the underlying manifest failure independently surfaces as
 		// ManifestCheckpointFailed/ChildrenFailed.
 		plan.readyStatus = metav1.ConditionFalse
-		plan.readyReason = plan.manifestsArchivedReason
-		plan.readyMessage = plan.manifestsArchivedMessage
+		plan.readyReason = snapshot.ReasonSubtreeManifestCapturePending
+		plan.readyMessage = plan.subtreeManifestsPersistedMessage
 	case plan.residualSweepStatus != metav1.ConditionTrue:
 		// Residual/orphan-PVC capture gate (lowest priority, fail-closed): on a namespace-root content,
 		// block the FIRST Ready=True until the reconciler latches residualVolumeCapture.phase=Complete.
@@ -617,62 +622,37 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 	return plan, nil
 }
 
-// computeManifestsArchived fills the ManifestsArchived subtree latch on plan. It is a lifelong latch
-// (never re-opens) that records the irreversible fact that this node and its whole subtree had their
-// manifests captured. It also acts as the second-lowest-priority Ready leg (the residual-sweep gate is
-// below it; see buildCommonSnapshotContentStatusPlan): because it is monotonic, it gates the FIRST
-// Ready=True but never drags Ready back down afterwards.
+// computeSubtreeManifestsPersisted fills the subtreeManifestsPersisted latch on plan. It is a lifelong
+// latch (never re-opens) that records the irreversible fact that this node and its whole subtree
+// persisted their manifests. It also acts as the second-lowest-priority Ready leg (the residual-sweep
+// gate is below it; see buildCommonSnapshotContentStatusPlan): because it is monotonic, it gates the
+// FIRST Ready=True but never drags Ready back down afterwards.
 //
-//   - If the current condition is already True (Archived) or terminally False (Failed), it is held as-is
+//   - If the persisted latch (status.subtreeManifestsPersisted) is already true, it is held true
 //     (immune to later ManifestsReady/Ready degradation or to a child disappearing). Snapshot.spec is
 //     immutable, so there is no recapture and no generation bookkeeping is needed.
-//   - Otherwise it is derived from the current subtree state: own manifest leg failed terminally before
-//     archive OR a child is Failed -> Failed; own ManifestsReady=True AND all children Archived -> True;
-//     else Capturing (transient; includes the fail-closed NamespaceCaptureIncomplete wait).
-func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
-	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
-	if err != nil {
-		return fmt.Errorf("extract SnapshotContentLike for ManifestsArchived: %w", err)
-	}
-	cur := snapshot.GetCondition(contentLike, snapshot.ConditionManifestsArchived)
-	if cur != nil && cur.Status == metav1.ConditionTrue {
-		plan.manifestsArchivedStatus = metav1.ConditionTrue
-		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchived
-		plan.manifestsArchivedMessage = cur.Message
-		return nil
-	}
-	if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == snapshot.ReasonManifestsArchiveFailed {
-		plan.manifestsArchivedStatus = metav1.ConditionFalse
-		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchiveFailed
-		plan.manifestsArchivedMessage = cur.Message
+//   - Otherwise it is derived from the current subtree state: own ManifestsReady=True AND all declared
+//     children persisted -> true; else false with a pending message. It is success-only: a terminal
+//     subtree failure surfaces on the Ready reason (manifestsFailed/childrenFailed), never here.
+func (r *SnapshotContentController) computeSubtreeManifestsPersisted(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
+	if cur, _, _ := unstructured.NestedBool(obj.Object, "status", "subtreeManifestsPersisted"); cur {
+		plan.subtreeManifestsPersisted = true
 		return nil
 	}
 
-	childrenArchived, anyChildFailed, childMessage, err := r.aggregateChildrenManifestsArchived(ctx, obj)
+	childrenPersisted, childMessage, err := r.aggregateChildrenSubtreeManifestsPersisted(ctx, obj)
 	if err != nil {
 		return err
 	}
-	switch {
-	case plan.manifestsFailed:
-		plan.manifestsArchivedStatus = metav1.ConditionFalse
-		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchiveFailed
-		plan.manifestsArchivedMessage = "own manifest capture failed terminally before archive: " + plan.manifestsMessage
-	case anyChildFailed:
-		plan.manifestsArchivedStatus = metav1.ConditionFalse
-		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchiveFailed
-		plan.manifestsArchivedMessage = childMessage
-	case plan.manifestsReady == metav1.ConditionTrue && childrenArchived:
-		plan.manifestsArchivedStatus = metav1.ConditionTrue
-		plan.manifestsArchivedReason = snapshot.ReasonManifestsArchived
-		plan.manifestsArchivedMessage = "manifests for this node and all descendants are archived"
-	default:
-		plan.manifestsArchivedStatus = metav1.ConditionFalse
-		plan.manifestsArchivedReason = snapshot.ReasonManifestsCapturing
-		if childMessage != "" {
-			plan.manifestsArchivedMessage = childMessage
-		} else {
-			plan.manifestsArchivedMessage = "manifests are being captured: " + plan.manifestsMessage
-		}
+	if plan.manifestsReady == metav1.ConditionTrue && childrenPersisted {
+		plan.subtreeManifestsPersisted = true
+		return nil
+	}
+	plan.subtreeManifestsPersisted = false
+	if childMessage != "" {
+		plan.subtreeManifestsPersistedMessage = childMessage
+	} else {
+		plan.subtreeManifestsPersistedMessage = "manifests are being captured: " + plan.manifestsMessage
 	}
 	return nil
 }
@@ -725,33 +705,34 @@ func (r *SnapshotContentController) computeResidualSweepGate(obj *unstructured.U
 	return nil
 }
 
-// aggregateChildrenManifestsArchived reports the children's ManifestsArchived latch state for this
-// node: allArchived (every child content ManifestsArchived=True), anyFailed (a child is terminally
-// Failed -> the subtree can never be archived), and a progress message. A NotFound or not-yet-archived
-// child is pending (not a failure): the subtree is simply not archived yet. This mirrors the child walk
-// in validateCommonContentChildren but keys on ManifestsArchived rather than Ready.
+// aggregateChildrenSubtreeManifestsPersisted reports whether every child content has
+// subtreeManifestsPersisted=true (allPersisted) plus a progress message. A NotFound or not-yet-persisted
+// child is pending (not a failure): the subtree is simply not persisted yet. A terminal child failure is
+// NOT reported here — it surfaces via the child Ready terminal reason (handled by validateCommonContentChildren
+// as ChildrenFailed). This mirrors the child walk in validateCommonContentChildren but keys on the
+// subtreeManifestsPersisted bool rather than Ready.
 //
 // Reliability (fail-closed against declared-but-unlinked children): a published-edges-only view
 // (status.childrenSnapshotContentRefs) can momentarily see FEWER (or zero) children than the owning
 // snapshot declares, because child content edges are published atomically only AFTER every declared
-// child snapshot binds (PublishSnapshotContentChildrenFromSnapshotRefs). Latching ManifestsArchived=True
-// on that partial view is the root cause of duplicate root captures: a not-yet-linked descendant subtree
-// is not reached by the root subtree walk and so its manifests are not excluded. Therefore allArchived
-// also requires every DECLARED non-leaf child of the owning snapshot (spec.snapshotRef ->
+// child snapshot binds (PublishSnapshotContentChildrenFromSnapshotRefs). Latching persisted=true on that
+// partial view is the root cause of duplicate root captures: a not-yet-linked descendant subtree is not
+// reached by the root subtree walk and so its manifests are not excluded. Therefore allPersisted also
+// requires every DECLARED non-leaf child of the owning snapshot (spec.snapshotRef ->
 // status.childrenSnapshotRefs) to be resolved, bound, linked into childrenSnapshotContentRefs, AND
-// archived; any unresolved/unbound/unlinked declared child is pending (not a failure). Because the latch
-// is one-way (never re-opens), this declared-vs-linked check is the only way to guarantee True implies a
-// complete, fully linked subtree.
-func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, bool, string, error) {
+// persisted; any unresolved/unbound/unlinked declared child is pending. Because the latch is one-way
+// (never re-opens), this declared-vs-linked check is the only way to guarantee true implies a complete,
+// fully linked subtree.
+func (r *SnapshotContentController) aggregateChildrenSubtreeManifestsPersisted(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
-		return false, false, "", err
+		return false, "", err
 	}
 	// linked tracks every published child content edge so the declared-vs-linked check below can detect a
 	// declared child that is not yet present in childrenSnapshotContentRefs.
 	linked := make(map[string]struct{}, len(rawRefs))
 	total := 0
-	archivedCount := 0
+	persistedCount := 0
 	var pendingNames []string
 	for _, raw := range rawRefs {
 		refMap, ok := raw.(map[string]interface{})
@@ -767,38 +748,30 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
 		// Cached read of the child content (same For-informer GVK). A just-created/not-yet-synced child
-		// missing from the cache is treated as pending (fail-closed), and ManifestsArchived is a one-way
-		// latch, so a stale read can only delay the archive, never falsely latch it True.
+		// missing from the cache is treated as pending (fail-closed), and the latch is one-way, so a stale
+		// read can only delay it, never falsely latch it true.
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
 				pendingNames = append(pendingNames, name)
 				continue
 			}
-			return false, false, "", err
+			return false, "", err
 		}
-		childLike, err := snapshot.ExtractSnapshotContentLike(childContent)
-		if err != nil {
-			return false, false, "", err
-		}
-		cond := snapshot.GetCondition(childLike, snapshot.ConditionManifestsArchived)
-		if cond != nil && cond.Status == metav1.ConditionTrue {
-			archivedCount++
+		if persisted, _, _ := unstructured.NestedBool(childContent.Object, "status", "subtreeManifestsPersisted"); persisted {
+			persistedCount++
 			continue
-		}
-		if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == snapshot.ReasonManifestsArchiveFailed {
-			return false, true, fmt.Sprintf("child snapshot content %s manifests archive failed: %s", name, cond.Message), nil
 		}
 		pendingNames = append(pendingNames, name)
 	}
 
 	// Fail-closed: every declared non-leaf child must be linked into the published edge set before the
-	// subtree can be considered archived.
+	// subtree can be considered persisted.
 	declaredNames, declaredComplete, err := r.declaredNonLeafChildContentNames(ctx, parentContentObj)
 	if err != nil {
-		return false, false, "", err
+		return false, "", err
 	}
 	if !declaredComplete {
-		return false, false, "waiting for declared child snapshot graph to bind and link", nil
+		return false, "waiting for declared child snapshot graph to bind and link", nil
 	}
 	var unlinked []string
 	for _, dn := range declaredNames {
@@ -807,13 +780,13 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		}
 	}
 	if len(unlinked) > 0 {
-		return false, false, "waiting for declared child content to be linked: " + strings.Join(unlinked, ", "), nil
+		return false, "waiting for declared child content to be linked: " + strings.Join(unlinked, ", "), nil
 	}
 
 	if len(pendingNames) > 0 {
-		return false, false, "waiting for child manifests archive: " + formatReadyProgress(archivedCount, total, pendingNames), nil
+		return false, "waiting for child manifests to persist: " + formatReadyProgress(persistedCount, total, pendingNames), nil
 	}
-	return true, false, "", nil
+	return true, "", nil
 }
 
 // declaredNonLeafChildContentNames resolves, from this content's owning snapshot (spec.snapshotRef ->
@@ -986,11 +959,6 @@ var terminalChildContentFailureReasons = map[string]struct{}{
 	snapshot.ReasonDataArtifactNotSupported: {},
 	snapshot.ReasonArtifactMissing:          {},
 	snapshot.ReasonChildrenFailed:           {},
-	// ManifestsArchiveFailed is a terminal subtree-latch failure: if a child's subtree can never be
-	// archived, the parent's cannot either. Today a child never surfaces it on Ready (the archive gate only
-	// reports the transient ManifestsCapturing — see buildCommonSnapshotContentStatusPlan), so this entry is
-	// defense-in-depth that keeps terminal propagation correct if the Ready priority ever changes.
-	snapshot.ReasonManifestsArchiveFailed: {},
 }
 
 func isTerminalChildContentFailure(reason string) bool {

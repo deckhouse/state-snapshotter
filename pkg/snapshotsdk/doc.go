@@ -20,8 +20,10 @@ limitations under the License.
 // owns three domain decisions and nothing more: what its source is, what child snapshots it implies,
 // and which PVCs make up its data leg. Everything else — talking to ManifestCaptureRequest, the
 // storage-foundation VolumeCaptureRequest, owner references, optimistic-locked status patches, and the
-// derived planning-barrier condition — is Kubernetes transport that this SDK hides behind a small set of
-// intent verbs.
+// lifecycle phase (status.captureState.domainSpecificController.phase) — is Kubernetes transport that
+// this SDK hides behind a small set of intent verbs. The SDK never writes the Ready condition: the core
+// always derives Ready (on every snapshot object) and the domain reads it back as its failure channel
+// via CoreCaptureOutcome.
 //
 // # Model
 //
@@ -36,14 +38,21 @@ limitations under the License.
 //
 // # Lifecycle (capture-only, v1)
 //
-// A typical domain Reconcile resolves its source, then drives the three planning legs and closes with
-// a barrier:
+// A typical domain Reconcile resolves its source, then drives the three planning legs, publishes the
+// source, marks barrier 1 (Planned), and later switches on CoreCaptureOutcome to confirm consistency
+// (barrier 2 = Finished) or fail:
 //
-//	if !valid { return sdk.MarkNotReady(ctx, t, NotReadySpec{Reason: "InvalidSourceRef"}) }
-//	if err := sdk.EnsureChildren(ctx, t, children); err != nil { return sdk.MarkPlanningFailed(...) }
+//	if !valid { return sdk.Reject(ctx, t, FailSpec{Reason: "InvalidSourceRef"}) }
+//	if err := sdk.EnsureChildren(ctx, t, children); err != nil { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) }
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
 //	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
-//	return sdk.MarkPlanningReady(ctx, t, "planning complete")
+//	_ = sdk.PublishSnapshotSource(ctx, t, SnapshotSource{...})
+//	if err := sdk.MarkPlanned(ctx, t); err != nil { return err }
+//	switch o := CoreCaptureOutcome(t); o.Outcome {
+//	case CaptureOutcomeCaptured: return sdk.ConfirmConsistent(ctx, t) // after any consistency action (e.g. fs unfreeze)
+//	case CaptureOutcomeFailed:   return sdk.Fail(ctx, t, Reason(o.Reason), errors.New(o.Message))
+//	default: // CaptureOutcomeCapturing: wait
+//	}
 //
 // # Restart-safe recipe
 //

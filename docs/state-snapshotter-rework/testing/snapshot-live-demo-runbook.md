@@ -148,7 +148,7 @@ kubectl -n "$DEMO_NS" get pvc -o json 2>/dev/null | jq -e \
 # 3) StorageClass + VolumeSnapshotClass
 kubectl get storageclass "$STORAGE_CLASS" >/dev/null
 VSC_NAME=$(kubectl get storageclass "$STORAGE_CLASS" -o jsonpath='{.metadata.annotations.storage\.deckhouse\.io/volumesnapshotclass}')
-[[ -n "$VSC_NAME" ]] || { echo "FAIL: SC без annotation state-snapshotter.deckhouse.io/volumesnapshotclass"; exit 1; }
+[[ -n "$VSC_NAME" ]] || { echo "FAIL: SC без annotation storage.deckhouse.io/volumesnapshotclass"; exit 1; }
 kubectl get volumesnapshotclass "$VSC_NAME" >/dev/null || { echo "FAIL: VolumeSnapshotClass $VSC_NAME"; exit 1; }
 echo "OK StorageClass=$STORAGE_CLASS VolumeSnapshotClass=$VSC_NAME"
 

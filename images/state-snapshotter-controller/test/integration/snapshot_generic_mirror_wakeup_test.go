@@ -88,9 +88,9 @@ var _ = Describe("Integration: generic Snapshot mirrors bound SnapshotContent Re
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, snap))
 		})
 
-		// Simulate the domain controller publishing PlanningReady=True for the current generation so the
+		// Simulate the domain controller publishing phase=Planned so the
 		// generic binder barrier passes (RegistrationTestSnapshot has no real domain controller).
-		setSnapshotPlanningReadyCurrent(ctx, snap)
+		setSnapshotDomainPlannedCurrent(ctx, snap)
 
 		snapKey := types.NamespacedName{Namespace: "default", Name: "gen-mirror-wakeup"}
 
@@ -117,7 +117,7 @@ var _ = Describe("Integration: generic Snapshot mirrors bound SnapshotContent Re
 		})
 
 		// Publish the truth ref (status.manifestCheckpointName) once. The generic binder leaves it untouched
-		// while status.manifestCaptureRequestName is empty, so the link is stable across the flips below.
+		// while status.captureState.domainSpecificController.manifestCaptureRequestName is empty, so the link is stable across the flips below.
 		mcpName := "mcp-gen-mirror-wakeup"
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			c := &storagev1alpha1.SnapshotContent{}

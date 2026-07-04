@@ -224,7 +224,6 @@ func TestReconcileVolumeCaptureSteadyState_staleTargetUIDNotComplete(t *testing.
 	ns := "default"
 	snap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"},
-		Status:     storagev1alpha1.SnapshotStatus{VolumeCaptureRequestName: "snap-vcr-content-uid"},
 	}
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")},
@@ -249,15 +248,12 @@ func TestReconcileVolumeCaptureSteadyState_staleTargetUIDNotComplete(t *testing.
 	if done {
 		t.Fatal("stale dataRefs must not satisfy steady-state")
 	}
-	if snap.Status.VolumeCaptureRequestName == "" {
-		t.Fatal("volumeCaptureRequestName must not be cleared while coverage incomplete")
-	}
 }
 
 // TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup verifies that two loose/orphan PVCs each
 // become their own standalone child volume node (Variant A: one dataRef per content), the root
-// aggregator stays dataRef-less, both children are linked under the root, and the stale root VCR /
-// status.volumeCaptureRequestName left by a prior VCR-based run is cleared once every child node is ready.
+// aggregator stays dataRef-less, both children are linked under the root, and the stale root VCR left
+// by a prior VCR-based run is deleted once every child node is ready.
 func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -269,7 +265,6 @@ func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	pvcB := newPVC(ns, "pvc-b", "uid-b")
 	snap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"},
-		Status:     storagev1alpha1.SnapshotStatus{VolumeCaptureRequestName: vcpkg.SnapshotContentVCRName("content-uid")},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	vscA := volumeSnapshotContent("vsc-a", true)
@@ -315,13 +310,6 @@ func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: vcrName}, gone); !apierrors.IsNotFound(err) {
 		t.Fatalf("stale VCR should be deleted: %v", err)
 	}
-	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: snap.Name}, fresh); err != nil {
-		t.Fatalf("get snapshot: %v", err)
-	}
-	if fresh.Status.VolumeCaptureRequestName != "" {
-		t.Fatalf("expected cleared volumeCaptureRequestName, got %q", fresh.Status.VolumeCaptureRequestName)
-	}
 }
 
 func TestReconcileVolumeCapture_RootIgnoresAndDeletesStaleVCR(t *testing.T) {
@@ -332,7 +320,6 @@ func TestReconcileVolumeCapture_RootIgnoresAndDeletesStaleVCR(t *testing.T) {
 	pvc := newPVC(ns, "pvc-a", "uid-a")
 	snap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"},
-		Status:     storagev1alpha1.SnapshotStatus{VolumeCaptureRequestName: vcpkg.SnapshotContentVCRName("content-uid")},
 	}
 	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")}}
 	target := pvcTarget(ns, "pvc-a", "uid-a")
@@ -350,13 +337,6 @@ func TestReconcileVolumeCapture_RootIgnoresAndDeletesStaleVCR(t *testing.T) {
 	}
 	if _, err := r.reconcileVolumeCapturePublish(ctx, snap, content, true); err != nil {
 		t.Fatalf("publish: %v", err)
-	}
-	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: snap.Name}, fresh); err != nil {
-		t.Fatalf("get snapshot: %v", err)
-	}
-	if fresh.Status.VolumeCaptureRequestName != "" {
-		t.Fatalf("root orphan PVC path must clear stale VCR status, got %q", fresh.Status.VolumeCaptureRequestName)
 	}
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: vcrName}, vcr); !apierrors.IsNotFound(err) {
 		t.Fatalf("stale VCR should be deleted, got %v", err)
@@ -966,7 +946,6 @@ func TestReconcileVolumeCapturePublish_ZeroOrphanTargetsClearsStaleVCR(t *testin
 	vcrName := vcpkg.SnapshotContentVCRName(content.UID)
 	snap := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"},
-		Status:     storagev1alpha1.SnapshotStatus{VolumeCaptureRequestName: vcrName},
 	}
 	// No PVCs in the namespace => zero orphan targets, but a stale VCR from a previous run still exists.
 	staleVCR := readyVCR(ns, vcrName, nil, nil)
@@ -982,13 +961,6 @@ func TestReconcileVolumeCapturePublish_ZeroOrphanTargetsClearsStaleVCR(t *testin
 	gone.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: vcrName}, gone); !apierrors.IsNotFound(err) {
 		t.Fatalf("stale VCR must be deleted on zero-target residual publish, got %v", err)
-	}
-	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: snap.Name}, fresh); err != nil {
-		t.Fatalf("get snapshot: %v", err)
-	}
-	if fresh.Status.VolumeCaptureRequestName != "" {
-		t.Fatalf("stale volumeCaptureRequestName must be cleared, got %q", fresh.Status.VolumeCaptureRequestName)
 	}
 }
 

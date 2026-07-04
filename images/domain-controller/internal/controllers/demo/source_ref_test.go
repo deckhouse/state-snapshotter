@@ -22,7 +22,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,8 +38,9 @@ import (
 
 // Demo reconcilers are content-free (commit 2 content-ownership, D1/D3): they validate the source, plan
 // the manifest-capture request (MCR), the data-leg volume-capture request (VCR) and the owned-disk child
-// graph, and publish results into demo.status (manifestCaptureRequestName, volumeCaptureRequestName,
-// childrenSnapshotRefs, PlanningReady). They never create/own/bind/mirror SnapshotContent;
+// graph, and publish results into demo.status.captureState.domainSpecificController
+// (manifestCaptureRequestName, volumeCaptureRequestName, phase) plus status.childrenSnapshotRefs and the
+// top-level status.snapshotSource. They never create/own/bind/mirror SnapshotContent;
 // GenericSnapshotBinderController owns all SnapshotContent work for demo kinds. These unit tests therefore
 // assert only the domain planning side; content creation/projection/Ready mirror is covered by the binder.
 
@@ -75,9 +75,13 @@ func TestDemoVirtualDiskSnapshot_InvalidSourceRefDoesNotCreateMCR(t *testing.T) 
 			}
 
 			snap := getDemoDiskSnapshot(t, cl)
-			ready := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionReady)
-			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidSourceRef" {
-				t.Fatalf("expected Ready=False InvalidSourceRef, got %#v", ready)
+			// New model: the domain publishes phase=Failed+reason (Reject); the core mirrors it into Ready.
+			// This isolated reconciler test runs no core, so assert the domain-owned phase/reason directly.
+			if phase := domainPhase(snap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
+				t.Fatalf("expected domainSpecificController.phase=Failed, got %q", phase)
+			}
+			if reason := domainReason(snap.Status.CaptureState); reason != demoReasonInvalidSourceRef {
+				t.Fatalf("expected domain reason %q, got %q", demoReasonInvalidSourceRef, reason)
 			}
 			assertNoDemoDiskContents(t, cl)
 			assertNoDemoMCRs(t, cl)
@@ -102,20 +106,22 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 	}
 
 	snap := getDemoDiskSnapshot(t, cl)
-	ready := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "SourceNotFound" {
-		t.Fatalf("expected Ready=False SourceNotFound, got %#v", ready)
+	if phase := domainPhase(snap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
+		t.Fatalf("expected domainSpecificController.phase=Failed, got %q", phase)
+	}
+	if reason := domainReason(snap.Status.CaptureState); reason != demoReasonSourceNotFound {
+		t.Fatalf("expected domain reason %q, got %q", demoReasonSourceNotFound, reason)
 	}
 	assertNoDemoDiskContents(t, cl)
 	assertNoDemoMCRs(t, cl)
 }
 
 // A manifest-only disk snapshot plans its MCR (manifest target = the source disk), publishes the MCR name,
-// reaches PlanningReady=True (leaf planning barrier), and never creates SnapshotContent.
+// reaches phase=Planned (leaf planning barrier), and never creates SnapshotContent.
 func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t,
 		&demov1alpha1.DemoVirtualDisk{
-			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1"},
+			ObjectMeta: metav1.ObjectMeta{Name: "disk-a", Namespace: "ns1", UID: "disk-a-uid"},
 		},
 		&demov1alpha1.DemoVirtualDiskSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: "snap-uid"},
@@ -136,7 +142,11 @@ func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 	}
 
 	snap := getDemoDiskSnapshot(t, cl)
-	mcrName := snap.Status.ManifestCaptureRequestName
+	// The captured live source uid is published (informational) for import-mode recreation.
+	if snap.Status.SnapshotSource == nil || snap.Status.SnapshotSource.UID != "disk-a-uid" {
+		t.Fatalf("expected status.snapshotSource.uid from the live DemoVirtualDisk uid, got %#v", snap.Status.SnapshotSource)
+	}
+	mcrName := domainMCRName(snap.Status.CaptureState)
 	if mcrName == "" {
 		t.Fatalf("expected published manifestCaptureRequestName, got empty")
 	}
@@ -152,9 +162,8 @@ func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 	if !equality.Semantic.DeepEqual(mcr.Spec.Targets, expectedTargets) {
 		t.Fatalf("unexpected MCR targets: %#v", mcr.Spec.Targets)
 	}
-	domainReady := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionPlanningReady)
-	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected PlanningReady=True for leaf disk snapshot, got %#v", domainReady)
+	if phase := domainPhase(snap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhasePlanned {
+		t.Fatalf("expected domainSpecificController.phase=Planned for leaf disk snapshot, got %q", phase)
 	}
 	// Content ownership is the binder's job; the demo reconciler never creates SnapshotContent.
 	assertNoDemoDiskContents(t, cl)
@@ -189,7 +198,7 @@ func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *test
 		t.Fatalf("first reconcile failed: %v", err)
 	}
 	snap := getDemoDiskSnapshot(t, cl)
-	mcrName := snap.Status.ManifestCaptureRequestName
+	mcrName := domainMCRName(snap.Status.CaptureState)
 	if mcrName == "" {
 		t.Fatalf("expected published manifestCaptureRequestName after first reconcile")
 	}
@@ -198,9 +207,10 @@ func TestDemoVirtualDiskSnapshot_ManifestCapturedSuppressesMCRRecreation(t *test
 		t.Fatalf("expected MCR %q after first reconcile: %v", mcrName, err)
 	}
 
-	// Common controller marks the leg captured and deletes the request.
+	// Common controller marks the leg captured (captureState.commonController.manifestCaptured) and
+	// deletes the request.
 	base := snap.DeepCopy()
-	snap.Status.ManifestCaptured = true
+	setCommonManifestCaptured(&snap.Status.CaptureState, true)
 	if err := cl.Status().Patch(context.Background(), snap, client.MergeFrom(base)); err != nil {
 		t.Fatalf("patch manifestCaptured: %v", err)
 	}
@@ -245,9 +255,11 @@ func TestDemoVirtualMachineSnapshot_InvalidSourceRefDoesNotCreateContentMCROrChi
 			}
 
 			snap := getDemoVMSnapshot(t, cl)
-			ready := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionReady)
-			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "InvalidSourceRef" {
-				t.Fatalf("expected Ready=False InvalidSourceRef, got %#v", ready)
+			if phase := domainPhase(snap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
+				t.Fatalf("expected domainSpecificController.phase=Failed, got %q", phase)
+			}
+			if reason := domainReason(snap.Status.CaptureState); reason != demoReasonInvalidSourceRef {
+				t.Fatalf("expected domain reason %q, got %q", demoReasonInvalidSourceRef, reason)
 			}
 			assertNoDemoVMContents(t, cl)
 			assertNoDemoMCRs(t, cl)
@@ -273,9 +285,11 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 	}
 
 	snap := getDemoVMSnapshot(t, cl)
-	ready := meta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "SourceNotFound" {
-		t.Fatalf("expected Ready=False SourceNotFound, got %#v", ready)
+	if phase := domainPhase(snap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
+		t.Fatalf("expected domainSpecificController.phase=Failed, got %q", phase)
+	}
+	if reason := domainReason(snap.Status.CaptureState); reason != demoReasonSourceNotFound {
+		t.Fatalf("expected domain reason %q, got %q", demoReasonSourceNotFound, reason)
 	}
 	assertNoDemoVMContents(t, cl)
 	assertNoDemoMCRs(t, cl)
@@ -283,7 +297,7 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 }
 
 // A VM snapshot plans its owned-disk child graph (only disks owned by the VM), publishes
-// childrenSnapshotRefs, plans the VM MCR, reaches PlanningReady=True, and never creates content.
+// childrenSnapshotRefs, plans the VM MCR, reaches phase=Planned, and never creates content.
 func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 	vmUID := types.UID("vm-uid")
 	cl := newDemoSourceRefFakeClient(t,
@@ -322,7 +336,11 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 	}
 
 	vmSnap := getDemoVMSnapshot(t, cl)
-	mcrName := vmSnap.Status.ManifestCaptureRequestName
+	// The captured live source uid is published (informational) for import-mode recreation.
+	if vmSnap.Status.SnapshotSource == nil || vmSnap.Status.SnapshotSource.UID != vmUID {
+		t.Fatalf("expected status.snapshotSource.uid from the live DemoVirtualMachine uid %q, got %#v", vmUID, vmSnap.Status.SnapshotSource)
+	}
+	mcrName := domainMCRName(vmSnap.Status.CaptureState)
 	if mcrName == "" {
 		t.Fatalf("expected published VM manifestCaptureRequestName, got empty")
 	}
@@ -362,9 +380,8 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 	}}) {
 		t.Fatalf("unexpected VM child refs: %#v", vmSnap.Status.ChildrenSnapshotRefs)
 	}
-	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, storagev1alpha1.ConditionPlanningReady)
-	if domainReady == nil || domainReady.Status != metav1.ConditionTrue {
-		t.Fatalf("expected VM PlanningReady=True after writing child refs, got %#v", domainReady)
+	if phase := domainPhase(vmSnap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhasePlanned {
+		t.Fatalf("expected VM domainSpecificController.phase=Planned after writing child refs, got %q", phase)
 	}
 	assertNoDemoVMContents(t, cl)
 	if vmSnap.Status.BoundSnapshotContentName != "" {
@@ -432,9 +449,11 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 	}
 	assertDemoSnapshotOwnedBy(t, child, conflictingOwner.APIVersion, conflictingOwner.Kind, conflictingOwner.Name)
 	vmSnap := getDemoVMSnapshot(t, cl)
-	domainReady := meta.FindStatusCondition(vmSnap.Status.Conditions, storagev1alpha1.ConditionPlanningReady)
-	if domainReady == nil || domainReady.Status != metav1.ConditionFalse || domainReady.Reason != storagev1alpha1.ReasonCreateChildFailed {
-		t.Fatalf("expected PlanningReady=False CreateChildFailed, got %#v", domainReady)
+	if phase := domainPhase(vmSnap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
+		t.Fatalf("expected domainSpecificController.phase=Failed on child-create failure, got %q", phase)
+	}
+	if reason := domainReason(vmSnap.Status.CaptureState); reason != storagev1alpha1.ReasonCreateChildFailed {
+		t.Fatalf("expected domainSpecificController.reason=CreateChildFailed, got %q", reason)
 	}
 }
 
@@ -545,4 +564,42 @@ func assertDemoSnapshotOwnedBy(t *testing.T, obj client.Object, apiVersion, kind
 		}
 	}
 	t.Fatalf("expected %s/%s to be owned by %s %s/%s, got %#v", obj.GetNamespace(), obj.GetName(), apiVersion, kind, name, obj.GetOwnerReferences())
+}
+
+// domainMCRName reads the domain-owned MCR name from captureState.domainSpecificController (empty if the
+// domain half is absent).
+func domainMCRName(cs *storagev1alpha1.CaptureStateStatus) string {
+	if cs == nil || cs.DomainSpecificController == nil {
+		return ""
+	}
+	return cs.DomainSpecificController.ManifestCaptureRequestName
+}
+
+// domainPhase reads the domain lifecycle phase from captureState.domainSpecificController (empty if absent).
+func domainPhase(cs *storagev1alpha1.CaptureStateStatus) storagev1alpha1.SnapshotCapturePhase {
+	if cs == nil || cs.DomainSpecificController == nil {
+		return ""
+	}
+	return cs.DomainSpecificController.Phase
+}
+
+// domainReason reads the domain phase=Failed reason from captureState.domainSpecificController.
+func domainReason(cs *storagev1alpha1.CaptureStateStatus) string {
+	if cs == nil || cs.DomainSpecificController == nil {
+		return ""
+	}
+	return cs.DomainSpecificController.Reason
+}
+
+// setCommonManifestCaptured simulates the common controller stamping the manifest-leg latch on
+// captureState.commonController (the core-written half the demo reconciler only reads).
+func setCommonManifestCaptured(cs **storagev1alpha1.CaptureStateStatus, v bool) {
+	if *cs == nil {
+		*cs = &storagev1alpha1.CaptureStateStatus{}
+	}
+	if (*cs).CommonController == nil {
+		(*cs).CommonController = &storagev1alpha1.CommonControllerCaptureState{}
+	}
+	captured := v
+	(*cs).CommonController.ManifestCaptured = &captured
 }

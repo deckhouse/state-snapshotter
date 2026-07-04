@@ -104,6 +104,49 @@ func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
 	}
 }
 
+// snapshotStatusCaptureStateSchema is the envtest structural schema for status.captureState. It must
+// list every nested field the controllers and test helpers write (commonController latches +
+// domainSpecificController phase/refs), otherwise the apiserver prunes them on status update.
+func snapshotStatusCaptureStateSchema() apiextensionsv1.JSONSchemaProps {
+	return apiextensionsv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{
+			"commonController": {
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"manifestCaptured": {Type: "boolean"},
+					"dataCaptured":     {Type: "boolean"},
+				},
+			},
+			"domainSpecificController": {
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"phase":                      {Type: "string"},
+					"reason":                     {Type: "string"},
+					"message":                    {Type: "string"},
+					"manifestCaptureRequestName": {Type: "string"},
+					"volumeCaptureRequestName":   {Type: "string"},
+				},
+			},
+		},
+	}
+}
+
+// snapshotSourceStatusSchema is the envtest structural schema for status.snapshotSource (the resolved
+// top-level source object ref published by the domain/import controllers).
+func snapshotSourceStatusSchema() apiextensionsv1.JSONSchemaProps {
+	return apiextensionsv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{
+			"apiVersion": {Type: "string"},
+			"kind":       {Type: "string"},
+			"name":       {Type: "string"},
+			"namespace":  {Type: "string"},
+			"uid":        {Type: "string"},
+		},
+	}
+}
+
 // integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
 // from graph built-ins and eligible CSD rows. Non-built-in domain pairs are intentionally CSD-gated here.
 func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
@@ -285,9 +328,9 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCaptureRequestName": {Type: "string"},
-										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName":   {Type: "string"},
+										"captureState":             snapshotStatusCaptureStateSchema(),
+										"snapshotSource":           snapshotSourceStatusSchema(),
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -344,8 +387,10 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCheckpointName": {Type: "string"},
-										"dataRef":                snapshotContentDataRefSchema(),
+										"manifestCheckpointName":    {Type: "string"},
+										"dataRef":                   snapshotContentDataRefSchema(),
+										"captureState":              snapshotStatusCaptureStateSchema(),
+										"subtreeManifestsPersisted": {Type: "boolean"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -415,9 +460,9 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCaptureRequestName": {Type: "string"},
-										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName":   {Type: "string"},
+										"captureState":             snapshotStatusCaptureStateSchema(),
+										"snapshotSource":           snapshotSourceStatusSchema(),
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -474,8 +519,10 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCheckpointName": {Type: "string"},
-										"dataRef":                snapshotContentDataRefSchema(),
+										"manifestCheckpointName":    {Type: "string"},
+										"dataRef":                   snapshotContentDataRefSchema(),
+										"captureState":              snapshotStatusCaptureStateSchema(),
+										"subtreeManifestsPersisted": {Type: "boolean"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -599,9 +646,9 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCaptureRequestName": {Type: "string"},
-										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName":   {Type: "string"},
+										"captureState":             snapshotStatusCaptureStateSchema(),
+										"snapshotSource":           snapshotSourceStatusSchema(),
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{

@@ -249,9 +249,12 @@ func dumpImportLeavesInNS(ctx context.Context, ns string) {
 		for i := range list.Items {
 			obj := &list.Items[i]
 			bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
-			// Import mode is the unified marker spec.source.import: {} across every snapshot kind, including
-			// the extended VolumeSnapshot (the owning DataImport is reverse-looked-up, not named on the leaf).
-			_, importMarker, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
+			// Import mode is the enum spec.mode: Import on our snapshot CRDs (e.g. DemoVirtualDiskSnapshot),
+			// while the CSI-shaped extended VolumeSnapshot keeps the spec.source.import: {} marker (the owning
+			// DataImport is reverse-looked-up, not named on the leaf). Tolerate both here.
+			mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
+			_, sourceImport, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
+			importMarker := mode == "Import" || sourceImport
 			GinkgoWriter.Printf("%s %s/%s:\n", entry.label, ns, obj.GetName())
 			GinkgoWriter.Printf("    boundSnapshotContentName=%q importMode=%v ownerRefs=%s\n",
 				bound, importMarker, formatOwnerReferences(obj.GetOwnerReferences()))

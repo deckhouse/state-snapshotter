@@ -71,7 +71,6 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 		if err := r.Client.Get(ctx, parentKey, nsSnap); err != nil {
 			return err
 		}
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,
@@ -87,58 +86,42 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 }
 
-// mirrorSnapshotManifestsArchivedFromBoundContent mirrors the bound SnapshotContent's ManifestsArchived
-// subtree-latch condition verbatim onto the root Snapshot. The SnapshotContent carries the source of truth
-// (it aggregates the latch across the whole subtree); the Snapshot is a read mirror so consumers (and the
-// per-namespace capture RBAC hook / e2e) can observe the latch on the Snapshot itself.
+// stampRootManifestCaptured maintains the root Snapshot's captureState.commonController.manifestCaptured
+// leg latch — the monotonic signal the per-namespace capture RBAC hook (040) reads to drop the transient
+// wide-read RoleBinding. It replaces the former ManifestsArchived condition mirror.
 //
-// ManifestsArchived gates the content Ready formula (it must be True before the first content Ready=True),
-// but this Snapshot-side mirror does not itself write Ready: it is an additive, standalone latch condition
-// surfaced for visibility, so it does not touch the single-aggregator Ready contract (INV-COND2/INV-COND4).
-// It stays useful after Ready later flaps False (the latch records that archiving did happen).
-//
-// Latch semantics: once the Snapshot's ManifestsArchived is True it is never downgraded (the content latch is
-// itself lifelong; this guard also protects against a transient content read that momentarily lost the
-// condition, e.g. child-content degradation — see E3). If the content has no ManifestsArchived condition yet
-// this is a no-op (the capture has not archived for the first time).
-func (r *SnapshotReconciler) mirrorSnapshotManifestsArchivedFromBoundContent(
+// The core eager-initializes the leg to false when capture starts (captured == false: the field's
+// presence declares the leg) and monotonically flips it to true once the bound content's subtree
+// manifests are persisted (SnapshotContent.status.subtreeManifestsPersisted). The root MCR is
+// subtree-gated by the wave barrier, so this reproduces the old ManifestsArchived=True timing. The latch
+// is success-only and never re-opened (a transient content read that momentarily lost the signal must
+// not downgrade it).
+func (r *SnapshotReconciler) stampRootManifestCaptured(
 	ctx context.Context,
 	parentKey types.NamespacedName,
-	contentName string,
+	captured bool,
 ) error {
-	fresh, err := r.getSnapshotContentFresh(ctx, contentName)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	src := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
-	if src == nil {
-		return nil
-	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &storagev1alpha1.Snapshot{}
 		if err := r.Client.Get(ctx, parentKey, cur); err != nil {
 			return err
 		}
-		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
-		// Latch: never re-open a Snapshot ManifestsArchived=True (the content latch is lifelong).
-		if existing != nil && existing.Status == metav1.ConditionTrue && src.Status != metav1.ConditionTrue {
+		// Monotonic: never downgrade a true latch.
+		if cs := cur.Status.CaptureState; cs != nil && cs.CommonController != nil &&
+			cs.CommonController.ManifestCaptured != nil && *cs.CommonController.ManifestCaptured {
 			return nil
 		}
-		if existing != nil && existing.Status == src.Status && existing.Reason == src.Reason &&
-			existing.Message == src.Message && existing.ObservedGeneration == cur.Generation {
+		if cur.Status.CaptureState == nil {
+			cur.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{}
+		}
+		if cur.Status.CaptureState.CommonController == nil {
+			cur.Status.CaptureState.CommonController = &storagev1alpha1.CommonControllerCaptureState{}
+		}
+		if existing := cur.Status.CaptureState.CommonController.ManifestCaptured; existing != nil && *existing == captured {
 			return nil
 		}
-		cur.Status.ObservedGeneration = cur.Generation
-		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionManifestsArchived,
-			Status:             src.Status,
-			Reason:             src.Reason,
-			Message:            src.Message,
-			ObservedGeneration: cur.Generation,
-		})
+		v := captured
+		cur.Status.CaptureState.CommonController.ManifestCaptured = &v
 		return r.Client.Status().Update(ctx, cur)
 	})
 }
@@ -180,7 +163,6 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 			existing.Message == message && existing.ObservedGeneration == cur.Generation {
 			return nil
 		}
-		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             status,

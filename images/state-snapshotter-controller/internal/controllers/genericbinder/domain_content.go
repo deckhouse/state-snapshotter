@@ -54,15 +54,17 @@ func (r *GenericSnapshotBinderController) ensureDomainContentLinks(
 	ns := obj.GetNamespace()
 
 	// Manifest cleanup + marker: once the MCP is published and owned by the SnapshotContent, the domain
-	// MCR is stale. Stamp manifestCaptured (so the domain controller stops re-creating it) and delete it.
-	manifestCaptured := nestedBool(obj, "manifestCaptured")
+	// MCR is stale. Flip the core-owned commonController.manifestCaptured leg latch (so the domain SDK
+	// stops re-creating the MCR) and delete it. The MCR name (domainSpecificController) is domain-owned;
+	// the binder never clears it — SDK suppression is driven by the leg latch, not by clearing the name.
+	manifestCaptured := commonControllerLegCaptured(obj, "manifestCaptured")
 	if !manifestCaptured && mcrName != "" {
 		safe, sErr := manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.APIReader, types.NamespacedName{Namespace: ns, Name: mcrName}, contentName)
 		if sErr != nil {
 			return false, "", "", sErr
 		}
 		if safe {
-			if mErr := r.markCaptureDone(ctx, obj, "manifestCaptured", "manifestCaptureRequestName"); mErr != nil {
+			if mErr := r.markCaptureLegCaptured(ctx, obj, "manifestCaptured"); mErr != nil {
 				return false, "", "", mErr
 			}
 			if dErr := r.deleteManifestCaptureRequest(ctx, types.NamespacedName{Namespace: ns, Name: mcrName}); dErr != nil {
@@ -85,8 +87,8 @@ func (r *GenericSnapshotBinderController) ensureDomainContentLinks(
 	}
 
 	// Data leg (leaf nodes with a PVC, e.g. demo disk). Absent volumeCaptureRequestName means manifest-only.
-	vcrName := nestedString(obj, "volumeCaptureRequestName")
-	dataCaptured := nestedBool(obj, "dataCaptured")
+	vcrName := domainCaptureStateString(obj, "volumeCaptureRequestName")
+	dataCaptured := commonControllerLegCaptured(obj, "dataCaptured")
 	if !dataCaptured && vcrName != "" {
 		done, treason, tmsg, dErr := r.projectDataLegFromVCR(ctx, obj, contentName, vcrName)
 		if dErr != nil {
@@ -104,7 +106,7 @@ func (r *GenericSnapshotBinderController) ensureDomainContentLinks(
 				return false, "", "", sErr
 			}
 			if safe {
-				if mErr := r.markCaptureDone(ctx, obj, "dataCaptured", "volumeCaptureRequestName"); mErr != nil {
+				if mErr := r.markCaptureLegCaptured(ctx, obj, "dataCaptured"); mErr != nil {
 					return false, "", "", mErr
 				}
 				if delErr := r.deleteVolumeCaptureRequest(ctx, vcrKey); delErr != nil {
@@ -199,10 +201,12 @@ func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
 	return true, "", "", nil
 }
 
-// markCaptureDone sets a domain-only boolean capture marker to true and clears the matching request-name
-// field in the same status patch, under an optimistic retry. The marker MUST be set before the request is
-// deleted so the domain controller (which gates re-creation on the marker) never re-creates it.
-func (r *GenericSnapshotBinderController) markCaptureDone(ctx context.Context, obj *unstructured.Unstructured, markerField, clearNameField string) error {
+// markCaptureLegCaptured monotonically flips a core-owned capture-leg success latch
+// (status.captureState.commonController.<leg>) to true under an optimistic retry. It MUST be set before
+// the corresponding request is deleted so the domain SDK (which suppresses re-creation on the latch)
+// never re-creates it. The core owns commonController; the domain-owned request-name
+// (domainSpecificController) is NOT touched here (single-writer per sub-structure).
+func (r *GenericSnapshotBinderController) markCaptureLegCaptured(ctx context.Context, obj *unstructured.Unstructured, leg string) error {
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -211,21 +215,54 @@ func (r *GenericSnapshotBinderController) markCaptureDone(ctx context.Context, o
 		if err := r.Get(ctx, key, fresh); err != nil {
 			return err
 		}
-		marker := nestedBool(fresh, markerField)
-		name := nestedString(fresh, clearNameField)
-		if marker && name == "" {
+		if commonControllerLegCaptured(fresh, leg) {
 			return nil
 		}
 		base := fresh.DeepCopy()
-		if err := unstructured.SetNestedField(fresh.Object, true, "status", markerField); err != nil {
+		if err := unstructured.SetNestedField(fresh.Object, true, "status", "captureState", "commonController", leg); err != nil {
 			return err
 		}
-		if err := unstructured.SetNestedField(fresh.Object, "", "status", clearNameField); err != nil {
+		// D4a: demo.status is co-owned (domain writes domainSpecificController + conditions), so use an
+		// optimistic-lock merge patch — a concurrent domain status write yields 409 and RetryOnConflict
+		// re-reads, instead of this patch silently racing on a stale resourceVersion.
+		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
+// eagerInitCaptureLegs declares the applicable core-owned capture legs on a domain-capture snapshot at
+// takeover: it initializes commonController.manifestCaptured to false (every capture node has a manifest
+// leg) and, for data-backed kinds, commonController.dataCaptured to false. Presence of the field declares
+// the leg (nil = no leg); the leg is later monotonically flipped to true by markCaptureLegCaptured. This
+// lets the SDK distinguish "not started yet" from "nothing to wait for" when computing CoreCaptureOutcome.
+func (r *GenericSnapshotBinderController) eagerInitCaptureLegs(ctx context.Context, obj *unstructured.Unstructured) error {
+	dataBacked := r.GVKRegistry.IsDataBacked(obj.GetObjectKind().GroupVersionKind().Kind)
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(gvk)
+		if err := r.Get(ctx, key, fresh); err != nil {
 			return err
 		}
-		// D4a: demo.status is co-owned (domain writes conditions/capture fields), so use an optimistic-lock
-		// merge patch — a concurrent demo status write yields 409 and RetryOnConflict re-reads, instead of
-		// this patch silently racing on a stale resourceVersion.
+		base := fresh.DeepCopy()
+		changed := false
+		if _, found, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "manifestCaptured"); !found {
+			if err := unstructured.SetNestedField(fresh.Object, false, "status", "captureState", "commonController", "manifestCaptured"); err != nil {
+				return err
+			}
+			changed = true
+		}
+		if dataBacked {
+			if _, found, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "dataCaptured"); !found {
+				if err := unstructured.SetNestedField(fresh.Object, false, "status", "captureState", "commonController", "dataCaptured"); err != nil {
+					return err
+				}
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
 		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }
@@ -341,9 +378,49 @@ func nestedString(obj *unstructured.Unstructured, field string) string {
 	return v
 }
 
-func nestedBool(obj *unstructured.Unstructured, field string) bool {
-	v, _, _ := unstructured.NestedBool(obj.Object, "status", field)
+// commonControllerLegCaptured reports whether the core-written capture-leg success latch
+// status.captureState.commonController.<leg> is present and true.
+func commonControllerLegCaptured(obj *unstructured.Unstructured, leg string) bool {
+	v, found, _ := unstructured.NestedBool(obj.Object, "status", "captureState", "commonController", leg)
+	return found && v
+}
+
+// domainCaptureStateString reads a string field from status.captureState.domainSpecificController
+// (the domain-written half of captureState: MCR/VCR names, phase reason/message).
+func domainCaptureStateString(obj *unstructured.Unstructured, field string) string {
+	v, _, _ := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", field)
 	return v
+}
+
+// domainCapturePhase reads status.captureState.domainSpecificController.phase off a domain snapshot.
+func domainCapturePhase(obj *unstructured.Unstructured) string {
+	return domainCaptureStateString(obj, "phase")
+}
+
+// domainCaptureAtLeastPlanned reports whether the domain reached capture barrier 1 (phase Planned or
+// Finished): objects created and refs published, so the binder may take over the SnapshotContent.
+func domainCaptureAtLeastPlanned(obj *unstructured.Unstructured) bool {
+	switch storagev1alpha1.SnapshotCapturePhase(domainCapturePhase(obj)) {
+	case storagev1alpha1.SnapshotCapturePhasePlanned, storagev1alpha1.SnapshotCapturePhaseFinished:
+		return true
+	default:
+		return false
+	}
+}
+
+// domainCaptureFinished reports whether the domain reached capture barrier 2 (phase Finished): the domain
+// completed its consistency actions, so the core may finalize the aggregate Ready.
+func domainCaptureFinished(obj *unstructured.Unstructured) bool {
+	return storagev1alpha1.SnapshotCapturePhase(domainCapturePhase(obj)) == storagev1alpha1.SnapshotCapturePhaseFinished
+}
+
+// domainCaptureFailed reports whether the domain reported a terminal failure (phase=Failed) and returns
+// its reason/message so the core can bubble it into the user-facing Ready.
+func domainCaptureFailed(obj *unstructured.Unstructured) (bool, string, string) {
+	if storagev1alpha1.SnapshotCapturePhase(domainCapturePhase(obj)) != storagev1alpha1.SnapshotCapturePhaseFailed {
+		return false, "", ""
+	}
+	return true, domainCaptureStateString(obj, "reason"), domainCaptureStateString(obj, "message")
 }
 
 // parseChildrenSnapshotRefs reads status.childrenSnapshotRefs into typed child refs (APIVersion/Kind/Name).

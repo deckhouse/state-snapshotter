@@ -50,8 +50,7 @@ const importPendingRequeueInterval = time.Minute
 func (r *SnapshotReconciler) reconcileImportPending(ctx context.Context, nsSnap *storagev1alpha1.Snapshot) (ctrl.Result, error) {
 	cur := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
 	if cur != nil && cur.Status == metav1.ConditionFalse && cur.Reason == snapshotpkg.ReasonImportPending &&
-		cur.Message == importPendingMessage && cur.ObservedGeneration == nsSnap.Generation &&
-		nsSnap.Status.ObservedGeneration == nsSnap.Generation {
+		cur.Message == importPendingMessage && cur.ObservedGeneration == nsSnap.Generation {
 		return ctrl.Result{RequeueAfter: importPendingRequeueInterval}, nil
 	}
 	key := client.ObjectKeyFromObject(nsSnap)
@@ -60,7 +59,6 @@ func (r *SnapshotReconciler) reconcileImportPending(ctx context.Context, nsSnap 
 		if err := r.Client.Get(ctx, key, fresh); err != nil {
 			return err
 		}
-		fresh.Status.ObservedGeneration = fresh.Generation
 		meta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,

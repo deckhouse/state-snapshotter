@@ -196,38 +196,39 @@ func collectRunSubtreeManifestExcludeKeys(
 }
 
 // requireContentManifestsArchived is the wave barrier for root manifest capture: a declared direct child
-// of the root snapshot must have its bound SnapshotContent at ManifestsArchived=True before the root MCR
-// is built. Because the content-node ManifestsArchived latch is fail-closed against declared-but-unlinked
-// children (see snapshotcontent.aggregateChildrenManifestsArchived), a direct child's True transitively
-// guarantees its ENTIRE subtree is archived and fully edge-linked. That makes WalkSnapshotContentSubtree
-// reach every descendant content, so the exclude set is complete and a descendant-captured object can
-// never leak back into the root MCP (the 409 duplicate-object race).
+// of the root snapshot must have its bound SnapshotContent at subtreeManifestsPersisted=true before the
+// root MCR is built. Because the content-node subtreeManifestsPersisted latch is fail-closed against
+// declared-but-unlinked children (see snapshotcontent.aggregateChildrenSubtreeManifestsPersisted), a
+// direct child's true transitively guarantees its ENTIRE subtree persisted its manifests and is fully
+// edge-linked. That makes WalkSnapshotContentSubtree reach every descendant content, so the exclude set
+// is complete and a descendant-captured object can never leak back into the root MCP (the 409
+// duplicate-object race).
 //
-// A child not yet archived -> ErrSubtreeManifestCapturePending (transient requeue); a child terminally
-// ManifestsArchived=False/ManifestsArchiveFailed -> ErrSubtreeManifestCaptureFailed.
+// A child not yet persisted -> ErrSubtreeManifestCapturePending (transient requeue); a child whose bound
+// SnapshotContent has a terminal Ready reason (IsReasonTerminal) -> ErrSubtreeManifestCaptureFailed. The
+// latch itself is success-only (no Failed value); the terminal signal is the Ready reason.
 //
-// The root's OWN ManifestsArchived is intentionally NOT consulted: it can only become True after the root
-// MCR exists and is processed (own ManifestsReady) AND all children are archived, so gating root-MCR
-// creation on it would be circular and deadlock. The root content node is not special; its own latch is
-// computed by the same content-controller path once its MCP is ready and children are archived.
+// The root's OWN subtreeManifestsPersisted is intentionally NOT consulted: it can only become true after
+// the root MCR exists and is processed AND all children persisted, so gating root-MCR creation on it
+// would be circular and deadlock.
 func requireContentManifestsArchived(ctx context.Context, c client.Reader, contentName string) error {
 	content := &storagev1alpha1.SnapshotContent{}
 	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("%w: direct child SnapshotContent %q not found (subtree not archived yet)",
+			return fmt.Errorf("%w: direct child SnapshotContent %q not found (subtree not persisted yet)",
 				ErrSubtreeManifestCapturePending, contentName)
 		}
 		return fmt.Errorf("get direct child SnapshotContent %q: %w", contentName, err)
 	}
-	cond := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
-	if cond != nil && cond.Status == metav1.ConditionTrue {
+	if content.Status.SubtreeManifestsPersisted {
 		return nil
 	}
-	if cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == snapshotpkg.ReasonManifestsArchiveFailed {
+	readyCond := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionReady)
+	if readyCond != nil && readyCond.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonTerminal(readyCond.Reason) {
 		return fmt.Errorf("%w: direct child SnapshotContent %q: %s",
-			ErrSubtreeManifestCaptureFailed, contentName, cond.Message)
+			ErrSubtreeManifestCaptureFailed, contentName, readyCond.Message)
 	}
-	return fmt.Errorf("%w: direct child SnapshotContent %q ManifestsArchived not yet True",
+	return fmt.Errorf("%w: direct child SnapshotContent %q subtreeManifestsPersisted not yet true",
 		ErrSubtreeManifestCapturePending, contentName)
 }
 

@@ -107,6 +107,7 @@ var _ = Describe("Integration: Snapshot static binding (pre-provisioning)", func
 		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: ns},
 			Spec: storagev1alpha1.SnapshotSpec{
+				Mode:   storagev1alpha1.SnapshotModeStaticBind,
 				Source: &storagev1alpha1.SnapshotSource{SnapshotContentName: contentName},
 			},
 		}
@@ -134,6 +135,7 @@ var _ = Describe("Integration: Snapshot static binding (pre-provisioning)", func
 		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: ns},
 			Spec: storagev1alpha1.SnapshotSpec{
+				Mode:   storagev1alpha1.SnapshotModeStaticBind,
 				Source: &storagev1alpha1.SnapshotSource{SnapshotContentName: contentName},
 			},
 		}
@@ -158,6 +160,7 @@ var _ = Describe("Integration: Snapshot static binding (pre-provisioning)", func
 		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: ns},
 			Spec: storagev1alpha1.SnapshotSpec{
+				Mode:   storagev1alpha1.SnapshotModeStaticBind,
 				Source: &storagev1alpha1.SnapshotSource{SnapshotContentName: "not-created-yet-" + ns},
 			},
 		}

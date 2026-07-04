@@ -100,17 +100,29 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualDisk, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
+		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
 	}
 	source := &demov1alpha1.DemoVirtualDisk{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: resolution.Name}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
 			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
 			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, resolution.Name),
 		})
+	}
+
+	// Publish the captured live source's full reference (top-level status.snapshotSource). d8-cli reads it
+	// as a self-contained block to rebuild the import-mode source. Not part of the readiness formula.
+	if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       controllercommon.KindDemoVirtualDisk,
+		Name:       source.Name,
+		Namespace:  source.Namespace,
+		UID:        source.UID,
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Data leg (D3): resolve the source disk's single PVC into the data-leg target (domain decision). A
@@ -121,7 +133,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 	if terminalReason != "" {
-		if perr := sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadySpec{
+		if perr := sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
 			Reason:  snapshotsdk.Reason(terminalReason),
 			Message: terminalMessage,
 			Requeue: true,
@@ -143,9 +155,30 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, err
 	}
 
-	// Planning barrier: for a leaf disk "domain planning complete" means its own MCR/VCR are created and
-	// published (it has no child snapshots). The common controller waits on this before taking over content.
-	return ctrl.Result{}, sdk.MarkPlanningReady(ctx, adapter, "manifest capture request planned")
+	// Barrier 1 (Planned): for a leaf disk "planning complete" means its own MCR/VCR are created and
+	// published (it has no child snapshots). The common controller waits on phase>=Planned before taking
+	// over the SnapshotContent.
+	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Barrier 2 (Finished): switch on the SDK-derived capture outcome. The core flips the commonController
+	// leg latches as it captures; a terminal Ready reason means failure. A disk is a data-leaf: it confirms
+	// consistency immediately once all its declared legs (manifest + data) are captured — there is no
+	// freeze/unfreeze showcase to time on a single volume.
+	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
+	case snapshotsdk.CaptureOutcomeCaptured:
+		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+	case snapshotsdk.CaptureOutcomeFailed:
+		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
+			Reason:  snapshotsdk.Reason(outcome.Reason),
+			Message: outcome.Message,
+		})
+	default:
+		// Capturing: wait for the core to finish. The status watch wakes us on each leg latch flip; poll as
+		// a fallback in case a signal is missed.
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
 }
 
 // resolveDemoVirtualDiskDataRef resolves the source disk's single PVC into the SDK data-leg target. It

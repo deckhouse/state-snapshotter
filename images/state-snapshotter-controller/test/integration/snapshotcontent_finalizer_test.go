@@ -65,7 +65,7 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 	// 4. Reconcile again (should be idempotent)
 	//
 	// EXPECTED BEHAVIOR:
-	// - SnapshotContent has "snapshot.deckhouse.io/parent-protect" finalizer
+	// - SnapshotContent has "state-snapshotter.deckhouse.io/parent-protect" finalizer
 	// - Manual deletion is blocked by finalizer
 	// - Reconcile is idempotent (no duplicate finalizers)
 	//
@@ -110,8 +110,8 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 			err := k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish PlanningReady=True for the current generation.
-			setSnapshotPlanningReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish phase=Planned.
+			setSnapshotDomainPlannedCurrent(ctx, snapshotObj)
 
 			// Create SnapshotContent via GenericSnapshotBinderController
 			// Create controllers for this test

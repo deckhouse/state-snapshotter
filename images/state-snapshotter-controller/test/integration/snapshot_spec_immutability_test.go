@@ -45,6 +45,7 @@ var _ = Describe("Integration: Snapshot spec immutability", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: ns},
 			Spec: storagev1alpha1.SnapshotSpec{
 				ResourceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "a"}},
+				Mode:             storagev1alpha1.SnapshotModeStaticBind,
 				Source:           &storagev1alpha1.SnapshotSource{SnapshotContentName: "no-such-content-" + ns},
 			},
 		}
@@ -54,7 +55,10 @@ var _ = Describe("Integration: Snapshot spec immutability", func() {
 		Eventually(func(g Gomega) {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: snapName}, snap)).To(Succeed())
 		}).Should(Succeed())
-		snap.Status.ManifestCaptureRequestName = "mcr-immutable"
+		captured := true
+		snap.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{
+			CommonController: &storagev1alpha1.CommonControllerCaptureState{ManifestCaptured: &captured},
+		}
 		Expect(k8sClient.Status().Update(ctx, snap)).To(Succeed())
 
 		By("rejecting a scalar spec field change (resourceSelector)")

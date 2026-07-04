@@ -81,13 +81,12 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 
 			wantContent := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(fresh.UID), "-", ""))
 			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(wantContent))
-			g.Expect(fresh.Status.ObservedGeneration).To(Equal(fresh.Generation))
 
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			// The temporary MCR name is cleared after the manifest artifact is handed off to SnapshotContent.
-			g.Expect(fresh.Status.ManifestCaptureRequestName).To(BeEmpty())
+			// The root MCR name is a core-internal deterministic handle (no longer a status field); its
+			// deletion after handoff is asserted below via SnapshotMCRName(uid).
 
 			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())

@@ -24,6 +24,8 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=csd
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
+// +kubebuilder:printcolumn:name="AccessGranted",type=string,JSONPath=`.status.conditions[?(@.type=="AccessGranted")].status`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // CustomSnapshotDefinition registers custom snapshot types for platform modules.
 // See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
 type CustomSnapshotDefinition struct {
@@ -78,6 +80,11 @@ type SnapshotGVKRef struct {
 
 // +k8s:deepcopy-gen=true
 type CustomSnapshotDefinitionStatus struct {
-	// Conditions include Accepted, AccessGranted, Ready (see ADR).
+	// Conditions carry three distinct signals, each with a single writer:
+	//   - Accepted — the spec is valid and registrable (written by the CSD reconciler);
+	//   - AccessGranted — the domain RBAC has been applied (written by the 030-domain-rbac hook);
+	//   - Ready — the aggregate Ready = Accepted && AccessGranted.
+	// Accepted and Ready diverge when Accepted=True but AccessGranted=False (spec accepted, RBAC not yet
+	// applied) → Ready=False; the printer columns surface all three so this is visible at a glance.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

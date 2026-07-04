@@ -642,7 +642,7 @@ DISK_ONLY_SOURCES=""
 for child in $DISK_ONLY_CHILDREN; do
   kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o yaml
   src=$(kubectl -n "$NS" get demovirtualdisksnapshot "$child" -o json \
-    | jq -r '.spec.sourceRef.name // (.metadata.annotations["state-snapshotter.deckhouse.io/source-ref"] // "")')
+    | jq -r '.spec.sourceRef.name // ""')
   DISK_ONLY_SOURCES="${DISK_ONLY_SOURCES} ${src}"
 done
 
@@ -1002,7 +1002,7 @@ kubectl logs -n "$CTRL_NS" deploy/"$CTRL_DEPLOY" --tail=500 \
 - нет неожиданных зависших finalizers;
 - retained objects либо удалены, либо ожидаемо остались по текущей Retain policy;
 - финальные логи без новых `panic`, `fatal`, `stacktrace` и без повторяющегося error loop;
-- warning про имя finalizer (`snapshot.finalizers.deckhouse.io` should include a path) сейчас не блокирует smoke, но должен быть отражён в отчёте как follow-up, если появился.
+- имя finalizer теперь содержит путь (`state-snapshotter.deckhouse.io/snapshot-protection`), поэтому прежний warning «finalizer name should include a path» больше не ожидается; если он всё же появился, это регресс и должен быть отражён в отчёте.
 
 ## Definition of Done для ручного smoke
 

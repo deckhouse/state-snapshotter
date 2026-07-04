@@ -1209,7 +1209,7 @@ func (r *ManifestCheckpointController) updateProcessingMessage(
 	}
 }
 
-// finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
+// finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, and updating status.
 // This is a unified helper to eliminate code duplication across all finalization paths.
 func (r *ManifestCheckpointController) finalizeMCR(
 	ctx context.Context,
@@ -1259,44 +1259,7 @@ func (r *ManifestCheckpointController) finalizeMCR(
 		return fmt.Errorf("failed to update MCR status: %w", err)
 	}
 
-	// Update TTL annotation (informational only, best-effort, no retry)
-	current := &storagev1alpha1.ManifestCaptureRequest{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err == nil {
-		base := current.DeepCopy()
-		r.setTTLAnnotation(current)
-		_ = r.Patch(ctx, current, client.MergeFrom(base)) // Ignore errors - annotation is informational
-	}
-
 	return nil
-}
-
-// setTTLAnnotation sets TTL annotation on the object.
-//
-// IMPORTANT TTL SEMANTICS:
-// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is INFORMATIONAL ONLY.
-// - Actual TTL deletion timing is controlled by controller configuration (config.DefaultTTL).
-// - TTL scanner uses config.DefaultTTL, NOT the annotation value.
-// - Annotation is set for observability and post-mortem analysis, but does not affect deletion timing.
-//
-// TTL is set when Ready/Failed condition is set during finalization.
-// TTL comes from configuration (state-snapshotter module settings), not from MCR spec.
-// If annotation already exists, it is not overwritten (idempotent).
-func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.ManifestCaptureRequest) {
-	// Don't overwrite if annotation already exists
-	if mcr.Annotations != nil {
-		if _, exists := mcr.Annotations[controllercommon.AnnotationKeyTTL]; exists {
-			return
-		}
-	}
-	if mcr.Annotations == nil {
-		mcr.Annotations = make(map[string]string)
-	}
-	// Get TTL from configuration (default: 168h)
-	ttlStr := config.DefaultTTLStr
-	if r.Config != nil && r.Config.DefaultTTLStr != "" {
-		ttlStr = r.Config.DefaultTTLStr
-	}
-	mcr.Annotations[controllercommon.AnnotationKeyTTL] = ttlStr
 }
 
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {
@@ -1341,8 +1304,7 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 //   - Non-terminal MCRs are never touched
 //
 // 2. TTL source:
-//   - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations
-//   - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - TTL is ALWAYS taken from controller configuration (config.DefaultTTL)
 //   - This ensures predictable cluster-wide retention policy
 //
 // 3. TTL calculation:
@@ -1386,18 +1348,15 @@ func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, clie
 // scanAndDeleteExpiredMCRs lists all MCRs and deletes those where completionTimestamp + TTL < now.
 //
 // IMPORTANT:
-// TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
 // TTL SEMANTICS:
-// - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations.
-// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - TTL is ALWAYS taken from controller configuration (config.DefaultTTL).
 // - This ensures consistent cleanup behavior: all MCRs use the same TTL policy defined by controller config.
 // - TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Ready=False).
 func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Context, client client.Client) {
 	// Get TTL from controller config (this is the ONLY source of TTL timing)
-	// TTL annotation is informational only and is ignored here
 	defaultTTL := config.DefaultTTL
 	if r.Config != nil && r.Config.DefaultTTL > 0 {
 		defaultTTL = r.Config.DefaultTTL
