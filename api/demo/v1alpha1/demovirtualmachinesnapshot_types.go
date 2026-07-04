@@ -90,6 +90,13 @@ type DemoVirtualMachineSnapshotStatus struct {
 	// +listMapKey=kind
 	// +listMapKey=name
 	ChildrenSnapshotRefs []storagev1alpha1.SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
+
+	// ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate
+	// (source objects vetoed out of this VM snapshot's subtree — e.g. a disk labeled with the exclude
+	// veto). Written ONLY by the core, exactly as it mirrors Ready.
+	// +optional
+	// +listType=atomic
+	ExcludedRefs []storagev1alpha1.ExcludedObjectRef `json:"excludedRefs,omitempty"`
 }
 
 // IsImportMode reports whether this VM snapshot is an import target (spec.mode == Import). Import

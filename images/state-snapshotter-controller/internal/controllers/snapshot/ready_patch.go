@@ -143,7 +143,14 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 	if transientErr != nil {
 		message = transientErr.Error()
 	}
+	// contentExcluded mirrors the bound content's durable excludedRefs aggregate onto the root Snapshot.
+	// Only applied when the content is observable (haveContent): a transient NotFound must not clobber a
+	// previously-mirrored set. The aggregate is monotonic on the content side, so a verbatim mirror is safe.
+	var contentExcluded []storagev1alpha1.ExcludedObjectRef
+	haveContent := false
 	if fresh, err := r.getSnapshotContentFresh(ctx, content.Name); err == nil {
+		haveContent = true
+		contentExcluded = fresh.Status.ExcludedRefs
 		if cond := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady); cond != nil {
 			status = cond.Status
 			reason = cond.Reason
@@ -158,10 +165,15 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 		if err := r.Client.Get(ctx, parentKey, cur); err != nil {
 			return err
 		}
+		excludedChanged := haveContent && !excludedObjectRefsEqualIgnoreOrder(cur.Status.ExcludedRefs, contentExcluded)
 		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionReady)
-		if existing != nil && existing.Status == status && existing.Reason == reason &&
-			existing.Message == message && existing.ObservedGeneration == cur.Generation {
+		conditionCurrent := existing != nil && existing.Status == status && existing.Reason == reason &&
+			existing.Message == message && existing.ObservedGeneration == cur.Generation
+		if conditionCurrent && !excludedChanged {
 			return nil
+		}
+		if excludedChanged {
+			cur.Status.ExcludedRefs = sortedExcludedObjectRefsSlice(contentExcluded)
 		}
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
@@ -172,4 +184,14 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 		})
 		return r.Client.Status().Update(ctx, cur)
 	})
+}
+
+// sortedExcludedObjectRefsSlice returns a stable, sorted copy of refs (nil-safe).
+func sortedExcludedObjectRefsSlice(refs []storagev1alpha1.ExcludedObjectRef) []storagev1alpha1.ExcludedObjectRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := append([]storagev1alpha1.ExcludedObjectRef(nil), refs...)
+	sortExcludedObjectRefs(out)
+	return out
 }

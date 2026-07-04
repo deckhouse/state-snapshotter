@@ -36,6 +36,18 @@ limitations under the License.
 // by ownerRef garbage collection (the parent owns each child) or a future cleanup component, not by the
 // SDK. This keeps the contract a pure publication layer with no risk of deleting a foreign object.
 //
+// # Exclude veto
+//
+// The label ExcludeLabelKey (state-snapshotter.deckhouse.io/exclude) is an absolute, always-active veto:
+// any object carrying it (value ignored) is dropped from every snapshot, at every level of the tree,
+// independently of the root's spec.resourceSelector. The core folds the veto into ResolveResourceSelector
+// so all core legs honor it with one edit, but a domain enumerator sees only the child specs it builds —
+// not the source objects' labels — so it MUST apply the veto itself with PartitionExcluded: build children
+// from the kept objects, and hand the excluded refs to EnsureChildren. The SDK publishes those excluded
+// refs into status.captureState.domainSpecificController.excludedRefs (the transient INPUT); the core
+// aggregates them into the durable SnapshotContent.status.excludedRefs and mirrors that onto the top-level
+// status.excludedRefs. The domain never writes the durable aggregate or the top-level mirror.
+//
 // # Lifecycle (capture-only, v1)
 //
 // A typical domain Reconcile resolves its source, then drives the three planning legs, publishes the
@@ -43,7 +55,9 @@ limitations under the License.
 // (barrier 2 = Finished) or fail:
 //
 //	if !valid { return sdk.Reject(ctx, t, FailSpec{Reason: "InvalidSourceRef"}) }
-//	if err := sdk.EnsureChildren(ctx, t, children); err != nil { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) }
+//	kept, dropped := PartitionExcluded(sourceObjs) // honor the state-snapshotter.deckhouse.io/exclude veto
+//	children, excludedRefs := buildFrom(kept), refsOf(dropped)
+//	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) }
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
 //	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
 //	_ = sdk.PublishSnapshotSource(ctx, t, SnapshotSource{...})

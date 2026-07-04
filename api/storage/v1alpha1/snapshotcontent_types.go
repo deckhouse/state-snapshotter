@@ -190,6 +190,17 @@ type SnapshotContentStatus struct {
 	// +optional
 	CaptureState *CaptureStateStatus `json:"captureState,omitempty"`
 
+	// ExcludedRefs is the DURABLE AGGREGATE of source objects excluded from this content node's subtree
+	// (this node's own direct exclusions UNION the direct exclusions of all descendants; on the root, PLUS
+	// the explicit top-level drops). It is written ONLY by the core (single aggregator) and is the TRUTH:
+	// being on the cluster-scoped SnapshotContent, it outlives deletion of the namespaced Snapshot (the
+	// recycle bin, wave4B) and is what the top-level status.excludedRefs mirrors. It is an aggregate rather
+	// than direct edges (like childrenSnapshotContentRefs) because an excluded object is non-navigable: no
+	// snapshot node is created for it, so per-node reconstruction is impossible after the fact.
+	// +optional
+	// +listType=atomic
+	ExcludedRefs []ExcludedObjectRef `json:"excludedRefs,omitempty"`
+
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

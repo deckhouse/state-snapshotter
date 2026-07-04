@@ -84,6 +84,13 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// +listMapKey=name
 	ChildrenSnapshotRefs []storagev1alpha1.SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 
+	// ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate,
+	// written ONLY by the core (as it mirrors Ready). A data-leaf disk has no children, so this is
+	// normally empty; it is kept for uniformity across snapshot kinds.
+	// +optional
+	// +listType=atomic
+	ExcludedRefs []storagev1alpha1.ExcludedObjectRef `json:"excludedRefs,omitempty"`
+
 	// StorageClassName mirrors this data leaf's volume StorageClass for d8 export: the bound
 	// SnapshotContent.status.dataRef.storageClassName on capture, or DataImport.spec.storageClassName on
 	// import (the import dataRef carries no storageClassName). Populated by the common controller.

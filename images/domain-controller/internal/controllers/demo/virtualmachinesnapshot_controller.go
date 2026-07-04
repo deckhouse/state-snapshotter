@@ -111,6 +111,15 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
+	// StaticBind mode (recycle-bin restore, wave4B): this VM snapshot binds to a pre-provisioned, surviving
+	// SnapshotContent (spec.source.snapshotContentName) instead of capturing. The domain controller does NO
+	// capture planning (no source-VM lookup, no children planning, no MCR); the core validates the
+	// back-binding and mirrors Ready/excludedRefs from the existing content, and re-creates the surviving
+	// child subtree as StaticBind. Domain planning is trivially complete for a static-bind node.
+	if s.IsStaticBind() {
+		return ctrl.Result{}, nil
+	}
+
 	adapter := demoVirtualMachineSnapshotAdapter{snap: s}
 	sdk := r.capture()
 
@@ -141,13 +150,15 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 
-	// Children planning: the domain decides which disks the VM owns and builds the desired child snapshot
-	// objects; the SDK adopts them, publishes status.childrenSnapshotRefs, and garbage-collects orphans.
-	children, err := r.planDemoVirtualMachineChildren(ctx, s, source)
+	// Children planning: the domain decides which disks the VM owns, honors the absolute exclude veto, and
+	// builds the desired child snapshot objects from the kept disks; the SDK adopts them and publishes
+	// status.childrenSnapshotRefs. The vetoed disks are handed back as excludedRefs (direct exclusions) and
+	// published into captureState.domainSpecificController.excludedRefs in the same status patch.
+	children, excluded, err := r.planDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := sdk.EnsureChildren(ctx, adapter, children); err != nil {
+	if err := sdk.EnsureChildren(ctx, adapter, children, excluded); err != nil {
 		if perr := sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed), err); perr != nil {
 			return ctrl.Result{}, perr
 		}
@@ -226,27 +237,39 @@ func childCoreCaptureState(child *demov1alpha1.DemoVirtualDiskSnapshot) snapshot
 }
 
 // planDemoVirtualMachineChildren builds the desired set of child DemoVirtualDiskSnapshot objects for the
-// disks owned by the VM. Owner references, adoption, ref derivation, and orphan GC are the SDK's job; the
-// domain only authors the child object identity and its immutable spec.sourceRef.
+// disks owned by the VM, honoring the absolute exclude veto. It returns the kept children plus the direct
+// exclusion refs for owned disks carrying state-snapshotter.deckhouse.io/exclude: a vetoed disk gets no
+// child snapshot (and hence no VCR/MCR), and the VM snapshot proceeds without it — an incomplete VM image
+// is accepted by design (no consistency-group machinery; the operator owns that trade-off). Owner
+// references, adoption, ref derivation, and excludedRefs publication are the SDK's job; the domain only
+// authors the child object identity and its immutable spec.sourceRef, and partitions the source disks.
 func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 	ctx context.Context,
 	vm *demov1alpha1.DemoVirtualMachineSnapshot,
 	source *demov1alpha1.DemoVirtualMachine,
-) ([]snapshotsdk.ChildSpec, error) {
+) ([]snapshotsdk.ChildSpec, []snapshotsdk.ExcludedObjectRef, error) {
 	disks := &demov1alpha1.DemoVirtualDiskList{}
 	if err := r.Client.List(ctx, disks, client.InNamespace(vm.Namespace)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sort.Slice(disks.Items, func(i, j int) bool {
 		return disks.Items[i].Name < disks.Items[j].Name
 	})
 
-	var children []snapshotsdk.ChildSpec
+	// Collect the disks the VM owns as source objects, then split off the vetoed ones. The veto is applied
+	// here (in the domain enumerator) because the SDK sees only built child specs, not source labels.
+	var owned []client.Object
 	for i := range disks.Items {
 		disk := &disks.Items[i]
-		if !demoDiskOwnedByVM(disk, source) {
-			continue
+		if demoDiskOwnedByVM(disk, source) {
+			owned = append(owned, disk)
 		}
+	}
+	kept, excluded := snapshotsdk.PartitionExcluded(owned)
+
+	children := make([]snapshotsdk.ChildSpec, 0, len(kept))
+	for _, o := range kept {
+		disk := o.(*demov1alpha1.DemoVirtualDisk)
 		childName := demoVirtualMachineDiskSnapshotName(vm.Namespace, vm.Name, disk.Name)
 		children = append(children, snapshotsdk.ChildSpec{
 			Object: &demov1alpha1.DemoVirtualDiskSnapshot{
@@ -266,7 +289,18 @@ func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 			},
 		})
 	}
-	return children, nil
+
+	// The excluded refs point at the SOURCE disks (the shadow of childrenSnapshotRefs), not at child
+	// snapshot objects (none exist for a vetoed disk).
+	excludedRefs := make([]snapshotsdk.ExcludedObjectRef, 0, len(excluded))
+	for _, o := range excluded {
+		excludedRefs = append(excludedRefs, snapshotsdk.ExcludedObjectRef{
+			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+			Kind:       controllercommon.KindDemoVirtualDisk,
+			Name:       o.GetName(),
+		})
+	}
+	return children, excludedRefs, nil
 }
 
 // demoDiskOwnedByVM resolves the snapshot-tree parent->child link from the VM side:

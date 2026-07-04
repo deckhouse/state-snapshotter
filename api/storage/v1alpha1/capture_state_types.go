@@ -100,6 +100,19 @@ type DomainSpecificControllerCaptureState struct {
 	// Message is a human-readable detail for Phase=Failed.
 	// +optional
 	Message string `json:"message,omitempty"`
+
+	// ExcludedRefs are the domain's DIRECT exclusion vetoes at this node: the source objects it dropped
+	// (via the exclude label) while enumerating its children. It is the transient INPUT the core reads and
+	// folds into the durable SnapshotContent.status.excludedRefs aggregate; the domain never writes the
+	// aggregate or the top-level mirror (both are core-owned).
+	//
+	// Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
+	// distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
+	// (e.g. a disk) never enumerates children, so it always writes []. Absent in Import/StaticBind
+	// (no live capture happens).
+	// +optional
+	// +listType=atomic
+	ExcludedRefs []ExcludedObjectRef `json:"excludedRefs"`
 }
 
 // SnapshotSourceObjectRef is the full reference to the live source object a snapshot captured, carried

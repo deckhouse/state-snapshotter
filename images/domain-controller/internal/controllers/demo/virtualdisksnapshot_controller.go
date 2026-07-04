@@ -95,6 +95,15 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
+	// StaticBind mode (recycle-bin restore, wave4B): this disk snapshot binds to a pre-provisioned,
+	// surviving SnapshotContent (spec.source.snapshotContentName) instead of capturing. The domain
+	// controller does NO capture planning (no source lookup, no MCR/VCR); the core validates the
+	// back-binding and mirrors Ready/excludedRefs from the existing content. Domain planning is trivially
+	// complete for a static-bind leaf.
+	if s.IsStaticBind() {
+		return ctrl.Result{}, nil
+	}
+
 	adapter := demoVirtualDiskSnapshotAdapter{snap: s}
 	sdk := r.capture()
 

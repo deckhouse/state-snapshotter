@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 )
 
 // +kubebuilder:object:root=true
@@ -123,15 +124,27 @@ func (s *Snapshot) IsStaticBind() bool {
 }
 
 // ResolveResourceSelector converts spec.resourceSelector into a labels.Selector used by the dynamic
-// capture legs. A nil selector means "no filtering" and resolves to labels.Everything(); note this
-// differs from metav1.LabelSelectorAsSelector(nil), which returns labels.Nothing() (matches nothing).
-// A non-nil but malformed selector is unlikely (the field is typed and the CRD schema validates most of
-// it at admission), but the conversion can still fail, so the error is returned rather than swallowed.
+// capture legs, with the absolute exclude veto ALWAYS ANDed on top. The veto (ExcludeLabelKey
+// DoesNotExist) is independent of the user selector, so a nil/empty resourceSelector no longer resolves
+// to labels.Everything() — it resolves to "everything except objects carrying the exclude label". This
+// single fold makes every core leg that resolves through this method honor the veto with one edit.
+//
+// A non-nil but malformed user selector is unlikely (the field is typed and the CRD schema validates
+// most of it at admission), but the conversion can still fail, so the error is returned rather than
+// swallowed.
 func (s *Snapshot) ResolveResourceSelector() (labels.Selector, error) {
-	if s == nil || s.Spec.ResourceSelector == nil {
-		return labels.Everything(), nil
+	excludeReq, err := labels.NewRequirement(ExcludeLabelKey, selection.DoesNotExist, nil)
+	if err != nil {
+		return nil, err
 	}
-	return metav1.LabelSelectorAsSelector(s.Spec.ResourceSelector)
+	base := labels.Everything()
+	if s != nil && s.Spec.ResourceSelector != nil {
+		base, err = metav1.LabelSelectorAsSelector(s.Spec.ResourceSelector)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return base.Add(*excludeReq), nil
 }
 
 // +k8s:deepcopy-gen=true
@@ -155,6 +168,15 @@ type SnapshotStatus struct {
 	// Populated by domain controllers or merge helpers that own graph edges.
 	// +optional
 	ChildrenSnapshotRefs []SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
+
+	// ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate
+	// (the whole-subtree set of source objects vetoed out of this snapshot). It is written ONLY by the
+	// core, exactly as it mirrors Ready from the bound content; on StaticBind-restore it is repopulated
+	// from the surviving content. It is a user-facing audit view — the durable truth lives on the
+	// cluster-scoped SnapshotContent (which outlives this namespaced object).
+	// +optional
+	// +listType=atomic
+	ExcludedRefs []ExcludedObjectRef `json:"excludedRefs,omitempty"`
 
 	// Conditions represent the latest observations (Ready, Bound, Failed, etc.).
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

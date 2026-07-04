@@ -47,11 +47,12 @@ const (
 	// DefaultSnapshotRootOKTTL is spec.ttl on root ObjectKeeper (ret-snap-* and unified ret-* snapshot OK)
 	// when neither STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL nor STATE_SNAPSHOTTER_NS_ROOT_OK_TTL is set.
 	//
-	// DEBUG ONLY (explicit team choice for TTL/smoke iteration): currently 1m so strict cluster smoke
-	// (PR4_SMOKE_REQUIRE_TTL=1) finishes quickly. This MUST NOT ship as the long-term default: before merge
-	// to a production-oriented branch, restore a safe built-in default (e.g. 168*time.Hour) or rely solely
-	// on env in chart/values — otherwise retained root content may disappear far faster than operators expect.
-	DefaultSnapshotRootOKTTL = 1 * time.Minute
+	// Production default: 30 days (720h). This is the "recycle bin" retention window (wave4B) — how long the
+	// durable cluster-scoped SnapshotContent tree survives after its namespaced Snapshot is deleted, during
+	// which the snapshot can be restored via StaticBind. Override per install with the snapshotRootOkTtl
+	// module parameter (env STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL). Keep this comfortably long: retained
+	// root content disappears once the window elapses, so a short value silently shrinks the restore window.
+	DefaultSnapshotRootOKTTL = 30 * 24 * time.Hour // 720h
 	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try EnvSnapshotRootOKTTLAlt, then default.
 	EnvSnapshotRootOKTTL = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"
 	// EnvSnapshotRootOKTTLAlt: second env var name for the same duration; read when EnvSnapshotRootOKTTL is unset or non-positive.

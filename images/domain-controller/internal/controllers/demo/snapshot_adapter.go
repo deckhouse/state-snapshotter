@@ -56,6 +56,7 @@ func (a demoVirtualDiskSnapshotAdapter) GetDomainCaptureState() snapshotsdk.Doma
 		d := cs.DomainSpecificController
 		st.ManifestCaptureRequestName = d.ManifestCaptureRequestName
 		st.VolumeCaptureRequestName = d.VolumeCaptureRequestName
+		st.ExcludedRefs = d.ExcludedRefs
 		st.Phase = d.Phase
 		st.Reason = d.Reason
 		st.Message = d.Message
@@ -69,6 +70,7 @@ func (a demoVirtualDiskSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.Dom
 	d := a.snap.Status.CaptureState.DomainSpecificController
 	d.ManifestCaptureRequestName = st.ManifestCaptureRequestName
 	d.VolumeCaptureRequestName = st.VolumeCaptureRequestName
+	d.ExcludedRefs = nonNilExcludedRefs(st.ExcludedRefs)
 	d.Phase = st.Phase
 	d.Reason = st.Reason
 	d.Message = st.Message
@@ -86,8 +88,12 @@ func (a demoVirtualDiskSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptu
 	return coreCaptureStateFrom(a.snap.Status.CaptureState)
 }
 
-func (a demoVirtualDiskSnapshotAdapter) ReadyReason() string  { return readyReason(a.snap.Status.Conditions) }
-func (a demoVirtualDiskSnapshotAdapter) ReadyMessage() string { return readyMessage(a.snap.Status.Conditions) }
+func (a demoVirtualDiskSnapshotAdapter) ReadyReason() string {
+	return readyReason(a.snap.Status.Conditions)
+}
+func (a demoVirtualDiskSnapshotAdapter) ReadyMessage() string {
+	return readyMessage(a.snap.Status.Conditions)
+}
 
 // demoVirtualMachineSnapshotAdapter maps a DemoVirtualMachineSnapshot to the generic capture protocol. The
 // VM snapshot is manifest-only (no data leg) and owns a set of child disk snapshots.
@@ -114,6 +120,7 @@ func (a demoVirtualMachineSnapshotAdapter) GetDomainCaptureState() snapshotsdk.D
 		d := cs.DomainSpecificController
 		st.ManifestCaptureRequestName = d.ManifestCaptureRequestName
 		st.VolumeCaptureRequestName = d.VolumeCaptureRequestName
+		st.ExcludedRefs = d.ExcludedRefs
 		st.Phase = d.Phase
 		st.Reason = d.Reason
 		st.Message = d.Message
@@ -127,6 +134,7 @@ func (a demoVirtualMachineSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.
 	d := a.snap.Status.CaptureState.DomainSpecificController
 	d.ManifestCaptureRequestName = st.ManifestCaptureRequestName
 	d.VolumeCaptureRequestName = st.VolumeCaptureRequestName
+	d.ExcludedRefs = nonNilExcludedRefs(st.ExcludedRefs)
 	d.Phase = st.Phase
 	d.Reason = st.Reason
 	d.Message = st.Message
@@ -149,6 +157,18 @@ func (a demoVirtualMachineSnapshotAdapter) ReadyReason() string {
 }
 func (a demoVirtualMachineSnapshotAdapter) ReadyMessage() string {
 	return readyMessage(a.snap.Status.Conditions)
+}
+
+// nonNilExcludedRefs guarantees a non-nil slice. The domain field
+// captureState.domainSpecificController.excludedRefs is written WITHOUT omitempty, so a nil slice would
+// marshal to JSON null and be rejected by the non-nullable CRD array. An empty [] is the correct
+// "domain planned, nothing excluded" wire value — which a data-leaf (disk) always writes, since it never
+// enumerates children.
+func nonNilExcludedRefs(refs []storagev1alpha1.ExcludedObjectRef) []storagev1alpha1.ExcludedObjectRef {
+	if refs == nil {
+		return []storagev1alpha1.ExcludedObjectRef{}
+	}
+	return refs
 }
 
 // ensureDomainSpecificController lazily allocates captureState + its domain-written half so the adapter can

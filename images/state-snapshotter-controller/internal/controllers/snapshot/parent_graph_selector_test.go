@@ -91,7 +91,7 @@ func TestEnsureParentOwnedChildGraphLayer_ResourceSelector(t *testing.T) {
 	run := func(t *testing.T, selector labels.Selector) []string {
 		t.Helper()
 		cov := &recordingCoverage{}
-		if _, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov, selector); err != nil {
+		if _, _, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov, selector); err != nil {
 			t.Fatalf("ensureParentOwnedChildGraphLayer: %v", err)
 		}
 		sort.Strings(cov.checked)
@@ -133,4 +133,74 @@ func TestEnsureParentOwnedChildGraphLayer_ResourceSelector(t *testing.T) {
 		}
 		assertSet(t, run(t, sel), []string{"thing-keep", "thing-nolabel"})
 	})
+}
+
+// TestEnsureParentOwnedChildGraphLayer_ExcludeVetoTopLevelDrop verifies that a top-level source object
+// carrying the exclude veto label is (1) NOT expanded into a child snapshot (dropped by the veto folded
+// into ResolveResourceSelector) and (2) recorded as an explicit top-level drop in the returned
+// excludedRefs, while an unlabeled sibling is unaffected.
+func TestEnsureParentOwnedChildGraphLayer_ExcludeVetoTopLevelDrop(t *testing.T) {
+	ns := "ns1"
+	sourceGVK := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoThing"}
+	sourceGVR := schema.GroupVersionResource{Group: "demo.example.com", Version: "v1", Resource: "demothings"}
+	snapshotGVK := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoThingSnapshot"}
+	snapshotGVR := schema.GroupVersionResource{Group: "demo.example.com", Version: "v1", Resource: "demothingsnapshots"}
+
+	mk := func(name string, vetoed bool) *unstructured.Unstructured {
+		o := &unstructured.Unstructured{}
+		o.SetGroupVersionKind(sourceGVK)
+		o.SetNamespace(ns)
+		o.SetName(name)
+		o.SetUID(types.UID(name + "-uid"))
+		if vetoed {
+			o.SetLabels(map[string]string{storagev1alpha1.ExcludeLabelKey: ""})
+		}
+		return o
+	}
+
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme,
+		map[schema.GroupVersionResource]string{sourceGVR: sourceGVK.Kind + "List"},
+		mk("thing-keep", false),
+		mk("thing-vetoed", true),
+	)
+
+	r := &SnapshotReconciler{Dynamic: dyn}
+	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: ns, UID: "root-uid"}}
+	mapping := csdregistry.EligibleResourceSnapshotMapping{
+		SourceGVR:   sourceGVR,
+		SourceGVK:   sourceGVK,
+		SnapshotGVR: snapshotGVR,
+		SnapshotGVK: snapshotGVK,
+	}
+
+	// The production selector folds the exclude veto in (DoesNotExist), so a veto-labeled object is dropped
+	// from expansion by the same selector that records it as a top-level drop.
+	selector, err := nsSnap.ResolveResourceSelector()
+	if err != nil {
+		t.Fatalf("ResolveResourceSelector: %v", err)
+	}
+
+	cov := &recordingCoverage{}
+	refs, excluded, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov, selector)
+	if err != nil {
+		t.Fatalf("ensureParentOwnedChildGraphLayer: %v", err)
+	}
+
+	// The unlabeled object passes the selector and reaches coverage (recorded, then short-circuited as
+	// covered). The vetoed object never reaches coverage.
+	if len(cov.checked) != 1 || cov.checked[0] != "thing-keep" {
+		t.Fatalf("coverage reached %v, want only [thing-keep]", cov.checked)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("expanded refs = %v, want none (coverage short-circuits)", refs)
+	}
+	if len(excluded) != 1 {
+		t.Fatalf("excluded = %v, want exactly one top-level drop", excluded)
+	}
+	got := excluded[0]
+	if got.Kind != sourceGVK.Kind || got.Name != "thing-vetoed" || got.APIVersion != sourceGVK.GroupVersion().String() {
+		t.Fatalf("excluded[0] = %+v, want DemoThing/thing-vetoed", got)
+	}
 }

@@ -131,6 +131,42 @@ spec:
                     description: 'DomainSpecificController holds the domain-written
                       planning refs and lifecycle. Single writer: domain (SDK).'
                     properties:
+                      excludedRefs:
+                        description: |-
+                          ExcludedRefs are the domain's DIRECT exclusion vetoes at this node: the source objects it dropped
+                          (via the exclude label) while enumerating its children. It is the transient INPUT the core reads and
+                          folds into the durable SnapshotContent.status.excludedRefs aggregate; the domain never writes the
+                          aggregate or the top-level mirror (both are core-owned).
+
+                          Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
+                          distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
+                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import/StaticBind
+                          (no live capture happens).
+                        items:
+                          description: |-
+                            ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                            status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                            the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                            state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                            snapshot. Namespace is implicit (the snapshot's namespace).
+
+                            Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                            excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                            created for it, so it cannot be descended into to recover a per-node view later.
+                          properties:
+                            apiVersion:
+                              type: string
+                            kind:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - apiVersion
+                          - kind
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
                       manifestCaptureRequestName:
                         description: ManifestCaptureRequestName is the temporary MCR
                           owned by the domain node while own-scope capture runs.
@@ -247,6 +283,36 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              excludedRefs:
+                description: |-
+                  ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate
+                  (source objects vetoed out of this VM snapshot's subtree — e.g. a disk labeled with the exclude
+                  veto). Written ONLY by the core, exactly as it mirrors Ready.
+                items:
+                  description: |-
+                    ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                    status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                    the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                    state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                    snapshot. Namespace is implicit (the snapshot's namespace).
+
+                    Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                    excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                    created for it, so it cannot be descended into to recover a per-node view later.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               snapshotSource:
                 description: |-
                   SnapshotSource is the full reference to the captured live source object (top-level, written by the

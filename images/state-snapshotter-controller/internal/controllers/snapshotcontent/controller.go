@@ -466,6 +466,23 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		changed = true
 	}
 
+	// Publish the durable excludedRefs aggregate (this node's own vetoes UNION every descendant's
+	// aggregate). SnapshotContent is the single writer and the cluster-scoped source of truth; the
+	// namespaced Snapshot/domain CRs only mirror it. The set is +listType=atomic, so the MergeFrom below
+	// replaces it wholesale (matching set semantics).
+	newExcluded, err := r.computeExcludedRefsAggregate(ctx, obj)
+	if err != nil {
+		return false, err
+	}
+	if !excludedObjectRefsEqualIgnoreOrder(parseExcludedRefs(obj, "status", "excludedRefs"), newExcluded) {
+		if len(newExcluded) == 0 {
+			delete(statusMap, "excludedRefs")
+		} else {
+			statusMap["excludedRefs"] = excludedRefsToUnstructured(newExcluded)
+		}
+		changed = true
+	}
+
 	if !changed {
 		return ready, nil
 	}

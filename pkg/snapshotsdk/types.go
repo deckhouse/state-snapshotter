@@ -36,6 +36,18 @@ type SourceRef struct {
 // contract type, re-exported so domain controllers and adapters reference a single definition.
 type SnapshotChildRef = storagev1alpha1.SnapshotChildRef
 
+// ExcludedObjectRef identifies one source object excluded from a snapshot — the shadow of SnapshotChildRef,
+// but pointing at the vetoed SOURCE object rather than at a child snapshot. Re-exported api type so domain
+// controllers and adapters reference a single definition.
+type ExcludedObjectRef = storagev1alpha1.ExcludedObjectRef
+
+// ExcludeLabelKey is the absolute snapshot veto label (re-exported from the api module — one source of
+// truth). Any object carrying this key (value ignored) is excluded from every snapshot, at every level of
+// the tree, independently of spec.resourceSelector. Domain enumerators MUST partition their candidate
+// source objects with PartitionExcluded: build children from kept, record excluded into
+// DomainCaptureState.ExcludedRefs (published to status.captureState.domainSpecificController.excludedRefs).
+const ExcludeLabelKey = storagev1alpha1.ExcludeLabelKey
+
 // Target is the single PVC capture target of a snapshot's data leg. The domain resolves its own PVC
 // (including readiness/ArtifactMissing decisions) and hands the SDK the result; the SDK turns it into the
 // storage-foundation VolumeCaptureRequest.
@@ -71,6 +83,13 @@ type DomainCaptureState struct {
 	ManifestCaptureRequestName string
 	VolumeCaptureRequestName   string
 	ChildrenSnapshotRefs       []SnapshotChildRef
+	// ExcludedRefs are this node's DIRECT exclusion vetoes: the source objects the domain dropped (via the
+	// exclude label) while enumerating its children. The SDK publishes them into
+	// status.captureState.domainSpecificController.excludedRefs as the INPUT the core folds into the durable
+	// SnapshotContent aggregate. The domain provides them through EnsureChildren (alongside the kept
+	// children); the SDK/adapter guarantees a non-nil slice on the wire (empty [] = "nothing excluded",
+	// which a leaf always writes). The domain never authors the durable aggregate or the top-level mirror.
+	ExcludedRefs []ExcludedObjectRef
 	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
 	Phase Phase
 	// Reason/Message carry the failure detail when Phase=Failed.
@@ -90,7 +109,9 @@ type CoreCaptureState struct {
 }
 
 // manifestCaptured reports whether the manifest leg is captured (nil latch => not captured).
-func (c CoreCaptureState) manifestCaptured() bool { return c.ManifestCaptured != nil && *c.ManifestCaptured }
+func (c CoreCaptureState) manifestCaptured() bool {
+	return c.ManifestCaptured != nil && *c.ManifestCaptured
+}
 
 // dataCaptured reports whether the data leg is captured (nil latch => not captured).
 func (c CoreCaptureState) dataCaptured() bool { return c.DataCaptured != nil && *c.DataCaptured }

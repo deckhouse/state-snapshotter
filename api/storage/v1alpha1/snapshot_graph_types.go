@@ -39,6 +39,23 @@ type SnapshotContentChildRef struct {
 	Name string `json:"name"`
 }
 
+// ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+// status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+// the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+// state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+// snapshot. Namespace is implicit (the snapshot's namespace).
+//
+// Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+// excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+// created for it, so it cannot be descended into to recover a per-node view later.
+//
+// +k8s:deepcopy-gen=true
+type ExcludedObjectRef struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+}
+
 // SnapshotSourceRef is the single source-of-truth identifying the namespace-local source object that a
 // snapshot captures. It lives on the snapshot spec (spec.sourceRef) and is the generic contract the
 // core planner reads to deduplicate coverage across the run tree. Namespace is implicit: the source

@@ -68,6 +68,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	}
 
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
+	var topLevelDrops []storagev1alpha1.ExcludedObjectRef
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
 	for layerStart := 0; layerStart < len(mappings); {
 		// The CSD mapping field is still named .Priority in wave3 (renamed to .Weight atomically with the
@@ -79,7 +80,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
+			refs, excluded, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
@@ -90,6 +91,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 				return false, false, err
 			}
 			layerRefs = append(layerRefs, refs...)
+			topLevelDrops = append(topLevelDrops, excluded...)
 		}
 		desiredRefs = append(desiredRefs, layerRefs...)
 		ready, terminalMessage, pending, err := r.weightLayerCaptureReady(ctx, nsSnap.Namespace, layerRefs)
@@ -120,8 +122,58 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		return false, false, err
 	}
 
+	// Publish the root's OWN top-level exclude-veto drops (wave4A). Recorded on the root Snapshot's
+	// captureState.domainSpecificController.excludedRefs — the uniform "own direct exclusions" input the
+	// SnapshotContent aggregator reads for every node (domain CRs get theirs from the domain SDK; the root
+	// gets its top-level drops from here). Monotonic and only published once the full graph is enumerated.
+	dropsChanged, err := r.publishSnapshotTopLevelExcludedRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, topLevelDrops)
+	if err != nil {
+		return false, false, err
+	}
+
 	_ = content
-	return statusChanged, true, nil
+	return statusChanged || dropsChanged, true, nil
+}
+
+// publishSnapshotTopLevelExcludedRefs records the root Snapshot's own top-level exclude-veto drops into
+// status.captureState.domainSpecificController.excludedRefs. This is the root's "own direct exclusions"
+// input to the durable SnapshotContent.status.excludedRefs aggregate (the SnapshotContent controller reads
+// this field for every owning snapshot uniformly). The set is monotonic: an object vetoed out of an
+// immutable snapshot stays vetoed, so a partial pass (an early-returning higher weight layer) never
+// subtracts a previously-recorded drop.
+func (r *SnapshotReconciler) publishSnapshotTopLevelExcludedRefs(
+	ctx context.Context,
+	parent types.NamespacedName,
+	drops []storagev1alpha1.ExcludedObjectRef,
+) (bool, error) {
+	if len(drops) == 0 {
+		return false, nil
+	}
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.Snapshot{}
+		if err := r.Client.Get(ctx, parent, cur); err != nil {
+			return err
+		}
+		var existing []storagev1alpha1.ExcludedObjectRef
+		if cs := cur.Status.CaptureState; cs != nil && cs.DomainSpecificController != nil {
+			existing = cs.DomainSpecificController.ExcludedRefs
+		}
+		merged := unionExcludedObjectRefs(existing, drops)
+		if excludedObjectRefsEqualIgnoreOrder(existing, merged) {
+			return nil
+		}
+		if cur.Status.CaptureState == nil {
+			cur.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{}
+		}
+		if cur.Status.CaptureState.DomainSpecificController == nil {
+			cur.Status.CaptureState.DomainSpecificController = &storagev1alpha1.DomainSpecificControllerCaptureState{}
+		}
+		cur.Status.CaptureState.DomainSpecificController.ExcludedRefs = merged
+		changed = true
+		return r.Client.Status().Update(ctx, cur)
+	})
+	return changed, err
 }
 
 func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
@@ -130,8 +182,9 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
 	selector labels.Selector,
-) ([]storagev1alpha1.SnapshotChildRef, error) {
+) ([]storagev1alpha1.SnapshotChildRef, []storagev1alpha1.ExcludedObjectRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
+	var excluded []storagev1alpha1.ExcludedObjectRef
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(mapping.SourceGVK)
 	list.SetKind(mapping.SourceGVK.Kind + "List")
@@ -139,14 +192,14 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	if err != nil {
 		// NotFound: the mapped source kind is not (yet) served by the API; legitimately empty for now.
 		if errors.IsNotFound(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
 		// Forbidden is RBAC-driven (granted externally via CSD AccessGranted). Treating it as "no objects"
 		// would silently drop coverage, so degrade the graph instead of returning empty (fail-closed).
 		if errors.IsForbidden(err) {
-			return nil, &sourceListForbiddenError{msg: fmt.Sprintf("list source %s: %v", mapping.SourceGVK.String(), err)}
+			return nil, nil, &sourceListForbiddenError{msg: fmt.Sprintf("list source %s: %v", mapping.SourceGVK.String(), err)}
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	list.Items = resources.Items
 	sort.Slice(list.Items, func(i, j int) bool {
@@ -161,6 +214,18 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	})
 	for i := range list.Items {
 		resource := &list.Items[i]
+		// Absolute exclude veto (wave4A): a top-level source object carrying the exclude label is dropped
+		// from EVERY leg (it also fails selector.Matches below, since ResolveResourceSelector folds the
+		// veto in) and is recorded as an explicit top-level drop. This is the root node's OWN direct
+		// exclusion, published into status.captureState.domainSpecificController.excludedRefs so the
+		// SnapshotContent aggregator folds it into the durable excludedRefs aggregate.
+		if _, vetoed := resource.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {
+			excluded = append(excluded, storagev1alpha1.ExcludedObjectRef{
+				APIVersion: mapping.SourceGVK.GroupVersion().String(),
+				Kind:       mapping.SourceGVK.Kind,
+				Name:       resource.GetName(),
+			})
+		}
 		// User-provided resourceSelector narrows expansion: a domain source object whose labels do not match
 		// is not expanded into a child snapshot (nil selector = expand all). The same object is then dropped
 		// from the root manifest leg by the same selector, keeping the two legs consistent.
@@ -169,14 +234,14 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		}
 		covered, err := coverage.IsCovered(ctx, resource)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if covered {
 			continue
 		}
 		childName := snapshotChildSnapshotName(nsSnap.Name, mapping.SourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName(), string(resource.GetUID()))
 		if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ref := storagev1alpha1.SnapshotChildRef{
 			APIVersion: mapping.SnapshotGVK.GroupVersion().String(),
@@ -185,11 +250,11 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		}
 		refs = append(refs, ref)
 		if err := coverage.ObservePlannedSnapshot(ctx, resource, ref, nil); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	sortSnapshotChildRefs(refs)
-	return refs, nil
+	return refs, excluded, nil
 }
 
 func snapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName, resourceUID string) string {

@@ -40,7 +40,14 @@ type Planning interface {
 	// create/adopt + publication only and never deletes children (SDK v1 is delete-free). A nil or empty
 	// desired set publishes empty refs: a child no longer desired becomes detached from the snapshot graph
 	// but is left in the cluster for ownerRef GC / a future cleanup component to reclaim.
-	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error
+	//
+	// excluded is the domain's DIRECT exclusion vetoes at this node — the source objects it dropped (via
+	// the exclude label) while enumerating children, obtained from PartitionExcluded. It is published in
+	// the same status patch as the kept children, into
+	// status.captureState.domainSpecificController.excludedRefs (the INPUT the core aggregates). The SDK
+	// does NOT compute the veto (it sees built child specs, not source labels): the domain partitions and
+	// hands both halves here. Pass nil when nothing is excluded; the wire value is normalized to [].
+	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error
 
 	// EnsureVolumeCapture ensures the data-leg capture request for the given PVC targets and publishes its
 	// name. An empty target set is a manifest-only snapshot (no request, no published name). The operation
@@ -116,7 +123,7 @@ type sdk struct {
 	provider  VolumeCaptureProvider
 }
 
-func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error {
+func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
 	obj := t.Object()
 	owner, err := s.ownerRef(t)
 	if err != nil {
@@ -130,12 +137,15 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 	if err != nil {
 		return err
 	}
+	newExcluded := normalizeExcludedRefs(excluded)
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
-		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, newRefs) {
+		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, newRefs) &&
+			excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded) {
 			return false
 		}
 		st.ChildrenSnapshotRefs = newRefs
+		st.ExcludedRefs = newExcluded
 		t.SetDomainCaptureState(st)
 		return true
 	})

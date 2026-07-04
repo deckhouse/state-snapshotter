@@ -684,6 +684,13 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonDeleting, fmt.Sprintf("SnapshotContent %s is being deleted", contentName))
 	}
 
+	// Mirror the bound content's durable excludedRefs aggregate onto this domain CR's top-level
+	// status.excludedRefs (user-facing audit). Best-effort: a mirror miss is retried on the next
+	// reconcile and never blocks Ready derivation below.
+	if err := r.mirrorExcludedRefsFromContent(ctx, obj, contentObj); err != nil {
+		logger.V(1).Info("Failed to mirror SnapshotContent excludedRefs; will retry", "error", err.Error())
+	}
+
 	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
 	if err != nil {
 		return fmt.Errorf("failed to extract SnapshotContentLike: %w", err)

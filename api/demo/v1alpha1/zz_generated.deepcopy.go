@@ -218,6 +218,11 @@ func (in *DemoVirtualDiskSnapshotStatus) DeepCopyInto(out *DemoVirtualDiskSnapsh
 		*out = make([]storagev1alpha1.SnapshotChildRef, len(*in))
 		copy(*out, *in)
 	}
+	if in.ExcludedRefs != nil {
+		in, out := &in.ExcludedRefs, &out.ExcludedRefs
+		*out = make([]storagev1alpha1.ExcludedObjectRef, len(*in))
+		copy(*out, *in)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))
@@ -462,6 +467,11 @@ func (in *DemoVirtualMachineSnapshotStatus) DeepCopyInto(out *DemoVirtualMachine
 	if in.ChildrenSnapshotRefs != nil {
 		in, out := &in.ChildrenSnapshotRefs, &out.ChildrenSnapshotRefs
 		*out = make([]storagev1alpha1.SnapshotChildRef, len(*in))
+		copy(*out, *in)
+	}
+	if in.ExcludedRefs != nil {
+		in, out := &in.ExcludedRefs, &out.ExcludedRefs
+		*out = make([]storagev1alpha1.ExcludedObjectRef, len(*in))
 		copy(*out, *in)
 	}
 }
