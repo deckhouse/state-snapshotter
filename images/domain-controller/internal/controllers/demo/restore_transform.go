@@ -31,7 +31,7 @@ import (
 // restore compiler in internal/usecase/restore stays domain-free.
 //
 // Behaviour:
-//   - A DemoVirtualDisk that owns a PVC data leg (spec.persistentVolumeClaimName) covers that PVC:
+//   - A DemoVirtualDisk that captures a PVC as data (spec.persistentVolumeClaimName) covers that PVC:
 //     the restored disk recreates it, so the compiler must not emit a standalone PVC for it.
 //   - A DemoVirtualDisk captured under a DemoVirtualDiskSnapshot node is rewritten to restore from
 //     that snapshot via spec.dataSource (mirroring PVC.spec.dataSourceRef -> VolumeSnapshot).

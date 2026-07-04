@@ -16,14 +16,13 @@ limitations under the License.
 
 package main
 
+// Front-proxy CA is read directly by controller from extension-apiserver-authentication ConfigMap.
+// No hook needed - controller handles mTLS client certificate verification internally.
 import (
 	"github.com/deckhouse/module-sdk/pkg/app"
-
 	_ "github.com/deckhouse/state-snapshotter/hooks/go/020-apiserver-certs"
 	_ "github.com/deckhouse/state-snapshotter/hooks/go/030-domain-rbac"
 	_ "github.com/deckhouse/state-snapshotter/hooks/go/040-namespace-capture-rbac"
-	// Front-proxy CA is read directly by controller from extension-apiserver-authentication ConfigMap
-	// No hook needed - controller handles mTLS client certificate verification internally
 )
 
 func main() {

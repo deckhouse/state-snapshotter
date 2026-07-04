@@ -238,7 +238,7 @@ func (r *DemoVirtualDiskReconciler) reconcileRestoredDisk(ctx context.Context, n
 func (r *DemoVirtualDiskReconciler) publishDiskReadyFromPVC(
 	ctx context.Context,
 	nn types.NamespacedName,
-	disk *demov1alpha1.DemoVirtualDisk,
+	_ *demov1alpha1.DemoVirtualDisk,
 	pvc *corev1.PersistentVolumeClaim,
 	pvcName string,
 ) (ctrl.Result, error) {

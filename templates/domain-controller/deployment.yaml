@@ -128,7 +128,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: DEMO_POD_IMAGE
-              value: {{ .Values.stateSnapshotter.demoPodImage | default "busybox:1.36" | quote }}
+              value: "busybox:1.36"
       volumes:
         - name: tls
           secret:

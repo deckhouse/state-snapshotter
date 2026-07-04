@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package api
+package api //nolint:revive // package name matches internal/api directory
 
 import (
 	"bytes"
@@ -53,7 +53,7 @@ func vsConnectorScheme() *runtime.Scheme {
 // vsConnectorVolumeSnapshot builds an extended CSI VolumeSnapshot. importMode marks it as an import-mode
 // target via the unified empty marker spec.source.import: {}; ready sets status.readyToUse for the
 // restore path.
-func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMode, ready bool) *unstructured.Unstructured {
+func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMode, ready bool) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
 	status := map[string]interface{}{}
 	if boundVSC != "" {
 		status["boundVolumeSnapshotContentName"] = boundVSC
