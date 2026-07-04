@@ -47,3 +47,21 @@ Chronological log of notable refactors. Newest wave at the bottom.
 - **Update** production recycle-bin retention default: `DefaultSnapshotRootOKTTL` = 30 days (720h) instead of the former `1m` DEBUG value. This is how long the durable cluster-scoped `SnapshotContent` tree survives after its namespaced `Snapshot` is deleted (the restore window). Rewrote `openapi/config-values.yaml` + `doc-ru-config-values.yaml` `snapshotRootOkTtl` descriptions accordingly; added `pkg/config` test (default 720h + env override/fallback).
 - **Update** domain snapshot reconcilers (demo virtualdisk/virtualmachine) to skip capture when `IsStaticBind()`, mirroring the existing `IsImportMode()` guard: a StaticBind domain snapshot binds to a pre-provisioned surviving `SnapshotContent` and never runs live capture (no source lookup / MCR / children planning). Added a no-op reconcile test.
 - **Deferred** (blocked on an API-contract decision — `spec.snapshotRef` mutability for restore: relaxed-immutability CEL vs. dedicated rebind subresource): generic domain `static_bind.go` core handling, tree-restore orchestration, d8-cli restore, and e2e.
+
+## Wave 4C — Unified UID name scheme (in progress: api/names + demo)
+
+- **Add** `api/names` — the single source of truth for the object-name scheme, depending on stdlib +
+  apimachinery only (no controller-runtime/SDK) so both the core and the SDK can share one definition.
+  `h8(s)=hex(sha256(s))[:8]`, `h16(s)=…[:16]`; generators `ChildSnapshotName(parentUID,sourceUID)` =
+  `nss-snap-<h8>-<h16>`, `ContentName`/`ManifestCaptureRequestName`/`ManifestCheckpointName`/`ChunkName`/
+  `OrphanVolumeSnapshotName`/`VolumeCaptureRequestName`/`ObjectKeeperName`. Names are opaque; connectivity
+  stays on refs/ownerRefs. Unit tests cover hash widths, determinism, DNS-1123, and child-name uniqueness
+  (different source, same source under two parents, per-PVC orphan MCR).
+- **Add** SDK re-export `snapshotsdk.ChildSnapshotName` so domain controllers name sub-children with the
+  same scheme via one definition.
+- **Refactor** demo VM planner: removed `demoVirtualMachineDiskSnapshotName` (name-based `demovmdisk-…`);
+  child disk snapshots are now named `snapshotsdk.ChildSnapshotName(vmSnapshotUID, diskUID)`. Updated
+  `source_ref_test.go` accordingly.
+- **In progress / deferred**: core generator unification (content/MCR/MCP/chunk/VCR/OK/orphan-VS/root-child
+  + append-only `PublishSnapshotContentChildrenRefs`), CSD `priority→weight` / `dataBacked→requiresDataArtifact`,
+  MCP `manifestCaptureRequestRef` drop, and d8-cli (`ExportedSnapshot` rename, clusterUUID, import-replay).

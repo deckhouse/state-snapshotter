@@ -34,6 +34,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
 // Demo reconcilers are content-free (commit 2 content-ownership, D1/D3): they validate the source, plan
@@ -357,7 +358,7 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 		t.Fatalf("unexpected VM MCR targets: %#v", mcr.Spec.Targets)
 	}
 
-	childName := demoVirtualMachineDiskSnapshotName("ns1", "snap", "disk-owned")
+	childName := snapshotsdk.ChildSnapshotName(types.UID("snap-uid"), types.UID("disk-owned-uid"))
 	child := &demov1alpha1.DemoVirtualDiskSnapshot{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "ns1", Name: childName}, child); err != nil {
 		t.Fatalf("expected owned disk child snapshot %q: %v", childName, err)
@@ -391,7 +392,7 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 
 func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *testing.T) {
 	vmUID := types.UID("vm-uid")
-	childName := demoVirtualMachineDiskSnapshotName("ns1", "snap", "disk-owned")
+	childName := snapshotsdk.ChildSnapshotName(types.UID("snap-uid"), types.UID("disk-owned-uid"))
 	conflictingOwner := metav1.OwnerReference{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
 		Kind:       controllercommon.KindDemoVirtualMachineSnapshot,

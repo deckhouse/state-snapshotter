@@ -18,8 +18,6 @@ package demo
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 
@@ -70,11 +68,6 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 
 func (r *DemoVirtualMachineSnapshotReconciler) capture() snapshotsdk.CaptureSDK {
 	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client))
-}
-
-func demoVirtualMachineDiskSnapshotName(namespace, vmSnapshotName, sourceDiskName string) string {
-	sum := sha256.Sum256([]byte("vm-disk:" + namespace + "/" + vmSnapshotName + "/" + sourceDiskName))
-	return "demovmdisk-" + hex.EncodeToString(sum[:8])
 }
 
 func mapDemoDiskSnapshotToParentVM(_ context.Context, o client.Object) []reconcile.Request {
@@ -270,7 +263,9 @@ func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 	children := make([]snapshotsdk.ChildSpec, 0, len(kept))
 	for _, o := range kept {
 		disk := o.(*demov1alpha1.DemoVirtualDisk)
-		childName := demoVirtualMachineDiskSnapshotName(vm.Namespace, vm.Name, disk.Name)
+		// Name the sub-child from UIDs (wave4C unified scheme): the parent snapshot's UID + the source
+		// disk's UID. Connectivity is carried by the ownerRef/childRefs the SDK writes, not by the name.
+		childName := snapshotsdk.ChildSnapshotName(vm.UID, disk.UID)
 		children = append(children, snapshotsdk.ChildSpec{
 			Object: &demov1alpha1.DemoVirtualDiskSnapshot{
 				ObjectMeta: metav1.ObjectMeta{
