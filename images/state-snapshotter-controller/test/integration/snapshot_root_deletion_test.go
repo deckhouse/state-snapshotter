@@ -21,8 +21,6 @@ package integration
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -191,7 +189,11 @@ var _ = Describe("Integration: Snapshot deletion semantics", func() {
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
-		contentName := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(snap.UID), "-", ""))
+		contentName := snapshot.GenerateSnapshotContentName(snap.Name, string(snap.UID))
+		// Pre-create the durable content the root reconciler will adopt (its name is derived from the
+		// Snapshot UID). Its snapshotRef MUST point back at snap-del so the aggregator's declared-child
+		// resolution finds a real owning Snapshot and the subtree/residual Ready gates latch, exactly as
+		// for a controller-created root content; a stale ref would pin Ready=False forever.
 		Expect(k8sClient.Create(ctx, &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       contentName,
@@ -199,7 +201,13 @@ var _ = Describe("Integration: Snapshot deletion semantics", func() {
 			},
 			Spec: storagev1alpha1.SnapshotContentSpec{
 				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyDelete,
-				SnapshotRef:    integrationContentSnapshotRef(),
+				SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "Snapshot",
+					Namespace:  nsName,
+					Name:       snap.Name,
+					UID:        snap.UID,
+				},
 			},
 		})).To(Succeed())
 

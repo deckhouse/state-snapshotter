@@ -21,8 +21,6 @@ package integration
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -79,7 +77,7 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 
-			wantContent := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(fresh.UID), "-", ""))
+			wantContent := snapshot.GenerateSnapshotContentName(fresh.Name, string(fresh.UID))
 			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(wantContent))
 
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)

@@ -89,12 +89,13 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		importSpecs()                 // import_gc_test.go: export -> import round-trip
 		gcSpecs()                     // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
 	})
-	resourceSelectorSpecs() // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
-	volumeDataSpecs()       // volumedata_test.go: full volume-data flow (phase 3, env-gated)
-	readyFlapSpecs()        // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
-	getLoadSpecs()          // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
-	backupDownloadSpecs()   // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
-	importVariantsSpecs()   // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
+	resourceSelectorSpecs()   // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
+	volumeDataSpecs()         // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	childBridgeFailureSpecs() // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (opt-in: E2E_CHILD_BRIDGE_FAILURE)
+	readyFlapSpecs()          // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
+	getLoadSpecs()            // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
+	backupDownloadSpecs()     // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
+	importVariantsSpecs()     // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
 })
 
 func prepareSuite() {

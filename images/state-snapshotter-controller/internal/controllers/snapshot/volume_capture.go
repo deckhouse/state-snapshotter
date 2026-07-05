@@ -18,6 +18,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -36,6 +37,19 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
+
+// ownedPVCTargetsFailureReason classifies a ListOwnedPVCTargetsForLogicalContent error into a terminal
+// capture Ready reason. A duplicate covered PVC UID is an invalid-plan terminal failure (the same PVC UID
+// is claimed by two descendant SnapshotContents) that must surface with the SAME reason regardless of
+// which leg observes it first: the manifest leg already maps it to "DuplicateCoveredPVCUID" (capture.go),
+// so the volume leg must not mask it as a generic "VolumeCaptureTargetsFailed" — otherwise the root
+// Ready reason races between the two legs and is non-deterministic.
+func ownedPVCTargetsFailureReason(err error) (reason, message string) {
+	if errors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
+		return "DuplicateCoveredPVCUID", err.Error()
+	}
+	return "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err)
+}
 
 // ensureVolumeCaptureLeg creates root residual data artifacts.
 // For orphan/uncovered PVCs the namespace root uses standard CSI VolumeSnapshots (ADR 2026-06-09);
@@ -61,7 +75,8 @@ func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 		}
 		targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, content)
 		if err != nil {
-			_, ferr := r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
+			reason, msg := ownedPVCTargetsFailureReason(err)
+			_, ferr := r.failCapture(ctx, nsSnap, content, reason, msg)
 			return ferr
 		}
 		return r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, content, targets)
@@ -69,7 +84,8 @@ func (r *SnapshotReconciler) ensureVolumeCaptureLeg(
 
 	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, content)
 	if err != nil {
-		_, ferr := r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
+		reason, msg := ownedPVCTargetsFailureReason(err)
+		_, ferr := r.failCapture(ctx, nsSnap, content, reason, msg)
 		return ferr
 	}
 	if len(targets) == 0 {
@@ -344,4 +360,3 @@ func (r *SnapshotReconciler) deleteSnapshotVolumeCaptureRequest(ctx context.Cont
 	}
 	return nil
 }
-

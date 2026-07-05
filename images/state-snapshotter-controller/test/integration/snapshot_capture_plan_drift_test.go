@@ -22,7 +22,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -81,7 +80,7 @@ var _ = Describe("Integration: Snapshot frozen capture plan (N2a, point-in-time)
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 		key := types.NamespacedName{Namespace: nsName, Name: snap.Name}
-		contentName = fmt.Sprintf("ns-%s", strings.ReplaceAll(string(snap.UID), "-", ""))
+		contentName = snapshot.GenerateSnapshotContentName(snap.Name, string(snap.UID))
 
 		mcrKey := client.ObjectKey{Namespace: nsName, Name: namespacemanifest.SnapshotMCRName(snap.UID)}
 		controller := true

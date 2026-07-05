@@ -166,8 +166,17 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
 
-		pvcA := pr7CreatePVC(ctx, nsName, "pvc-a")
-		dupBinding := pr7PVCDataBinding(pvcA, "vsc-dup-a")
+		// Duplicate detection keys purely on the descendant SnapshotContents' dataRef target UID. Use a
+		// synthetic PVC identity that is NOT a live namespace PVC: a real PVC would be discovered as a
+		// residual/orphan PVC and its volume capture would fail closed first (no storageClassName, and no CSI
+		// VolumeSnapshotClass chain exists in envtest), so the child would surface VolumeCaptureFailed and the
+		// root would mirror ChildrenFailed before ever reaching the duplicate guard. With no live PVC nothing
+		// residual-captures, so both child contents simply claim the same UID and the root fails closed with
+		// DuplicateCoveredPVCUID (the invariant this spec exists to prove).
+		dupPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "pvc-dup", Namespace: nsName, UID: types.UID("pr7-dup-covered-pvc-uid")},
+		}
+		dupBinding := pr7PVCDataBinding(dupPVC, "vsc-dup-a")
 
 		child1Name, child2Name := "pr7-dup-child-1", "pr7-dup-child-2"
 		for _, name := range []string{child1Name, child2Name} {
@@ -178,8 +187,14 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		}
 		child1Snap := pr7WaitSnapshotBound(ctx, types.NamespacedName{Namespace: nsName, Name: child1Name})
 		child2Snap := pr7WaitSnapshotBound(ctx, types.NamespacedName{Namespace: nsName, Name: child2Name})
-		pr7InstallReadyChildSubtreeFixture(ctx, child1Snap.Status.BoundSnapshotContentName, nsName, pvcA, []storagev1alpha1.SnapshotDataBinding{dupBinding})
-		pr7InstallReadyChildSubtreeFixture(ctx, child2Snap.Status.BoundSnapshotContentName, nsName, pvcA, []storagev1alpha1.SnapshotDataBinding{dupBinding})
+		// pvc=nil: do not install a live PVC (and no PVC manifest in the child MCP), only publish the
+		// colliding dataRef on each child content so the duplicate guard is exercised in isolation.
+		pr7InstallReadyChildSubtreeFixture(ctx, child1Snap.Status.BoundSnapshotContentName, nsName, nil, []storagev1alpha1.SnapshotDataBinding{dupBinding})
+		pr7InstallReadyChildSubtreeFixture(ctx, child2Snap.Status.BoundSnapshotContentName, nsName, nil, []storagev1alpha1.SnapshotDataBinding{dupBinding})
+		// Latch the manifest-capture wave barrier on both direct children so the root advances past
+		// ManifestCapturePending to the PVC exclude computation, where the duplicate covered-PVC-UID guard runs.
+		pr7SeedSubtreeManifestsPersisted(ctx, child1Snap.Status.BoundSnapshotContentName)
+		pr7SeedSubtreeManifestsPersisted(ctx, child2Snap.Status.BoundSnapshotContentName)
 
 		rootName := "pr7-dup-root"
 		Expect(k8sClient.Create(ctx, &storagev1alpha1.Snapshot{
@@ -199,10 +214,10 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 			g.Expect(rc).NotTo(BeNil())
 			g.Expect(rc.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(rc.Reason).To(Equal("DuplicateCoveredPVCUID"))
-			g.Expect(rc.Message).To(ContainSubstring(string(pvcA.UID)))
+			g.Expect(rc.Message).To(ContainSubstring(string(dupPVC.UID)))
 			mcr, err := pr7GetMCR(ctx, nsName, root)
 			if err == nil {
-				g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "invalid root MCR must not plan pvc-a after duplicate failure")
+				g.Expect(pr7MCRHasPVCTarget(mcr, dupPVC)).To(BeFalse(), "invalid root MCR must not plan the duplicated PVC after duplicate failure")
 			} else {
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
 			}

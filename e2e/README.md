@@ -115,6 +115,16 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `E2E_GC_TTL`: `snapshotRootOkTtl` applied for the GC spec. Defaults to `60s`.
 - `E2E_VOLUME_DATA`: when truthy (`true`/`1`/`yes`), runs phases 3-5 (full
   volume-data flow, backup download, and backup restore). Off by default (phases 1-2 only).
+- `E2E_CHILD_BRIDGE_FAILURE`: opt-in regression for the child-Snapshot terminal-failure
+  bridge (INV-FAIL-PROP). Requires `E2E_VOLUME_DATA` too. It provisions a StorageClass
+  wired to a non-existent `VolumeSnapshotClass`, captures a data-backed `DemoVirtualDisk`
+  whose volume capture then fails terminally, and asserts the root `Snapshot` flips to
+  `Ready=False/ChildrenFailed`. Off by default even under `E2E_VOLUME_DATA` because it
+  mutates cluster StorageClass wiring and must be validated on a real cluster before being
+  promoted to the standard volume-data CI. The same invariant is covered deterministically
+  by unit tests (`internal/usecase/child_snapshot_terminal_failures_test.go`); the two
+  envtest specs in `snapshot_graph_integration_test.go` are skipped because a genuine
+  terminal child volume capture cannot be synthesized under envtest.
 - `E2E_GET_LOAD`: when truthy, runs the opt-in GET-load measurement spec (REST
   GET-load delta across the capture wave, scraped from the leader controller's
   `/metrics`). Off by default even when `E2E_VOLUME_DATA` is set, because the

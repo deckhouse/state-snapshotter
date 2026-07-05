@@ -66,13 +66,27 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 
 		mcpName := "mcp-wake-" + contentName
 
-		// Publish the truth ref (status.manifestCheckpointName) on the content.
+		// Publish the truth ref (status.manifestCheckpointName) on the content and seed the two
+		// core-internal, lowest-priority Ready gates. This spec fabricates a namespace-root content
+		// (retainContentSpec's spec.snapshotRef is a core Snapshot) without a real owning Snapshot graph,
+		// so those gates cannot latch on their own and must be seeded to their satisfied (monotonic) values:
+		//   - subtreeManifestsPersisted: the recursive manifest latch. Its declared-vs-linked fail-closed
+		//     check resolves the owning Snapshot's childrenSnapshotRefs, which is absent here, so it would
+		//     otherwise pin Ready=False (SubtreeManifestCapturePending) forever.
+		//   - residualVolumeCapture.phase: the residual/orphan-PVC sweep gate, which only the snapshot
+		//     reconciler (absent here) ever latches Complete, so it would otherwise pin Ready=False
+		//     (ResidualVolumeCapturePending) forever.
+		// This spec exercises MCP-driven manifest degradation, not those gates.
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			c := &storagev1alpha1.SnapshotContent{}
 			if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, c); err != nil {
 				return err
 			}
 			c.Status.ManifestCheckpointName = mcpName
+			c.Status.SubtreeManifestsPersisted = true
+			c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
+				Phase: storagev1alpha1.ResidualVolumeCapturePhaseComplete,
+			}
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 
@@ -167,12 +181,20 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 		mcpName := "chunk-wake-" + contentName
 		chunkName := mcpName + "-0"
 
+		// Publish the manifest truth ref and seed the two lowest-priority Ready gates
+		// (subtreeManifestsPersisted + residualVolumeCapture.phase=Complete); see the companion spec above
+		// for why a namespace-root content without a real owning Snapshot graph must seed them. This spec
+		// exercises chunk-integrity degradation, not those gates.
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			c := &storagev1alpha1.SnapshotContent{}
 			if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, c); err != nil {
 				return err
 			}
 			c.Status.ManifestCheckpointName = mcpName
+			c.Status.SubtreeManifestsPersisted = true
+			c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
+				Phase: storagev1alpha1.ResidualVolumeCapturePhaseComplete,
+			}
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 

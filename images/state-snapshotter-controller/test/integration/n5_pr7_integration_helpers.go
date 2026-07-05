@@ -188,6 +188,24 @@ func pr7PatchSnapshotContent(
 	})
 }
 
+// pr7SeedSubtreeManifestsPersisted latches a child SnapshotContent's subtreeManifestsPersisted=true. This
+// is the root manifest-capture wave barrier (requireContentManifestsArchived): the root MCR/exclude set is
+// not built until every declared direct child content reports its subtree manifests persisted. The latch is
+// fail-closed and success-only (monotonic), so the live content aggregator never resets it. Fixture child
+// subtrees are fully persisted by construction, so seeding it lets the root proceed to the PVC exclude
+// computation (where the subtree covered-PVC-UID guard runs) instead of parking on ManifestCapturePending.
+func pr7SeedSubtreeManifestsPersisted(ctx context.Context, contentName string) {
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sc := &storagev1alpha1.SnapshotContent{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc); err != nil {
+			return err
+		}
+		base := sc.DeepCopy()
+		sc.Status.SubtreeManifestsPersisted = true
+		return k8sClient.Status().Patch(ctx, sc, client.MergeFrom(base))
+	})).To(Succeed())
+}
+
 func pr7InstallPendingVCR(ctx context.Context, namespace string, content *storagev1alpha1.SnapshotContent, pvc *corev1.PersistentVolumeClaim) {
 	Expect(content.UID).NotTo(BeEmpty())
 	vcr := vcctrl.NewVolumeCaptureRequestObject(

@@ -83,6 +83,23 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 			uid = string(fresh.UID)
 			g.Expect(uid).NotTo(BeEmpty())
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		// retainContentSpec's spec.snapshotRef is a core Snapshot, so every content here is a namespace-root
+		// content subject to two monotonic, lowest-priority Ready gates that only the (absent) snapshot
+		// reconciler latches: subtreeManifestsPersisted and residualVolumeCapture.phase=Complete. Seed both to
+		// their satisfied values so readiness is driven purely by the ManifestsReady/ChildrenReady legs under
+		// test; without this the gates pin Ready=False forever.
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			c := &storagev1alpha1.SnapshotContent{}
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, c); err != nil {
+				return err
+			}
+			c.Status.SubtreeManifestsPersisted = true
+			c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
+				Phase: storagev1alpha1.ResidualVolumeCapturePhaseComplete,
+			}
+			return k8sClient.Status().Update(ctx, c)
+		})).To(Succeed())
 		return name, uid
 	}
 
