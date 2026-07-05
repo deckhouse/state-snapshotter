@@ -153,11 +153,19 @@ type SnapshotStatus struct {
 	// The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
-	// CaptureState collects internal capture signals. On the namespace-root Snapshot only the
-	// core-written commonController.manifestCaptured is present (read by the RBAC hook); there is no
-	// domainSpecificController (the root has no domain writer in wave3). The root's own execution
-	// handles (root MCR + residual orphan-PVC VS/per-PVC MCR) are core-internal — tracked by
-	// ownerRef/label, deterministic name — and are NOT surfaced in the public status.
+	// SnapshotSource is the provenance of what this root Snapshot captured. On the namespace-root Snapshot
+	// it is the captured Namespace (kind=Namespace), written by the in-process namespace-domain via the SDK
+	// (PublishSnapshotSource). It is a self-contained provenance block (read by d8-cli without joining spec
+	// and a separate uid); it is NOT a restore directive — the import target namespace comes from
+	// spec/targetNamespace, not from this field.
+	// +optional
+	SnapshotSource *SnapshotSourceObjectRef `json:"snapshotSource,omitempty"`
+
+	// CaptureState collects internal capture signals. On the namespace-root Snapshot the core-written
+	// commonController.manifestCaptured is present (read by the RBAC hook); the root ALSO carries
+	// domainSpecificController, written by the in-process namespace-domain (SDK): manifestCaptureRequestName
+	// (the namespace MCR) and phase, plus the core-published excludedRefs aggregate input. There is no
+	// volumeCaptureRequestName on the root (a namespace has no data leg of its own).
 	// +optional
 	CaptureState *CaptureStateStatus `json:"captureState,omitempty"`
 

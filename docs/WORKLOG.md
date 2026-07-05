@@ -189,3 +189,20 @@ Chronological log of notable refactors. Newest wave at the bottom.
 - **Update** (w4-cross-verify) dev-image Makefiles (`images/domain-controller`,
   `images/state-snapshotter-controller`) pass `GO_VERSION` (read from `go.mod`) into the `Dockerfile-dev`
   build so the builder toolchain matches the module's required Go.
+
+## Wave 5 — Root as in-process namespace-domain on SDK (dogfooding)
+
+- **Add** (w5-api) `Snapshot.status.snapshotSource` (`*SnapshotSourceObjectRef`) on the namespace-root
+  Snapshot so the root publishes its capture provenance (kind=Namespace) the same way domain snapshots do.
+  Refreshed the `status.captureState` carve-out comment (the root now also carries
+  `domainSpecificController.manifestCaptureRequestName`/`phase`, written by the in-process namespace-domain)
+  and dropped the stale "absent on the namespace root" note on `SnapshotSourceObjectRef`. Regenerated
+  deepcopy + `crds/state-snapshotter.deckhouse.io_snapshots.yaml`. Additive; no behavior change (the writer
+  lands with the deferred namespace-domain reconciler rewrite).
+- **Verify** (w5-orphan-node / w5-registration / w5-rbac) No code change needed — confirmed: Variant A orphan
+  `VolumeSnapshot` child leaves are already emitted into `status.childrenSnapshotRefs[]`
+  (`reconcileOrphanPVCVolumeSnapshotChildLeaves`) and consumed via `IsVolumeSnapshotVisibilityLeaf`; the
+  built-in `Snapshot↔SnapshotContent` pair resolves without a CSD (`DefaultGraphRegistryBuiltInPairs`) and
+  orphan-VS child content bypasses CSD via `EnsureVolumeChildContent`; the `040-namespace-capture-rbac` hook
+  keys only on `commonController.manifestCaptured` (unaffected by folding content creation / adding
+  `domainSpecificController` on the root).

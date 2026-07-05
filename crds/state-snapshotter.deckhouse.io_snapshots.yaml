@@ -161,11 +161,11 @@ spec:
                 type: string
               captureState:
                 description: |-
-                  CaptureState collects internal capture signals. On the namespace-root Snapshot only the
-                  core-written commonController.manifestCaptured is present (read by the RBAC hook); there is no
-                  domainSpecificController (the root has no domain writer in wave3). The root's own execution
-                  handles (root MCR + residual orphan-PVC VS/per-PVC MCR) are core-internal — tracked by
-                  ownerRef/label, deterministic name — and are NOT surfaced in the public status.
+                  CaptureState collects internal capture signals. On the namespace-root Snapshot the core-written
+                  commonController.manifestCaptured is present (read by the RBAC hook); the root ALSO carries
+                  domainSpecificController, written by the in-process namespace-domain (SDK): manifestCaptureRequestName
+                  (the namespace MCR) and phase, plus the core-published excludedRefs aggregate input. There is no
+                  volumeCaptureRequestName on the root (a namespace has no data leg of its own).
                 properties:
                   commonController:
                     description: 'CommonController holds the core-written capture-leg
@@ -367,6 +367,36 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              snapshotSource:
+                description: |-
+                  SnapshotSource is the provenance of what this root Snapshot captured. On the namespace-root Snapshot
+                  it is the captured Namespace (kind=Namespace), written by the in-process namespace-domain via the SDK
+                  (PublishSnapshotSource). It is a self-contained provenance block (read by d8-cli without joining spec
+                  and a separate uid); it is NOT a restore directive — the import target namespace comes from
+                  spec/targetNamespace, not from this field.
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the source object (namespaced sources
+                      only).
+                    type: string
+                  uid:
+                    description: UID of the captured live source object (best-effort;
+                      used by d8-cli for import-mode recreation).
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
             type: object
         type: object
     served: true

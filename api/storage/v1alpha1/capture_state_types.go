@@ -118,8 +118,8 @@ type DomainSpecificControllerCaptureState struct {
 // SnapshotSourceObjectRef is the full reference to the live source object a snapshot captured, carried
 // on top-level status.snapshotSource. It is written by the domain controller (PublishSnapshotSource) and
 // is self-contained for import-mode recreation (d8-cli reads it as a single block, without joining
-// spec.sourceRef and a separate uid). Absent on the namespace-root Snapshot (a namespace is captured,
-// not a single object).
+// spec.sourceRef and a separate uid). On the namespace-root Snapshot it references the captured Namespace
+// (kind=Namespace), written by the in-process namespace-domain.
 // +k8s:deepcopy-gen=true
 type SnapshotSourceObjectRef struct {
 	// +kubebuilder:validation:MinLength=1
