@@ -41,7 +41,7 @@ clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (sna
 	if [ -n "$$ns" ]; then \
 		for n in $$ns; do \
 			echo "  namespace $$n:"; \
-			kubectl -n "$$n" delete snapshots.storage.deckhouse.io --all --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) || true; \
+			kubectl -n "$$n" delete snapshots.state-snapshotter.deckhouse.io --all --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) || true; \
 		done; \
 	else echo "  none found"; fi
 	@echo "==> Deleting namespaces with prefix 'snap-e2e' (no wait)..."
