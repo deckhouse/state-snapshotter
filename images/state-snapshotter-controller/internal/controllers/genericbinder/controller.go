@@ -446,7 +446,14 @@ func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
 	if err != nil {
 		return false, "", "", err
 	}
-	if mcrName != "" {
+	// Only chase the MCR while the manifest leg is still in flight. Once commonController.manifestCaptured
+	// is latched, the binder has already published the checkpoint onto the bound SnapshotContent and then
+	// intentionally deleted the MCR (ensureDomainContentLinks). The domain-owned manifestCaptureRequestName
+	// is never cleared, so it keeps pointing at the now-absent MCR: treating that NotFound as requeue=true
+	// would return at Step 4 before the Step 5 Ready mirror on every subsequent reconcile, wedging the
+	// snapshot (and its parent) at Ready=False/ContentMissing whenever the content's Ready=True mirror did
+	// not already land in the narrow window between checkpoint archive and MCR deletion.
+	if mcrName != "" && !commonControllerLegCaptured(obj, "manifestCaptured") {
 		mcr := &ssv1alpha1.ManifestCaptureRequest{}
 		if getErr := r.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: mcrName}, mcr); getErr != nil {
 			if errors.IsNotFound(getErr) {

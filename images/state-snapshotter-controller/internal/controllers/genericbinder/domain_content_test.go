@@ -32,6 +32,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
@@ -65,8 +66,13 @@ func domainTestScheme(t *testing.T) *runtime.Scheme {
 	if err := demov1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add demo scheme: %v", err)
 	}
+	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add ss scheme: %v", err)
+	}
 	return scheme
 }
+
+var demoVMSnapshotGVK = demov1alpha1.SchemeGroupVersion.WithKind("DemoVirtualMachineSnapshot")
 
 func domainTestPVC() *corev1.PersistentVolumeClaim {
 	sc := "sc-a"
@@ -326,5 +332,52 @@ func TestEnsureDomainContentLinks_DataLegFailedIsTerminal(t *testing.T) {
 	}
 	if !domainTestVCRExists(t, cl) {
 		t.Fatalf("failed VCR must not be deleted (operator needs to see it)")
+	}
+}
+
+// Regression: once the manifest leg is captured (commonController.manifestCaptured=true), the binder has
+// already published the checkpoint onto the content and intentionally deleted the MCR. The domain-owned
+// manifestCaptureRequestName still points at the now-absent MCR, so a NotFound MCR lookup MUST NOT set
+// requeue=true — otherwise ensureSnapshotContentLinks returns before the Step 5 Ready mirror on every
+// reconcile and the (manifest-only) snapshot wedges at Ready=False/ContentMissing while its bound content
+// is already Ready=True, cascading the parent into ChildrenPending forever.
+func TestEnsureSnapshotContentLinks_ManifestCapturedMCRDeletedDoesNotRequeue(t *testing.T) {
+	ctx := context.Background()
+	scheme := domainTestScheme(t)
+
+	// Manifest-only demo VM snapshot at phase>=Planned with the manifest leg already latched captured and
+	// its MCR gone (deleted by the binder after the durable checkpoint handoff). No children, no data leg.
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(demoVMSnapshotGVK)
+	obj.SetNamespace(domainTestNS)
+	obj.SetName("vm-snap")
+	obj.SetUID("vm-snap-uid")
+	if err := unstructured.SetNestedField(obj.Object, "Planned", "status", "captureState", "domainSpecificController", "phase"); err != nil {
+		t.Fatalf("set phase: %v", err)
+	}
+	if err := unstructured.SetNestedField(obj.Object, "nss-mcr-gone", "status", "captureState", "domainSpecificController", "manifestCaptureRequestName"); err != nil {
+		t.Fatalf("set mcr name: %v", err)
+	}
+	if err := unstructured.SetNestedField(obj.Object, true, "status", "captureState", "commonController", "manifestCaptured"); err != nil {
+		t.Fatalf("set manifestCaptured: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&demov1alpha1.DemoVirtualMachineSnapshot{}, &storagev1alpha1.SnapshotContent{}).
+		WithObjects(domainTestSnapshotContent(), obj).
+		Build()
+	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
+	r.MarkDomainCaptureKind(demoVMSnapshotGVK)
+
+	requeue, treason, tmsg, err := r.ensureSnapshotContentLinks(ctx, nil, obj, domainTestContent)
+	if err != nil {
+		t.Fatalf("ensureSnapshotContentLinks: %v", err)
+	}
+	if treason != "" {
+		t.Fatalf("captured manifest leg must not be terminal, got reason %q (msg=%q)", treason, tmsg)
+	}
+	if requeue {
+		t.Fatalf("captured manifest leg with a GC'd MCR must not requeue (would starve the Ready mirror)")
 	}
 }

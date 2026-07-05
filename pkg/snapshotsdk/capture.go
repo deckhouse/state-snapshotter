@@ -156,23 +156,38 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 		return nil
 	}
 	obj := t.Object()
-	if !t.CoreCaptureState().dataCaptured() {
+	if t.CoreCaptureState().dataCaptured() {
+		return nil
+	}
+	namespace := obj.GetNamespace()
+	name := s.provider.VCRName(obj.GetUID())
+
+	// Cached existence probe first (a live data-leg VCR always carries its PVC target, so a non-nil result
+	// means the request still exists). While the data leg is in flight the VCR is present in cache, so we
+	// converge without any uncached read and keep the domain's in-flight poll off the API server. Only
+	// when the VCR is absent is the state ambiguous ("not created yet" vs "captured, then deleted by the
+	// binder"): only then do we pay the authoritative uncached read to consult the leg latch and avoid
+	// re-creating a captured request (the binder sets dataCaptured=true before deleting the VCR).
+	existingTarget, err := s.provider.OwnedPVCTarget(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+	if existingTarget == nil {
 		if err := s.refresh(ctx, obj); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return err
 		}
-	}
-	if t.CoreCaptureState().dataCaptured() {
-		return nil
+		if t.CoreCaptureState().dataCaptured() {
+			return nil
+		}
 	}
 	owner, err := s.ownerRef(t)
 	if err != nil {
 		return err
 	}
-	name := s.provider.VCRName(obj.GetUID())
-	if err := s.provider.EnsureVCR(ctx, obj.GetNamespace(), name, owner, *in.DataRef); err != nil {
+	if err := s.provider.EnsureVCR(ctx, namespace, name, owner, *in.DataRef); err != nil {
 		return err
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
@@ -188,26 +203,33 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
 	obj := t.Object()
-	if !t.CoreCaptureState().manifestCaptured() {
-		if err := s.refresh(ctx, obj); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}
-	}
 	if t.CoreCaptureState().manifestCaptured() {
 		return nil
 	}
 	namespace := obj.GetNamespace()
 	mcrName := manifest.RequestName(obj.GetUID())
 
+	// Cached existence probe first. While the manifest leg is in flight the MCR still lives in the informer
+	// cache, so we converge without any uncached read — this keeps the domain's in-flight poll
+	// (RequeueAfter every few hundred ms) off the API server. Only when the cache shows the MCR absent is
+	// the state ambiguous ("not created yet" vs "captured, then deleted by the binder"): only then do we
+	// pay the authoritative uncached read to consult the leg latch and avoid re-creating a captured
+	// request (the binder sets manifestCaptured=true before deleting the MCR).
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
 	getErr := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}, existing)
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
 	}
 	if apierrors.IsNotFound(getErr) {
+		if err := s.refresh(ctx, obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if t.CoreCaptureState().manifestCaptured() {
+			return nil
+		}
 		ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
 		if err != nil {
 			return err

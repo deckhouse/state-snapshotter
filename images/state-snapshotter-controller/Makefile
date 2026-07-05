@@ -26,6 +26,10 @@ git_dirty := $(shell git diff --quiet 2>/dev/null || echo -dirty)
 build_ts := $(shell date -u +%Y%m%dT%H%M%SZ)
 app_version := $(git_sha)$(git_dirty)-$(build_ts)
 
+# Go toolchain version read from go.mod (the `go X.Y.Z` directive) so the dev image builder always matches
+# the required toolchain. Falls back to the Dockerfile ARG default if extraction fails.
+go_version := $(shell awk '/^go [0-9]/{print $$2; exit}' go.mod)
+
 # Variables
 GO := go
 GOFMT := gofmt
@@ -173,8 +177,8 @@ run: ## Run controller locally
 	$(GO) run -race ./cmd/main.go
 
 fox_build_and_push: ## Build dev image and push to fox registry
-	@echo "$(BLUE)Building image with version: $(app_version)$(NC)"
-	DOCKER_BUILDKIT=1 docker build --build-arg APP_VERSION=$(app_version) -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
+	@echo "$(BLUE)Building image with version: $(app_version) (Go $(go_version))$(NC)"
+	DOCKER_BUILDKIT=1 docker build --build-arg APP_VERSION=$(app_version) --build-arg GO_VERSION=$(go_version) -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
 	docker push $(repo_fox)/$(image_name):$(image_tag)
 
 redeploy: ## Restart controller deployment, wait for rollout, and print the running build version
