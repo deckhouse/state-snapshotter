@@ -162,3 +162,30 @@ Chronological log of notable refactors. Newest wave at the bottom.
   `priority`/`dataBacked`/`manifestCaptureRequestRef` identifiers remain in code.
 - **Deferred**: obsolete `docs/…/snapshot-tree-demo/02-csd.yaml` still uses the pre-flat
   `snapshotResourceMapping` schema (invalid regardless of this rename); left as-is (out of core scope).
+
+## Wave 4 — cross-verify (real-cluster e2e fixes)
+
+- **Bugfix** (w4-cross-verify) Domain capture `phase` was not monotonic. The demo VM/disk reconcilers call
+  `MarkPlanned` on every reconcile before switching on `CoreCaptureOutcome`, so a leaf that already reached
+  `Finished` was dragged back to `Planned`; each reconcile then emitted two status writes (`Planned` then
+  `Finished`) and, because the domain watches its own object, the pair re-triggered the reconcile — a
+  self-sustaining phase write storm. The churn starved the core binder's optimistic-lock Ready mirror (34+
+  "object has been modified" conflicts), wedging the tree at `Ready=False/ContentMissing` while the bound
+  `SnapshotContent` was `Ready=True`. Guarded `setPhase` with `phaseCanAdvance`: the forward chain
+  `Planning<Planned<Finished` never regresses (MarkPlanned is a no-op once Finished); `Failed` stays
+  orthogonal (settable from any phase, recovery preserved). Added `pkg/snapshotsdk/capture_phase_test.go`.
+- **Bugfix** (w4-cross-verify) Generic binder wedged the snapshot (and its parent) at
+  `Ready=False/ContentMissing`: after the manifest checkpoint is archived the binder deletes the domain MCR
+  but never clears `domainSpecificController.manifestCaptureRequestName`, so `ensureSnapshotContentLinks`
+  chased the now-absent MCR and returned `requeue=true` at Step 4 before the Step 5 Ready mirror. Now skip
+  the MCR chase once `commonController.manifestCaptured` is latched.
+- **Update** (w4-cross-verify) SDK `EnsureManifestCapture`/`EnsureVolumeCapture` probe the informer cache
+  for the MCR/VCR before the uncached `refresh`, paying the authoritative uncached read only when the
+  request is absent — keeps the domain's in-flight `RequeueAfter` poll off the API server. Added
+  `pkg/snapshotsdk/capture_refresh_test.go`.
+- **Bugfix** (w4-cross-verify) `e2e/Makefile` `clean-env` deleted `snapshots.storage.deckhouse.io`; pointed
+  the cascade at the current `snapshots.state-snapshotter.deckhouse.io` group so leftover Snapshots are
+  actually removed.
+- **Update** (w4-cross-verify) dev-image Makefiles (`images/domain-controller`,
+  `images/state-snapshotter-controller`) pass `GO_VERSION` (read from `go.mod`) into the `Dockerfile-dev`
+  build so the builder toolchain matches the module's required Go.
