@@ -91,20 +91,14 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// +listType=atomic
 	ExcludedRefs []storagev1alpha1.ExcludedObjectRef `json:"excludedRefs,omitempty"`
 
-	// StorageClassName mirrors this data leaf's volume StorageClass for d8 export: the bound
-	// SnapshotContent.status.dataRef.storageClassName on capture, or DataImport.spec.storageClassName on
-	// import (the import dataRef carries no storageClassName). Populated by the common controller.
+	// Data is the self-contained, top-level captured-volume descriptor for this data leaf: the
+	// {source, artifact, volumeMode, fsType, accessModes, storageClassName, size} block the core mirrors
+	// verbatim from the bound SnapshotContent.status.data (mirrorLeafDataFromContent). It makes the
+	// namespaced snapshot self-sufficient for d8 export/restore without reading the cluster-scoped
+	// SnapshotContent. It replaces the former flat status.storageClassName/size/volumeMode mirrors.
+	// Populated by the common controller once the bound content has a published data binding.
 	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
-	// Size mirrors the real allocated volume size (e.g. "10Gi"): the bound dataRef.size on capture, or the
-	// VolumeSnapshotContent restoreSize on import. Populated by the common controller.
-	// +optional
-	Size string `json:"size,omitempty"`
-
-	// VolumeMode mirrors the source volume mode (Filesystem or Block). Populated by the common controller.
-	// +optional
-	VolumeMode string `json:"volumeMode,omitempty"`
+	Data *storagev1alpha1.SnapshotDataBinding `json:"data,omitempty"`
 
 	// Conditions report readiness. Ready is the single user-facing condition, always derived by the core.
 	// +optional

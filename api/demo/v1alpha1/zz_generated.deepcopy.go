@@ -223,6 +223,11 @@ func (in *DemoVirtualDiskSnapshotStatus) DeepCopyInto(out *DemoVirtualDiskSnapsh
 		*out = make([]storagev1alpha1.ExcludedObjectRef, len(*in))
 		copy(*out, *in)
 	}
+	if in.Data != nil {
+		in, out := &in.Data, &out.Data
+		*out = new(storagev1alpha1.SnapshotDataBinding)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

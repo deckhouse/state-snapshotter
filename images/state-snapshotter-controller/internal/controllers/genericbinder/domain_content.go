@@ -19,6 +19,7 @@ package genericbinder
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -297,13 +298,14 @@ func (r *GenericSnapshotBinderController) deleteVolumeCaptureRequest(ctx context
 	return nil
 }
 
-// mirrorLeafVolumeMetadataFromContent copies the data leaf's volume metadata
-// (storageClassName/size/volumeMode) from the bound SnapshotContent.status.dataRef onto the leaf
-// snapshot status, so d8 can read it on export (the leaf status mirrors the content dataRef). On import
-// the content dataRef carries no storageClassName (it is not derived from a live PVC), so the caller
-// passes scOverride from DataImport.spec.storageClassName; on capture scOverride is empty and the live
-// dataRef.storageClassName is used. No-op until the content has a published dataRef.
-func (r *GenericSnapshotBinderController) mirrorLeafVolumeMetadataFromContent(
+// mirrorLeafDataFromContent mirrors the bound SnapshotContent's self-contained data binding
+// (SnapshotContent.status.data: source + artifact + volume metadata) verbatim onto the namespaced data
+// leaf's top-level status.data, so d8 can read the captured-volume descriptor namespaced without touching
+// the cluster-scoped SnapshotContent. On import the content data carries no storageClassName (it is not
+// derived from a live PVC), so the caller passes scOverride from DataImport.spec.storageClassName; on
+// capture scOverride is empty and the live content storageClassName is used. No-op until the content has
+// a published data binding.
+func (r *GenericSnapshotBinderController) mirrorLeafDataFromContent(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
 	contentName string,
@@ -316,36 +318,22 @@ func (r *GenericSnapshotBinderController) mirrorLeafVolumeMetadataFromContent(
 	if content.Status.Data == nil {
 		return nil
 	}
-	sc := content.Status.Data.StorageClassName
+	data := *content.Status.Data
 	if scOverride != "" {
-		sc = scOverride
+		data.StorageClassName = scOverride
 	}
-	return r.mirrorVolumeMetadataToLeaf(ctx, obj, sc, content.Status.Data.Size, content.Status.Data.VolumeMode)
+	return r.mirrorDataToLeaf(ctx, obj, &data)
 }
 
-// mirrorVolumeMetadataToLeaf writes the provided (non-empty) volume metadata fields onto the leaf
-// snapshot status under an optimistic-lock merge patch (D4a: demo.status is co-owned). Idempotent — it
-// re-reads and short-circuits when all provided fields already match.
-func (r *GenericSnapshotBinderController) mirrorVolumeMetadataToLeaf(
+// mirrorDataToLeaf writes the self-contained data binding onto the leaf snapshot's top-level status.data
+// under an optimistic-lock merge patch (D4a: demo.status is co-owned). Idempotent — it re-reads and
+// short-circuits when status.data already equals the desired block.
+func (r *GenericSnapshotBinderController) mirrorDataToLeaf(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
-	storageClassName string,
-	size string,
-	volumeMode string,
+	data *storagev1alpha1.SnapshotDataBinding,
 ) error {
-	desired := map[string]string{}
-	if storageClassName != "" {
-		desired["storageClassName"] = storageClassName
-	}
-	if size != "" {
-		desired["size"] = size
-	}
-	if volumeMode != "" {
-		desired["volumeMode"] = volumeMode
-	}
-	if len(desired) == 0 {
-		return nil
-	}
+	desired := snapshotDataBindingToMap(data)
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -354,29 +342,64 @@ func (r *GenericSnapshotBinderController) mirrorVolumeMetadataToLeaf(
 		if err := r.Get(ctx, key, fresh); err != nil {
 			return err
 		}
-		allMatch := true
-		for field, want := range desired {
-			if nestedString(fresh, field) != want {
-				allMatch = false
-				break
-			}
-		}
-		if allMatch {
+		if cur, found, _ := unstructured.NestedMap(fresh.Object, "status", "data"); found && reflect.DeepEqual(cur, desired) {
 			return nil
 		}
 		base := fresh.DeepCopy()
-		for field, want := range desired {
-			if err := unstructured.SetNestedField(fresh.Object, want, "status", field); err != nil {
-				return err
-			}
+		if err := unstructured.SetNestedMap(fresh.Object, desired, "status", "data"); err != nil {
+			return err
 		}
 		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }
 
-func nestedString(obj *unstructured.Unstructured, field string) string {
-	v, _, _ := unstructured.NestedString(obj.Object, "status", field)
-	return v
+// snapshotDataBindingToMap renders a SnapshotDataBinding as a JSON-typed unstructured map suitable for
+// SetNestedMap (only string / []interface{} / map[string]interface{} values). source and artifact are
+// always present (required); the volume-metadata fields are written only when non-empty.
+func snapshotDataBindingToMap(d *storagev1alpha1.SnapshotDataBinding) map[string]interface{} {
+	source := map[string]interface{}{
+		"apiVersion": d.Source.APIVersion,
+		"kind":       d.Source.Kind,
+		"name":       d.Source.Name,
+	}
+	if d.Source.Namespace != "" {
+		source["namespace"] = d.Source.Namespace
+	}
+	if d.Source.UID != "" {
+		source["uid"] = string(d.Source.UID)
+	}
+	artifact := map[string]interface{}{
+		"apiVersion": d.Artifact.APIVersion,
+		"kind":       d.Artifact.Kind,
+		"name":       d.Artifact.Name,
+	}
+	if d.Artifact.UID != "" {
+		artifact["uid"] = string(d.Artifact.UID)
+	}
+	out := map[string]interface{}{
+		"source":   source,
+		"artifact": artifact,
+	}
+	if d.VolumeMode != "" {
+		out["volumeMode"] = d.VolumeMode
+	}
+	if d.FsType != "" {
+		out["fsType"] = d.FsType
+	}
+	if len(d.AccessModes) > 0 {
+		am := make([]interface{}, len(d.AccessModes))
+		for i, m := range d.AccessModes {
+			am[i] = m
+		}
+		out["accessModes"] = am
+	}
+	if d.StorageClassName != "" {
+		out["storageClassName"] = d.StorageClassName
+	}
+	if d.Size != "" {
+		out["size"] = d.Size
+	}
+	return out
 }
 
 // commonControllerLegCaptured reports whether the core-written capture-leg success latch

@@ -219,6 +219,18 @@ Chronological log of notable refactors. Newest wave at the bottom.
   Non-isolated integration suite + all unit tests green; e2e module compiles. (The `isolated` `duplicate pvcUID` spec
   times out on a pre-existing envtest limitation — no `VolumeSnapshotContent` CRD — proven identical on the base
   commit `5308a73`; unrelated to this rename.)
+- **Update** (w5-status-source-descriptor, ss domain side) Made the namespaced data-leaf status self-sufficient
+  for d8: replaced the flat top-level mirrors `status.storageClassName/size/volumeMode` on
+  `DemoVirtualDiskSnapshotStatus` with a single self-contained top-level `status.data`
+  (`*storagev1alpha1.SnapshotDataBinding`: source+artifact+volumeMode/fsType/accessModes/storageClassName/size).
+  Rewrote the core mirror `genericbinder/domain_content.go` `mirrorLeafVolumeMetadataFromContent`→
+  `mirrorLeafDataFromContent` + `mirrorVolumeMetadataToLeaf`→`mirrorDataToLeaf` (+ `snapshotDataBindingToMap`) to
+  mirror the WHOLE `SnapshotContent.status.data` block verbatim (import still overrides storageClassName from
+  `DataImport.spec.storageClassName`); updated both callers (capture path `controller.go`, import path `import.go`).
+  Regenerated deepcopy + `crds/demo.state-snapshotter.deckhouse.io_demovirtualdisksnapshots.yaml`. Unit + non-isolated
+  integration green; gofmt clean. Deferred: the extended-VolumeSnapshot fork `status.data` (storage-foundation
+  patch 003 + VS CRD + `volumesnapshotimport` writer) — the fork patch applies to the upstream external-snapshotter
+  tree not vendored here and cannot be compile-validated locally; kept the flat VS mirror with a `TODO(wave5)` marker.
 - **Rename** (w5-field-rename, ss consumer side of the storage-foundation VCR/DataImport rename) Moved the
   cross-repo unstructured readers in lockstep with storage-foundation `20c48b5`: VCR `status.dataRef`→`status.data`
   (artifact-only) and DataImport `status.dataArtifactRef`→`status.data.artifact`. `ParseVolumeCaptureDataRefs`

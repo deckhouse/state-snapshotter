@@ -397,12 +397,13 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
-		// Mirror the captured volume metadata (storageClassName/size/volumeMode) from the bound content's
-		// dataRef onto the data leaf snapshot status, so d8 reads it on export. data-artifact leaves only —
-		// manifest-only kinds have no dataRef. No-op until the content publishes a dataRef.
+		// Mirror the self-contained captured-volume descriptor (source/artifact + volume metadata) from the
+		// bound content's status.data onto the data leaf snapshot's top-level status.data, so d8 reads it
+		// namespaced on export. data-artifact leaves only — manifest-only kinds have no data binding. No-op
+		// until the content publishes status.data.
 		if r.GVKRegistry.RequiresDataArtifact(obj.GetObjectKind().GroupVersionKind().Kind) {
-			if err := r.mirrorLeafVolumeMetadataFromContent(ctx, obj, contentName, ""); err != nil {
-				logger.Error(err, "Failed to mirror captured volume metadata to leaf status")
+			if err := r.mirrorLeafDataFromContent(ctx, obj, contentName, ""); err != nil {
+				logger.Error(err, "Failed to mirror captured volume data to leaf status")
 			}
 		}
 	}

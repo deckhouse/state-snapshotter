@@ -337,6 +337,13 @@ func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (v
 // volumeMode} under an optimistic-lock merge patch (D4a). These are the mirrored volume-metadata fields the
 // forked extended-VS status exposes for d8 export/consumption; the forked snapshot-controller skips import
 // VS, so they are ours to own. Best-effort and idempotent: only non-empty source fields are written.
+//
+// TODO(wave5): w5-status-source-descriptor — reshape these flat fields into a self-contained top-level
+// status.data{source,artifact,volumeMode,fsType,accessModes,storageClassName,size} block, symmetric with
+// the domain data-leaf mirror (genericbinder.mirrorDataToLeaf). Deferred: the extended-VolumeSnapshot fork
+// is defined by a patch (storage-foundation images/snapshot-controller/patches/003-*) that applies to the
+// upstream external-snapshotter tree (not vendored here), so the reshaped Go type + CRD cannot be
+// compile-validated locally in this repo. Keep the flat mirror until the fork is reshaped in lockstep.
 func (r *Controller) mirrorVolumeMetadataFromDataImport(ctx context.Context, key client.ObjectKey, di *unstructured.Unstructured) error {
 	storageClassName, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
 	size, _, _ := unstructured.NestedString(di.Object, "spec", "size")

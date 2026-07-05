@@ -282,6 +282,100 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              data:
+                description: |-
+                  Data is the self-contained, top-level captured-volume descriptor for this data leaf: the
+                  {source, artifact, volumeMode, fsType, accessModes, storageClassName, size} block the core mirrors
+                  verbatim from the bound SnapshotContent.status.data (mirrorLeafDataFromContent). It makes the
+                  namespaced snapshot self-sufficient for d8 export/restore without reading the cluster-scoped
+                  SnapshotContent. It replaces the former flat status.storageClassName/size/volumeMode mirrors.
+                  Populated by the common controller once the bound content has a published data binding.
+                properties:
+                  accessModes:
+                    description: AccessModes records the source PVC access modes (e.g.
+                      ReadWriteOnce, ReadWriteMany).
+                    items:
+                      type: string
+                    type: array
+                  artifact:
+                    description: Artifact references the cluster-scoped durable data
+                      artifact (for example VolumeSnapshotContent).
+                    properties:
+                      apiVersion:
+                        minLength: 1
+                        type: string
+                      kind:
+                        minLength: 1
+                        type: string
+                      name:
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+                          artifact reference self-contained, symmetric with source.uid. Optional: the artifact may be
+                          referenced before its UID is known, so producers fill it best-effort.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  fsType:
+                    description: FsType records the source filesystem type (Filesystem
+                      volumes only).
+                    type: string
+                  size:
+                    description: |-
+                      Size records the real allocated size of the captured volume, taken from the data artifact
+                      (VolumeSnapshotContent.status.restoreSize). The snapshot outlives the source PVC, so the size MUST
+                      be persisted here to recreate the volume on restore/export (the export VolumeRestoreRequest sizes
+                      the target PVC from it). Stored as a resource.Quantity string (e.g. "10Gi") to keep the api module
+                      dependency-free; controllers parse it via resource.ParseQuantity.
+                    type: string
+                  source:
+                    description: |-
+                      Source identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
+                      this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  storageClassName:
+                    description: |-
+                      StorageClassName records the source StorageClass of the captured volume. Used by the
+                      aggregated /index and by import StorageClass mapping.
+                    type: string
+                  volumeMode:
+                    description: |-
+                      VolumeMode records the source volume mode (Block or Filesystem). CSI snapshots are
+                      mode-agnostic, so this is persisted here to drive the unified export (VolumeRestoreRequest)
+                      and to recreate the PVC on import. Typed as a string to keep the api module dependency-free;
+                      controllers convert it to corev1.PersistentVolumeMode.
+                    enum:
+                    - Block
+                    - Filesystem
+                    type: string
+                required:
+                - artifact
+                - source
+                type: object
               excludedRefs:
                 description: |-
                   ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate,
@@ -312,11 +406,6 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              size:
-                description: |-
-                  Size mirrors the real allocated volume size (e.g. "10Gi"): the bound dataRef.size on capture, or the
-                  VolumeSnapshotContent restoreSize on import. Populated by the common controller.
-                type: string
               snapshotSource:
                 description: |-
                   SnapshotSource is the full reference to the captured live source object (top-level, written by the
@@ -344,16 +433,6 @@ spec:
                 - kind
                 - name
                 type: object
-              storageClassName:
-                description: |-
-                  StorageClassName mirrors this data leaf's volume StorageClass for d8 export: the bound
-                  SnapshotContent.status.dataRef.storageClassName on capture, or DataImport.spec.storageClassName on
-                  import (the import dataRef carries no storageClassName). Populated by the common controller.
-                type: string
-              volumeMode:
-                description: VolumeMode mirrors the source volume mode (Filesystem
-                  or Block). Populated by the common controller.
-                type: string
             type: object
         type: object
     served: true

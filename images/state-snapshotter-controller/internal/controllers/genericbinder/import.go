@@ -192,12 +192,13 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		if !done {
 			requeue = true
 		} else {
-			// Mirror volume metadata onto the leaf status for d8 export. storageClassName is absent from the
-			// import dataRef by design, so take it from DataImport.spec.storageClassName; size/volumeMode come
-			// from the content dataRef (enriched from VSC.restoreSize + DataImport.status.volumeMode).
+			// Mirror the self-contained data descriptor onto the leaf's top-level status.data for d8 export.
+			// storageClassName is absent from the import content data by design, so take it from
+			// DataImport.spec.storageClassName; source/artifact/size/volumeMode come from the content
+			// status.data (enriched from VSC.restoreSize + DataImport.status.volumeMode).
 			scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-			if mErr := r.mirrorLeafVolumeMetadataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
-				logger.Error(mErr, "Failed to mirror volume metadata to import leaf status")
+			if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
+				logger.Error(mErr, "Failed to mirror volume data to import leaf status")
 			}
 		}
 	}
