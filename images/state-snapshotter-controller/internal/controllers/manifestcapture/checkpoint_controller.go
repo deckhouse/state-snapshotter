@@ -388,11 +388,6 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{
 			SourceNamespace: mcr.Namespace,
-			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-				Name:      mcr.Name,
-				Namespace: mcr.Namespace,
-				UID:       string(mcr.UID),
-			},
 		},
 		Status: storagev1alpha1.ManifestCheckpointStatus{},
 	}

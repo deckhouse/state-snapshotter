@@ -349,7 +349,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				Version: "v1alpha1",
 				Kind:    "ObjectKeeper",
 			}
-			objectKeeperName := snapshot.GenerateObjectKeeperName(snapshotGVK.Kind, snapshotName)
+			objectKeeperName := snapshot.GenerateObjectKeeperName(freshSnapshot.GetUID())
 
 			objectKeeper := &unstructured.Unstructured{}
 			objectKeeper.SetGroupVersionKind(objectKeeperGVK)

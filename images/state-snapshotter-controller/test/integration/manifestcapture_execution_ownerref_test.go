@@ -76,8 +76,9 @@ var _ = Describe("Integration: ManifestCaptureRequest execution ObjectKeeper bef
 
 			mcp := &storagev1alpha1.ManifestCheckpoint{}
 			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: mcpName}, mcp)).To(Succeed())
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
-			mcrUID := types.UID(mcp.Spec.ManifestCaptureRequestRef.UID)
+			// The originating request name is carried on the source-request label (spec no longer refs it).
+			g.Expect(mcp.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", mcr.Name))
+			mcrUID := mcr.UID
 			g.Expect(mcrUID).NotTo(BeEmpty())
 			okName = namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcrUID)
 

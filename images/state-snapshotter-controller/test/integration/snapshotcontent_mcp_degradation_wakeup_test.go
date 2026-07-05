@@ -255,8 +255,7 @@ func ensureManifestCheckpointStatus(
 					}},
 				},
 				Spec: ssv1alpha1.ManifestCheckpointSpec{
-					SourceNamespace:           "default",
-					ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{Name: "mcr-" + contentName, Namespace: "default", UID: "mcr-uid"},
+					SourceNamespace: "default",
 				},
 			}
 			if cErr := k8sClient.Create(ctx, m); cErr != nil {

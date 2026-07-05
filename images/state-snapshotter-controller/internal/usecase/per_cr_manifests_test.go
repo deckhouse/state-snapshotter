@@ -202,7 +202,7 @@ func TestBuildSingleNodeJSON_DownloadUploadRoundTripPreservesRawFields(t *testin
 	}
 
 	importMCPName := "mcp-import-roundtrip"
-	if err := ReconstructManifestCheckpoint(ctx, cl, importMCPName, "ns1", nil, nil, downloaded); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, importMCPName, "ns1", nil, downloaded); err != nil {
 		t.Fatalf("reconstruct import MCP: %v", err)
 	}
 	if err := cl.Create(ctx, aggManifestContent("import-content", importMCPName)); err != nil {

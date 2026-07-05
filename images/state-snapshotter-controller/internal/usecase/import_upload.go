@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
 // ManifestsAndChildrenUpload is the per-CR import payload (POST manifests-and-children-refs-upload):
@@ -112,11 +111,9 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	// Reconstruct the node's raw ManifestCheckpoint (idempotent, deterministic name keyed to the CR UID).
 	// ownerRefs are intentionally nil here: the ManifestCheckpoint is cluster-scoped and cannot be owned
 	// by the namespaced snapshot CR; the import orchestrator (C5) attaches it to the SnapshotContent it
-	// materializes, which is the durable GC owner. captureRef is a synthetic back-reference to the CR
-	// (ManifestCheckpointSpec requires one); it is not a real ManifestCaptureRequest on the import path.
+	// materializes, which is the durable GC owner.
 	checkpointName := ReconstructedManifestCheckpointName(uid, "")
-	captureRef := &ssv1alpha1.ObjectReference{Name: name, Namespace: namespace, UID: string(uid)}
-	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, namespace, captureRef, nil, manifests); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, namespace, nil, manifests); err != nil {
 		return "", classifyReconstructError(err)
 	}
 

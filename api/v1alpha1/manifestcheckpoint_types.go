@@ -42,13 +42,13 @@ type ManifestCheckpointList struct {
 
 // +k8s:deepcopy-gen=true
 type ManifestCheckpointSpec struct {
-	// SourceNamespace is the namespace of the original ManifestCaptureRequest
+	// SourceNamespace is the namespace of the original ManifestCaptureRequest. It is the only durable
+	// source-provenance field: the originating ManifestCaptureRequest is short-lived (deleted right after
+	// the checkpoint is created) and never resolved by ref, so the checkpoint carries no back-reference to
+	// it. The originating request name is recorded on the state-snapshotter.deckhouse.io/source-request
+	// label instead.
 	// +kubebuilder:validation:Required
 	SourceNamespace string `json:"sourceNamespace"`
-
-	// ManifestCaptureRequestRef references the ManifestCaptureRequest that created this checkpoint
-	// +kubebuilder:validation:Required
-	ManifestCaptureRequestRef *ObjectReference `json:"manifestCaptureRequestRef"`
 }
 
 // +k8s:deepcopy-gen=true

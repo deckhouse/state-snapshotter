@@ -59,11 +59,6 @@ func createTestCheckpoint(name string, ready bool, chunks []storagev1alpha1.Chun
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{
 			SourceNamespace: "test-ns",
-			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-				Name:      "test-mcr",
-				Namespace: "test-ns",
-				UID:       "mcr-uid",
-			},
 		},
 		Status: storagev1alpha1.ManifestCheckpointStatus{
 			Chunks:         chunks,

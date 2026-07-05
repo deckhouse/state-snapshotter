@@ -62,10 +62,9 @@ func TestReconstructManifestCheckpoint_BuildsReadyCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	cl := newReconstructClient(t)
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--snap")
-	captureRef := &ssv1alpha1.ObjectReference{Name: "imp", Namespace: "ns1", UID: "import-uid"}
 	ownerRefs := []metav1.OwnerReference{{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "imp", UID: "import-uid"}}
 
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", captureRef, ownerRefs, sampleManifests(t)); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", ownerRefs, sampleManifests(t)); err != nil {
 		t.Fatalf("reconstruct: %v", err)
 	}
 
@@ -109,11 +108,11 @@ func TestReconstructManifestCheckpoint_Idempotent(t *testing.T) {
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--snap")
 	raw := sampleManifests(t)
 
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, nil, raw); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, raw); err != nil {
 		t.Fatalf("first reconstruct: %v", err)
 	}
 	// A second call on an already-Ready checkpoint is a no-op and must not error.
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, nil, raw); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, raw); err != nil {
 		t.Fatalf("second reconstruct: %v", err)
 	}
 	cp := &ssv1alpha1.ManifestCheckpoint{}
@@ -130,7 +129,7 @@ func TestReconstructManifestCheckpoint_EmptyObjectsSingleChunk(t *testing.T) {
 	cl := newReconstructClient(t)
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--empty")
 
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, nil, []byte("[]")); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, []byte("[]")); err != nil {
 		t.Fatalf("reconstruct empty: %v", err)
 	}
 	cp := &ssv1alpha1.ManifestCheckpoint{}
@@ -149,7 +148,7 @@ func TestReconstructManifestCheckpoint_RejectsNonArray(t *testing.T) {
 	ctx := context.Background()
 	cl := newReconstructClient(t)
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--bad")
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, nil, []byte(`{"not":"an array"}`)); err == nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, []byte(`{"not":"an array"}`)); err == nil {
 		t.Fatal("expected error for non-array manifests")
 	}
 }
@@ -168,7 +167,7 @@ func TestCollectReconstructedManifestObjects_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, nil, raw); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, raw); err != nil {
 		t.Fatalf("reconstruct: %v", err)
 	}
 

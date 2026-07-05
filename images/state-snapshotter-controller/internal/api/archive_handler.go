@@ -174,11 +174,9 @@ func (h *ArchiveHandler) HandleGetCheckpointInfo(w http.ResponseWriter, r *http.
 	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
 	isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
 
-	// Get source capture request name from ref
-	sourceCaptureRequest := ""
-	if checkpoint.Spec.ManifestCaptureRequestRef != nil {
-		sourceCaptureRequest = checkpoint.Spec.ManifestCaptureRequestRef.Name
-	}
+	// Source capture request name comes from the source-request label: the originating
+	// ManifestCaptureRequest is short-lived and no longer referenced by spec.
+	sourceCaptureRequest := checkpoint.Labels["state-snapshotter.deckhouse.io/source-request"]
 
 	// Build response with checkpoint metadata
 	response := &CheckpointInfoResponse{
@@ -490,11 +488,8 @@ func (h *ArchiveHandler) HandleListCheckpoints(w http.ResponseWriter, r *http.Re
 		if sourceNamespace != "" && checkpoint.Spec.SourceNamespace != sourceNamespace {
 			continue
 		}
-		// Get source capture request name from ref
-		sourceCaptureRequest := ""
-		if checkpoint.Spec.ManifestCaptureRequestRef != nil {
-			sourceCaptureRequest = checkpoint.Spec.ManifestCaptureRequestRef.Name
-		}
+		// Source capture request name comes from the source-request label (originating MCR is short-lived).
+		sourceCaptureRequest := checkpoint.Labels["state-snapshotter.deckhouse.io/source-request"]
 
 		// Check Ready condition
 		readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)

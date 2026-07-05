@@ -46,30 +46,15 @@ spec:
             type: object
           spec:
             properties:
-              manifestCaptureRequestRef:
-                description: ManifestCaptureRequestRef references the ManifestCaptureRequest
-                  that created this checkpoint
-                properties:
-                  name:
-                    description: Name of the referred object
-                    type: string
-                  namespace:
-                    description: Namespace of the referred object (empty for cluster-scoped
-                      objects)
-                    type: string
-                  uid:
-                    description: UID of the referred object
-                    type: string
-                required:
-                - name
-                - namespace
-                - uid
-                type: object
               sourceNamespace:
-                description: SourceNamespace is the namespace of the original ManifestCaptureRequest
+                description: |-
+                  SourceNamespace is the namespace of the original ManifestCaptureRequest. It is the only durable
+                  source-provenance field: the originating ManifestCaptureRequest is short-lived (deleted right after
+                  the checkpoint is created) and never resolved by ref, so the checkpoint carries no back-reference to
+                  it. The originating request name is recorded on the state-snapshotter.deckhouse.io/source-request
+                  label instead.
                 type: string
             required:
-            - manifestCaptureRequestRef
             - sourceNamespace
             type: object
           status:

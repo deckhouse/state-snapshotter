@@ -136,3 +136,29 @@ Chronological log of notable refactors. Newest wave at the bottom.
   readyToUse/boundVolumeSnapshotContentName come from the CSI snapshot-controller, not envtest); deep
   resolver walks of nested domain subtrees rely on each domain CR's own `status.childrenSnapshotRefs`
   reconstruction, validated when the domain binder StaticBind path runs on-cluster.
+
+## Wave 4C (tail) — CSD/MCP API cleanup
+
+- **Rename** (w4c-tail) `CustomSnapshotDefinition.spec.priority` → `spec.weight` (ascending order, lower runs
+  first; documented against FlowSchema.matchingPrecedence / NodeGroupConfiguration.weight, explicitly NOT a
+  PriorityClass). Updated the API type, `csdregistry/pairs.go` (`EligibleResourceSnapshotMapping.Weight` +
+  ascending sort), the `parent_graph.go` weight-layer readers, and `templates/domain-controller/demo-csd.yaml`.
+- **Rename** (w4c-tail) `CustomSnapshotDefinition.spec.dataBacked` → `spec.requiresDataArtifact`. Threaded
+  through the API type, `UnifiedGVKPair.RequiresDataArtifact`, `GVKRegistry.MarkRequiresDataArtifact` /
+  `RequiresDataArtifact` (map `requiresDataArtifactBySnapshotKind`), and every producer/consumer
+  (`csdregistry/pairs.go`, `unifiedbootstrap`, `unifiedruntime/syncer`, `snapshotgraphregistry/build`,
+  `genericbinder` controller/import/domain_content, `cmd/main`) plus the demo CSD template.
+- **Remove** (w4c-tail) `ManifestCheckpoint.spec.manifestCaptureRequestRef` (the originating request is
+  short-lived and never resolved by ref). Provenance now = `spec.sourceNamespace` + the
+  `state-snapshotter.deckhouse.io/source-request` label. Dropped the field from the API type,
+  `checkpoint_controller` create, `ReconstructManifestCheckpoint` signature (`captureRef` param removed) and
+  `import_upload`; `archive_handler` reads the source request name from the label. Updated the doc-ru CRD.
+- **Update** (w4c-tail) tests: `api/v1alpha1/manifestcheckpoint_test.go`, manifestcapture ginkgo/chunk-retry,
+  `usecase` reconstruct/per-cr/archive, `internal/api/archive_handler` tests, and integration + e2e
+  (`manifestcapture_execution_ownerref`, `snapshot_root_lifecycle`, `snapshot_aggregated_manifests`,
+  `snapshotcontent_mcp_degradation_wakeup`, `e2e_test`) to the label/sourceNamespace provenance model.
+- **Codegen** (w4c-tail) regenerated `api/v1alpha1/zz_generated.deepcopy.go` and the CSD/MCP CRDs. Module
+  unit tests pass; integration + e2e packages compile; `gofmt` clean; no stale
+  `priority`/`dataBacked`/`manifestCaptureRequestRef` identifiers remain in code.
+- **Deferred**: obsolete `docs/…/snapshot-tree-demo/02-csd.yaml` still uses the pre-flat
+  `snapshotResourceMapping` schema (invalid regardless of this rename); left as-is (out of core scope).

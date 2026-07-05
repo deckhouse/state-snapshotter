@@ -79,13 +79,11 @@ func DeleteReconstructedManifestCheckpoint(ctx context.Context, c client.Client,
 // pre-provisioned SnapshotContent that references it restores exactly like a captured one.
 //
 // It is idempotent: an already-Ready checkpoint is left untouched; chunk creation tolerates
-// AlreadyExists. captureRef is the synthetic source request reference required by
-// ManifestCheckpointSpec; ownerRefs anchor the checkpoint for GC (the owning import snapshot CR).
+// AlreadyExists. ownerRefs anchor the checkpoint for GC (the owning import snapshot CR).
 func ReconstructManifestCheckpoint(
 	ctx context.Context,
 	c client.Client,
 	checkpointName, sourceNamespace string,
-	captureRef *storagev1alpha1.ObjectReference,
 	ownerRefs []metav1.OwnerReference,
 	rawManifests []byte,
 ) error {
@@ -113,8 +111,7 @@ func ReconstructManifestCheckpoint(
 			},
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace:           sourceNamespace,
-			ManifestCaptureRequestRef: captureRef,
+			SourceNamespace: sourceNamespace,
 		},
 	}
 	if err := c.Create(ctx, cp); err != nil && !apierrors.IsAlreadyExists(err) {

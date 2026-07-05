@@ -78,11 +78,6 @@ func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl c
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: ssv1alpha1.ManifestCheckpointSpec{
 			SourceNamespace: srcNS,
-			ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{
-				Name:      "mcr-agg-tst-" + name,
-				Namespace: srcNS,
-				UID:       "agg-mcr-uid-" + name,
-			},
 		},
 	}
 	Expect(cl.Create(ctx, ch)).To(Succeed())

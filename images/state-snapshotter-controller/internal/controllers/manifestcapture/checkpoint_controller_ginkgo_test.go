@@ -804,11 +804,6 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 				},
 				Spec: storagev1alpha1.ManifestCheckpointSpec{
 					SourceNamespace: mcr.Namespace,
-					ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-						Name:      mcr.Name,
-						Namespace: mcr.Namespace,
-						UID:       string(mcr.UID),
-					},
 				},
 			}
 			Expect(client.Create(ctx, checkpoint)).To(Succeed())
@@ -1344,11 +1339,6 @@ var _ = Describe("Resource Scoping", func() {
 				},
 				Spec: storagev1alpha1.ManifestCheckpointSpec{
 					SourceNamespace: "test-namespace",
-					ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-						Name:      "test-mcr",
-						Namespace: "test-namespace",
-						UID:       "test-uid",
-					},
 				},
 			}
 
@@ -1379,8 +1369,8 @@ var _ = Describe("Resource Scoping", func() {
 	})
 })
 
-var _ = Describe("Object References", func() {
-	It("should create ManifestCaptureRequestRef correctly", func() {
+var _ = Describe("Source provenance", func() {
+	It("should carry the originating request namespace on spec and its name on the source-request label", func() {
 		mcr := &storagev1alpha1.ManifestCaptureRequest{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-mcr",
@@ -1389,20 +1379,22 @@ var _ = Describe("Object References", func() {
 			},
 		}
 
-		spec := storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: mcr.Namespace,
-			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-				Name:      mcr.Name,
-				Namespace: mcr.Namespace,
-				UID:       string(mcr.UID),
+		// The manifestCaptureRequestRef field was dropped (the originating request is short-lived and
+		// never resolved by ref); provenance is now spec.sourceNamespace + the source-request label.
+		checkpoint := &storagev1alpha1.ManifestCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "mcp-provenance",
+				Labels: map[string]string{
+					"state-snapshotter.deckhouse.io/source-request": mcr.Name,
+				},
+			},
+			Spec: storagev1alpha1.ManifestCheckpointSpec{
+				SourceNamespace: mcr.Namespace,
 			},
 		}
 
-		Expect(spec.SourceNamespace).To(Equal(mcr.Namespace))
-		Expect(spec.ManifestCaptureRequestRef).ToNot(BeNil())
-		Expect(spec.ManifestCaptureRequestRef.Name).To(Equal(mcr.Name))
-		Expect(spec.ManifestCaptureRequestRef.Namespace).To(Equal(mcr.Namespace))
-		Expect(spec.ManifestCaptureRequestRef.UID).To(Equal(string(mcr.UID)))
+		Expect(checkpoint.Spec.SourceNamespace).To(Equal(mcr.Namespace))
+		Expect(checkpoint.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", mcr.Name))
 	})
 })
 

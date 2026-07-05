@@ -106,10 +106,8 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			for _, ref := range mcp.OwnerReferences {
 				g.Expect(ref.Kind).NotTo(Equal("ObjectKeeper"), "after handoff the MCP must no longer have an ObjectKeeper ownerRef")
 			}
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Namespace).To(Equal(nsName))
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Name).To(Equal(mcrName))
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef.UID).NotTo(BeEmpty())
+			g.Expect(mcp.Spec.SourceNamespace).To(Equal(nsName))
+			g.Expect(mcp.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", mcrName))
 			// Durability is guaranteed by the MCP being owned by SnapshotContent (asserted above), not by the
 			// transient execution ObjectKeeper. The execution OK itself is garbage-collected by the external
 			// Deckhouse ObjectKeeper controller (FollowObject -> MCR) once the MCR is deleted; that controller

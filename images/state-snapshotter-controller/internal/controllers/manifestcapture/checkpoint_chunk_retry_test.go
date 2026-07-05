@@ -221,9 +221,6 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: checkpointName},
 			Spec: storagev1alpha1.ManifestCheckpointSpec{
 				SourceNamespace: mcr.Namespace,
-				ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-					Name: mcr.Name, Namespace: mcr.Namespace, UID: string(mcr.UID),
-				},
 			},
 		}
 		Expect(c.Create(ctx, mcp)).To(Succeed())

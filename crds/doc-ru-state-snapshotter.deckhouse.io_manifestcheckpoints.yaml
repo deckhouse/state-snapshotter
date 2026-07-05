@@ -8,18 +8,12 @@ spec:
           properties:
             spec:
               properties:
-                manifestCaptureRequestRef:
-                  description: |
-                    Ссылка на ManifestCaptureRequest, по которому создан этот чекпоинт.
-                  properties:
-                    name:
-                      description: Имя связанного объекта.
-                    namespace:
-                      description: Namespace связанного объекта (пусто для cluster-scoped объектов).
-                    uid:
-                      description: UID связанного объекта.
                 sourceNamespace:
-                  description: Namespace исходного ManifestCaptureRequest.
+                  description: |
+                    Namespace исходного ManifestCaptureRequest. Единственное долговечное поле происхождения:
+                    исходный ManifestCaptureRequest недолговечен (удаляется сразу после создания чекпоинта) и
+                    не разрешается по ссылке, поэтому чекпоинт не хранит обратную ссылку на него. Имя исходного
+                    запроса записывается в метку state-snapshotter.deckhouse.io/source-request.
             status:
               properties:
                 chunks:

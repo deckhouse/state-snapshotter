@@ -72,9 +72,8 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 		if err := k8sClient.List(ctx, checkpoints); err == nil {
 			for i := range checkpoints.Items {
 				cp := &checkpoints.Items[i]
-				// Only delete checkpoints that reference MCRs from this test namespace
-				if cp.Spec.ManifestCaptureRequestRef != nil &&
-					cp.Spec.ManifestCaptureRequestRef.Namespace == testNS {
+				// Only delete checkpoints sourced from this test namespace
+				if cp.Spec.SourceNamespace == testNS {
 					foreground := metav1.DeletePropagationForeground
 					_ = k8sClient.Delete(ctx, cp, &client.DeleteOptions{
 						PropagationPolicy: &foreground,
@@ -103,8 +102,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 					// Check if this checkpoint belongs to our test namespace
 					cp := &storagev1alpha1.ManifestCheckpoint{}
 					if err := k8sClient.Get(ctx, types.NamespacedName{Name: checkpointName}, cp); err == nil {
-						if cp.Spec.ManifestCaptureRequestRef != nil &&
-							cp.Spec.ManifestCaptureRequestRef.Namespace == testNS {
+						if cp.Spec.SourceNamespace == testNS {
 							// Stray ObjectKeeper for this namespace — delete for a clean test run
 							_ = k8sClient.Delete(ctx, ok)
 						}
@@ -136,11 +134,10 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 			// Create ManifestCaptureRequest
 			targets := GetStandardTargets()
-			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
-			mcrUID := string(mcr.UID) // Save UID before namespace deletion
+			createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
 
 			// Wait for Ready
-			mcr = waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
+			mcr := waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
 			// Verify MCR status
 			Expect(mcr.Status.CheckpointName).NotTo(BeEmpty())
@@ -150,12 +147,9 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			mcp := getManifestCheckpoint(ctx, checkpointName)
 			verifyCheckpointIsClusterScoped(mcp)
 
-			// Verify manifestCaptureRequestRef
-			Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
-			Expect(mcp.Spec.ManifestCaptureRequestRef.Name).To(Equal(TestFixtures.TestMCRName))
-			Expect(mcp.Spec.ManifestCaptureRequestRef.Namespace).To(Equal(testNS))
-			Expect(mcp.Spec.ManifestCaptureRequestRef.UID).To(Equal(mcrUID))
+			// Verify source provenance: sourceNamespace on spec, originating request name on the label
 			Expect(mcp.Spec.SourceNamespace).To(Equal(testNS))
+			Expect(mcp.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", TestFixtures.TestMCRName))
 
 			// Verify chunks are created and cluster-scoped
 			chunks := listManifestCheckpointContentChunks(ctx, checkpointName)
@@ -315,7 +309,6 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 				makeTarget("v1", "ConfigMap", TestFixtures.TestConfigMapName),
 			}
 			mcr := createManifestCaptureRequest(ctx, testNS, TestFixtures.TestMCRName, targets)
-			mcrUID := string(mcr.UID) // Save UID for verification
 
 			// Wait for Ready
 			mcr = waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
@@ -340,8 +333,8 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Verify checkpoint still exists and is the same
 			mcp := getManifestCheckpoint(ctx, checkpointName1)
 			Expect(mcp).NotTo(BeNil())
-			Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
-			Expect(mcp.Spec.ManifestCaptureRequestRef.UID).To(Equal(mcrUID), "Checkpoint should reference correct MCR UID")
+			Expect(mcp.Spec.SourceNamespace).To(Equal(testNS))
+			Expect(mcp.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", TestFixtures.TestMCRName))
 		})
 
 		It("should not recreate retainers on reconcile", func() {
@@ -408,18 +401,16 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(mcr.Status.CheckpointName).To(BeEmpty())
 
 			// Verify no checkpoint created for this MCR
-			// Filter by checking that no checkpoint has this MCR's UID in manifestCaptureRequestRef
+			// Filter by the source provenance: sourceNamespace + the source-request label name.
 			checkpoints := &storagev1alpha1.ManifestCheckpointList{}
 			err := k8sClient.List(ctx, checkpoints)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Count checkpoints that reference this MCR
+			// Count checkpoints sourced from this MCR
 			matchingCheckpoints := 0
 			for _, cp := range checkpoints.Items {
-				if cp.Spec.ManifestCaptureRequestRef != nil &&
-					cp.Spec.ManifestCaptureRequestRef.Name == TestFixtures.TestMCRName &&
-					cp.Spec.ManifestCaptureRequestRef.Namespace == testNS &&
-					cp.Spec.ManifestCaptureRequestRef.UID == string(mcr.UID) {
+				if cp.Spec.SourceNamespace == testNS &&
+					cp.Labels["state-snapshotter.deckhouse.io/source-request"] == TestFixtures.TestMCRName {
 					matchingCheckpoints++
 				}
 			}
@@ -441,7 +432,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 
 			// Verify MCR ObjectKeeper
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			ok := getRetainer(ctx, retainerName)
 
 			Expect(ok.Spec.Mode).To(Equal("FollowObject"))
@@ -468,7 +459,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// This ObjectKeeper:
 			// - Uses FollowObject mode to follow MCR (no TTL - TTL is handled by MCR controller)
 			// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			ok := getRetainer(ctx, retainerName)
 
 			// Verify ObjectKeeper follows MCR in FollowObject mode
@@ -515,7 +506,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 			// Get checkpoint and MCR ObjectKeeper
 			mcp := getManifestCheckpoint(ctx, checkpointName)
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			ok := getRetainer(ctx, retainerName)
 
 			// Verify ObjectKeeper exists and follows MCR
@@ -564,7 +555,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(mcp).NotTo(BeNil())
 
 			// Verify checkpoint has ownerRef to MCR ObjectKeeper
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			Expect(len(mcp.OwnerReferences)).To(Equal(1))
 			Expect(mcp.OwnerReferences[0].Kind).To(Equal("ObjectKeeper"))
 			Expect(mcp.OwnerReferences[0].Name).To(Equal(retainerName))
@@ -693,7 +684,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 			// ADR: one UID-aware ObjectKeeper exists for this MCR UID.
 			// This ObjectKeeper uses FollowObject mode to follow MCR
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(testNS, TestFixtures.TestMCRName, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			var objectKeeper deckhousev1alpha1.ObjectKeeper
 			err := k8sClient.Get(ctx, client.ObjectKey{Name: retainerName}, &objectKeeper)
 			Expect(err).NotTo(HaveOccurred(), "MCR ObjectKeeper should exist")
