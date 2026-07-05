@@ -27,7 +27,6 @@ import (
 	stderrors "errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -46,6 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/api/names"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
@@ -288,7 +288,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	// executor never creates artifacts owned by SnapshotContent and never depends on SnapshotContent
 	// existing. Execution ObjectKeeper names are UID-aware so stale keepers from a deleted MCR cannot
 	// block a recreated request with the same namespace/name.
-	retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
+	retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
 	r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
 
@@ -739,11 +739,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		// Encode to base64 for storage
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
 
-		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
-			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
-		}
-		chunkName := fmt.Sprintf("%s%s-0", namespacemanifest.CheckpointNamePrefix, checkpointID)
+		chunkName := names.ChunkName(types.UID(checkpointUID), 0)
 
 		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{
 			TypeMeta: metav1.TypeMeta{
@@ -896,12 +892,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	// Create chunk resources
 	chunkInfos := make([]storagev1alpha1.ChunkInfo, 0, len(chunks))
 	for i, chunk := range chunks {
-		// Extract ID from checkpoint name (remove prefix if present)
-		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
-			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
-		}
-		chunkName := fmt.Sprintf("%s%s-%d", namespacemanifest.CheckpointNamePrefix, checkpointID, i)
+		// Chunk name keyed by the ManifestCheckpoint UID (unified wave4C scheme, see api/names). The
+		// name is recorded in status.chunks[].name and read back from there, so consumers never
+		// reverse-derive it.
+		chunkName := names.ChunkName(types.UID(checkpointUID), i)
 
 		// Marshal chunk objects to JSON array
 		chunkJSON, err := json.Marshal(chunk.objects)

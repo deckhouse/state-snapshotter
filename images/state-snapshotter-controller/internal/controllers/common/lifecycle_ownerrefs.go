@@ -18,8 +18,6 @@ package common //nolint:revive // package name matches internal/controllers/comm
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -27,21 +25,22 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
-func RootObjectKeeperName(snapshotNamespace, snapshotAPIVersion, snapshotKind, snapshotName string) string {
-	if snapshotAPIVersion == storagev1alpha1.SchemeGroupVersion.String() && snapshotKind == KindSnapshot {
-		return namespacemanifest.SnapshotRootObjectKeeperName(snapshotNamespace, snapshotName)
-	}
-	sum := sha256.Sum256([]byte(snapshotAPIVersion + "|" + snapshotKind + "|" + snapshotNamespace + "/" + snapshotName))
-	return "ret-snap-" + hex.EncodeToString(sum[:10])
+// RootObjectKeeperName returns the deterministic root ObjectKeeper name for a snapshot object, keyed by
+// its UID (unified wave4C scheme, see api/names). The OK is looked up after the Snapshot is gone by
+// listing ObjectKeepers and matching FollowObjectRef (see aggregated retained-content lookup), so the
+// name need not be derivable from namespace/name.
+func RootObjectKeeperName(snapshotUID types.UID) string {
+	return names.ObjectKeeperName(snapshotUID)
 }
 
 func RootObjectKeeperTTL(cfg *config.Options) time.Duration {
@@ -62,7 +61,7 @@ func EnsureRootObjectKeeperWithTTL(
 	if snapshotObj.GetUID() == "" {
 		return nil, ctrl.Result{Requeue: true}, nil
 	}
-	name := RootObjectKeeperName(snapshotObj.GetNamespace(), snapshotGVK.GroupVersion().String(), snapshotGVK.Kind, snapshotObj.GetName())
+	name := RootObjectKeeperName(snapshotObj.GetUID())
 	want := deckhousev1alpha1.ObjectKeeperSpec{
 		Mode: ObjectKeeperModeFollowObjectWithTTL,
 		FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{

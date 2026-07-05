@@ -18,8 +18,6 @@ package snapshot
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -35,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
@@ -43,10 +42,6 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
-
-// orphanPVCVolumeSnapshotNamePrefix marks VolumeSnapshots created by the namespace-root orphan-PVC
-// data leg. The prefix identifies our own orphan VolumeSnapshots for visibility-leaf bookkeeping.
-const orphanPVCVolumeSnapshotNamePrefix = "nss-vs-"
 
 // volumeSnapshotContentRetainPolicy is the deletionPolicy that keeps the bound VSC durable after the
 // per-run VolumeSnapshot is deleted (durable-artifact contract, ADR 2026-06-09 / spec §3.9.11).
@@ -76,6 +71,10 @@ var (
 //   - otherwise: still pending (caller requeues without writing a terminal condition).
 type orphanVSBindingResult struct {
 	binding *storagev1alpha1.SnapshotDataBinding
+	// vsUID is the live orphan VolumeSnapshot UID. It keys the child volume-node SnapshotContent and its
+	// per-PVC ManifestCaptureRequest under the unified wave4C naming scheme (api/names), so the per-PVC
+	// leaf identity is the VS (not the PVC).
+	vsUID   types.UID
 	ready   bool
 	failed  bool
 	reason  string
@@ -345,9 +344,10 @@ func orphanPVCVolumeSnapshotObject(nsSnap *storagev1alpha1.Snapshot, target vcpk
 	return obj
 }
 
+// orphanPVCVolumeSnapshotName returns the deterministic orphan/residual-PVC CSI VolumeSnapshot name,
+// keyed by the root Snapshot UID and the captured PVC UID (unified wave4C scheme, see api/names).
 func orphanPVCVolumeSnapshotName(snapshotUID types.UID, target vcpkg.Target) string {
-	sum := sha256.Sum256([]byte(string(snapshotUID) + "|" + target.UID + "|" + target.Namespace + "/" + target.Name))
-	return orphanPVCVolumeSnapshotNamePrefix + hex.EncodeToString(sum[:])[:20]
+	return names.OrphanVolumeSnapshotName(snapshotUID, types.UID(target.UID))
 }
 
 func ownerRefToMap(ref metav1.OwnerReference) map[string]interface{} {
@@ -471,7 +471,7 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 			allReady = false
 			continue
 		}
-		ready, terr := r.ensureOrphanVolumeChildNode(ctx, nsSnap, content, target, res.binding)
+		ready, terr := r.ensureOrphanVolumeChildNode(ctx, nsSnap, content, target, res.vsUID, res.binding)
 		if terr != nil {
 			return ctrl.Result{}, terr
 		}
@@ -506,6 +506,7 @@ func (r *SnapshotReconciler) ensureOrphanVolumeChildNode(
 	nsSnap *storagev1alpha1.Snapshot,
 	root *storagev1alpha1.SnapshotContent,
 	target vcpkg.Target,
+	vsUID types.UID,
 	binding *storagev1alpha1.SnapshotDataBinding,
 ) (ready bool, err error) {
 	enriched, eerr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.directReader(), []storagev1alpha1.SnapshotDataBinding{*binding})
@@ -515,17 +516,22 @@ func (r *SnapshotReconciler) ensureOrphanVolumeChildNode(
 	// snapshotRef points back at the orphan CSI VolumeSnapshot that binds this child via its
 	// status.boundSnapshotContentName (INV-ORPHAN4) — that is the handshake subject, not the root
 	// content ownerRef (which is only the GC lifecycle link). The orphan VolumeSnapshot is durable for
-	// the life of the Snapshot (it is the snapshot of the PVC), removed only by ownerRef GC. UID is left
-	// empty for now: the deterministic name + namespace are the anti-spoofing boundary and the restore
-	// handshake matches UID only when present (mirrors the core staticBindRefMatches pre-provisioned
-	// allowance). Populating the UID is a possible future hardening now that the VS is stable.
+	// the life of the Snapshot (it is the snapshot of the PVC), removed only by ownerRef GC.
+	//
+	// UID is stamped with the live orphan VolumeSnapshot UID (wave4B): it pins the leaf<->VS identity so
+	// the resolver's anti-spoof handshake (verifyOrphanContentSnapshotRef) matches UID, and — crucially —
+	// gives recycle-bin restore a concrete uid to re-point (relaxed-CEL) when the durable leaf content is
+	// re-attached to a freshly re-created VolumeSnapshot handle (which carries a NEW uid). Under the
+	// unified wave4C scheme this same VS UID also keys the child content name and per-PVC MCR, so the leaf
+	// identity is consistently the VS across name, MCR, and back-reference.
 	orphanVSRef := &storagev1alpha1.SnapshotSubjectRef{
 		APIVersion: snapshotpkg.CSISnapshotAPIVersion,
 		Kind:       snapshotpkg.KindVolumeSnapshot,
 		Namespace:  nsSnap.Namespace,
 		Name:       orphanPVCVolumeSnapshotName(nsSnap.UID, target),
+		UID:        vsUID,
 	}
-	child, err := snapshotcontent.EnsureVolumeChildContent(ctx, r.Client, root, target.UID, orphanVSRef)
+	child, err := snapshotcontent.EnsureVolumeChildContent(ctx, r.Client, root, vsUID, orphanVSRef)
 	if err != nil {
 		return false, err
 	}
@@ -536,7 +542,7 @@ func (r *SnapshotReconciler) ensureOrphanVolumeChildNode(
 	if err := snapshotcontent.PublishSnapshotContentDataRef(ctx, r.Client, child.Name, &enriched[0]); err != nil {
 		return false, err
 	}
-	mcpReady, err := r.ensureOrphanVolumeChildManifestCheckpoint(ctx, nsSnap, child, target)
+	mcpReady, err := r.ensureOrphanVolumeChildManifestCheckpoint(ctx, nsSnap, child, target, vsUID)
 	if err != nil {
 		return false, err
 	}
@@ -559,8 +565,9 @@ func (r *SnapshotReconciler) ensureOrphanVolumeChildManifestCheckpoint(
 	nsSnap *storagev1alpha1.Snapshot,
 	child *storagev1alpha1.SnapshotContent,
 	target vcpkg.Target,
+	vsUID types.UID,
 ) (ready bool, err error) {
-	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotVolumeMCRName(nsSnap.UID, target.UID)}
+	mcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: namespacemanifest.SnapshotVolumeMCRName(vsUID)}
 
 	// Already persisted: MCP Ready under the child's published name. Do not recreate the per-orphan MCR.
 	cur := &storagev1alpha1.SnapshotContent{}
@@ -780,6 +787,7 @@ func (r *SnapshotReconciler) orphanPVCVolumeSnapshotBinding(
 
 	return orphanVSBindingResult{
 		ready: true,
+		vsUID: vs.GetUID(),
 		binding: &storagev1alpha1.SnapshotDataBinding{
 			TargetUID: target.UID,
 			Target: storagev1alpha1.SnapshotSubjectRef{

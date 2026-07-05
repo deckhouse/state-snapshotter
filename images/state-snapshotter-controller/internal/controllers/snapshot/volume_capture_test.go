@@ -177,7 +177,7 @@ func TestReconcileVolumeCapturePublish_orphanVolumeSnapshotHandoffBeforePublish(
 	if _, err := r.reconcileVolumeCapturePublish(ctx, snap, content, false); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	childName := orphanChildContentName(content.Name, target)
+	childName := orphanChildContentName(snap.UID, target)
 	vscObj := &unstructured.Unstructured{}
 	vscObj.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
 	if err := cl.Get(ctx, client.ObjectKey{Name: "vsc-a"}, vscObj); err != nil {
@@ -201,7 +201,7 @@ func TestReconcileVolumeCapturePublish_orphanVolumeSnapshotHandoffBeforePublish(
 	if root.Status.DataRef != nil {
 		t.Fatalf("root aggregator must not carry a dataRef, got %#v", root.Status.DataRef)
 	}
-	childRef := orphanChildDataRef(t, cl, content.Name, target)
+	childRef := orphanChildDataRef(t, cl, snap.UID, target)
 	if childRef == nil || childRef.Artifact.Name != "vsc-a" {
 		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", childRef)
 	}
@@ -300,7 +300,7 @@ func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 		t.Fatalf("expected 2 child volume nodes linked under root, got %#v", got.Status.ChildrenSnapshotContentRefs)
 	}
 	for _, target := range []vcpkg.Target{targetA, targetB} {
-		ref := orphanChildDataRef(t, cl, content.Name, target)
+		ref := orphanChildDataRef(t, cl, snap.UID, target)
 		if ref == nil || ref.TargetUID != target.UID {
 			t.Fatalf("child volume node for %s missing its dataRef, got %#v", target.Name, ref)
 		}
@@ -348,7 +348,7 @@ func TestReconcileVolumeCapture_RootIgnoresAndDeletesStaleVCR(t *testing.T) {
 	if got.Status.DataRef != nil {
 		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
 	}
-	if ref := orphanChildDataRef(t, cl, content.Name, target); ref == nil || ref.Artifact.Name != "vsc-a" {
+	if ref := orphanChildDataRef(t, cl, snap.UID, target); ref == nil || ref.Artifact.Name != "vsc-a" {
 		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", ref)
 	}
 }
@@ -489,8 +489,18 @@ func readyVolumeSnapshot(ns, name, pvcName, vscName string, owner *storagev1alph
 	if owner != nil {
 		obj.SetOwnerReferences([]metav1.OwnerReference{volumeSnapshotOwnerReferenceForSnapshot(owner)})
 	}
+	// Deterministic UID so the child volume-node SnapshotContent and per-orphan MCR names (keyed by the
+	// orphan VS UID under the unified wave4C scheme) are stable and distinct per orphan in these tests.
+	obj.SetUID(orphanVSTestUID(name))
 	obj.SetGroupVersionKind(csiVolumeSnapshotGVK)
 	return obj
+}
+
+// orphanVSTestUID is the deterministic UID stamped on orphan VolumeSnapshots created by test fixtures,
+// mirroring what a live apiserver would assign. It keys the child content / per-orphan MCR names in
+// assertions (unified wave4C scheme, see api/names).
+func orphanVSTestUID(vsName string) types.UID {
+	return types.UID("vsuid-" + vsName)
 }
 
 // unboundVolumeSnapshot builds a VolumeSnapshot that is not yet bound (no boundVolumeSnapshotContentName),
@@ -638,7 +648,7 @@ func TestReconcileVolumeCapturePublish_DeletePolicyPatchedToRetain(t *testing.T)
 	if got.Status.DataRef != nil {
 		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
 	}
-	if ref := orphanChildDataRef(t, cl, content.Name, target); ref == nil || ref.Artifact.Name != "vsc-a" {
+	if ref := orphanChildDataRef(t, cl, snap.UID, target); ref == nil || ref.Artifact.Name != "vsc-a" {
 		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", ref)
 	}
 }
@@ -1014,9 +1024,11 @@ func testVolumeCaptureScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// orphanChildContentName is the deterministic child volume-node SnapshotContent name for a captured PVC.
-func orphanChildContentName(rootContentName string, target vcpkg.Target) string {
-	return snapshotcontentctrl.ChildVolumeContentName(rootContentName, target.UID)
+// orphanChildContentName is the deterministic child volume-node SnapshotContent name for a captured PVC,
+// keyed by the orphan VolumeSnapshot UID (unified wave4C scheme).
+func orphanChildContentName(snapUID types.UID, target vcpkg.Target) string {
+	vsUID := orphanVSTestUID(orphanPVCVolumeSnapshotName(snapUID, target))
+	return snapshotcontentctrl.ChildVolumeContentName(vsUID)
 }
 
 // csiVolumeSnapshotStatusStub registers the CSI VolumeSnapshot as a status-subresource type on the fake
@@ -1034,7 +1046,8 @@ func csiVolumeSnapshotStatusStub() client.Object {
 // place, ensureOrphanVolumeChildManifestCheckpoint finds the MCR, publishes the MCP name onto the child
 // volume node, and observes it Ready — letting the orphan publish path reach completion.
 func seedOrphanChildManifest(ns string, snapUID types.UID, target vcpkg.Target) []client.Object {
-	mcrName := namespacemanifest.SnapshotVolumeMCRName(snapUID, target.UID)
+	vsUID := orphanVSTestUID(orphanPVCVolumeSnapshotName(snapUID, target))
+	mcrName := namespacemanifest.SnapshotVolumeMCRName(vsUID)
 	mcrUID := types.UID("mcr-uid-" + target.UID)
 	mcr := &ssv1alpha1.ManifestCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: mcrName, Namespace: ns, UID: mcrUID},
@@ -1053,10 +1066,10 @@ func seedOrphanChildManifest(ns string, snapUID types.UID, target vcpkg.Target) 
 }
 
 // orphanChildDataRef reads the single published dataRef of the child volume node for a captured PVC.
-func orphanChildDataRef(t *testing.T, cl client.Client, rootContentName string, target vcpkg.Target) *storagev1alpha1.SnapshotDataBinding {
+func orphanChildDataRef(t *testing.T, cl client.Client, snapUID types.UID, target vcpkg.Target) *storagev1alpha1.SnapshotDataBinding {
 	t.Helper()
 	child := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(context.Background(), client.ObjectKey{Name: orphanChildContentName(rootContentName, target)}, child); err != nil {
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: orphanChildContentName(snapUID, target)}, child); err != nil {
 		t.Fatalf("get orphan child content for %s: %v", target.Name, err)
 	}
 	return child.Status.DataRef

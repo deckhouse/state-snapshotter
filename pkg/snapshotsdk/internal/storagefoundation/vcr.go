@@ -30,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
 // VolumeCaptureRequestGVK is the storage-foundation VolumeCaptureRequest GVK.
@@ -51,9 +53,10 @@ type Target struct {
 }
 
 // VCRName returns the deterministic data-leg VolumeCaptureRequest name owned by a snapshot, keyed by the
-// snapshot UID. The name is derivable from the snapshot alone, without reading SnapshotContent.
+// snapshot UID (unified wave4C scheme, see api/names). The name is derivable from the snapshot alone,
+// without reading SnapshotContent.
 func VCRName(snapshotUID types.UID) string {
-	return fmt.Sprintf("snap-owned-vcr-%s", snapshotUID)
+	return names.VolumeCaptureRequestName(snapshotUID)
 }
 
 // Provider creates and reads storage-foundation VolumeCaptureRequests on behalf of the SDK data leg.

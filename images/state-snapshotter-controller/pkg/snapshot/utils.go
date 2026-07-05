@@ -17,7 +17,6 @@ limitations under the License.
 package snapshot
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -26,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
 const (
@@ -684,21 +685,18 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataSnapshotMethod() strin
 	return ""
 }
 
-// GenerateSnapshotContentName generates a deterministic name for SnapshotContent
-// based on Snapshot name and UID
+// GenerateSnapshotContentName returns the deterministic SnapshotContent name for a snapshot object, keyed
+// by its UID (unified wave4C scheme, see api/names). The snapshotName argument is retained for signature
+// compatibility but no longer part of the name (names are opaque; connectivity is via refs).
 func GenerateSnapshotContentName(snapshotName, snapshotUID string) string {
-	// Use first 8 characters of UID for uniqueness
-	uidSuffix := snapshotUID
-	if len(uidSuffix) > 8 {
-		uidSuffix = uidSuffix[:8]
-	}
-	return fmt.Sprintf("%s-content-%s", snapshotName, strings.ToLower(uidSuffix))
+	_ = snapshotName
+	return names.ContentName(types.UID(snapshotUID))
 }
 
-// GenerateObjectKeeperName generates a deterministic name for ObjectKeeper
-// for root snapshots
-func GenerateObjectKeeperName(snapshotKind, snapshotName string) string {
-	return fmt.Sprintf("ret-%s-%s", strings.ToLower(snapshotKind), snapshotName)
+// GenerateObjectKeeperName returns the deterministic root ObjectKeeper name for a snapshot object, keyed
+// by its UID (unified wave4C scheme, see api/names).
+func GenerateObjectKeeperName(snapshotUID types.UID) string {
+	return names.ObjectKeeperName(snapshotUID)
 }
 
 // IsRootSnapshot checks if a snapshot is a root (has no parent ownerRef)

@@ -89,10 +89,10 @@ func TestReconstructManifestCheckpoint_BuildsReadyCheckpoint(t *testing.T) {
 		t.Fatalf("checkpoint name %q must use the capture prefix %q", name, namespacemanifest.CheckpointNamePrefix)
 	}
 
-	// Chunk naming must follow <prefix><id>-<n> so the ArchiveService (prefix-stripped id) can find it.
-	id := strings.TrimPrefix(name, namespacemanifest.CheckpointNamePrefix)
+	// Chunk names are recorded in status and read back from there (unified wave4C scheme keys them by the
+	// checkpoint UID, not the name), so resolve chunk 0 via the recorded ChunkInfo rather than derivation.
 	chunk := &ssv1alpha1.ManifestCheckpointContentChunk{}
-	if err := cl.Get(ctx, types.NamespacedName{Name: namespacemanifest.CheckpointNamePrefix + id + "-0"}, chunk); err != nil {
+	if err := cl.Get(ctx, types.NamespacedName{Name: cp.Status.Chunks[0].Name}, chunk); err != nil {
 		t.Fatalf("get chunk 0: %v", err)
 	}
 	if chunk.Spec.CheckpointName != name {

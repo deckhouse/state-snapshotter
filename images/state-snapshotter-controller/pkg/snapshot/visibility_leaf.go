@@ -40,18 +40,14 @@ const (
 	// 2025-06-24-auto-add-volumesnapshotclass). It MUST stay on storage.deckhouse.io.
 	AnnotationStorageClassVolumeSnapshotClass = "storage.deckhouse.io/volumesnapshotclass"
 
-	// ChildVolumeContentInfix is the deterministic infix in a child volume-node SnapshotContent name
-	// (<rootContentName>-vol-<hash>, Variant A). It only affects naming determinism; child-volume-node
-	// detection uses the LabelChildVolumeNode marker (see IsChildVolumeNodeContent), not this infix.
-	ChildVolumeContentInfix = "-vol-"
-
 	// LabelChildVolumeNode marks a SnapshotContent created as a standalone child volume node for a
 	// root-residual/orphan PVC (Variant A). It is the authoritative signal that distinguishes the orphan
 	// capture itself from a real domain subtree child: subtree PVC-coverage must skip these nodes (the
 	// orphan PVC must stay in the root residual scope so the same PVC is not double-handled),
-	// while the manifest-checkpoint subtree exclude still removes the PVC manifest from the root MCP. A
-	// name-prefix heuristic on ChildVolumeContentInfix is fragile (a coincidentally named content would
-	// be misclassified); this explicit label is set at creation by EnsureVolumeChildContent.
+	// while the manifest-checkpoint subtree exclude still removes the PVC manifest from the root MCP.
+	// Under the unified wave4C naming scheme content names are opaque (keyed by the orphan VolumeSnapshot
+	// UID; see api/names), so classification cannot rely on the name — this explicit label, set at
+	// creation by EnsureVolumeChildContent, is the sole marker.
 	LabelChildVolumeNode = "state-snapshotter.deckhouse.io/child-volume-node"
 )
 

@@ -295,7 +295,7 @@ var _ = Describe("Integration: Snapshot deletion semantics", func() {
 				"root SnapshotContent must not use ownerReferences to short-lived Snapshot")
 		}
 		ok := &deckhousev1alpha1.ObjectKeeper{}
-		okName := namespacemanifest.SnapshotRootObjectKeeperName(nsName, snap.Name)
+		okName := snapshot.GenerateObjectKeeperName(rootUID)
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: okName}, ok)).To(Succeed())
 		Expect(ok.Spec.FollowObjectRef).NotTo(BeNil())
 		Expect(ok.Spec.FollowObjectRef.Kind).To(Equal("Snapshot"))

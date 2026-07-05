@@ -20,49 +20,30 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
 
 func TestRootObjectKeeperNameIsDNS1123Safe(t *testing.T) {
-	tests := []struct {
-		name       string
-		namespace  string
-		apiVersion string
-		kind       string
-		snapshot   string
-		want       string
-	}{
-		{
-			name:       "Snapshot keeps legacy stable name",
-			namespace:  "ns1",
-			apiVersion: storagev1alpha1.SchemeGroupVersion.String(),
-			kind:       KindSnapshot,
-			snapshot:   "snap",
-			want:       namespacemanifest.SnapshotRootObjectKeeperName("ns1", "snap"),
-		},
-		{
-			name:       "apiVersion slash is hashed out",
-			namespace:  "ns1",
-			apiVersion: "example.deckhouse.io/v1alpha1",
-			kind:       "WidgetSnapshot",
-			snapshot:   "snap",
-		},
+	uids := []types.UID{
+		"snap-uid-1",
+		"example.deckhouse.io/v1alpha1|WidgetSnapshot|ns1/snap",
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := RootObjectKeeperName(tt.namespace, tt.apiVersion, tt.kind, tt.snapshot)
-			if tt.want != "" && got != tt.want {
-				t.Fatalf("RootObjectKeeperName() = %q, want %q", got, tt.want)
-			}
-			if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
-				t.Fatalf("RootObjectKeeperName() produced invalid metadata.name %q: %v", got, errs)
-			}
-		})
+	for _, uid := range uids {
+		got := RootObjectKeeperName(uid)
+		if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
+			t.Fatalf("RootObjectKeeperName(%q) produced invalid metadata.name %q: %v", uid, got, errs)
+		}
+	}
+	// Deterministic per UID; distinct UIDs give distinct names.
+	if RootObjectKeeperName("a") != RootObjectKeeperName("a") {
+		t.Fatal("RootObjectKeeperName not deterministic")
+	}
+	if RootObjectKeeperName("a") == RootObjectKeeperName("b") {
+		t.Fatal("RootObjectKeeperName collides for distinct UIDs")
 	}
 }
 

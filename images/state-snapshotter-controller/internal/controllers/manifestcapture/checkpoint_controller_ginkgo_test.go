@@ -724,7 +724,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			Expect(client.Create(ctx, cm)).To(Succeed())
 
 			// Create ObjectKeeper manually (simulating controller behavior)
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: controllercommon.DeckhouseAPIVersion,
@@ -769,7 +769,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 				},
 			}
 
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: retainerName,
@@ -851,8 +851,8 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			Expect(client.Create(ctx, cm)).To(Succeed())
 			Expect(client.Create(ctx, mcr2)).To(Succeed())
 
-			oldRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr1.Namespace, mcr1.Name, mcr1.UID)
-			newRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr2.Namespace, mcr2.Name, mcr2.UID)
+			oldRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr1.UID)
+			newRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr2.UID)
 			Expect(newRetainerName).ToNot(Equal(oldRetainerName))
 
 			oldObjectKeeper := &deckhousev1alpha1.ObjectKeeper{

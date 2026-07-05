@@ -79,7 +79,7 @@ var _ = Describe("Integration: ManifestCaptureRequest execution ObjectKeeper bef
 			g.Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
 			mcrUID := types.UID(mcp.Spec.ManifestCaptureRequestRef.UID)
 			g.Expect(mcrUID).NotTo(BeEmpty())
-			okName = namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcrUID)
+			okName = namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcrUID)
 
 			// Execution ObjectKeeper must exist (created before the MCP) and follow this MCR.
 			ok := &deckhousev1alpha1.ObjectKeeper{}

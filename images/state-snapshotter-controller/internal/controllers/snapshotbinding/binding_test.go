@@ -28,9 +28,14 @@ import (
 )
 
 func TestStableContentName(t *testing.T) {
-	got := StableContentName("snap", types.UID("12345678-1234-1234-1234-123456789abc"))
-	if got != "snap-content-12345678" {
-		t.Fatalf("unexpected stable content name: %q", got)
+	uid := types.UID("12345678-1234-1234-1234-123456789abc")
+	got := StableContentName("snap", uid)
+	// Unified wave4C scheme: opaque, UID-keyed, name-independent.
+	if want := StableContentName("other-name", uid); got != want {
+		t.Fatalf("StableContentName must depend only on UID: %q != %q", got, want)
+	}
+	if got == StableContentName("snap", types.UID("00000000-0000-0000-0000-000000000000")) {
+		t.Fatalf("StableContentName must differ for different UIDs: %q", got)
 	}
 }
 

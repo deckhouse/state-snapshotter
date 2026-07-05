@@ -199,12 +199,8 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	if t.CoreCaptureState().manifestCaptured() {
 		return nil
 	}
-	gvk, err := apiutil.GVKForObject(obj, s.client.Scheme())
-	if err != nil {
-		return err
-	}
 	namespace := obj.GetNamespace()
-	mcrName := manifest.RequestName(gvk.Kind, namespace, obj.GetName())
+	mcrName := manifest.RequestName(obj.GetUID())
 
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
 	getErr := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}, existing)

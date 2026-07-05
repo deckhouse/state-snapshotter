@@ -32,7 +32,6 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
@@ -96,18 +95,27 @@ func (s *AggregatedNamespaceManifests) resolveRootContentName(ctx context.Contex
 }
 
 func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx context.Context, namespace, snapshotName string) (string, error) {
-	okName := namespacemanifest.SnapshotRootObjectKeeperName(namespace, snapshotName)
-	ok := &deckhousev1alpha1.ObjectKeeper{}
-	if err := s.client.Get(ctx, client.ObjectKey{Name: okName}, ok); err != nil {
-		return "", err
+	// The root ObjectKeeper name is keyed by the (now-deleted) Snapshot UID (unified wave4C scheme), so it
+	// is not derivable from namespace/name here. Find the retained OK by listing ObjectKeepers and matching
+	// FollowObjectRef back at this Snapshot instead.
+	oks := &deckhousev1alpha1.ObjectKeeperList{}
+	if err := s.client.List(ctx, oks); err != nil {
+		return "", fmt.Errorf("list ObjectKeeper for retained Snapshot %s/%s: %w", namespace, snapshotName, err)
 	}
-	if ok.Spec.FollowObjectRef == nil ||
-		ok.Spec.FollowObjectRef.APIVersion != storagev1alpha1.SchemeGroupVersion.String() ||
-		ok.Spec.FollowObjectRef.Kind != "Snapshot" ||
-		ok.Spec.FollowObjectRef.Namespace != namespace ||
-		ok.Spec.FollowObjectRef.Name != snapshotName {
-		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
-			fmt.Sprintf("ObjectKeeper %q does not follow Snapshot %s/%s", okName, namespace, snapshotName))
+	var ok *deckhousev1alpha1.ObjectKeeper
+	for i := range oks.Items {
+		ref := oks.Items[i].Spec.FollowObjectRef
+		if ref != nil &&
+			ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() &&
+			ref.Kind == "Snapshot" &&
+			ref.Namespace == namespace &&
+			ref.Name == snapshotName {
+			ok = &oks.Items[i]
+			break
+		}
+	}
+	if ok == nil {
+		return "", apierrors.NewNotFound(schema.GroupResource{Group: "deckhouse.io", Resource: "objectkeepers"}, snapshotName)
 	}
 
 	contents := &storagev1alpha1.SnapshotContentList{}
@@ -132,12 +140,12 @@ func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx contex
 	switch len(matches) {
 	case 0:
 		return "", NewAggregatedStatusError(http.StatusNotFound, "NotFound",
-			fmt.Sprintf("retained SnapshotContent for Snapshot %s/%s not found via ObjectKeeper %q", namespace, snapshotName, okName))
+			fmt.Sprintf("retained SnapshotContent for Snapshot %s/%s not found via ObjectKeeper %q", namespace, snapshotName, ok.Name))
 	case 1:
 		return matches[0], nil
 	default:
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
-			fmt.Sprintf("multiple retained SnapshotContents for Snapshot %s/%s found via ObjectKeeper %q", namespace, snapshotName, okName))
+			fmt.Sprintf("multiple retained SnapshotContents for Snapshot %s/%s found via ObjectKeeper %q", namespace, snapshotName, ok.Name))
 	}
 }
 

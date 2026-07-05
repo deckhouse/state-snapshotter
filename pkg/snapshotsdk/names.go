@@ -16,11 +16,11 @@ limitations under the License.
 
 package snapshotsdk
 
-import "github.com/deckhouse/state-snapshotter/api/names"
+import apinames "github.com/deckhouse/state-snapshotter/api/names"
 
 // ChildSnapshotName re-exports api/names.ChildSnapshotName so domain controllers name their sub-children
 // with the same UID scheme the core uses for root-owned children — one definition, zero duplicates. The
 // name is nss-snap-<h8(parentSnapshotUID)>-<h16(sourceUID)>: pass the domain snapshot's own UID as the
 // parent and the captured source object's UID as the source. Connectivity is carried by refs/ownerRefs,
 // so the name is opaque; never reverse-derive it.
-var ChildSnapshotName = names.ChildSnapshotName
+var ChildSnapshotName = apinames.ChildSnapshotName

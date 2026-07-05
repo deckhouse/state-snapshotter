@@ -17,49 +17,40 @@ limitations under the License.
 package namespacemanifest
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
-// CheckpointNamePrefix is the prefix for ManifestCheckpoint names and related chunk names (must match manifest line).
-const CheckpointNamePrefix = "mcp-"
+// CheckpointNamePrefix is the prefix for ManifestCheckpoint names and related chunk names (unified wave4C
+// scheme, see api/names). Chunk names are recorded in status and read back from there, so this prefix is
+// not reverse-parsed by consumers.
+const CheckpointNamePrefix = "nss-mcp-"
 
-// SnapshotMCRName returns the deterministic ManifestCaptureRequest name for a Snapshot root (design §4.7).
+// SnapshotMCRName returns the deterministic ManifestCaptureRequest name for a Snapshot root, keyed by the
+// owning snapshot UID (unified wave4C scheme, see api/names).
 func SnapshotMCRName(uid types.UID) string {
-	return fmt.Sprintf("snap-%s", uid)
+	return names.ManifestCaptureRequestName(uid)
 }
 
 // SnapshotVolumeMCRName returns the deterministic per-orphan-PVC ManifestCaptureRequest name for a child
 // volume node (Variant A): each loose/orphan PVC becomes its own snapshot node whose PVC manifest is
-// captured in its own ManifestCheckpoint (co-ownership: PVC manifest + its dataRef live on one content),
-// rather than being folded into the root MCR. Keyed by the Snapshot UID and the captured PVC UID so it is
-// stable across reconciles and distinct from the root MCR (snap-<uid>).
-func SnapshotVolumeMCRName(snapshotUID types.UID, targetUID string) string {
-	hash := sha256.Sum256([]byte(string(snapshotUID) + "|" + targetUID))
-	return "snap-vol-" + hex.EncodeToString(hash[:8])
+// captured in its own ManifestCheckpoint. Keyed by the orphan VolumeSnapshot UID (the per-PVC leaf
+// identity, unified wave4C scheme), so it is stable across reconciles and distinct from the root MCR.
+func SnapshotVolumeMCRName(orphanVSUID types.UID) string {
+	return names.ManifestCaptureRequestName(orphanVSUID)
 }
 
-// SnapshotRootObjectKeeperName is the cluster-scoped ObjectKeeper name for root retention (FollowObjectWithTTL on Snapshot; see controller config).
-// Root ObjectKeeper name intentionally stays stable for one retained root run. Execution request ObjectKeepers are UID-aware
-// to avoid stale request-name reuse conflicts.
-func SnapshotRootObjectKeeperName(namespace, snapshotName string) string {
-	return fmt.Sprintf("ret-snap-%s-%s", namespace, snapshotName)
+// ManifestCaptureRequestObjectKeeperName returns the execution ObjectKeeper name for a ManifestCaptureRequest,
+// keyed by the MCR UID (unified wave4C scheme, see api/names). A recreated request with the same
+// namespace/name gets a distinct UID and therefore a distinct OK, so a stale OK cannot collide.
+func ManifestCaptureRequestObjectKeeperName(uid types.UID) string {
+	return names.ObjectKeeperName(uid)
 }
 
-// ManifestCaptureRequestObjectKeeperName returns the generic execution ObjectKeeper name for a ManifestCaptureRequest.
-// The name includes a hash of the MCR UID so a recreated request with the same namespace/name cannot collide with a stale OK.
-func ManifestCaptureRequestObjectKeeperName(namespace, name string, uid types.UID) string {
-	hash := sha256.Sum256([]byte(namespace + "|" + name + "|" + string(uid)))
-	return "ret-mcr-" + hex.EncodeToString(hash[:8])
-}
-
-// GenerateManifestCheckpointNameFromUID returns the deterministic ManifestCheckpoint name for a ManifestCaptureRequest UID.
-// Must stay in sync with ManifestCheckpointController (single SSOT).
+// GenerateManifestCheckpointNameFromUID returns the deterministic ManifestCheckpoint name for a
+// ManifestCaptureRequest UID (unified wave4C scheme, see api/names). Single SSOT with the checkpoint
+// controller.
 func GenerateManifestCheckpointNameFromUID(mcrUID types.UID) string {
-	hash := sha256.Sum256([]byte(mcrUID))
-	id := hex.EncodeToString(hash[:8])
-	return CheckpointNamePrefix + id
+	return names.ManifestCheckpointName(mcrUID)
 }

@@ -18,26 +18,26 @@ package snapshotcontent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // ChildVolumeContentName returns the deterministic cluster-scoped SnapshotContent name for a child
-// volume node of root, keyed by the captured PVC target UID. Variant A models every PVC as its own
-// volume node (≤1 dataRef per content), so a multi-PVC scope (root residual/orphan) fans out into one
-// child SnapshotContent per PVC instead of a dataRefs[] list on the parent.
-func ChildVolumeContentName(rootContentName, targetUID string) string {
-	sum := sha256.Sum256([]byte(rootContentName + "|" + targetUID))
-	return rootContentName + snapshotpkg.ChildVolumeContentInfix + hex.EncodeToString(sum[:])[:12]
+// volume node of root, keyed by the orphan CSI VolumeSnapshot UID (the per-PVC leaf identity, unified
+// wave4C scheme; see api/names). Variant A models every orphan PVC as its own volume node (≤1 dataRef
+// per content), so a multi-PVC scope (root residual/orphan) fans out into one child SnapshotContent per
+// PVC — each named for its own VolumeSnapshot — instead of a dataRefs[] list on the parent.
+func ChildVolumeContentName(orphanVSUID types.UID) string {
+	return names.ContentName(orphanVSUID)
 }
 
 // EnsureVolumeChildContent ensures the cluster-scoped child volume-node SnapshotContent backing one PVC.
@@ -52,10 +52,10 @@ func EnsureVolumeChildContent(
 	ctx context.Context,
 	c client.Client,
 	root *storagev1alpha1.SnapshotContent,
-	targetUID string,
+	orphanVSUID types.UID,
 	snapshotRef *storagev1alpha1.SnapshotSubjectRef,
 ) (*storagev1alpha1.SnapshotContent, error) {
-	childName := ChildVolumeContentName(root.Name, targetUID)
+	childName := ChildVolumeContentName(orphanVSUID)
 	child := &storagev1alpha1.SnapshotContent{}
 	err := c.Get(ctx, client.ObjectKey{Name: childName}, child)
 	if apierrors.IsNotFound(err) {

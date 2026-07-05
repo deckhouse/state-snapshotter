@@ -62,6 +62,34 @@ Chronological log of notable refactors. Newest wave at the bottom.
 - **Refactor** demo VM planner: removed `demoVirtualMachineDiskSnapshotName` (name-based `demovmdisk-…`);
   child disk snapshots are now named `snapshotsdk.ChildSnapshotName(vmSnapshotUID, diskUID)`. Updated
   `source_ref_test.go` accordingly.
-- **In progress / deferred**: core generator unification (content/MCR/MCP/chunk/VCR/OK/orphan-VS/root-child
-  + append-only `PublishSnapshotContentChildrenRefs`), CSD `priority→weight` / `dataBacked→requiresDataArtifact`,
-  MCP `manifestCaptureRequestRef` drop, and d8-cli (`ExportedSnapshot` rename, clusterUUID, import-replay).
+- **Refactor** (w4c-core) core generator unification — every core object-name generator now delegates to
+  `api/names` and keys purely on cluster-local UIDs:
+  - SDK: `manifest.RequestName(snapshotUID)` and `storagefoundation.VCRName(snapshotUID)` delegate to
+    `names.ManifestCaptureRequestName` / `names.VolumeCaptureRequestName`; `capture.go` passes `obj.GetUID()`
+    directly (dropped the intermediate GVK computation).
+  - Content: `snapshot.GenerateSnapshotContentName`, `snapshotContentName`, `snapshotbinding.StableContentName`
+    → `names.ContentName(uid)` (name arg kept for signature compat but ignored / UID-only).
+  - VCR: `volumecapture.SnapshotContentVCRName` / `SnapshotOwnedVCRName` → `names.VolumeCaptureRequestName`.
+  - ObjectKeeper: `common.RootObjectKeeperName(uid)`, `snapshot.GenerateObjectKeeperName(uid)`,
+    `namespacemanifest.ManifestCaptureRequestObjectKeeperName(uid)` → `names.ObjectKeeperName(uid)`; the
+    post-deletion retained-content lookup (`retainedRootContentForSnapshot`) was rewritten to list
+    `ObjectKeeper`s and match `spec.followObjectRef` (the deleted Snapshot's UID is gone, so the name can no
+    longer be derived).
+  - Parent graph: `snapshotChildSnapshotName(parentUID, sourceUID)` → `names.ChildSnapshotName` (GVK dropped).
+  - Orphan (Variant A) keyed by the **orphan VolumeSnapshot UID** per ADR: `orphanPVCVolumeSnapshotName` →
+    `names.OrphanVolumeSnapshotName`; child-node content → `names.ContentName(vsUID)`; per-orphan MCR →
+    `names.ManifestCaptureRequestName(vsUID)`. `vsUID` is threaded through `orphanVSBindingResult` and read
+    from the live VS at binding time.
+  - MCP chunks → `names.ChunkName(mcpUID, i)` at both creation sites (`checkpoint_controller`,
+    `import_manifest_reconstruct`); chunk names are read back from `ManifestCheckpoint.status.chunks[].name`,
+    never re-derived.
+  - `PublishSnapshotContentChildrenRefs` is now append-only (monotonic union, dedup+sort), removing the
+    `volNodePrefix` heuristic and the `ChildVolumeContentInfix` constant — child classification no longer
+    depends on name prefixes.
+- **Update** (w4c-core) tests: unit (`namespacemanifest`, `common` OK-name, `snapshotbinding`,
+  `volume_capture` orphan helpers keyed by a deterministic test VS UID, `import_manifest_reconstruct`) and
+  integration (`snapshot_recreate`, `snapshot_root_deletion` use `snapshot.GenerateObjectKeeperName(uid)`;
+  `manifestcapture_execution_ownerref` UID-only OK name). All module unit tests pass; integration + e2e
+  packages compile; `gofmt` clean.
+- **Deferred**: CSD `priority→weight` / `dataBacked→requiresDataArtifact`, MCP `manifestCaptureRequestRef`
+  drop, and d8-cli (`ExportedSnapshot` rename, clusterUUID, import-replay).

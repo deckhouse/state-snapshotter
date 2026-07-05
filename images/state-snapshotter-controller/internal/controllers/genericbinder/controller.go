@@ -523,7 +523,7 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 	contentName string,
 ) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	retainerName := snapshot.GenerateObjectKeeperName(obj.GetKind(), obj.GetName())
+	retainerName := snapshot.GenerateObjectKeeperName(obj.GetUID())
 
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)

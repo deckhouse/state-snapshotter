@@ -19,18 +19,20 @@ package manifest
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/storagefoundation"
 )
 
 func TestRequestNameDeterministic(t *testing.T) {
-	a := RequestName("Kind", "ns", "name")
-	b := RequestName("Kind", "ns", "name")
+	a := RequestName(types.UID("uid-1"))
+	b := RequestName(types.UID("uid-1"))
 	if a != b {
 		t.Fatalf("RequestName not deterministic: %q != %q", a, b)
 	}
-	if a == RequestName("Kind", "ns", "other") {
-		t.Fatal("RequestName collides for different names")
+	if a == RequestName(types.UID("uid-2")) {
+		t.Fatal("RequestName collides for different UIDs")
 	}
 }
 

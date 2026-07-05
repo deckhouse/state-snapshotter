@@ -28,7 +28,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -37,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
@@ -161,7 +161,6 @@ func writeReconstructedChunks(
 	}
 
 	controllerTrue := true
-	id := strings.TrimPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix)
 
 	infos := make([]storagev1alpha1.ChunkInfo, 0, len(groups))
 	totalObjects := 0
@@ -178,7 +177,9 @@ func writeReconstructedChunks(
 		encoded := base64.StdEncoding.EncodeToString(gz)
 		sum := sha256.Sum256(gz)
 		checksum := hex.EncodeToString(sum[:])
-		chunkName := fmt.Sprintf("%s%s-%d", namespacemanifest.CheckpointNamePrefix, id, index)
+		// Chunk name keyed by the reconstructed ManifestCheckpoint UID (unified wave4C scheme, see
+		// api/names). Recorded in ChunkInfo.Name and read back from there.
+		chunkName := names.ChunkName(checkpointUID, index)
 
 		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{
 			ObjectMeta: metav1.ObjectMeta{

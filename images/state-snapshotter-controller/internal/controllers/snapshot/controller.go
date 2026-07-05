@@ -21,7 +21,6 @@ import (
 	"fmt"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
-	"strings"
 	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -455,8 +454,7 @@ func desiredSnapshotContentSpec(nsSnap *storagev1alpha1.Snapshot) storagev1alpha
 }
 
 func snapshotContentName(ns *storagev1alpha1.Snapshot) string {
-	uid := strings.ReplaceAll(string(ns.UID), "-", "")
-	return fmt.Sprintf("ns-%s", uid)
+	return snapshotpkg.GenerateSnapshotContentName(ns.Name, string(ns.UID))
 }
 
 // snapshotContentObjectMeta builds metadata for a new SnapshotContent.

@@ -3,7 +3,6 @@ package snapshotcontent
 import (
 	"context"
 	"errors"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,18 +69,19 @@ func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.
 	})
 }
 
-// PublishSnapshotContentChildrenRefs sets the snapshot-derived (domain) child content edges on
+// PublishSnapshotContentChildrenRefs adds the snapshot-derived (domain) child content edges to
 // contentName.status.childrenSnapshotContentRefs.
 //
-// domainRefs is the authoritative DOMAIN child set (derived from the owning snapshot's
-// status.childrenSnapshotRefs). It is published as a full replacement of the domain edges, but
-// child-volume-node edges (orphan/root-residual PVC nodes, named <contentName>-vol-<hash>) are
-// PRESERVED: those are linked by a separate writer (LinkChildVolumeContentRef) and are not part of
-// the snapshot-derived set, so a blind full-replace here would clobber them and start a write-war
-// with that linker (each side repeatedly removing the other's edge, churning resourceVersion and
-// livelocking the optimistic status update that publishes Ready). The read is done via reader
-// (the non-cached APIReader) so the preserve set reflects edges just written by the other writer
-// rather than a stale cache that would re-clobber them.
+// domainRefs is the DOMAIN child set (derived from the owning snapshot's status.childrenSnapshotRefs).
+// The merge is APPEND-ONLY (monotonic): every existing edge is preserved and new domain edges are added
+// on top, deduped by name. This matches the monotonic snapshot-tree model (nodes are added during
+// capture and only removed when the whole content is torn down) and makes the write commutative with
+// LinkChildVolumeContentRef, which co-writes the child-volume-node (orphan/root-residual PVC) edges:
+// neither writer can clobber the other's edges, so there is no write-war / Ready livelock. Because names
+// are opaque under the unified scheme (api/names), edges are no longer classified by name prefix — the
+// append-only merge preserves both domain and volume-node edges uniformly. The read is done via reader
+// (the non-cached APIReader) so the preserve set reflects edges just written by the other writer rather
+// than a stale cache.
 func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, reader client.Reader, contentName string, domainRefs []storagev1alpha1.SnapshotContentChildRef) error {
 	if contentName == "" {
 		return nil
@@ -89,18 +89,15 @@ func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, re
 	if reader == nil {
 		reader = c
 	}
-	// Anchored to THIS content's own vol-node naming (ChildVolumeContentName = contentName + infix +
-	// hash). Unlike a bare infix scan this cannot misclassify a domain child: domain child content
-	// names derive from the child snapshot, never from the parent content name + "-vol-".
-	volNodePrefix := contentName + snapshotpkg.ChildVolumeContentInfix
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		content := &storagev1alpha1.SnapshotContent{}
 		if err := reader.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}
 		desired := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(domainRefs)+len(content.Status.ChildrenSnapshotContentRefs))
-		seen := make(map[string]struct{}, len(domainRefs))
-		for _, ref := range domainRefs {
+		seen := make(map[string]struct{}, len(domainRefs)+len(content.Status.ChildrenSnapshotContentRefs))
+		// Preserve every existing edge first (append-only), then add new domain edges.
+		for _, ref := range content.Status.ChildrenSnapshotContentRefs {
 			if ref.Name == "" {
 				continue
 			}
@@ -110,14 +107,15 @@ func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, re
 			seen[ref.Name] = struct{}{}
 			desired = append(desired, ref)
 		}
-		for _, ref := range content.Status.ChildrenSnapshotContentRefs {
+		for _, ref := range domainRefs {
+			if ref.Name == "" {
+				continue
+			}
 			if _, ok := seen[ref.Name]; ok {
 				continue
 			}
-			if strings.HasPrefix(ref.Name, volNodePrefix) {
-				seen[ref.Name] = struct{}{}
-				desired = append(desired, ref)
-			}
+			seen[ref.Name] = struct{}{}
+			desired = append(desired, ref)
 		}
 		controllercommon.SortSnapshotContentChildRefs(desired)
 		if controllercommon.SnapshotContentChildRefsEqualIgnoreOrder(content.Status.ChildrenSnapshotContentRefs, desired) {

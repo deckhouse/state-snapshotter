@@ -18,8 +18,6 @@ package snapshot
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	stderrors "errors"
 	"fmt"
 	"sort"
@@ -36,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -239,7 +238,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		if covered {
 			continue
 		}
-		childName := snapshotChildSnapshotName(nsSnap.Name, mapping.SourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName(), string(resource.GetUID()))
+		childName := snapshotChildSnapshotName(nsSnap.UID, resource.GetUID())
 		if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource); err != nil {
 			return nil, nil, err
 		}
@@ -257,9 +256,12 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	return refs, excluded, nil
 }
 
-func snapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName, resourceUID string) string {
-	sum := sha256.Sum256([]byte(parentName + "|" + resourceGVK + "|" + snapshotGVK + "|" + resourceName + "|" + resourceUID))
-	return "nss-child-" + hex.EncodeToString(sum[:10])
+// snapshotChildSnapshotName is the name of a root-owned domain child snapshot CR, keyed by the parent
+// Snapshot UID and the captured source object UID (unified wave4C scheme, see api/names). The child
+// snapshot GVK is intentionally NOT part of the key (it is derived from the source GVK via the
+// CustomSnapshotDefinition); connectivity is carried by ownerRefs/childRefs, not the name.
+func snapshotChildSnapshotName(parentSnapshotUID, sourceUID types.UID) string {
+	return names.ChildSnapshotName(parentSnapshotUID, sourceUID)
 }
 
 func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(

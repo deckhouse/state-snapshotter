@@ -24,26 +24,24 @@ import (
 )
 
 func TestManifestCaptureRequestObjectKeeperName(t *testing.T) {
-	t.Run("same namespace name and UID produce same name", func(t *testing.T) {
-		first := ManifestCaptureRequestObjectKeeperName("ns", "mcr", types.UID("uid-1"))
-		second := ManifestCaptureRequestObjectKeeperName("ns", "mcr", types.UID("uid-1"))
+	t.Run("same UID produces same name", func(t *testing.T) {
+		first := ManifestCaptureRequestObjectKeeperName(types.UID("uid-1"))
+		second := ManifestCaptureRequestObjectKeeperName(types.UID("uid-1"))
 		if first != second {
 			t.Fatalf("expected stable name for same MCR UID, got %q and %q", first, second)
 		}
 	})
 
-	t.Run("same namespace and name with different UID produce different names", func(t *testing.T) {
-		first := ManifestCaptureRequestObjectKeeperName("ns", "mcr", types.UID("uid-1"))
-		second := ManifestCaptureRequestObjectKeeperName("ns", "mcr", types.UID("uid-2"))
+	t.Run("different UID produces different names", func(t *testing.T) {
+		first := ManifestCaptureRequestObjectKeeperName(types.UID("uid-1"))
+		second := ManifestCaptureRequestObjectKeeperName(types.UID("uid-2"))
 		if first == second {
 			t.Fatalf("expected different names for different MCR UIDs, got %q", first)
 		}
 	})
 
-	t.Run("long namespace and name produce valid DNS-1123 name", func(t *testing.T) {
+	t.Run("long UID produces valid DNS-1123 name", func(t *testing.T) {
 		got := ManifestCaptureRequestObjectKeeperName(
-			"very-long-namespace-name-that-would-not-fit-in-a-retainer-name",
-			"very-long-manifest-capture-request-name-that-would-not-fit",
 			types.UID("uid-with-dashes-and-long-enough-to-exercise-hashing"),
 		)
 		if len(got) > 63 {

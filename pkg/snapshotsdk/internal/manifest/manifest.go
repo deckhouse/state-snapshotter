@@ -19,22 +19,22 @@ limitations under the License.
 package manifest
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/storagefoundation"
 )
 
-// RequestName returns the deterministic ManifestCaptureRequest name for a snapshot identity. The name is
-// derivable from the snapshot alone (kind/namespace/name), so it is stable across reconciles and restarts.
-func RequestName(kind, namespace, name string) string {
-	sum := sha256.Sum256([]byte(kind + ":" + namespace + "/" + name))
-	return "mcr-" + hex.EncodeToString(sum[:10])
+// RequestName returns the deterministic ManifestCaptureRequest name for a snapshot, keyed by its UID
+// (unified wave4C scheme, see api/names). The name is derivable from the snapshot alone, so it is stable
+// across reconciles and restarts.
+func RequestName(snapshotUID types.UID) string {
+	return names.ManifestCaptureRequestName(snapshotUID)
 }
 
 // Targets merges the base manifest target(s) with the snapshot's single owned data-leg PVC (derived from
