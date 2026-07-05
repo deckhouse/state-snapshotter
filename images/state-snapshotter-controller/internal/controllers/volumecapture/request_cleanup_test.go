@@ -84,13 +84,18 @@ func TestVolumeCaptureRequestSafeToDelete_emptyOwnerUIDNotSafe(t *testing.T) {
 	vcr.SetName(vcpkg.SnapshotContentVCRName(contentUID))
 	vcr.SetNamespace(ns)
 	_ = unstructured.SetNestedMap(vcr.Object, map[string]interface{}{
-		"targetUID": "uid-a",
+		"uid":        "uid-a",
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"name":       "pvc-a",
+	}, "spec", "target")
+	_ = unstructured.SetNestedMap(vcr.Object, map[string]interface{}{
 		"artifact": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1",
 			"kind":       "VolumeSnapshotContent",
 			"name":       "vsc-a",
 		},
-	}, "status", "dataRef")
+	}, "status", "data")
 
 	vsc := &unstructured.Unstructured{}
 	vsc.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})

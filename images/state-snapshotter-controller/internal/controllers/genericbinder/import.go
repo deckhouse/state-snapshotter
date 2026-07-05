@@ -62,7 +62,7 @@ func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
 //   - manifest leg: publish the reconstructed ManifestCheckpoint (manifests-and-children-refs-upload keyed
 //     to the leaf UID);
 //   - children: publish the content-graph edges from the uploaded namespaced child refs;
-//   - data leg: read DataImport.status.dataArtifactRef -> VolumeSnapshotContent, force Retain + transfer
+//   - data leg: read DataImport.status.data.artifact -> VolumeSnapshotContent, force Retain + transfer
 //     ownership to the content, publish dataRef;
 //   - Ready: mirror the bound content's Ready (single-aggregator), exiting ImportPending.
 //
@@ -230,7 +230,7 @@ func importSnapshotContentSpec(leaf *unstructured.Unstructured) storagev1alpha1.
 }
 
 // projectDataLegFromDataImport resolves the (reverse-looked-up) DataImport's produced durable artifact
-// (status.dataArtifactRef), transfers VolumeSnapshotContent ownership to the SnapshotContent (force
+// (status.data.artifact), transfers VolumeSnapshotContent ownership to the SnapshotContent (force
 // Retain + ownerRef), and publishes the single dataRef. Returns done=true once the dataRef is published.
 // A non-empty terminalReason is an actionable, non-retryable import failure.
 func (r *GenericSnapshotBinderController) projectDataLegFromDataImport(
@@ -244,7 +244,7 @@ func (r *GenericSnapshotBinderController) projectDataLegFromDataImport(
 		return false, treason, tmsg, nil
 	}
 	if !ready {
-		// DataImport has not produced its artifact yet (status.dataArtifactRef empty). Pending.
+		// DataImport has not produced its artifact yet (status.data.artifact empty). Pending.
 		return false, "", "", nil
 	}
 
@@ -279,18 +279,18 @@ func (r *GenericSnapshotBinderController) projectDataLegFromDataImport(
 	return true, "", "", nil
 }
 
-// buildImportDataBinding maps a DataImport's produced artifact (status.dataArtifactRef) into the single
+// buildImportDataBinding maps a DataImport's produced artifact (status.data.artifact) into the single
 // SnapshotDataBinding for the imported leaf's content. ready=false (binding nil, no terminal reason) means
 // the DataImport has not produced its artifact yet. A non-empty terminalReason is a non-retryable fault.
 //
 // Pure function (no client) so it is unit-tested directly.
 func buildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Unstructured) (binding *storagev1alpha1.SnapshotDataBinding, ready bool, terminalReason string, terminalMessage string) {
-	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "kind")
-	name, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "name")
+	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "apiVersion")
+	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "kind")
+	name, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "name")
 	// uid is best-effort (DataImport fills it from the VCR artifact uid). When empty, the dataRef
 	// enricher backfills it from the live VolumeSnapshotContent; when present, it is preserved.
-	uid, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "uid")
+	uid, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "uid")
 	if apiVersion == "" || kind == "" || name == "" {
 		return nil, false, "", ""
 	}

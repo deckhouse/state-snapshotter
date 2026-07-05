@@ -94,27 +94,33 @@ func ParseVolumeCaptureTargets(obj *unstructured.Unstructured) ([]vcpkg.Target, 
 	}}, nil
 }
 
-// ParseVolumeCaptureDataRefs reads the single status.dataRef from a VCR object and returns it as a 0-or-1
-// element slice. The foundation fills status.dataRef.target.namespace from the VCR namespace.
+// ParseVolumeCaptureDataRefs reads the VCR's produced data binding and returns it as a 0-or-1 element
+// slice. The durable artifact comes from status.data.artifact; the captured PVC identity comes from the
+// immutable spec.target (status.data no longer duplicates the target). Returns an empty slice until the
+// foundation writes status.data.artifact.
 func ParseVolumeCaptureDataRefs(obj *unstructured.Unstructured) ([]vcpkg.DataBinding, error) {
-	m, found, err := unstructured.NestedMap(obj.Object, "status", "dataRef")
+	dataMap, found, err := unstructured.NestedMap(obj.Object, "status", "data")
 	if err != nil {
 		return nil, err
 	}
-	if !found || len(m) == 0 {
+	if !found || len(dataMap) == 0 {
 		return nil, nil
 	}
-	targetMap, _ := m["target"].(map[string]interface{})
-	artifactMap, _ := m["artifact"].(map[string]interface{})
+	artifactMap, _ := dataMap["artifact"].(map[string]interface{})
+	if len(artifactMap) == 0 {
+		return nil, nil
+	}
+	targets, err := ParseVolumeCaptureTargets(obj)
+	if err != nil {
+		return nil, err
+	}
+	var target vcpkg.Target
+	if len(targets) > 0 {
+		target = targets[0]
+	}
 	return []vcpkg.DataBinding{{
-		TargetUID: nestedString(m, "targetUID"),
-		Target: vcpkg.Target{
-			UID:        nestedString(targetMap, "uid"),
-			APIVersion: nestedString(targetMap, "apiVersion"),
-			Kind:       nestedString(targetMap, "kind"),
-			Name:       nestedString(targetMap, "name"),
-			Namespace:  nestedString(targetMap, "namespace"),
-		},
+		TargetUID: target.UID,
+		Target:    target,
 		Artifact: vcpkg.ArtifactRef{
 			APIVersion: nestedString(artifactMap, "apiVersion"),
 			Kind:       nestedString(artifactMap, "kind"),

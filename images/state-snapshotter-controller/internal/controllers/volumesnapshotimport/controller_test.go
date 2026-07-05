@@ -100,7 +100,7 @@ func TestResolveDataImportArtifact(t *testing.T) {
 		}
 		return &unstructured.Unstructured{Object: map[string]interface{}{
 			"metadata": map[string]interface{}{"name": "di-1", "namespace": "ns1"},
-			"status":   map[string]interface{}{"dataArtifactRef": ref},
+			"status":   map[string]interface{}{"data": map[string]interface{}{"artifact": ref}},
 		}}
 	}
 	r := &Controller{}

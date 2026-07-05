@@ -362,27 +362,15 @@ func readyVCR(ns, name string, targets []vcpkg.Target, refs []vcpkg.DataBinding)
 			"reason": vcpkg.ConditionReasonCompleted,
 		},
 	}, "status", "conditions")
-	byUID := make(map[string]vcpkg.Target, len(targets))
-	for _, t := range targets {
-		byUID[t.UID] = t
-	}
-	// A snapshot node binds at most one data artifact, so status.dataRef is a single object.
+	// A snapshot node binds at most one data artifact, so status.data is a single object carrying only the
+	// artifact; the captured PVC identity comes from spec.target (set by NewVolumeCaptureRequestObject).
 	if len(refs) > 0 {
 		r := refs[0]
-		tgt := r.Target
-		if tgt.UID == "" {
-			tgt = byUID[r.TargetUID]
-		}
 		_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{
-			"targetUID": r.TargetUID,
-			"target": map[string]interface{}{
-				"uid": tgt.UID, "apiVersion": tgt.APIVersion, "kind": tgt.Kind,
-				"name": tgt.Name, "namespace": tgt.Namespace,
-			},
 			"artifact": map[string]interface{}{
 				"apiVersion": r.Artifact.APIVersion, "kind": r.Artifact.Kind, "name": r.Artifact.Name,
 			},
-		}, "status", "dataRef")
+		}, "status", "data")
 	}
 	return obj
 }

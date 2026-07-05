@@ -57,7 +57,7 @@ func dataImportWithArtifact(apiVersion, kind, name string) *unstructured.Unstruc
 		if name != "" {
 			ref["name"] = name
 		}
-		_ = unstructured.SetNestedMap(di.Object, ref, "status", "dataArtifactRef")
+		_ = unstructured.SetNestedMap(di.Object, ref, "status", "data", "artifact")
 	}
 	return di
 }
@@ -72,7 +72,7 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	_ = unstructured.SetNestedField(di.Object, "Block", "status", "volumeMode")
 	// DataImport fills the durable artifact uid best-effort (from the VCR artifact uid); it must flow
 	// through into the published dataRef.artifact.uid.
-	_ = unstructured.SetNestedField(di.Object, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", "status", "dataArtifactRef", "uid")
+	_ = unstructured.SetNestedField(di.Object, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", "status", "data", "artifact", "uid")
 	leaf := importLeafObject()
 
 	binding, ready, reason, _ := buildImportDataBinding(di, leaf)
@@ -89,7 +89,7 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 		t.Fatalf("unexpected artifact apiVersion: %q", binding.Artifact.APIVersion)
 	}
 	if binding.Artifact.UID != "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a" {
-		t.Fatalf("expected artifact uid propagated from DataImport.status.dataArtifactRef.uid, got %q", binding.Artifact.UID)
+		t.Fatalf("expected artifact uid propagated from DataImport.status.data.artifact.uid, got %q", binding.Artifact.UID)
 	}
 	if string(binding.Source.UID) != "leaf-uid-1" {
 		t.Fatalf("expected Source.UID from leaf UID, got %q", binding.Source.UID)
@@ -102,7 +102,7 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	}
 }
 
-// Before the DataImport produces its artifact (no status.dataArtifactRef), the binding is pending
+// Before the DataImport produces its artifact (no status.data.artifact), the binding is pending
 // (not terminal) so the binder keeps polling rather than failing the import.
 func TestBuildImportDataBinding_PendingWhenArtifactAbsent(t *testing.T) {
 	di := dataImportWithArtifact("", "", "")
@@ -112,7 +112,7 @@ func TestBuildImportDataBinding_PendingWhenArtifactAbsent(t *testing.T) {
 	}
 }
 
-// A partially-written dataArtifactRef (missing name) is still treated as not-yet-produced (pending).
+// A partially-written status.data.artifact (missing name) is still treated as not-yet-produced (pending).
 func TestBuildImportDataBinding_PendingWhenArtifactPartial(t *testing.T) {
 	di := dataImportWithArtifact("snapshot.storage.k8s.io/v1", "VolumeSnapshotContent", "")
 	binding, ready, reason, _ := buildImportDataBinding(di, importLeafObject())

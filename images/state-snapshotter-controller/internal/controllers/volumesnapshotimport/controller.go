@@ -318,8 +318,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 //
 // Pure function (the DataImport is already fetched by the reverse-lookup), so it is unit-testable directly.
 func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (vscName string, ready bool, terminalMessage string) {
-	kind, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "kind")
-	name, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "name")
+	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "kind")
+	name, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "name")
 	if name == "" {
 		// Artifact not produced yet (kind may be set early, but without a name there is nothing to bind).
 		return "", false, ""

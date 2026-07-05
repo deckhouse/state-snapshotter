@@ -294,7 +294,7 @@ func waitDataImportCompleted(ctx context.Context, ns, name string, timeout time.
 		obj, gerr := getResource(ctx, dataImportGVR, ns, name)
 		if gerr == nil {
 			st, reason, found := conditionStatus(obj, "Completed")
-			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "dataArtifactRef")
+			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifact")
 			if found && st == "True" && artFound && len(artifact) > 0 {
 				return nil
 			}

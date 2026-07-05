@@ -219,3 +219,13 @@ Chronological log of notable refactors. Newest wave at the bottom.
   Non-isolated integration suite + all unit tests green; e2e module compiles. (The `isolated` `duplicate pvcUID` spec
   times out on a pre-existing envtest limitation — no `VolumeSnapshotContent` CRD — proven identical on the base
   commit `5308a73`; unrelated to this rename.)
+- **Rename** (w5-field-rename, ss consumer side of the storage-foundation VCR/DataImport rename) Moved the
+  cross-repo unstructured readers in lockstep with storage-foundation `20c48b5`: VCR `status.dataRef`→`status.data`
+  (artifact-only) and DataImport `status.dataArtifactRef`→`status.data.artifact`. `ParseVolumeCaptureDataRefs`
+  (`volumecapture/unstructured.go`) now reads the durable artifact from `status.data.artifact` and backfills the
+  captured PVC identity from the immutable `spec.target` (VCR status no longer duplicates the target), so
+  `ValidateDataRefsForPublish`/`SnapshotDataBindingsFromVCRStatus` and all callers are unchanged. Updated the
+  DataImport artifact readers in `genericbinder/import.go` (`buildImportDataBinding`) and
+  `volumesnapshotimport/controller.go` (`resolveDataImportArtifact`), the e2e DataImport readers
+  (`diagnostics`/`backup_restore`), and all VCR/DataImport unit fixtures. All unit tests + non-isolated integration
+  suite green; e2e compiles.

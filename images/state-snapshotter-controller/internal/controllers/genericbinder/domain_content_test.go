@@ -115,16 +115,13 @@ func domainTestReadyVCR(withDataRefs bool) *unstructured.Unstructured {
 				"reason": vcpkg.ConditionReasonCompleted,
 			},
 		}, "status", "conditions")
+		// status.data carries only the artifact; the captured PVC identity comes from spec.target
+		// (set by NewVolumeCaptureRequestObject above).
 		_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{
-			"targetUID": domainTestPVCUID,
-			"target": map[string]interface{}{
-				"uid": domainTestPVCUID, "apiVersion": corev1.SchemeGroupVersion.String(), "kind": "PersistentVolumeClaim",
-				"name": domainTestPVCName, "namespace": domainTestNS,
-			},
 			"artifact": map[string]interface{}{
 				"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": domainTestVSCName,
 			},
-		}, "status", "dataRef")
+		}, "status", "data")
 	}
 	return obj
 }
