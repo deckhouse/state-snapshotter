@@ -111,8 +111,8 @@ func TestReconcileVolumeCapturePublish_missingVolumeSnapshotNoPublish(t *testing
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("expected no published dataRef on the root aggregator, got %v", got.Status.DataRef)
+	if got.Status.Data != nil {
+		t.Fatalf("expected no published dataRef on the root aggregator, got %v", got.Status.Data)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestReconcileVolumeCapturePublish_incompleteVolumeSnapshotsNoPublish(t *tes
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("expected no published dataRef on the root aggregator, got %v", got.Status.DataRef)
+	if got.Status.Data != nil {
+		t.Fatalf("expected no published dataRef on the root aggregator, got %v", got.Status.Data)
 	}
 }
 
@@ -198,8 +198,8 @@ func TestReconcileVolumeCapturePublish_orphanVolumeSnapshotHandoffBeforePublish(
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, root); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if root.Status.DataRef != nil {
-		t.Fatalf("root aggregator must not carry a dataRef, got %#v", root.Status.DataRef)
+	if root.Status.Data != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", root.Status.Data)
 	}
 	childRef := orphanChildDataRef(t, cl, snap.UID, target)
 	if childRef == nil || childRef.Artifact.Name != "vsc-a" {
@@ -228,9 +228,9 @@ func TestReconcileVolumeCaptureSteadyState_staleTargetUIDNotComplete(t *testing.
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1", UID: types.UID("content-uid")},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				TargetUID: "wrong-uid",
-				Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source:   storagev1alpha1.SnapshotSubjectRef{UID: "wrong-uid"},
+				Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
 			},
 		},
 	}
@@ -293,15 +293,15 @@ func TestReconcileVolumeCapture_PublishTwoDataRefsAndCleanup(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
+	if got.Status.Data != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.Data)
 	}
 	if len(got.Status.ChildrenSnapshotContentRefs) != 2 {
 		t.Fatalf("expected 2 child volume nodes linked under root, got %#v", got.Status.ChildrenSnapshotContentRefs)
 	}
 	for _, target := range []vcpkg.Target{targetA, targetB} {
 		ref := orphanChildDataRef(t, cl, snap.UID, target)
-		if ref == nil || ref.TargetUID != target.UID {
+		if ref == nil || string(ref.Source.UID) != target.UID {
 			t.Fatalf("child volume node for %s missing its dataRef, got %#v", target.Name, ref)
 		}
 	}
@@ -345,8 +345,8 @@ func TestReconcileVolumeCapture_RootIgnoresAndDeletesStaleVCR(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
+	if got.Status.Data != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.Data)
 	}
 	if ref := orphanChildDataRef(t, cl, snap.UID, target); ref == nil || ref.Artifact.Name != "vsc-a" {
 		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", ref)
@@ -645,8 +645,8 @@ func TestReconcileVolumeCapturePublish_DeletePolicyPatchedToRetain(t *testing.T)
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.DataRef)
+	if got.Status.Data != nil {
+		t.Fatalf("root aggregator must not carry a dataRef, got %#v", got.Status.Data)
 	}
 	if ref := orphanChildDataRef(t, cl, snap.UID, target); ref == nil || ref.Artifact.Name != "vsc-a" {
 		t.Fatalf("expected child volume node dataRef -> vsc-a, got %#v", ref)
@@ -695,8 +695,8 @@ func TestReconcileVolumeCapturePublish_RetainPatchImpossibleIsTerminal(t *testin
 	if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("no dataRef must be published on terminal failure, got %v", got.Status.DataRef)
+	if got.Status.Data != nil {
+		t.Fatalf("no dataRef must be published on terminal failure, got %v", got.Status.Data)
 	}
 }
 
@@ -1072,5 +1072,5 @@ func orphanChildDataRef(t *testing.T, cl client.Client, snapUID types.UID, targe
 	if err := cl.Get(context.Background(), client.ObjectKey{Name: orphanChildContentName(snapUID, target)}, child); err != nil {
 		t.Fatalf("get orphan child content for %s: %v", target.Name, err)
 	}
-	return child.Status.DataRef
+	return child.Status.Data
 }

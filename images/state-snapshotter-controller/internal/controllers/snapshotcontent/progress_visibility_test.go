@@ -25,10 +25,9 @@ func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstru
 		"metadata":   map[string]interface{}{"name": name},
 		"status": map[string]interface{}{
 			"manifestCheckpointName": mcpName,
-			"dataRef": map[string]interface{}{
-				"targetUID": "pvc-1",
-				"target": map[string]interface{}{
-					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default",
+			"data": map[string]interface{}{
+				"source": map[string]interface{}{
+					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default", "uid": "pvc-1",
 				},
 				"artifact": map[string]interface{}{
 					"apiVersion": volumeSnapshotContentAPIVersion,
@@ -93,7 +92,7 @@ func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 		"metadata":   map[string]interface{}{"name": "c"},
 		"status": map[string]interface{}{
 			"manifestCheckpointName": "mcp-ok",
-			"dataRef":                dataRefEntry("pvc-1", "vsc-pending"),
+			"data":                   dataRefEntry("pvc-1", "vsc-pending"),
 		},
 	}}
 	content.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
@@ -187,9 +186,8 @@ func TestChildrenReadySuccessMessageReflectsState(t *testing.T) {
 
 func dataRefEntry(targetUID, vscName string) map[string]interface{} {
 	return map[string]interface{}{
-		"targetUID": targetUID,
-		"target": map[string]interface{}{
-			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": targetUID, "namespace": "default",
+		"source": map[string]interface{}{
+			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": targetUID, "namespace": "default", "uid": targetUID,
 		},
 		"artifact": map[string]interface{}{
 			"apiVersion": volumeSnapshotContentAPIVersion,

@@ -409,8 +409,7 @@ func (r *Controller) setVolumeSnapshotError(ctx context.Context, key client.Obje
 // shape identical. Size/storageClass etc. are enriched downstream from VolumeSnapshotContent.status.restoreSize.
 func importDataBinding(pvc *unstructured.Unstructured, vscName string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		TargetUID: string(pvc.GetUID()),
-		Target: storagev1alpha1.SnapshotSubjectRef{
+		Source: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: pvc.GetAPIVersion(),
 			Kind:       pvc.GetKind(),
 			Namespace:  pvc.GetNamespace(),

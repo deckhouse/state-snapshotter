@@ -206,3 +206,16 @@ Chronological log of notable refactors. Newest wave at the bottom.
   orphan-VS child content bypasses CSD via `EnsureVolumeChildContent`; the `040-namespace-capture-rbac` hook
   keys only on `commonController.manifestCaptured` (unaffected by folding content creation / adding
   `domainSpecificController` on the root).
+- **Rename** (w5-field-rename, ss side) Hard-renamed the `SnapshotContent` data-role status (no back-compat
+  aliases): `status.dataRef`→`status.data`, `SnapshotDataBinding.Target`→`Source`, dropped the standalone
+  `SnapshotDataBinding.TargetUID` (the volume identity is now `data.source.uid`), and `SnapshotContent.DataRefList()`
+  →`DataList()`. Regenerated deepcopy + `crds/state-snapshotter.deckhouse.io_snapshotcontents.yaml`. Updated all
+  consumers: volumecapture (`validate`/`request_cleanup`/`unstructured`/`subtree_covered_pvc`/`domain_owned_targets`),
+  `snapshotcontent/datarefs_publish`, `genericbinder` (`domain_content`/`import`), `snapshot`
+  (`orphan_pvc_volume_snapshot`/`static_bind`/`volume_capture`), `volumesnapshotimport/controller`, the unstructured
+  reader `pkg/snapshot/utils.go` (`status.data`/`data.source.uid`), the demo domain-controller restore path, the e2e
+  readers (`status.data.source.name`), and the envtest structural schema in `test/integration/setup_test.go`. Updated
+  all unit/integration fixtures + assertions; removed the obsolete "rejects empty targetUID" CRD-validation spec.
+  Non-isolated integration suite + all unit tests green; e2e module compiles. (The `isolated` `duplicate pvcUID` spec
+  times out on a pre-existing envtest limitation — no `VolumeSnapshotContent` CRD — proven identical on the base
+  commit `5308a73`; unrelated to this rename.)

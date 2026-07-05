@@ -91,11 +91,11 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	if binding.Artifact.UID != "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a" {
 		t.Fatalf("expected artifact uid propagated from DataImport.status.dataArtifactRef.uid, got %q", binding.Artifact.UID)
 	}
-	if binding.TargetUID != "leaf-uid-1" {
-		t.Fatalf("expected TargetUID from leaf UID, got %q", binding.TargetUID)
+	if string(binding.Source.UID) != "leaf-uid-1" {
+		t.Fatalf("expected Source.UID from leaf UID, got %q", binding.Source.UID)
 	}
-	if binding.Target.Kind != "DemoVirtualDiskSnapshot" || binding.Target.Name != "disk-snap" || binding.Target.Namespace != "project-a" {
-		t.Fatalf("unexpected target: %#v", binding.Target)
+	if binding.Source.Kind != "DemoVirtualDiskSnapshot" || binding.Source.Name != "disk-snap" || binding.Source.Namespace != "project-a" {
+		t.Fatalf("unexpected source: %#v", binding.Source)
 	}
 	if binding.VolumeMode != "Block" {
 		t.Fatalf("expected volumeMode propagated from DataImport.status.volumeMode, got %q", binding.VolumeMode)

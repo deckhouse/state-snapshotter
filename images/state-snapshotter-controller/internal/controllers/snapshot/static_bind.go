@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -294,11 +293,11 @@ func (r *SnapshotReconciler) ensureRestoredOrphanVolumeLeaf(
 	nsSnap *storagev1alpha1.Snapshot,
 	leafContent *storagev1alpha1.SnapshotContent,
 ) (*storagev1alpha1.SnapshotChildRef, bool, error) {
-	dataRef := leafContent.Status.DataRef
+	dataRef := leafContent.Status.Data
 	if dataRef == nil || dataRef.Artifact.Name == "" {
-		return nil, false, fmt.Errorf("orphan child SnapshotContent %q has no dataRef artifact to restore", leafContent.Name)
+		return nil, false, fmt.Errorf("orphan child SnapshotContent %q has no data artifact to restore", leafContent.Name)
 	}
-	pvcUID := types.UID(dataRef.TargetUID)
+	pvcUID := dataRef.Source.UID
 	vscName := dataRef.Artifact.Name
 	vsName := names.OrphanVolumeSnapshotName(nsSnap.UID, pvcUID)
 	key := client.ObjectKey{Namespace: nsSnap.Namespace, Name: vsName}

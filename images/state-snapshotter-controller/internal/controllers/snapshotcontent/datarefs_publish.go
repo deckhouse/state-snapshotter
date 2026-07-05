@@ -72,17 +72,17 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 		if b.Artifact.UID == "" && uid != "" {
 			b.Artifact.UID = uid
 		}
-		if b.Target.Kind != "PersistentVolumeClaim" || b.Target.Name == "" {
+		if b.Source.Kind != "PersistentVolumeClaim" || b.Source.Name == "" {
 			continue
 		}
 		pvc := &corev1.PersistentVolumeClaim{}
-		if err := c.Get(ctx, client.ObjectKey{Namespace: b.Target.Namespace, Name: b.Target.Name}, pvc); err != nil {
+		if err := c.Get(ctx, client.ObjectKey{Namespace: b.Source.Namespace, Name: b.Source.Name}, pvc); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Info("source PVC gone; skipping volume-metadata enrichment",
-					"pvc", b.Target.Namespace+"/"+b.Target.Name)
+					"pvc", b.Source.Namespace+"/"+b.Source.Name)
 				continue
 			}
-			return bindings, fmt.Errorf("read source PVC %s/%s for volume metadata: %w", b.Target.Namespace, b.Target.Name, err)
+			return bindings, fmt.Errorf("read source PVC %s/%s for volume metadata: %w", b.Source.Namespace, b.Source.Name, err)
 		}
 		// PVC.spec.volumeMode defaults to Filesystem when nil (Kubernetes semantics).
 		if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != "" {
@@ -105,7 +105,7 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 		if b.VolumeMode != string(corev1.PersistentVolumeBlock) && pvc.Spec.VolumeName != "" {
 			pv := &corev1.PersistentVolume{}
 			if err := direct.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
-				return bindings, fmt.Errorf("read bound PV %s for fsType of PVC %s/%s: %w", pvc.Spec.VolumeName, b.Target.Namespace, b.Target.Name, err)
+				return bindings, fmt.Errorf("read bound PV %s for fsType of PVC %s/%s: %w", pvc.Spec.VolumeName, b.Source.Namespace, b.Source.Name, err)
 			}
 			if pv.Spec.CSI != nil {
 				b.FsType = pv.Spec.CSI.FSType
@@ -176,7 +176,7 @@ func PublishSnapshotContentDataRefs(ctx context.Context, c client.Client, conten
 }
 
 // PublishSnapshotContentDataRef writes the single durable data binding onto a logical SnapshotContent.
-// A nil binding clears status.dataRef. The write is idempotent under optimistic retry.
+// A nil binding clears status.data. The write is idempotent under optimistic retry.
 func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, contentName string, ref *storagev1alpha1.SnapshotDataBinding) error {
 	if contentName == "" {
 		return nil
@@ -186,15 +186,15 @@ func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, content
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}
-		if snapshotDataRefEqual(content.Status.DataRef, ref) {
+		if snapshotDataRefEqual(content.Status.Data, ref) {
 			return nil
 		}
 		base := content.DeepCopy()
 		if ref == nil {
-			content.Status.DataRef = nil
+			content.Status.Data = nil
 		} else {
 			cp := *ref
-			content.Status.DataRef = &cp
+			content.Status.Data = &cp
 		}
 		return c.Status().Patch(ctx, content, client.MergeFrom(base))
 	})
@@ -290,12 +290,9 @@ func snapshotDataRefEqual(a, b *storagev1alpha1.SnapshotDataBinding) bool {
 }
 
 func dataBindingEqual(x, y storagev1alpha1.SnapshotDataBinding) bool {
-	if x.TargetUID != y.TargetUID {
-		return false
-	}
-	if x.Target.APIVersion != y.Target.APIVersion || x.Target.Kind != y.Target.Kind ||
-		x.Target.Name != y.Target.Name || x.Target.Namespace != y.Target.Namespace ||
-		string(x.Target.UID) != string(y.Target.UID) {
+	if x.Source.APIVersion != y.Source.APIVersion || x.Source.Kind != y.Source.Kind ||
+		x.Source.Name != y.Source.Name || x.Source.Namespace != y.Source.Namespace ||
+		string(x.Source.UID) != string(y.Source.UID) {
 		return false
 	}
 	if x.Artifact != y.Artifact {

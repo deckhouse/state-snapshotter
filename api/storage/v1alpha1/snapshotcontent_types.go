@@ -102,24 +102,22 @@ type SnapshotDataArtifactRef struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
-	// artifact reference self-contained, symmetric with target.uid. Optional: the artifact may be
+	// artifact reference self-contained, symmetric with source.uid. Optional: the artifact may be
 	// referenced before its UID is known, so producers fill it best-effort.
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
 }
 
-// SnapshotDataBinding associates the single PVC target of a logical snapshot node with its captured
-// data artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE dataRef; multiple
+// SnapshotDataBinding associates the single PVC source of a logical snapshot node with its captured data
+// artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE data binding; multiple
 // volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
+// It is self-contained ({source, artifact, volume metadata}) so the core can mirror it verbatim onto the
+// namespaced snapshot's top-level status.data (see the status-source descriptor).
 // +k8s:deepcopy-gen=true
 type SnapshotDataBinding struct {
-	// TargetUID identifies the captured PersistentVolumeClaim (its UID) backing this node's data.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	TargetUID string `json:"targetUID"`
-
-	// Target identifies the PVC (and related metadata) captured in MCP for this binding.
-	Target SnapshotSubjectRef `json:"target"`
+	// Source identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
+	// this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
+	Source SnapshotSubjectRef `json:"source"`
 
 	// Artifact references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
 	Artifact SnapshotDataArtifactRef `json:"artifact"`
@@ -164,11 +162,13 @@ type SnapshotContentStatus struct {
 	// +optional
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
-	// DataRef is the single PVC-target-to-data-artifact binding for this logical snapshot node.
+	// Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
 	// Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
 	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
+	// It is the durable, self-contained {source, artifact, volume metadata} block the core mirrors onto
+	// the namespaced snapshot's top-level status.data.
 	// +optional
-	DataRef *SnapshotDataBinding `json:"dataRef,omitempty"`
+	Data *SnapshotDataBinding `json:"data,omitempty"`
 
 	// ResidualVolumeCapture latches completion of the final residual/orphan-PVC capture wave on a
 	// namespace-root SnapshotContent. It is the gate signal the aggregator reads to hold the FIRST
@@ -228,7 +228,7 @@ const (
 )
 
 // ResidualVolumeCaptureStatus is the residual/orphan-PVC capture latch on a namespace-root
-// SnapshotContent. Only the snapshot reconciler writes it (status field, like dataRef), and only the
+// SnapshotContent. Only the snapshot reconciler writes it (status field, like data), and only the
 // SnapshotContent aggregator reads it (locally, to gate the first Ready=True). It is NOT a condition:
 // conditions on SnapshotContent are the aggregator's exclusive domain, so the "wave finished" signal
 // that the reconciler owns is carried as a field and surfaced to users via the aggregate Ready reason.
@@ -250,12 +250,12 @@ type ResidualVolumeCaptureStatus struct {
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 }
 
-// DataRefList returns status.dataRef as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a
+// DataList returns status.data as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a
 // node, but the coverage/dedup/publish helpers stay generic over a slice; this bridge lets them iterate
 // the single binding without each call site special-casing the nil pointer.
-func (c *SnapshotContent) DataRefList() []SnapshotDataBinding {
-	if c == nil || c.Status.DataRef == nil {
+func (c *SnapshotContent) DataList() []SnapshotDataBinding {
+	if c == nil || c.Status.Data == nil {
 		return nil
 	}
-	return []SnapshotDataBinding{*c.Status.DataRef}
+	return []SnapshotDataBinding{*c.Status.Data}
 }

@@ -154,10 +154,9 @@ func seedVolumeSnapshotLeaf(t *testing.T, cl client.Client, vsName string, ready
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-vol",
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				TargetUID: "uid-pvc",
-				Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "ns1", UID: "uid-pvc"},
-				Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-1"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "ns1", UID: "uid-pvc"},
+				Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-1"},
 			},
 		},
 	}

@@ -40,20 +40,20 @@ func TestImportDataBinding_TargetsPVC(t *testing.T) {
 
 	b := importDataBinding(pvc, "vsc-artifact")
 
-	if b.TargetUID != "pvc-uid-123" {
-		t.Fatalf("TargetUID must be the PVC uid, got %q", b.TargetUID)
+	if string(b.Source.UID) != "pvc-uid-123" {
+		t.Fatalf("Source.UID must be the PVC uid, got %q", b.Source.UID)
 	}
-	if b.Target.Kind != "PersistentVolumeClaim" {
-		t.Fatalf("Target.Kind must be PersistentVolumeClaim, got %q", b.Target.Kind)
+	if b.Source.Kind != "PersistentVolumeClaim" {
+		t.Fatalf("Source.Kind must be PersistentVolumeClaim, got %q", b.Source.Kind)
 	}
-	if b.Target.APIVersion != "v1" {
-		t.Fatalf("Target.APIVersion must be v1, got %q", b.Target.APIVersion)
+	if b.Source.APIVersion != "v1" {
+		t.Fatalf("Source.APIVersion must be v1, got %q", b.Source.APIVersion)
 	}
-	if b.Target.Name != "bk-pvc" || b.Target.Namespace != "source-ns" {
-		t.Fatalf("Target identity mismatch: %s/%s", b.Target.Namespace, b.Target.Name)
+	if b.Source.Name != "bk-pvc" || b.Source.Namespace != "source-ns" {
+		t.Fatalf("Source identity mismatch: %s/%s", b.Source.Namespace, b.Source.Name)
 	}
-	if string(b.Target.UID) != "pvc-uid-123" {
-		t.Fatalf("Target.UID must be the PVC uid, got %q", b.Target.UID)
+	if string(b.Source.UID) != "pvc-uid-123" {
+		t.Fatalf("Source.UID must be the PVC uid, got %q", b.Source.UID)
 	}
 	if b.Artifact.Kind != snapshotpkg.KindVolumeSnapshotContent || b.Artifact.Name != "vsc-artifact" {
 		t.Fatalf("Artifact must point at the durable VSC, got %s/%s", b.Artifact.Kind, b.Artifact.Name)

@@ -62,8 +62,8 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_ForcesRetainAndOwner(t *test
 	content.SetUID(types.UID("content-uid-1"))
 
 	bindings := []storagev1alpha1.SnapshotDataBinding{{
-		TargetUID: "pvc-uid-1",
-		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-domain"},
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "pvc-uid-1"},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-domain"},
 	}}
 
 	if err := EnsureVolumeSnapshotContentsOwnedByContent(ctx, cl, content, bindings); err != nil {
@@ -111,8 +111,8 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_StableWhenAlreadyRetainAndOw
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).Build()
 
 	bindings := []storagev1alpha1.SnapshotDataBinding{{
-		TargetUID: "pvc-uid-1",
-		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-domain"},
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "pvc-uid-1"},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-domain"},
 	}}
 	if err := EnsureVolumeSnapshotContentsOwnedByContent(ctx, cl, content, bindings); err != nil {
 		t.Fatalf("handoff: %v", err)
@@ -159,8 +159,8 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_SkipsDeletingVSC(t *testing.
 	content.SetName("demodiskc-1")
 	content.SetUID(types.UID("content-uid-1"))
 	bindings := []storagev1alpha1.SnapshotDataBinding{{
-		TargetUID: "pvc-uid-1",
-		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-deleting"},
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "pvc-uid-1"},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-deleting"},
 	}}
 
 	if err := EnsureVolumeSnapshotContentsOwnedByContent(ctx, cl, content, bindings); err != nil {
@@ -210,8 +210,8 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_IgnoresNonVSCArtifacts(t *te
 	content.SetName("demodiskc-1")
 	content.SetUID(types.UID("content-uid-1"))
 	bindings := []storagev1alpha1.SnapshotDataBinding{
-		{TargetUID: "u1", Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "backup.example.io/v1", Kind: "BackupSnapshot", Name: "b-1"}},
-		{TargetUID: "u2", Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: ""}},
+		{Source: storagev1alpha1.SnapshotSubjectRef{UID: "u1"}, Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "backup.example.io/v1", Kind: "BackupSnapshot", Name: "b-1"}},
+		{Source: storagev1alpha1.SnapshotSubjectRef{UID: "u2"}, Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: ""}},
 	}
 
 	if err := EnsureVolumeSnapshotContentsOwnedByContent(ctx, cl, content, bindings); err != nil {

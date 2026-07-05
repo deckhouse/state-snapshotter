@@ -99,13 +99,13 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		childContent := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: childContentName}, childContent)).To(Succeed())
 		// Variant A: the child volume node carries a single dataRef (cardinality ≤1), not a list.
-		ref := childContent.Status.DataRef
-		Expect(ref).NotTo(BeNil(), "child SnapshotContent must publish its single dataRef")
-		Expect(ref.TargetUID).To(Equal(string(pvcA.UID)), "child SnapshotContent must publish dataRef for pvc-a UID")
-		Expect(ref.Target.Kind).To(Equal("PersistentVolumeClaim"))
-		Expect(ref.Target.APIVersion).To(Equal(corev1.SchemeGroupVersion.String()))
-		Expect(ref.Target.Name).To(Equal("pvc-a"))
-		Expect(ref.Target.Namespace).To(Equal(nsName))
+		ref := childContent.Status.Data
+		Expect(ref).NotTo(BeNil(), "child SnapshotContent must publish its single data binding")
+		Expect(string(ref.Source.UID)).To(Equal(string(pvcA.UID)), "child SnapshotContent must publish data for pvc-a UID")
+		Expect(ref.Source.Kind).To(Equal("PersistentVolumeClaim"))
+		Expect(ref.Source.APIVersion).To(Equal(corev1.SchemeGroupVersion.String()))
+		Expect(ref.Source.Name).To(Equal("pvc-a"))
+		Expect(ref.Source.Namespace).To(Equal(nsName))
 	})
 
 	It("pending VCR spec.targets count as subtree coverage before dataRefs publish", func() {
@@ -134,7 +134,7 @@ var _ = Describe("Integration: N5 PR-7 two-PVC subtree vertical slice", Serial, 
 		pr7InstallPendingVCR(ctx, nsName, childContent, pvcA)
 		freshChildContent := &storagev1alpha1.SnapshotContent{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: childContent.Name}, freshChildContent)).To(Succeed())
-		Expect(freshChildContent.Status.DataRef).To(BeNil())
+		Expect(freshChildContent.Status.Data).To(BeNil())
 
 		rootName := "pr7-pending-root"
 		Expect(k8sClient.Create(ctx, &storagev1alpha1.Snapshot{

@@ -238,7 +238,7 @@ func (r *SnapshotReconciler) reconcileVolumeCaptureSteadyState(
 	vcrKey types.NamespacedName,
 	targets []vcpkg.Target,
 ) (done bool, res ctrl.Result, err error) {
-	if !volumecapturectrl.ContentDataRefsCoverExpectedTargets(content.DataRefList(), targets) {
+	if !volumecapturectrl.ContentDataRefsCoverExpectedTargets(content.DataList(), targets) {
 		return false, ctrl.Result{}, nil
 	}
 

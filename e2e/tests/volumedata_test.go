@@ -262,10 +262,10 @@ func walkContentDataRefs(ctx context.Context, rootContent string) ([]volBinding,
 		if err != nil {
 			return nil, fmt.Errorf("get SnapshotContent %s: %w", name, err)
 		}
-		if dr, ok, _ := unstructured.NestedMap(obj.Object, "status", "dataRef"); ok {
+		if dr, ok, _ := unstructured.NestedMap(obj.Object, "status", "data"); ok {
 			artifactKind, _, _ := unstructured.NestedString(dr, "artifact", "kind")
 			artifactName, _, _ := unstructured.NestedString(dr, "artifact", "name")
-			targetName, _, _ := unstructured.NestedString(dr, "target", "name")
+			targetName, _, _ := unstructured.NestedString(dr, "source", "name")
 			volumeMode, _, _ := unstructured.NestedString(dr, "volumeMode")
 			if artifactKind == "VolumeSnapshotContent" && artifactName != "" {
 				out = append(out, volBinding{pvc: targetName, vsc: artifactName, volumeMode: volumeMode})

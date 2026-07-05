@@ -150,7 +150,7 @@ func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
-	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataRefList(), expectedTargets) {
+	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataList(), expectedTargets) {
 		return true, "", "", nil
 	}
 
@@ -313,14 +313,14 @@ func (r *GenericSnapshotBinderController) mirrorLeafVolumeMetadataFromContent(
 	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 		return err
 	}
-	if content.Status.DataRef == nil {
+	if content.Status.Data == nil {
 		return nil
 	}
-	sc := content.Status.DataRef.StorageClassName
+	sc := content.Status.Data.StorageClassName
 	if scOverride != "" {
 		sc = scOverride
 	}
-	return r.mirrorVolumeMetadataToLeaf(ctx, obj, sc, content.Status.DataRef.Size, content.Status.DataRef.VolumeMode)
+	return r.mirrorVolumeMetadataToLeaf(ctx, obj, sc, content.Status.Data.Size, content.Status.Data.VolumeMode)
 }
 
 // mirrorVolumeMetadataToLeaf writes the provided (non-empty) volume metadata fields onto the leaf

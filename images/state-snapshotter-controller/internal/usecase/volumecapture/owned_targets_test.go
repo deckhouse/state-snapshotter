@@ -82,7 +82,7 @@ func TestCollectSubtreeCoveredPVCUIDs_staleUIDDoesNotCoverUnrelatedPVC(t *testin
 	child := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "stale-uid-not-in-cluster"},
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "stale-uid-not-in-cluster"}},
 		},
 	}
 	pvcA := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc-a", Namespace: ns, UID: "uid-a"}}

@@ -49,7 +49,7 @@ func restoreTreeScheme() *runtime.Scheme {
 func readySnapshotContent(name, mcp string, dataRef *storagev1alpha1.SnapshotDataBinding) *storagev1alpha1.SnapshotContent {
 	c := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: mcp, DataRef: dataRef},
+		Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: mcp, Data: dataRef},
 	}
 	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
 	return c
@@ -144,9 +144,8 @@ func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 	})
 	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
 	orphanContent := orphanChildContent("root-content-vol-orphan", "mcp-orphan", "vs-orphan", &storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-orphan",
-		Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
-		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
+		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
 	})
 	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
 	diskContent := readySnapshotContent("disk-content", "mcp-disk", nil)
@@ -360,9 +359,8 @@ func TestResolveRestoreTree_OrphanContentSnapshotRefMismatchFailsClosed(t *testi
 	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
 	// The child content's spec.snapshotRef points at a DIFFERENT VolumeSnapshot than the one binding it.
 	orphanContent := orphanChildContent("root-content-vol-orphan", "mcp-orphan", "vs-other", &storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-orphan",
-		Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
-		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
+		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
 	})
 	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-orphan")
 

@@ -256,9 +256,9 @@ func (r *GenericSnapshotBinderController) projectDataLegFromDataImport(
 	// artifact and the (now source-derived) volumeMode. Comparing volumeMode too lets a content that was
 	// bound before volumeMode propagation existed self-heal instead of staying stuck with an empty mode
 	// that fails restore closed.
-	if content.Status.DataRef != nil &&
-		content.Status.DataRef.Artifact == binding.Artifact &&
-		content.Status.DataRef.VolumeMode == binding.VolumeMode {
+	if content.Status.Data != nil &&
+		content.Status.Data.Artifact == binding.Artifact &&
+		content.Status.Data.VolumeMode == binding.VolumeMode {
 		return true, "", "", nil
 	}
 
@@ -311,10 +311,9 @@ func buildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 	// DataImport and are resolved downstream from the disk spec / defaults.
 	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
 	return &storagev1alpha1.SnapshotDataBinding{
-		// The imported leaf has no live source PVC; use the leaf identity as the binding target so the
-		// dataRef is stable/idempotent (size etc. are enriched from VolumeSnapshotContent.status.restoreSize).
-		TargetUID: string(leaf.GetUID()),
-		Target: storagev1alpha1.SnapshotSubjectRef{
+		// The imported leaf has no live source PVC; use the leaf identity as the binding source so the
+		// data binding is stable/idempotent (size etc. are enriched from VolumeSnapshotContent.status.restoreSize).
+		Source: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: leafGVK.GroupVersion().String(),
 			Kind:       leafGVK.Kind,
 			Namespace:  leaf.GetNamespace(),

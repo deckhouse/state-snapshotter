@@ -93,8 +93,8 @@ func TestDemoVirtualDiskRestoreRejectsCrossNamespace(t *testing.T) {
 			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				Target: storagev1alpha1.SnapshotSubjectRef{Namespace: "other-ns", Name: "orig-pvc"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{Namespace: "other-ns", Name: "orig-pvc"},
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					Kind: vscKind,
 					Name: "vsc-1",
@@ -151,8 +151,8 @@ func TestDemoVirtualDiskRestoreVRRHasNoSize(t *testing.T) {
 			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				Target: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					Kind: vscKind,
 					Name: "vsc-1",
@@ -209,8 +209,8 @@ func TestDemoVirtualDiskRestoreDeniedOnSnapshotRefSpoof(t *testing.T) {
 			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				Target: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					Kind: vscKind,
 					Name: "vsc-1",

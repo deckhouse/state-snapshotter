@@ -115,16 +115,16 @@ func resolveDemoDiskRestore(
 		return out, nil
 	}
 
-	dataRef := content.Status.DataRef
+	dataRef := content.Status.Data
 	if dataRef == nil || dataRef.Artifact.Name == "" {
 		out.Reason = demoReasonContentNotReady
-		out.Message = fmt.Sprintf("waiting for SnapshotContent %q status.dataRef", content.Name)
+		out.Message = fmt.Sprintf("waiting for SnapshotContent %q status.data", content.Name)
 		return out, nil
 	}
-	if dataRef.Target.Namespace == "" || dataRef.Target.Namespace != disk.Namespace {
+	if dataRef.Source.Namespace == "" || dataRef.Source.Namespace != disk.Namespace {
 		out.Failed = true
 		out.Reason = demoReasonRestoreDenied
-		out.Message = fmt.Sprintf("dataRef target namespace %q does not match disk namespace %q", dataRef.Target.Namespace, disk.Namespace)
+		out.Message = fmt.Sprintf("data source namespace %q does not match disk namespace %q", dataRef.Source.Namespace, disk.Namespace)
 		return out, nil
 	}
 	if dataRef.Artifact.Kind != vscKind {

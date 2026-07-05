@@ -241,9 +241,8 @@ func TestReconcileStaticBindRestoreTree_OrphanVolumeLeaf(t *testing.T) {
 	}
 	leaf.Status.ParentDeleted = true
 	leaf.Status.ManifestCheckpointName = "mcp-leaf"
-	leaf.Status.DataRef = &storagev1alpha1.SnapshotDataBinding{
-		TargetUID: pvcUID,
-		Target: storagev1alpha1.SnapshotSubjectRef{
+	leaf.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		Source: storagev1alpha1.SnapshotSubjectRef{
 			UID: types.UID(pvcUID), APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "ns", Name: "pvc-1",
 		},
 		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
@@ -294,8 +293,8 @@ func TestReconcileStaticBindRestoreTree_OrphanVolumeLeaf(t *testing.T) {
 	if gotLeaf.UID != types.UID("leaf-uid") {
 		t.Fatalf("leaf content was re-created (uid changed to %q); it must survive", gotLeaf.UID)
 	}
-	if gotLeaf.Status.DataRef == nil || gotLeaf.Status.DataRef.Artifact.Name != "vsc-durable" {
-		t.Fatalf("leaf content dataRef lost: %#v", gotLeaf.Status.DataRef)
+	if gotLeaf.Status.Data == nil || gotLeaf.Status.Data.Artifact.Name != "vsc-durable" {
+		t.Fatalf("leaf content data lost: %#v", gotLeaf.Status.Data)
 	}
 	if gotLeaf.Spec.SnapshotRef.Name != vsName || gotLeaf.Spec.SnapshotRef.UID != vs.GetUID() {
 		t.Fatalf("leaf content snapshotRef not re-pointed to new VS handle: %#v (want name=%q uid=%q)", gotLeaf.Spec.SnapshotRef, vsName, vs.GetUID())

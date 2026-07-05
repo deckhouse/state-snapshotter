@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -52,8 +53,7 @@ func scPtr(s string) *string                  { return &s }
 
 func pvcTargetBinding(ns, name string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-" + name,
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "PersistentVolumeClaim", Namespace: ns, Name: name},
+		Source: storagev1alpha1.SnapshotSubjectRef{UID: types.UID("uid-" + name), Kind: "PersistentVolumeClaim", Namespace: ns, Name: name},
 	}
 }
 
@@ -175,8 +175,7 @@ func TestEnrich_NonPVCTargetSkipped(t *testing.T) {
 	scheme := enrichScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	binding := storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-x",
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-x", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
 	}
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{binding})
 	if err != nil {
@@ -226,9 +225,8 @@ func TestEnrich_PopulatesSizeFromVSCRestoreSize(t *testing.T) {
 	pvcBinding := pvcTargetBinding("ns1", "data")
 	pvcBinding.Artifact = vscArtifact("vsc-pvc")
 	domainBinding := storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-disk",
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
-		Artifact:  vscArtifact("vsc-disk"),
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		Artifact: vscArtifact("vsc-disk"),
 	}
 
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcBinding, domainBinding})
@@ -257,14 +255,12 @@ func TestEnrich_BackfillsArtifactUIDFromVSC(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vscNamed, vscPreset).Build()
 
 	nameOnly := storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-disk",
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
-		Artifact:  vscArtifact("vsc-named"),
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		Artifact: vscArtifact("vsc-named"),
 	}
 	preset := storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-disk2",
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk2"},
-		Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-preset", UID: "producer-supplied-uid"},
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk2", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk2"},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-preset", UID: "producer-supplied-uid"},
 	}
 
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{nameOnly, preset})
@@ -336,8 +332,7 @@ func TestReadArtifactRestoreSize_TransientErrorPropagates(t *testing.T) {
 
 func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 	base := storagev1alpha1.SnapshotDataBinding{
-		TargetUID:        "u1",
-		Target:           storagev1alpha1.SnapshotSubjectRef{Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
+		Source:           storagev1alpha1.SnapshotSubjectRef{UID: "u1", Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
 		Artifact:         storagev1alpha1.SnapshotDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "vsc", APIVersion: "snapshot.storage.k8s.io/v1"},
 		VolumeMode:       "Filesystem",
 		FsType:           "ext4",

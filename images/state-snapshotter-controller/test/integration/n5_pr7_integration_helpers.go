@@ -119,8 +119,7 @@ func pr7CreatePVC(ctx context.Context, namespace, name string) *corev1.Persisten
 
 func pr7PVCDataBinding(pvc *corev1.PersistentVolumeClaim, vscName string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		TargetUID: string(pvc.UID),
-		Target: storagev1alpha1.SnapshotSubjectRef{
+		Source: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: corev1.SchemeGroupVersion.String(),
 			Kind:       "PersistentVolumeClaim",
 			Name:       pvc.Name,
@@ -179,9 +178,9 @@ func pr7PatchSnapshotContent(
 		// Variant A (cardinality ≤1): publish the single dataRef on the child volume node. Callers pass at
 		// most one binding (a domain/child leaf owns exactly one PVC); >1 would be a fixture bug.
 		if len(dataRefs) > 0 {
-			Expect(dataRefs).To(HaveLen(1), "Variant A: a SnapshotContent carries at most one dataRef")
+			Expect(dataRefs).To(HaveLen(1), "Variant A: a SnapshotContent carries at most one data binding")
 			cp := dataRefs[0]
-			sc.Status.DataRef = &cp
+			sc.Status.Data = &cp
 		}
 		// Do not mark SnapshotContent Ready here: SCC would validate VolumeSnapshotContent objects that envtest does not install.
 		return k8sClient.Status().Patch(ctx, sc, client.MergeFrom(base))

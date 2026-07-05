@@ -170,19 +170,16 @@ func coveredPVCUIDsForContent(
 }
 
 func pvcUIDsFromSnapshotContentDataRefs(content *storagev1alpha1.SnapshotContent) ([]string, error) {
-	refs := content.DataRefList()
+	refs := content.DataList()
 	if len(refs) == 0 {
 		return nil, nil
 	}
 	out := make([]string, 0, len(refs))
 	for i := range refs {
 		b := refs[i]
-		uid := b.TargetUID
+		uid := string(b.Source.UID)
 		if uid == "" {
-			uid = string(b.Target.UID)
-		}
-		if uid == "" {
-			return nil, fmt.Errorf("SnapshotContent %q dataRef: empty targetUID", content.Name)
+			return nil, fmt.Errorf("SnapshotContent %q data: empty source uid", content.Name)
 		}
 		out = append(out, uid)
 	}

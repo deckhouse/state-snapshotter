@@ -789,8 +789,7 @@ func (r *SnapshotReconciler) orphanPVCVolumeSnapshotBinding(
 		ready: true,
 		vsUID: vs.GetUID(),
 		binding: &storagev1alpha1.SnapshotDataBinding{
-			TargetUID: target.UID,
-			Target: storagev1alpha1.SnapshotSubjectRef{
+			Source: storagev1alpha1.SnapshotSubjectRef{
 				UID:        types.UID(target.UID),
 				APIVersion: target.APIVersion,
 				Kind:       target.Kind,

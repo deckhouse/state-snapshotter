@@ -83,9 +83,8 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 			ChildrenSnapshotContentRefs: []SnapshotContentChildRef{
 				{Name: "child-content-1"},
 			},
-			DataRef: &SnapshotDataBinding{
-				TargetUID: pvcUID,
-				Target: SnapshotSubjectRef{
+			Data: &SnapshotDataBinding{
+				Source: SnapshotSubjectRef{
 					APIVersion: "v1",
 					Kind:       "PersistentVolumeClaim",
 					Name:       "data",
@@ -117,12 +116,12 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	if got := out.Status.ChildrenSnapshotContentRefs; len(got) != 1 || got[0].Name != "child-content-1" {
 		t.Fatalf("ChildrenSnapshotContentRefs: got %#v", got)
 	}
-	if out.Status.DataRef == nil {
-		t.Fatalf("DataRef: got nil want a binding")
+	if out.Status.Data == nil {
+		t.Fatalf("Data: got nil want a binding")
 	}
-	ref := *out.Status.DataRef
-	if ref.TargetUID != pvcUID || ref.Target.Name != "data" || ref.Artifact.Name != "vsc-1" {
-		t.Fatalf("DataRef: got %#v", ref)
+	ref := *out.Status.Data
+	if string(ref.Source.UID) != pvcUID || ref.Source.Name != "data" || ref.Artifact.Name != "vsc-1" {
+		t.Fatalf("Data: got %#v", ref)
 	}
 	if ref.Artifact.Kind == "VolumeCaptureRequest" {
 		t.Fatalf("artifact must reference a durable artifact, not an execution request: %#v", ref.Artifact)
@@ -144,9 +143,10 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	if _, ok := item["namespace"]; ok {
 		t.Fatalf("did not expect namespace key in child content ref JSON: %#v", item)
 	}
-	entry := status["dataRef"].(map[string]interface{})
-	if entry["targetUID"] != pvcUID {
-		t.Fatalf("expected targetUID on singular dataRef, got %#v", entry)
+	entry := status["data"].(map[string]interface{})
+	source := entry["source"].(map[string]interface{})
+	if source["uid"] != pvcUID {
+		t.Fatalf("expected source.uid on singular data binding, got %#v", entry)
 	}
 	artifact := entry["artifact"].(map[string]interface{})
 	if artifact["apiVersion"] != "snapshot.storage.k8s.io/v1" ||
@@ -157,8 +157,11 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 	if _, ok := artifact["namespace"]; ok {
 		t.Fatalf("did not expect namespace key in cluster artifact JSON: %#v", artifact)
 	}
+	if _, ok := status["dataRef"]; ok {
+		t.Fatal("legacy singular dataRef key must not be present in JSON (wave5 renamed it to data)")
+	}
 	if _, ok := status["dataRefs"]; ok {
-		t.Fatal("plural dataRefs must not be present in JSON (Variant A: singular dataRef)")
+		t.Fatal("plural dataRefs must not be present in JSON (Variant A: singular data)")
 	}
 }
 

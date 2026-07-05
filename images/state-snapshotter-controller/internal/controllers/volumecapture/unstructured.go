@@ -158,8 +158,7 @@ func SnapshotDataBindingsFromVCRStatus(refs []vcpkg.DataBinding) []storagev1alph
 	out := make([]storagev1alpha1.SnapshotDataBinding, 0, len(refs))
 	for _, ref := range refs {
 		out = append(out, storagev1alpha1.SnapshotDataBinding{
-			TargetUID: ref.TargetUID,
-			Target: storagev1alpha1.SnapshotSubjectRef{
+			Source: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: ref.Target.APIVersion,
 				Kind:       ref.Target.Kind,
 				Name:       ref.Target.Name,

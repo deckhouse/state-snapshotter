@@ -205,12 +205,12 @@ func TestEnsureDomainContentLinks_DataLegHandoff(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef == nil {
-		t.Fatalf("expected 1 published dataRef, got none")
+	if got.Status.Data == nil {
+		t.Fatalf("expected 1 published data binding, got none")
 	}
-	ref := *got.Status.DataRef
-	if ref.TargetUID != domainTestPVCUID || ref.Artifact.Name != domainTestVSCName {
-		t.Fatalf("unexpected dataRef: %#v", ref)
+	ref := *got.Status.Data
+	if string(ref.Source.UID) != domainTestPVCUID || ref.Artifact.Name != domainTestVSCName {
+		t.Fatalf("unexpected data binding: %#v", ref)
 	}
 	if ref.StorageClassName != "sc-a" || ref.VolumeMode != string(corev1.PersistentVolumeFilesystem) || len(ref.AccessModes) != 1 || ref.AccessModes[0] != string(corev1.ReadWriteOnce) {
 		t.Fatalf("dataRef not enriched with volume metadata: %#v", ref)
@@ -283,8 +283,8 @@ func TestEnsureDomainContentLinks_DataLegPendingRequeues(t *testing.T) {
 	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("pending VCR must not publish dataRefs, got %#v", got.Status.DataRef)
+	if got.Status.Data != nil {
+		t.Fatalf("pending VCR must not publish data binding, got %#v", got.Status.Data)
 	}
 	fresh := &unstructured.Unstructured{}
 	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)

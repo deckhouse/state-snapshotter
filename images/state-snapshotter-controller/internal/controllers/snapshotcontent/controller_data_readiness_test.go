@@ -246,13 +246,13 @@ func commonSnapshotContentWithDataRef(bindings []snapshot.DataBindingRef) *unstr
 	status := map[string]interface{}{}
 	if len(bindings) > 0 {
 		b := bindings[0]
-		status["dataRef"] = map[string]interface{}{
-			"targetUID": b.TargetUID,
-			"target": map[string]interface{}{
+		status["data"] = map[string]interface{}{
+			"source": map[string]interface{}{
 				"apiVersion": "v1",
 				"kind":       "PersistentVolumeClaim",
 				"name":       "pvc",
 				"namespace":  "default",
+				"uid":        b.TargetUID,
 			},
 			"artifact": map[string]interface{}{
 				"apiVersion": b.Artifact.APIVersion,
