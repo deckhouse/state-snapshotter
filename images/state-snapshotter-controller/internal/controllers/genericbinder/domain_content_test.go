@@ -378,3 +378,132 @@ func TestEnsureSnapshotContentLinks_ManifestCapturedMCRDeletedDoesNotRequeue(t *
 		t.Fatalf("captured manifest leg with a GC'd MCR must not requeue (would starve the Ready mirror)")
 	}
 }
+
+// mirrorLeafDataFromContent copies the bound SnapshotContent's self-contained data binding verbatim onto
+// the namespaced data leaf's top-level status.data (source + artifact + volume metadata) and writes NO
+// flat top-level storageClassName/size/volumeMode mirrors (folded into status.data in wave5).
+func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
+	ctx := context.Background()
+	scheme := domainTestScheme(t)
+	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
+	content := domainTestSnapshotContent()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		Source: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName,
+			Namespace: domainTestNS, UID: types.UID(domainTestPVCUID),
+		},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent",
+			Name: domainTestVSCName, UID: types.UID("vsc-uid-1"),
+		},
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		AccessModes:      []string{string(corev1.ReadWriteOnce)},
+		StorageClassName: "sc-a",
+		Size:             "10Gi",
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
+		WithObjects(content, demoObj).
+		Build()
+	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
+
+	if err := r.mirrorLeafDataFromContent(ctx, demoObj, domainTestContent, ""); err != nil {
+		t.Fatalf("mirrorLeafDataFromContent: %v", err)
+	}
+
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
+		t.Fatalf("get demo snapshot: %v", err)
+	}
+	data, found, _ := unstructured.NestedMap(fresh.Object, "status", "data")
+	if !found {
+		t.Fatalf("expected status.data to be mirrored")
+	}
+	if srcUID, _, _ := unstructured.NestedString(data, "source", "uid"); srcUID != domainTestPVCUID {
+		t.Fatalf("status.data.source.uid = %q, want %q", srcUID, domainTestPVCUID)
+	}
+	if artName, _, _ := unstructured.NestedString(data, "artifact", "name"); artName != domainTestVSCName {
+		t.Fatalf("status.data.artifact.name = %q, want %q", artName, domainTestVSCName)
+	}
+	if sc, _, _ := unstructured.NestedString(data, "storageClassName"); sc != "sc-a" {
+		t.Fatalf("status.data.storageClassName = %q, want sc-a", sc)
+	}
+	if size, _, _ := unstructured.NestedString(data, "size"); size != "10Gi" {
+		t.Fatalf("status.data.size = %q, want 10Gi", size)
+	}
+	// The flat top-level mirrors must be gone (folded into status.data).
+	if _, found, _ := unstructured.NestedString(fresh.Object, "status", "storageClassName"); found {
+		t.Fatalf("flat status.storageClassName must not be written")
+	}
+	if _, found, _ := unstructured.NestedString(fresh.Object, "status", "volumeMode"); found {
+		t.Fatalf("flat status.volumeMode must not be written")
+	}
+	if _, found, _ := unstructured.NestedString(fresh.Object, "status", "size"); found {
+		t.Fatalf("flat status.size must not be written")
+	}
+}
+
+// On import the content data carries no storageClassName; the caller passes it from
+// DataImport.spec.storageClassName as scOverride, which must land in the mirrored status.data.
+func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
+	ctx := context.Background()
+	scheme := domainTestScheme(t)
+	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
+	content := domainTestSnapshotContent()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName, Namespace: domainTestNS, UID: types.UID(domainTestPVCUID)},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
+		Size:     "5Gi",
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
+		WithObjects(content, demoObj).
+		Build()
+	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
+	if err := r.mirrorLeafDataFromContent(ctx, demoObj, domainTestContent, "sc-import"); err != nil {
+		t.Fatalf("mirrorLeafDataFromContent: %v", err)
+	}
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
+		t.Fatalf("get demo snapshot: %v", err)
+	}
+	if sc, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "storageClassName"); sc != "sc-import" {
+		t.Fatalf("scOverride not applied: status.data.storageClassName = %q, want sc-import", sc)
+	}
+}
+
+// snapshotDataBindingToMap renders source/artifact always, omits empty optionals, and converts
+// AccessModes to a JSON-typed []interface{} (required by unstructured.SetNestedMap).
+func TestSnapshotDataBindingToMap(t *testing.T) {
+	m := snapshotDataBindingToMap(&storagev1alpha1.SnapshotDataBinding{
+		Source:      storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc", UID: types.UID("u1")},
+		Artifact:    storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
+		AccessModes: []string{"ReadWriteOnce"},
+	})
+	if _, ok := m["source"].(map[string]interface{}); !ok {
+		t.Fatalf("source must be a map, got %#v", m["source"])
+	}
+	if _, ok := m["artifact"].(map[string]interface{}); !ok {
+		t.Fatalf("artifact must be a map, got %#v", m["artifact"])
+	}
+	am, ok := m["accessModes"].([]interface{})
+	if !ok || len(am) != 1 || am[0] != "ReadWriteOnce" {
+		t.Fatalf("accessModes must be []interface{}{\"ReadWriteOnce\"}, got %#v", m["accessModes"])
+	}
+	// Empty optionals are omitted.
+	if _, ok := m["storageClassName"]; ok {
+		t.Fatalf("empty storageClassName must be omitted")
+	}
+	if _, ok := m["size"]; ok {
+		t.Fatalf("empty size must be omitted")
+	}
+	// The Namespace on source was empty -> omitted.
+	if src := m["source"].(map[string]interface{}); func() bool { _, ok := src["namespace"]; return ok }() {
+		t.Fatalf("empty source.namespace must be omitted")
+	}
+}

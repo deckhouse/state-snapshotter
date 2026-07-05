@@ -241,3 +241,22 @@ Chronological log of notable refactors. Newest wave at the bottom.
   `volumesnapshotimport/controller.go` (`resolveDataImportArtifact`), the e2e DataImport readers
   (`diagnostics`/`backup_restore`), and all VCR/DataImport unit fixtures. All unit tests + non-isolated integration
   suite green; e2e compiles.
+- **Add** (w5-tests, ss domain status.data mirror) Unit coverage for the wave5 self-contained data-leaf mirror
+  in `genericbinder/domain_content_test.go`: `TestMirrorLeafDataFromContent_WritesTopLevelStatusData` (mirrors the
+  whole `SnapshotContent.status.data` block onto the leaf `status.data` — source.uid/artifact/storageClassName/size —
+  and asserts the removed flat `status.storageClassName/volumeMode/size` mirrors are NOT written),
+  `TestMirrorLeafDataFromContent_ScOverride` (import path: `DataImport.spec.storageClassName` override lands in
+  `status.data.storageClassName`), and `TestSnapshotDataBindingToMap` (JSON-typed map shape: source/artifact always
+  present, `accessModes` as `[]interface{}`, empty optionals omitted). All green.
+- **Note** (w5-content-creation + w5-namespace-domain-sdk) DEFERRED as one unit (hottest path, unsafe unattended):
+  the binder's watch set excludes the built-in root `Snapshot` (`cmd/main.go` `FilterGenericSnapshotGVKPairs`), so
+  folding root `SnapshotContent` creation into the binder cannot be separated from the full `snapshot/` → in-process
+  SDK namespace-domain reconciler rewrite (two controllers would contend over `boundSnapshotContentName` / capture
+  ordering). Left the working implementation intact; do attended behind the integration gate. Rationale + wiring
+  facts in `.cursor/plans/wave5_notes.md`.
+- **Note** (w5-cli + w5-d8-user-rbac, d8-cli) DEFERRED: the necessary local-type realignment
+  (`SnapshotContentStatus` `dataRef`→`data`, `SnapshotDataBinding` `target`→`source` + drop `targetUID`) is green in
+  d8 isolation today (self-consistent local copy; break only at runtime vs a not-yet-deployed wave5 cluster), and the
+  namespaced BuildTree rewrite (drop cluster-scoped `SnapshotContent` reads; resolve from namespaced
+  `status.snapshotSource`+`status.data`) depends on producers that are part of the deferred namespace-domain work
+  (root `snapshotSource` writer, extended-VS `status.data`). Do d8 after those land. Details in `wave5_notes.md`.
