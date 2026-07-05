@@ -313,6 +313,15 @@ func (s *sdk) setPhase(ctx context.Context, t SnapshotAdapter, phase storagev1al
 	obj := t.Object()
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
+		// Monotonic barrier guard. Domain controllers call MarkPlanned on every reconcile (before
+		// switching on the capture outcome), so without this a snapshot that already advanced to Finished
+		// would be dragged back to Planned. That regression makes each reconcile emit two status writes
+		// (Planned then Finished) and, because the domain watches its own object, the pair re-triggers the
+		// reconcile — a self-sustaining phase write storm (Planned<->Finished) that starves the core
+		// binder's optimistic-lock Ready mirror and wedges the snapshot tree at Ready=False/ContentMissing.
+		if !phaseCanAdvance(st.Phase, phase) {
+			return false
+		}
 		if st.Phase == phase && st.Reason == reason && st.Message == message {
 			return false
 		}
@@ -322,6 +331,32 @@ func (s *sdk) setPhase(ctx context.Context, t SnapshotAdapter, phase storagev1al
 		t.SetDomainCaptureState(st)
 		return true
 	})
+}
+
+// phaseRank orders the forward capture barriers. Unknown/empty ranks 0 so the first real phase always
+// advances; Failed is intentionally absent (handled out-of-band in phaseCanAdvance).
+func phaseRank(p storagev1alpha1.SnapshotCapturePhase) int {
+	switch p {
+	case storagev1alpha1.SnapshotCapturePhasePlanning:
+		return 1
+	case storagev1alpha1.SnapshotCapturePhasePlanned:
+		return 2
+	case storagev1alpha1.SnapshotCapturePhaseFinished:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// phaseCanAdvance reports whether a from->to phase transition is allowed. The forward chain
+// (Planning<Planned<Finished) must never regress — this is what stops MarkPlanned from dragging a
+// Finished snapshot back to Planned. Failed stays orthogonal: it may be entered from any phase (surface a
+// late error) and left again on a subsequent successful reconcile, preserving pre-guard failure behavior.
+func phaseCanAdvance(from, to storagev1alpha1.SnapshotCapturePhase) bool {
+	if from == storagev1alpha1.SnapshotCapturePhaseFailed || to == storagev1alpha1.SnapshotCapturePhaseFailed {
+		return true
+	}
+	return phaseRank(to) >= phaseRank(from)
 }
 
 func (s *sdk) ownerRef(t SnapshotAdapter) (metav1.OwnerReference, error) {
