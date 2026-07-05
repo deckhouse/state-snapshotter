@@ -135,16 +135,17 @@ func (s *Syncer) Sync(ctx context.Context) error {
 	// (see activateDedicatedControllersLocked). Generic watches are wired in the loop below.
 	s.activateDedicatedControllersLocked(state.ResolvedSnapshotGVKs)
 
-	// CSD spec.dataBacked is carried on the merged pairs (lost by the parallel resolved slices); index
-	// it by snapshot Kind so the binder's registry learns which kinds expect a DataImport/data artifact.
-	dataBackedByKind := make(map[string]bool, len(state.DesiredMerged))
+	// CSD spec.requiresDataArtifact is carried on the merged pairs (lost by the parallel resolved
+	// slices); index it by snapshot Kind so the binder's registry learns which kinds expect a
+	// DataImport/data artifact.
+	requiresDataArtifactByKind := make(map[string]bool, len(state.DesiredMerged))
 	for _, p := range state.DesiredMerged {
-		dataBackedByKind[p.Snapshot.Kind] = p.DataBacked
+		requiresDataArtifactByKind[p.Snapshot.Kind] = p.RequiresDataArtifact
 	}
 
 	for i := range state.ResolvedSnapshotGVKs {
 		snapGVK, contentGVK := state.ResolvedSnapshotGVKs[i], state.ResolvedContentGVKs[i]
-		s.snap.MarkDataBacked(snapGVK.Kind, dataBackedByKind[snapGVK.Kind])
+		s.snap.MarkRequiresDataArtifact(snapGVK.Kind, requiresDataArtifactByKind[snapGVK.Kind])
 		if err := s.content.AddSnapshotStatusWatch(s.mgr, snapGVK); err != nil {
 			s.log.Error(err, "add SnapshotContent snapshot status watch failed", "snapshot", snapGVK.String())
 			continue

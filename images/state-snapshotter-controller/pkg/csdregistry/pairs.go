@@ -36,14 +36,15 @@ type EligibleResourceSnapshotMapping struct {
 	SnapshotGVR     schema.GroupVersionResource
 	SnapshotGVK     schema.GroupVersionKind
 	SnapshotContent schema.GroupVersionKind
-	Priority        int32
-	// DataBacked mirrors CSD spec.dataBacked: the snapshot kind carries a volume data leg.
-	DataBacked bool
+	Weight          int32
+	// RequiresDataArtifact mirrors CSD spec.requiresDataArtifact: the snapshot kind carries a volume
+	// data leg.
+	RequiresDataArtifact bool
 }
 
 // EligibleUnifiedGVKPairs returns one UnifiedGVKPair per CSD object that satisfies CSDWatchEligible.
 // Duplicate snapshot GVKs in the output are skipped (first wins). Caller should merge with bootstrap
-// pairs; invalid CRDs are skipped (no error). The pair carries spec.dataBacked so the generic
+// pairs; invalid CRDs are skipped (no error). The pair carries spec.requiresDataArtifact so the generic
 // controller's registry learns which snapshot kinds expect a data artifact.
 func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedbootstrap.UnifiedGVKPair, error) {
 	var list ssv1alpha1.CustomSnapshotDefinitionList
@@ -67,9 +68,9 @@ func EligibleUnifiedGVKPairs(ctx context.Context, c client.Reader) ([]unifiedboo
 		}
 		seen[key] = struct{}{}
 		out = append(out, unifiedbootstrap.UnifiedGVKPair{
-			Snapshot:        snapGVK,
-			SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
-			DataBacked:      d.Spec.DataBacked,
+			Snapshot:             snapGVK,
+			SnapshotContent:      unifiedbootstrap.CommonSnapshotContentGVK(),
+			RequiresDataArtifact: d.Spec.RequiresDataArtifact,
 		})
 	}
 	return out, nil
@@ -107,20 +108,20 @@ func EligibleResourceSnapshotMappings(ctx context.Context, c client.Reader, mapp
 		}
 		seen[key] = struct{}{}
 		out = append(out, EligibleResourceSnapshotMapping{
-			SourceGVR:       sourceMapping.Resource,
-			SourceGVK:       sourceGVK,
-			SnapshotGVR:     snapshotMapping.Resource,
-			SnapshotGVK:     snapshotGVK,
-			SnapshotContent: unifiedbootstrap.CommonSnapshotContentGVK(),
-			Priority:        d.Spec.Priority,
-			DataBacked:      d.Spec.DataBacked,
+			SourceGVR:            sourceMapping.Resource,
+			SourceGVK:            sourceGVK,
+			SnapshotGVR:          snapshotMapping.Resource,
+			SnapshotGVK:          snapshotGVK,
+			SnapshotContent:      unifiedbootstrap.CommonSnapshotContentGVK(),
+			Weight:               d.Spec.Weight,
+			RequiresDataArtifact: d.Spec.RequiresDataArtifact,
 		})
 	}
-	// Ascending by Priority: lower numeric priority runs first (earlier traversal wave).
-	// Tie-break by SourceGVK for a stable, deterministic order within a priority layer.
+	// Ascending by Weight: lower numeric weight runs first (earlier traversal wave).
+	// Tie-break by SourceGVK for a stable, deterministic order within a weight layer.
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Priority != out[j].Priority {
-			return out[i].Priority < out[j].Priority
+		if out[i].Weight != out[j].Weight {
+			return out[i].Weight < out[j].Weight
 		}
 		return out[i].SourceGVK.String() < out[j].SourceGVK.String()
 	})

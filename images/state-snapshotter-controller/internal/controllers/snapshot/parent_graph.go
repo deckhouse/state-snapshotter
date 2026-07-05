@@ -70,11 +70,11 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	var topLevelDrops []storagev1alpha1.ExcludedObjectRef
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
 	for layerStart := 0; layerStart < len(mappings); {
-		// The CSD mapping field is still named .Priority in wave3 (renamed to .Weight atomically with the
-		// wave4C pairs.go change); the user-facing barrier terminology here is already "weight layer".
-		weight := mappings[layerStart].Priority
+		// Mappings are ordered ascending by CSD spec.weight; a weight layer is the run of equal-weight
+		// mappings processed together before the next (higher) layer.
+		weight := mappings[layerStart].Weight
 		layerEnd := layerStart + 1
-		for layerEnd < len(mappings) && mappings[layerEnd].Priority == weight {
+		for layerEnd < len(mappings) && mappings[layerEnd].Weight == weight {
 			layerEnd++
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
@@ -736,7 +736,7 @@ func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 }
 
 // coverageRootsForNextWave returns the snapshot refs used to seed the coverage checker for the next
-// (higher-numeric) priority wave during child-graph recompute. It intentionally returns ONLY the refs
+// (higher-numeric) weight wave during child-graph recompute. It intentionally returns ONLY the refs
 // planned/confirmed in the current recompute pass and NEVER the parent's own
 // status.childrenSnapshotRefs.
 //
@@ -745,7 +745,7 @@ func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 // and marks that source covered. The same source is then skipped this pass, omitted from
 // desiredRefs, and finally stripped by mergeSnapshotManagedChildRefs — so the standalone child ref
 // silently disappears from the root on every subsequent reconcile. Planning must be a full recompute:
-// coverage between waves flows only from earlier (lower-numeric-priority) subtrees planned in this pass.
+// coverage between waves flows only from earlier (lower-numeric-weight) subtrees planned in this pass.
 func coverageRootsForNextWave(plannedThisPass []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
 	return append([]storagev1alpha1.SnapshotChildRef{}, plannedThisPass...)
 }

@@ -29,10 +29,11 @@ import (
 type UnifiedGVKPair struct {
 	Snapshot        schema.GroupVersionKind
 	SnapshotContent schema.GroupVersionKind
-	// DataBacked marks that the snapshot kind carries a volume data leg (CSD spec.dataBacked).
-	// Built-in/bootstrap pairs leave it false. It is carried through merge/resolve so the generic
-	// controller's GVKRegistry learns which snapshot kinds expect a data artifact.
-	DataBacked bool
+	// RequiresDataArtifact marks that the snapshot kind carries a volume data leg (CSD
+	// spec.requiresDataArtifact). Built-in/bootstrap pairs leave it false. It is carried through
+	// merge/resolve so the generic controller's GVKRegistry learns which snapshot kinds expect a data
+	// artifact.
+	RequiresDataArtifact bool
 }
 
 // CommonSnapshotContentGVK returns the common storage SnapshotContent GVK used by every snapshot kind.

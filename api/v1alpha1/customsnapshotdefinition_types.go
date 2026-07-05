@@ -48,9 +48,12 @@ type CustomSnapshotDefinitionList struct {
 // One CSD registers exactly one snapshot kind (flat schema): the snapshot apiVersion/kind live at the
 // top level, the domain resource being snapshotted is referenced by Source.
 type CustomSnapshotDefinitionSpec struct {
-	// Priority orders universal traversal across snapshot kinds. Lower values run first.
+	// Weight orders universal traversal across snapshot kinds by ascending value: lower weights run
+	// first (earlier traversal wave), like FlowSchema.spec.matchingPrecedence and the Deckhouse-native
+	// NodeGroupConfiguration.spec.weight. It is NOT a Kubernetes PriorityClass value (where a higher
+	// number wins) — the ordering here is the opposite.
 	// +kubebuilder:validation:Minimum=0
-	Priority int32 `json:"priority,omitempty"`
+	Weight int32 `json:"weight,omitempty"`
 	// APIVersion is the apiVersion of the snapshot resource that materializes Source.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
@@ -59,10 +62,11 @@ type CustomSnapshotDefinitionSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
-	// DataBacked marks that this snapshot kind carries a volume data leg: the generic controller must
-	// wait for the data artifact (capture) or the matching DataImport (import). Manifest-only snapshot
-	// kinds (no volume data) set false.
-	DataBacked bool `json:"dataBacked,omitempty"`
+	// RequiresDataArtifact marks that this snapshot kind carries a volume data leg: the generic
+	// controller must wait for the data artifact (capture, SnapshotContent.status.data.artifact) or the
+	// matching DataImport (import) before it reports Ready. Manifest-only snapshot kinds (no volume
+	// data) set false.
+	RequiresDataArtifact bool `json:"requiresDataArtifact,omitempty"`
 	// Source is the GVK of the domain resource being snapshotted.
 	// +kubebuilder:validation:Required
 	Source SnapshotGVKRef `json:"source"`

@@ -47,8 +47,8 @@ const importContentPollInterval = 5 * time.Second
 // snapshot CRDs signal it with the enum spec.mode: Import (parity with Snapshot.IsImportMode / domain
 // IsImportMode); the shared helper also tolerates the legacy spec.source.import marker kept by the
 // CSI-shaped VolumeSnapshot fork. An import leaf is materialized from the uploaded payload and — for
-// dataBacked kinds — the matching DataImport found by reverse-lookup (DataImport.spec.targetRef), not
-// from a name carried on the leaf.
+// data-artifact kinds — the matching DataImport found by reverse-lookup (DataImport.spec.targetRef),
+// not from a name carried on the leaf.
 func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
 	return usecase.IsUnstructuredImportMode(obj)
 }
@@ -155,11 +155,11 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		}
 	}
 
-	// Data leg: only dataBacked snapshot kinds (CSD spec.dataBacked) carry a volume data leg and have a
-	// matching DataImport. A structural import node (dataBacked=false, e.g. a VM snapshot or root Snapshot)
-	// has only manifests + children, so it skips the data leg entirely — otherwise it would poll forever
-	// for a DataImport that never exists.
-	if r.GVKRegistry.IsDataBacked(gvk.Kind) {
+	// Data leg: only data-artifact snapshot kinds (CSD spec.requiresDataArtifact) carry a volume data leg
+	// and have a matching DataImport. A structural import node (requiresDataArtifact=false, e.g. a VM
+	// snapshot or root Snapshot) has only manifests + children, so it skips the data leg entirely —
+	// otherwise it would poll forever for a DataImport that never exists.
+	if r.GVKRegistry.RequiresDataArtifact(gvk.Kind) {
 		// Reverse-lookup: the leaf carries no DataImport name; find the DataImport whose spec.targetRef
 		// points at this leaf (exactly one; >=2 is fail-closed).
 		di, treason, tmsg, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, obj)

@@ -61,23 +61,18 @@ spec:
                   that materializes Source.
                 minLength: 1
                 type: string
-              dataBacked:
-                description: |-
-                  DataBacked marks that this snapshot kind carries a volume data leg: the generic controller must
-                  wait for the data artifact (capture) or the matching DataImport (import). Manifest-only snapshot
-                  kinds (no volume data) set false.
-                type: boolean
               kind:
                 description: Kind is the kind of the snapshot resource that materializes
                   Source.
                 minLength: 1
                 type: string
-              priority:
-                description: Priority orders universal traversal across snapshot kinds.
-                  Lower values run first.
-                format: int32
-                minimum: 0
-                type: integer
+              requiresDataArtifact:
+                description: |-
+                  RequiresDataArtifact marks that this snapshot kind carries a volume data leg: the generic
+                  controller must wait for the data artifact (capture, SnapshotContent.status.data.artifact) or the
+                  matching DataImport (import) before it reports Ready. Manifest-only snapshot kinds (no volume
+                  data) set false.
+                type: boolean
               source:
                 description: Source is the GVK of the domain resource being snapshotted.
                 properties:
@@ -91,6 +86,15 @@ spec:
                 - apiVersion
                 - kind
                 type: object
+              weight:
+                description: |-
+                  Weight orders universal traversal across snapshot kinds by ascending value: lower weights run
+                  first (earlier traversal wave), like FlowSchema.spec.matchingPrecedence and the Deckhouse-native
+                  NodeGroupConfiguration.spec.weight. It is NOT a Kubernetes PriorityClass value (where a higher
+                  number wins) — the ordering here is the opposite.
+                format: int32
+                minimum: 0
+                type: integer
             required:
             - apiVersion
             - kind

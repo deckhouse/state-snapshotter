@@ -151,13 +151,14 @@ func (r *GenericSnapshotBinderController) isDomainCaptureKind(gvk schema.GroupVe
 	return ok
 }
 
-// MarkDataBacked records whether a snapshot Kind carries a volume data leg (CSD spec.dataBacked) on the
-// GVK registry, so the import path knows whether to wait for a DataImport/data artifact. Idempotent;
-// guarded by watchMu (the same lock that serializes registry mutations in AddWatchForPair).
-func (r *GenericSnapshotBinderController) MarkDataBacked(snapshotKind string, dataBacked bool) {
+// MarkRequiresDataArtifact records whether a snapshot Kind carries a volume data leg (CSD
+// spec.requiresDataArtifact) on the GVK registry, so the import path knows whether to wait for a
+// DataImport/data artifact. Idempotent; guarded by watchMu (the same lock that serializes registry
+// mutations in AddWatchForPair).
+func (r *GenericSnapshotBinderController) MarkRequiresDataArtifact(snapshotKind string, requiresDataArtifact bool) {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
-	r.GVKRegistry.MarkDataBacked(snapshotKind, dataBacked)
+	r.GVKRegistry.MarkRequiresDataArtifact(snapshotKind, requiresDataArtifact)
 }
 
 // isDomainPlanningComplete reports whether the domain controller reached capture barrier 1
@@ -237,9 +238,9 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 
 	// Import branch (C5): an import-mode leaf (spec.source.import: {}) has no live capture and no domain
 	// planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
-	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint; for dataBacked
-	// kinds, the data leg from the reverse-looked-up DataImport's produced artifact) — there is no second
-	// content creator.
+	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint; for
+	// data-artifact kinds, the data leg from the reverse-looked-up DataImport's produced artifact) —
+	// there is no second content creator.
 	if snapshotIsImportMode(obj) {
 		return r.reconcileGenericImport(ctx, obj, snapshotLike)
 	}
@@ -397,9 +398,9 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 
 		// Mirror the captured volume metadata (storageClassName/size/volumeMode) from the bound content's
-		// dataRef onto the data leaf snapshot status, so d8 reads it on export. dataBacked leaves only —
+		// dataRef onto the data leaf snapshot status, so d8 reads it on export. data-artifact leaves only —
 		// manifest-only kinds have no dataRef. No-op until the content publishes a dataRef.
-		if r.GVKRegistry.IsDataBacked(obj.GetObjectKind().GroupVersionKind().Kind) {
+		if r.GVKRegistry.RequiresDataArtifact(obj.GetObjectKind().GroupVersionKind().Kind) {
 			if err := r.mirrorLeafVolumeMetadataFromContent(ctx, obj, contentName, ""); err != nil {
 				logger.Error(err, "Failed to mirror captured volume metadata to leaf status")
 			}

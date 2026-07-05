@@ -2,18 +2,18 @@
 # Reference demo CustomSnapshotDefinitions shipped with the module and applied by Deckhouse. They teach
 # the core CSD registry the demo snapshot graph and drive the 030-domain-rbac hook. Flat schema: one
 # snapshot kind per object (spec.apiVersion/kind), the snapshotted resource referenced by spec.source.
-# spec.dataBacked marks the kind that carries a volume data leg (the disk snapshot); the structural VM
-# snapshot is manifest-only.
+# spec.requiresDataArtifact marks the kind that carries a volume data leg (the disk snapshot); the
+# structural VM snapshot is manifest-only. spec.weight orders traversal ascending (lower runs first).
 apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: CustomSnapshotDefinition
 metadata:
   name: demo-virtual-machine
   {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
 spec:
-  priority: 100
+  weight: 100
   apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
   kind: DemoVirtualMachineSnapshot
-  dataBacked: false
+  requiresDataArtifact: false
   source:
     apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
     kind: DemoVirtualMachine
@@ -24,10 +24,10 @@ metadata:
   name: demo-virtual-disk
   {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
 spec:
-  priority: 10
+  weight: 10
   apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
   kind: DemoVirtualDiskSnapshot
-  dataBacked: true
+  requiresDataArtifact: true
   source:
     apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
     kind: DemoVirtualDisk

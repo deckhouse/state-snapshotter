@@ -231,11 +231,12 @@ func (r *GenericSnapshotBinderController) markCaptureLegCaptured(ctx context.Con
 
 // eagerInitCaptureLegs declares the applicable core-owned capture legs on a domain-capture snapshot at
 // takeover: it initializes commonController.manifestCaptured to false (every capture node has a manifest
-// leg) and, for data-backed kinds, commonController.dataCaptured to false. Presence of the field declares
-// the leg (nil = no leg); the leg is later monotonically flipped to true by markCaptureLegCaptured. This
-// lets the SDK distinguish "not started yet" from "nothing to wait for" when computing CoreCaptureOutcome.
+// leg) and, for data-artifact kinds, commonController.dataCaptured to false. Presence of the field
+// declares the leg (nil = no leg); the leg is later monotonically flipped to true by
+// markCaptureLegCaptured. This lets the SDK distinguish "not started yet" from "nothing to wait for" when
+// computing CoreCaptureOutcome.
 func (r *GenericSnapshotBinderController) eagerInitCaptureLegs(ctx context.Context, obj *unstructured.Unstructured) error {
-	dataBacked := r.GVKRegistry.IsDataBacked(obj.GetObjectKind().GroupVersionKind().Kind)
+	requiresDataArtifact := r.GVKRegistry.RequiresDataArtifact(obj.GetObjectKind().GroupVersionKind().Kind)
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -252,7 +253,7 @@ func (r *GenericSnapshotBinderController) eagerInitCaptureLegs(ctx context.Conte
 			}
 			changed = true
 		}
-		if dataBacked {
+		if requiresDataArtifact {
 			if _, found, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "dataCaptured"); !found {
 				if err := unstructured.SetNestedField(fresh.Object, false, "status", "captureState", "commonController", "dataCaptured"); err != nil {
 					return err
