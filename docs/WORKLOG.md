@@ -46,7 +46,7 @@ Chronological log of notable refactors. Newest wave at the bottom.
 
 - **Update** production recycle-bin retention default: `DefaultSnapshotRootOKTTL` = 30 days (720h) instead of the former `1m` DEBUG value. This is how long the durable cluster-scoped `SnapshotContent` tree survives after its namespaced `Snapshot` is deleted (the restore window). Rewrote `openapi/config-values.yaml` + `doc-ru-config-values.yaml` `snapshotRootOkTtl` descriptions accordingly; added `pkg/config` test (default 720h + env override/fallback).
 - **Update** domain snapshot reconcilers (demo virtualdisk/virtualmachine) to skip capture when `IsStaticBind()`, mirroring the existing `IsImportMode()` guard: a StaticBind domain snapshot binds to a pre-provisioned surviving `SnapshotContent` and never runs live capture (no source lookup / MCR / children planning). Added a no-op reconcile test.
-- **Deferred** (blocked on an API-contract decision — `spec.snapshotRef` mutability for restore: relaxed-immutability CEL vs. dedicated rebind subresource): generic domain `static_bind.go` core handling, tree-restore orchestration, d8-cli restore, and e2e.
+- **Deferred** (blocked on an API-contract decision — `spec.snapshotRef` mutability for restore: relaxed-immutability CEL vs. dedicated rebind subresource): generic domain `static_bind.go` core handling, tree-restore orchestration, d8-cli restore, and e2e. **Resolved in "Wave 4B — Recycle bin restore" below** (relaxed-CEL chosen); d8-cli restore + real-cluster e2e remain out of scope for that iteration.
 
 ## Wave 4C — Unified UID name scheme (in progress: api/names + demo)
 
@@ -93,3 +93,46 @@ Chronological log of notable refactors. Newest wave at the bottom.
   packages compile; `gofmt` clean.
 - **Deferred**: CSD `priority→weight` / `dataBacked→requiresDataArtifact`, MCP `manifestCaptureRequestRef`
   drop, and d8-cli (`ExportedSnapshot` rename, clusterUUID, import-replay).
+
+## Wave 4B — Recycle bin restore (StaticBind end-to-end)
+
+- **Update** (w4b-cel-relax) relax `SnapshotContent.spec.snapshotRef` immutability: dropped the field-level
+  `self == oldSelf` rule and moved two object-level `XValidation` rules onto the `SnapshotContent` root
+  (so CEL sees both `self.spec` and `self.status`): `snapshotRef` may change only once
+  `status.parentDeleted` is latched (recycle bin), `deletionPolicy` stays immutable always. Regenerated
+  `crds/…_snapshotcontents.yaml`. Rewrote `test/integration/snapshotcontent_spec_immutability_test.go`
+  (reject re-point while parent alive, reject deletionPolicy change, allow re-point after parentDeleted,
+  still reject deletionPolicy after parentDeleted); envtest run green.
+- **Add** (w4b-domain-staticbind-runtime) domain StaticBind in the generic binder: new
+  `genericbinder/static_bind.go` (`snapshotIsStaticBind`, `reconcileGenericStaticBind`,
+  `genericStaticBindRefMatches`) plus a branch in `Reconcile` beside the import branch. A StaticBind domain
+  leaf validates the back-reference handshake, binds `status.boundSnapshotContentName`, and mirrors
+  Ready + `excludedRefs` from the existing content — running NO capture. Confirmed the demo capture-skip
+  guard (`IsStaticBind()`).
+- **Add** (w4b-restore-orchestration) core tree orchestration in `snapshot/static_bind.go`
+  (`reconcileStaticBindRestoreTree`): after the root binds, walk the durable
+  `SnapshotContent.status.childrenSnapshotContentRefs` graph and idempotently re-create each domain
+  `XxxxSnapshot` child as StaticBind (`spec.mode: StaticBind` + `spec.source.snapshotContentName`, ownerRef
+  → root Snapshot, deterministic name `names.ChildSnapshotName(rootUID, childContentUID)`), re-point each
+  child content's `spec.snapshotRef` onto the re-created CR (relaxed-CEL, gated on `parentDeleted`), and
+  recurse. Also reconstructs the root Snapshot's `status.childrenSnapshotRefs` (the tree the restore
+  resolver walks), since a StaticBind root runs no capture wave.
+- **Add** (w4b-orphan-vs-repoint) orphan volume-node leaf restore (Variant A). Capture now stamps
+  `leafContent.spec.snapshotRef.uid` with the live orphan VolumeSnapshot UID (`orphan_pvc_volume_snapshot.go`),
+  pinning the leaf↔VS identity and giving restore a concrete uid to re-point. On restore, the durable leaf
+  content is NOT re-created; instead the CSI VolumeSnapshot handle is re-created pre-provisioned to the
+  surviving Retain `VolumeSnapshotContent` (`spec.source.volumeSnapshotContentName`, ownerRef → root), the
+  leaf back-reference is re-pointed to the new handle uid, and the INV-ORPHAN4 handle
+  (`VolumeSnapshot.status.boundSnapshotContentName` → leaf) is written. Updated the resolver handshake
+  comment (`usecase/restore/resolver.go`) to reflect that capture now stamps the uid.
+- **Add** (w4b-tests) unit tests: `genericbinder/static_bind_test.go` (`snapshotIsStaticBind`,
+  `genericStaticBindRefMatches`) and `snapshot/static_bind_restore_test.go` (domain re-create + re-point +
+  root-tree reconstruction + idempotency + recursion; orphan leaf VS re-create + re-point + INV-ORPHAN4
+  handle with the durable leaf content surviving). All module unit tests pass; integration test binary
+  compiles; `gofmt` clean.
+- **Note** monotonic `parentDeleted` (latch false→true only) leaves `snapshotRef` re-pointable after a
+  restore — accepted as break-glass (RBAC gates writers).
+- **Deferred**: d8-cli restore (`restore from bin` + `bin ls`) and real-cluster e2e (orphan VS
+  readyToUse/boundVolumeSnapshotContentName come from the CSI snapshot-controller, not envtest); deep
+  resolver walks of nested domain subtrees rely on each domain CR's own `status.childrenSnapshotRefs`
+  reconstruction, validated when the domain binder StaticBind path runs on-cluster.
