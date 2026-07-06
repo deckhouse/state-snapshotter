@@ -230,6 +230,49 @@ func (r *GenericSnapshotBinderController) markCaptureLegCaptured(ctx context.Con
 	})
 }
 
+// mirrorSubtreeManifestsPersistedFromContent mirrors the bound SnapshotContent's monotonic recursive
+// subtreeManifestsPersisted latch (status.subtreeManifestsPersisted: this node's own MCP is Ready AND
+// every child content's subtree is persisted) onto the snapshot's core-owned
+// status.captureState.commonController.subtreeManifestsPersisted, so a parent aggregator can read its
+// children's NAMESPACED mirror as the manifest-exclude pre-gate without ever reading the cluster-scoped
+// SnapshotContent. True-only (monotonic, matching the content latch): absence reads as "subtree not
+// persisted yet" for the gate, so no eager false init is needed. Single writer: core (binder). Uses an
+// optimistic-lock merge patch (D4a: demo.status is co-owned by the domain). Best-effort — a miss is
+// retried on the next content->snapshot wake-up.
+func (r *GenericSnapshotBinderController) mirrorSubtreeManifestsPersistedFromContent(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+	contentObj *unstructured.Unstructured,
+) error {
+	persisted, found, err := unstructured.NestedBool(contentObj.Object, "status", "subtreeManifestsPersisted")
+	if err != nil {
+		return err
+	}
+	if !found || !persisted {
+		return nil
+	}
+	if commonControllerLegCaptured(obj, "subtreeManifestsPersisted") {
+		return nil
+	}
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(gvk)
+		if err := r.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		if commonControllerLegCaptured(fresh, "subtreeManifestsPersisted") {
+			return nil
+		}
+		base := fresh.DeepCopy()
+		if err := unstructured.SetNestedField(fresh.Object, true, "status", "captureState", "commonController", "subtreeManifestsPersisted"); err != nil {
+			return err
+		}
+		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
 // eagerInitCaptureLegs declares the applicable core-owned capture legs on a domain-capture snapshot at
 // takeover: it initializes commonController.manifestCaptured to false (every capture node has a manifest
 // leg) and, for data-artifact kinds, commonController.dataCaptured to false. Presence of the field

@@ -709,6 +709,16 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		logger.V(1).Info("Failed to mirror SnapshotContent excludedRefs; will retry", "error", err.Error())
 	}
 
+	// Mirror the bound content's recursive subtreeManifestsPersisted latch onto this domain CR's
+	// core-owned commonController.subtreeManifestsPersisted, so a parent aggregator can read its
+	// children's namespaced mirror as the manifest-exclude pre-gate (see the subtree-manifest-identities
+	// subresource). Domain-capture kinds only (commonController is a capture-mode structure); best-effort.
+	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
+		if err := r.mirrorSubtreeManifestsPersistedFromContent(ctx, obj, contentObj); err != nil {
+			logger.V(1).Info("Failed to mirror SnapshotContent subtreeManifestsPersisted; will retry", "error", err.Error())
+		}
+	}
+
 	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
 	if err != nil {
 		return fmt.Errorf("failed to extract SnapshotContentLike: %w", err)
