@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -254,7 +255,12 @@ func main() {
 	// Cluster-scoped resources (ManifestCheckpoint, Retainer) are always watched
 	managerOpts := manager.Options{
 		Scheme: scheme,
-		//MetricsBindAddress: cfgParams.MetricsPort,
+		// Built-in controller-runtime metrics (plaintext HTTP on :8080). This is the same value
+		// controller-runtime defaults to when Metrics is unset, made explicit so the scrape target is
+		// obvious: it exports per-controller controller_runtime_reconcile_total / reconcile_time_seconds and
+		// workqueue_adds_total / _depth / _queue_duration_seconds, which measure enqueue and reconcile counts
+		// per Named controller (the mapper-cost-vs-critical-path question) without a profiler.
+		Metrics:                 metricsserver.Options{BindAddress: ":8080"},
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,

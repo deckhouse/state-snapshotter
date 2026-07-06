@@ -18,7 +18,6 @@ package genericbinder
 
 import (
 	"context"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -29,7 +28,7 @@ import (
 )
 
 // mapBoundContentToSnapshots returns a watch map function that, for a SnapshotContent change event, enqueues
-// the generic Snapshot(s) of snapshotGVK whose status.boundSnapshotContentName references that content.
+// the generic Snapshot of snapshotGVK whose status.boundSnapshotContentName references that content.
 //
 // Why this watch exists: SnapshotContent is the single source of truth for readiness and Snapshot.Ready is a
 // verbatim mirror of it. Without a reverse wake-up the binder only re-mirrors while it is still polling
@@ -38,52 +37,34 @@ import (
 // Snapshot.Ready stale. This watch makes the mirror converge in both directions, event-driven, without any
 // polling loop or forced periodic reconcile.
 //
-// Why List+filter and not a field index / ownerRef hop: the content carries no reverse Snapshot reference
-// (its controller ownerRef points up the content tree to the root ObjectKeeper or a parent SnapshotContent,
-// never to the namespaced Snapshot), so the bound Snapshot is resolved through its own truth ref
-// (status.boundSnapshotContentName). A field index cannot be added once the informer has started, but binder
-// watches may be registered at runtime via AddWatchForPair (CSD-driven), so a List+filter keeps the mapping
-// valid for both bootstrap and runtime registration. The handler only enqueues; it never writes conditions.
-//
-// TODO: replace List+filter with a field index on status.boundSnapshotContentName when dynamic watch
-// registration is removed, or when indexes can be registered before cache start for all CSD-discovered GVKs.
-// This List+filter is a temporary dynamic-registration tradeoff: every SnapshotContent event triggers a
-// List of all Snapshots of the paired GVK (per registered generic controller), which is fine at the current
-// scale but is not the final scalable scheme.
-func (r *GenericSnapshotBinderController) mapBoundContentToSnapshots(snapshotGVK schema.GroupVersionKind) func(context.Context, client.Object) []reconcile.Request {
-	listGVK := schema.GroupVersionKind{
-		Group:   snapshotGVK.Group,
-		Version: snapshotGVK.Version,
-		Kind:    snapshotGVK.Kind + "List",
-	}
+// Routing is O(1) and index-free: the content's OWN spec.snapshotRef is the binding-subject snapshot — the
+// exact object whose status.boundSnapshotContentName points back at this content. The binder writes both
+// sides atomically (creates the content with snapshotRef=this snapshot in Reconcile Step 3, then sets the
+// snapshot's status.boundSnapshotContentName), and spec.snapshotRef is immutable, so it is a reliable
+// inverse. This replaces the former List-of-all-snapshots-of-the-paired-GVK + filter, which ran a full
+// unstructured List + JSON decode on every SnapshotContent event (the SETS=10 CPU/allocation hotspot,
+// T-index). The handler only enqueues; it never writes conditions. A missed event is backstopped by the
+// snapshot's own 5s Reconcile requeue (no List fallback — that would reintroduce the hot path).
+func mapBoundContentToSnapshots(snapshotGVK schema.GroupVersionKind) func(context.Context, client.Object) []reconcile.Request {
+	wantAPIVersion := snapshotGVK.GroupVersion().String()
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
-		if obj == nil || obj.GetName() == "" {
+		statBoundContentToSnapshots.invoked.Add(1)
+		content, ok := obj.(*unstructured.Unstructured)
+		if !ok || content == nil {
 			return nil
 		}
-		contentName := obj.GetName()
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(listGVK)
-		if err := r.List(ctx, list); err != nil {
-			log.FromContext(ctx).V(1).Info("content wake-up: failed to list snapshots",
-				"snapshotKind", snapshotGVK.Kind, "content", contentName, "error", err.Error())
+		apiVersion, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "apiVersion")
+		kind, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "kind")
+		name, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
+		namespace, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
+		// Only route to this controller's paired snapshot GVK; other pairs' controllers handle their own.
+		if name == "" || kind != snapshotGVK.Kind || apiVersion != wantAPIVersion {
 			return nil
 		}
-		var reqs []reconcile.Request
-		for i := range list.Items {
-			bound, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "boundSnapshotContentName")
-			if bound == "" || bound != contentName {
-				continue
-			}
-			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
-				Namespace: list.Items[i].GetNamespace(),
-				Name:      list.Items[i].GetName(),
-			}})
-		}
-		if len(reqs) > 0 {
-			log.FromContext(ctx).V(1).Info("snapshotcontent change enqueues bound snapshot(s)",
-				"snapshotKind", snapshotGVK.Kind, "content", contentName, "count", len(reqs))
-		}
-		return reqs
+		statBoundContentToSnapshots.enqueued.Add(1)
+		log.FromContext(ctx).V(1).Info("snapshotcontent change enqueues bound snapshot",
+			"snapshotKind", snapshotGVK.Kind, "content", content.GetName(), "snapshot", name)
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}}
 	}
 }
 
@@ -98,60 +79,60 @@ func (r *GenericSnapshotBinderController) mapBoundContentToSnapshots(snapshotGVK
 // parent once per poll interval. This watch wakes the waiting children the moment the parent content appears
 // (or changes), collapsing the multi-second ladder; the RequeueAfter path remains only as a safety net.
 //
-// Resolution: every SnapshotContent carries spec.snapshotRef — the binding-subject snapshot it belongs to,
-// which is exactly the PARENT of the children we must wake. We list childGVK in the subject's namespace and
-// match the snapshot-parent ownerRef (kind suffix "Snapshot", same name, and uid when present) against the
-// subject. This covers both tree levels: the namespace-root Snapshot's content wakes first-level domain
-// children, and a domain parent's content (e.g. a VM snapshot) wakes its own children (e.g. the VM's disk).
-//
-// Why List+filter: same dynamic-registration tradeoff as mapBoundContentToSnapshots — a field index cannot
-// be guaranteed before cache start for runtime-registered (CSD-driven) GVKs. The handler only enqueues.
+// Routing (index-free, no full List): every SnapshotContent carries spec.snapshotRef — the binding-subject
+// snapshot it belongs to, which is exactly the PARENT of the children we must wake. We read the parent
+// snapshot's published status.childrenSnapshotRefs (the declared graph edges, populated by the domain/
+// namespace planner before the parent content exists) and enqueue the refs of childGVK. This is one small
+// Get by the parent's own ref plus a walk of its child edges, replacing the former List-of-all-childGVK +
+// ownerRef filter that ran a full unstructured List + JSON decode on every SnapshotContent event (the
+// SETS=10 hotspot, T-index). It covers both tree levels: the namespace-root Snapshot's content wakes
+// first-level domain children, and a domain parent's content (e.g. a VM snapshot) wakes its own children
+// (e.g. the VM's disk). Child namespace equals the parent Snapshot namespace (SnapshotChildRef is
+// name/apiVersion/kind only). The handler only enqueues; a missed event is backstopped by the child
+// Reconcile's RequeueAfter (no List fallback — that would reintroduce the hot path).
 func (r *GenericSnapshotBinderController) mapParentContentToChildSnapshots(childGVK schema.GroupVersionKind) func(context.Context, client.Object) []reconcile.Request {
-	listGVK := schema.GroupVersionKind{
-		Group:   childGVK.Group,
-		Version: childGVK.Version,
-		Kind:    childGVK.Kind + "List",
-	}
+	wantChildAPIVersion := childGVK.GroupVersion().String()
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		statParentContentToChildren.invoked.Add(1)
 		content, ok := obj.(*unstructured.Unstructured)
 		if !ok || content == nil {
 			return nil
 		}
 		parentName, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
-		if parentName == "" {
-			return nil
-		}
-		parentUID, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
 		parentNS, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
-
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(listGVK)
-		opts := []client.ListOption{}
-		if parentNS != "" {
-			opts = append(opts, client.InNamespace(parentNS))
-		}
-		if err := r.List(ctx, list, opts...); err != nil {
-			log.FromContext(ctx).V(1).Info("parent-content wake-up: failed to list child snapshots",
-				"childKind", childGVK.Kind, "content", content.GetName(), "error", err.Error())
+		parentAPIVersion, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "apiVersion")
+		parentKind, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "kind")
+		if parentName == "" || parentAPIVersion == "" || parentKind == "" {
 			return nil
 		}
-		var reqs []reconcile.Request
-		for i := range list.Items {
-			child := &list.Items[i]
-			for _, ref := range child.GetOwnerReferences() {
-				if !strings.HasSuffix(ref.Kind, "Snapshot") || ref.Name != parentName {
-					continue
-				}
-				if parentUID != "" && string(ref.UID) != parentUID {
-					continue
-				}
-				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
-					Namespace: child.GetNamespace(),
-					Name:      child.GetName(),
-				}})
-				break
-			}
+		parentGV, err := schema.ParseGroupVersion(parentAPIVersion)
+		if err != nil {
+			return nil
 		}
+		parent := &unstructured.Unstructured{}
+		parent.SetGroupVersionKind(parentGV.WithKind(parentKind))
+		if err := r.Get(ctx, client.ObjectKey{Namespace: parentNS, Name: parentName}, parent); err != nil {
+			log.FromContext(ctx).V(1).Info("parent-content wake-up: failed to get parent snapshot",
+				"childKind", childGVK.Kind, "content", content.GetName(), "parent", parentName, "error", err.Error())
+			return nil
+		}
+		childRefs, _, _ := unstructured.NestedSlice(parent.Object, "status", "childrenSnapshotRefs")
+		var reqs []reconcile.Request
+		for _, raw := range childRefs {
+			m, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			kind, _ := m["kind"].(string)
+			apiVersion, _ := m["apiVersion"].(string)
+			name, _ := m["name"].(string)
+			if name == "" || kind != childGVK.Kind || apiVersion != wantChildAPIVersion {
+				continue
+			}
+			// SnapshotChildRef is namespace-less; child namespace equals the parent Snapshot namespace.
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: parentNS, Name: name}})
+		}
+		statParentContentToChildren.enqueued.Add(int64(len(reqs)))
 		if len(reqs) > 0 {
 			log.FromContext(ctx).V(1).Info("parent SnapshotContent change enqueues waiting child snapshot(s)",
 				"childKind", childGVK.Kind, "content", content.GetName(), "count", len(reqs))

@@ -885,7 +885,7 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// Reverse wake-up so Snapshot.Ready mirrors the bound SnapshotContent.Ready in both directions
 		// (including Ready=True -> False after the binder stopped polling). Enqueue-only; truth stays on
 		// SnapshotContent. See mapBoundContentToSnapshots.
-		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapBoundContentToSnapshots(gvk))).
+		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(mapBoundContentToSnapshots(gvk))).
 		// Event-driven parent->child unblock: when a PARENT SnapshotContent appears/changes, wake the child
 		// snapshots of this GVK that are waiting to resolve their parent's content ownerRef. Replaces the
 		// per-poll re-check that previously gated children on the Reconcile RequeueAfter fallback. See
@@ -894,7 +894,7 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// Event-driven capture handoff: when an MCR publishes its checkpoint, wake the owning snapshot so
 		// the binder publishes SnapshotContent.status.manifestCheckpointName immediately instead of on the
 		// next poll. See mapMCRToOwningSnapshots.
-		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(r.mapMCRToOwningSnapshots(gvk))).
+		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(mapMCRToOwningSnapshots(gvk))).
 		WithOptions(genericBinderControllerOptions()).
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 	return builder.Complete(r)
@@ -906,6 +906,7 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 // matching this exact pair are reverted (see GVKRegistry.RevertSnapshotRegistrationIfExact). If the
 // snapshot GVK was already in the slice (bootstrap), registry is not reverted on failure.
 func (r *GenericSnapshotBinderController) AddWatchForPair(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
+	r.ensureWatchMapStatsReporter(mgr)
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
 	if r.activeSnapshotWatchSet == nil {
@@ -946,6 +947,7 @@ func (r *GenericSnapshotBinderController) AddWatchForPair(mgr ctrl.Manager, snap
 // Registers watches for all registered Snapshot GVKs and their corresponding SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
 func (r *GenericSnapshotBinderController) SetupWithManager(mgr ctrl.Manager) error {
+	r.ensureWatchMapStatsReporter(mgr)
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
 	if r.activeSnapshotWatchSet == nil {
