@@ -322,10 +322,14 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   (name/storageClassName/volumeMode/accessModes) + root `fsType`, target namespace = the VRR's own namespace,
   with SF→corev1 mirror-type converters (`convertAccessModes`/`vrrVolumeMode`/`vrrStorageClassName`/
   `vrrTargetPVCName`/`vrrTargetNamespace`); test rewritten to `pvcTemplate`. New-file hunk headers recomputed
-  (821→862, 1073→1084); `git apply --numstat` clean (internal consistency OK). NOT locally verifiable (no
-  compile path): the `go.mod` pin `b97b1e1` is the pre-wave6 flat schema and is left as-is; the patch README
-  carries a BLOCKER — before building, publish the wave6 api, regenerate the fork branch `d8-63742164-vrr`, and
-  bump the pin.
+  (821→862, 1073→1084).
+- **Update** (w6-vrr executor verify, storage-foundation) wave6 api pushed (commit `2c52550`); re-pinned
+  `002-vrr-executor.patch` `b97b1e1` → `v0.0.0-20260706134706-2c525506f13c` (+`go.sum` hashes) and bumped the
+  `go` directive `1.25.10` → `1.26.4` (`api/go.mod` requires 1.26.4). Verified end-to-end: `001`+`002` apply
+  cleanly on a pristine `v6.2.0` tag, `CGO_ENABLED=0 go build ./cmd/csi-provisioner` builds (~98 MB) and
+  `go test ./pkg/controller/` (all 25 VRR tests) passes against the pinned wave6 api. Patch README + `oss.yaml`
+  updated: BLOCKER removed, patch-on-tag model documented. Remaining follow-up is operational only — swap the
+  pseudo-version for a published `api/vX.Y.Z` tag once it exists.
 - **Note** (w6-di-controller) `volumeRef`+`force` overwrite path is a fail-closed stub (net-new populator
   logic, follow-up); `virtualDiskTemplate` deferred per ADR.
 
