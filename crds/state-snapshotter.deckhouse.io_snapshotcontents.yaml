@@ -131,6 +131,18 @@ spec:
                           ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
                           false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
                         type: boolean
+                      subtreeManifestsPersisted:
+                        description: |-
+                          SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
+                          (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
+                          leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
+                          RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
+                          an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
+                          (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
+                          own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
+                          fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
+                          carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+                        type: boolean
                     type: object
                   domainSpecificController:
                     description: 'DomainSpecificController holds the domain-written
@@ -438,11 +450,14 @@ spec:
                 description: |-
                   SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own
                   ManifestCheckpoint is Ready AND every declared child SnapshotContent has subtreeManifestsPersisted=true,
-                  fail-closed). It replaces the former ManifestsArchived condition (user-facing objects no longer carry
-                  it). It serves three purposes not reducible to per-node manifestCaptured: (1) gate the FIRST Ready=True
-                  against declared-but-unlinked children, (2) drive the wave-barrier exclude-set of the root MCR (subtree
-                  completeness + linkage => no 409 double-capture), (3) monotonicity (never re-opens after the first Ready).
-                  It never expresses failure — a terminal manifest failure surfaces via the Ready reason (IsReasonTerminal).
+                  fail-closed). This SnapshotContent field is the durable truth; user-facing objects do not carry this
+                  top-level field but DO carry a core-written mirror at captureState.commonController.subtreeManifestsPersisted
+                  (see CommonControllerCaptureState) used as the manifest-exclude pre-gate. It serves purposes not
+                  reducible to per-node manifestCaptured: (1) gate the FIRST Ready=True against declared-but-unlinked
+                  children, (2) drive the wave-barrier exclude-set of an aggregator MCR (subtree completeness + linkage
+                  => no 409 double-capture; identities served by the subtree-manifest-identities subresource),
+                  (3) monotonicity (never re-opens after the first Ready). It never expresses failure — a terminal
+                  manifest failure surfaces via the Ready reason (IsReasonTerminal).
                 type: boolean
             type: object
         type: object

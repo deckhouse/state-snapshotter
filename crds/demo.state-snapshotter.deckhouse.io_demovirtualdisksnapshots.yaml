@@ -125,6 +125,18 @@ spec:
                           ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
                           false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
                         type: boolean
+                      subtreeManifestsPersisted:
+                        description: |-
+                          SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
+                          (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
+                          leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
+                          RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
+                          an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
+                          (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
+                          own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
+                          fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
+                          carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+                        type: boolean
                     type: object
                   domainSpecificController:
                     description: 'DomainSpecificController holds the domain-written

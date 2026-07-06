@@ -63,6 +63,7 @@ type CaptureStateStatus struct {
 // means "no such leg"), then monotonically flips them to true as each leg is captured. Success-only:
 // a capture failure is NOT written here — it surfaces as a terminal Ready reason (IsReasonTerminal).
 // There is no rollup field; "all legs captured" is computed by the SDK over the declared legs.
+// It also carries the non-leg SubtreeManifestsPersisted mirror (a manifest-exclude pre-gate), see below.
 // +k8s:deepcopy-gen=true
 type CommonControllerCaptureState struct {
 	// ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
@@ -75,6 +76,18 @@ type CommonControllerCaptureState struct {
 	// child's dataCaptured to time freeze/unfreeze.
 	// +optional
 	DataCaptured *bool `json:"dataCaptured,omitempty"`
+
+	// SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
+	// (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
+	// leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
+	// RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
+	// an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
+	// (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
+	// own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
+	// fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
+	// carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+	// +optional
+	SubtreeManifestsPersisted *bool `json:"subtreeManifestsPersisted,omitempty"`
 }
 
 // DomainSpecificControllerCaptureState is the domain-written half of captureState: execution-request
