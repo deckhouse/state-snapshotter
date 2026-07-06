@@ -69,13 +69,19 @@ type SubtreeManifestIdentitiesResponse struct {
 // apiVersion|kind|namespace|name) the results into the aggregator's exclude set. It is fail-closed: any
 // unbound child or any 409 from the subresource yields ErrSubtreeIdentitiesPending (never a partial set).
 func (s *sdk) SubtreeManifestIdentities(ctx context.Context, t SnapshotAdapter) ([]SubtreeManifestIdentity, error) {
+	children := t.GetDomainCaptureState().ChildrenSnapshotRefs
+	// A node with no children has an empty exclude set: nothing was captured beneath it. Return early
+	// (no REST call needed), so leaf-shaped aggregators need not wire the subresource client.
+	if len(children) == 0 {
+		return []SubtreeManifestIdentity{}, nil
+	}
 	if s.subresourceREST == nil {
 		return nil, fmt.Errorf("snapshotsdk: SubtreeManifestIdentities requires a subresource REST client (New(..., WithSubresourceREST(...)))")
 	}
 	namespace := t.Object().GetNamespace()
 	seen := make(map[string]struct{})
 	out := make([]SubtreeManifestIdentity, 0)
-	for _, child := range t.GetDomainCaptureState().ChildrenSnapshotRefs {
+	for _, child := range children {
 		contentName, err := s.resolveChildContentName(ctx, namespace, child)
 		if err != nil {
 			return nil, err
