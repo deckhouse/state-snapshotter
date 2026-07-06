@@ -110,6 +110,34 @@ func SortRefs(refs []storagev1alpha1.SnapshotChildRef) {
 	})
 }
 
+// UnionRefs returns the set union of two child-ref slices, de-duplicated by full ref identity
+// (apiVersion+kind+name) and sorted deterministically. It is the additive publication primitive (wave5):
+// a planning pass unions its freshly derived refs INTO the already-published set rather than replacing it,
+// so refs contributed by a co-writer of the same field — the namespace root's orphan VolumeSnapshot wave,
+// which a given planning pass does not itself enumerate (see wave5 design §6.2) — are preserved. This keeps
+// SDK v1 delete-free: refs only accumulate; a child no longer desired is simply not re-added by its
+// emitter, nothing is removed here.
+func UnionRefs(existing, added []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
+	out := make([]storagev1alpha1.SnapshotChildRef, 0, len(existing)+len(added))
+	seen := make(map[storagev1alpha1.SnapshotChildRef]struct{}, len(existing)+len(added))
+	for _, r := range existing {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	for _, r := range added {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	SortRefs(out)
+	return out
+}
+
 // RefsEqualIgnoreOrder reports set equality of two child-ref slices.
 func RefsEqualIgnoreOrder(a, b []storagev1alpha1.SnapshotChildRef) bool {
 	if len(a) != len(b) {

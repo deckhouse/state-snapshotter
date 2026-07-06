@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 const childNS = "ns"
@@ -121,6 +123,36 @@ func TestReconcileFailsClosedOnConflictingOwner(t *testing.T) {
 	}
 	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != "other" {
 		t.Fatalf("child must be left untouched on conflict, got %#v", got.OwnerReferences)
+	}
+}
+
+func TestUnionRefsMergesDedupesAndSorts(t *testing.T) {
+	ref := func(kind, name string) storagev1alpha1.SnapshotChildRef {
+		return storagev1alpha1.SnapshotChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: kind, Name: name}
+	}
+	// existing holds a co-writer's ref (an orphan VolumeSnapshot child); added is this pass's domain
+	// child plus a duplicate of an existing ref.
+	existing := []storagev1alpha1.SnapshotChildRef{ref("VolumeSnapshot", "orphan-pvc"), ref("Snapshot", "b")}
+	added := []storagev1alpha1.SnapshotChildRef{ref("Snapshot", "a"), ref("Snapshot", "b")}
+
+	got := UnionRefs(existing, added)
+
+	want := []storagev1alpha1.SnapshotChildRef{ref("Snapshot", "a"), ref("Snapshot", "b"), ref("VolumeSnapshot", "orphan-pvc")}
+	if len(got) != len(want) {
+		t.Fatalf("union size = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("union[%d] = %#v, want %#v (full: %#v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestUnionRefsPreservesExistingWhenNothingAdded(t *testing.T) {
+	ref := storagev1alpha1.SnapshotChildRef{APIVersion: "v1", Kind: "VolumeSnapshot", Name: "orphan"}
+	got := UnionRefs([]storagev1alpha1.SnapshotChildRef{ref}, nil)
+	if len(got) != 1 || got[0] != ref {
+		t.Fatalf("empty added must leave existing refs intact, got %#v", got)
 	}
 }
 

@@ -37,10 +37,14 @@ import (
 // intent and publishes the resulting names/refs into the snapshot status.
 type Planning interface {
 	// EnsureChildren makes the cluster match the desired set of child snapshots (create/adopt each under
-	// this snapshot) and publishes the resulting refs as status.childrenSnapshotRefs. It performs
-	// create/adopt + publication only and never deletes children (SDK v1 is delete-free). A nil or empty
-	// desired set publishes empty refs: a child no longer desired becomes detached from the snapshot graph
-	// but is left in the cluster for ownerRef GC / a future cleanup component to reclaim.
+	// this snapshot) and publishes the resulting refs as status.childrenSnapshotRefs. Publication is
+	// ADDITIVE (wave5): the freshly derived refs are UNIONED into the currently published set, never
+	// replacing it — so refs contributed by a co-writer of the same field that this pass does not itself
+	// enumerate (the namespace root's orphan VolumeSnapshot wave, §6.2) are preserved. It performs
+	// create/adopt + publication only and never deletes children (SDK v1 is delete-free): a nil or empty
+	// desired set therefore publishes NO new refs and leaves the currently published set intact. A child
+	// no longer desired is simply not re-added by its emitter and is left in the cluster for ownerRef GC /
+	// a future cleanup component to reclaim.
 	//
 	// excluded is the domain's DIRECT exclusion vetoes at this node — the source objects it dropped (via
 	// the exclude label) while enumerating children, obtained from PartitionExcluded. It is published in
@@ -174,11 +178,16 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 	newExcluded := normalizeExcludedRefs(excluded)
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
-		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, newRefs) &&
+		// Additive publication: union the freshly planned refs into the currently published set instead
+		// of overwriting it. patch.Status re-reads the live object before every attempt, so st here holds
+		// FRESH refs — the union therefore preserves refs published by a co-writer of the same field (the
+		// root's orphan VolumeSnapshot wave, §6.2) that this planning pass does not enumerate.
+		mergedRefs := children.UnionRefs(st.ChildrenSnapshotRefs, newRefs)
+		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, mergedRefs) &&
 			excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded) {
 			return false
 		}
-		st.ChildrenSnapshotRefs = newRefs
+		st.ChildrenSnapshotRefs = mergedRefs
 		st.ExcludedRefs = newExcluded
 		t.SetDomainCaptureState(st)
 		return true
