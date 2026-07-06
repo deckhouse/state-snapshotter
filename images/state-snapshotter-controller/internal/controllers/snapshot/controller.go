@@ -172,8 +172,15 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	return b.Complete(r)
 }
 
-func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, retErr error) {
 	log.FromContext(ctx).V(1).Info("reconcile Snapshot", "snapshot", req.NamespacedName)
+	// Exit trace: the returned Result governs the requeue cadence of this key (RequeueAfter forgets the
+	// rate limiter and schedules deterministically; Requeue:true / error re-adds rate-limited with growing
+	// backoff). Logging it makes the root-Snapshot reconcile cadence observable without guessing.
+	defer func() {
+		log.FromContext(ctx).V(1).Info("reconcile Snapshot done", "snapshot", req.NamespacedName,
+			"requeue", res.Requeue, "requeueAfterMs", res.RequeueAfter.Milliseconds(), "err", retErr != nil)
+	}()
 	nsSnap := &storagev1alpha1.Snapshot{}
 	if err := r.snapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
 		if errors.IsNotFound(err) {

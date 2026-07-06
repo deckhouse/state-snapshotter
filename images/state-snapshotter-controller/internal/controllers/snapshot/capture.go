@@ -181,6 +181,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	existingMCR := &ssv1alpha1.ManifestCaptureRequest{}
 	switch err := r.APIReader.Get(ctx, mcrKey, existingMCR); {
 	case err == nil:
+		logger.V(1).Info("capture N2a: root MCR present, driving readiness", "branch", "mcr-present")
 		return r.driveRootManifestCheckpointReadiness(ctx, nsSnap, content, existingMCR.UID)
 	case !apierrors.IsNotFound(err):
 		return ctrl.Result{}, err
@@ -249,6 +250,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, freshParent, content, err); mErr != nil {
 				return ctrl.Result{}, mErr
 			}
+			logger.V(1).Info("capture N2a: root gated on subtree manifests archive; requeue 500ms", "branch", "subtree-pending", "err", err.Error())
 			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
@@ -299,6 +301,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if res.RequeueAfter > 0 || res.Requeue {
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
 	}
+	logger.V(1).Info("capture N2a: root MCR planned+created; driving readiness", "branch", "mcr-created", "mcr", mcr.Name)
 	return r.driveRootManifestCheckpointReadiness(ctx, nsSnap, content, mcr.UID)
 }
 
@@ -340,9 +343,11 @@ func (r *SnapshotReconciler) driveRootManifestCheckpointReadiness(
 		if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); mErr != nil {
 			return ctrl.Result{}, mErr
 		}
+		log.FromContext(ctx).V(1).Info("drive root MCP: not Ready yet; requeue 500ms", "branch", "mcp-not-ready", "mcp", mcpName)
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}
 
+	log.FromContext(ctx).V(1).Info("drive root MCP: Ready; finalizing root manifest leg", "branch", "mcp-ready", "mcp", mcpName)
 	if readyCond.Reason != ssv1alpha1.ManifestCheckpointConditionReasonCompleted {
 		// Ready=True with unexpected reason — still treat as success if True (defensive).
 		log.FromContext(ctx).Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)

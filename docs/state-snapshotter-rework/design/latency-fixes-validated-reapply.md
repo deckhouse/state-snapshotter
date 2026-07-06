@@ -25,11 +25,13 @@ Current validated state after applied fixes — two distinct benchmarks, do not 
 
 - **Parallel same-shape snapshot burst** (N independent trees of the same shape): SET=1 ~3s, TREES=5 ~6s.
 - **Namespace fan-out benchmark** (one root Snapshot over N independent standard sets): SETS=10 ROOT Ready
-  ~33.5s — **still above target and an open scaling issue.**
+  ~29.2s after FIX 8 (was ~33.5s) — **still above target and an open scaling issue.**
 
 **Do not claim snapshot scalability is solved by these fixes.** They removed the first (rate-limiter) tail and
-several poll-handshake tails; the SETS=10 namespace fan-out tail (content-side maturation) is **not** fixed by
-anything here — see the last "Open" section.
+several poll-handshake tails; FIX 8 additionally removed the genericbinder reverse-watch `List`+decode CPU/alloc
+hotspot (a load fix). The remaining SETS=10 namespace fan-out tail is now **latency-bound** (per-level dependency
+chain / requeue cadence / content-side maturation), **not** CPU or `List` cost, and is **not** closed by anything
+here — see the last "Open" section.
 
 ---
 
@@ -203,12 +205,50 @@ the L4 load-shaving).
 
 ---
 
+## FIX 8 — genericbinder reverse-watch mappers: direct-ref O(1) routing (remove full unstructured `List`+decode)
+
+**Load/throughput fix, not the wall-clock fix.** Files under
+`images/state-snapshotter-controller/internal/controllers/genericbinder/`.
+
+Root cause: the three reverse-watch map functions each did a full `unstructuredClient.List` of a GVK + JSON
+decode of every object, then filtered to the one match — O(#snapshots/#contents) work + allocations **per
+event** (SETS=10 profile: ~69% CPU, ~84% alloc; grows with tree size). Replace with the references that already
+exist on the event object (no `List`, no decode):
+
+| file | mapper | change |
+|---|---|---|
+| `content_watch.go` | `mapBoundContentToSnapshots` | read `content.spec.snapshotRef`, enqueue it directly (O(1)) |
+| `content_watch.go` | `mapParentContentToChildSnapshots` | `Get` the owning child Snapshot (from `content.spec.snapshotRef`), enqueue the parents it lists in `status.childrenSnapshotRefs` |
+| `mcr_watch.go` | `mapMCRToOwningSnapshots` | walk `obj.GetOwnerReferences()` for the matching Kind/APIVersion, enqueue the owner |
+
+Update `controller.go` watch registrations to the standalone (no-`r.`) mapper signatures where applicable. No
+reconcile-contract or status changes; no field index needed (the direct references are the index). Keep no extra
+backstop — the existing watch/requeue coverage is unchanged.
+
+Optional diagnostics shipped alongside (gate off by default): per-mapper atomic counters
+(`watch_map_stats.go`, env `STATE_SNAPSHOTTER_WATCH_MAP_STATS`) and explicit controller-runtime metrics on
+`:8080` in `cmd/main.go`.
+
+Validated (SETS=10, post-deploy): the two `List`-based mappers **disappear** from the CPU profile; watch-path
+`unstructuredClient.List` drops to ~1%; controller is ~73% idle during the fan-out; reconciles stay bounded
+(~3–5 / object), 0 errors, no post-Ready storm. ROOT Ready ~33.5s → **~29.2s** (−13%): the mapper cost was a
+real scaling liability but **not** the dominant wall-clock term — the residual tail is latency-bound (see Open).
+
+---
+
 ## Open (NOT fixed here) — next lever
 
-At SETS=10, ROOT Ready ~33.5s. Data path (VCR/CSI-VSC ready) completes ~14.5s, but per-content
-`VolumesReady`/`ManifestsReady` spread to ~29–34s (a straggler). This **content-side maturation** tail is under
-diagnosis (content-controller wake-up vs queue-starvation vs reconcile cost) and is addressed by none of the
-fixes above. It is the next thing to investigate, not something to re-apply.
+At SETS=10, ROOT Ready ~29.2s (after FIX 8). FIX 8 proved (by CPU profile) that the reverse-watch mapper
+`List`+decode cost — though real and growing with size — was **not** the dominant wall-clock term: with it gone
+the controller is ~73% idle during the fan-out, so the tail is **latency-bound**, not CPU-bound. Data path
+(VCR/CSI-VSC ready) completes ~14.5s, but per-content `VolumesReady`/`ManifestsReady` spread to ~29–34s (a
+straggler). This **content-side maturation** tail (per-level dependency chain / requeue cadence / late artifact
+observation) needs a **critical-path timing** run, not another `List`/CPU optimization, and is addressed by none
+of the fixes above. It is the next thing to investigate, not something to re-apply.
+
+Run #2 (critical-path timing) to locate the wall-clock: enable `STATE_SNAPSHOTTER_WATCH_MAP_STATS`, and collect
+per-level content timings, top-5 straggler contents, artifact-ready→content-ready deltas, and the
+root direct-children-archived → root-MCR → root-Ready chain — then decide the next fix.
 
 Diagnostic plan (run before writing any fix), per SnapshotContent — especially the top stragglers:
 

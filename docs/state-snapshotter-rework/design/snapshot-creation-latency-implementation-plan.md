@@ -1034,3 +1034,159 @@ Median `ROOT Ready` improved ~37s → ~33.5s (the C-2 gap last-child-archived→
 `ManifestsArchived` now spreads to ~29–34s (a straggler content). That ~15s content-manifest/archive spread — not the MCR
 wake — is the dominant remaining chunk. Next levers: T-dedup (coalesce duplicate content reconciles) and content-controller
 manifest-leg throughput; L9b (lengthen the 500ms backstop) only after those.
+
+##### T-index — genericbinder reverse-watch mappers: replace full unstructured `List`+decode with direct-ref O(1) routing (implemented + cluster-validated)
+
+**Problem (proven by profile, not hypothesis).** A SETS=10 CPU profile showed the three `genericbinder` reverse-watch
+map functions — `mapBoundContentToSnapshots`, `mapParentContentToChildSnapshots`, `mapMCRToOwningSnapshots` — dominating the
+fan-out: each event did a full `unstructuredClient.List` of a GVK plus JSON decode of every object, then filtered to the one
+match. That is O(#snapshots/#contents) work + allocations **per SnapshotContent/MCR event** (~69% CPU, ~84% alloc in the
+earlier profile), growing with namespace/tree size.
+
+**Fix.** Route by references that already exist on the event object, no `List`/decode:
+- `mapBoundContentToSnapshots` → read `content.spec.snapshotRef` and enqueue directly (O(1)).
+- `mapParentContentToChildSnapshots` → `Get` the owning child Snapshot (from `content.spec.snapshotRef`) and enqueue the
+  parents it lists in `status.childrenSnapshotRefs`.
+- `mapMCRToOwningSnapshots` → walk `ownerReferences` for the matching Kind/APIVersion and enqueue the owner.
+No reconcile-contract or status changes; no field indexes required (the direct references are the index). Committed with
+diagnostic instrumentation (per-mapper atomic counters gated by `STATE_SNAPSHOTTER_WATCH_MAP_STATS`; controller-runtime
+metrics on `:8080`) in commit `aff04e3`.
+
+**Cluster validation (SETS=10, 1 namespace × 10 independent standard sets, 20 leaf disks, post-deploy `aff04e3`):**
+
+| signal | before (median) | after |
+|---|---|---|
+| ROOT Ready (wall) | ~33.5s | **29.2s** |
+| CPU busy during 30s fan-out window | mappers dominate (~69% CPU) | **8.24s samples / 30s ≈ 27% busy** (controller idle ~73%) |
+| `mapBoundContentToSnapshots`, `mapMCRToOwningSnapshots` in CPU profile | hot (List+decode) | **absent** |
+| `unstructuredClient.List` on the watch path | dominant | **0.09s cum (~1%)** |
+| `unstructuredClient.Get` (new direct lookup + reconcile Gets) | — | ~2s (24% of 8.24s) — cheap in absolute terms |
+| reconcile errors over the run | — | **0** |
+| reconcile / object | — | ~3–5 (disk-snapshot binder +100 over 20 leaves; VM binder +38; SnapshotContent +80; MCR +99) |
+| post-Ready churn | — | low background ~1.2 reconcile/s (periodic requeue-resync), **no storm** |
+
+**Result (this is a load/throughput fix, not the wall-clock fix).**
+- The reverse-watch `List`+decode CPU/alloc hotspot is **removed** — the two `List`-based mappers no longer appear in the
+  profile and watch-path `List` drops to ~1%. The remaining `mapParentContentToChildSnapshots` now uses a single `Get`.
+- Reconcile counts stay bounded (no enqueue amplification) and errors are zero — no regression, no post-Ready storm.
+- **Wall-clock only moved ~33.5s → 29.2s (~13%).** During the fan-out the controller is ~73% idle and the CPU top is
+  `syscall`/`futex` (network round-trips / waiting), not computation. So the mapper cost was a real scaling liability but
+  **not** the dominant term of the SETS=10 tail.
+
+**Conclusion.** T-index is a throughput/scaling fix (removes work that grew with object count); it is independent of and
+does not close the remaining wall-clock tail. The residual ~29s is **latency-bound** (per-level dependency chain, requeue
+cadence, watch propagation, CSI/leg readiness) and requires a **separate critical-path timing** measurement (run #2:
+`WATCH_MAP_STATS` + per-level content timings, top-5 straggler contents, artifact-ready→content-ready deltas, root direct
+children archived → root MCR → root Ready) before the next fix.
+
+##### Run #2 — critical-path timing (WATCH_MAP_STATS on; offsets from root-Snapshot creation)
+
+Post-`aff04e3`, `STATE_SNAPSHOTTER_WATCH_MAP_STATS=10s`, one SETS=10 run (offsets are cluster-clock `lastTransitionTime`
+minus root `creationTimestamp`; condition timestamps are 1s-granular). **Wall this run = 42.4s** (vs 29.2s the prior run —
+absolute wall is noisy, likely cold caches on the just-rolled pod; the *structure* below is the stable signal, not the
+absolute seconds).
+
+Root Snapshot chain: `ChildrenSnapshotReady +18s → ManifestsArchived +39s → Ready +42s`.
+
+Decomposition (two dominant, latency-bound chunks; neither is mapper/CPU):
+
+1. **Leaf volume staircase, +2s → +19s (~17s).** The 20 leaf/child contents reach Ready in a *staircase*
+   (+2,+2,+3,+3,+6,+6,+7,+8,+8,+10,+11,+13,+14,+14,+15,+17,+17,+18,+18,+19,+19), not a flat parallel cluster — despite
+   independent source volumes (no CSI same-source serialization by design). Per leaf `VolumesReady == ManifestsReady ==
+   ManifestsArchived == Ready` (same second) ⇒ **no content-side wake lag at the leaf**; the pacing is in *when each leaf's
+   volume leg becomes ready*. Candidate cause: a concurrency ceiling / batching in the volume-leg path (VCR / domain
+   leaf-snapshot creation / CSI snapshotter throughput), not the binder.
+2. **Root manifest leg, +19s → +40s (~21s) — the single biggest chunk.** After all children are ready (+18/19s) the root
+   content latches `Vol/Man/Arch/Ready` together at +40s. ManifestCheckpoints are individually instant (all `created ==
+   Ready` same second — capture cost ≈ 0) but are *created* late, out to +35s; last MCP +35s → root `ManifestsArchived`
+   +39s is the ~3–4s archive observe-lag (matches the known ~3.1s). So the 21s is the root MCR→checkpoint-creation→archive
+   *dependency/cadence* chain after children ready, not capture cost.
+
+Enqueue churn (WATCH_MAP_STATS, cumulative over the run): `mapBoundContentToSnapshots` invoked ~900 / enqueued ~430,
+`mapParentContentToChildSnapshots` invoked ~900 / enqueued ~450, `mapMCRToOwningSnapshots` invoked ~1058 / enqueued ~512 —
+≈2900 mapper invocations, ≈1400 enqueues for a 20-leaf tree. **Answer to "много enqueue/reconcile?": yes**, high churn from
+frequent per-content status updates re-firing the reverse-watches — but each mapper is now O(1) (T-index), so this is cheap
+CPU and is *not* the wall driver; it just shows the wall is gated on leg readiness, not on enqueue/reconcile work.
+
+Diagnostic answers: **late artifact observation?** leaf — no (`Vol==Ready` same second); root — minor (~4s observe lag).
+**per-level dependency chain?** yes — dominant (leaf staircase + root leg). **root/leaf straggler?** the root content is THE
+straggler (+40s vs last leaf +19s); leaf stragglers sit at +17/18/19s.
+
+**Next-fix candidates (decide before implementing):**
+- **A — leaf volume staircase:** find why independent-source volume legs serialize (concurrency ceiling / CSI snapshotter
+  throughput / VCR batching). Needs VCR + CSI VolumeSnapshot timing (they live outside the workload namespace; capture from
+  the storage-foundation side).
+- **B — root manifest leg:** shorten root MCR→checkpoint-creation→archive after children ready (planning cadence + archive
+  observe-lag). This is the previously-identified T-mcr-wake residual, now quantified.
+
+##### Run #2 stabilized — 3× SETS=10 (WATCH_MAP_STATS OFF), averaged offsets
+
+The 42.4s above was a noisy outlier (cold pod just after the stats rollout). Three back-to-back clean runs
+(`WATCH_MAP_STATS` removed, controller settled) are tight and consistent — **wall 33.5 / 35.2 / 36.0s** — so the earlier
+29s and 42s were both outliers and the real SETS=10 wall is ~**34s**. Offsets (s from root create, cluster clock):
+
+| metric | r1 | r2 | r3 | avg |
+|---|---|---|---|---|
+| first leaf Ready | 1 | 1 | 2 | 1.3 |
+| last leaf Ready | 20 | 21 | 23 | 21.3 |
+| root ChildrenSnapshotReady | 18 | 19 | 17 | 18.0 |
+| root MCR created | 24 | 26 | 26 | 25.3 |
+| root MCP Ready | 25 | 26 | 26 | 25.7 |
+| root ManifestsArchived | 31 | 32 | 33 | 32.0 |
+| root Ready | 33 | 34 | 35 | 34.0 |
+| **leaf staircase** (last−first leaf) | 19 | 20 | 21 | **20.0** |
+| **root manifest-leg** (archived−children) | 13 | 13 | 16 | **14.0** |
+| **observe-lag** (archived−MCP Ready) | 6 | 6 | 7 | **6.3** |
+
+Root manifest-leg sub-breakdown (avg): children→MCR created **7.3s** (planning gap), MCR→MCP Ready **0.4s** (capture is
+instant), MCP Ready→archived **6.3s** (archive observe-lag), archived→Ready **2s**.
+
+**Decision.** Both chunks are stable. The **leaf staircase (~20s) is consistently the larger** (19/20/21 vs 13/13/16), and
+the two are sequential (the root leg cannot start until children are ready ~18s), so both are on the critical path and
+additive. Per the pre-agreed tie-break (both stable ⇒ do the single root-path chunk first, cheaper to localize): **start
+with B (root manifest leg, ~14s)** — it is entirely inside state-snapshotter and decomposes into two concrete, self-contained
+targets: the **7.3s children-archived→root-MCR-created planning gap** and the **6.3s MCP-Ready→root-archived observe-lag**
+(capture itself is ~0s). Then take **C (leaf staircase, ~20s)** — the bigger but cross-repo effort (storage-foundation
+VCR / CSI snapshotter volume-leg pacing), which needs VCR + CSI VolumeSnapshot timing first.
+
+##### B diagnosis — event-level causality from controller logs (diagnosis only, no code change)
+
+One clean SETS=10 run (wall 34.2s) with the controller-runtime logger already at dev-mode DEBUG (so V(1) `reconcile
+Snapshot` / `snapshotcontent trace` and Info `Reconciling SnapshotContent` are emitted **without any redeploy** — `LOG_LEVEL`
+does not gate these; `cmd/main.go` sets `zap.UseDevMode(true)`). Offsets from root create; root content =
+`ns-<hash>`, its `status.manifestCheckpointName` = the root MCP.
+
+Observed root-path event timeline:
+- last direct-child content `ManifestsArchived=True`: **+21s** (staircase +3→+21, n=30); root `ChildrenSnapshotReady` +18s.
+- **`reconcile Snapshot`(bench-root) offsets: `0,1,2,6,11,12,18, 27,28,29, 35,36,37`** — the `snapshot` controller reconciles
+  **only** the root key (all 18 reconciles are bench-root; child snapshots are handled by other controllers), 8 workers,
+  zero contention. The cadence is **backoff-shaped** (gaps grow 6→11→18→27).
+- root MCR created **+26/27**; root MCP created+Ready **+26**; root content latches (`manifestsReady=T, manifestsArchived=T,
+  gate=Completed, ready=T`) in a **single** transition at **+29** (111 prior root-content reconciles were `gate=
+  ManifestCapturePending`, `patch=noop`, `durMs=0`); root Snapshot `ManifestsArchived` **+32**, `Ready` **+34**.
+
+**B1 (children-archived→root-MCR, ~5–7s) = workqueue/backoff scheduling, NOT a missing wake and NOT a stale read.** The
+content→gated-parent wake fires correctly and often: in the window **+18..+26 the root was wake-enqueued 10×**
+(`snapshotcontent update enqueues bound snapshot`, snapshot=bench-root) — yet the root was reconciled only at **+18 and
++27** (2 reconciles for 10 enqueues, single key, idle workers). So the event wake does **not preempt** the root key's
+delayed/rate-limited requeue: the pending manifest-gate path returns `RequeueAfter:500ms`/`Requeue:true` and other setup
+paths return `Result{Requeue:true}` (→ `AddRateLimited`, exponential 200ms→10s), so the key sits in the delay/backoff queue
+and the `q.Add` wakes don't pull it forward. Only 1 ERROR in the whole window ⇒ not error-driven. Fix direction (later, not
+now): make the child-archive wake produce a prompt root reconcile — e.g. `Forget` the key / stop rate-limiting the
+pending-gate requeue so the event wake governs cadence instead of a growing backoff.
+
+**B2 (MCP-Ready→root-archived, ~6s) = two ~3s observe hops, reconcile work is ~0.** (a) MCP Ready **+26** → root content
+latch **+29** (~3s): the root content reconciles continuously (backstop, `durMs=0`) but doesn't latch `ManifestsReady`/
+`ManifestsArchived` until ~3s after its MCP is Ready ⇒ **stale cached MCP read / needs-another-pass** on the content
+manifest mirror (aggregate observe lag), not compute. (b) root content archived **+29** → root Snapshot `ManifestsArchived`
+**+32** (~3s): the snapshot→content mirror hop, gated again by the same sparse backoff schedule (snapshot reconciles
++27,+28,+29 then +35). Fix direction (later): fresher MCP status read on the content mirror + ensure content→snapshot
+mirror wake is prompt (same backoff lever as B1).
+
+**Shared root cause:** the root Snapshot's reconcile cadence is governed by requeue/rate-limiter backoff rather than by the
+content-archive / MCP-Ready events; the two events are enqueued promptly but do not preempt the delayed key, and one content
+manifest mirror read is cache-stale. B1 and B2 are the **same queue/observe lever**, which is why B is the cheaper,
+self-contained first fix (both sub-gaps live in `snapshot/` + `snapshotcontent/`). Grep-able trace points used:
+`reconcile Snapshot`, `snapshotcontent update enqueues bound snapshot`, `Reconciling SnapshotContent`, `snapshotcontent
+trace` (field `manifestsArchived`/`gate`). Silent points (inferred, would need trace lines if we want them explicit): the
+root-MCR gate pending reason, the MCR `Create`, and successful MCP→content mapping.
