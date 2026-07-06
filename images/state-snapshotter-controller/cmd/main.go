@@ -20,10 +20,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof handlers on http.DefaultServeMux (gated server below)
 	"os"
 	"os/signal"
 	goruntime "runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -102,6 +105,52 @@ func buildTimeFromVersion(v string) (time.Time, bool) {
 	return t, true
 }
 
+// startPprofServer starts a net/http/pprof debug endpoint ONLY when STATE_SNAPSHOTTER_PPROF_ADDR is set
+// (e.g. ":6060"). It is disabled by default and adds no runtime overhead when off. This is a diagnostics-only
+// hook: it serves runtime profiles and does NOT touch business logic or the controller manager.
+//
+// Optional profilers are gated behind their own env vars because each adds per-event overhead and must stay
+// off in normal operation:
+//
+//	STATE_SNAPSHOTTER_BLOCK_PROFILE_RATE     -> runtime.SetBlockProfileRate(n)      (n>0 enables block profile)
+//	STATE_SNAPSHOTTER_MUTEX_PROFILE_FRACTION -> runtime.SetMutexProfileFraction(n)  (n>0 enables mutex profile)
+//
+// CPU, heap, goroutine and allocs profiles are always available once the endpoint is on.
+func startPprofServer(ctx context.Context, log *logger.Logger) {
+	addr := os.Getenv("STATE_SNAPSHOTTER_PPROF_ADDR")
+	if addr == "" {
+		return
+	}
+
+	if v := os.Getenv("STATE_SNAPSHOTTER_BLOCK_PROFILE_RATE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			goruntime.SetBlockProfileRate(n)
+			log.Info(fmt.Sprintf("[pprof] block profiling enabled rate=%d", n))
+		}
+	}
+	if v := os.Getenv("STATE_SNAPSHOTTER_MUTEX_PROFILE_FRACTION"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			goruntime.SetMutexProfileFraction(n)
+			log.Info(fmt.Sprintf("[pprof] mutex profiling enabled fraction=%d", n))
+		}
+	}
+
+	// nil Handler => http.DefaultServeMux, where net/http/pprof registered /debug/pprof/*.
+	srv := &http.Server{Addr: addr, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		log.Info(fmt.Sprintf("[pprof] debug server listening on %s (net/http/pprof)", addr))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error(err, "[pprof] debug server failed")
+		}
+	}()
+}
+
 func main() {
 	flag.Parse()
 
@@ -160,6 +209,9 @@ func main() {
 	log.Info("[main] CfgParams has been successfully created")
 	log.Info(fmt.Sprintf("[main] %s = %s", config.LogLevelEnvName, cfgParams.Loglevel))
 	log.Info(fmt.Sprintf("[main] RequeueStorageClassInterval = %d", cfgParams.RequeueStorageClassInterval))
+
+	// Diagnostics-only: gated net/http/pprof endpoint (off unless STATE_SNAPSHOTTER_PPROF_ADDR is set).
+	startPprofServer(ctx, log)
 
 	kConfig, err := kubutils.KubernetesDefaultConfigCreate()
 	if err != nil {
