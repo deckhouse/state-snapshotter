@@ -373,3 +373,20 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   SnapshotContent is gone" — test pre-creates the content; the binder's `Create` doesn't handle
   `AlreadyExists`→adopt, so it never binds (**w7-creator adopt path / w7-main-split**). Full suite green is the
   `w7-verify` gate.
+- **Add** (w7-main-split, content-controller Ready mirror) The `SnapshotContent` reconciler (reconcile key
+  = `SnapshotContent`) now mirrors the just-computed `content.Ready` onto the owning `Snapshot.Ready` in the
+  SAME reconcile pass (`internal/controllers/snapshotcontent/ready_mirror.go`
+  `mirrorReadyToOwnerSnapshot`), called from `Reconcile` right after `reconcileCommonSnapshotContentStatus`.
+  Owner is resolved from `content.spec.snapshotRef` (apiVersion/kind/namespace/name); the mirror is gated on
+  the monotonic creator->main writer switch (`owner.status.boundSnapshotContentName == content name`), skips
+  ownerless/bucket content and non-bind owner kinds (e.g. a `VolumeSnapshot` leaf handle), bubbles a domain
+  `phase=Failed` into a terminal Ready=False, and patches under an optimistic-lock merge (gen-stamped). This
+  collapses the former cross-controller hop that let the binder re-derive a stale Ready (INV-FAIL-PROP).
+  Staged per plan: the binder's `checkConsistencyAndSetReady` mirror stays as a converging fallback (both
+  writers derive the same value under a changed-gate) and the binder keeps the `excludedRefs` /
+  `subtreeManifestsPersisted` mirrors; **w7-final-wave-1** removes the binder's Ready mirror + content->snapshot
+  watch and relocates the two remaining mirrors here (single post-bind writer). Verify: build + gofmt + unit
+  (snapshotcontent, genericbinder) green; full `!isolated` integration shows the same 3 pre-existing reds and
+  **no new failing spec** — E5 (`snapshot_graph_integration`) and N1 (`snapshot_n1_boundary`) are pre-existing
+  timing-flaky specs (both also fail on the stashed baseline under load, E5 at a different assertion), not
+  regressions.

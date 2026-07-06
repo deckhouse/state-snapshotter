@@ -347,6 +347,15 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
 	}
+	// w7-main-split: mirror the just-computed content.Ready onto the owning Snapshot in the SAME pass
+	// (owner resolved from spec.snapshotRef; post-bind writer switch on status.boundSnapshotContentName).
+	// Runs regardless of `ready` so a content.Ready=False (e.g. ManifestCapturePending) is reflected on the
+	// Snapshot too. Removing the cross-controller hop is what closes the staleness window where the binder
+	// re-derived a stale Ready. On a transient API error, requeue and retry.
+	if err := r.mirrorReadyToOwnerSnapshot(ctx, obj); err != nil {
+		logger.Error(err, "Failed to mirror content Ready onto owner Snapshot")
+		return ctrl.Result{}, err
+	}
 	// Keep actively requeuing until Ready is True. Ready includes the ManifestsArchived subtree latch as a
 	// (monotonic) gate, so while any descendant is still archiving this node's Ready stays False — this
 	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
