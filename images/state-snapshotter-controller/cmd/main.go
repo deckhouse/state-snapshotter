@@ -326,6 +326,20 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// wave7 (w7-creator): additionally register the built-in root Snapshot pair on the binder at boot.
+	// FilterGenericSnapshotGVKPairs strips the root (a dedicated kind) but since wave5 the binder is the
+	// creator/owner of the root SnapshotContent, and the compensating unifiedSync.Sync only runs on CSD
+	// reconciles — so without this the binder never watches the root at startup and root content is never
+	// created. See unifiedbootstrap.StartupDomainCaptureRootPair. Idempotent w.r.t. a later Sync.
+	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(snapshotGVKs, snapshotContentGVKs); ok {
+		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
+		if err := snapshotController.AddWatchForPair(mgr, rootSnapGVK, rootContentGVK); err != nil {
+			log.Error(err, "Failed to setup GenericSnapshotBinderController root Snapshot watch", "snapshotGVK", rootSnapGVK.String(), "snapshotContentGVK", rootContentGVK.String())
+			cancel()
+			os.Exit(1)
+		}
+		log.Info("GenericSnapshotBinderController watching built-in root Snapshot at startup (w7-creator)", "snapshotGVK", rootSnapGVK.String())
+	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
 	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.import marker; owning DataImport

@@ -341,3 +341,35 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
 - Build + unit tests green: storage-foundation `data-manager-controller` (`data-export` + `data-import`);
   d8-cli `snapimport` + `data/dataimport` (go vet + test, gpgme sidestepped via targeted packages).
 - gofmt clean on all changed Go files.
+
+## Wave 7 — Ready/conditions model: capture-controller repartition + late Planned
+
+- **Bugfix** (w7-creator, green-restore) The generic binder never watched the built-in root `Snapshot` at
+  pod startup, so root `SnapshotContent` was never created/bound and the whole root capture path hung
+  pre-bind (envtest RED: N2a root-lifecycle / frozen-plan / MCR-GC / aggregated-manifests). Root cause: since
+  wave5 the root `Snapshot` is a domain-capture kind owned by the binder, but `FilterGenericSnapshotGVKPairs`
+  still strips every dedicated kind (root included) from the startup watch set, and the only compensating
+  registration — `unifiedruntime.Syncer.Sync` — runs on CSD reconciles, never at boot (documented deferral,
+  this WORKLOG "w5-content-creation" note). Fix: added `unifiedbootstrap.StartupDomainCaptureRootPair` and,
+  in both `cmd/main.go` and `test/integration/setup_test.go`, register the built-in root pair on the binder
+  at startup (`MarkDomainCaptureKind` + `AddWatchForPair`, idempotent w.r.t. a later `Sync`; unlike demo
+  kinds the built-in root needs no RBAC gating). The 4 N2a specs pass (305s→~26s, no more timeout-blocked
+  `Eventually`s); unit + build + vet green. NOTE: the full `w7-creator` single-writer contract (creator
+  writes `Snapshot.Ready` only pre-bind/only `False` via `ContentBindingPending`; never after bind) lands
+  together with `w7-main-split`/`w7-final-wave-1`, where the post-bind mirror (`checkConsistencyAndSetReady`)
+  moves to the `main` reconciler and `ContentBindingPending` is introduced — the binder today writes Ready
+  only post-bind, so no pre-bind violation exists to fix in isolation.
+- **Note** (w7-creator, remaining pre-existing root-path reds) Full `!isolated` integration pass is **52/55**
+  after the green-restore; the 3 still-red specs are **pre-existing** (verified RED at the wave5 baseline via
+  `git stash` — all three gate on `status.boundSnapshotContentName`, which was never set while root was
+  unwatched — so they are NOT regressions) and each is owned by a later wave7 task:
+  (1) `snapshot_content_ready_propagation_test.go` "mirrors Ready=True when only SnapshotContent status
+  changes" — asserts a PURE mirror; the pre-split binder re-derives Ready every reconcile
+  (`checkConsistencyAndSetReady` → "Deriving Snapshot Ready" ManifestCapturePending), clobbering the test's
+  manual `content.Ready=True`. Structurally requires **w7-main-split/w7-final-wave-1** (pure mirror). (2)
+  `snapshot_root_lifecycle_test.go` "reaches Ready with empty MCP when there are no allowlisted namespaced
+  resources" — empty-namespace manifest leg never publishes a checkpoint (**w7-reorder-planning / capture
+  completion**). (3) `snapshot_root_deletion_test.go` "Delete: root finalizer clears only after
+  SnapshotContent is gone" — test pre-creates the content; the binder's `Create` doesn't handle
+  `AlreadyExists`→adopt, so it never binds (**w7-creator adopt path / w7-main-split**). Full suite green is the
+  `w7-verify` gate.

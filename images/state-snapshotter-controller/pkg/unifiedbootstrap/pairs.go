@@ -140,6 +140,32 @@ func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKi
 	return snapOut, contentOut
 }
 
+// StartupDomainCaptureRootPair returns the built-in root Snapshot pair (DefaultSnapshotPair) from the
+// resolved parallel slices, if present. ok is false when the root pair is not in the resolved set
+// (CRDs absent) or the slices are mismatched.
+//
+// The generic binder MUST watch this pair at startup. Since wave5 the namespace-root "Snapshot" is a
+// domain-capture kind whose cluster-scoped SnapshotContent is created/bound/mirrored by the generic
+// binder (not by the root reconciler). But FilterGenericSnapshotGVKPairs strips every dedicated kind
+// (root included), and the only compensating registration — unifiedruntime.Syncer.Sync — runs on CSD
+// reconciles, never at pod boot. So without an explicit startup registration the binder never watches
+// the root Snapshot and root SnapshotContent is never created (the root capture path silently hangs
+// pre-bind). Unlike demo domain-capture kinds (which must stay deferred to Sync until their CSD grants
+// RBAC, to avoid a cache-sync deadlock), the built-in root is always present and needs no gating, so it
+// is safe to register directly at startup. Registration is idempotent, so a later Sync is a no-op.
+func StartupDomainCaptureRootPair(snapGVKs, contentGVKs []schema.GroupVersionKind) (snap, content schema.GroupVersionKind, ok bool) {
+	if len(snapGVKs) != len(contentGVKs) {
+		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, false
+	}
+	root := DefaultSnapshotPair().Snapshot
+	for i := range snapGVKs {
+		if snapGVKs[i] == root {
+			return snapGVKs[i], contentGVKs[i], true
+		}
+	}
+	return schema.GroupVersionKind{}, schema.GroupVersionKind{}, false
+}
+
 // FilterGenericSnapshotContentGVKs drops content GVKs whose snapshot side is handled by a dedicated
 // reconciler. Common SnapshotContent may still be kept through other generic pairs after dedupe.
 func FilterGenericSnapshotContentGVKs(snapshotGVKs, contentGVKs []schema.GroupVersionKind) []schema.GroupVersionKind {

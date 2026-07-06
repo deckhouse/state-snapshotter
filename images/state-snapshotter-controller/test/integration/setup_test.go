@@ -769,6 +769,12 @@ var _ = BeforeSuite(func() {
 	for i := range genericSnapGVKs {
 		Expect(snapshotController.AddWatchForPair(mgr, genericSnapGVKs[i], genericContentGVKs[i])).To(Succeed())
 	}
+	// wave7 (w7-creator): mirror cmd/main.go — register the built-in root Snapshot pair on the binder at
+	// startup so the root SnapshotContent is created/bound without waiting for a CSD-driven Syncer.Sync.
+	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
+		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
+		Expect(snapshotController.AddWatchForPair(mgr, rootSnapGVK, rootContentGVK)).To(Succeed())
+	}
 
 	var contentController *controllers.SnapshotContentController
 	contentController, err = controllers.NewSnapshotContentController(
