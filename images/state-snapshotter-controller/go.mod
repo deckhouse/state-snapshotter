@@ -1,10 +1,12 @@
 module github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller
 
 go 1.26.4
+
 require (
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/state-snapshotter/lib/go/common v0.0.0-00010101000000-000000000000
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-00010101000000-000000000000
 	github.com/go-logr/logr v1.4.3
 	github.com/onsi/ginkgo/v2 v2.23.3
 	github.com/onsi/gomega v1.37.0
@@ -24,6 +26,7 @@ require (
 replace (
 	github.com/deckhouse/state-snapshotter/api => ../../api
 	github.com/deckhouse/state-snapshotter/lib/go/common => ../../lib/go/common
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk => ../../pkg/snapshotsdk
 )
 
 require (
