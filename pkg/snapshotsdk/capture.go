@@ -21,6 +21,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
@@ -87,6 +88,22 @@ type SourcePublisher interface {
 	PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error
 }
 
+// ManifestExclude is the reusable exclude-ordering capability (wave5 §6.3) any aggregator uses to build
+// its own manifest MCR as EnsureManifestCapture(base − exclude): the exclude set is everything its
+// descendant snapshots already captured. It is optional — only aggregators that own a manifest leg
+// spanning objects their children also capture need it (the namespace-root Snapshot; a VM whose disk
+// children capture part of its objects). It requires a subresource REST client (WithSubresourceREST).
+type ManifestExclude interface {
+	// SubtreeManifestIdentities returns the union of object identities captured across this snapshot's
+	// DIRECT children subtrees — the exclude set for the aggregator's own manifest MCR. It resolves each
+	// child's bound SnapshotContent (child.status.boundSnapshotContentName) and calls the
+	// snapshotcontents/<name>/subtree-manifest-identities subresource, unioning (de-duplicating) the
+	// results. It is FAIL-CLOSED: if any subtree is not fully persisted (a 409 from the subresource) or a
+	// child has not bound its content yet, it returns ErrSubtreeIdentitiesPending and the caller requeues
+	// — a partial exclude is never returned. A node with no children returns an empty set.
+	SubtreeManifestIdentities(ctx context.Context, t SnapshotAdapter) ([]SubtreeManifestIdentity, error)
+}
+
 // CaptureSDK is the capture-side protocol facade a domain snapshot controller drives. It hides all
 // Kubernetes transport (capture requests, owner references, optimistic-locked status patches, the
 // lifecycle phase) behind a small set of intent verbs.
@@ -95,6 +112,7 @@ type CaptureSDK interface {
 	CaptureBarrier
 	CaptureFault
 	SourcePublisher
+	ManifestExclude
 }
 
 // CoreCaptureOutcome derives the tri-state the domain switches its wait loop on, from the core's leg
@@ -111,16 +129,32 @@ func CoreCaptureOutcome(t SnapshotAdapter) CaptureOutcomeResult {
 	return CaptureOutcomeResult{Outcome: CaptureOutcomeCapturing}
 }
 
+// Option configures optional SDK dependencies passed to New.
+type Option func(*sdk)
+
+// WithSubresourceREST wires the aggregated-subresource REST client (typically a discovery REST client)
+// the SDK uses for the ManifestExclude capability (SubtreeManifestIdentities). Domains that do not use
+// that capability may omit it; SubtreeManifestIdentities then returns a configuration error.
+func WithSubresourceREST(r rest.Interface) Option {
+	return func(s *sdk) { s.subresourceREST = r }
+}
+
 // New returns a CaptureSDK bound to a client (for writes and cached reads), an API reader (for live,
-// TOCTOU-safe marker refreshes), and a data-leg provider (see NewStorageFoundationProvider).
-func New(c client.Client, apiReader client.Reader, provider VolumeCaptureProvider) CaptureSDK {
-	return &sdk{client: c, apiReader: apiReader, provider: provider}
+// TOCTOU-safe marker refreshes), and a data-leg provider (see NewStorageFoundationProvider). Optional
+// dependencies (e.g. the subresource REST client for ManifestExclude) are supplied via Options.
+func New(c client.Client, apiReader client.Reader, provider VolumeCaptureProvider, opts ...Option) CaptureSDK {
+	s := &sdk{client: c, apiReader: apiReader, provider: provider}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 type sdk struct {
-	client    client.Client
-	apiReader client.Reader
-	provider  VolumeCaptureProvider
+	client          client.Client
+	apiReader       client.Reader
+	provider        VolumeCaptureProvider
+	subresourceREST rest.Interface
 }
 
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
