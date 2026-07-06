@@ -221,6 +221,26 @@ func coreManifestsSubresourceRules(snapshotGVRs []schema.GroupVersionResource) [
 	}}
 }
 
+// coreSubtreeManifestIdentitiesRule grants the DOMAIN SA get on core's SINGLE, fixed
+// snapshotcontents/subtree-manifest-identities aggregated subresource (core subresources group). Unlike
+// coreManifestsSubresourceRules this rule is NOT per-snapshot-GVR — the endpoint hangs off the core
+// SnapshotContent resource (all snapshot kinds bind to it), so one grant covers every domain. It backs
+// the reusable SDK ManifestExclude capability: an aggregator snapshot reconciler (e.g. a VM aggregating
+// disk children) calls it on each child's bound content to compute its own manifest MCR as
+// EnsureManifestCapture(base - exclude). Read-only and fail-closed (409 while any subtree checkpoint is
+// not Ready); it exposes captured identities only, granting neither ManifestCheckpoint nor generic
+// SnapshotContent reads. Gated on a registered domain (snapshotGVRs) to match coreManifestsSubresourceRules.
+func coreSubtreeManifestIdentitiesRule(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(snapshotGVRs) == 0 {
+		return nil
+	}
+	return []rbacv1.PolicyRule{{
+		APIGroups: []string{consts.CoreSubresourcesGroup},
+		Resources: []string{"snapshotcontents/subtree-manifest-identities"},
+		Verbs:     []string{"get"},
+	}}
+}
+
 // domainRestoreSubresourceRules grants the CORE SA get on the domain apiserver's
 // /manifests-with-data-restoration subresource for each demo snapshot resource, so core can delegate the
 // domain subtree restore. The subresource group is "subresources." + the snapshot's own API group.

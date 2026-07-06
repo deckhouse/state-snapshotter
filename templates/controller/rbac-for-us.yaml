@@ -113,6 +113,16 @@ rules:
   - "snapshotcontents/status"
   verbs: ["get", "update", "patch"]
 
+# SnapshotContent subtree-manifest-identities: the controller both SERVES this aggregated subresource
+# (group subresources.state-snapshotter.deckhouse.io) and CONSUMES it — the root Namespace reconciler uses
+# the SDK ManifestExclude capability, whose REST call loops back through kube-apiserver -> APIService ->
+# this controller, authenticated as this SA. Read-only get; the reconciler stays content-free (it reads
+# captured identities, never SnapshotContent objects). Fail-closed 409 while any subtree checkpoint is not
+# Ready.
+- apiGroups: ["subresources.state-snapshotter.deckhouse.io"]
+  resources: ["snapshotcontents/subtree-manifest-identities"]
+  verbs: ["get"]
+
 # VolumeCaptureRequest (storage-foundation): N5 PR-4 ensure/publish/delete per SnapshotContent
 - apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests"]
