@@ -159,11 +159,11 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 
 	// Manifest leg: ensure the per-snapshot MCR (VM is manifest-only, no data leg) and publish its name.
-	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
-		TargetAPIVersion: demov1alpha1.SchemeGroupVersion.String(),
-		TargetKind:       controllercommon.KindDemoVirtualMachine,
-		TargetName:       source.Name,
-	}); err != nil {
+	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       controllercommon.KindDemoVirtualMachine,
+		Name:       source.Name,
+	}}}); err != nil {
 		return ctrl.Result{}, err
 	}
 

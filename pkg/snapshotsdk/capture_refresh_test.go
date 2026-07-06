@@ -142,7 +142,7 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	adapter := &refreshTestAdapter{obj: snap, core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)}}
 
 	sdk := New(cl, reader, provider)
-	spec := ManifestCaptureSpec{TargetAPIVersion: "demo/v1alpha1", TargetKind: "DemoVirtualMachine", TargetName: "vm-a"}
+	spec := ManifestCaptureSpec{Targets: []ManifestTarget{{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualMachine", Name: "vm-a"}}}
 
 	// Phase 1 — first reconcile: MCR absent in cache, so the SDK must consult the latch once (uncached)
 	// before creating, then create the MCR and publish its name.

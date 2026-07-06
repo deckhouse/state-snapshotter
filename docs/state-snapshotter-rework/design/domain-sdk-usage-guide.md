@@ -305,12 +305,12 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// 5. Манифест (всегда): один базовый target — сам источник; owned-PVC SDK подмешает сам.
-	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
-		TargetAPIVersion: myGV.String(),
-		TargetKind:       "MyResource",
-		TargetName:       source.Name,
-	}); err != nil {
+	// 5. Манифест (всегда): набор базовых target'ов — обычно один (сам источник); owned-PVC SDK подмешает сам.
+	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
+		APIVersion: myGV.String(),
+		Kind:       "MyResource",
+		Name:       source.Name,
+	}}}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -340,20 +340,22 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 ## `ManifestCaptureSpec` — какие манифесты попадут в MCR
 
-`EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{...})` принимает **один базовый target** — идентити
-самого снапшотируемого источника:
+`EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{...})` принимает **набор базовых target'ов**
+(`Targets []ManifestTarget`). Обычный доменный снапшот передаёт **один** target — идентити самого
+снапшотируемого источника; агрегатор, захватывающий много объектов сразу (например, корневой
+namespace-`Snapshot`, чей манифест-лег — весь набор объектов неймспейса), передаёт **весь набор**:
 
 ```go
-snapshotsdk.ManifestCaptureSpec{
-	TargetAPIVersion: demov1alpha1.SchemeGroupVersion.String(),
-	TargetKind:       "DemoVirtualDisk",
-	TargetName:       source.Name,
-}
+snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
+	APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+	Kind:       "DemoVirtualDisk",
+	Name:       source.Name,
+}}}
 ```
 
-SDK превращает это в **один** `ManifestCaptureRequest` и сам подмешивает technical **owned-PVC target**,
-обнаруженный из data-лега (`VolumeCaptureRequest`). Дедупликация по `(apiVersion|kind|namespace|name)` и
-детерминированная сортировка — внутри SDK.
+SDK превращает это в **один** `ManifestCaptureRequest` (со всеми target'ами) и сам подмешивает technical
+**owned-PVC target**, обнаруженный из data-лега (`VolumeCaptureRequest`). Дедупликация по
+`(apiVersion|kind|namespace|name)` и детерминированная сортировка — внутри SDK.
 
 SDK отвечает только за transport-механику: создать (если ещё нет) один MCR, проставить ownerRef,
 опубликовать `status.captureState.domainSpecificController.manifestCaptureRequestName`, сохранить
