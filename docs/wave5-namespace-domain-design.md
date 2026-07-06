@@ -463,6 +463,20 @@ The danger is a window where both `snapshot/controller.go` and the binder create
    only — the CSI capture path, per-PVC MCR, invariants (INV-ORPHAN1/2), the `childrenSnapshotRefs` ref
    (Variant A) and the `residualVolumeCapture` latch are all **preserved**. Separate PR so it can be
    reverted independently. Gate on `snapshot_n1_boundary` + the two-PVC subtree spec.
+
+   > **Implementation outcome (2026-07-06): PR-C lands as a no-op code change — the goal is already met by
+   > PR-B.** Routing the orphan emission through a generic SDK verb is infeasible without a regression:
+   > `reconcileOrphanPVCVolumeSnapshotChildLeaves` performs a **replace of the VolumeSnapshot-leaf
+   > partition** (a leaf ref no longer desired is dropped from `childrenSnapshotRefs`, while the durable VS
+   > object is never pruned — pinned by `TestEnsureOrphanPVCVolumeSnapshots_DurableVSNotPruned`). The SDK is
+   > deliberately **delete-free** (additive union) and **kind-agnostic**, so it cannot express "replace only
+   > the VolumeSnapshot-leaf partition" without leaking root-specific leaf semantics into the shared module,
+   > and a naive `EnsureChildren` reuse would additionally (a) reset the planner's `excludedRefs` and (b)
+   > flip the leaf's **deliberate non-controller ownerRef** to controller-owned. The single-field-correctness
+   > the single-writer goal targets is already achieved by PR-B: `EnsureChildren` unions additively (so it
+   > preserves the orphan leaves) and the orphan writer preserves the non-leaf domain refs — the two
+   > partitions co-write `childrenSnapshotRefs` without conflict. The orphan `reconcile…ChildLeaves` write is
+   > therefore kept in the controller (with an explanatory comment) instead of being moved to the SDK.
 5. **PR-D: move static-bind + import into the binder.** Finalize "single content creator".
 
 Each PR must be green on the envtest integration gate before the next.

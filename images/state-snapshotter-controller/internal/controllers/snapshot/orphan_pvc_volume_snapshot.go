@@ -402,6 +402,15 @@ func volumeSnapshotConflictingSnapshotOwner(refs []metav1.OwnerReference, ns *st
 // reconcileOrphanPVCVolumeSnapshotChildLeaves rewrites the VolumeSnapshot visibility leaves on
 // Snapshot.status.childrenSnapshotRefs[] to exactly the desired set, preserving real domain child refs.
 // This is a status-refs-only write; it touches no conditions.
+//
+// wave5 note (PR-C): this REPLACE-of-the-leaf-partition (drop a VolumeSnapshot leaf ref no longer in the
+// desired set, while the durable VS object itself is never pruned — see
+// TestEnsureOrphanPVCVolumeSnapshots_DurableVSNotPruned) is deliberately kept in the controller rather
+// than routed through the generic SDK EnsureChildren/PublishChildRefs: the SDK is delete-free (additive
+// union) and kind-agnostic, so it cannot express "replace only the VolumeSnapshot-leaf partition" without
+// leaking root-specific leaf semantics into the shared module. The single-field-correctness the wave5
+// single-writer goal targets is already met: EnsureChildren unions additively (preserving these leaves)
+// and this writer preserves the non-leaf domain refs, so the two partitions co-write without conflict.
 func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotChildLeaves(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
