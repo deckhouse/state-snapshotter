@@ -322,7 +322,11 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
+	graphStart := time.Now()
 	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
+	if d := time.Since(graphStart); d > 150*time.Millisecond {
+		log.FromContext(ctx).V(1).Info("reconcile Snapshot: section slow", "section", "child-graph-planning", "durMs", d.Milliseconds())
+	}
 	if err != nil {
 		if patchErr := r.patchSnapshotChildrenSnapshotReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
 			return ctrl.Result{}, patchErr

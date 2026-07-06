@@ -141,7 +141,11 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: APIReader is nil")
 	}
 
+	keeperStart := time.Now()
 	_, res, err := r.ensureSnapshotRootObjectKeeper(ctx, nsSnap, content)
+	if d := time.Since(keeperStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "root-object-keeper", "durMs", d.Milliseconds())
+	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -371,7 +375,11 @@ func (r *SnapshotReconciler) driveRootManifestCheckpointReadiness(
 		log.FromContext(ctx).Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
 	}
 
+	finStart := time.Now()
 	res, err := r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+	if d := time.Since(finStart); d > 150*time.Millisecond {
+		log.FromContext(ctx).V(1).Info("drive root MCP: section slow", "section", "finalize-after-manifest-capture", "durMs", d.Milliseconds())
+	}
 	return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
 }
 
