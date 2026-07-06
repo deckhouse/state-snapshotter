@@ -108,6 +108,15 @@ const indexKeyManifestCheckpointName = ".status.manifestCheckpointName"
 // when the parent links the child and is stable through the child's later archive transition.
 const indexKeyChildContentName = ".status.childrenSnapshotContentRefs.name"
 
+// indexKeyDataRefArtifactName is the cache field-index key on SnapshotContent.status.dataRef.artifact.name
+// (only when the artifact is a VolumeSnapshotContent). It backs the dual-path VolumeSnapshotContent wake-up
+// (Commit C): a leaf content latches VolumesReady from its published status.dataRef.artifact (the VSC name),
+// but the VSC is created owned by an execution ObjectKeeper and only reparented to the SnapshotContent at
+// handoff, so the ownerRef-only path drops readyToUse events that flip before adoption. This durable data
+// edge is published when the content links the VSC and is stable across the VSC readyToUse transition, so it
+// lets the readyToUse flip wake the owning content event-driven instead of via the 500ms self-requeue poll.
+const indexKeyDataRefArtifactName = ".status.dataRef.artifact.name"
+
 // snapshotContentControllerOptions tunes every controller instance that drives this reconciler (the
 // per-GVK content controllers and the Snapshot-status wake-up controllers all share r). With the default
 // MaxConcurrentReconciles=1 a single worker per instance starved individual content nodes during the
@@ -699,6 +708,25 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 //   - Otherwise it is derived from the current subtree state: own manifest leg failed terminally before
 //     archive OR a child is Failed -> Failed; own ManifestsReady=True AND all children Archived -> True;
 //     else Capturing (transient; includes the fail-closed NamespaceCaptureIncomplete wait).
+//
+// manifestLegAlreadyLatched reports whether this content's manifest leg is already verified ready AND the
+// monotonic ManifestsArchived latch is closed for the current generation. When true, fillOwnLegs skips the
+// expensive per-poll manifest re-validation (cached MCP Get + adoption patch + uncached APIReader chunk
+// GETs): the latch never re-opens, so re-checking cannot change the manifest verdict, and chunk integrity
+// is re-verified on the read/download/archive path rather than on this readiness gate. Requires BOTH
+// ManifestsReady=True and ManifestsArchived=True at the current generation (a generation bump re-validates).
+func manifestLegAlreadyLatched(obj *unstructured.Unstructured) bool {
+	like, err := snapshot.ExtractSnapshotContentLike(obj)
+	if err != nil {
+		return false
+	}
+	gen := obj.GetGeneration()
+	mr := snapshot.GetCondition(like, snapshot.ConditionManifestsReady)
+	ma := snapshot.GetCondition(like, snapshot.ConditionManifestsArchived)
+	return mr != nil && mr.Status == metav1.ConditionTrue && mr.ObservedGeneration == gen &&
+		ma != nil && ma.Status == metav1.ConditionTrue && ma.ObservedGeneration == gen
+}
+
 func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
 	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
 	if err != nil {
@@ -1020,28 +1048,41 @@ func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstru
 		return nil
 	}
 
-	mcpReady, mcpFailed, mcpMessage, err := r.validateCommonContentManifestCheckpoint(ctx, obj, mcpName)
-	if err != nil {
-		return err
-	}
-	if mcpFailed {
-		plan.manifestsReady = metav1.ConditionFalse
-		plan.manifestsFailed = true
-		plan.manifestsReason = snapshot.ReasonManifestCheckpointFailed
-		plan.manifestsMessage = mcpMessage
-		return nil
-	}
-	if !mcpReady {
-		plan.manifestsReady = metav1.ConditionFalse
-		plan.manifestsReason = snapshot.ReasonManifestCapturePending
-		plan.manifestsMessage = mcpMessage
-		return nil
-	}
+	if manifestLegAlreadyLatched(obj) {
+		// Cost-cut (Commit C): the manifest leg already reached readiness and the monotonic
+		// ManifestsArchived latch is closed for this generation, so re-validating the ManifestCheckpoint
+		// (cached MCP Get + adoption patch) and re-checking chunk existence (uncached APIReader GETs) on
+		// every 500ms volumes-pending poll cannot change the manifest verdict — the latch never re-opens.
+		// Chunk integrity is defense-in-depth re-verified on the read/download/archive path, not on this
+		// readiness gate, so skipping it here is safe and removes the dominant per-reconcile cost while a
+		// leaf waits on its volume leg. The volume leg below is still evaluated every pass.
+		plan.manifestsReady = metav1.ConditionTrue
+		plan.manifestsReason = snapshot.ReasonCompleted
+		plan.manifestsMessage = "manifest is ready"
+	} else {
+		mcpReady, mcpFailed, mcpMessage, err := r.validateCommonContentManifestCheckpoint(ctx, obj, mcpName)
+		if err != nil {
+			return err
+		}
+		if mcpFailed {
+			plan.manifestsReady = metav1.ConditionFalse
+			plan.manifestsFailed = true
+			plan.manifestsReason = snapshot.ReasonManifestCheckpointFailed
+			plan.manifestsMessage = mcpMessage
+			return nil
+		}
+		if !mcpReady {
+			plan.manifestsReady = metav1.ConditionFalse
+			plan.manifestsReason = snapshot.ReasonManifestCapturePending
+			plan.manifestsMessage = mcpMessage
+			return nil
+		}
 
-	// Manifest leg satisfied.
-	plan.manifestsReady = metav1.ConditionTrue
-	plan.manifestsReason = snapshot.ReasonCompleted
-	plan.manifestsMessage = "manifest is ready"
+		// Manifest leg satisfied.
+		plan.manifestsReady = metav1.ConditionTrue
+		plan.manifestsReason = snapshot.ReasonCompleted
+		plan.manifestsMessage = "manifest is ready"
+	}
 
 	// Volume leg: evaluated only after the manifest leg is Ready (kept sequencing, v1).
 	dataReady, dataReason, dataMessage, err := r.resolveDataReadiness(ctx, obj)
@@ -1648,6 +1689,12 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyChildContentName, extractChildContentNamesIndex); err != nil {
 			return fmt.Errorf("failed to register childrenSnapshotContentRefs index for SnapshotContent GVK %s: %w", gvk.String(), err)
 		}
+		// Commit C: index the published VSC data edge (status.dataRef.artifact.name) so a
+		// VolumeSnapshotContent readyToUse flip can reverse-resolve and wake the owning leaf content
+		// event-driven (mapVolumeSnapshotContentToContent) even when the flip preceded the ownerRef handoff.
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyDataRefArtifactName, extractDataRefArtifactNameIndex); err != nil {
+			return fmt.Errorf("failed to register dataRef artifact name index for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			WithOptions(snapshotContentControllerOptions()).
@@ -1685,11 +1732,16 @@ func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder)
 		}
 		artifactObj := &unstructured.Unstructured{}
 		artifactObj.SetGroupVersionKind(gvk)
-		// ManifestCheckpoint uses the dual-path resolver (ownerRef + pre-adoption name reverse-lookup,
-		// L9a); other artifacts (VolumeSnapshotContent) keep the ownerRef-only resolver.
+		// Both durable artifacts use a dual-path resolver (ownerRef + pre-adoption reverse-lookup) so a
+		// status flip observed before the ownerRef handoff still wakes the owning content: ManifestCheckpoint
+		// by status.manifestCheckpointName (L9a), VolumeSnapshotContent by status.dataRef.artifact.name
+		// (Commit C). Any other artifact falls back to the ownerRef-only resolver.
 		mapper := mapArtifactToOwningSnapshotContent
-		if gvk.Kind == "ManifestCheckpoint" {
+		switch gvk.Kind {
+		case "ManifestCheckpoint":
 			mapper = r.mapManifestCheckpointToContent
+		case kindVolumeSnapshotContent:
+			mapper = r.mapVolumeSnapshotContentToContent
 		}
 		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapper))
 	}
@@ -1844,6 +1896,90 @@ func (r *SnapshotContentController) lookupContentsByManifestCheckpointName(ctx c
 		}
 	}
 	return out
+}
+
+// mapVolumeSnapshotContentToContent is the dual-path artifact resolver for VolumeSnapshotContent wake-up
+// (Commit C), mirroring mapManifestCheckpointToContent. It only enqueues reconciles; it NEVER changes
+// ownership or state.
+//
+//	path 1 (ownerRef): once the SnapshotContent has adopted the VSC (handoff reparented the ownerRef from
+//	  the execution ObjectKeeper to the SnapshotContent), route by that ownerRef — same as every artifact.
+//	path 2 (data-edge reverse lookup): before/independently of adoption, resolve the owning content by the
+//	  durable published edge content.status.dataRef.artifact.name == vsc.Name (indexKeyDataRefArtifactName).
+//
+// This closes the wake gap where a VSC flips status.readyToUse=true before the ownerRef handoff (the event
+// was previously dropped, forcing the content to discover readiness only on its 500ms self-requeue). Safety:
+// a stale/missing index entry can only mis-time a wake-up (spurious enqueue → idempotent no-op reconcile, or
+// missed enqueue → the 500ms self-requeue still backstops); it can never produce a wrong owner because
+// adoption logic is untouched.
+func (r *SnapshotContentController) mapVolumeSnapshotContentToContent(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil {
+		return nil
+	}
+	if reqs := ownerRefToContentRequests(obj); reqs != nil {
+		return reqs
+	}
+	if reqs := r.lookupContentsByDataRefArtifactName(ctx, obj.GetName()); len(reqs) > 0 {
+		return reqs
+	}
+	log.FromContext(ctx).V(1).Info(
+		"VolumeSnapshotContent event resolved to no SnapshotContent (no ownerRef, no dataRef match); dropping (self-requeue backstops)",
+		"volumeSnapshotContent", obj.GetName(),
+	)
+	return nil
+}
+
+// lookupContentsByDataRefArtifactName resolves the SnapshotContent(s) whose published
+// status.dataRef.artifact.name equals vscName, via the cache field index. The link is 1:1 (a content binds a
+// single VSC data leg), so this normally returns a single request. Read-only; a List error degrades to the
+// self-requeue backstop rather than failing the wake-up.
+func (r *SnapshotContentController) lookupContentsByDataRefArtifactName(ctx context.Context, vscName string) []reconcile.Request {
+	if vscName == "" {
+		return nil
+	}
+	var out []reconcile.Request
+	seen := make(map[string]struct{})
+	for _, gvk := range r.SnapshotContentGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+		if err := r.Client.List(ctx, list, client.MatchingFields{indexKeyDataRefArtifactName: vscName}); err != nil {
+			log.FromContext(ctx).V(1).Info("reverse lookup of SnapshotContent by dataRef artifact failed; self-requeue backstops",
+				"volumeSnapshotContent", vscName, "gvk", gvk.String(), "err", err.Error())
+			continue
+		}
+		for i := range list.Items {
+			name := list.Items[i].GetName()
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		}
+	}
+	return out
+}
+
+// extractDataRefArtifactNameIndex is the field-index extractor for indexKeyDataRefArtifactName: it projects a
+// SnapshotContent's published status.dataRef.artifact.name when that artifact is a VolumeSnapshotContent, so
+// the VSC dual-path wake-up (path 2) can find the owning content by its durable data edge independently of
+// the ownerRef handoff. A non-VSC artifact or an empty/absent name yields no index entry.
+func extractDataRefArtifactNameIndex(obj client.Object) []string {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	kind, _, err := unstructured.NestedString(u.Object, "status", "dataRef", "artifact", "kind")
+	if err != nil || kind != kindVolumeSnapshotContent {
+		return nil
+	}
+	name, found, err := unstructured.NestedString(u.Object, "status", "dataRef", "artifact", "name")
+	if err != nil || !found || name == "" {
+		return nil
+	}
+	return []string{name}
 }
 
 // extractManifestCheckpointNameIndex is the field-index extractor for indexKeyManifestCheckpointName: it

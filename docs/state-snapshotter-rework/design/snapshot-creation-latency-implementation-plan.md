@@ -1190,3 +1190,128 @@ self-contained first fix (both sub-gaps live in `snapshot/` + `snapshotcontent/`
 `reconcile Snapshot`, `snapshotcontent update enqueues bound snapshot`, `Reconciling SnapshotContent`, `snapshotcontent
 trace` (field `manifestsArchived`/`gate`). Silent points (inferred, would need trace lines if we want them explicit): the
 root-MCR gate pending reason, the MCR `Create`, and successful MCP→content mapping.
+
+##### Commit B — "Skip child graph replan after readiness" (`2b2bbf1`): validated, partial
+
+Section-timer instrumentation (per-reconcile `durMs` + `child-graph-planning` / `volume-leg` /
+`mcp-already-ready-check` / `namespace-list-manifest-planning` markers, `>150ms`) relocalized B **away from
+the queue/backoff hypothesis above**: the dominant root-reconcile cost is `reconcileParentOwnedChildGraph`
+(child-graph re-plan: dynamic List of every source kind + coverage tree walk + child Gets), which ran O(N)
+on **every** root reconcile — including all passes after children are ready and even after the MCR exists.
+
+**Fix (in-scope, one guard):** `childGraphReplanSkippable` in `snapshot/controller.go` skips the re-plan when
+`ChildrenSnapshotReady=True` with `Reason=Completed` and `ObservedGeneration==metadata.generation`; capture then
+proceeds from the already-published `status.childrenSnapshotRefs`. Empty graph is a valid skip (manifests-only
+namespace). Terminal child failures still propagate via the content-tree mirror + capture pending-path bridge
+(`SummarizeChildSnapshotTerminalFailures`), covered by unit tests (`child_graph_replan_skip_test.go`, 5 cases).
+
+**Measured (SETS=1 and SETS=10 ×3, pod `76bd5d44dc`):**
+
+| metric | SETS=1 | SETS=10 r1 | r2 | r3 |
+|---|---|---|---|---|
+| wall (Ready) | 5.8s | 27.5 | 28.3 | 28.3 |
+| ChildrenSnapshotReady | +1 | +17 | +18 | +14 |
+| last leaf archived | +5 | +21 | +20 | +20 |
+| root MCR created | +2 | +23 | +23 | +23 |
+| root MCP Ready | +3 | +23 | +24 | +24 |
+| root ManifestsArchived | +4 | +29 | +29 | +27 |
+| root Ready | +5 | +27 | +28 | +27 |
+| **B1** children→MCR | 1 | 6 | 5 | 9 |
+| **B2** MCP→archived | 1 | 6 | 5 | 3 |
+| **root leg** children→archived | 3 | 12 | 11 | 13 |
+
+- **SETS=1: acceptance met** (B1=1s, B2=1s, leg=3s).
+- **SETS=10: wall −18% (34→27.5–28.3s); the skip is confirmed working** — post-readiness root reconciles collapse
+  from 5–15s to **20–130ms** (burst at +14..+16 in r3). But the SETS=10 acceptance (B1/B2 ~1–2s, leg ≤4s) is
+  **NOT met**, because the residual root-leg time is **no longer redundant re-plan** but three costs, none of which
+  is the in-scope B logic (root MCR planning / MCP→archived observe) itself:
+  1. **child-graph-planning intrinsic cost ~7s** (r3: the single MCR-creating reconcile = child-graph 6988ms +
+     volume-leg 3251ms + namespace-list 1798ms = 14.1s). This is *child-graph* work, not the manifest leg; the
+     transition reconcile pays one full re-plan because it enters with a stale not-ready read. Sums to ~18s over the
+     planning window (before ChildrenSnapshotReady).
+  2. **volume-leg ~2–3s and mcp-check ~1s** per manifest-leg reconcile — **volume path, explicitly out of scope B**.
+  3. MCR cannot be created until child **contents** archive (~+20s, the leaf/**C** staircase), upstream of B.
+
+**Conclusion.** Commit B is correct and complete for its defined scope (remove redundant re-plan); keep it. The
+remaining SETS=10 root-leg latency is dominated by (1) the intrinsic child-graph-planning O(N) cost — same
+optimization family as the T-index fix, a **separate commit**, arguably neither strictly B nor C — and (2) the
+out-of-scope volume-leg. **Out-of-scope findings (documented, not fixed in B):** volume-leg ~2–3s/pass;
+mcp-already-ready-check ~1s/pass; ~60 root reconciles/run (direct child-watch relay + wakes + requeue) though each
+is now cheap when the graph is stable.
+
+##### Commit C — leaf staircase diagnosis (diagnosis only, no code yet)
+
+Per-leaf volume-capture chain traced with a single-clock poller (VSC `readyToUse`, VCR `Ready`, leaf content
+`VolumesReady`/`Ready` all sampled on the same clock, 1s cadence) over one SETS=10 run (wall 28.9s, n=20 leaves).
+**Path correction:** on the domain-disk leaf path storage-foundation creates a `VolumeSnapshotContent` **directly**
+(empty `spec.volumeSnapshotRef`); no CSI `VolumeSnapshot` is created (that is orphan-root only). Chain is
+VCR → VSC → VSC `readyToUse` → VCR `Ready` → leaf content `VolumesReady` → leaf content `Ready`.
+
+Stage staircases (offset from root create) and skew-free per-stage deltas:
+
+| stage | staircase | per-stage delta (min/med/max) | owner |
+|---|---|---|---|
+| VSC created | +1..+11 (10s) | — | upstream (child-graph creation pacing) |
+| VSC `readyToUse` | +1..+14 (13s) | CSI per-volume created→ready **0/3/5s (flat)** | CSI/storage |
+| VCR `Ready` | +1..+14 (13s) | VSC-ready→VCR-ready **−2/0/0s** | foundation VCR (~0) |
+| leaf content `VolumesReady` | +3..+23 (20s) | VCR-ready→content **4/6/11s (grows)** | **state-snapshotter leaf observe** |
+| leaf content `Ready` | +3..+23 (20s) | content VolumesReady→Ready **0/0/0s** | (manifest latch instant) |
+
+**Decision-tree result:** CSI per-volume is flat ~3s (not the staircase driver — the VSC-ready staircase is inherited
+from the VSC-**creation** staircase); VSC-ready→VCR-ready ≈ 0 (**foundation VCR is not the bottleneck**); the
+growing 4→11s gap is **VCR-ready → leaf content Ready = the state-snapshotter leaf observe path**. Last-leaf budget
+(+23s) ≈ 9s creation pacing (upstream child-graph, out of C scope) + ~5s CSI + **~9s leaf observe-lag** (in C scope).
+
+**Observe-lag mechanism (controller logs, same run):** 490 `snapshotcontent` reconciles, total **157s** reconcile
+work across **8 workers** (`MaxConcurrentReconciles=8`), each leaf reconciled ~20× (500ms poll storm while
+volumes/manifests pending), p90 **926ms** / max **4792ms** per pass. Two concrete state-snapshotter causes:
+1. **Worker contention + per-reconcile cost (dominant):** the volumes-pending leaf path returns `RequeueAfter:500ms`
+   and still does MCP GET + **uncached `APIReader` chunk GET(s)** + owner-ref self-heal each pass; 8 workers are
+   saturated by the ×20-leaf 500ms storm, so later leaves wait — matches the growing 4→11s gap.
+2. **Dropped VSC wakes:** `VolumeSnapshotContent` → owning content mapping is **ownerRef-only** (no reverse index),
+   and the VSC is created owned by an `ObjectKeeper` and only reparented to the `SnapshotContent` during handoff. If
+   `readyToUse` flips before the ownerRef is present the wake event is dropped — logged **198×** in the run
+   (`artifact event has no owning SnapshotContent ownerRef; dropping`). MCP already has a dual-path (ownerRef +
+   name reverse-lookup) resolver; VSC does not. Dropped wake ⇒ leaf falls back to the 500ms poll under contention.
+
+Not the issue: missing VSC watch (it exists), uncached VSC reads (cached), O(tree) aggregation for leaves (fast-pathed).
+
+**Proposed Commit C scope (leaf content readiness only; NOT root path, NOT child-graph planning):**
+(a) give VSC→content the same dual-path reverse resolver as MCP (ownerRef + `storage.deckhouse.io/vcr-*` label /
+dataRef lookup) so `readyToUse` wakes are never dropped before handoff; (b) cut per-reconcile cost on the
+volumes-pending leaf path (avoid the uncached chunk `APIReader` GET when the leaf only awaits volumes) to relieve
+worker contention. CSI per-volume (~3s) and foundation VCR (~0) are **out of scope / not the bottleneck** and are
+documented, not changed.
+
+##### Commit C — leaf staircase fix (implemented; both levers, one commit)
+
+Both levers land in `internal/controllers/snapshotcontent/controller.go`, strictly inside leaf content readiness
+(no root path, no child-graph planning, no foundation/CSI/VCR change; 500ms self-requeue kept as backstop).
+
+**(a) Dual-path VSC→content resolver.** The `VolumeSnapshotContent` watch mapper was ownerRef-only; it now mirrors
+the MCP L9a dual-path (`mapVolumeSnapshotContentToContent`): path 1 = ownerRef (once handoff reparents the VSC to
+the content); path 2 = reverse lookup on a new cache field index `indexKeyDataRefArtifactName`
+(`.status.dataRef.artifact.name`, populated only when the artifact kind is `VolumeSnapshotContent`, via
+`extractDataRefArtifactNameIndex`). A leaf publishes `status.dataRef.artifact = {kind: VolumeSnapshotContent,
+name: <vsc>}` when it links its VSC — a **durable edge stable across the `readyToUse` flip and independent of the
+ObjectKeeper→content ownerRef handoff**. So the `readyToUse=true` transition now wakes the owning content
+event-driven even when it flips before adoption (previously logged **198× dropped** wakes). Ownership/adoption logic
+is untouched: a stale/missing index entry can only mis-time a wake (spurious no-op enqueue, or missed enqueue that
+the 500ms poll still backstops), never route to a wrong owner.
+
+**(b) Manifest-leg cost cut on volumes-pending passes.** New guard `manifestLegAlreadyLatched(obj)` (both
+`ManifestsReady=True` **and** `ManifestsArchived=True` at the current generation). When true, `fillOwnLegs` skips the
+per-pass manifest re-validation — cached MCP Get + adoption patch + **uncached `APIReader` chunk-existence GET(s)** —
+and latches the manifest leg from the closed monotonic latch instead. Safe because the `ManifestsArchived` latch never
+re-opens (`computeManifestsArchived` short-circuits on the already-True condition) and chunk integrity is re-verified on
+the read/download/archive path, not on this readiness gate. A generation bump clears the guard and forces full
+re-validation. This removes the dominant per-reconcile cost while a leaf waits only on its volume leg, relieving the
+8-worker 500ms-poll contention behind the growing 4→11s observe-lag. The volume leg is still evaluated every pass.
+
+**Tests** (`vsc_reverse_lookup_test.go`): `extractDataRefArtifactNameIndex` (VSC name / non-VSC kind / empty / no
+dataRef / non-unstructured); `mapVolumeSnapshotContentToContent` dual-path (ownerRef wins, dataRef reverse lookup,
+unknown miss → nil, nil obj); `manifestLegAlreadyLatched` (both-True-current latches; stale generation, either leg
+not-True, or missing leg → re-validate). Full unit suite + `golangci-lint v1.64.5 --build-tags ce` green.
+
+**Acceptance to measure after redeploy (SETS=10 ×3):** VCR-ready→leaf content Ready 4/6/11s → ≤1–3s; leaf staircase
+~20s → ~10–14s; `snapshotcontent` reconciles ≪ 490; no post-Ready storm.
