@@ -5,7 +5,10 @@ Status: **DESIGN / not implemented.** This is the design for the deferred wave5 
 attended, behind the envtest integration gate (`snapshot_root_lifecycle` / `snapshot_recreate` /
 `snapshot_n1_boundary`). Companion execution log: `.cursor/plans/wave5_notes.md`.
 
-Absolute paths are relative to `images/state-snapshotter-controller/` unless noted.
+Paths are relative to `images/state-snapshotter-controller/` **except**: `pkg/snapshotsdk/*` is the
+repo-root shared SDK module (`repos/state-snapshotter/pkg/snapshotsdk/`, imported by both core and
+external domain controllers — that is what makes the root dogfoodable), and demo-controller paths
+(`images/domain-controller/…`) are given in full.
 
 ---
 
@@ -45,8 +48,11 @@ Verified wiring facts:
   `pkg/unifiedbootstrap/pairs.go` (`DedicatedSnapshotControllerKinds`, `FilterGenericSnapshotGVKPairs`).
   So **today the binder never watches the root `Snapshot`**; root `SnapshotContent` is created solely
   by `internal/controllers/snapshot/controller.go` (`Reconcile`, the `IsNotFound → Create` block).
-- The binder's `IsRootSnapshot` branch (`genericbinder/controller.go`) is for hand-created *top-level
-  domain* snapshots, **not** the namespace root.
+- `IsRootSnapshot` is by ownerRef (no snapshot parent), so it is a general *top-level* case that the
+  namespace root **does** satisfy — it is NOT root-excluding. But today the binder's `IsRootSnapshot`
+  branch (`genericbinder/controller.go`) never fires *for the root*, because the binder does not watch
+  `Snapshot` (above); today it is reached only for hand-created top-level *domain* snapshots. Once the
+  root is watched (§5.1) the same branch fires for it.
 
 If we fold root content creation into the binder *without* rewriting the reconciler, two controllers
 (`snapshot/controller.go` and the binder) both reconcile `Snapshot` and contend over
@@ -56,6 +62,13 @@ the controller must first poll for existence, and the "who owns the bind field" 
 
 Therefore content-creation moves to the binder **only as part of** turning the reconciler into a
 content-free SDK domain. Treat them as a single, staged change (§7 gives a safe cutover order).
+
+> **Plan note.** The plan lists `w5-content-creation` and `w5-namespace-domain-sdk` as two sequential
+> todos (content-creation first). That split assumed `w5-content-creation`'s open verification item —
+> *«биндер уже вызывается для корневого Snapshot»* — is true. It is **not**: the root sits in
+> `DedicatedSnapshotControllerKinds`, so `FilterGenericSnapshotGVKPairs` drops it and the binder does
+> not watch it today (§5.1). Hence the two todos cannot land independently; execute them as the single
+> staged change in §7.
 
 ---
 
@@ -67,8 +80,8 @@ content-free SDK domain. Treat them as a single, staged change (§7 gives a safe
 | Children graph | bespoke `snapshot/parent_graph.go` | root domain builds `[]ChildSpec` → `sdk.EnsureChildren` |
 | Namespace manifest | bespoke `snapshot/capture.go` `ensureManifestCaptureRequest` | `sdk.EnsureManifestCapture` + publish MCR name into `domainSpecificController.manifestCaptureRequestName` |
 | `status.snapshotSource` (Namespace) | not written | `sdk.PublishSnapshotSource` |
-| Data leg projection onto content | bespoke `snapshot/capture.go` + `volume_capture.go` | **binder** `ensureDomainContentLinks` (already does VCR→VSC handoff→`status.data` for domains) |
-| Orphan/residual PVC wave | `snapshot/volume_capture.go` (creates CSI VS / child volume nodes) | folded into `EnsureChildren` as volume-child `ChildSpec`s (§6.2) |
+| Data leg projection onto content | bespoke `snapshot/capture.go` | root's own content = aggregator, **no data leg**; domain-child disk leaves use **binder** `ensureDomainContentLinks` (VCR→VSC→`status.data`). Orphan volume legs are the CSI path, separate row below |
+| Orphan/residual PVC wave | `snapshot/volume_capture.go` + `orphan_pvc_volume_snapshot.go` (CSI VS + per-PVC MCR + leaf content + `childrenSnapshotRefs` ref) | **preserved**; emitted through `EnsureChildren` as `VolumeSnapshot` children (CSI path, no VCR — INV-ORPHAN1) (§6.2) |
 | `boundSnapshotContentName` | dual writer (root + would-be binder) | **single writer: binder** |
 | `commonController.manifestCaptured` (root RBAC latch) | `snapshot/ready_patch.go` `stampRootManifestCaptured` | stays core (binder `eagerInitCaptureLegs`/`markCaptureLegCaptured`); root RBAC carve-out retained (§6.4) |
 | static-bind / import / delete-retain | `snapshot/{static_bind,import}.go` + `reconcileDelete` | binder's generic paths (`reconcileGenericStaticBind`/`reconcileGenericImport`) extended to the root (§6.5) |
@@ -76,8 +89,12 @@ content-free SDK domain. Treat them as a single, staged change (§7 gives a safe
 **Shape match:** the root is an **aggregator** domain — namespace manifest + children, no single-PVC
 data leg of its own — so it maps to the **DemoVirtualMachineSnapshot** pattern
 (`images/domain-controller/internal/controllers/demo/virtualmachinesnapshot_controller.go`:
-`EnsureChildren` + `EnsureManifestCapture` + `MarkPlanned` + wait `allChildrenCaptured` +
-`ConfirmConsistent`), **not** the single-volume DemoVirtualDiskSnapshot pattern.
+`EnsureChildren` + `EnsureManifestCapture` + `MarkPlanned` + `ConfirmConsistent`), **not** the
+single-volume DemoVirtualDiskSnapshot pattern. **One deliberate divergence from the VM aggregator:** the
+VM waits `allChildrenCaptured` + unfreeze/verify before `ConfirmConsistent` (crash-consistent group);
+the namespace domain has **no consistency action**, so its `phase=Finished` fires right after planning
+(orphan wave `Complete` + direct domain children `phase>=Planned`), without the `allChildrenCaptured`
+wait — see §4.2/§6.2.
 
 ---
 
@@ -90,10 +107,10 @@ data leg of its own — so it maps to the **DemoVirtualMachineSnapshot** pattern
   `ReadyReason`, `ReadyMessage`. Writer discipline: the SDK writes ONLY
   `captureState.domainSpecificController`, `childrenSnapshotRefs`, `snapshotSource`; it only *reads*
   `commonController` and `Ready`.
-- `CaptureSDK` (SDK provides) — `pkg/snapshotsdk/capture.go:34-98`:
+- `CaptureSDK` (SDK provides) — `pkg/snapshotsdk/capture.go` (interface + methods):
   `EnsureChildren`, `EnsureVolumeCapture`, `EnsureManifestCapture`, `MarkPlanned`,
-  `ConfirmConsistent`, `Fail`, `Reject`, `PublishSnapshotSource`; constructed with
-  `snapshotsdk.New(client, apiReader, provider)`; read-only tri-state via
+  `ConfirmConsistent`, `Fail`, `Reject`, `PublishSnapshotSource` (`capture.go:271`); constructed with
+  `snapshotsdk.New(client, apiReader, provider)` (`capture.go:116`); read-only tri-state via
   `snapshotsdk.CoreCaptureOutcome(adapter)`.
 
 ### 4.1 New `NamespaceSnapshotAdapter`
@@ -103,12 +120,18 @@ Add a root adapter next to the demo one (mirror `images/domain-controller/intern
 
 - `Object()` → the `*storagev1alpha1.Snapshot` (typed; root is a first-class API type, so the adapter
   can be typed rather than unstructured — simpler than the demo unstructured adapter).
-- `SourceRef()` → `{Kind: "Namespace", Name: snapshot.Namespace}` (the namespace is the logical
-  source of a root snapshot).
+- `SourceRef()` → `{Kind: "Namespace", Name: snapshot.Namespace}` (the adapter's lightweight identity
+  ref; note this is the `SourceRef` type, distinct from the published `SnapshotSource` below — and it is
+  unused on the root anyway, since `EnsureVolumeCapture` is never called for it, §6.1).
 - `Get/SetDomainCaptureState()` ↔ `snapshot.Status.CaptureState.DomainSpecificController` +
   `snapshot.Status.ChildrenSnapshotRefs` (typed fields already exist —
   `api/storage/v1alpha1/capture_state_types.go`).
-- `Get/SetSnapshotSource()` ↔ `snapshot.Status.SnapshotSource` (added in `w5-api`, `5308a73`).
+- `Get/SetSnapshotSource()` ↔ `snapshot.Status.SnapshotSource` (`SnapshotSourceObjectRef`, added in
+  `w5-api`, `5308a73`). The published ref must be the **full** self-contained ref
+  `{apiVersion: v1, kind: Namespace, name: <ns>, uid: <ns UID>}` (ADR root example; plan `{v1,Namespace,ns,uid}`),
+  **not** just kind+name — so the reconciler must `GET` the `Namespace` to resolve its `UID`
+  (`apiVersion=v1` is constant). `PublishSnapshotSource` early-returns on an all-empty ref, so the UID
+  resolution must happen before it is called.
 - `CoreCaptureState()` → reads `snapshot.Status.CaptureState.CommonController`.
 - `ReadyReason/Message()` → reads `snapshot.Status.Conditions[Ready]`.
 
@@ -129,21 +152,36 @@ Reconcile(Snapshot):
   adapter := NewNamespaceSnapshotAdapter(snap)
   sdk     := snapshotsdk.New(Client, APIReader, volumeProvider)
 
-  sdk.PublishSnapshotSource(ctx, adapter, {Kind: Namespace, Name: snap.Namespace})
+  nsUID := getNamespaceUID(ctx, snap.Namespace)          // GET Namespace — snapshotSource needs the UID
+  sdk.PublishSnapshotSource(ctx, adapter,
+      {APIVersion: "v1", Kind: "Namespace", Name: snap.Namespace, UID: nsUID})   // full self-contained ref
 
   desired, excluded := planNamespaceChildren(ctx, snap)   // resource graph + orphan/residual PVCs (§6.2)
   sdk.EnsureChildren(ctx, adapter, desired, excluded)
 
-  sdk.EnsureManifestCapture(ctx, adapter, namespaceManifestSpec(snap))   // §6.3
+  sdk.EnsureManifestCapture(ctx, adapter, namespaceManifestSpec(snap))   // §6.3 — request namespace MCR
 
   sdk.MarkPlanned(ctx, adapter)                            // phase → Planned; unblocks binder
 
-  switch snapshotsdk.CoreCaptureOutcome(adapter) {         // reads commonController latches
-    Pending:   requeue (also wait allChildrenCaptured, cf. VM:203-230)
-    Succeeded: sdk.ConfirmConsistent(ctx, adapter)         // phase → Finished
-    Failed:    sdk.Reject(ctx, adapter, ...)               // phase → Failed
+  // A namespace domain has NO consistency action (no freeze/unfreeze), so it Finishes as soon as
+  // PLANNING is done — it does NOT wait for children dataCaptured / MCP execution / Ready (that is the
+  // separate Ready gate, §5 / §8). Finish gate (ADR "Корень как встроенный namespace-домен", root
+  // example `phase: Finished` note):
+  //   (a) orphan wave latched Complete   — residualVolumeCapture.phase=Complete, AND
+  //   (b) every DIRECT DOMAIN child reached domainSpecificController.phase>=Planned.
+  // orphan VolumeSnapshot children have NO phase (no domain controller — §6.2); they gate via the wave
+  // latch, not a child phase. So CoreCaptureOutcome (commonController latches) is NOT the phase gate.
+  switch {
+    planning error:                       sdk.Fail(ctx, adapter, ...)          // phase → Failed + reason
+    !(orphanWaveComplete(snap) &&
+      directDomainChildrenPlanned(snap)): requeue                              // still planning
+    default:                              sdk.ConfirmConsistent(ctx, adapter)  // phase → Finished (no verify)
   }
 ```
+
+`ConfirmConsistent` here is a phase-only transition (no verify step) — the namespace domain has nothing
+to reconcile for consistency, unlike the VM aggregator whose `ConfirmConsistent` runs after
+`allChildrenCaptured` + unfreeze/verify.
 
 Everything the reconciler does today AFTER planning (create content, bind, publish content children,
 run MCR→MCP, VCR→VSC handoff, mirror `Ready`) moves to the **binder** for the root, exactly as it
@@ -159,11 +197,22 @@ create content / bind → `ensureSnapshotContentLinks` → `checkConsistencyAndS
 `genericbinder/domain_content.go` `ensureDomainContentLinks`: children projection + VCR data-leg
 handoff + latch stamping). The root must flow through the **same** code:
 
-1. **Wire the root into the binder watch set.** Move `"Snapshot"` out of
-   `DedicatedSnapshotControllerKinds` and into `DomainCaptureSnapshotKinds`
-   (`pkg/unifiedbootstrap/pairs.go`), OR add an explicit root pair to the binder's watch list and mark
-   it `MarkDomainCaptureKind`. Result: `FilterGenericSnapshotGVKPairs` no longer removes the root, and
-   `unifiedruntime/syncer.go` marks the root as a domain-capture kind (binder owns its content).
+1. **Wire the root into the binder watch set.** **Add** `"Snapshot"` to `DomainCaptureSnapshotKinds`
+   while **keeping** it in `DedicatedSnapshotControllerKinds` (`pkg/unifiedbootstrap/pairs.go`) — exactly
+   as the two demo kinds are in **both** sets. `DomainCaptureSnapshotKinds` is a *strict subset* of
+   `DedicatedSnapshotControllerKinds` (the dedicated planning controller stays activated **and** the
+   binder additionally watches), so this is an **add, not a move**: removing the root from
+   `DedicatedSnapshotControllerKinds` would deactivate its dedicated planning controller (the
+   content-free SDK reconciler) and is wrong. The binder watch is wired **not** via
+   `FilterGenericSnapshotGVKPairs` (the root stays dedicated, so that filter still drops it from the
+   *generic* pair set — correct) but via the syncer's dedicated loop: once `"Snapshot"` is a
+   domain-capture kind, `unifiedruntime/syncer.go` stops taking the fully-dedicated short-circuit
+   (`syncer.go:154-162`) and instead calls `s.snap.MarkDomainCaptureKind(snapGVK)` + `AddWatchForPair`
+   (`syncer.go:181-183`) — the binder now owns the root's content.
+   *Ordering caveat:* in the single in-process manager that runs **both** the root planning controller
+   and the binder, if the root reconciler registers a typed informer + field index, the activator gate
+   (`syncer.go:176-180`) requires the planning controller to activate before the binder watch, to avoid
+   an indexer conflict on the shared informer (same rule that orders demo children before parents).
 2. **Root ObjectKeeper.** The binder's `IsRootSnapshot` branch (`controller.go`) already ensures the
    root `RootObjectKeeperOwnerReference` and uses it as content owner — this is exactly what the root
    needs (it is a root). Confirm it triggers for `Snapshot` once watched (it keys on "no parent owner
@@ -172,10 +221,16 @@ handoff + latch stamping). The root must flow through the **same** code:
    `Status().Update` of `boundSnapshotContentName` (`snapshot/controller.go`); the binder's
    `PatchUnstructuredBoundContentName` becomes the only writer. The root reconciler simply *reads* the
    field to know its content exists.
-4. **Data-leg projection.** Root child volume leaves are ordinary domain leaves to the binder; their
-   VCR→VSC→`status.data` handoff is already `ensureDomainContentLinks`. The root's own content has no
-   single data binding (aggregator) — it only aggregates `childrenSnapshotContentRefs` (already done by
-   `PublishSnapshotContentChildrenFromSnapshotRefs`).
+4. **Data-leg projection.** The root's own content has no single data binding (aggregator) — it only
+   aggregates `childrenSnapshotContentRefs` (already done by
+   `PublishSnapshotContentChildrenFromSnapshotRefs`). The root's DIRECT volume children are
+   **orphan/standalone PVCs**, which take the **CSI `VolumeSnapshot` path, NOT the VCR path**: `VCR` is
+   forbidden for orphan PVCs (ADR INV-ORPHAN1); their durable artifact is the bound VSC
+   (`deletionPolicy=Retain`, INV-ORPHAN2), and their leaf content is created **typed** via
+   `snapshotcontent.EnsureVolumeChildContent` (bypasses `getSnapshotContentGVK` and the generic VCR
+   handoff). Domain-subtree disk leaves (e.g. VM→disk) DO use the binder's
+   VCR→VSC→`status.data` handoff (`ensureDomainContentLinks`), but those are owned by the domain child,
+   not by the root.
 
 ---
 
@@ -195,19 +250,33 @@ enum were added in `w5-api`).
 - Exclude-label veto (`snapshotsdk.PartitionExcluded`) — the SDK already publishes
   `domainSpecificController.excludedRefs`, replacing the root's manual
   `publishSnapshotTopLevelExcludedRefs` (`parent_graph.go:137-176`).
-- **Orphan/residual PVCs** (PVCs not owned by a planned workload) become **volume-child ChildSpecs**
-  (generic PVC leaves), instead of the bespoke CSI-VolumeSnapshot wave in `volume_capture.go`. Each
-  becomes its own `SnapshotContent` (Variant-A cardinality ≤1), bound & data-captured by the binder.
-  *This is the largest behavioral consolidation and the main risk area — gate hard.*
+- **Orphan/residual PVCs** (PVCs not owned by a planned workload) are emitted by `EnsureChildren` as
+  **`VolumeSnapshot` children** (kind=`VolumeSnapshot`) — the existing orphan model, **preserved, not
+  rewritten** (do NOT turn them into generic VCR-captured PVC leaves). Each orphan PVC already gets its
+  own CSI `VolumeSnapshot` + per-PVC MCR + leaf content (typed `EnsureVolumeChildContent`, CSI path,
+  **no VCR** — INV-ORPHAN1) + durable bound VSC (`deletionPolicy=Retain`, INV-ORPHAN2), and its ref is
+  already added to `root.status.childrenSnapshotRefs` (Variant A) by
+  `reconcileOrphanPVCVolumeSnapshotChildLeaves` (`orphan_pvc_volume_snapshot.go`). The
+  `residualVolumeCapture` wave-completion latch (`residualVolumeCapture.phase=Complete`) is preserved —
+  it gates the first `Ready=True` **and** (per §4.2/§6.2 barrier) the root's `phase=Finished`. The wave5
+  change here is **only the emission seam**: the SDK's `EnsureChildren` owns the child list uniformly,
+  while the CSI capture path, per-PVC MCR, invariants, and latch are unchanged. *Re-routing emission is
+  the main risk area — gate hard; behavior must be byte-for-byte the pre-wave5 orphan wave.*
 
-Weight-layer ordering (`weightLayerCaptureReady`, `parent_graph.go:459-495`) maps onto the aggregator
-barrier: `MarkPlanned` only after all layers are planned; `ConfirmConsistent` only after
-`allChildrenCaptured` (cf. VM `childCoreCaptureState`/`AllLegsCaptured`).
+Weight-layer ordering (`weightLayerCaptureReady`, `parent_graph.go:459-495`) maps onto **barrier-1
+only**: `MarkPlanned` fires after all layers are planned. Unlike the VM aggregator, the namespace
+domain has **no consistency action**, so `ConfirmConsistent` (→ `phase=Finished`) fires as soon as the
+orphan wave is latched `Complete` (`residualVolumeCapture.phase=Complete`) **and** every direct DOMAIN
+child reached `phase>=Planned` — it does **not** wait for `allChildrenCaptured` / children `Ready` (ADR
+root example `phase: Finished` note: *«у namespace-домена нет действий согласованности → Finished сразу
+после orphan-волны и phase>=Planned прямых детей»*). Full-subtree capture/readiness is the separate
+`Ready` gate (binder + `SnapshotContentController`), which `phase=Finished` unblocks but never waits on.
 
 ### 6.3 Namespace manifest capture (one MCR for the whole namespace)
 `EnsureManifestCapture` today (demo) creates a per-object MCR. The root needs a **namespace** MCR
-(`namespacemanifest.SnapshotMCRName(uid)`, targets from
-`BuildRootNamespaceManifestCaptureTargets`, `capture.go:181-210`). Two options:
+(`namespacemanifest.SnapshotMCRName(uid)`, targets from `BuildRootNamespaceManifestCaptureTargets`,
+`internal/usecase/root_capture_run_exclude.go:67` — the wave-barrier exclude-set builder, *called* from
+`capture.go`, not defined there). Two options:
 - (a) pass a `ManifestCaptureSpec` that already carries the namespace target set (preferred — keeps the
   SDK generic; the root builds the spec);
 - (b) add a namespace variant to the provider. Prefer (a). The SDK then owns MCR create + publishes
@@ -247,13 +316,16 @@ The danger is a window where both `snapshot/controller.go` and the binder create
 1. **PR-A (no behavior change): extract & share.** Land the `NamespaceSnapshotAdapter` and
    `planNamespaceChildren` (pure planners) behind the existing bespoke path; add the binder root-watch
    *disabled* by a flag. Unit-test the adapter + planner in isolation. Green on the integration gate.
-2. **PR-B (flip creation to the binder).** In one commit: (a) enable the binder to watch `Snapshot`
-   (`DomainCaptureSnapshotKinds`), (b) delete the root's content `Create` + `boundSnapshotContentName`
+2. **PR-B (flip creation to the binder).** In one commit: (a) add `Snapshot` to
+   `DomainCaptureSnapshotKinds` (keep it in `DedicatedSnapshotControllerKinds`) so the binder watches it
+   (§5.1), (b) delete the root's content `Create` + `boundSnapshotContentName`
    `Status().Update`, (c) switch the reconciler to the SDK recipe (`§4.2`). Because creation is now
    binder-only from the same commit, there is no dual-writer window. Keep static-bind/import bespoke in
    this PR (still root-owned) to shrink blast radius.
-3. **PR-C: fold orphan/residual PVC wave into `EnsureChildren`.** Highest-risk consolidation; separate
-   PR so it can be reverted independently. Gate on `snapshot_n1_boundary` + the two-PVC subtree spec.
+3. **PR-C: route the (existing) orphan `VolumeSnapshot` wave through `EnsureChildren`.** Emission seam
+   only — the CSI capture path, per-PVC MCR, invariants (INV-ORPHAN1/2), the `childrenSnapshotRefs` ref
+   (Variant A) and the `residualVolumeCapture` latch are all **preserved**. Separate PR so it can be
+   reverted independently. Gate on `snapshot_n1_boundary` + the two-PVC subtree spec.
 4. **PR-D: move static-bind + import into the binder.** Finalize "single content creator".
 
 Each PR must be green on the envtest integration gate before the next.
@@ -263,7 +335,12 @@ Each PR must be green on the envtest integration gate before the next.
 ## 8. Single-writer invariants (must hold after every PR)
 
 - `captureState.domainSpecificController.*`, `childrenSnapshotRefs`, `snapshotSource` — **root SDK
-  adapter only**.
+  adapter only** (the in-process namespace domain, via the adapter's `SetDomainCaptureState`). NB: the
+  ADR root example annotates `childrenSnapshotRefs` *"← ядро"* — read that as "the in-process namespace
+  domain, which runs in the core process", **not** the kind-agnostic core services; it is the same
+  DOMAIN writer that domain nodes use for their `childrenSnapshotRefs`. Orphan `VolumeSnapshot` child
+  refs (today emitted by the core orphan path `reconcileOrphanPVCVolumeSnapshotChildLeaves`) move under
+  this same domain emission via `EnsureChildren` (§6.2), so the field stays single-writer.
 - `captureState.commonController.*` — **core only** (binder `eagerInitCaptureLegs`/`markCaptureLegCaptured`;
   root RBAC `stampRootManifestCaptured`). SDK reads, never writes (`adapter.go:23-63`).
 - `boundSnapshotContentName` — **binder only** (after PR-B).
@@ -283,9 +360,10 @@ Grep anchors for the co-write / optimistic-merge discipline to preserve: `single
 - **Capture ordering** (binder creates content async; reconciler must poll for existence before
   publishing children) — the SDK barrier already sequences this (`MarkPlanned` gates the binder). Gate:
   `snapshot_recreate`.
-- **Orphan/residual PVC** semantics change (bespoke CSI-VS wave → child volume nodes) — PR-C isolated;
-  gate: two-PVC subtree spec (`n5_pr7_two_pvc_integration_test.go`) **once** the envtest
-  `VolumeSnapshotContent` CRD gap is fixed (currently a pre-existing envtest limitation — see
+- **Orphan/residual PVC** emission moves to `EnsureChildren`; the CSI-VS wave + per-PVC MCR +
+  invariants (INV-ORPHAN1/2) + `residualVolumeCapture` latch are **unchanged** (only the emission seam
+  moves) — PR-C isolated; gate: two-PVC subtree spec (`n5_pr7_two_pvc_integration_test.go`) **once** the
+  envtest `VolumeSnapshotContent` CRD gap is fixed (currently a pre-existing envtest limitation — see
   `wave5_notes.md` "Open risks"; the `isolated` spec times out without that CRD, unrelated to wave5).
 - **Namespace MCR vs per-object MCR** — keep the namespace target builder; unit-test
   `namespaceManifestSpec`.
@@ -294,7 +372,9 @@ Grep anchors for the co-write / optimistic-merge discipline to preserve: `single
 
 New unit coverage to add alongside implementation: `NamespaceSnapshotAdapter` write-discipline
 (only domain half + source + children), `planNamespaceChildren` (weight layers + exclude veto +
-orphan PVCs → ChildSpec), `namespaceManifestSpec` targets. Integration: the three gate suites above.
+orphan PVCs → `VolumeSnapshot` children, CSI path, no VCR), the `phase=Finished` gate (orphan wave
+`Complete` + direct domain children `phase>=Planned`, NOT `allChildrenCaptured`), `namespaceManifestSpec`
+targets. Integration: the three gate suites above.
 
 ---
 
@@ -304,14 +384,24 @@ orphan PVCs → ChildSpec), `namespaceManifestSpec` targets. Integration: the th
   content `Create` + `boundSnapshotContentName` write.
 - `internal/controllers/snapshot/snapshot_adapter.go` — **new** `NamespaceSnapshotAdapter`.
 - `internal/controllers/snapshot/parent_graph.go` + `volume_capture.go` → **new** `planNamespaceChildren`
-  (reuse the mapping/selector/weight logic; emit `[]ChildSpec`); retire the bespoke content-coupled bits.
+  (reuse the mapping/selector/weight logic; emit `[]ChildSpec`); retire only the bespoke
+  *content-coupled* bits (the root no longer creates content), NOT the capture logic.
+- `internal/controllers/snapshot/orphan_pvc_volume_snapshot.go` — orphan CSI wave
+  (`reconcileOrphanPVCVolumeSnapshotChildLeaves`: per-PVC MCR + VS + leaf content + `childrenSnapshotRefs`
+  ref + `residualVolumeCapture` latch) is **preserved**; only its child emission moves under
+  `EnsureChildren` (§6.2). Do not rewrite the CSI capture path.
+- `internal/usecase/root_capture_run_exclude.go` — `BuildRootNamespaceManifestCaptureTargets` feeds
+  `namespaceManifestSpec` (§6.3); keep the wave-barrier exclude-set.
 - `internal/controllers/snapshot/capture.go` → `namespaceManifestSpec` (targets) fed to
   `EnsureManifestCapture`; retire bespoke MCR create/drive (binder owns MCP chase).
 - `internal/controllers/genericbinder/controller.go` — confirm `IsRootSnapshot` + root content
   create/bind path covers `Snapshot`; ensure it is the only `boundSnapshotContentName` writer.
 - `internal/controllers/genericbinder/import.go` — extend to root import (PR-D).
-- `pkg/unifiedbootstrap/pairs.go` — move `"Snapshot"` to `DomainCaptureSnapshotKinds`.
-- `pkg/unifiedruntime/syncer.go` — root now `MarkDomainCaptureKind` + binder watch.
+- `pkg/unifiedbootstrap/pairs.go` — **add** `"Snapshot"` to `DomainCaptureSnapshotKinds` (keep it in
+  `DedicatedSnapshotControllerKinds`; the two sets overlap — see §5.1).
+- `pkg/unifiedruntime/syncer.go` — root no longer takes the fully-dedicated short-circuit
+  (`:154-162`); it now flows to `MarkDomainCaptureKind` + `AddWatchForPair` (`:181-183`), respecting the
+  activator ordering gate (`:176-180`).
 - `cmd/main.go` — the root planning controller still registers, but now content-free; binder watch set
   includes the root.
 - Tests as in §9.
@@ -320,7 +410,9 @@ orphan PVCs → ChildSpec), `namespaceManifestSpec` targets. Integration: the th
 
 ## 11. Open questions to confirm before PR-B
 
-1. `PublishSnapshotSource` + `snapshotSource` enum accept `Namespace` end-to-end (API + any consumer)?
+1. `PublishSnapshotSource` + `snapshotSource` enum accept `Namespace` end-to-end — **likely already
+   done** (`w5-api` is marked complete and the ADR root example uses `snapshotSource.kind: Namespace`).
+   Confirm the enum + consumers (d8) rather than treating this as a PR-B blocker.
 2. Does `EnsureManifestCapture`'s `ManifestCaptureSpec` allow a namespace target set (option 7/6.3-a)
    without SDK changes, or is a small SDK addition needed?
 3. Root import: move to binder (preferred) vs keep in `snapshot/import.go` calling the binder
