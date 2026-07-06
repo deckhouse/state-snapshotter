@@ -33,6 +33,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -301,10 +302,16 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, lErr
 	}
 
-	// Mirror volume metadata onto the extended VS status for d8 export/consumption (parity with the
-	// generic/domain leaf mirror). Source is DataImport.spec — the authoritative import parameters.
-	if mErr := r.mirrorVolumeMetadataFromDataImport(ctx, req.NamespacedName, di); mErr != nil {
-		logger.Error(mErr, "Failed to mirror volume metadata to import VolumeSnapshot status")
+	// Mirror the full data binding onto the extended VS top-level status.data for d8 export/consumption
+	// (byte-identical wire shape to the domain data-leaf mirror genericbinder.mirrorDataToLeaf), so d8
+	// resolves the imported leaf's captured-volume descriptor (source + artifact + volume metadata) from
+	// the namespaced VolumeSnapshot alone, without touching the cluster-scoped SnapshotContent. We mirror
+	// the SAME binding just published onto the backing SnapshotContent (enriched[0]); StorageClass is
+	// overridden from DataImport.spec.storageClassName (the authoritative import mapping), matching the
+	// domain import path.
+	scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
+	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, req.NamespacedName, enriched[0], scOverride); mErr != nil {
+		logger.Error(mErr, "Failed to mirror data binding to import VolumeSnapshot status")
 	}
 	return ctrl.Result{}, nil
 }
@@ -332,52 +339,32 @@ func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (v
 	return name, true, ""
 }
 
-// mirrorVolumeMetadataFromDataImport copies the DataImport's scratch-volume parameters
-// (spec.storageClassName/size/volumeMode) onto the extended VolumeSnapshot status.{storageClassName,size,
-// volumeMode} under an optimistic-lock merge patch (D4a). These are the mirrored volume-metadata fields the
-// forked extended-VS status exposes for d8 export/consumption; the forked snapshot-controller skips import
-// VS, so they are ours to own. Best-effort and idempotent: only non-empty source fields are written.
-//
-// TODO(wave5): w5-status-source-descriptor — reshape these flat fields into a self-contained top-level
-// status.data{source,artifact,volumeMode,fsType,accessModes,storageClassName,size} block, symmetric with
-// the domain data-leaf mirror (genericbinder.mirrorDataToLeaf). Deferred: the extended-VolumeSnapshot fork
-// is defined by a patch (storage-foundation images/snapshot-controller/patches/003-*) that applies to the
-// upstream external-snapshotter tree (not vendored here), so the reshaped Go type + CRD cannot be
-// compile-validated locally in this repo. Keep the flat mirror until the fork is reshaped in lockstep.
-func (r *Controller) mirrorVolumeMetadataFromDataImport(ctx context.Context, key client.ObjectKey, di *unstructured.Unstructured) error {
-	storageClassName, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-	size, _, _ := unstructured.NestedString(di.Object, "spec", "size")
-	volumeMode, _, _ := unstructured.NestedString(di.Object, "spec", "volumeMode")
-	if storageClassName == "" && size == "" && volumeMode == "" {
-		return nil
+// mirrorDataToImportVolumeSnapshot writes the self-contained data binding onto the extended VolumeSnapshot's
+// top-level status.data (source + artifact + volume metadata) under an optimistic-lock merge patch (D4a).
+// It mirrors the SAME binding just published onto the backing SnapshotContent, via the shared
+// snapshotcontent.SnapshotDataBindingToUnstructuredMap, so the wire shape is byte-identical to the domain
+// data-leaf mirror (genericbinder.mirrorDataToLeaf); d8 then resolves the imported leaf's captured-volume
+// descriptor from the namespaced VolumeSnapshot alone. scOverride, when non-empty, replaces the binding's
+// StorageClassName with DataImport.spec.storageClassName (the authoritative import StorageClass mapping),
+// matching the domain import path. The forked snapshot-controller skips import VS, so status.data is ours to
+// own. Idempotent: re-reads and short-circuits when status.data already equals the desired block.
+func (r *Controller) mirrorDataToImportVolumeSnapshot(ctx context.Context, key client.ObjectKey, binding storagev1alpha1.SnapshotDataBinding, scOverride string) error {
+	if scOverride != "" {
+		binding.StorageClassName = scOverride
 	}
+	desired := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&binding)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vs := &unstructured.Unstructured{}
 		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
 		if err := r.Get(ctx, key, vs); err != nil {
 			return err
 		}
-		curSC, _, _ := unstructured.NestedString(vs.Object, "status", "storageClassName")
-		curSize, _, _ := unstructured.NestedString(vs.Object, "status", "size")
-		curMode, _, _ := unstructured.NestedString(vs.Object, "status", "volumeMode")
-		if curSC == storageClassName && curSize == size && curMode == volumeMode {
+		if cur, found, _ := unstructured.NestedMap(vs.Object, "status", "data"); found && reflect.DeepEqual(cur, desired) {
 			return nil
 		}
 		base := vs.DeepCopy()
-		if storageClassName != "" {
-			if err := unstructured.SetNestedField(vs.Object, storageClassName, "status", "storageClassName"); err != nil {
-				return err
-			}
-		}
-		if size != "" {
-			if err := unstructured.SetNestedField(vs.Object, size, "status", "size"); err != nil {
-				return err
-			}
-		}
-		if volumeMode != "" {
-			if err := unstructured.SetNestedField(vs.Object, volumeMode, "status", "volumeMode"); err != nil {
-				return err
-			}
+		if err := unstructured.SetNestedMap(vs.Object, desired, "status", "data"); err != nil {
+			return err
 		}
 		return r.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})

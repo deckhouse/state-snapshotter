@@ -260,3 +260,18 @@ Chronological log of notable refactors. Newest wave at the bottom.
   namespaced BuildTree rewrite (drop cluster-scoped `SnapshotContent` reads; resolve from namespaced
   `status.snapshotSource`+`status.data`) depends on producers that are part of the deferred namespace-domain work
   (root `snapshotSource` writer, extended-VS `status.data`). Do d8 after those land. Details in `wave5_notes.md`.
+- **Update** (w5-status-source-descriptor, extended-VS fork — Surface B, un-deferred) Reshaped the forked extended
+  `VolumeSnapshot` `status` from the flat `storageClassName`/`size`/`volumeMode` mirror into a single self-contained
+  top-level `status.data` (`VolumeSnapshotDataBinding`: source+artifact+volumeMode/fsType/accessModes/storageClassName/
+  size), byte-identical to the domain data-leaf `status.data`, so d8 resolves the imported leaf's captured-volume
+  descriptor from the namespaced VolumeSnapshot alone. ss side (compile-validated): rewrote `volumesnapshotimport`
+  `mirrorVolumeMetadataFromDataImport`→`mirrorDataToImportVolumeSnapshot`, now mirroring the same enriched
+  `SnapshotDataBinding` already published to the backing SnapshotContent (`enriched[0]`, SC overridden from
+  `DataImport.spec.storageClassName`), through a new shared serializer
+  `snapshotcontent.SnapshotDataBindingToUnstructuredMap` — extracted from genericbinder's private
+  `snapshotDataBindingToMap` so both the domain-leaf and import-VS mirrors share one wire-shape source of truth
+  (`TestSnapshotDataBindingToMap` retargeted). storage-foundation side (blind — the fork patch applies to the
+  upstream external-snapshotter tree, not vendored here): reshaped `003-volumesnapshot-dataimport-fork.patch` (Go
+  types + hand-written deepcopy, both `./client` and `vendor` copies) and the hand-maintained VS CRD
+  (`snapshot.storage.k8s.io_volumesnapshots.yaml` + doc-ru, both `v1`/`v1beta1`) and patch README. ss build/vet/unit
+  green; patch length-consistency verified via `git apply --numstat`.

@@ -33,6 +33,7 @@ import (
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
@@ -477,10 +478,10 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 	}
 }
 
-// snapshotDataBindingToMap renders source/artifact always, omits empty optionals, and converts
-// AccessModes to a JSON-typed []interface{} (required by unstructured.SetNestedMap).
+// SnapshotDataBindingToUnstructuredMap renders source/artifact always, omits empty optionals, and
+// converts AccessModes to a JSON-typed []interface{} (required by unstructured.SetNestedMap).
 func TestSnapshotDataBindingToMap(t *testing.T) {
-	m := snapshotDataBindingToMap(&storagev1alpha1.SnapshotDataBinding{
+	m := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&storagev1alpha1.SnapshotDataBinding{
 		Source:      storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc", UID: types.UID("u1")},
 		Artifact:    storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
 		AccessModes: []string{"ReadWriteOnce"},

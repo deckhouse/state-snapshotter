@@ -200,6 +200,58 @@ func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, content
 	})
 }
 
+// SnapshotDataBindingToUnstructuredMap renders a SnapshotDataBinding as a JSON-typed unstructured map
+// suitable for unstructured.SetNestedMap (only string / []interface{} / map[string]interface{} values).
+// source and artifact are always present (required); the volume-metadata fields are written only when
+// non-empty. This is the single wire-shape serializer for mirroring a binding onto a namespaced object's
+// top-level status.data — shared by the domain data-leaf mirror (genericbinder.mirrorDataToLeaf) and the
+// extended-VolumeSnapshot import mirror (volumesnapshotimport), so the two stay byte-identical for d8.
+func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding) map[string]interface{} {
+	source := map[string]interface{}{
+		"apiVersion": d.Source.APIVersion,
+		"kind":       d.Source.Kind,
+		"name":       d.Source.Name,
+	}
+	if d.Source.Namespace != "" {
+		source["namespace"] = d.Source.Namespace
+	}
+	if d.Source.UID != "" {
+		source["uid"] = string(d.Source.UID)
+	}
+	artifact := map[string]interface{}{
+		"apiVersion": d.Artifact.APIVersion,
+		"kind":       d.Artifact.Kind,
+		"name":       d.Artifact.Name,
+	}
+	if d.Artifact.UID != "" {
+		artifact["uid"] = string(d.Artifact.UID)
+	}
+	out := map[string]interface{}{
+		"source":   source,
+		"artifact": artifact,
+	}
+	if d.VolumeMode != "" {
+		out["volumeMode"] = d.VolumeMode
+	}
+	if d.FsType != "" {
+		out["fsType"] = d.FsType
+	}
+	if len(d.AccessModes) > 0 {
+		am := make([]interface{}, len(d.AccessModes))
+		for i, m := range d.AccessModes {
+			am[i] = m
+		}
+		out["accessModes"] = am
+	}
+	if d.StorageClassName != "" {
+		out["storageClassName"] = d.StorageClassName
+	}
+	if d.Size != "" {
+		out["size"] = d.Size
+	}
+	return out
+}
+
 // volumeSnapshotContentRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot /
 // VolumeCaptureRequest is deleted (durable-artifact contract, ADR 2026-06-09 / spec §3.9.6, §3.9.11).
 const volumeSnapshotContentRetainPolicy = "Retain"
