@@ -37,17 +37,17 @@ DemoVirtualDisk disk-standalone                                          PVC dem
 
 | PVC | Где живёт | Data-путь | Где артефакт (VSC) | Манифест PVC |
 |---|---|---|---|---|
-| `demo-pvc` | standalone/orphan прямо в namespace | root создаёт **CSI VolumeSnapshot** как visibility-leaf (`nss-vs-*` в `Snapshot.status.childrenSnapshotRefs[]`); VCR **не** создаётся | `dataRefs[]` **root** SnapshotContent | в **root** MCP |
-| `demo-pvc-disk` | вложена в `DemoVirtualDisk/disk-vm` (`spec.persistentVolumeClaimName`) | доменный диск создаёт **VolumeCaptureRequest** (как любой доменный узел), затем handoff VSC | `dataRefs[]` **disk-vm** SnapshotContent | в **disk-vm** MCP |
+| `demo-pvc` | standalone/orphan прямо в namespace | root создаёт **CSI VolumeSnapshot** как visibility-leaf (`nss-vs-*` в `Snapshot.status.childrenSnapshotRefs[]`); VCR **не** создаётся | `status.data` **root** SnapshotContent | в **root** MCP |
+| `demo-pvc-disk` | вложена в `DemoVirtualDisk/disk-vm` (`spec.persistentVolumeClaimName`) | доменный диск создаёт **VolumeCaptureRequest** (как любой доменный узел), затем handoff VSC | `status.data` **disk-vm** SnapshotContent | в **disk-vm** MCP |
 
-Инвариант: вложенная `demo-pvc-disk` является subtree-covered (через `dataRefs[]`/in-flight VCR
+Инвариант: вложенная `demo-pvc-disk` является subtree-covered (через `status.data`/in-flight VCR
 у disk-vm content), поэтому root **не** считает её сиротой и **не** создаёт для неё VS. Сам объект
 `VolumeSnapshot` (nss-vs-*) — это только data-leg сироты, он **не** попадает в ManifestCheckpoint.
 
 | Сущность | Роль |
 |---|---|
 | **Snapshot** (ns) | заявка на снимок узла; после готовности ссылается на content |
-| **SnapshotContent** (cluster) | долговечный носитель узла: `manifestCheckpointName`, `dataRefs[]`, `childrenSnapshotContentRefs[]` |
+| **SnapshotContent** (cluster) | долговечный носитель узла: `manifestCheckpointName`, `status.data`, `childrenSnapshotContentRefs[]` |
 | **ManifestCaptureRequest / ManifestCheckpoint / Chunk** | снапшот **манифестов** (payload в chunk, get-by-name) |
 | **VolumeCaptureRequest / VolumeSnapshotContent** | снапшот **данных** тома |
 | **ObjectKeeper** | держит content после удаления Snapshot; по TTL → каскадный GC |
@@ -68,8 +68,8 @@ Volumes восстанавливаются **только** так (без `PVC 
 без временных `VolumeSnapshot`):
 
 ```
-SnapshotContent.status.dataRefs[]  →  artifact = VolumeSnapshotContent
-  →  VolumeRestoreRequest (sourceRef.kind=VolumeSnapshotContent)
+SnapshotContent.status.data  →  artifact = VolumeSnapshotContent
+  →  VolumeRestoreRequest (sourceRef.kind=VolumeSnapshotContent, pvcTemplate)
   →  external-provisioner executor  →  CSI CreateVolume (snapshotHandle)
   →  PV  →  PVC (spec.volumeName)  →  storage-foundation видит PVC Bound  →  VRR Ready=True
 ```

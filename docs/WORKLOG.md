@@ -275,3 +275,65 @@ Chronological log of notable refactors. Newest wave at the bottom.
   types + hand-written deepcopy, both `./client` and `vendor` copies) and the hand-maintained VS CRD
   (`snapshot.storage.k8s.io_volumesnapshots.yaml` + doc-ru, both `v1`/`v1beta1`) and patch README. ss build/vet/unit
   green; patch length-consistency verified via `git apply --numstat`.
+
+## Wave 6 — DataImport / VolumeRestoreRequest honest spec (mode + Template/Ref)
+
+Spec redesign of the two service resources onto the suffix convention: `...Template` = an object we
+**create** (does not exist yet), `...Ref` = a reference to an **existing** object. The overloaded
+`targetRef` (which conflated create vs. reference) is removed from both `DataImport` and `VRR`.
+`DataExport.spec.targetRef` is untouched (it is an honest Ref to an existing source volume).
+
+- **Refactor** (w6-vrr-api, storage-foundation) `VolumeRestoreRequest`: dropped `spec.targetRef` + root
+  `storageClassName`/`volumeMode`/`accessModes` in favor of `spec.pvcTemplate` (PVC name in
+  `pvcTemplate.metadata.name`); `spec.fsType` stays at the root (restore execution parameter read by the
+  external-provisioner, not a PVC field); `status.targetRef`→`status.pvcRef` (with namespace + uid). Added
+  `uid` to the shared `ObjectReference`. CRD + doc-ru + CEL + deepcopy regenerated with controller-gen
+  v0.18.0 (the repo's actual version; v0.14.0 corrupted inline enums into `$ref`). VRR controller moved to
+  `pvcTemplate`/`pvcRef`. (committed `b522440`)
+- **Refactor** (w6-ss-reverse-lookup) `common/dataimport_lookup.go` `FindDataImportForLeaf` now matches a
+  `DataImport` to a snapshot leaf by `spec.snapshotRef` (`apiVersion`→group, `kind`, `name`) instead of the
+  old `spec.targetRef`; version-skew diagnostics reworded to `spec.snapshotRef`. Tests build a
+  `ProduceArtifact` DataImport (`mode`+`snapshotRef`); a legacy-`targetRef` fixture is now a negative case.
+- **Refactor** (w6-vrr-ss) `domain-controller` `demo/virtualdisk_restore.go` `buildDemoDiskVRR` now emits
+  `sourceRef` + `pvcTemplate` (name + spec storageClassName/volumeMode/accessModes), `fsType` at root.
+- **Bugfix** (w6-vrr-ss, storage-foundation — found by w6-verify grep) `data-manager-controller`
+  `data-export/snapshot_resolver.go` `ensureVolumeRestoreRequest` was still building the old
+  `spec.targetRef` VRR; moved to `sourceRef` + `pvcTemplate` (fsType at root). Test asserts
+  `pvcTemplate.metadata.name`/`spec.volumeMode` and absence of `spec.targetRef`.
+- **Update** (w6-e2e) e2e fixtures: `createDataImport(apiVersion)` → `mode: ProduceArtifact` +
+  `scratchVolumeTemplate` + `snapshotRef` (apiVersion corrected to `storage-foundation.deckhouse.io/v1alpha1`);
+  `createVolumeRestoreRequest` → `pvcTemplate` (apiVersion corrected from the wrong `state-snapshotter…` to
+  `storage-foundation…`); `diagnostics_test.go` reads `spec.snapshotRef`; demo YAML
+  `04-volumerestorerequest.template.yaml` → `sourceRef`+`pvcTemplate`.
+- **Update** (w6-docs, cross-repo) d8-cli `internal/data/dataimport/README.md` (`mode: PopulateVolume` +
+  `pvcTemplate`) and `docs/CHEATSHEET_E2E.md` (`mode: ProduceArtifact` + `snapshotRef` +
+  `scratchVolumeTemplate`); demo runbook + notes updated (`dataRefs[]`→ singular `status.data`, working
+  jsonpath `.status.data.artifact.name`, VRR `sourceRef`+`pvcTemplate`). Historical design/spec docs left
+  intact.
+- **Update** (w6-d8-snapshot, d8-cli) `snapimport/volume.go` `EnsureDataImport` → `mode: ProduceArtifact` +
+  `snapshotRef` + `scratchVolumeTemplate`; `leafTargetRef`→`leafSnapshotRef` (returns apiVersion+kind);
+  `dataImportCompleted` reads `status.data.artifact` (was `status.dataArtifactRef`).
+- **Update** (w6-d8-standalone, d8-cli) typed `DataImport` API + `util` → top-level `Mode`
+  (`ModePopulateVolume`) + `PvcTemplate` (removed `TargetRef`/`DataImportTargetRefSpec`).
+- **Note** (w6-d8-vrr) N/A: d8-cli neither creates nor reads `VolumeRestoreRequest`; VRR is produced only by
+  the domain-controller (state-snapshotter) and the data-export controller (storage-foundation).
+- **Update** (w6-vrr executor, storage-foundation, blind per user request) Rewrote the csi-external-provisioner
+  `002-vrr-executor.patch` to the wave6 VRR schema: `vrr_handler.go` reads `spec.pvcTemplate`
+  (name/storageClassName/volumeMode/accessModes) + root `fsType`, target namespace = the VRR's own namespace,
+  with SF→corev1 mirror-type converters (`convertAccessModes`/`vrrVolumeMode`/`vrrStorageClassName`/
+  `vrrTargetPVCName`/`vrrTargetNamespace`); test rewritten to `pvcTemplate`. New-file hunk headers recomputed
+  (821→862, 1073→1084); `git apply --numstat` clean (internal consistency OK). NOT locally verifiable (no
+  compile path): the `go.mod` pin `b97b1e1` is the pre-wave6 flat schema and is left as-is; the patch README
+  carries a BLOCKER — before building, publish the wave6 api, regenerate the fork branch `d8-63742164-vrr`, and
+  bump the pin.
+- **Note** (w6-di-controller) `volumeRef`+`force` overwrite path is a fail-closed stub (net-new populator
+  logic, follow-up); `virtualDiskTemplate` deferred per ADR.
+
+### Verification (w6-verify)
+
+- Grep `targetRef`/`TargetRef` in active DataImport/VRR code across storage-foundation + state-snapshotter +
+  d8-cli: the only remaining matches are the intentional `DataExport.spec.targetRef` (unchanged this wave)
+  and the `SnapshotDataArtifactRef` SnapshotContent type (unrelated). No stale `status.dataArtifactRef`.
+- Build + unit tests green: storage-foundation `data-manager-controller` (`data-export` + `data-import`);
+  d8-cli `snapimport` + `data/dataimport` (go vet + test, gpgme sidestepped via targeted packages).
+- gofmt clean on all changed Go files.

@@ -149,7 +149,7 @@ func createImportVMSnapshot(ctx context.Context, ns, name string, ownerRefs []me
 
 // createImportDiskSnapshot creates an import-mode DemoVirtualDiskSnapshot. Import is signalled by the
 // enum marker spec.mode: Import — no sourceRef (the live disk is absent on import) and no DataImport name
-// on the leaf: the binder finds the DataImport by reverse-lookup on spec.targetRef.
+// on the leaf: the binder finds the DataImport by reverse-lookup on spec.snapshotRef.
 func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
 	meta := map[string]interface{}{
 		"name":      name,
@@ -198,22 +198,26 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name string, ownerRefs 
 	return nil
 }
 
-func createDataImport(ctx context.Context, ns, name, group, kind, leafName, storageClassName, size, volumeMode string) error {
-	spec := map[string]interface{}{
-		"ttl":              bkDataImportTTL,
+func createDataImport(ctx context.Context, ns, name, apiVersion, kind, leafName, storageClassName, size, volumeMode string) error {
+	scratchVolumeTemplate := map[string]interface{}{
 		"storageClassName": storageClassName,
 		"size":             size,
-		"targetRef": map[string]interface{}{
-			"group": group,
-			"kind":  kind,
-			"name":  leafName,
-		},
 	}
 	if volumeMode != "" {
-		spec["volumeMode"] = volumeMode
+		scratchVolumeTemplate["volumeMode"] = volumeMode
+	}
+	spec := map[string]interface{}{
+		"ttl":  bkDataImportTTL,
+		"mode": "ProduceArtifact",
+		"snapshotRef": map[string]interface{}{
+			"apiVersion": apiVersion,
+			"kind":       kind,
+			"name":       leafName,
+		},
+		"scratchVolumeTemplate": scratchVolumeTemplate,
 	}
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
 		"metadata": map[string]interface{}{
 			"name":      name,
@@ -543,7 +547,7 @@ func materializeImportNode(ctx context.Context, ns string, node *importNode, par
 		if perr != nil {
 			return perr
 		}
-		if err := createDataImport(ctx, ns, node.name, node.group, node.kind, node.name, scName, scSize, scMode); err != nil {
+		if err := createDataImport(ctx, ns, node.name, node.apiVersion, node.kind, node.name, scName, scSize, scMode); err != nil {
 			return err
 		}
 	}

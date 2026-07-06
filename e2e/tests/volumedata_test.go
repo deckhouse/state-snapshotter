@@ -324,7 +324,7 @@ func createVolumeRestoreRequest(ctx context.Context, restoreNS, targetPVC, vsc, 
 		volumeMode = "Filesystem"
 	}
 	vrr := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
 		"kind":       "VolumeRestoreRequest",
 		"metadata": map[string]interface{}{
 			"name":      "restore-" + targetPVC,
@@ -335,14 +335,17 @@ func createVolumeRestoreRequest(ctx context.Context, restoreNS, targetPVC, vsc, 
 				"kind": "VolumeSnapshotContent",
 				"name": vsc,
 			},
-			// targetRef carries only kind+name: restore is never cross-namespace, so the foundation VRR
-			// controller derives the target namespace from metadata.namespace (set to restoreNS above).
-			"targetRef": map[string]interface{}{
-				"kind": "PersistentVolumeClaim",
-				"name": targetPVC,
+			// pvcTemplate describes the restore target PVC; its namespace is implicit = the VRR
+			// namespace (restore is never cross-namespace), so metadata.namespace (restoreNS) applies.
+			"pvcTemplate": map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"name": targetPVC,
+				},
+				"spec": map[string]interface{}{
+					"storageClassName": sc,
+					"volumeMode":       volumeMode,
+				},
 			},
-			"storageClassName": sc,
-			"volumeMode":       volumeMode,
 		},
 	}}
 	_, err := suiteDyn.Resource(volumeRestoreRequestGVR).Namespace(restoreNS).Create(ctx, vrr, metav1.CreateOptions{})

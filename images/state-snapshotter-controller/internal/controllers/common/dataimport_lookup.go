@@ -33,12 +33,13 @@ import (
 var dataImportListGVK = schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImportList"}
 
 // FindDataImportForLeaf reverse-looks-up the DataImport that materializes the data leg for an import-mode
-// snapshot leaf. The leaf↔DataImport link is single-directional: only DataImport.spec.targetRef points at
-// the leaf (group/kind/name; namespace implicit = leaf namespace), so the binder lists DataImports in the
-// leaf namespace and matches targetRef against the leaf identity. Matching is by GroupKind — the leaf's own
-// GVK carries its group and kind, so no RESTMapping is needed. It is the single source of the
-// list+match+fail-closed semantics shared by the generic binder (domain data leaves) and the VolumeSnapshot
-// import binder (F2).
+// snapshot leaf. The leaf↔DataImport link is single-directional: only a ProduceArtifact DataImport's
+// spec.snapshotRef points at the leaf (apiVersion/kind/name; namespace implicit = leaf namespace), so the
+// binder lists DataImports in the leaf namespace and matches snapshotRef against the leaf identity. Matching
+// is by GroupKind — the leaf's own GVK carries its group and kind, and snapshotRef.apiVersion carries the
+// referenced group/version, so no RESTMapping is needed. PopulateVolume DataImports carry no snapshotRef and
+// never match. It is the single source of the list+match+fail-closed semantics shared by the generic binder
+// (domain data leaves) and the VolumeSnapshot import binder (F2).
 //
 // Outcomes:
 //   - di != nil: exactly one DataImport targets the leaf;
@@ -52,7 +53,7 @@ func FindDataImportForLeaf(ctx context.Context, c client.Client, leaf *unstructu
 	leafKind := gvk.Kind
 	leafName := leaf.GetName()
 
-	// Defensive: a leaf with no Kind would match any DataImport whose targetRef.kind is absent (all-empty
+	// Defensive: a leaf with no Kind would match any DataImport whose snapshotRef.kind is absent (all-empty
 	// equality, fail-open). Production callers always set the leaf GVK, so this is unreachable, but guard
 	// it explicitly so the invariant cannot regress silently.
 	if leafKind == "" {
@@ -69,9 +70,12 @@ func FindDataImportForLeaf(ctx context.Context, c client.Client, leaf *unstructu
 	count := 0
 	for i := range list.Items {
 		item := &list.Items[i]
-		g, _, _ := unstructured.NestedString(item.Object, "spec", "targetRef", "group")
-		k, _, _ := unstructured.NestedString(item.Object, "spec", "targetRef", "kind")
-		n, _, _ := unstructured.NestedString(item.Object, "spec", "targetRef", "name")
+		apiVersion, _, _ := unstructured.NestedString(item.Object, "spec", "snapshotRef", "apiVersion")
+		k, _, _ := unstructured.NestedString(item.Object, "spec", "snapshotRef", "kind")
+		n, _, _ := unstructured.NestedString(item.Object, "spec", "snapshotRef", "name")
+		// snapshotRef.apiVersion is "group/version" (or "version" for the core group); the leaf identity is
+		// keyed by group only, so parse the group out and ignore the version.
+		g := schema.FromAPIVersionAndKind(apiVersion, k).Group
 		if g == leafGroup && k == leafKind && n == leafName {
 			count++
 			match = item
@@ -81,8 +85,8 @@ func FindDataImportForLeaf(ctx context.Context, c client.Client, leaf *unstructu
 	case 0:
 		// Help diagnose a producer/consumer version skew: if there are candidate DataImports in the
 		// namespace but none matched by GroupKind, the producer may still be writing the legacy
-		// spec.targetRef.resource instead of .kind. A leaf with zero candidates is the normal
-		// not-yet-created (pending) case and stays quiet.
+		// spec.targetRef instead of the ProduceArtifact spec.snapshotRef. A leaf with zero candidates is
+		// the normal not-yet-created (pending) case and stays quiet.
 		if len(list.Items) > 0 {
 			log.FromContext(ctx).V(1).Info("no DataImport matched leaf by GroupKind",
 				"leafGroup", leafGroup, "leafKind", leafKind, "leafName", leafName,

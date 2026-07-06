@@ -90,7 +90,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	// does NO capture planning (no source-disk lookup, no MCR/VCR) — the live DemoVirtualDisk may be
 	// absent on import. The common controller materializes the backing SnapshotContent from the uploaded
 	// manifests (reconstructed ManifestCheckpoint) and the data leg from the matching DataImport
-	// (reverse-lookup by targetRef). Domain planning is trivially complete for an import leaf.
+	// (reverse-lookup by spec.snapshotRef). Domain planning is trivially complete for an import leaf.
 	if s.IsImportMode() {
 		return ctrl.Result{}, nil
 	}

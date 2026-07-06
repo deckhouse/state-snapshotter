@@ -40,8 +40,31 @@ func lookupScheme() *runtime.Scheme {
 	return scheme
 }
 
-// dataImportTargeting builds a DataImport whose spec.targetRef points at a leaf by GroupKind+name.
+// dataImportTargeting builds a ProduceArtifact DataImport whose spec.snapshotRef points at a leaf by
+// GroupKind+name (apiVersion carries the group as "group/version").
 func dataImportTargeting(name, namespace, group, kind, targetName string) *unstructured.Unstructured {
+	apiVersion := group + "/v1"
+	if group == "" {
+		apiVersion = "v1"
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
+		"kind":       "DataImport",
+		"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
+		"spec": map[string]interface{}{
+			"mode": "ProduceArtifact",
+			"snapshotRef": map[string]interface{}{
+				"apiVersion": apiVersion,
+				"kind":       kind,
+				"name":       targetName,
+			},
+		},
+	}}
+}
+
+// dataImportLegacyTargetRef builds a DataImport in the superseded shape: spec.targetRef is set (the old
+// polymorphic target) and spec.snapshotRef is absent. The snapshotRef-based matcher must ignore it.
+func dataImportLegacyTargetRef(name, namespace, group, kind, targetName string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
@@ -51,23 +74,6 @@ func dataImportTargeting(name, namespace, group, kind, targetName string) *unstr
 				"group": group,
 				"kind":  kind,
 				"name":  targetName,
-			},
-		},
-	}}
-}
-
-// dataImportLegacyResourceTargeting builds a DataImport in the pre-rename shape: spec.targetRef.resource
-// (plural) is set and spec.targetRef.kind is absent. The kind-based matcher must ignore it.
-func dataImportLegacyResourceTargeting(name, namespace, group, resource, targetName string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
-		"kind":       "DataImport",
-		"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
-		"spec": map[string]interface{}{
-			"targetRef": map[string]interface{}{
-				"group":    group,
-				"resource": resource,
-				"name":     targetName,
 			},
 		},
 	}}
@@ -115,11 +121,11 @@ func TestFindDataImportForLeaf(t *testing.T) {
 			},
 		},
 		{
-			name: "legacy resource-only targetRef is ignored (field rename guard)",
+			name: "legacy targetRef is ignored (spec-redesign guard)",
 			dataImports: []*unstructured.Unstructured{
-				// Pre-rename shape: only spec.targetRef.resource (plural) set, no kind. Under the old
-				// resource-based matcher this would have matched the leaf; the kind matcher must skip it.
-				dataImportLegacyResourceTargeting("di-legacy", ns, leafGroup, "virtualdisksnapshots", leafName),
+				// Superseded shape: spec.targetRef set (group+kind+name matching the leaf), no snapshotRef.
+				// Under the old matcher this would have matched; the snapshotRef matcher must skip it.
+				dataImportLegacyTargetRef("di-legacy", ns, leafGroup, leafKind, leafName),
 			},
 		},
 		{
@@ -189,8 +195,8 @@ func TestFindDataImportForLeaf(t *testing.T) {
 }
 
 // TestFindDataImportForLeaf_NamespaceScoped verifies the reverse-lookup only considers DataImports in the
-// leaf's own namespace (targetRef namespace is implicit = leaf namespace), so a same-identity DataImport in
-// another namespace must not match.
+// leaf's own namespace (snapshotRef namespace is implicit = leaf namespace), so a same-identity DataImport
+// in another namespace must not match.
 func TestFindDataImportForLeaf_NamespaceScoped(t *testing.T) {
 	leaf := leafObject("snapshot.storage.k8s.io", "v1", "VolumeSnapshot", "snap", "ns-a")
 	di := dataImportTargeting("di-other-ns", "ns-b", "snapshot.storage.k8s.io", "VolumeSnapshot", "snap")

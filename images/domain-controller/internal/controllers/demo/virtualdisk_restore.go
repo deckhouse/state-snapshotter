@@ -209,30 +209,38 @@ func demoSnapshotContentRefMismatch(ref *storagev1alpha1.SnapshotSubjectRef, sna
 
 func buildDemoDiskVRR(disk *demov1alpha1.DemoVirtualDisk, resolution demoRestoreResolution) *unstructured.Unstructured {
 	name := demoDiskVRRName(disk.UID)
-	spec := map[string]interface{}{
-		"sourceRef": map[string]interface{}{
-			"kind": vscKind,
-			"name": resolution.VSCName,
-		},
-		// targetRef carries only kind+name: restore is never cross-namespace, so the foundation VRR
-		// controller derives the target namespace from metadata.namespace (set to disk.Namespace below).
-		// Only kind=PersistentVolumeClaim is supported for now.
-		"targetRef": map[string]interface{}{
-			"kind": pvcKind,
-			"name": disk.Spec.PersistentVolumeClaimName,
-		},
+	// pvcTemplate is the spec of the PVC the restore creates and binds; it absorbs the former root
+	// storageClassName/volumeMode/accessModes. The PVC name lives in pvcTemplate.metadata.name; the
+	// namespace is implicit = the VRR namespace (restore is never cross-namespace), set below via
+	// metadata.namespace = disk.Namespace. Size is intentionally omitted — the foundation restore
+	// executor derives it from the source snapshot's restoreSize.
+	pvcSpec := map[string]interface{}{
 		"storageClassName": resolution.StorageClassName,
 		"volumeMode":       string(resolution.VolumeMode),
-	}
-	if resolution.FsType != "" {
-		spec["fsType"] = resolution.FsType
 	}
 	if len(resolution.AccessModes) > 0 {
 		modes := make([]interface{}, 0, len(resolution.AccessModes))
 		for _, mode := range resolution.AccessModes {
 			modes = append(modes, string(mode))
 		}
-		spec["accessModes"] = modes
+		pvcSpec["accessModes"] = modes
+	}
+	spec := map[string]interface{}{
+		"sourceRef": map[string]interface{}{
+			"kind": vscKind,
+			"name": resolution.VSCName,
+		},
+		"pvcTemplate": map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"name": disk.Spec.PersistentVolumeClaimName,
+			},
+			"spec": pvcSpec,
+		},
+	}
+	// fsType is a restore execution parameter read by the external-provisioner, not a PVC field, so it
+	// stays at spec root (optional, ignored for Block volumes).
+	if resolution.FsType != "" {
+		spec["fsType"] = resolution.FsType
 	}
 
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{

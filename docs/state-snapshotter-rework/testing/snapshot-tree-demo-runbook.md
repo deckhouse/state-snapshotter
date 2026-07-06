@@ -9,9 +9,9 @@ restore, opt. каскадный GC по TTL. Детали/контракт/вн
 
 - **дерево**: root `Snapshot` → дочерние `DemoVirtualMachineSnapshot`/`DemoVirtualDiskSnapshot`;
 - **manifest leg**: `ManifestCaptureRequest` → `ManifestCheckpoint` → chunk;
-- **data leg**: `VolumeCaptureRequest` → `VolumeSnapshotContent` (`dataRefs[]`);
+- **data leg**: `VolumeCaptureRequest` → `VolumeSnapshotContent` (`status.data`);
 - каждый узел: `Snapshot` → `SnapshotContent` → `ObjectKeeper` (follow + TTL);
-- restore тома идёт через VRR: `dataRefs[] → VSC → VRR → PV/PVC`, `PVC dataSource` **не используется**.
+- restore тома идёт через VRR: `status.data → VSC → VRR → PV/PVC`, `PVC dataSource` **не используется**.
 
 Части 5–7 **опциональны**; часть A (разделы 1–4) самодостаточна.
 
@@ -80,7 +80,7 @@ kubectl -n "$DEMO_NS" get pod -l demo.state-snapshotter.deckhouse.io/vm=vm-1
 
 Restore из снимка (после §3, когда есть `DemoVirtualDiskSnapshot`): создайте новый
 `DemoVirtualDisk` с `spec.dataSource.kind=DemoVirtualDiskSnapshot` (тот же namespace).
-Domain-controller сам прочитает `boundSnapshotContentName → SnapshotContent.status.dataRef`
+Domain-controller сам прочитает `boundSnapshotContentName → SnapshotContent.status.data`
 и создаст `VolumeRestoreRequest`; PVC усыновляется диском, VRR удаляется после adoption.
 Пример:
 
@@ -174,12 +174,12 @@ kubectl get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io "${MC
     -o jsonpath='{range .items[*]}{.status.boundSnapshotContentName}{"\n"}{end}' 2>/dev/null
 } | sort -u | grep -v '^$' > /tmp/tree-contents.txt
 
-# первый VSC из dataRefs любого content дерева
+# первый VSC из status.data любого content дерева
 # (while read, чтобы работало и в bash, и в zsh; done < file — чтобы VSC_NAME сохранился)
 export VSC_NAME=""
 while IFS= read -r c; do
   [ -n "$c" ] || continue
-  v=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$c" -o jsonpath='{.status.dataRefs[0].artifact.name}' 2>/dev/null)
+  v=$(kubectl get snapshotcontents.state-snapshotter.deckhouse.io "$c" -o jsonpath='{.status.data.artifact.name}' 2>/dev/null)
   if [ -n "$v" ] && [ -z "$VSC_NAME" ]; then export VSC_NAME="$v"; echo "VSC on $c: $VSC_NAME"; break; fi
 done < /tmp/tree-contents.txt
 [ -n "$VSC_NAME" ] || echo "WARN: VSC не найден — data leg не готов или PVC не Bound"
@@ -330,7 +330,7 @@ kubectl delete namespace "$DEMO_NS" snapshot-demo-restored --ignore-not-found --
 |---|---|---|
 | root `Ready=False` + `SubtreeManifestCapturePending`, MCR нет | webhook SA не читает demo inventory | redeploy RBAC модуля; см. §1 |
 | `childrenSnapshotRefs` пусто | CSD не Ready / не AccessGranted | проверить §2; логи controller |
-| `dataRefs` пусто, VCR `PVC … is not bound` | PVC не Bound (WFFC без Pod) | дождаться Bound до Snapshot |
+| `status.data` пусто, VCR `PVC … is not bound` | PVC не Bound (WFFC без Pod) | дождаться Bound до Snapshot |
 | restore PVC `Pending`, `VolumeMismatch` | PV без `storageClassName` (старый образ) | обход `patch pv` (§5/notes); пересобрать executor |
 | `patch objectkeepers` forbidden | нет прав | дождаться естественного `1m` TTL |
 
@@ -363,7 +363,7 @@ cd /path/to/state-snapshotter
 | `02-tree-ready` | форма дерева (root→VM→disk-vm; standalone disk как root child; covered disk не дублируется; ConfigMap в MCP, не child); happy-path `ManifestsReady/VolumeReady/ChildrenReady/Ready=True`; baseline mirror root `Snapshot.Ready == content.Ready` |
 | `03-priority-inverted` | инверсия priority (Disk<VM) в чистом namespace: форма меняется **или** fail-closed с явной причиной; CSD восстанавливается в VM-first. **Авто-skip**, если на кластере есть чужие demo-снапшоты/CSD вне этого прогона (глобальный CSD-priority flip их бы задел) |
 | `04-domainready-barrier` | **hard**: каждый domain snapshot `PlanningReady=True` и `observedGeneration == generation`; ни один `SnapshotContent` не несёт `PlanningReady` (нет self-publication common-слоя). **soft**: timeline (content не биндится до current-gen `PlanningReady`) |
-| `05-ownership-handoff` | MCP/VSC `ownerRef -> SnapshotContent` после handoff (steady-state); execution `ObjectKeeper ret-mcr-*`; `dataRefs` после handoff. **Limitation:** окно «born under execution OK» в live может быть пропущено — birth-семантика покрыта integration-тестами (записано в `notes.txt`) |
+| `05-ownership-handoff` | MCP/VSC `ownerRef -> SnapshotContent` после handoff (steady-state); execution `ObjectKeeper ret-mcr-*`; `status.data` после handoff. **Limitation:** окно «born under execution OK» в live может быть пропущено — birth-семантика покрыта integration-тестами (записано в `notes.txt`) |
 | `06-mcp-failure` | leaf MCP `Ready=False` → leaf `ManifestsReady=False/ManifestCheckpointFailed` → parent/root `ChildrenReady=False/ChildrenFailed` → root `Snapshot Ready=False` (verbatim mirror); sibling `Ready=True` |
 | `07-mcp-recovery` | возврат MCP `Ready=True` → дерево/root recover `Ready=True`; mirror совпадает |
 | `08-vsc-pending` | VSC `readyToUse=false` → `VolumeReady=False/DataCapturePending` (non-terminal) → root mirror |
