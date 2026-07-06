@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -29,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
@@ -230,12 +228,12 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, err
 	}
-	_ = ns
 
 	// CSI-like static (pre-provisioning) bind: when spec.source.snapshotContentName is set the
 	// Snapshot binds to existing pre-provisioned content (created by the import path) instead of
-	// running dynamic capture. This MUST be handled before the deterministic expectedName logic below,
-	// which would otherwise reset the bind (the static bind points at the import-chosen content name).
+	// running dynamic capture. This MUST be handled before the capture path below. The root reconciler
+	// owns the root static-bind (the generic binder skips root static-bind — see
+	// genericbinder/static_bind.go reconcileGenericStaticBind root-skip).
 	// The root ObjectKeeper ensured above is intentionally kept for static-bind Snapshots too: it
 	// TTL-cleans the Snapshot record itself (its cascade to retained content is simply a no-op here,
 	// since the pre-provisioned content is owned via the import path, not re-owned on this path).
@@ -252,79 +250,13 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.reconcileImport(ctx, nsSnap, rootOK)
 	}
 
-	expectedName := snapshotContentName(nsSnap)
-
-	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
-		nsSnap.Status.BoundSnapshotContentName = ""
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	content := &storagev1alpha1.SnapshotContent{}
-	err = r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content)
-	if errors.IsNotFound(err) {
-		if nsSnap.Status.BoundSnapshotContentName != "" {
-			nsSnap.Status.BoundSnapshotContentName = ""
-			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
-			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{Requeue: true}, nil
-		}
-
-		om := snapshotContentObjectMeta(nsSnap)
-		om.OwnerReferences = []metav1.OwnerReference{controllercommon.RootObjectKeeperOwnerReference(rootOK)}
-		newContent := &storagev1alpha1.SnapshotContent{
-			ObjectMeta: om,
-			Spec:       desiredSnapshotContentSpec(nsSnap),
-		}
-		if err := r.Client.Create(ctx, newContent); err != nil {
-			if errors.IsAlreadyExists(err) {
-				return r.finishReconcileWithExistingContent(ctx, nsSnap, expectedName)
-			}
-			return ctrl.Result{}, err
-		}
-		nsSnap.Status.BoundSnapshotContentName = expectedName
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if nsSnap.Status.BoundSnapshotContentName == "" {
-		nsSnap.Status.BoundSnapshotContentName = expectedName
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
-	if err != nil {
-		if patchErr := r.patchSnapshotReadyLocal(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
-		}
-		return ctrl.Result{}, err
-	}
-	if res, block := childGraphCaptureGate(graphChanged, graphReady); block {
-		return res, nil
-	}
-	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.snapshotReader(), nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !graphPublished {
-		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
-	}
-	return r.reconcileCaptureN2a(ctx, nsSnap, content)
+	// wave5 content-free flip: the root no longer creates/binds its own SnapshotContent nor runs the
+	// bespoke parent_graph + reconcileCaptureN2a legs. It drives capture through the in-process snapshotsdk
+	// (children planning + residual/orphan + manifest-exclude legs), while the generic binder — which now
+	// watches the root (unifiedbootstrap.DomainCaptureSnapshotKinds) — creates/binds the root
+	// SnapshotContent, chases its MCR->MCP, and mirrors Ready. See docs/wave5-namespace-domain-design.md
+	// and reconcileNamespaceCapture.
+	return r.reconcileNamespaceCapture(ctx, nsSnap, &ns)
 }
 
 // snapshotChildGraphPollInterval is the polling fallback cadence used while a weight layer is

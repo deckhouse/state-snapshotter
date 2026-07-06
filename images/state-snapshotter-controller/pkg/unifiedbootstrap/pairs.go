@@ -98,13 +98,18 @@ func IsDedicatedSnapshotControllerKind(kind string) bool {
 }
 
 // DomainCaptureSnapshotKinds lists dedicated Snapshot kinds whose domain controller plans capture
-// out-of-band (creates MCR/VCR/children, publishes demo.status, owns PlanningReady) but whose
-// cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController (content-ownership
+// out-of-band (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase) but
+// whose cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController (content-ownership
 // commit 2, D1). They are a strict subset of DedicatedSnapshotControllerKinds: the dedicated planning
 // controller is still activated for them, AND the generic binder additionally watches them (gated by
-// MarkDomainCaptureKind) to create/project/mirror their SnapshotContent. A fully-dedicated kind that
-// also owns its own content (the namespace-root "Snapshot") is NOT in this set.
+// MarkDomainCaptureKind) to create/project/mirror their SnapshotContent.
+//
+// wave5: the namespace-root "Snapshot" is now in this set too ("dogfooding" — the root reconciler drives
+// capture through the same snapshotsdk as external/demo domains and no longer owns its SnapshotContent;
+// the generic binder creates/binds/mirrors the root content, chases its MCR->MCP, and mirrors Ready).
+// See docs/wave5-namespace-domain-design.md.
 var DomainCaptureSnapshotKinds = []string{
+	"Snapshot",
 	"DemoVirtualDiskSnapshot",
 	"DemoVirtualMachineSnapshot",
 }

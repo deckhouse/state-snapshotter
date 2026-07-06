@@ -66,6 +66,16 @@ func (r *GenericSnapshotBinderController) reconcileGenericStaticBind(
 	logger := log.FromContext(ctx)
 	gvk := obj.GetObjectKind().GroupVersionKind()
 
+	// Root static-bind snapshots (the namespace-root "Snapshot") are materialized by their own dedicated
+	// reconciler (snapshot/static_bind.go: reconcileStaticBind), which validates the handshake, binds the
+	// surviving content, and mirrors Ready. The binder now watches the root (wave5 domain-capture flip) but
+	// must NOT double-handle its static-bind path — mirroring the import root-skip in reconcileGenericImport.
+	if snapshot.IsRootSnapshot(obj) {
+		logger.V(1).Info("static-bind snapshot is a root; handled by the namespace Snapshot orchestrator, skipping",
+			"snapshot", obj.GetName(), "gvk", gvk.String())
+		return ctrl.Result{}, nil
+	}
+
 	contentName, _, _ := unstructured.NestedString(obj.Object, "spec", "source", "snapshotContentName")
 	if contentName == "" {
 		// The CRD CEL guarantees StaticBind carries spec.source.snapshotContentName; treat a missing one as
