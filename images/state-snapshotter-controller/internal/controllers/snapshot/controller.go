@@ -176,10 +176,13 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	log.FromContext(ctx).V(1).Info("reconcile Snapshot", "snapshot", req.NamespacedName)
 	// Exit trace: the returned Result governs the requeue cadence of this key (RequeueAfter forgets the
 	// rate limiter and schedules deterministically; Requeue:true / error re-adds rate-limited with growing
-	// backoff). Logging it makes the root-Snapshot reconcile cadence observable without guessing.
+	// backoff). durMs exposes reconcile wall time: a slow pass locks the key and delays servicing of
+	// child-archive / MCP-ready wakes. Logging it makes the root-Snapshot reconcile cadence observable.
+	reconcileStart := time.Now()
 	defer func() {
 		log.FromContext(ctx).V(1).Info("reconcile Snapshot done", "snapshot", req.NamespacedName,
-			"requeue", res.Requeue, "requeueAfterMs", res.RequeueAfter.Milliseconds(), "err", retErr != nil)
+			"requeue", res.Requeue, "requeueAfterMs", res.RequeueAfter.Milliseconds(), "err", retErr != nil,
+			"durMs", time.Since(reconcileStart).Milliseconds())
 	}()
 	nsSnap := &storagev1alpha1.Snapshot{}
 	if err := r.snapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {

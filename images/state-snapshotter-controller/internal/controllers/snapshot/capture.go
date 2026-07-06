@@ -158,14 +158,23 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, content.Name); err != nil {
 		return ctrl.Result{}, err
 	}
+	volStart := time.Now()
 	if err := r.ensureVolumeCaptureLeg(ctx, nsSnap, content); err != nil {
 		return ctrl.Result{}, err
 	}
 	if _, err := r.reconcileVolumeCapturePublish(ctx, nsSnap, content, false); err != nil {
 		return ctrl.Result{}, err
 	}
+	if d := time.Since(volStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "volume-leg", "durMs", d.Milliseconds())
+	}
 
-	if done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content); done {
+	mcpChkStart := time.Now()
+	done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content)
+	if d := time.Since(mcpChkStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "mcp-already-ready-check", "durMs", d.Milliseconds())
+	}
+	if done {
 		return res, err
 	}
 
@@ -202,12 +211,21 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	// hooks/go/040-namespace-capture-rbac hook, so the first list otherwise races RBAC propagation and
 	// hits Forbidden -> NamespaceCaptureIncomplete. A SelfSubjectAccessReview goes through the same
 	// authorizer as the list, so once it allows, the list is guaranteed readable (strictly one list).
-	if allowed, sarErr := r.namespaceCaptureRBACReady(ctx, nsSnap.Namespace); sarErr != nil {
+	sarStart := time.Now()
+	allowed, sarErr := r.namespaceCaptureRBACReady(ctx, nsSnap.Namespace)
+	if d := time.Since(sarStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "rbac-sar", "durMs", d.Milliseconds())
+	}
+	if sarErr != nil {
 		return ctrl.Result{}, sarErr
 	} else if !allowed {
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}
+	planStart := time.Now()
 	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds)
+	if d := time.Since(planStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "namespace-list-manifest-planning", "durMs", d.Milliseconds())
+	}
 	if err != nil {
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
