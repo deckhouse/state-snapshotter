@@ -1012,3 +1012,25 @@ gated-parent toggle; and request dedup when owner and parent resolve to the same
 Acceptance (cluster, SETS=10, pending redeploy): root MCR created ≤1–2s after the last direct-child
 `ManifestsArchived`; root `Ready` wall below the current ~33–38s; no post-Ready storm; child/root content reconcile
 count not increased.
+
+**T-mcr-wake cluster validation (SETS=10, 3 runs, post-deploy):**
+
+| metric (s)                   | run1  | run2  | run3  | median |
+|------------------------------|-------|-------|-------|--------|
+| ROOT ChildrenSnapshotReady   | 14.72 | 16.60 | 16.20 | ~16.2  |
+| **root MCR created**         | 23.29 | 24.37 | 25.75 | ~24.4  |
+| MCP Ready                    | 26.03 | 27.02 | 31.15 | ~27.0  |
+| root content ManifestsReady  | 29.16 | 31.05 | 34.11 | ~31.1  |
+| observe lag (MCP→root)       | 3.13  | 4.03  | 2.96  | ~3.1   |
+| **ROOT Ready**               | 31.57 | 33.46 | 33.93 | ~33.5  |
+
+Result: root MCR creation moved from the previous poll-late ~30–31s (8–9s variable gap after children archived) to a
+prompt ~23–25.75s — it now tracks the child-content archive edge instead of sleeping poll cycles, exactly as intended.
+Median `ROOT Ready` improved ~37s → ~33.5s (the C-2 gap last-child-archived→root-archived stays ~2.4s; observe lag stays
+~3.1s — untouched by this change, as expected). No post-Ready storm; only benign teardown races
+(`namespace … being terminated`) and L9c finalizer conflicts in logs, no throttling, no new error class.
+
+**Residual tail moved (not MCR-wake anymore):** leaf DATA path ends ~14.5s, but per-content `ManifestsReady`/
+`ManifestsArchived` now spreads to ~29–34s (a straggler content). That ~15s content-manifest/archive spread — not the MCR
+wake — is the dominant remaining chunk. Next levers: T-dedup (coalesce duplicate content reconciles) and content-controller
+manifest-leg throughput; L9b (lengthen the 500ms backstop) only after those.
