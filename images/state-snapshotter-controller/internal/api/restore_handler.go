@@ -91,25 +91,31 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 		}
 	})
 
-	// Cluster-scoped snapshotcontents/<name>/manifests-download (no /namespaces/ segment): the import
-	// path's DataImport reads a node's original manifest directly off its SnapshotContent before any
-	// namespaced snapshot CR binds. Only manifests-download (GET, single-node) is exposed here.
+	// Cluster-scoped snapshotcontents/<name>/<subresource> (no /namespaces/ segment):
+	//   - manifests-download (GET, single-node): the import path's DataImport reads a node's original
+	//     manifest directly off its SnapshotContent before any namespaced snapshot CR binds.
+	//   - subtree-manifest-identities (GET, recursive): the exclude-computation endpoint an aggregator's
+	//     SDK calls on each child content to obtain the subtree identity set (fail-closed, §6.3).
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/")
 		path = strings.TrimSuffix(path, "/")
 		parts := strings.Split(path, "/")
 		if len(parts) != 2 {
-			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "expected snapshotcontents/<name>/manifests-download")
+			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "expected snapshotcontents/<name>/<subresource>")
 			return
 		}
 		contentName := parts[0]
 		switch parts[1] {
 		case "manifests-download":
-			if r.Method != http.MethodGet {
-				h.writeKubernetesErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "only GET method is supported")
+			if !h.requireMethod(w, r, http.MethodGet) {
 				return
 			}
 			h.HandleContentManifestsDownload(w, r, contentName)
+		case "subtree-manifest-identities":
+			if !h.requireMethod(w, r, http.MethodGet) {
+				return
+			}
+			h.HandleContentSubtreeManifestIdentities(w, r, contentName)
 		default:
 			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 		}
@@ -281,6 +287,25 @@ func (h *RestoreHandler) HandleContentManifestsDownload(w http.ResponseWriter, r
 	}
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned per-content manifests-download", "content", contentName, "duration", time.Since(start))
+}
+
+// HandleContentSubtreeManifestIdentities returns the fail-closed set of captured object identities across
+// the whole subtree of a cluster-scoped SnapshotContent (own node + descendants), addressed by content
+// name. It backs the exclude-computation SDK method SubtreeManifestIdentities: a partial subtree yields
+// 409 (writeAggregatedError maps the usecase's Conflict status), never a partial list.
+func (h *RestoreHandler) HandleContentSubtreeManifestIdentities(w http.ResponseWriter, r *http.Request, contentName string) {
+	start := time.Now()
+	if h.nsAggregated == nil {
+		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "manifests handler not configured")
+		return
+	}
+	data, err := h.nsAggregated.BuildSubtreeManifestIdentities(r.Context(), contentName)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	h.writeJSONResponse(w, r, data)
+	h.logger.Info("Returned subtree-manifest-identities", "content", contentName, "duration", time.Since(start))
 }
 
 // HandleSnapshotManifestsAndChildrenUpload persists one core Snapshot node's import payload

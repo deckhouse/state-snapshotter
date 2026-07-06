@@ -31,9 +31,8 @@ import (
 //
 // Shape: the root is an aggregator domain — a namespace manifest leg plus children (domain subtrees and
 // orphan VolumeSnapshot leaves), with NO single-PVC data leg of its own (SourceRef is a Namespace, not a
-// PVC; EnsureVolumeCapture is never called for the root). It therefore mirrors the
-// DemoVirtualMachineSnapshot adapter, but is typed (the root is a first-class API type) rather than
-// unstructured.
+// PVC; EnsureVolumeCapture is never called for the root). It therefore mirrors the demo VM-snapshot
+// aggregator adapter, but is typed (the root is a first-class API type) rather than unstructured.
 //
 // Writer discipline (mirrors demo/snapshot_adapter.go): the SDK writes ONLY
 // status.captureState.domainSpecificController (via Get/SetDomainCaptureState), the top-level
