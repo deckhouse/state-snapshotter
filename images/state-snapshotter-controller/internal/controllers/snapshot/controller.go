@@ -322,16 +322,28 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	graphStart := time.Now()
-	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
-	if d := time.Since(graphStart); d > 150*time.Millisecond {
-		log.FromContext(ctx).V(1).Info("reconcile Snapshot: section slow", "section", "child-graph-planning", "durMs", d.Milliseconds())
-	}
-	if err != nil {
-		if patchErr := r.patchSnapshotChildrenSnapshotReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
+	var graphChanged, graphReady bool
+	if childGraphReplanSkippable(nsSnap) {
+		// Fast path: the parent-owned child graph is already fully planned for this generation, so the
+		// O(N) re-plan (dynamic List of every source kind + full child-tree coverage walk) is redundant.
+		// Proceed straight to the manifest/capture leg using the already-published
+		// status.childrenSnapshotRefs. Terminal child failures after readiness still propagate via the
+		// content-tree mirror (INV-COND4) and the capture pending-path bridge; the point-in-time child
+		// set is frozen at ChildrenSnapshotReady=True, so re-detecting sources is unnecessary.
+		graphChanged, graphReady = false, true
+	} else {
+		graphStart := time.Now()
+		changed, ready, planErr := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
+		if d := time.Since(graphStart); d > 150*time.Millisecond {
+			log.FromContext(ctx).V(1).Info("reconcile Snapshot: section slow", "section", "child-graph-planning", "durMs", d.Milliseconds())
 		}
-		return ctrl.Result{}, err
+		if planErr != nil {
+			if patchErr := r.patchSnapshotChildrenSnapshotReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, planErr.Error()); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{}, planErr
+		}
+		graphChanged, graphReady = changed, ready
 	}
 	if res, block := childGraphCaptureGate(graphChanged, graphReady); block {
 		return res, nil
@@ -351,6 +363,26 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 // are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does not
 // stall if a child-kind notification is dropped.
 const snapshotChildGraphPollInterval = 30 * time.Second
+
+// childGraphReplanSkippable reports whether the parent-owned child graph is already fully planned for
+// the current generation, so the O(N) re-plan can be skipped and reconcile can proceed straight to the
+// manifest/capture leg using the already-published status.childrenSnapshotRefs.
+//
+// It requires a *successful* plan, not merely ChildrenSnapshotReady=True: the condition must be True
+// with Reason=Completed (the only reason set by a successful plan via patchSnapshotChildrenRefs) AND
+// current for this generation (ObservedGeneration == metadata.generation). A stale observedGeneration
+// (spec changed) or any non-Completed/True state (pending / GraphPlanningFailed) forces a full re-plan.
+//
+// An empty child graph is a valid success state: a namespace with no snapshottable sources still
+// produces a manifests-only snapshot and reaches ChildrenSnapshotReady=True/Completed with an empty
+// status.childrenSnapshotRefs. Therefore an empty refs slice does NOT block the skip.
+func childGraphReplanSkippable(nsSnap *storagev1alpha1.Snapshot) bool {
+	cond := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshotpkg.ConditionChildrenSnapshotReady)
+	return cond != nil &&
+		cond.Status == metav1.ConditionTrue &&
+		cond.Reason == snapshotpkg.ReasonCompleted &&
+		cond.ObservedGeneration == nsSnap.Generation
+}
 
 // childGraphCaptureGate decides how reconcile proceeds after child-graph planning and reports whether
 // capture must be blocked (block=true means return the result, do not capture):
