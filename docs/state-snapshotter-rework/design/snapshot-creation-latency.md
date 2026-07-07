@@ -18,8 +18,10 @@ Repos: `state-snapshotter` (controller + demo domain-controller) and `storage-fo
 ## 1. Purpose / scope
 
 The investigation went from ~10 hypotheses to **3 confirmed bottlenecks**, several correct-but-secondary
-optimizations, one architecture/correctness cleanup, several rejected hypotheses, and **one** still-open latency
-issue (H3 — repeated root child-graph planning; H1 was disproven as a distinct problem and absorbed into H3).
+optimizations, one architecture/correctness cleanup, several rejected hypotheses, and a child-graph-planning cost
+(H3) that is now **closed** by Commit D.3 (H1 was disproven as a distinct problem and had been absorbed into H3).
+The remaining SETS=10 tail is a **new, narrower question** — the root manifest leg (`ChildrenSnapshotReady` →
+`Ready` ≈10s) — which is a separate investigation, not a child-graph fix.
 
 Sections 4–6 are a **re-application guide**: apply by hand on a fresh `main`; section order is the recommended
 application order. Sections 3, 7, 8 are the **classification** (why each change matters, what was disproven, what
@@ -30,13 +32,16 @@ remains). **Do not claim snapshot scalability is solved** — see section 8.
 Two distinct benchmarks — **do not conflate them**:
 
 - **Parallel same-shape snapshot burst** (N independent trees of the same shape): SET=1 ~3s, TREES=5 ~6s.
-- **Namespace fan-out benchmark** (one root Snapshot over N independent standard sets): **SETS=10 ROOT Ready
-  ~25s server-side (~29–30s client-measured)** — still above target and an open scaling issue.
+- **Namespace fan-out benchmark** (one root Snapshot over N independent standard sets): after Commit D.3,
+  **SETS=10 ROOT Ready ~23–24s client-measured** (3 warm runs: 23.4 / 23.7 / 24.2s), down from ~29–30s. Still
+  above target, but the bottleneck has moved (see below).
 
 CPU is no longer the bottleneck (genericbinder mapper fix; controller mostly idle during fan-out), the
-reverse-watch mapper `List` is gone, the rate limiter is fixed, and polling is largely event-driven. The
-remaining SETS=10 tail is **latency-bound** (per-level dependency chain / requeue cadence / content-side
-maturation), not CPU or `List` cost, and is **not** closed by anything here.
+reverse-watch mapper `List` is gone, the rate limiter is fixed, polling is largely event-driven, and **child-graph
+planning cost is closed** (D.3: per-child `Get`s → one `List`/GVK; worst pass 11.1s → ~0.8–1.1s). The remaining
+SETS=10 tail is **latency-bound** and now concentrated in the **root manifest leg**: after all children are ready
+(`ChildrenSnapshotReady` ~13s) the root Snapshot still takes ~10s to reach `Ready` (`ManifestsArchived`/`Ready`
+~24s). That leg is the **next** open investigation — a new hypothesis, not a child-graph fix.
 
 ## 3. Confirmed bottlenecks (real root causes, measurable effect)
 
@@ -302,13 +307,19 @@ Keep these — they reduce work or are prerequisites — but do not credit them 
 
 ## 8. Remaining open issues (open investigations)
 
-State at SETS=10: **ROOT Ready ~25s server-side (~29–30s client-measured)**. CPU, mapper `List`, the rate
-limiter, and most polling are **no longer** bottlenecks. The remaining tail is **latency-bound** and, per the
-Commit-D audit below, sits in **repeated root child-graph planning** — a single open issue (H3). H1 is no longer
-a distinct hypothesis.
+State at SETS=10 (pre-D.3): **ROOT Ready ~25s server-side (~29–30s client-measured)**. CPU, mapper `List`, the
+rate limiter, and most polling are **no longer** bottlenecks. The remaining tail is **latency-bound** and, per the
+Commit-D audit below, sat in **repeated root child-graph planning** (H3). H1 is not a distinct hypothesis.
+**After D.3 (see below): wall ~23–24s client-measured** and the child-graph-planning cost is effectively closed;
+the residual tail has moved to the **root manifest leg** (ChildrenSnapshotReady ~13s → Ready ~24s).
 
-- **H3 — repeated root child-graph planning is the remaining bottleneck (PRIMARY open issue). Internal cost
-  distribution is still unresolved.** `reconcileParentOwnedChildGraph` runs **only** on the root unified
+- **H3 — repeated root child-graph planning (CLOSED by Commit D.3; kept for history).** Was the primary open
+  bottleneck; the per-pass cost was attributed by the Commit-D instrumentation and then removed by D.3 (per-child
+  `Get`s → one `List`/GVK): worst pass 11.1s → ~0.8–1.1s, the three `Get`-heavy sections dropped ~7×, wall
+  ~29–30s → ~23–24s. The mechanism below remains true — the root is still re-reconciled many times and still
+  re-plans each pending pass — but each pass is now cheap, so neither the per-pass cost nor the duplicate passes
+  are worth optimizing further (see "no longer recommended" below). Original diagnosis, for the record:
+  `reconcileParentOwnedChildGraph` runs **only** on the root unified
   `Snapshot` (it is registered `For(&storagev1alpha1.Snapshot{})`; demo VM/disk snapshots are reconciled by the
   separate domain-controller, not by this path). During the pending fan-out phase the root is re-reconciled
   **~36×/run** (SETS=10) — ~2/3 of those wakes come from the `nss-chw-*` child-watch relays firing on every child
@@ -361,14 +372,21 @@ Conclusions:
 
 Fixes, one variable at a time, guided by the numbers:
 
-- **D.3 — collapse per-child `Get`s into one `List` per child GVK (implemented; measurement pending redeploy).**
+- **D.3 — collapse per-child `Get`s into one `List` per child GVK (implemented and validated, SETS=10 warm).**
   `parent_graph.go` only. A per-pass `childSnapshotReadCache` lazily lists each child snapshot GVK once (via
   `r.Client` — the **same** client the former per-item `Get`s used, so the source of truth is identical) and
   serves the coverage walk, the ensure existence check, and the per-child readiness check from that map. No
   status-contract, membership-skip, debounce, or coverage-invariant change. Guardrail: all three reads were
   already `r.Client` (cached), **not** intentionally-uncached `APIReader`, so this is purely N `Get`s → 1 `List`.
-  Acceptance (SETS=10 warm): coverageWalk 17.5s / priorityReady 12.8s / ensureChildren 11.4s sums drop sharply;
-  worst child-graph pass 11s → target <3–4s; wall below ~25–30s; Ready correctness unchanged.
+  **Measured (SETS=10 warm, 3 runs after redeploy):** the three `Get`-heavy sections collapsed exactly as
+  predicted — worst child-graph pass **11144ms → 788–1089ms** (target <3–4s met); section sums per run dropped
+  coverageWalk **17.5s → ~2.5s**, ensureChildren **11.4s → ~2.3–2.6s**, priorityReady **12.8s → ~0.01–0.02s**
+  (near-eliminated); per-pass child reads went from N per-child `Get`s to **≤2 `List`/pass** (`childListCalls`).
+  Wall (client) **~29–30s → 23.4/23.7/24.2s**; ROOT Ready correctness unchanged (20 children, 20 leaves Ready
+  every run). Risk-3 (stale per-pass list) did **not** materialize: wall dropped rather than grew, so newly-created
+  children were not pushed into an extra pass in a way that cost latency. Residual wall is now dominated by the
+  root manifest leg (ChildrenSnapshotReady ~13s → Ready ~24s) and leaf-creation cadence, **not** child-graph
+  planning — H3's planning cost is effectively closed; the remaining tail moves to the manifest leg.
   Pre-deploy risk review (checked in code, not just claimed):
   - **List-GVK convention** — the cache builds an `UnstructuredList` with `Kind: gvk.Kind+"List"` and lists via
     `r.Client`. Precedent: `snapshotcontent/controller.go` already does exactly this against the module's snapshot
@@ -384,13 +402,28 @@ Fixes, one variable at a time, guided by the numbers:
     and requeues; the next pass (woken by the child event) re-lists fresh. No extra pass is added versus the former
     post-`Create` `Get`. If, contrary to this reasoning, the wall does **not** drop or grows after deploy, this is
     the first thing to re-check.
-- **D.2 (next, only if D.3 is insufficient)** — avoid the walk when child *membership* is unchanged (only status
-  changed). Largest remaining lever but an algorithm change needing an invariant proof.
-- **D.1′ (last)** — coalesce/dedupe the concurrent relay-driven root re-plans (removes duplicate passes; changes
-  event-delivery semantics; a debounce can hide a lost event, so it needs the most evidence).
+- **D.2 — NO LONGER RECOMMENDED (premise gone).** Was: avoid the walk when child *membership* is unchanged. It
+  only mattered while a pass was expensive; after D.3 a full pass is ~0.8–1.1s and the walk is ~2.5s summed across
+  all passes, so the invariant-proof risk of a membership-skip is not justified by the remaining cost.
+- **D.1′ — NO LONGER RECOMMENDED (premise gone).** Was: coalesce/dedupe the concurrent relay-driven root re-plans.
+  Duplicate passes only hurt because each pass was expensive; now that passes are cheap, changing event-delivery
+  semantics (a debounce can hide a lost event) is not worth the risk for the remaining latency.
 
 Adjacent future work: choose the production manager client QPS/Burst deliberately (50/100 was capacity tuning, not
 proof of low work — see FIX 1 caveat).
+
+### H4 — root manifest leg (`ChildrenSnapshotReady` → `Ready` ≈10s) — NEW open investigation
+
+With H3 closed, this is the **only** remaining SETS=10 latency issue and it is well-localised. After every child
+is ready (`ChildrenSnapshotReady=True` at ~13s), the root Snapshot still takes ~10s to reach `Ready`
+(`ManifestsArchived`/`Ready` at ~24s). New problem statement — **not** a child-graph fix:
+
+> Why, once `ChildrenSnapshotReady=True`, does the root Snapshot take ~10s more to become `Ready`?
+
+Starting questions to answer with evidence before proposing any change (per the investigation-methodology rule):
+what happens between `ChildrenSnapshotReady` and `ManifestsArchived` (root MCR/MCP creation, manifest archival,
+bottom-up latch), whether it is a poll/requeue cadence, a per-child aggregation cost, or content-side maturation,
+and whether it scales with N. Instrument/trace first; do not assume.
 
 ---
 
@@ -403,7 +436,7 @@ proof of low work — see FIX 1 caveat).
 5. [ARCH 1](#arch-1--snapshot-controller-wake-the-gated-parent-on-child-content-archive) (gated-parent wake) and [ARCH 2](#arch-2--single-snapshotcontent-controller-with-dynamic-snapshot-status-watches-h2) (single content controller) — apply as architecture/correctness; not
    headline latency fixes.
 6. Confirmed optimizations (section 6) — keep; hygiene.
-7. Open issue H3 (section 8) — Commit D instrumentation is applied; attribute per-pass cost before optimizing. Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
+7. H3 (section 8) — **closed** by Commit D.3 (per-child `Get`s → one `List`/GVK; validated SETS=10 warm). D.2 (membership-skip) and D.1′ (relay debounce) are **no longer recommended** — the premise is gone. Next open investigation is **H4 — root manifest leg** (`ChildrenSnapshotReady` → `Ready` ≈10s). Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
 
 ## 10. Tooling (storage-e2e, measurement only)
 
