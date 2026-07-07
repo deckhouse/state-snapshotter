@@ -515,3 +515,21 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   e2e ready_flap diagnostic (contentDiagExtract) to print ChildrenReady status/reason (surfacing the
   ChildrenLinkPending gate) instead of the removed status.residualVolumeCapture.phase. `go vet` green for
   both modules; envtest/e2e RUN validation still pending in the w7-verify loop.
+- **Refactor** (w7-final-wave-1) Collapsed the steady-state Snapshot.Ready mirror to a SINGLE post-bind
+  writer — the SnapshotContentController (`snapshotcontent/ready_mirror.go: mirrorReadyToOwnerSnapshot`),
+  which already mirrors content.Ready + bubbles phase=Failed + applies the barrier-2 (phase=Finished) gate in
+  the same pass that computes content.Ready (no cross-controller staleness, INV-FAIL-PROP; ADR wave7 note
+  "зеркало считает main тем же проходом"). Removed the binder's happy-path Ready re-derivation from
+  `genericbinder/controller.go: checkConsistencyAndSetReady` (and the now-dead `domainCaptureFinished` /
+  `domainCaptureFailed` helpers in domain_content.go — barrier-2/Failed now live only in the content
+  controller). The binder RETAINS: the pre-bind and content-missing/deleting degradation Ready co-write (a
+  deleted content produces no content reconcile to mirror from — the binder is woken for it by
+  `mapBoundContentToSnapshots`), plus the excludedRefs / subtreeManifestsPersisted side-channel mirrors
+  (not Ready, triggered by the same watch). Decision: the bound-content watch and the two side-channel
+  mirrors are NOT removed/relocated (the original w7-final-wave-1 sketch) because the watch is still required
+  for the content-deletion degradation path; relocating the side channels would add regression risk on the
+  manifest-exclude pre-gate for no functional gain. Tests: removed genericbinder/barrier2_test.go (binder no
+  longer gates Ready); rewrote genericbinder/mirror_test.go to assert the binder co-writes ContentMissing
+  when the bound content is gone and does NOT overwrite Ready when the content is present. Build + gofmt +
+  full controller-module unit green; integration module `go vet` green. Runtime validation deferred to the
+  w7-verify integration loop.

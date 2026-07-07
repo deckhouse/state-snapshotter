@@ -426,20 +426,10 @@ func domainCaptureAtLeastPlanned(obj *unstructured.Unstructured) bool {
 	}
 }
 
-// domainCaptureFinished reports whether the domain reached capture barrier 2 (phase Finished): the domain
-// completed its consistency actions, so the core may finalize the aggregate Ready.
-func domainCaptureFinished(obj *unstructured.Unstructured) bool {
-	return storagev1alpha1.SnapshotCapturePhase(domainCapturePhase(obj)) == storagev1alpha1.SnapshotCapturePhaseFinished
-}
-
-// domainCaptureFailed reports whether the domain reported a terminal failure (phase=Failed) and returns
-// its reason/message so the core can bubble it into the user-facing Ready.
-func domainCaptureFailed(obj *unstructured.Unstructured) (bool, string, string) {
-	if storagev1alpha1.SnapshotCapturePhase(domainCapturePhase(obj)) != storagev1alpha1.SnapshotCapturePhaseFailed {
-		return false, "", ""
-	}
-	return true, domainCaptureStateString(obj, "reason"), domainCaptureStateString(obj, "message")
-}
+// Barrier-2 (phase=Finished) finalization and the phase=Failed bubble are applied by the single post-bind
+// Ready writer in the SnapshotContentController (ready_mirror.go: ownerDomainCapturePhase /
+// ownerDomainCaptureFailed), not here — wave7 final-wave-1 removed the binder's steady-state Ready mirror.
+// domainCapturePhase / domainCaptureAtLeastPlanned above remain for the Step-1 barrier (isDomainPlanningComplete).
 
 // parseChildrenSnapshotRefs reads status.childrenSnapshotRefs into typed child refs (APIVersion/Kind/Name).
 func parseChildrenSnapshotRefs(obj *unstructured.Unstructured) []storagev1alpha1.SnapshotChildRef {

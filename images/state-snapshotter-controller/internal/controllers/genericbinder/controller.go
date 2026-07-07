@@ -665,9 +665,21 @@ func genericBinderObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSp
 	return true
 }
 
-// checkConsistencyAndSetReady mirrors the bound SnapshotContent Ready condition.
-// GenericSnapshotBinderController does not aggregate children; SnapshotContent is
-// the single source of truth for final readiness.
+// checkConsistencyAndSetReady mirrors the bound SnapshotContent's durable side-channel fields onto the
+// domain CR and derives the user-facing Ready ONLY for the degradation cases the content controller cannot
+// express (bound content missing or being deleted). GenericSnapshotBinderController does not aggregate
+// children; SnapshotContent is the single source of truth for readiness.
+//
+// wave7 final-wave-1: the STEADY-STATE Ready mirror is owned by the SnapshotContentController
+// (mirrorReadyToOwnerSnapshot) — the single post-bind writer that mirrors content.Ready, bubbles a domain
+// phase=Failed, and applies the barrier-2 (phase=Finished) finalization gate in the SAME pass that computes
+// content.Ready (no cross-controller staleness, INV-FAIL-PROP). The binder no longer re-derives content.Ready
+// here. It still owns the "bound content gone/deleting" degradation, because a deleted content produces no
+// content reconcile to mirror from; the bound-content watch (mapBoundContentToSnapshots) wakes the binder
+// for that. The excludedRefs and subtreeManifestsPersisted mirrors stay here too (they are not Ready and are
+// triggered by the same watch). This function is only reached after the Step-1 barrier
+// (isDomainPlanningComplete) confirmed phase>=Planned; the domain phase itself is never written here (owned
+// by the domain SDK).
 func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	ctx context.Context,
 	snapshotLike snapshot.SnapshotLike,
@@ -675,10 +687,6 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 ) error {
 	logger := log.FromContext(ctx)
 	contentName := snapshotLike.GetStatusContentName()
-	// The domain phase is intentionally NOT written here. This function derives the user-facing Ready and
-	// is only reached after the Step-1 barrier (isDomainPlanningComplete) confirmed phase>=Planned. The
-	// phase is owned exclusively by the domain controller (via the SDK); the core only reads it — mirroring
-	// the bound SnapshotContent.Ready and bubbling a domain phase=Failed into Ready=False.
 	if contentName == "" {
 		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}
@@ -693,6 +701,9 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 
 	if err := r.APIReader.Get(ctx, contentKey, contentObj); err != nil {
 		if errors.IsNotFound(err) {
+			// E3 degradation: the bound content was deleted out from under a Ready snapshot. The content
+			// controller cannot express this (no reconcile for a gone object), so the binder co-writes the
+			// terminal-shaped ContentMissing directly, woken by mapBoundContentToSnapshots on the delete.
 			return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
 		}
 		return fmt.Errorf("failed to get SnapshotContent: %w", err)
@@ -703,8 +714,7 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	}
 
 	// Mirror the bound content's durable excludedRefs aggregate onto this domain CR's top-level
-	// status.excludedRefs (user-facing audit). Best-effort: a mirror miss is retried on the next
-	// reconcile and never blocks Ready derivation below.
+	// status.excludedRefs (user-facing audit). Best-effort: a mirror miss is retried on the next reconcile.
 	if err := r.mirrorExcludedRefsFromContent(ctx, obj, contentObj); err != nil {
 		logger.V(1).Info("Failed to mirror SnapshotContent excludedRefs; will retry", "error", err.Error())
 	}
@@ -719,44 +729,9 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		}
 	}
 
-	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
-	if err != nil {
-		return fmt.Errorf("failed to extract SnapshotContentLike: %w", err)
-	}
-	readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
-	status := metav1.ConditionFalse
-	reason := snapshot.ReasonContentMissing
-	message := fmt.Sprintf("SnapshotContent %s has no Ready condition", contentName)
-	if readyCond != nil {
-		status = readyCond.Status
-		reason = readyCond.Reason
-		message = readyCond.Message
-	}
-	// Bubble a domain-reported terminal failure (captureState.domainSpecificController.phase=Failed) into
-	// the user-facing Ready: a content mirror cannot express a domain planning/consistency failure.
-	if failed, freason, fmsg := domainCaptureFailed(obj); failed {
-		status = metav1.ConditionFalse
-		if freason != "" {
-			reason = freason
-		}
-		if fmsg != "" {
-			message = fmsg
-		}
-	}
-	// Barrier 2 (ADR §6.2): hold Ready=False until the domain reported phase=Finished — it may still be
-	// running consistency actions (fs freeze/unfreeze, verify) after publishing its objects at barrier 1.
-	// This is the mirror of the content controller's finalization gate (both post-bind writers agree during
-	// the staged split) and revives the domainCaptureFinished barrier. A non-domain owner (import/
-	// static-bind, no phase field) is unaffected; phase=Failed is bubbled above.
-	if status == metav1.ConditionTrue {
-		if phase := domainCapturePhase(obj); phase != "" && !domainCaptureFinished(obj) {
-			status = metav1.ConditionFalse
-			reason = snapshot.ReasonChildrenPending
-			message = fmt.Sprintf("waiting for domain capture to finish (phase=%s)", phase)
-		}
-	}
-	logger.V(1).Info("Deriving Snapshot Ready", "content", contentName, "status", status, "reason", reason)
-	return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message)
+	// Steady-state Ready (content.Ready mirror + phase=Failed bubble + barrier-2 gate) is owned by the
+	// SnapshotContentController's single post-bind writer; the binder does not re-derive it here.
+	return nil
 }
 
 func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(

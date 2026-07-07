@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,39 +30,23 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// D: the bound Snapshot Ready is a verbatim mirror of the root SnapshotContent Ready (status, reason,
-// message). The binder must not recompute an alternative reason — SnapshotContent is the single source
-// of truth for tree readiness (INV-COND2/INV-COND4, snapshot-rework/2026-06-03-snapshot-conditions-model.md).
-func TestCheckConsistencyAndSetReadyMirrorsContentReadyVerbatim(t *testing.T) {
-	ctx := context.Background()
+// wave7 final-wave-1 moved the STEADY-STATE Ready mirror (content.Ready verbatim + phase=Failed bubble +
+// barrier-2 gate) to the SnapshotContentController's single post-bind writer (ready_mirror.go). The binder's
+// checkConsistencyAndSetReady must therefore:
+//   - NOT overwrite Ready when the bound content exists (steady state is owned by the content controller), and
+//   - still co-write the E3 degradation Ready=False/ContentMissing when the bound content is gone (a deleted
+//     content produces no reconcile for the content controller to mirror from).
+func newMirrorTestController(t *testing.T, objs ...client.Object) (*GenericSnapshotBinderController, *runtime.Scheme) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storage scheme: %v", err)
 	}
-
-	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    snapshot.ConditionReady,
-		Status:  metav1.ConditionFalse,
-		Reason:  snapshot.ReasonChildrenFailed,
-		Message: "child SnapshotContent child-a failed: reason=ChildrenFailed message=child SnapshotContent leaf-broken failed: reason=ManifestCheckpointFailed message=ManifestCheckpoint mcp-leaf not found",
-	})
-
-	snapGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
-	snapObj := &unstructured.Unstructured{}
-	snapObj.SetGroupVersionKind(snapGVK)
-	snapObj.SetName("root-snap")
-	snapObj.SetNamespace("default")
-	if err := unstructured.SetNestedField(snapObj.Object, "root-content", "status", "boundSnapshotContentName"); err != nil {
-		t.Fatalf("set boundSnapshotContentName: %v", err)
-	}
-
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(content, snapObj).
-		WithStatusSubresource(snapObj).
+		WithObjects(objs...).
+		WithStatusSubresource(objs...).
 		Build()
-
 	reg := snapshot.NewGVKRegistry()
 	if err := reg.RegisterSnapshotContentMapping(
 		"Snapshot", storagev1alpha1.SchemeGroupVersion.String(),
@@ -71,7 +54,25 @@ func TestCheckConsistencyAndSetReadyMirrorsContentReadyVerbatim(t *testing.T) {
 	); err != nil {
 		t.Fatalf("register snapshot/content mapping: %v", err)
 	}
-	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme, GVKRegistry: reg}
+	return &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme, GVKRegistry: reg}, scheme
+}
+
+func newBoundSnapshotUnstructured(name, contentName string) *unstructured.Unstructured {
+	snapGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(snapGVK)
+	obj.SetName(name)
+	obj.SetNamespace("default")
+	_ = unstructured.SetNestedField(obj.Object, contentName, "status", "boundSnapshotContentName")
+	return obj
+}
+
+// E3 degradation: the bound content was deleted out from under the snapshot. The binder (not the content
+// controller) must co-write Ready=False/ContentMissing.
+func TestCheckConsistencyAndSetReady_ContentMissingCoWrite(t *testing.T) {
+	ctx := context.Background()
+	snapObj := newBoundSnapshotUnstructured("root-snap", "gone-content")
+	r, _ := newMirrorTestController(t, snapObj)
 
 	snapLike, err := snapshot.ExtractSnapshotLike(snapObj)
 	if err != nil {
@@ -81,23 +82,53 @@ func TestCheckConsistencyAndSetReadyMirrorsContentReadyVerbatim(t *testing.T) {
 		t.Fatalf("checkConsistencyAndSetReady: %v", err)
 	}
 
+	got := freshSnapshotReady(t, r.Client, "root-snap")
+	if got == nil {
+		t.Fatalf("snapshot has no Ready condition after content-missing co-write")
+	}
+	if got.Status != metav1.ConditionFalse || got.Reason != snapshot.ReasonContentMissing {
+		t.Fatalf("want Ready=False/ContentMissing, got %s/%s", got.Status, got.Reason)
+	}
+}
+
+// Steady state: the bound content exists and is Ready. The binder must NOT write/overwrite the snapshot's
+// Ready condition — that is owned by the SnapshotContentController's single post-bind writer.
+func TestCheckConsistencyAndSetReady_DoesNotOverwriteReadyWhenContentPresent(t *testing.T) {
+	ctx := context.Background()
+	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
+	content.Status.Conditions = []metav1.Condition{{
+		Type:    snapshot.ConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  snapshot.ReasonReady,
+		Message: "ready",
+	}}
+	snapObj := newBoundSnapshotUnstructured("root-snap", "root-content")
+	r, _ := newMirrorTestController(t, content, snapObj)
+
+	snapLike, err := snapshot.ExtractSnapshotLike(snapObj)
+	if err != nil {
+		t.Fatalf("extract snapshot like: %v", err)
+	}
+	if err := r.checkConsistencyAndSetReady(ctx, snapLike, snapObj); err != nil {
+		t.Fatalf("checkConsistencyAndSetReady: %v", err)
+	}
+
+	if got := freshSnapshotReady(t, r.Client, "root-snap"); got != nil {
+		t.Fatalf("binder must not write Ready when content is present (owned by content controller), got %s/%s", got.Status, got.Reason)
+	}
+}
+
+func freshSnapshotReady(t *testing.T, cl client.Client, name string) *metav1.Condition {
+	t.Helper()
+	snapGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
 	fresh := &unstructured.Unstructured{}
 	fresh.SetGroupVersionKind(snapGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: "default", Name: "root-snap"}, fresh); err != nil {
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, fresh); err != nil {
 		t.Fatalf("get snapshot: %v", err)
 	}
 	freshLike, err := snapshot.ExtractSnapshotLike(fresh)
 	if err != nil {
 		t.Fatalf("extract fresh snapshot like: %v", err)
 	}
-
-	got := snapshot.GetCondition(freshLike, snapshot.ConditionReady)
-	want := meta.FindStatusCondition(content.Status.Conditions, snapshot.ConditionReady)
-	if got == nil {
-		t.Fatalf("snapshot has no Ready condition after mirror")
-	}
-	if got.Status != want.Status || got.Reason != want.Reason || got.Message != want.Message {
-		t.Fatalf("snapshot Ready is not a verbatim mirror:\n got  (%s/%s/%q)\n want (%s/%s/%q)",
-			got.Status, got.Reason, got.Message, want.Status, want.Reason, want.Message)
-	}
+	return snapshot.GetCondition(freshLike, snapshot.ConditionReady)
 }

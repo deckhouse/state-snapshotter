@@ -122,11 +122,12 @@ func (r *GenericSnapshotBinderController) reconcileGenericStaticBind(
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Steady state: mirror the bound content's Ready condition + durable excludedRefs onto this domain CR
-	// (single-aggregator contract). checkConsistencyAndSetReady already performs both the Ready mirror and
-	// mirrorExcludedRefsFromContent; no capture legs are touched.
+	// Steady state: mirror the bound content's durable excludedRefs onto this domain CR and handle the
+	// content-missing/deleting degradation (single-aggregator contract). The steady-state Ready mirror is
+	// owned by the SnapshotContentController's single post-bind writer (wave7 final-wave-1); no capture legs
+	// are touched here.
 	if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
-		logger.Error(err, "Failed to mirror static-bind SnapshotContent Ready")
+		logger.Error(err, "Failed to mirror static-bind SnapshotContent side channels")
 	}
 	if !snapshot.IsReady(snapshotLike) {
 		return ctrl.Result{RequeueAfter: staticBindContentPollInterval}, nil

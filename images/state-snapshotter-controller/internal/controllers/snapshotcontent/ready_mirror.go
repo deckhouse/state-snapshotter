@@ -42,11 +42,13 @@ import (
 // and the mirror into one pass is what closes the staleness window where the binder re-derived a stale
 // Ready from a cross-controller hop (INV-FAIL-PROP).
 //
-// Staged: during the split BOTH the creator/binder (checkConsistencyAndSetReady) and this controller
-// mirror the same content.Ready under a changed-gate, so they converge on the same value and neither
-// thrashes. The binder still owns the excludedRefs / subtreeManifestsPersisted mirrors; w7-final-wave-1
-// removes the binder's Ready mirror (and its content->snapshot watch) and relocates those two mirrors
-// here, leaving this controller as the single post-bind writer.
+// wave7 final-wave-1: this controller is now the SINGLE post-bind writer of the steady-state Snapshot.Ready
+// (content.Ready verbatim + phase=Failed bubble + barrier-2 phase=Finished gate). The binder no longer
+// re-derives content.Ready. The binder retains only (a) the pre-bind Ready and the content-missing/deleting
+// degradation Ready — a deleted content produces no reconcile here to mirror from, so the binder co-writes
+// ContentMissing, woken by its bound-content watch — and (b) the excludedRefs / subtreeManifestsPersisted
+// side-channel mirrors (not Ready; triggered by the same watch). Keeping (a)/(b) in the binder is why that
+// watch is not removed.
 //
 // Best-effort: an owner that is gone or not yet bound, or content with no owning Snapshot (bucket
 // content), is a no-op; a transient API error is returned so the content reconcile requeues and retries.
