@@ -1,0 +1,58 @@
+---
+description: Evidence-first methodology for any investigation (performance, correctness, concurrency, distributed systems, controllers, races, consistency, scaling) before proposing designs or writing code
+alwaysApply: true
+---
+
+# Investigation methodology (evidence first, code second)
+
+Applies to performance, correctness, architecture, concurrency, distributed-systems,
+Kubernetes-controller, race-condition, consistency, and scaling work. **Evidence first. Code second.**
+If evidence is missing, propose diagnostics — not code.
+
+## Before proposing ANY code, answer these six
+
+1. What exactly is the problem?
+2. What evidence proves it exists?
+3. What is the current leading hypothesis?
+4. What evidence could disprove it?
+5. What is the smallest experiment that validates the hypothesis?
+6. What observable metric should change if the hypothesis is correct?
+
+## Principles
+
+1. **Never optimize intuition.** Start from an observable problem, not a solution. Every hypothesis needs
+   evidence first (logs, traces, metrics, pprof, timelines, source, experiments).
+2. **Identify the real bottleneck.** Do not conflate *expensive* code, *frequently executed* code, and the
+   *critical path*. Something can dominate CPU yet add ~0 to wall-clock; something rare can dominate completion
+   time.
+3. **Build timelines before conclusions.** Reconstruct one object's lifecycle: creation → state transitions →
+   controller observations → reconcile start/end → parent notifications → completion. Never compare unrelated
+   events.
+4. **Correlate by stable identity**, not log ordering or timestamps alone: UID, namespace/name, GVK,
+   reconcileID, controller name, generation/resourceVersion.
+5. **Understand the execution model** before changing architecture. Prove how the framework actually behaves
+   (controller vs reconciler, watch vs controller, queue vs worker, cache vs APIReader, informer vs List,
+   optimistic-lock vs race). Read framework source if needed; do not assume.
+6. **Separate observations from conclusions:** observed facts → interpretation → hypothesis → validation →
+   conclusion. Never present a hypothesis as a fact.
+7. **Every hypothesis must be falsifiable.** Define up front what would confirm and what would reject it. If new
+   evidence contradicts it, update the conclusion — do not defend the original idea.
+8. **Classify every finding** as exactly one: confirmed root cause · confirmed optimization ·
+   architecture/correctness improvement · rejected hypothesis · still open. Never leave obsolete hypotheses
+   mixed with validated conclusions.
+9. **Change one variable at a time.** Each change tests one hypothesis; do not bundle unrelated optimizations, or
+   the effect cannot be attributed.
+10. **Distinguish cause from symptom.** Ask: is this where time/work is spent, or where the delay becomes
+    visible? Fix causes, not downstream symptoms.
+11. **Validate after implementation.** Define acceptance criteria before coding; compare measurements after. If
+    the expected metric did not move, the hypothesis was wrong — regardless of how correct the code looks.
+12. **Document negative results.** Record what was investigated, why it looked promising, how it was disproven,
+    and why not to revisit. Prevent repeated dead-end investigations.
+13. **Prefer minimal explanations.** Find the smallest explanation fitting all observations; do not invent
+    multiple independent causes when one verified cause explains the data.
+14. **Preserve correctness over optimization.** Never replace correctness mechanisms (fresh reads,
+    synchronization, ordering/consistency guarantees) with faster alternatives unless correctness is explicitly
+    proven.
+15. **Update documentation continuously.** Investigation docs must reflect *today's* understanding: when a
+    hypothesis is disproven, remove it from open issues, move it to rejected hypotheses, and update the current
+    model — not historical thinking.
