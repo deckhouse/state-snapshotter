@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -14,42 +13,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
-
-// MarkResidualVolumeCaptureComplete latches status.residualVolumeCapture.phase = Complete on a
-// namespace-root SnapshotContent, signalling that the final residual/orphan-PVC capture wave finished
-// (no orphan targets, or every orphan child node linked and ready).
-//
-// Option P: the reconciler is the SOLE writer of this field; the SnapshotContent aggregator only reads
-// it (locally) to gate the FIRST Ready=True (fail-closed). The write is an idempotent, monotonic latch —
-// once Phase is already Complete this is a no-op, so re-stamping on every steady-state reconcile
-// (import / static-bind) costs nothing and the latch never reverts. targetUIDs/CompletedAt are
-// best-effort diagnostics only (nil/empty when there were no orphan targets); the gate reads ONLY
-// Phase, so a re-stamp through a momentarily stale cache (which would refresh CompletedAt) is benign.
-// It writes a status MergeFrom patch (NOT a full Status().Update) so it never clobbers the conditions
-// the aggregator owns (INV-COND2): the two writers touch disjoint status subtrees.
-func MarkResidualVolumeCaptureComplete(ctx context.Context, c client.Client, contentName string, targetUIDs []string) error {
-	if contentName == "" {
-		return nil
-	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		content := &storagev1alpha1.SnapshotContent{}
-		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-			return err
-		}
-		if content.Status.ResidualVolumeCapture != nil &&
-			content.Status.ResidualVolumeCapture.Phase == storagev1alpha1.ResidualVolumeCapturePhaseComplete {
-			return nil
-		}
-		base := content.DeepCopy()
-		now := metav1.Now()
-		content.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
-			Phase:       storagev1alpha1.ResidualVolumeCapturePhaseComplete,
-			TargetUIDs:  append([]string(nil), targetUIDs...),
-			CompletedAt: &now,
-		}
-		return c.Status().Patch(ctx, content, client.MergeFrom(base))
-	})
-}
 
 func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.Client, contentName, mcpName string) error {
 	if contentName == "" || mcpName == "" {

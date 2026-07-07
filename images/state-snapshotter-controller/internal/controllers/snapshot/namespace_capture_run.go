@@ -59,11 +59,15 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 // manifest leg is subtree-gated and therefore runs AFTER the content is bound):
 //  1. PublishSnapshotSource (the captured Namespace) — d8-cli import-mode recreation.
 //  2. planNamespaceChildren -> EnsureChildren (create/adopt + ADDITIVE publish of childrenSnapshotRefs).
-//  3. MarkPlanned (barrier 1) — unblocks the binder to create/bind the root SnapshotContent.
-//  4. Wait for the binder to bind the content; then maintain the RBAC latch.
-//  5. Residual/orphan PVC wave (root-owned): CSI VolumeSnapshots for uncovered PVCs.
-//  6. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
-//  7. ConfirmConsistent (barrier 2) once the manifest leg is captured (CoreCaptureOutcome==Captured).
+//  3. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
+//     CSI VolumeSnapshots for uncovered PVCs and publish their leaves onto childrenSnapshotRefs, so the
+//     FULL child set (domain + orphan) is enumerated before the content is created/frozen.
+//  4. MarkPlanned (barrier 1) — unblocks the binder to create/bind the root SnapshotContent with the full
+//     frozen child set.
+//  5. Wait for the binder to bind the content; then maintain the RBAC latch.
+//  6. Orphan child-content linking (post-bind): materialize + link each orphan PVC's child volume node.
+//  7. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
+//  8. ConfirmConsistent (barrier 2) once the manifest leg is captured (CoreCaptureOutcome==Captured).
 func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -122,12 +126,29 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
 	}
 
-	// 4. Barrier 1 (phase=Planned): unblocks the generic binder to create + bind the root SnapshotContent.
+	// 4. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
+	//    the CSI VolumeSnapshots for uncovered PVCs and publish their visibility leaves onto
+	//    childrenSnapshotRefs. Running the enumeration before MarkPlanned means the FULL child set (domain
+	//    children + orphan VolumeSnapshot leaves) is present when the binder creates + freezes the root
+	//    SnapshotContent, so no orphan child is missed from the frozen childrenSnapshotContentRefs. The
+	//    orphan CHILD-CONTENT linking still runs post-bind (step 8): it needs the bound root content.
+	if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap); err != nil {
+		return ctrl.Result{}, err
+	} else if res.Requeue || res.RequeueAfter > 0 {
+		return res, nil
+	}
+	// Re-read so the orphan leaves just published on childrenSnapshotRefs are observed downstream.
+	if err := r.snapshotReader().Get(ctx, key, nsSnap); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 5. Barrier 1 (phase=Planned): unblocks the generic binder to create + bind the root SnapshotContent
+	//    with the full, frozen child set.
 	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 5. The binder owns the SnapshotContent now: wait for it to create + bind before the residual/manifest
+	// 6. The binder owns the SnapshotContent now: wait for it to create + bind before the linking/manifest
 	//    legs, which read the bound content.
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
@@ -140,17 +161,14 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		return ctrl.Result{}, err
 	}
 
-	// 6. Maintain the RBAC latch (commonController.manifestCaptured mirror of content.subtreeManifestsPersisted).
+	// 7. Maintain the RBAC latch (commonController.manifestCaptured mirror of content.subtreeManifestsPersisted).
 	//    The per-namespace capture-RBAC hook (040) reads it to drop the transient wide-read RoleBinding.
 	if err := r.stampRootManifestCaptured(ctx, key, content.Status.SubtreeManifestsPersisted); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 7. Residual/orphan PVC wave (root-owned; gated on all domain children Ready). Publishes the CSI
-	//    VolumeSnapshot visibility leaves onto childrenSnapshotRefs (preserved by the additive EnsureChildren).
-	if err := r.ensureVolumeCaptureLeg(ctx, nsSnap, content); err != nil {
-		return ctrl.Result{}, err
-	}
+	// 8. Orphan child-content linking (post-bind): materialize each ready orphan PVC's standalone child
+	//    volume node (own dataRef + own ManifestCheckpoint) and link it under the now-bound root content.
 	if res, err := r.reconcileVolumeCapturePublish(ctx, nsSnap, content, true); err != nil {
 		return ctrl.Result{}, err
 	} else if res.Requeue || res.RequeueAfter > 0 {
@@ -184,6 +202,50 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	default:
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
+}
+
+// ensureOrphanVolumeSnapshotsPrePlanned runs the root residual/orphan PVC volume wave BEFORE barrier 1
+// (MarkPlanned), CONTENT-FREE of the root SnapshotContent (which does not exist yet). It creates the CSI
+// VolumeSnapshots for uncovered PVCs and publishes their visibility leaves onto childrenSnapshotRefs, so
+// the full child set is enumerated before the binder creates + freezes the root content ("late Planned").
+//
+// The wave is gated on all declared domain children being Ready so the subtree-covered PVC UID set (read
+// from each descendant's bound content) is complete — a PVC a domain child covers is never momentarily
+// treated as orphan. While the gate is closed, or while coverage is transiently unavailable (a child not
+// created/bound yet), it requeues on the child-graph poll cadence. A duplicate covered PVC UID is a
+// terminal invalid-plan failure; with no bound root content yet to carry it, it is surfaced on the
+// Snapshot's own Ready.
+func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+) (ctrl.Result, error) {
+	if !volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, nil) {
+		return ctrl.Result{}, nil
+	}
+	ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, nsSnap.Namespace, nsSnap.Status.ChildrenSnapshotRefs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !ready {
+		log.FromContext(ctx).V(1).Info("deferring orphan PVC volume wave until domain children are Ready", "pending", summarizePendingChildren(pending))
+		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+	}
+	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, nil)
+	if err != nil {
+		key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+		if stderrors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
+			return ctrl.Result{}, r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, "DuplicateCoveredPVCUID", err.Error())
+		}
+		// Transient (a child not created/bound yet, PVC list): requeue on the child-graph poll cadence.
+		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+	}
+	// content==nil: pre-Planned there is no bound root content; ensureOrphanPVCVolumeSnapshots creates the
+	// VolumeSnapshots and publishes childrenSnapshotRefs leaves, routing any terminal orphan-class failure
+	// onto the Snapshot's own Ready (failOrphanCaptureTerminal).
+	if err := r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, nil, targets); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // reconcileNamespaceManifestLeg ensures the root namespace manifest MCR via the SDK, using the proven

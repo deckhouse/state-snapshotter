@@ -390,3 +390,100 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   **no new failing spec** — E5 (`snapshot_graph_integration`) and N1 (`snapshot_n1_boundary`) are pre-existing
   timing-flaky specs (both also fail on the stashed baseline under load, E5 at a different assertion), not
   regressions.
+- **Add** (w7-adr-conditions) Normative "Conditions & Reasons" catalog added to the ADR
+  (`arch/.../2026-06-29-unified-snapshots-overview.md`, under "Модель статусов"): condition types
+  (`Ready` user-facing + core-internal `ManifestsReady`/`VolumeReady`/`ChildrenReady`), the exact
+  terminal set (`TerminalReadyReasons`) vs non-terminal reasons, the single-reason priority order, the
+  wave7 `Snapshot.Ready` writer switch (pre-bind creator `False`/`ContentBindingPending` → post-bind main
+  mirror on monotonic `boundSnapshotContentName`), and the wave7 catalog deltas (new fail-closed
+  `ChildrenLinkPending`; `ResidualVolumeCapturePending` marked REMOVED). Strings kept verbatim to
+  `api/storage/v1alpha1/conditions.go` + `pkg/snapshot/conditions.go`. (ADR committed by user.)
+- **Refactor** (w7-d8-import-namespaced) [d8-cli repo, commit bf62a8d] Import readiness waits on the
+  node's OWN namespaced object instead of the cluster-scoped `SnapshotContent`: core `Snapshot` root and
+  domain data leaf poll their own `Ready=True` (a faithful all-legs mirror post-bind, wave7 INV-FAIL-PROP);
+  a CSI `VolumeSnapshot` leaf polls `status.readyToUse` (no `Ready` condition). Removed
+  `waitSnapshotContentReady` + `snapshotContentGVR` + per-leg condition constants; the CLI no longer needs
+  cluster-scoped `snapshotcontents` access. Package + repo build/vet/test green.
+- **Add** (w7-content-free-coverage, stage 1 of the capture-core reorder) Root-residual/orphan PVC coverage
+  is now computed CONTENT-FREE of the ROOT: new
+  `usecase/volumecapture.CollectSubtreeCoveredPVCUIDsFromSnapshot` walks the Snapshot child graph
+  (`status.childrenSnapshotRefs`, populated at planning time before the root content bind), reads each
+  descendant node's OWN already-bound `SnapshotContent` (`status.boundSnapshotContentName`), and reuses
+  `coveredPVCUIDsForContent` so the covered-UID set is identical to the content-tree walk
+  (`CollectSubtreeCoveredPVCUIDs`). Skips CSI `VolumeSnapshot` visibility leaves (residual wave's own
+  output), fails closed on unreadable child/bound-content and on duplicate covered UID
+  (`ErrDuplicateCoveredPVCUID`). `listResidualRootOwnedPVCTargets` + `IsResidualRootPVCCaptureScope`
+  (`domain_owned_targets.go`) switched to this Snapshot-derived path (bound-content arg retained, unused).
+  This breaks the "late Planned" circular dependency (residual/orphan discovery no longer needs the root's
+  bound content). Runtime-safe: the same GVK Gets already run in the preceding
+  `allDeclaredDomainChildSnapshotsReady` gate. Unit tests (new walker + updated residual test) + full module
+  build green; integration deferred to the end-of-wave `w7-verify` loop.
+- **Decision** (w7-reorder-planning scoping) Resolved an internal ADR contradiction on the root-MCR
+  manifest-exclude source for "late Planned". ADR §"Late Planned" (str. 267-271/290-296) literally reads
+  exclude from descendant `ManifestCaptureRequest.spec.targets[]` at `Planned`, but MCRs are EPHEMERAL (the
+  binder deletes the MCR after `manifestCaptured=true`), so under bottom-up `Planned` a child MCR can be
+  captured+deleted before the root builds its MCR → exclude under-counts → 409/double-capture. Per user
+  ("решение на новый эндпоинт на api сервисе на snapshotcontent") the DURABLE source is the existing
+  `snapshotcontents/<name>/subtree-manifest-identities` subresource (`usecase.BuildSubtreeManifestIdentities`,
+  fail-closed 409, gated by `subtreeManifestsPersisted`) — NOT ephemeral MCR targets. Chosen scope (variant
+  A, matches ADR §287-288 + the removal todos): late-Planned reorders ONLY the VOLUME axis (orphan/residual
+  PVC wave + content-free PVC coverage move BEFORE `MarkPlanned`, gate flips from "children Ready" to
+  "children `phase>=Planned`" via `allDirectDomainChildrenAtLeastPlanned`); the MANIFEST axis
+  (`BuildRootNamespaceManifestCaptureTargets` + `subtreeManifestsPersisted` wave-barrier / subtree-identities
+  endpoint) is left intact. Prereq refactors: make `BuildRootNamespaceManifestCaptureTargets` and the orphan
+  VS-creation leg ROOT-content-free (discover descendants via `status.childrenSnapshotRefs`, not the root
+  content tree) so the root MCR + orphan VS can be created before the binder binds the root content; the
+  orphan child-content LINKING (`reconcileOrphanPVCVolumeSnapshotPublish`) stays POST-bind.
+- **Refactor** (w7-reorder-run + w7-rcf-orphan) "Late Planned" VOLUME-axis reorder in
+  `reconcileNamespaceCapture` (`namespace_capture_run.go`): the orphan/residual PVC wave (CSI VolumeSnapshot
+  creation + `childrenSnapshotRefs` leaf publish) now runs CONTENT-FREE and BEFORE `MarkPlanned`, so the full
+  child set (domain children + orphan leaves) is enumerated when the binder creates+freezes the root content
+  — no orphan is missed from the frozen `childrenSnapshotContentRefs`. New
+  `ensureOrphanVolumeSnapshotsPrePlanned` gates on all domain children Ready (guarantees complete
+  subtree-covered PVC coverage under the current bound-content coverage reader), computes residual targets via
+  `ListOwnedPVCTargetsForLogicalContent(..., nil)`, and creates VS with no bound root content;
+  `ensureOrphanPVCVolumeSnapshots` routes terminal orphan-class failures via `failOrphanCaptureTerminal`
+  (content!=nil → `failCapture`; pre-bind content==nil → Snapshot's own `Ready`). The orphan child-content
+  LINKING (`reconcileVolumeCapturePublish`) and the MANIFEST leg stay POST-bind (manifest axis unchanged —
+  wave-barrier). Dead `reconcileCaptureN2a` (capture.go) untouched (not on the live path). New unit tests
+  cover the content-free create + the children-Ready gate; full module build+unit green.
+- **Bugfix** (w7-reorder-run) `ListOwnedPVCTargetsForLogicalContent` dropped its early
+  `if content == nil { return nil, nil }` guard, which silently returned zero targets and would have made the
+  content-free pre-Planned wave a no-op; the residual root path is content-free by design and the domain path
+  is already nil-safe. Updated the stale `TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed` (pre-existing
+  failure since the Stage-1 content-free coverage flip: it built the duplicate on the ROOT content tree, which
+  the residual path no longer walks) to build the duplicate on the Snapshot child graph and pass `nil` content.
+- **Update** (fix-adr) Resolved the ADR §"Late Planned" self-contradiction on the manifest-exclude source
+  (`arch/.../2026-06-29-unified-snapshots-overview.md`): content-free planning is now scoped to the VOLUME
+  axis (orphan enumeration from the Snapshot child graph); the MANIFEST-exclude set is explicitly a
+  wave-barrier fed by the durable `snapshotcontents/<name>/subtree-manifest-identities` subresource gated by
+  `subtreeManifestsPersisted` (NOT ephemeral descendant `MCR.spec.targets[]`), so the root MCR is built
+  post-bind. Redefined PIT = moment of `Planned` = FREEZE of `childrenSnapshotContentRefs` (decoupled from
+  root-MCR creation); fixed the sequence-diagram note (orphan VS + `childrenSnapshotRefs` before Planned,
+  per-PVC MCR/linking post-bind). Added an implementation-interim note: the volume wave currently gates on
+  children `Ready` (bound-content coverage) rather than the target `phase>=Planned` (VCR-based coverage).
+- **Remove** (w7-remove-residual + w7-childrenready-recompute) Deleted the `residualVolumeCapture` latch
+  mechanism and folded the orphan/residual-PVC wave into `ChildrenReady`. Gone: API type
+  `ResidualVolumeCaptureStatus` + `SnapshotContentStatus.residualVolumeCapture` field + phase consts (api +
+  deepcopy + `crds/...snapshotcontents.yaml`), the writer `MarkResidualVolumeCaptureComplete` (status_publish.go)
+  and all 4 callers (orphan_pvc_volume_snapshot.go ×2, static_bind.go, import.go), the aggregator gate
+  `computeResidualSweepGate` + `residualSweep*` plan legs + the lowest-priority Ready switch case
+  (snapshotcontent/controller.go), and `ReasonResidualVolumeCapturePending` (api/storage + pkg/snapshot
+  aliases). Replacement: `validateCommonContentChildren` now runs a fail-closed declared-vs-linked check for
+  orphan children — `unlinkedOrphanChildContents` reads the owner's `status.childrenSnapshotRefs`, keeps the
+  CSI VolumeSnapshot visibility leaves, derives each orphan child content name from the live VS UID
+  (`orphanChildContentNameFromVSLeaf`, skips a fresh-NotFound VS = reconstructed import/restore leaf), and
+  holds `ChildrenReady=False/ChildrenLinkPending` until each is linked into `childrenSnapshotContentRefs`.
+  Monotonic upgrade-guard (skips once this content's Ready is already True) preserves the removed gate's
+  "blocks only the FIRST Ready=True" contract. New reason `ReasonChildrenLinkPending` (api/storage canonical +
+  pkg/snapshot alias, non-terminal). Because the archive one-way latch (`subtreeManifestsPersisted` /
+  `declaredNonLeafChildContentNames`, permanent-duplicate-capture risk) was left untouched, the worst-case of
+  a wrong orphan-set is Ready stuck False (liveness, detectable), never a silent duplicate capture. Tests:
+  deleted residual_gate_aggregation_test.go / residual_volume_capture_test.go /
+  snapshot/residual_gate_stamp_test.go; retargeted the reconcile-count MergeFrom clobber-safety test onto the
+  `status.parentDeleted` sibling field; repointed the RBAC hook predicate test to `ReasonChildrenLinkPending`;
+  added orphan_link_gate_test.go (unlinked→ChildrenLinkPending, linked→Ready, leaf/non-root/foreign-apiVersion
+  ungated, no-VS-leaves/missing-VS skipped, upgrade-guard, pending-child priority). Build + unit green across
+  api / controller / hooks modules. NOTE: the integration + e2e residual tests
+  (test/integration/*, e2e/tests/ready_flap_test.go — build-tagged / separate module) still reference the
+  removed symbols and are deferred to the w7-verify integration loop.

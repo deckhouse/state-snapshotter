@@ -46,11 +46,12 @@ const (
 	// ReasonGraphPlanningFailed: terminal Ready=False — graph planning failed.
 	ReasonGraphPlanningFailed = "GraphPlanningFailed"
 
-	// ReasonResidualVolumeCapturePending: Ready=False (non-terminal) — the namespace-root content has
-	// finished its domain children but the final residual/orphan-PVC capture wave has not completed yet
-	// (status.residualVolumeCapture.phase != Complete). The aggregate Ready is held at this reason so a
-	// consumer never observes the first Ready=True before the orphan data is captured (fail-closed gate).
-	ReasonResidualVolumeCapturePending = "ResidualVolumeCapturePending"
+	// ReasonChildrenLinkPending: Ready=False (non-terminal) — a namespace-root content has declared child
+	// snapshots (in particular the orphan/residual-PVC volume leaves) that are not yet linked into
+	// status.childrenSnapshotContentRefs. ChildrenReady is held fail-closed at this reason until every
+	// declared child content edge is present, so a consumer never observes the first Ready=True before the
+	// orphan data is captured and linked. This subsumes the former residual/orphan-PVC capture latch gate.
+	ReasonChildrenLinkPending = "ChildrenLinkPending"
 )
 
 // TerminalReadyReasons is the canonical set of Ready=False reasons treated as terminal capture failure

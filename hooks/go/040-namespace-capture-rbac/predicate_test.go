@@ -93,7 +93,7 @@ func TestNeedsCaptureRBAC(t *testing.T) {
 		},
 		{
 			name: "Ready=False non-terminal reason -> grant (capture still in progress)",
-			snap: snapshotWithReady("ns", metav1.ConditionFalse, storagev1alpha1.ReasonResidualVolumeCapturePending),
+			snap: snapshotWithReady("ns", metav1.ConditionFalse, storagev1alpha1.ReasonChildrenLinkPending),
 			want: true,
 		},
 		{

@@ -32,7 +32,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -87,13 +86,10 @@ func (r *SnapshotReconciler) reconcileStaticBind(ctx context.Context, nsSnap *st
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// A statically-bound content has no residual/orphan-PVC wave of its own (it was materialized by the
-	// import path or pre-provisioned out of band). Latch the residual gate Complete (idempotent: import
-	// content already carries it; pre-provisioned content gets it here) so the aggregator's fail-closed
-	// residual gate cannot hold the mirror's first Ready=True forever.
-	if err := snapshotcontent.MarkResidualVolumeCaptureComplete(ctx, r.Client, content.Name, nil); err != nil {
-		return ctrl.Result{}, err
-	}
+	// A statically-bound content has no live residual/orphan-PVC wave of its own (it was materialized by the
+	// import path or pre-provisioned out of band). The aggregator's fail-closed orphan-link gate keys off
+	// the owner's declared VS leaves and skips reconstructed leaves whose VolumeSnapshot does not exist, so
+	// a statically-bound root is never held at Ready=False by a residual gate — no latch to stamp.
 
 	// Recycle-bin restore orchestration (wave4B): the surviving content tree that outlived its namespaced
 	// Snapshot is re-attached here. Walk the durable childrenSnapshotContentRefs graph, idempotently

@@ -397,23 +397,14 @@ type commonContentStatusPlan struct {
 	readyReason  string
 	readyMessage string
 
-	// subtreeManifestsPersisted is the core-internal monotonic recursive latch AND the second-lowest-priority
-	// Ready leg (the residual-sweep gate is below it): it gates the first Ready=True; true once this node's
-	// own manifest leg reached readiness AND every declared child content has subtreeManifestsPersisted=true;
-	// it never re-opens. It is success-only (no Failed value): a terminal subtree failure surfaces on the
-	// Ready reason (manifestsFailed/childrenFailed), not here. Persisted to status.subtreeManifestsPersisted
-	// (a bool field), not a condition. subtreeManifestsPersistedMessage carries the pending gate message.
+	// subtreeManifestsPersisted is the core-internal monotonic recursive latch AND the lowest-priority
+	// Ready leg: it gates the first Ready=True; true once this node's own manifest leg reached readiness
+	// AND every declared child content has subtreeManifestsPersisted=true; it never re-opens. It is
+	// success-only (no Failed value): a terminal subtree failure surfaces on the Ready reason
+	// (manifestsFailed/childrenFailed), not here. Persisted to status.subtreeManifestsPersisted (a bool
+	// field), not a condition. subtreeManifestsPersistedMessage carries the pending gate message.
 	subtreeManifestsPersisted        bool
 	subtreeManifestsPersistedMessage string
-
-	// ResidualSweep gates the FIRST Ready=True on a namespace-root content until the reconciler latches
-	// status.residualVolumeCapture.phase=Complete (the residual/orphan-PVC capture wave has finished). It
-	// is a fail-closed, monotonic, lowest-priority Ready leg (below ManifestsArchived): leaf/domain-child/
-	// non-root contents and roots whose Ready is already True are never gated. False is non-terminal
-	// (ResidualVolumeCapturePending). See computeResidualSweepGate / api/storage ResidualVolumeCaptureStatus.
-	residualSweepStatus  metav1.ConditionStatus
-	residualSweepReason  string
-	residualSweepMessage string
 }
 
 // reconcileCommonSnapshotContentStatus aggregates and publishes the SnapshotContent conditions and
@@ -499,7 +490,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
 	// Condition-only MergeFrom patch (not a full Status().Update). base vs obj differ only in
 	// status.conditions, so the JSON merge patch is {"status":{"conditions":[...]}} and leaves sibling
-	// status fields written by the snapshot reconciler (residualVolumeCapture, dataRefs, ...) untouched.
+	// status fields written by the snapshot reconciler (data, parentDeleted, ...) untouched.
 	// conditions are the aggregator's exclusive domain (INV-COND2, single writer) and reconcile of one
 	// object is serialized, so no optimistic lock is needed: MergeFrom sends no resourceVersion, so a
 	// concurrent sibling-field write does not turn into a 409 (which the previous Status().Update would
@@ -536,18 +527,18 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 }
 
 // buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumeReady, ChildrenReady, the
-// ManifestsArchived subtree latch, the residual-sweep gate, and the derived Ready. Ready priority (single
-// reason when several legs are not satisfied):
+// ManifestsArchived subtree latch, and the derived Ready. Ready priority (single reason when several
+// legs are not satisfied):
 //
-//	manifestsFailed > volumeFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > archivePending > residualSweepPending > Completed
+//	manifestsFailed > volumeFailed > childrenFailed > manifestsPending > volumesPending > childrenPending > archivePending > Completed
 //
 // Terminal failures win over pending (actionable first); own-node legs win over children, and the
-// manifest leg wins over the volume leg at equal severity. ManifestsArchived is a low-priority gate: it
-// blocks the FIRST Ready=True until the whole subtree's manifests are archived. The residual-sweep gate is
-// the LOWEST priority: on a namespace-root content it blocks the FIRST Ready=True until the residual/
-// orphan-PVC capture wave is latched Complete (fail-closed). Both are monotonic, so neither ever drags
-// Ready back down after the first Ready=True. PlanningReady is NOT part of this formula; it is
-// only a gate/barrier upstream.
+// manifest leg wins over the volume leg at equal severity. ManifestsArchived is the LOWEST-priority gate:
+// it blocks the FIRST Ready=True until the whole subtree's manifests are archived. It is monotonic, so it
+// never drags Ready back down after the first Ready=True. The former residual/orphan-PVC capture latch
+// gate is gone: the orphan wave is now gated through ChildrenReady (ChildrenLinkPending, fail-closed
+// against declared-but-unlinked orphan volume child content — see validateCommonContentChildren).
+// PlanningReady is NOT part of this formula; it is only a gate/barrier upstream.
 func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
 	plan := commonContentStatusPlan{
 		manifestsReady:   metav1.ConditionFalse,
@@ -588,13 +579,6 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		return plan, err
 	}
 
-	// Residual-sweep gate (lowest-priority Ready leg): on a namespace-root content, hold the FIRST
-	// Ready=True until the reconciler latches the residual/orphan-PVC wave Complete. Local read only
-	// (no owner GET): the discriminator comes from this content's own spec.snapshotRef.
-	if err := r.computeResidualSweepGate(obj, &plan); err != nil {
-		return plan, err
-	}
-
 	switch {
 	case plan.manifestsReady != metav1.ConditionTrue && plan.manifestsFailed:
 		plan.readyStatus = metav1.ConditionFalse
@@ -630,15 +614,6 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyStatus = metav1.ConditionFalse
 		plan.readyReason = snapshot.ReasonSubtreeManifestCapturePending
 		plan.readyMessage = plan.subtreeManifestsPersistedMessage
-	case plan.residualSweepStatus != metav1.ConditionTrue:
-		// Residual/orphan-PVC capture gate (lowest priority, fail-closed): on a namespace-root content,
-		// block the FIRST Ready=True until the reconciler latches residualVolumeCapture.phase=Complete.
-		// Reached only when every other leg (including the archive latch) is already satisfied. Monotonic:
-		// computeResidualSweepGate opens the gate once Ready is already True (or the latch is Complete), so
-		// this case never fires afterwards and cannot drag Ready back down (no True->False flap).
-		plan.readyStatus = metav1.ConditionFalse
-		plan.readyReason = plan.residualSweepReason
-		plan.readyMessage = plan.residualSweepMessage
 	default:
 		plan.readyStatus = metav1.ConditionTrue
 		plan.readyReason = snapshot.ReasonCompleted
@@ -650,9 +625,9 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 
 // computeSubtreeManifestsPersisted fills the subtreeManifestsPersisted latch on plan. It is a lifelong
 // latch (never re-opens) that records the irreversible fact that this node and its whole subtree
-// persisted their manifests. It also acts as the second-lowest-priority Ready leg (the residual-sweep
-// gate is below it; see buildCommonSnapshotContentStatusPlan): because it is monotonic, it gates the
-// FIRST Ready=True but never drags Ready back down afterwards.
+// persisted their manifests. It also acts as the lowest-priority Ready leg (see
+// buildCommonSnapshotContentStatusPlan): because it is monotonic, it gates the FIRST Ready=True but
+// never drags Ready back down afterwards.
 //
 //   - If the persisted latch (status.subtreeManifestsPersisted) is already true, it is held true
 //     (immune to later ManifestsReady/Ready degradation or to a child disappearing). Snapshot.spec is
@@ -679,54 +654,6 @@ func (r *SnapshotContentController) computeSubtreeManifestsPersisted(ctx context
 		plan.subtreeManifestsPersistedMessage = childMessage
 	} else {
 		plan.subtreeManifestsPersistedMessage = "manifests are being captured: " + plan.manifestsMessage
-	}
-	return nil
-}
-
-// computeResidualSweepGate fills the residual-sweep gate on plan: the LOWEST-priority Ready leg that holds
-// the FIRST Ready=True on a namespace-root content until the snapshot reconciler latches the residual/
-// orphan-PVC capture wave Complete (status.residualVolumeCapture.phase=Complete). It is fail-closed and
-// purely LOCAL: the aggregator never reads the owning Snapshot.
-//
-// Discriminator (all from this content's OWN object, no owner GET):
-//   - A child-volume-node content (LabelChildVolumeNode) models a single PVC and has no residual wave -> open.
-//   - Only a namespace-root content (spec.snapshotRef -> a core state-snapshotter.deckhouse.io Snapshot) carries the
-//     residual wave; domain XxxxSnapshot / orphan-VolumeSnapshot-bound contents are never gated -> open.
-//   - Upgrade-guard (monotonicity): if Ready is ALREADY persisted True, never re-gate. The gate blocks only
-//     the FIRST Ready=True (like ManifestsArchived); on a controller rollout this prevents an already-ready
-//     root - whose latch field is still absent because it predates this feature - from being dragged back to
-//     False (the very flap this feature removes). On a clean install Ready=True can only have been persisted
-//     after the gate opened (latch Complete, monotonic), so the guard merely confirms a valid state.
-//
-// When none of the above opens the gate, it stays closed until the latch reaches Complete.
-func (r *SnapshotContentController) computeResidualSweepGate(obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
-	// Default open: leaf/domain-child/non-root, an already-Ready root, and a Complete latch all leave this True.
-	plan.residualSweepStatus = metav1.ConditionTrue
-	plan.residualSweepReason = snapshot.ReasonCompleted
-	plan.residualSweepMessage = "residual volume capture complete"
-
-	if obj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
-		return nil
-	}
-	apiVersion, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotRef", "kind")
-	if kind != "Snapshot" || apiVersion != storagev1alpha1.SchemeGroupVersion.String() {
-		return nil
-	}
-
-	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
-	if err != nil {
-		return fmt.Errorf("extract SnapshotContentLike for residual gate: %w", err)
-	}
-	if cur := snapshot.GetCondition(contentLike, snapshot.ConditionReady); cur != nil && cur.Status == metav1.ConditionTrue {
-		return nil
-	}
-
-	phase, _, _ := unstructured.NestedString(obj.Object, "status", "residualVolumeCapture", "phase")
-	if phase != storagev1alpha1.ResidualVolumeCapturePhaseComplete {
-		plan.residualSweepStatus = metav1.ConditionFalse
-		plan.residualSweepReason = snapshot.ReasonResidualVolumeCapturePending
-		plan.residualSweepMessage = "waiting for residual/orphan-PVC volume capture wave to complete"
 	}
 	return nil
 }
@@ -1000,6 +927,16 @@ func isTerminalChildContentFailure(reason string) bool {
 // and surfaces as ChildrenPending only when no terminal failure exists. In both branches the
 // message names the failed/pending child and carries its original Ready reason/message so a deeper
 // leaf failure is not lost as the failure climbs the ancestor chain.
+//
+// Orphan-link fail-close (replaces the former residual/orphan-PVC latch gate): on a namespace-root
+// content the orphan/residual-PVC wave publishes CSI VolumeSnapshot visibility leaves into the owning
+// Snapshot's status.childrenSnapshotRefs BEFORE it links the corresponding child-volume-node contents
+// into status.childrenSnapshotContentRefs (linking happens only after the root content binds). Because
+// childrenSnapshotContentRefs carries only LINKED edges, a root whose orphan children are not yet linked
+// would otherwise read ChildrenReady=True prematurely. unlinkedOrphanChildContents recomputes the
+// declared orphan child set from the owner and holds ChildrenReady=False (ChildrenLinkPending,
+// fail-closed) until every declared orphan child content is linked. It is monotonic (gated off once this
+// content's Ready is already True), matching the removed latch gate's "only blocks the FIRST Ready=True".
 func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, string, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
@@ -1008,6 +945,7 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 	total := 0
 	readyCount := 0
 	var pendingNames []string
+	linked := make(map[string]struct{}, len(rawRefs))
 	for _, raw := range rawRefs {
 		refMap, ok := raw.(map[string]interface{})
 		if !ok {
@@ -1017,6 +955,7 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		if name == "" {
 			continue
 		}
+		linked[name] = struct{}{}
 		total++
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
@@ -1052,10 +991,122 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		return false, snapshot.ReasonChildrenPending,
 			"waiting for child snapshot contents: " + formatReadyProgress(readyCount, total, pendingNames), nil
 	}
+
+	// Fail-closed orphan-link gate (subsumes the removed residual/orphan-PVC latch): every declared orphan
+	// volume child content must be linked into childrenSnapshotContentRefs before ChildrenReady may be True.
+	unlinkedOrphans, err := r.unlinkedOrphanChildContents(ctx, parentContentObj, linked)
+	if err != nil {
+		return false, "", "", err
+	}
+	if len(unlinkedOrphans) > 0 {
+		return false, snapshot.ReasonChildrenLinkPending,
+			"waiting for orphan volume child content to be linked: " + strings.Join(unlinkedOrphans, ", "), nil
+	}
+
 	if total == 0 {
 		return true, "", "no child content", nil
 	}
 	return true, "", fmt.Sprintf("%d/%d child content ready", readyCount, total), nil
+}
+
+// unlinkedOrphanChildContents returns the declared orphan (child-volume-node) child content names that are
+// NOT yet present in the parent's linked child edge set (linked). It is the fail-closed declared-vs-linked
+// check that replaces the former residual/orphan-PVC capture latch gate.
+//
+// Scope / monotonicity (returns nil, i.e. "nothing to gate", in all of these cases):
+//   - a child-volume-node content (LabelChildVolumeNode) models a single PVC and has no orphan wave;
+//   - a non-root content (spec.snapshotRef is not a core state-snapshotter.deckhouse.io Snapshot) — only a
+//     namespace-root carries the orphan wave;
+//   - this content's Ready is ALREADY True (upgrade-guard): the gate blocks only the FIRST Ready=True, so a
+//     linked orphan that later degrades does not re-open it (matches the removed monotonic latch gate);
+//   - the owning Snapshot is not observable (NotFound) — nothing to enumerate.
+//
+// For a live-capture namespace-root it reads the owner's declared children fresh (APIReader — the
+// authoritative declared set, same reasoning as declaredNonLeafChildContentNames), keeps only the CSI
+// VolumeSnapshot visibility leaves (the orphan wave), and derives each orphan child content name from the
+// VolumeSnapshot UID. A VolumeSnapshot that does not exist (fresh NotFound) is SKIPPED, not gated: a
+// published leaf in the capture path always has a live VS (it is created before the leaf ref is
+// published), so a missing VS means a reconstructed ref (import/restore) with no live orphan wave.
+func (r *SnapshotContentController) unlinkedOrphanChildContents(ctx context.Context, contentObj *unstructured.Unstructured, linked map[string]struct{}) ([]string, error) {
+	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
+		return nil, nil
+	}
+	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
+	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
+	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
+	if kind != "Snapshot" || apiVersion != storagev1alpha1.SchemeGroupVersion.String() || name == "" {
+		return nil, nil
+	}
+
+	// Upgrade-guard / monotonicity: never re-gate once Ready is already persisted True.
+	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
+	if err != nil {
+		return nil, fmt.Errorf("extract SnapshotContentLike for orphan-link gate: %w", err)
+	}
+	if cur := snapshot.GetCondition(contentLike, snapshot.ConditionReady); cur != nil && cur.Status == metav1.ConditionTrue {
+		return nil, nil
+	}
+
+	owner := &unstructured.Unstructured{}
+	owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(apiVersion, kind))
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	rawRefs, _, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return nil, err
+	}
+	var unlinked []string
+	for _, raw := range rawRefs {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ref := storagev1alpha1.SnapshotChildRef{}
+		ref.APIVersion, _ = m["apiVersion"].(string)
+		ref.Kind, _ = m["kind"].(string)
+		ref.Name, _ = m["name"].(string)
+		if !snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
+			continue
+		}
+		childName, err := r.orphanChildContentNameFromVSLeaf(ctx, ref, namespace)
+		if err != nil {
+			return nil, err
+		}
+		if childName == "" {
+			// VS not observable (reconstructed import/restore ref, or genuinely gone): nothing to gate on.
+			continue
+		}
+		if _, ok := linked[childName]; !ok {
+			unlinked = append(unlinked, childName)
+		}
+	}
+	return unlinked, nil
+}
+
+// orphanChildContentNameFromVSLeaf resolves the child-volume-node SnapshotContent name for a CSI
+// VolumeSnapshot visibility leaf by reading the VS UID (the content name is derived from it). It returns
+// "" (not an error) when the VolumeSnapshot does not exist, so a reconstructed import/restore leaf ref
+// with no live VS is skipped rather than fail-closed forever. The VS UID is immutable once created, so a
+// cached read is safe; APIReader is used for parity with the fresh owner read above.
+func (r *SnapshotContentController) orphanChildContentNameFromVSLeaf(ctx context.Context, ref storagev1alpha1.SnapshotChildRef, namespace string) (string, error) {
+	vs := &unstructured.Unstructured{}
+	vs.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, vs); err != nil {
+		if errors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	uid := vs.GetUID()
+	if uid == "" {
+		return "", nil
+	}
+	return ChildVolumeContentName(uid), nil
 }
 
 // childTerminalLeafInfo distills a terminal child's Ready condition into the original failed leaf's

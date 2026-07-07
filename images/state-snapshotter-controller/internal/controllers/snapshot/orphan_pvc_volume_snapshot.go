@@ -85,9 +85,14 @@ type orphanVSBindingResult struct {
 // records the current set as Snapshot.status.childrenSnapshotRefs[] visibility leaves. The orphan
 // VolumeSnapshot is durable (it is the snapshot of the PVC) and is NOT pruned mid-life: it is removed only
 // by ownerRef GC when the Snapshot is deleted. Orphan volume capture is sequenced after all domain
-// children are Ready (see ensureVolumeCaptureLeg), so the targets here are the genuinely uncovered PVCs
-// and there is no "became covered -> prune" churn.
-// Domain/non-root controllers keep the VCR path; this helper is the namespace-root carve-out only.
+// children are Ready (the "late Planned" pre-barrier wave gates on it, see
+// ensureOrphanVolumeSnapshotsPrePlanned), so the targets here are the genuinely uncovered PVCs and there
+// is no "became covered -> prune" churn.
+//
+// content may be nil: in the "late Planned" pre-barrier wave the root SnapshotContent is not bound yet, so
+// a terminal VolumeSnapshotClass failure is routed onto the Snapshot's own Ready (failOrphanCaptureTerminal)
+// rather than onto the (absent) content. Domain/non-root controllers keep the VCR path; this helper is the
+// namespace-root carve-out only.
 func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -103,9 +108,10 @@ func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 		}
 		if treason != "" {
 			// VolumeSnapshotClass resolution/validation failed (annotation/class/PV-CSI/driver):
-			// write a terminal capture-failure condition instead of requeueing forever.
-			_, ferr := r.failCapture(ctx, nsSnap, content, treason, tmsg)
-			return ferr
+			// write a terminal capture-failure condition instead of requeueing forever. Pre-Planned
+			// ("late Planned" wave, content==nil) there is no bound root content to carry it, so the
+			// terminal is written on the Snapshot's own Ready.
+			return r.failOrphanCaptureTerminal(ctx, nsSnap, content, treason, tmsg)
 		}
 		desired = append(desired, storagev1alpha1.SnapshotChildRef{
 			APIVersion: snapshotpkg.CSISnapshotAPIVersion,
@@ -114,6 +120,23 @@ func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 		})
 	}
 	return r.reconcileOrphanPVCVolumeSnapshotChildLeaves(ctx, nsSnap, desired)
+}
+
+// failOrphanCaptureTerminal writes a terminal orphan-PVC capture failure. Post-bind it degrades the bound
+// root content (failCapture); pre-bind ("late Planned" wave, content==nil) it degrades the Snapshot's own
+// Ready directly, since no root content exists yet to carry the failure.
+func (r *SnapshotReconciler) failOrphanCaptureTerminal(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	content *storagev1alpha1.SnapshotContent,
+	reason, message string,
+) error {
+	if content != nil {
+		_, err := r.failCapture(ctx, nsSnap, content, reason, message)
+		return err
+	}
+	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+	return r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, reason, message)
 }
 
 // ensureOrphanPVCVolumeSnapshot creates (or adopts) the orphan-PVC VolumeSnapshot for a target.
@@ -452,14 +475,10 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 	allowRequeue bool,
 ) (ctrl.Result, error) {
 	if len(targets) == 0 {
-		// Residual/orphan-PVC wave is done with zero orphan targets (reachable only after the domain
-		// gate opened, so there really are no orphans): latch the residual gate Complete before clearing
-		// any stale VCR. This is the anti-deadlock stamp point for the zero-targets capture root.
-		if err := snapshotcontent.MarkResidualVolumeCaptureComplete(ctx, r.Client, content.Name, nil); err != nil {
-			return ctrl.Result{}, err
-		}
-		// No orphan PVCs in residual root scope: still clear any stale VCR / status.volumeCaptureRequestName
-		// left behind by a previous (VCR-based) run or migration.
+		// Residual/orphan-PVC wave is done with zero orphan targets (reachable only after the domain gate
+		// opened, so there really are no orphans): the orphan-link gate on the aggregator is vacuously open
+		// (no VS leaves declared), so no latch is needed. Still clear any stale VCR /
+		// status.volumeCaptureRequestName left behind by a previous (VCR-based) run or migration.
 		return r.clearOrphanPVCStaleVCR(ctx, nsSnap, content)
 	}
 	// Re-read the root content so childrenSnapshotContentRefs / UID are fresh for child linking and ownerRefs.
@@ -491,16 +510,10 @@ func (r *SnapshotReconciler) reconcileOrphanPVCVolumeSnapshotPublish(
 	if !allReady {
 		return requeueVolumeCaptureIf(allowRequeue, "waiting for orphan PVC child volume nodes")
 	}
-	// Residual/orphan-PVC wave finished: every orphan child volume node is linked and ready. Latch the
-	// residual gate Complete (recording the captured orphan UIDs for diagnostics) before clearing the
-	// stale VCR. NOT stamped on the !allReady requeue above, so the gate opens only once data is ready.
-	orphanUIDs := make([]string, 0, len(targets))
-	for _, target := range targets {
-		orphanUIDs = append(orphanUIDs, target.UID)
-	}
-	if err := snapshotcontent.MarkResidualVolumeCaptureComplete(ctx, r.Client, content.Name, orphanUIDs); err != nil {
-		return ctrl.Result{}, err
-	}
+	// Residual/orphan-PVC wave finished: every orphan child volume node is linked and ready. The aggregator
+	// observes this directly (each orphan child content is now linked into childrenSnapshotContentRefs), so
+	// the fail-closed orphan-link gate (ChildrenReady) opens on its own — no separate latch to stamp. Clear
+	// any stale VCR left by a previous run.
 	return r.clearOrphanPVCStaleVCR(ctx, nsSnap, content)
 }
 

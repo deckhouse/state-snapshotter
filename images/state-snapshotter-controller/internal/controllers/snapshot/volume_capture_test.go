@@ -985,6 +985,82 @@ func TestOrphanPVCVolumeSnapshotClass_UnboundPVCIsTransient(t *testing.T) {
 	}
 }
 
+// TestEnsureOrphanVolumeSnapshotsPrePlanned_ContentFreeCreatesVSAndLeaf verifies the "late Planned"
+// pre-barrier wave: with no domain children (gate passes vacuously) it computes residual targets and
+// creates the orphan VolumeSnapshot + publishes the visibility leaf onto childrenSnapshotRefs WITHOUT a
+// bound root SnapshotContent (content-free), so the full child set is enumerated before MarkPlanned.
+func TestEnsureOrphanVolumeSnapshotsPrePlanned_ContentFreeCreatesVSAndLeaf(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := testVolumeCaptureScheme(t)
+	ns := "default"
+	snap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"}}
+
+	// No SnapshotContent object in the fixtures: the wave must not need it.
+	objs := orphanCaptureFixtures(ns, "pvc-a", "uid-a")
+	objs = append(objs, snap)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).Build()
+	r := &SnapshotReconciler{Client: cl, APIReader: cl}
+
+	res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, snap)
+	if err != nil {
+		t.Fatalf("ensureOrphanVolumeSnapshotsPrePlanned: %v", err)
+	}
+	if res.Requeue || res.RequeueAfter > 0 {
+		t.Fatalf("content-free wave with a resolvable target must not requeue, got %#v", res)
+	}
+	vsName := orphanPVCVolumeSnapshotName(snap.UID, pvcTarget(ns, "pvc-a", "uid-a"))
+	vs := &unstructured.Unstructured{}
+	vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: vsName}, vs); err != nil {
+		t.Fatalf("expected orphan VolumeSnapshot created content-free, got %v", err)
+	}
+	fresh := &storagev1alpha1.Snapshot{}
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: snap.Name}, fresh); err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	if len(fresh.Status.ChildrenSnapshotRefs) != 1 || fresh.Status.ChildrenSnapshotRefs[0].Name != vsName {
+		t.Fatalf("expected VS visibility leaf %q published before Planned, got %#v", vsName, fresh.Status.ChildrenSnapshotRefs)
+	}
+}
+
+// TestEnsureOrphanVolumeSnapshotsPrePlanned_DefersUntilDomainChildrenReady verifies the wave is gated on
+// domain children being Ready (so subtree-covered PVC coverage is complete): a not-yet-Ready domain child
+// keeps the wave closed (requeue) and no orphan VolumeSnapshot is created.
+func TestEnsureOrphanVolumeSnapshotsPrePlanned_DefersUntilDomainChildrenReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := testVolumeCaptureScheme(t)
+	ns := "default"
+	childRef := storagev1alpha1.SnapshotChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "nss-child-domain"}
+	child := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "nss-child-domain", Namespace: ns, UID: "child-uid"}}
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns, UID: "snap-uid"},
+		Status:     storagev1alpha1.SnapshotStatus{ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{childRef}},
+	}
+
+	objs := orphanCaptureFixtures(ns, "pvc-a", "uid-a")
+	objs = append(objs, snap, child)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).Build()
+	r := &SnapshotReconciler{Client: cl, APIReader: cl}
+
+	res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, snap)
+	if err != nil {
+		t.Fatalf("ensureOrphanVolumeSnapshotsPrePlanned: %v", err)
+	}
+	if !res.Requeue && res.RequeueAfter == 0 {
+		t.Fatalf("wave must defer (requeue) until domain children are Ready, got %#v", res)
+	}
+	vsName := orphanPVCVolumeSnapshotName(snap.UID, pvcTarget(ns, "pvc-a", "uid-a"))
+	vs := &unstructured.Unstructured{}
+	vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: vsName}, vs); !apierrors.IsNotFound(err) {
+		t.Fatalf("no orphan VolumeSnapshot must be created while the gate is closed, got %v", err)
+	}
+}
+
 func TestHasNonVisibilitySnapshotChildren(t *testing.T) {
 	t.Parallel()
 	leaf := storagev1alpha1.SnapshotChildRef{APIVersion: snapshotpkg.CSISnapshotAPIVersion, Kind: snapshotpkg.KindVolumeSnapshot, Name: "nss-vs-x"}

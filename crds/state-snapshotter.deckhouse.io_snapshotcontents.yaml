@@ -417,35 +417,6 @@ spec:
                   longer re-adds the parent-protect finalizer (the parent is gone) and GC may proceed. Monotonic
                   (false -> true only); it replaces the former snapshot.deckhouse.io/parent-deleted annotation.
                 type: boolean
-              residualVolumeCapture:
-                description: |-
-                  ResidualVolumeCapture latches completion of the final residual/orphan-PVC capture wave on a
-                  namespace-root SnapshotContent. It is the gate signal the aggregator reads to hold the FIRST
-                  Ready=True until the residual wave is done (fail-closed). It is written ONLY by the snapshot
-                  reconciler (the sole owner of the namespace PVC scope), never by the aggregator: absence (or any
-                  Phase != Complete) means "wave not finished yet". See ResidualVolumeCaptureStatus.
-                properties:
-                  completedAt:
-                    description: CompletedAt records when the latch reached Complete.
-                      Diagnostic only.
-                    format: date-time
-                    type: string
-                  phase:
-                    description: |-
-                      Phase is the latch state. The reconciler writes only Complete; the aggregator treats anything
-                      other than Complete (including an absent residualVolumeCapture) as "wave not finished".
-                    enum:
-                    - Pending
-                    - Complete
-                    type: string
-                  targetUIDs:
-                    description: |-
-                      TargetUIDs records the captured orphan PVC UIDs at completion (empty when there were no orphan
-                      targets). Diagnostic only; the gate does not read it.
-                    items:
-                      type: string
-                    type: array
-                type: object
               subtreeManifestsPersisted:
                 description: |-
                   SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own

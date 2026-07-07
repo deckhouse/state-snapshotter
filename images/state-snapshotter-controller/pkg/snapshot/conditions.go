@@ -130,11 +130,13 @@ const (
 	// ReasonChildrenFailed is set when any required child has a terminal Ready=False
 	// (see usecase.ChildSnapshotTerminalReadyReasons).
 	ReasonChildrenFailed = "ChildrenFailed"
-	// ReasonResidualVolumeCapturePending is the non-terminal, fail-closed reason on a namespace-root
-	// SnapshotContent (mirrored onto Snapshot) while the final residual/orphan-PVC capture wave has not
-	// completed (status.residualVolumeCapture.phase != Complete). It gates only the FIRST Ready=True so
-	// a consumer never restores before the orphan data is captured. Defined canonically in api/storage.
-	ReasonResidualVolumeCapturePending = storagev1alpha1.ReasonResidualVolumeCapturePending
+	// ReasonChildrenLinkPending is the non-terminal, fail-closed reason on a namespace-root SnapshotContent
+	// (mirrored onto Snapshot) while declared child snapshots — in particular the orphan/residual-PVC
+	// volume leaves — are not yet linked into status.childrenSnapshotContentRefs. ChildrenReady is held at
+	// this reason until every declared child content edge is present, so a consumer never observes the
+	// first Ready=True before the orphan data is captured and linked. It subsumes the former residual/
+	// orphan-PVC capture latch gate. Defined canonically in api/storage.
+	ReasonChildrenLinkPending = storagev1alpha1.ReasonChildrenLinkPending
 )
 
 // Graph/capture-planning reasons surfaced on the root Snapshot Ready condition. The parent no longer

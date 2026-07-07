@@ -36,13 +36,19 @@ func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = storagev1alpha1.AddToScheme(scheme)
 
-	rootNS := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: ns}}
-	rootContent := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-content"},
-		Status: storagev1alpha1.SnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "c1"}, {Name: "c2"}},
-		},
+	// wave7 content-free coverage walks the SNAPSHOT child graph (status.childrenSnapshotRefs -> each
+	// direct child's bound SnapshotContent), not the root content tree. Two domain children whose bound
+	// contents claim the same PVC UID must fail closed with ErrDuplicateCoveredPVCUID before any residual
+	// PVC listing. Passing a nil root content also exercises the "late Planned" pre-bind (content-free) path.
+	childRef := func(name string) storagev1alpha1.SnapshotChildRef {
+		return storagev1alpha1.SnapshotChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: name}
 	}
+	rootNS := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: ns},
+		Status:     storagev1alpha1.SnapshotStatus{ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{childRef("child-a"), childRef("child-b")}},
+	}
+	childA := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "child-a", Namespace: ns}, Status: storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "c1"}}
+	childB := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "child-b", Namespace: ns}, Status: storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "c2"}}
 	c1 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
 		Status:     storagev1alpha1.SnapshotContentStatus{Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}}},
@@ -51,9 +57,9 @@ func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "c2"},
 		Status:     storagev1alpha1.SnapshotContentStatus{Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}}},
 	}
-	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(rootNS, rootContent, c1, c2).Build()
+	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(rootNS, childA, childB, c1, c2).Build()
 
-	_, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, cl, rootNS, rootContent)
+	_, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, cl, rootNS, nil)
 	if err == nil {
 		t.Fatal("expected duplicate covered PVC error")
 	}

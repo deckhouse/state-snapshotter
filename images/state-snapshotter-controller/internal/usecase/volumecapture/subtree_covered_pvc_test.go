@@ -181,20 +181,31 @@ func TestListOwnedPVCTargets_residualExcludesSubtreeCovered(t *testing.T) {
 	ns := "ns"
 	pvcRoot := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "root-pvc", Namespace: ns, UID: types.UID("uid-root")}}
 	pvcChild := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "child-pvc", Namespace: ns, UID: types.UID("uid-child")}}
-	root := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root"},
-		Status: storagev1alpha1.SnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-content"}},
-		},
-	}
-	child := &storagev1alpha1.SnapshotContent{
+	// wave7 root-content-free coverage: the covered child is discovered through the Snapshot child graph — a
+	// child Snapshot node bound to its OWN content, whose data binding covers uid-child — NOT the root's
+	// SnapshotContent subtree.
+	childContent := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-child"}},
 		},
 	}
-	snap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns}}
-	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(pvcRoot, pvcChild, root, child, snap).Build()
+	childSnap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-snap", Namespace: ns},
+		Status: storagev1alpha1.SnapshotStatus{
+			BoundSnapshotContentName: "child-content",
+		},
+	}
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
+				{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "child-snap"},
+			},
+		},
+	}
+	root := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root"}}
+	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(pvcRoot, pvcChild, childContent, childSnap, snap, root).Build()
 	got, err := ListOwnedPVCTargetsForLogicalContent(context.Background(), cl, snap, root)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

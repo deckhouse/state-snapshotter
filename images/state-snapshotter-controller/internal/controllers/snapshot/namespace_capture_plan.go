@@ -64,9 +64,10 @@ func manifestIdentityKey(apiVersion, kind, name string) string {
 // planned" half of the root's phase=Finished gate (design §4.2/§6.2).
 //
 // CSI VolumeSnapshot visibility leaves (the orphan/residual PVC wave) are skipped: they have no domain
-// controller and therefore no phase, and are gated by the orphan wave's residualVolumeCapture latch, not
-// here. phaseByName maps a child ref Name to its observed capture phase (empty = no phase yet). A root
-// with no domain children passes vacuously.
+// controller and therefore no phase, and are gated by the aggregator's fail-closed orphan-link gate
+// (ChildrenReady=ChildrenLinkPending until each orphan child content is linked), not here. phaseByName
+// maps a child ref Name to its observed capture phase (empty = no phase yet). A root with no domain
+// children passes vacuously.
 //
 // Pure function (phases supplied by the caller) so the gate is unit-tested directly (design §9).
 func allDirectDomainChildrenAtLeastPlanned(refs []storagev1alpha1.SnapshotChildRef, phaseByName map[string]storagev1alpha1.SnapshotCapturePhase) bool {
