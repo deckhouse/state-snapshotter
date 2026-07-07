@@ -106,7 +106,7 @@ writes ONLY own Snapshot.status:          creates + binds SnapshotContent (EAGER
   - phase (+ subtreePlanned latch)           - parent/child ownerRef                    - childrenSnapshotContentRefs (single, frozen)
   - data (mirror)                            - bind (boundSnapshotContentName)          - manifestCheckpointName (MCR→MCP)
                                              - finalizer                                - data (VCR→data)
-                                           watches all xxxSnapshot + orphan VS leaves   - subtreeManifestsPersisted / excludedRefs
+                                           watches all xxxSnapshot (incl. VS, §11)      - subtreeManifestsPersisted / excludedRefs
 never touches SnapshotContent             writes NO content.status                     projects owner childrenSnapshotRefs → child edges
 ```
 
@@ -126,6 +126,9 @@ edge set, reusing the resolvers that today only read:
 - desired set = `declaredNonLeafChildContentNames` (domain, resolved+bound) ∪ existing-orphan
   child-volume-node contents (from `unlinkedOrphanChildContents`' resolution, but keeping those that
   exist rather than reporting the unlinked remainder).
+  *Superseded by §11 (2026-07-07): once `VolumeSnapshot` is a registered domain kind there is no orphan
+  partition — every declared child (incl. kind `VolumeSnapshot`) resolves uniformly via
+  `ResolveChildSnapshotRefToBoundContentName`; the desired set is just the resolved declared set.*
 - for each edge: ensure the parent→child ownerRef (`ensureChildSnapshotContentOwnedByParent`,
   `controller.go:1124` — already present).
 - write `status.childrenSnapshotContentRefs`.
@@ -214,13 +217,18 @@ The precondition for writing `childrenSnapshotContentRefs` is **stronger than "c
 the write barrier is both:
 
 1. `childrenSnapshotRefs` is complete/frozen — the Late-Planned enumeration (all children, **including the
-   orphan volume leaves**, present); AND
+   orphan volume leaves**, present — *per §11 orphan `VolumeSnapshot` entries are regular domain children,
+   not a separate leaf category*); AND
 2. every declared child has **materialized content**:
    - domain child — `boundSnapshotContentName` resolvable (`declaredNonLeafChildContentNames` → complete);
    - orphan leaf — its child-volume-node content exists (`unlinkedOrphanChildContents` → empty).
+     *Superseded by §11: orphan `VolumeSnapshot` children are domain children — the first bullet covers
+     them; the separate orphan condition disappears with the machinery.*
 
 This is exactly the pair the aggregator already computes for its fail-closed Ready gate; the single writer
-reuses it as the **write** gate. Condition 1 (this node's plan frozen) is the OWN `planned` leg that may be
+reuses it as the **write** gate. Under §11 the pair collapses to the first bullet alone — every declared
+child (incl. kind `VolumeSnapshot`) resolves uniformly via `ResolveChildSnapshotRefToBoundContentName`.
+Condition 1 (this node's plan frozen) is the OWN `planned` leg that may be
 backed by the proposed `subtreePlanned` latch (§8.1); the write gate needs only that own leg, not the full
 subtree recursion.
 
@@ -248,7 +256,9 @@ distinct child milestones must not be conflated:
   `status.boundSnapshotContentName` resolves. This is what §3.5 condition 2 requires; it is the write
   barrier for the edge.
 - **Milestone B — `status.data` published:** `SnapshotContent.status.data.source.uid` appears only **after**
-  the child's `VolumeCaptureRequest` completes and `PublishSnapshotContentDataRef(s)` runs.
+  the child's `VolumeCaptureRequest` completes and `PublishSnapshotContentDataRef(s)` runs. *Native-CSI
+  domains (§11.4, kind `VolumeSnapshot`) reach B without a VCR — the aggregator projects `status.data` from
+  the owner's CSI binding (`boundVolumeSnapshotContentName` → VSC); the A→B window exists identically.*
 
 A happens **before** B. Therefore **an existing edge (barrier A) does NOT imply a materialized
 `status.data.source.uid` (B)**. This matters for orphan/residual PVC coverage, which reads B
@@ -256,12 +266,13 @@ A happens **before** B. Therefore **an existing edge (barrier A) does NOT imply 
 `internal/usecase/volumecapture/subtree_covered_pvc.go:172`) with an in-flight-VCR fallback
 (`pvcUIDsFromPendingVCR`, `spec.targets[].uid`, same file :189) precisely for the A→B window.
 
-Consequence: **the VCR fallback in `coveredPVCUIDsForContent` must be kept** — moving edge-writing to the
-single writer does not close the A→B window, so the fallback is still the only signal during it. The
-fallback could be removed **only** if the barrier is strengthened from A to B (write the edge only once the
-child's `status.data` is published), which is a **stronger, separate gate**: it delays `childrenSnapshotContentRefs`
-linking until each child's volume capture finishes and couples edge-linking to VCR completion. Not adopted
-here; noted as an option.
+Consequence: **the A→B fallback in `coveredPVCUIDsForContent` must be kept** — moving edge-writing to the
+single writer does not close the A→B window, so the fallback is still the only signal during it. For
+VCR-based domains the fallback reads the in-flight VCR targets; for native-CSI domains (§11.7) it reads the
+owner's `snapshotSource` PVC UID. The fallback could be removed **only** if the barrier is strengthened from
+A to B (write the edge only once the child's `status.data` is published), which is a **stronger, separate
+gate**: it delays `childrenSnapshotContentRefs` linking until each child's volume capture finishes and
+couples edge-linking to capture completion. Not adopted here; noted as an option.
 
 ### 3.6 `ChildrenReady` read barrier — evaluate only after the frozen set is committed
 
@@ -279,17 +290,18 @@ are even linked. So the (now real and long) empty-edges window must read **pendi
 
 **Leaf vs pending disambiguation.** Under set-once immutability (§3.4) an empty `childrenSnapshotContentRefs`
 is ambiguous — a true leaf writes empty, a not-yet-written parent is also empty. Resolve by comparing the
-**declared** child set (the node's frozen `childrenSnapshotRefs` / owner-derived orphan set) against the
-**linked** edges:
+**declared** child set (the node's frozen `childrenSnapshotRefs`; *under §11 there is no separate
+owner-derived orphan set*) against the **linked** edges:
 
 - declared children exist AND edges not yet the complete set → `ChildrenReady=False` (`ChildrenLinkPending`);
 - declared set empty (true leaf) → `ChildrenReady=True` ("no child content") is correct.
 
 This **generalizes today's orphan-only gate** `unlinkedOrphanChildContents` (`controller.go:995-1004`, which
 already recomputes the declared orphan set and holds `ChildrenLinkPending`) to **all** declared children
-(domain + orphan). Under the atomic frozen-set write (§3.1 end-state) there is no partial-link state: edges are
-either empty (pending) or the complete set (evaluate readiness) — so the gate reduces to "declared non-empty
-AND edges empty → pending".
+(*and per §11 replaces that orphan-only gate entirely — `unlinkedOrphanChildContents` is removed with the
+orphan machinery, §11.6*). Under the atomic frozen-set write (§3.1 end-state) there is no partial-link state:
+edges are either empty (pending) or the complete set (evaluate readiness) — so the gate reduces to "declared
+non-empty AND edges empty → pending".
 
 **No cycle.** §3.5 writes edges once every child has **content** (A); §3.6 then evaluates each linked child's
 **Ready** (recursive B/subtree). Edge-commit precedes readiness evaluation, so the two barriers compose
@@ -330,7 +342,8 @@ writer publish partial edges.
 The current thread. Move child-edge projection into `SnapshotContentController`; remove the two external
 writers. Child-volume-node content **creation** still lives in the namespace domain for now
 (`EnsureVolumeChildContent`); the aggregator only *links* it once it exists. This is safe because linking
-is exactly what the aggregator already resolves for its fail-closed gate.
+is exactly what the aggregator already resolves for its fail-closed gate. *(Interim only: the
+child-volume-node path itself is dismantled by §11 in Slice 3 — see §11.6.)*
 
 - **Acceptance:** demo tree (root Snapshot + child domain nodes) and the orphan/residual-PVC wave both
   reach `Ready=True`; `childrenSnapshotContentRefs` is written only by the aggregator (grep: no other
@@ -345,35 +358,36 @@ owning `xxxSnapshot`'s `captureState.manifestCaptureRequestName` → MCR → MCP
 (it already watches MCP via `artifactWakeUpGVKs`; add an MCR watch, which the binder has today at
 `controller.go:942`).
 
-**Orphan branch — no owning `xxxSnapshot`.** An orphan child-volume-node content has no `xxxSnapshot`
-owner (its `spec.snapshotRef` points at the orphan CSI `VolumeSnapshot`), so there is no `captureState`.
-For it the aggregator derives the manifest leg from `spec.snapshotRef.uid` (the VS UID):
-`SnapshotVolumeMCRName(vsUID)` → MCR UID → MCP name. It must be **latch-idempotent**: the domain deletes
-the per-orphan MCR once its MCP is Ready (`orphan_pvc_volume_snapshot.go:594-607`), so once
-`manifestCheckpointName` is published the aggregator keeps it even when the MCR is gone.
+**Orphan branch — no owning `xxxSnapshot`.** *Superseded by §11 (2026-07-07) — not implemented.* An orphan
+child-volume-node content has no `xxxSnapshot` owner (its `spec.snapshotRef` points at the orphan CSI
+`VolumeSnapshot`), so there is no `captureState`. For it the aggregator derives the manifest leg from
+`spec.snapshotRef.uid` (the VS UID): `SnapshotVolumeMCRName(vsUID)` → MCR UID → MCP name. It must be
+**latch-idempotent**: the domain deletes the per-orphan MCR once its MCP is Ready
+(`orphan_pvc_volume_snapshot.go:594-607`), so once `manifestCheckpointName` is published the aggregator
+keeps it even when the MCR is gone. *Under §11 the VS is a domain kind with its own `captureState`
+(`manifestCaptureRequestName` published by the foundation domain controller), so the standard projection
+covers it and this branch is never needed.*
 
-### Slice 3 — data leg → aggregator (main) + orphan content creation → binder (content-free domain)
+### Slice 3 — data leg → aggregator (main) + VS-domain dismantling (content-free domain)
 
 The largest slice; finishes rule #1 for the namespace domain (strict INV-CONTENT-WRITER-1).
+**Re-cut 2026-07-07 per §11** — the orphan-specific sub-items below are superseded by the `VolumeSnapshot`
+domain (§11.9); the slice now pairs with the foundation-side VS-domain blocks.
 
 - **data leg → aggregator.** Move `EnrichDataBindingsWithVolumeMetadata` +
   `EnsureVolumeSnapshotContentsOwnedByContent` + `PublishSnapshotContentDataRef(s)` off the binder
   (`domain_content.go:188-199`) and the namespace domain (`orphan_pvc_volume_snapshot.go:534-564`,
   `volume_capture.go:179-189`) into the `SnapshotContentController` aggregator. For a domain data-leaf the
-  aggregator reads `captureState.volumeCaptureRequestName` → VCR → VSC → `status.data`; for an orphan
-  child it reads `spec.snapshotRef` (the orphan VS) → its bound VSC → binding. Nobody watches VCR today
-  (verified — the binder watches only snapshots/contents/MCR), so add a VCR watch to the aggregator or
-  lean on its 500 ms self-requeue while `!ready` (§3.2).
-- **orphan child-volume-node content creation → binder (RESOLVED 2026-07-07: binder, eager).** The binder
-  is the single creator for **all** nodes. Extend the binder watch to the orphan **CSI `VolumeSnapshot`**
-  leaves and create+bind the orphan shell **eagerly** as soon as the leaf exists (same uniform rule as the
-  root/domain eager shell, §9): the orphan content's parent ownerRef resolves against the eager root shell.
-  Remove `EnsureVolumeChildContent` creation from `orphan_pvc_volume_snapshot.go`. This supersedes the
-  earlier "(a) aggregator creates orphan content" option — keeping *all* content creation in one creator
-  (the binder) is the uniform creator/main model, not an orphan-only carve-out. The namespace domain keeps
-  only: create the orphan CSI `VolumeSnapshot`, publish the VS visibility leaf into `childrenSnapshotRefs`,
-  and bind `VolumeSnapshot.status.boundSnapshotContentName` → deterministic child name
-  (`ChildVolumeContentName(vsUID)`, needs no content read).
+  aggregator reads `captureState.volumeCaptureRequestName` → VCR → VSC → `status.data`; for an owner of
+  kind **`VolumeSnapshot`** (native-CSI domain, §11.4) it reads `owner.status.boundVolumeSnapshotContentName`
+  → VSC → binding. Nobody watches VCR today (verified — the binder watches only snapshots/contents/MCR), so
+  add a VCR watch to the aggregator or lean on its 500 ms self-requeue while `!ready` (§3.2).
+- ~~**orphan child-volume-node content creation → binder (watch orphan VS leaves).**~~ **Superseded by §11
+  (2026-07-07).** `VolumeSnapshot` is a registered domain kind (CSD): the binder watches it through the
+  standard `AddWatchForPair` and creates+binds its content eagerly like any kind — no orphan-VS carve-out
+  watch, no `ChildVolumeContentName` naming, no domain-side `boundSnapshotContentName` bind. Remove
+  `EnsureVolumeChildContent` and the rest of the §11.6 table. The namespace domain keeps only: create the
+  orphan `VolumeSnapshot` for each residual PVC and declare it via regular `EnsureChildren`.
 - **restore `spec.snapshotRef` repoint → binder.** The recycle-bin restore repoint
   (`snapshot/static_bind.go` `repointContentSnapshotRef`) and the namespace static-bind content adoption
   also move to the binder (it writes `spec` universally as the creator) — the last remaining `SnapshotContent`
@@ -414,21 +428,23 @@ precondition). Steps:
   frozen `childrenSnapshotContentRefs` is committed. While the node has declared children but empty edges
   (the eager-shell window, §9), `ChildrenReady=False` (`ChildrenLinkPending`) — an empty edge set is read as
   `True` **only** for a true leaf (declared child set empty). This generalizes the orphan-only
-  `unlinkedOrphanChildContents` gate to all declared children.
+  `unlinkedOrphanChildContents` gate to all declared children (*that gate itself is removed by §11*).
 - **Monotonic edges (interim, until slice 4):** an edge, once published, is removed only by teardown —
   never dropped on a partial per-reconcile view. Superseded by INV-CONTENT-CHILDREN-2 once the frozen set
   is written atomically.
 - **Ready model — mostly unchanged, one addition:** the fail-closed reads
-  (`validateCommonContentChildren`, `aggregateChildrenSubtreeManifestsPersisted`, `unlinkedOrphanChildContents`)
-  keep their meaning and now read edges written by the same controller in the same pass. The one change is the
-  §3.6 read barrier (INV-CONTENT-CHILDREN-4): `validateCommonContentChildren` must treat empty edges with a
-  non-empty declared child set as pending, not `ChildrenReady=True` — required by eager shells (§9).
+  (`validateCommonContentChildren`, `aggregateChildrenSubtreeManifestsPersisted`; *`unlinkedOrphanChildContents`
+  until it is removed by §11*) keep their meaning and now read edges written by the same controller in the
+  same pass. The one change is the §3.6 read barrier (INV-CONTENT-CHILDREN-4):
+  `validateCommonContentChildren` must treat empty edges with a non-empty declared child set as pending, not
+  `ChildrenReady=True` — required by eager shells (§9).
 
 ---
 
 ## 6. Testing
 
-- **Unit:** aggregator child-projection — domain-only children, orphan-only leaves, mixed; partial
+- **Unit:** aggregator child-projection — domain-only children, orphan-only leaves, mixed (*post-§11:
+  "orphan leaves" become regular `VolumeSnapshot` domain children — same projection path*); partial
   (unresolved/unbound child) → edge withheld, existing edges preserved; teardown removal.
 - **Unit (§3.6 read barrier):** eager parent shell with declared children + empty `childrenSnapshotContentRefs`
   → `ChildrenReady=False` (`ChildrenLinkPending`); true leaf (no declared children) + empty edges →
@@ -436,8 +452,8 @@ precondition). Steps:
   (INV-CONTENT-CHILDREN-4).
 - **Integration (envtest):** `n5_pr7` orphan-wave (isolated CSI-simulator pass) + non-isolated
   regression; `snapshot_root_lifecycle` / `snapshot_recreate`.
-- **e2e:** `capture` (root + demo tree `Ready`), `volumedata` (orphan child volume node + domain-VCR
-  coverage).
+- **e2e:** `capture` (root + demo tree `Ready`), `volumedata` (*post-§11: orphan PVC captured as a
+  `VolumeSnapshot` domain child with data-bearing content* + domain-VCR coverage).
 - **envtest CEL (slice 4):** apiserver accepts the first complete set on an empty field, then rejects
   every subsequent change — shrink, append, reorder, and full replace — proving INV-CONTENT-CHILDREN-2.
 - **Guard:** grep/lint asserting INV-CONTENT-WRITER-1 and INV-CONTENT-CHILDREN-1 (single-writer).
@@ -449,8 +465,9 @@ precondition). Steps:
 - **Churn from replace-set writes** → keep union/monotonic semantics (§3.1), not blind replace.
 - **Latency of linking** relative to the old inline publish → covered by the existing 500 ms self-requeue;
   add owner/child wake-up watches only if a measured regression appears.
-- **Slice 3 creation ownership** is the one real design decision (§4, open question) — resolve before
-  touching the data leg; slices 1–2 are mechanical moves and can land first.
+- **Slice 3 creation ownership** — RESOLVED 2026-07-07 by §11: `VolumeSnapshot` is a CSD-registered domain
+  kind, the binder creates+binds its content through the standard pair watch; no orphan-only creation path
+  remains.
 - **Immutability vs incremental population (slice 4)** — enabling the immutable CEL rule before the writer
   emits the complete frozen set in one write would wedge every capture (2nd edge write rejected by the
   apiserver). Order is mandatory: atomic frozen-set write first (§3.1 end-state), then flip the rule (§3.4).
@@ -459,10 +476,11 @@ precondition). Steps:
   after set would be rejected once immutable. Audit (grep for status writes to the field) before slice 4;
   the single-writer work (slices 1–3) should already have removed all but the aggregator.
 - **Frozen-set correctness depends on Late-Planned enumeration** — the immutable single write assumes
-  `childrenSnapshotRefs` is genuinely complete at the write barrier (§3.5 condition 1: all domain + orphan
-  children enumerated by Planned). If an orphan leaf is appended to `childrenSnapshotRefs` *after* the frozen
-  set is committed, immutability locks it out. Mitigation: confirm the orphan-wave enumeration completes by
-  the write barrier before enabling immutability (slice 4); keep the interim append semantics until then.
+  `childrenSnapshotRefs` is genuinely complete at the write barrier (§3.5 condition 1: all children —
+  domain kinds and orphan `VolumeSnapshot` children alike (§11) — enumerated by Planned). If a child is
+  appended to `childrenSnapshotRefs` *after* the frozen set is committed, immutability locks it out.
+  Mitigation: confirm the orphan-wave enumeration completes by the write barrier before enabling
+  immutability (slice 4); keep the interim append semantics until then.
 
 ---
 
@@ -483,8 +501,9 @@ subtreePlanned(n) = planned(n) AND every descendant of n is planned
 Computed recursively as `planned(n) ∧ ⋀(c ∈ direct children) subtreePlanned(c)` — each child's latch
 already encodes its own subtree, so a parent checks only DIRECT children yet transitively knows the whole
 subtree (same fixpoint pattern as `subtreeManifestsPersisted`). `planned(n)` (own leg) = the node reached
-Planned with its direct children (domain + orphan leaves) fully enumerated in `childrenSnapshotRefs`
-(Late-Planned). Monotonic (spec is immutable; no recapture).
+Planned with its direct children (*all domain kinds — per §11 orphan `VolumeSnapshot` entries are regular
+domain children*) fully enumerated in `childrenSnapshotRefs` (Late-Planned). Monotonic (spec is immutable;
+no recapture).
 
 Two consumers, at DIFFERENT levels:
 
@@ -506,7 +525,9 @@ Two consumers, at DIFFERENT levels:
   which already writes the sibling `captureState.commonController.subtreeManifestsPersisted` mirror
   (`mirrorSubtreeManifestsPersistedFromContent`, `genericbinder/controller.go:771`). It computes
   `planned(n) ∧ ⋀(direct children) subtreePlanned(c)` by reading each direct child snapshot's
-  phase + latch; CSI VS visibility leaves count as enumerated (no phase of their own). Child→parent
+  phase + latch. ~~CSI VS visibility leaves count as enumerated (no phase of their own).~~ *Superseded by
+  §11: `VolumeSnapshot` children carry their own `captureState.phase` (the foundation domain controller
+  runs `MarkPlanned`) and participate in the recursion like every domain kind.* Child→parent
   wake-up reuses the existing snapshot-status watch.
 
 ### 8.2 Relationship to `subtreeManifestsPersisted` (do NOT conflate)
@@ -585,12 +606,13 @@ involved in orphan volume detection — it is the parallel manifest-dedup leg (k
 - **Wave gate:** `allDeclaredDomainChildSnapshotsReady` (direct-child walk + `observedGeneration`) can become
   a read of the recursive `subtreePlanned` latch (§8.1) — but note coverage still needs **B** (data), and
   `subtreePlanned` is only structure (A-level), so the gate change and the coverage read stay separate.
-- **VCR fallback stays, but its source changes (§8.5).** Per §3.5 correction: the write barrier is milestone A
+- **A→B fallback stays, but its source changes (§8.5).** Per §3.5 correction: the write barrier is milestone A
   (content exists/bound), while coverage reads milestone B (`status.data.source.uid`). Edge existence does not
-  imply B, so a VCR fallback remains the only signal in the A→B window. Removing it requires strengthening the
+  imply B, so a fallback remains the only signal in the A→B window. Removing it requires strengthening the
   barrier to B (edge only after `status.data` published) — a separate, stronger gate. The fallback should read
-  the VCR name from the owning `xxxSnapshot` (`captureState.volumeCaptureRequestName`), not derive it from the
-  content UID — see §8.5.
+  the VCR name from the owning `xxxSnapshot` (`captureState.domainSpecificController.volumeCaptureRequestName`),
+  not derive it from the content UID — see §8.5; for native-CSI kinds without a VCR (`VolumeSnapshot`, §11.7)
+  it reads the owner's `snapshotSource` PVC UID instead.
 - **Fewer races / duplicates:** a single writer + immutable edge set removes partial/reordered graph views
   that the fail-closed `DuplicateCoveredPVCUID` currently defends against.
 
@@ -605,8 +627,9 @@ orphan set = List(PVCs in ns, resourceSelector) − coveredUIDs(rootContent)
 ```
 
 `coveredUIDs` **walks the content tree** — the root content's frozen `childrenSnapshotContentRefs` subtree
-(skipping orphan-output nodes: `IsChildVolumeNodeContent`). Per content node it first determines, **authoritatively
-from the CSD** (not from the shape of the tree), whether the node **carries a data leg**:
+(~~skipping orphan-output nodes: `IsChildVolumeNodeContent`~~ — *superseded by §11: no orphan-output nodes
+exist; `VolumeSnapshot` contents are regular data-bearing nodes*). Per content node it first determines,
+**authoritatively from the CSD** (not from the shape of the tree), whether the node **carries a data leg**:
 
 - **data-bearing?** `reg.RequiresDataArtifact(kind)` where `kind = content.spec.snapshotRef.kind` — backed by
   CSD `spec.requiresDataArtifact` (`customsnapshotdefinition_types.go:65-69`) and exposed via the **existing**
@@ -623,7 +646,10 @@ Then, per node:
    - read `status.captureState.domainSpecificController.volumeCaptureRequestName`
      (`domainCaptureStateString`, `domain_content.go:406-410`);
    - GET that `VolumeCaptureRequest`; `vcctrl.ParseVolumeCaptureTargets` → covered PVC UIDs
-     (`spec.targets[].uid`).
+     (`spec.targets[].uid`);
+   - **native-CSI domains (no VCR, §11.7):** if `volumeCaptureRequestName` is empty and the owner is a
+     native-CSI kind (e.g. `VolumeSnapshot`), the covered PVC UID is the owner's
+     `status.snapshotSource.uid` (the source PVC, published at adoption).
 
 **Always recurse into `childrenSnapshotContentRefs`**, independent of whether this node is data-bearing — a node
 may have both data and children.
@@ -702,7 +728,8 @@ waits for its own Planned), which is the cleanest lever.
    exists), no plan/children/data required.
 2. **`childrenSnapshotContentRefs`** — frozen set, single writer, written **late** at the §3.5 barrier
    (milestone A of every child).
-3. **`status.data`** — written **late**, after the node's VCR completes (milestone B).
+3. **`status.data`** — written **late**, after the node's VCR completes (milestone B; for native-CSI kinds
+   (§11.4) — after the owner's CSI binding delivers the VSC).
 
 The `phase>=Planned` gate moves **off event 1 and onto event 2** (edge writing), not shell creation.
 
@@ -713,11 +740,11 @@ The `phase>=Planned` gate moves **off event 1 and onto event 2** (edge writing),
 - **ownerRef:** `ResolveParentSnapshotContentOwnerRef` resolves immediately because the parent shell already
   exists — still top-down (parent shell before child shell) but with no Planned coupling and no long pending.
 - **Aggregator:** `phase>=Planned` (own leg, §3.5 / §8.1) now gates only the frozen-set edge write.
-- **Orphan child-volume-node: EAGER too (RESOLVED 2026-07-07, one uniform rule).** The binder creates+binds
-  the orphan shell as soon as the orphan CSI `VolumeSnapshot` leaf exists — decoupled from Planned/bind,
-  exactly like root/domain shells. No post-bind carve-out. Creation moves from `EnsureVolumeChildContent`
-  (namespace domain) to the binder's orphan-VS watch (§4 Slice 3). The orphan content's parent ownerRef
-  resolves against the eager root shell, so eager creation is safe.
+- **Orphan child-volume-node: EAGER too (RESOLVED 2026-07-07, one uniform rule; mechanism updated by §11).**
+  The shell for a `VolumeSnapshot` node is created+bound by the binder eagerly, exactly like root/domain
+  shells — but via the **standard CSD-registered domain-kind watch** (`AddWatchForPair`), not an orphan-VS
+  carve-out watch. `EnsureVolumeChildContent` (namespace domain) is removed (§11.6). The content's parent
+  ownerRef resolves against the eager root shell (tree case); a standalone VS content has no parent.
 - name unchanged (`names.ContentName(uid)`).
 
 ### 9.5 Interactions & invariants
@@ -734,7 +761,8 @@ The `phase>=Planned` gate moves **off event 1 and onto event 2** (edge writing),
   has declared children but no committed frozen set (INV-CONTENT-CHILDREN-4). Without this, eager shells flip
   subtrees Ready prematurely.
 - **Coverage unchanged by this.** Milestone B still gates coverage; a shell (A) carries no `status.data`, so
-  the VCR fallback stays (§3.5 correction / §8.4).
+  the A→B fallback stays (VCR targets, or `snapshotSource` for native-CSI kinds — §3.5 correction / §8.4 /
+  §11.7).
 - **Edges still never dangle.** Shells are created top-down, so by the time an edge is written (§3.5 barrier)
   the child shell provably exists — eager creation only makes A reachable sooner, it does not write edges early.
 
@@ -788,3 +816,191 @@ capture's execution OK), so the reconstructed MCP is GC-safe from birth. Do **no
 `ensureManifestCheckpointOwnedByContent` (aggregator), after the content ownerRef is patched onto the MCP,
 **remove the now-redundant ObjectKeeper** (drop its ownerRef and delete the dedicated OK) so the MCP is GC'd
 with its content like the capture MCP.
+
+---
+
+## 11. VolumeSnapshot domain — orphan PVCs become a first-class domain (decision 2026-07-07)
+
+**Decision.** The forked CSI `VolumeSnapshot` (v1) becomes a **registered domain snapshot kind**, driven by
+a dedicated domain controller in **storage-foundation** through `pkg/snapshotsdk` — the same pattern external
+teams (e.g. virtualization) will use. This **replaces the entire orphan-PVC special path** in
+state-snapshotter (visibility leaves, `LabelChildVolumeNode` child-volume-node contents, per-orphan MCR/MCP,
+`bindOrphanVSToChildContent`) with the standard domain protocol: the namespace domain merely **creates** the
+orphan `VolumeSnapshot` and declares it as a regular child; everything else is the uniform
+creator/main pipeline.
+
+Scope is **wider than orphans**: every **new** `VolumeSnapshot` in the cluster — including user-created ones —
+is a domain object (a standalone VS is a one-node tree). Rationale: a manually created VS must be
+downloadable via `d8` and re-importable/restorable, which requires its `SnapshotContent` to carry an MCP from
+the start.
+
+### 11.1 Domain object — forked `VolumeSnapshot` v1 (CRD + patch 003)
+
+- **v1 only.** The stable `v1` schema (hand-maintained CRD in storage-foundation `crds/`) gains the protocol
+  status fields: `status.captureState`, `status.childrenSnapshotRefs`, `status.snapshotSource`,
+  `status.conditions` — alongside the existing fork fields (`status.boundSnapshotContentName` — the SS
+  protocol bind to the `SnapshotContent`, `status.data`, `spec.source.import`). This satisfies the CSD CRD
+  contract (`boundSnapshotContentName` + `conditions`, `internal/controllers/csd/controller.go:57-65`).
+  Not to be confused with the **upstream CSI** field `status.boundVolumeSnapshotContentName` (VS → VSC
+  binding, written by the fork's CSI machinery) — that one is untouched and is the data-leg source (§11.4).
+- **v1beta1 is stripped** of all fork fields and stays as legacy; it is never treated as a domain version.
+  Verified: the external-snapshotter client module ships only `client/apis/volumesnapshot/v1`, so the strip
+  touches only the hand-maintained CRD yaml.
+- **Patch 003** (`storage-foundation/images/snapshot-controller/patches/`) is extended:
+  1. the v1 **client types** gain the new status fields for round-trip safety — the fork's typed
+     `UpdateStatus` would otherwise erase fields unknown to its structs;
+  2. **behavior:** on entry to the unready path (`syncUnreadySnapshot`, i.e. `!ready || !bound`) the fork
+     stamps a **"taken into work" label** on the VS (e.g. `storage-foundation.deckhouse.io/processed`),
+     check-then-set (idempotent across resyncs), placed **after** the existing `spec.source.import` skip so
+     import VSs are never labeled. The existing skip behavior is unchanged.
+- **Two readiness signals, documented separately:** `status.readyToUse` (CSI binding, written by the fork)
+  vs `conditions[Ready]` (state-snapshotter protocol: manifest+data captured, content consistent, written by
+  the core). Different meanings, no conflict.
+
+### 11.2 Domain controller — storage-foundation, via the SDK
+
+- New controller-runtime reconciler in **storage-foundation `images/controller`** (the manager that already
+  runs the VCR controller): registration is a minimal `main.go` edit; all logic in new files. There is no
+  existing VolumeSnapshot reconciler in that manager today (the only VS watchers are the fork's informer
+  loop and the mutating webhook), so this is net-new and does not disturb the fork.
+- SDK dependency: `github.com/deckhouse/state-snapshotter/{api,pkg/snapshotsdk}` via **pseudo-versions**,
+  moving to tags once the module stabilizes.
+- The reconciler follows the demo-disk recipe (`virtualdisksnapshot_controller.go` pattern): adapter over the
+  forked VS status fields, `PublishSnapshotSource` (the source PVC), `EnsureManifestCapture(target=PVC)`,
+  `MarkPlanned`, `CoreCaptureOutcome` loop → `ConfirmConsistent`/`Reject`. It does **not** call
+  `EnsureVolumeCapture` (see §11.4 — the data artifact is native CSI).
+
+### 11.3 Adoption — fork-label discriminator, veto, `managed` latch
+
+**Old/new discriminator = the fork label (no watermark, no hooks, no external state).** The fork knows
+unambiguously whether it takes a VS into work (`!ready || !bound`); the label it stamps at that moment is the
+adoption trigger. Properties:
+
+- VSs that were already ready+bound before the module never enter the unready path → never labeled → legacy,
+  untouched forever.
+- The label lives on the VS object itself → survives module disable/enable; a VS created while the module was
+  off sits pending, gets labeled and adopted after re-enable. No missed windows.
+- Edge (accepted): a **pre-module VS that never became ready** is taken into work by the new
+  snapshot-controller, gets labeled and becomes managed — the semantics are "ready before the module — don't
+  touch", not strictly creation-time. A VS that became ready **before the module version carrying the label
+  patch** stays legacy (the feature did not exist yet).
+
+**Adoption flow (domain reconciler):** sees the fork label → evaluates the **veto** → latches its own label
+`managed: "true"/"false"` on the VS. All later filtering keys on `managed`; the decision never flips.
+
+**Veto:** `ExcludeLabelKey` (`state-snapshotter.deckhouse.io/exclude`) is checked **on the source PVC only**
+(consistent with all domains — veto applies to sources, cf. the demo VM controller vetoing disks), **once, at
+adoption**. A vetoed standalone VS behaves exactly like a legacy VS: the CSI snapshot works, but no
+MCR/content is created and it is not `d8`-exportable (making it exportable would be a one-step veto bypass).
+In the namespace tree the PVC veto keeps today's behavior: no orphan VS is created and the PVC is recorded in
+`excludedRefs`.
+
+**Skipped by the domain reconciler:** import VSs (`spec.source.import != nil`; never labeled by the fork
+anyway), unlabeled VSs (legacy), `managed: "false"`, and **pre-provisioned VSs without a PVC source**
+(`spec.source.volumeSnapshotContentName` set: no PVC to capture a manifest of and nothing to restore —
+skipped with an Event on the object).
+
+### 11.4 Capture legs
+
+- **Manifest leg — standard SDK path.** The domain calls `EnsureManifestCapture(target=PVC)`; the MCR name
+  lands in `captureState.domainSpecificController.manifestCaptureRequestName` and the aggregator projects
+  MCR → MCP → `manifestCheckpointName` exactly as in Slice 2 — the per-orphan MCR branch (§4 Slice 2 "orphan
+  branch") is **superseded** and removed. If the PVC is already gone at capture time (user created the VS
+  and deleted the PVC), the protocol fails terminally (Ready=False + reason/message); the CSI artifact is not
+  touched.
+- **Data leg — native CSI, no new fields.** The VS *is* the volume capture: the fork binds it to a VSC
+  (`status.boundVolumeSnapshotContentName`, `readyToUse`). The domain does **not** create a VCR. Instead the
+  **aggregator**, for an owner of kind `VolumeSnapshot`, reads `owner.status.boundVolumeSnapshotContentName`
+  → VSC → projects `content.status.data`, and performs the durability handoff (VSC `deletionPolicy: Retain`
+  + ownerRef → content; the `EnsureVolumeSnapshotContentsOwnedByContent` machinery moves under the
+  aggregator per Slice 3).
+- **`dataCaptured` latch — binder (writer discipline preserved).** For kind `VolumeSnapshot` the binder marks
+  `captureState.commonController.dataCaptured` once `content.status.data` is published and the VSC is owned
+  by the content — symmetric to the VCR branch in `domain_content.go`. Verified: the binder's reverse
+  content-watch (`content_watch.go`) wakes it on content status changes, so no new watch machinery is needed.
+- **CSI errors are transient.** The data leg does **not** go terminal from `VS.status.error` alone — the node
+  stays Capturing (CSI retries). Terminality rules for the data leg are explicit: deletion of the VS
+  mid-capture (teardown path) or protocol-level rejection only. (Design checkpoint §11.8.)
+
+### 11.5 Registration — CSD, domain-capture marking, RBAC
+
+- **CSD shipped by storage-foundation** (the domain owner owns its CSD, as virtualization will):
+  `apiVersion: snapshot.storage.k8s.io/v1`, `kind: VolumeSnapshot`, `requiresDataArtifact: true`,
+  `source: PersistentVolumeClaim (v1)`.
+- **CSD-registered kinds are domain-capture by definition.** Today `unifiedruntime.Syncer` calls
+  `MarkDomainCaptureKind` only for kinds in the hardcoded `DomainCaptureSnapshotKinds` list — a CSD kind
+  outside the lists gets the binder watch (`AddWatchForPair`) but **not** domain-capture semantics
+  (eager capture-leg init etc.). Fix: mark every CSD-derived kind as domain-capture without hardcoded list
+  membership. `VolumeSnapshot` is **NOT** added to `DedicatedSnapshotControllerKinds` — that list is
+  SS-internal activation ordering for in-process dedicated controllers; the VS controller lives in
+  foundation and activates itself. The built-in `Snapshot` stays a bootstrap kind.
+- **RBAC:** foundation ships its own controller's rights (VS full, MCR create/get, PVC read, CSD/Snapshot
+  read); the SS `030-domain-rbac` hook grants the core access to the VS GVR from the CSD as usual.
+
+### 11.6 What is dismantled in state-snapshotter (supersedes)
+
+The entire parallel orphan machinery is removed once the VS domain lands:
+
+| Removed | Where |
+|---|---|
+| `IsVolumeSnapshotVisibilityLeaf` + every skip branch keyed on it | `pkg/snapshot/visibility_leaf.go`, `status_publish.go`, `namespace_capture_plan.go`, `ready_mirror.go`, aggregator |
+| `LabelChildVolumeNode` + `EnsureVolumeChildContent` + `ChildVolumeContentName` naming | `snapshotcontent/volume_child_content.go`, aggregator special cases |
+| `orphanChildContentNameFromVSLeaf` / `unlinkedOrphanChildContents` orphan-link gate | `snapshotcontent/controller.go` |
+| per-orphan MCR/MCP creation + latch-idempotent orphan MCP projection (§4 Slice 2 orphan branch) | `orphan_pvc_volume_snapshot.go`, aggregator |
+| `bindOrphanVSToChildContent` (domain-side bind of `VS.status.boundSnapshotContentName`) | `orphan_pvc_volume_snapshot.go` — the **binder** binds VS like any domain kind |
+| VS-leaf partition maintenance (`reconcileOrphanPVCVolumeSnapshotChildLeaves`) | `orphan_pvc_volume_snapshot.go` — replaced by regular `EnsureChildren` refs |
+| `"VolumeSnapshot"` transient-artifact special case | `snapshotcontent/data_readiness.go` |
+
+The namespace domain **keeps** exactly two responsibilities for orphans: create the orphan `VolumeSnapshot`
+(ownerRef to the namespace `Snapshot` for GC) for each residual PVC, and declare it as a **regular** child
+ref via `EnsureChildren` (kind `VolumeSnapshot` entries are no longer "visibility leaves" — they resolve via
+`ResolveChildSnapshotRefToBoundContentName` like every domain child). Content naming becomes the standard
+`names.ContentName(vsUID)`; the core mirrors `conditions[Ready]` onto the VS like any domain CR (the
+`ready_mirror.go` "VS leaf has no bind model" skip is removed).
+
+### 11.7 Coverage & namespace-tree semantics
+
+- **A standalone (user-created) VS does NOT cover its PVC** for namespace capture: it is a point-in-time from
+  an arbitrary past moment. Coverage is computed over the **tree** (declared children) only; the namespace
+  domain creates its own fresh orphan VS for such a PVC (two VSs on one PVC are legal in CSI).
+- **§8.5 simplification:** `VolumeSnapshot` nodes are data-bearing via CSD `requiresDataArtifact: true` — the
+  standard `RequiresDataArtifact(kind)` decision applies; the orphan-output node skip
+  (`IsChildVolumeNodeContent`) disappears with the machinery. **Fallback nuance:** a VS node has no VCR, so in
+  the A→B window the covered PVC UID comes from the owner VS itself — `status.snapshotSource.uid` (the source
+  PVC, published at adoption) — instead of VCR `spec.targets[].uid`. The §8.5 fallback rule becomes:
+  data-bearing + no `status.data` → read `captureState.domainSpecificController.volumeCaptureRequestName` if
+  present (VCR-based domains), else the owner's `snapshotSource` PVC UID (native-CSI domains like
+  `VolumeSnapshot`).
+
+### 11.8 Lifecycle, GC, and design checkpoints
+
+- **Tree nodes:** orphan VS deleted via ownerRef cascade when the tree is deleted; its content via the
+  existing content-tree GC; the VSC stays owned by the content (Retain + ownerRef) — as today.
+- **Standalone VS deletion — semantics change (must be documented in ADR):** with Retain + content-ownerRef
+  handoff, deleting a user VS no longer frees storage directly (upstream `Delete` class policy would have);
+  the VSC is deleted when the content is GC'd after the owner VS disappears. Checkpoint: confirm the
+  unlinked-content GC covers a standalone content whose owner VS is gone (a content→VS ownerRef is
+  impossible: cluster-scoped → namespaced), and document the deletion-to-storage-free window.
+- **Checkpoint — build infra:** `state-snapshotter/{api,pkg/snapshotsdk}` modules must resolve from the
+  foundation werf build (GOPROXY/SOURCE_REPO; private repo → GOPRIVATE).
+- **Checkpoint — helm ordering:** the CSD (a CR of the SS module's CRD) shipped in foundation templates —
+  confirm CRD-before-CR at converge (`module.yaml` already requires `state-snapshotter >= 0.0.0`).
+- **Checkpoint — `VS.status.error` policy:** explicit terminality rules per §11.4 (no auto-terminal from a
+  transient CSI error).
+
+### 11.9 Impact on migration slices
+
+- **Slice 3 (Block 3) is re-cut.** The "orphan child-content creation → binder (watch orphan VS leaves)" and
+  "namespace domain binds `VolumeSnapshot.status.boundSnapshotContentName`" sub-items are **superseded**: VS
+  is a registered domain kind, the binder watches it through the standard CSD `AddWatchForPair` and binds it
+  like any kind. What remains of Slice 3: data-leg projection → aggregator (with the kind-`VolumeSnapshot`
+  native-CSI branch of §11.4 replacing the old "orphan child reads `spec.snapshotRef` → bound VSC" wording —
+  same data source, now via the owner), restore `spec.snapshotRef` repoint → binder, namespace domain
+  content-free STRICT, plus the §11.6 dismantling.
+- **Slice 2's orphan branch** (aggregator deriving per-orphan MCP from the VS UID) is superseded: the VS
+  domain publishes `manifestCaptureRequestName` like every domain; the standard projection applies.
+- **§8.5 / Block 5** simplifies per §11.7 (no orphan-output skip; fallback rule extended for native-CSI
+  domains).
+- **New implementation blocks (storage-foundation side):** CRD v1 extension + v1beta1 strip + patch 003
+  (types + label), VS domain reconciler + adapter + adoption/veto logic, CSD + RBAC templates, go.mod wiring.
+  Sequenced in the implementation plan.

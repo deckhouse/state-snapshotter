@@ -788,3 +788,16 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   local helper ownedBySnapshotContent (ownerRef predicate); reuses walkSnapshotTree/gvrForSnapshotKind/
   conditionStatus. gofmt + go vet (e2e module) green; Bugbot found no bugs (flagged the vacuous-walk window on
   first pass, fixed, clean on re-review). Full run needs a cluster.
+- **Update** (w8-design, docs) docs/content-single-writer-design.md — new §11 "VolumeSnapshot domain"
+  (decision 2026-07-07): the forked CSI VolumeSnapshot (v1 only) becomes a CSD-registered domain snapshot
+  kind driven by a dedicated reconciler in storage-foundation via pkg/snapshotsdk; scope is every NEW
+  VolumeSnapshot incl. user-created (standalone = one-node tree, d8-exportable); old/new discriminator =
+  fork "taken into work" label stamped in syncUnreadySnapshot; veto = ExcludeLabelKey on the source PVC
+  only, latched via a managed label; manifest leg = standard EnsureManifestCapture(PVC), data leg = native
+  CSI (aggregator projects from owner.status.boundVolumeSnapshotContentName -> VSC, binder writes the
+  dataCaptured latch); CSD-registered kinds are domain-capture by definition. §11.6 enumerates the orphan
+  machinery to dismantle (visibility leaves, child-volume-node contents, per-orphan MCR/MCP,
+  bindOrphanVSToChildContent, data_readiness special case). Marked the superseded orphan carve-outs across
+  §3.1/§3.5/§3.6/§4 (Slices 1-3)/§5/§6/§7/§8.1/§8.4/§8.5/§9 with pointers to §11; extended the milestone-B
+  and A->B-fallback wording for native-CSI kinds (snapshotSource-based covered-UID). Doc-only change; code
+  lands per the re-cut Blocks 3/3b/3c/3d.
