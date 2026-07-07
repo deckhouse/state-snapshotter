@@ -164,7 +164,11 @@ declared child's `boundSnapshotContentName`; not required for correctness given 
 
 ### 3.3 Removals after the writer moves
 
-- delete `LinkChildVolumeContentRef` and its call (`orphan_pvc_volume_snapshot.go:571`).
+- delete `LinkChildVolumeContentRef` and its call (`orphan_pvc_volume_snapshot.go:571`). *Timing (as
+  executed): kept through Slice 1 — splitting the orphan create/link across controllers regressed
+  orphan-wave convergence — and removed with the §11.6 dismantling (plan Block 3d). Until then the edge
+  set has two append-only writers (aggregator + orphan linker), so the §3.4 immutability CEL must not
+  land before the dismantling.*
 - delete the `PublishSnapshotContentChildrenFromSnapshotRefs` call in the binder
   (`domain_content.go:79-88`) and in the namespace domain (`import.go:114`).
 - `PublishSnapshotContentChildrenRefs` / `…FromSnapshotRefs` / `PublishSnapshotContentLeafChildrenRefs`

@@ -801,3 +801,7 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   §3.1/§3.5/§3.6/§4 (Slices 1-3)/§5/§6/§7/§8.1/§8.4/§8.5/§9 with pointers to §11; extended the milestone-B
   and A->B-fallback wording for native-CSI kinds (snapshotSource-based covered-UID). Doc-only change; code
   lands per the re-cut Blocks 3/3b/3c/3d.
+- **Update** (w8-design, docs) Final cross-doc review fix (plan/design/ADR consistency pass): §3.3 now
+  records the as-executed Block 1 deviation — LinkChildVolumeContentRef stays (two append-only edge
+  writers) until the §11.6 dismantling (plan Block 3d), so the §3.4 immutability CEL must not land before
+  it. Doc-only.
