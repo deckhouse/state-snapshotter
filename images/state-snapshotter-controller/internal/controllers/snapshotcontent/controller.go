@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -89,6 +90,11 @@ type SnapshotContentController struct {
 	watchMu                sync.RWMutex
 	activeContentWatchSet  map[string]struct{} // SnapshotContent GVK String()
 	activeSnapshotWatchSet map[string]struct{} // Snapshot GVK String() -> status watch registered with manager
+
+	// primaryContentController is the retained handle of the single common-SnapshotContent controller
+	// (For(CommonSnapshotContentGVK)). Snapshot-status wakes are attached to it via Controller.Watch(...)
+	// rather than constructing a second controller-runtime Controller per Snapshot GVK.
+	primaryContentController controller.Controller
 }
 
 const defaultSnapshotContentRequeueAfter = 500 * time.Millisecond
@@ -1625,7 +1631,8 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 		For(obj).
 		WithOptions(snapshotContentControllerOptions()).
 		Named(fmt.Sprintf("snapshotcontent-%s-%s", contentGVK.Group, contentGVK.Kind))
-	if err := builder.Complete(r); err != nil {
+	built, err := builder.Build(r)
+	if err != nil {
 		if needAppendMain {
 			r.SnapshotContentGVKs = r.SnapshotContentGVKs[:len(r.SnapshotContentGVKs)-1]
 		}
@@ -1640,6 +1647,9 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 			r.GVKRegistry.RevertSnapshotRegistrationIfExact(snapshotGVK.Kind, snapshotGVK, contentGVK)
 		}
 		return fmt.Errorf("setup SnapshotContent watch for %s: %w", contentGVK.String(), err)
+	}
+	if contentGVK == unifiedbootstrap.CommonSnapshotContentGVK() {
+		r.primaryContentController = built
 	}
 	r.activeContentWatchSet[key] = struct{}{}
 	return nil
@@ -1710,8 +1720,15 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		// VolumeSnapshotContent under envtest) degrades to "no watch" instead of failing startup;
 		// revalidation on the next reconcile still recomputes state (INV-RECONCILE-TRUTH).
 		builder = r.addArtifactWakeUpWatches(builder)
-		if err := builder.Complete(r); err != nil {
+		// Build (== Complete + return the controller handle) so the common-SnapshotContent controller can be
+		// retained for AddSnapshotStatusWatch to attach snapshot-status wakes as additional Watches on THIS
+		// single controller, instead of building a second Controller per Snapshot GVK.
+		built, err := builder.Build(r)
+		if err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
+		if gvk == unifiedbootstrap.CommonSnapshotContentGVK() {
+			r.primaryContentController = built
 		}
 		r.activeContentWatchSet[key] = struct{}{}
 	}
@@ -1759,13 +1776,18 @@ func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manage
 	if _, err := r.RESTMapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version); err != nil {
 		return fmt.Errorf("RESTMapping for snapshot status watch %s: %w", snapshotGVK.String(), err)
 	}
+	if r.primaryContentController == nil {
+		return fmt.Errorf("primary SnapshotContent controller not initialized before snapshot status watch %s (SetupWithManager must run first)", snapshotGVK.String())
+	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(snapshotGVK)
-	if err := ctrl.NewControllerManagedBy(mgr).
-		Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent)).
-		WithOptions(snapshotContentControllerOptions()).
-		Named(fmt.Sprintf("snapshotcontent-snapshot-%s-%s", snapshotGVK.Group, snapshotGVK.Kind)).
-		Complete(r); err != nil {
+	// Attach the snapshot-status wake as an additional event source on the SINGLE primary SnapshotContent
+	// controller. Controller.Watch supports adding sources before OR after Start, so this preserves the
+	// registry-driven / dynamic-CSD activation model while eliminating the former per-GVK second Controller
+	// (which duplicated reconciliation of the same SnapshotContent object and caused 409 write conflicts).
+	// The enqueue mapping (status.boundSnapshotContentName -> bound content) is unchanged.
+	src := source.Kind(mgr.GetCache(), client.Object(obj), handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent))
+	if err := r.primaryContentController.Watch(src); err != nil {
 		return fmt.Errorf("setup SnapshotContent snapshot status watch for %s: %w", snapshotGVK.String(), err)
 	}
 	r.activeSnapshotWatchSet[key] = struct{}{}
