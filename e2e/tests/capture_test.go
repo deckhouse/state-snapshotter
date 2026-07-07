@@ -129,6 +129,11 @@ func captureSpecs() {
 		})
 
 		It("captures the demo snapshot tree (root Snapshot + SnapshotContent Ready)", func() {
+			// This is the regression guard for the pre-Planned orphan-wave deadlock (content-single-writer
+			// design §9.2): before the eager-shell fix the root Snapshot never reached Ready on this exact
+			// demo tree (root content <- root Planned <- children Ready <- child content bound <- root content).
+			// If Block 0 regresses, this wait times out.
+			//
 			// Snapshot creation (capture) must complete quickly, so both waits below are bounded by the
 			// short captureReadyTO (fail fast) instead of the generous restore-path snapshotReadyTO.
 			// Budget for the two sequential waits plus a buffer for the intervening GETs.

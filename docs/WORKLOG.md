@@ -707,3 +707,13 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   (snapshot_deletion_test.go) proving a Snapshot deleted BEFORE Planned gets an eager Retain shell whose
   parent-protect finalizer is still removed on deletion (no wedge, hazard H7). gofmt + go vet + full controller
   module tests green.
+- **Test** (w8-block0, e2e) Block 0 e2e coverage (design §9/§9.2). In e2e/tests/capture_test.go annotated the
+  existing "captures the demo snapshot tree" spec as the explicit regression guard for the pre-Planned
+  orphan-wave deadlock (the exact create cycle root content <- root Planned <- children Ready <- child content
+  bound <- root content that the eager shell breaks) — if Block 0 regresses, that Ready wait times out. In
+  e2e/tests/namespace_capture_rbac_test.go added eagerShellDeletionSpecs() (wired into
+  namespaceCaptureReworkSpecs) proving the no-wedge invariant on a live cluster: a root Snapshot created and
+  immediately deleted (best-effort pre-Planned) is fully GC'd — the eager Retain shell's parent-protect
+  finalizer never wedges the Snapshot's deletion. Deterministic pre-Planned timing stays pinned by the
+  integration spec (test/integration/snapshot_deletion_test.go); the live cluster's Planned transition is too
+  fast to pin, so the e2e asserts the timing-robust invariant. gofmt + go build + go vet (e2e module) green.

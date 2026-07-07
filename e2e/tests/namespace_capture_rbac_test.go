@@ -113,12 +113,43 @@ func configMapObject(ns, name string, data map[string]interface{}) *unstructured
 // transient RBAC hook lifecycle, discovery inclusion/exclusion, raw secret capture, spec immutability,
 // and (env-gated) arbitrary-CR discovery and child degradation with the ManifestsArchived latch.
 func namespaceCaptureReworkSpecs() {
-	captureRBACHookSpecs()  // E1
-	rawSecretsSpecs()       // E4
-	inclusionRuleSpecs()    // E5 (self-contained: generic + RBAC + domain object inclusion/exclusion)
-	specImmutabilitySpecs() // E6
-	arbitraryCRSpecs()      // E2 (env-gated)
-	childDegradationSpecs() // E3 (env-gated)
+	captureRBACHookSpecs()    // E1
+	rawSecretsSpecs()         // E4
+	inclusionRuleSpecs()      // E5 (self-contained: generic + RBAC + domain object inclusion/exclusion)
+	specImmutabilitySpecs()   // E6
+	eagerShellDeletionSpecs() // Block 0 (eager shell / pre-Planned deletion no-wedge)
+	arbitraryCRSpecs()        // E2 (env-gated)
+	childDegradationSpecs()   // E3 (env-gated)
+}
+
+// Block 0 — eager content shell / pre-Planned deletion. With the eager-shell fix (content-single-writer
+// design §9) the SnapshotContent object is created AND bound as soon as the Snapshot exists, decoupled from
+// the domain phase>=Planned barrier. A Snapshot deleted while still pre-Planned must NOT wedge on the
+// eager shell's parent-protect finalizer: the binder deletion path removes it regardless of capture phase.
+// The deterministic pre-Planned timing is pinned by the controller integration test
+// (test/integration/snapshot_deletion_test.go); on a live cluster the Planned transition is too fast to
+// pin, so this spec asserts the timing-robust no-wedge invariant (create -> immediate delete -> fully GC'd).
+func eagerShellDeletionSpecs() {
+	Context("Block 0: eager content shell / pre-Planned deletion", func() {
+		It("does not wedge a root Snapshot deleted immediately after creation (no finalizer wedge)", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+
+			ns := uniqueNS("eager-del")
+			Expect(ensureNamespace(ctx, ns)).To(Succeed())
+			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
+
+			By("Applying a capturable ConfigMap")
+			Expect(applyObjects(ctx, []*unstructured.Unstructured{configMapObject(ns, "b0-cm", map[string]interface{}{"a": "b"})}, ns)).To(Succeed())
+
+			By("Creating and immediately deleting the root Snapshot (best-effort before Planned)")
+			Expect(createRootSnapshot(ctx, ns, "b0-del")).To(Succeed())
+			Expect(suiteDyn.Resource(snapshotGVR).Namespace(ns).Delete(ctx, "b0-del", metav1.DeleteOptions{})).To(Succeed())
+
+			By("Asserting the Snapshot is fully removed (the eager content shell's finalizer never wedges deletion)")
+			assertResourceGone(ctx, snapshotGVR, ns, "b0-del", 2*time.Minute)
+		})
+	})
 }
 
 // E1 — transient per-namespace RBAC hook (040-namespace-capture-rbac).
