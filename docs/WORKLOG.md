@@ -717,3 +717,10 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   finalizer never wedges the Snapshot's deletion. Deterministic pre-Planned timing stays pinned by the
   integration spec (test/integration/snapshot_deletion_test.go); the live cluster's Planned transition is too
   fast to pin, so the e2e asserts the timing-robust invariant. gofmt + go build + go vet (e2e module) green.
+- **Bugfix** (w8-block0, test) Fixed the Block 0 eager-shell deletion integration spec
+  (test/integration/snapshot_deletion_test.go): dropped the `spec.deletionPolicy == "Retain"` assertion on the
+  eager shell. The integration harness registers a minimal TestSnapshotContent CRD whose schema has no
+  spec.deletionPolicy, so the API server prunes the field and the assertion always failed once the spec ran
+  under envtest (it was not exercised in Block 0). The durable Retain policy is covered on the real common
+  SnapshotContent GVK in the binder unit path; hazard H7 only needs the shell to exist and never wedge deletion,
+  which the spec still asserts.

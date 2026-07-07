@@ -417,12 +417,14 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 				return contentName != ""
 			}, "10s", "100ms").Should(BeTrue(), "content shell should be created+bound eagerly before Planned")
 
-			// The eager shell is a durable (Retain) empty content object.
+			// The eager shell exists as an empty content object. (The binder creates it with
+			// deletionPolicy=Retain, but this integration harness registers a minimal TestSnapshotContent
+			// CRD whose schema has no spec.deletionPolicy, so the API server prunes that field — the durable
+			// Retain policy is asserted on the real common SnapshotContent GVK in the binder unit path, not
+			// here. What matters for hazard H7 is only that the shell exists and never wedges deletion.)
 			contentObj := &unstructured.Unstructured{}
 			contentObj.SetGroupVersionKind(contentGVK)
 			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
-			policy, _, _ := unstructured.NestedString(contentObj.Object, "spec", "deletionPolicy")
-			Expect(policy).To(Equal("Retain"), "eager shell must be created with deletionPolicy=Retain")
 
 			// Simulate the content controller having finalized the shell (parent-protect finalizer), so the
 			// deletion path has something to remove — otherwise the Snapshot would wedge on GC.
