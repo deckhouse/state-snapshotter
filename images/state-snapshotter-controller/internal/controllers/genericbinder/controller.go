@@ -743,6 +743,18 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 			message = fmsg
 		}
 	}
+	// Barrier 2 (ADR §6.2): hold Ready=False until the domain reported phase=Finished — it may still be
+	// running consistency actions (fs freeze/unfreeze, verify) after publishing its objects at barrier 1.
+	// This is the mirror of the content controller's finalization gate (both post-bind writers agree during
+	// the staged split) and revives the domainCaptureFinished barrier. A non-domain owner (import/
+	// static-bind, no phase field) is unaffected; phase=Failed is bubbled above.
+	if status == metav1.ConditionTrue {
+		if phase := domainCapturePhase(obj); phase != "" && !domainCaptureFinished(obj) {
+			status = metav1.ConditionFalse
+			reason = snapshot.ReasonChildrenPending
+			message = fmt.Sprintf("waiting for domain capture to finish (phase=%s)", phase)
+		}
+	}
 	logger.V(1).Info("Deriving Snapshot Ready", "content", contentName, "status", status, "reason", reason)
 	return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, status, reason, message)
 }

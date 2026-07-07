@@ -106,6 +106,21 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Conte
 			message = fmsg
 		}
 	}
+	// Barrier 2 (ADR §6.2 — "финализация Ready ТОЛЬКО после доменного phase=Finished"): on a
+	// domain-capture owner, do NOT finalize a mirrored Ready=True until the domain reported
+	// captureState.domainSpecificController.phase=Finished — the domain may still be running consistency
+	// actions (fs freeze/unfreeze, verify) after publishing its objects. While phase is Planning/Planned the
+	// aggregate is held Ready=False with a non-terminal ChildrenPending (phase=Failed is already bubbled
+	// above; a non-domain owner has no phase field and is unaffected). The content reconcile re-runs on the
+	// owner-status watch when the phase advances, so this converges without a dedicated wake-up.
+	if status == metav1.ConditionTrue {
+		if phase := ownerDomainCapturePhase(owner); phase != "" &&
+			storagev1alpha1.SnapshotCapturePhase(phase) != storagev1alpha1.SnapshotCapturePhaseFinished {
+			status = metav1.ConditionFalse
+			reason = snapshot.ReasonChildrenPending
+			message = fmt.Sprintf("waiting for domain capture to finish (phase=%s)", phase)
+		}
+	}
 	return r.patchOwnerReadyFromContent(ctx, owner, status, reason, message)
 }
 
@@ -167,12 +182,19 @@ func (r *SnapshotContentController) patchOwnerReadyFromContent(
 	})
 }
 
+// ownerDomainCapturePhase reads status.captureState.domainSpecificController.phase off the owning Snapshot.
+// It is "" when the owner is not a domain-capture kind (import/static-bind/leaf handle), which the callers
+// use to skip the domain barriers for non-domain owners.
+func ownerDomainCapturePhase(obj *unstructured.Unstructured) string {
+	phase, _, _ := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "phase")
+	return phase
+}
+
 // ownerDomainCaptureFailed reports whether the owning Snapshot's domain half reported a terminal failure
 // (captureState.domainSpecificController.phase=Failed) and returns its reason/message so the core can
 // bubble it into the user-facing Ready.
 func ownerDomainCaptureFailed(obj *unstructured.Unstructured) (bool, string, string) {
-	phase, _, _ := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "phase")
-	if storagev1alpha1.SnapshotCapturePhase(phase) != storagev1alpha1.SnapshotCapturePhaseFailed {
+	if storagev1alpha1.SnapshotCapturePhase(ownerDomainCapturePhase(obj)) != storagev1alpha1.SnapshotCapturePhaseFailed {
 		return false, "", ""
 	}
 	reason, _, _ := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "reason")

@@ -487,3 +487,21 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   api / controller / hooks modules. NOTE: the integration + e2e residual tests
   (test/integration/*, e2e/tests/ready_flap_test.go — build-tagged / separate module) still reference the
   removed symbols and are deferred to the w7-verify integration loop.
+- **Add** (w7-barrier2) Revived the barrier-2 Ready-finalization gate (ADR §6.2: the core finalizes a
+  domain snapshot's user-facing `Ready=True` ONLY after `captureState.domainSpecificController.phase=Finished`).
+  Folded a fail-closed `phase=Finished` check into BOTH post-bind Ready writers so they agree during the
+  staged creator→main split: the binder `checkConsistencyAndSetReady` (genericbinder/controller.go, reviving
+  the previously dead `domainCaptureFinished`) and the content controller `mirrorReadyToOwnerSnapshot`
+  (snapshotcontent/ready_mirror.go, new `ownerDomainCapturePhase` helper; `ownerDomainCaptureFailed` routed
+  through it). While a domain owner is at `phase in {Planning,Planned}` and the content is already Ready=True,
+  the aggregate is held `Ready=False/ChildrenPending` (non-terminal, "как childrenPending" per ADR); the
+  content reconcile re-runs on the owner-status watch when the phase advances. Precedence: `phase=Failed` is
+  still bubbled ahead of the gate (the gate only engages when the mirrored status would be True); a non-domain
+  owner (import/static-bind/leaf handle — no `phase` field) mirrors verbatim, unaffected. No deadlock:
+  `phase=Finished` is driven by the latch-based `CoreCaptureOutcome` (ConfirmConsistent), independent of
+  `Ready`, so Ready and Finished converge from the same capture latches. Tests: added
+  genericbinder/barrier2_test.go and snapshotcontent/ready_mirror_barrier2_test.go (Planned holds /
+  Finished finalizes / no-phase verbatim / Failed bubbles first). Build + gofmt + unit green (controller
+  module). w7-final-wave-1 (collapse to the single content-controller writer — remove the binder Ready mirror
+  + content→snapshot watch, relocate the excludedRefs/subtreeManifestsPersisted mirrors) stays deferred to the
+  w7-verify integration loop, as it removes the converging fallback and a watch (liveness-sensitive).
