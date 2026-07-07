@@ -44,8 +44,10 @@ SETS=10 tail was **latency-bound** and concentrated in the **root manifest leg**
 Commit H4.1 — the reverse-lookup wakes were dead (unstructured `List`s hit the API server with an unsupported
 field selector) and the leg ran on poll backstops; routing those `List`s through the cache indexes restored
 event-driven wakes, killed the `field label not supported` errors and the 89s lost-wake tail, and left the leg
-stable at ~9–10s. No open latency investigation remains; the residual ~24–25s wall is genuine bottom-up archive
-propagation, tracked as a lower-priority follow-up if further cuts are wanted.
+stable at ~9–10s. **No open latency investigation remains and active latency work is stopped** (see the STOP
+decision under H4): the residual ~24–25s wall is genuine, evenly-spread staged readiness propagation with no
+single interval >50% that a safe local fix could remove. Further cuts are diminishing-return micro-optimizations
+unless a new production-scale trace surfaces a fresh dominant interval.
 
 ## 3. Confirmed bottlenecks (real root causes, measurable effect)
 
@@ -501,6 +503,42 @@ rather than poll-backstopped. Ready correctness unchanged (all subtrees reached 
 ~9–10s leg is now genuine bottom-up archive propagation (child-content `ManifestsArchived` staircase up to ~17–22s
 from root create), not lost wakes — a separate, lower-priority investigation if further cuts are wanted.
 
+### Final residual diagnosis (post-H4.1) — decision: STOP active latency work
+
+A read-only server-side trace of 3 warm SETS=10 runs after H4.1 was used to decide whether one more safe,
+high-leverage fix exists. Timeline (offsets in s from root create, 1s-granularity `lastTransitionTime`):
+
+| boundary | r1 | r2 | r3 |
+|---|---|---|---|
+| first child content `ManifestsArchived` | 2 | 3 | 2 |
+| `ChildrenSnapshotReady` | 12 | 13 | 13 |
+| last direct child `ManifestsArchived` | 16 | 16 | 17 |
+| root MCP `Ready` | 20 | 20 | 20 |
+| root content `ManifestsReady` / `ManifestsArchived` | 22 | 23 | 22 |
+| root Snapshot `Ready` (client wall) | 23 (24.5) | 23 (23.5) | 24 (25.0) |
+
+Derived: direct-child archived span 13–15s (n=30); last-child-archived → root-MCP-Ready 3–4s; MCP-Ready →
+content-archived ~2s; content-archived → root-Ready 1–2s; **total `ChildrenSnapshotReady → Ready` 10–11s**. No root
+MCR is created (root captures via MCP directly). Counters (3 runs + warm-up, ~13 min): 0 `field label not
+supported`, 0 `leader election lost`, 0 error lines, ~3 conflicts/run; SnapshotContent ~766 reconciles/run, root
+`bench-root` ~176 reconciles/run, ~37 relay triggers/run; ~456 dropped `MCP→content` / `VSC→content` wakes/run that
+fall back to the 500ms self-requeue. Top-5 slowest contents all show `archived == ready` with **no stuck gate**.
+
+**Classification of the ~24–25s wall.** No single interval exceeds 50% of the tail. Two blocks: (a) root create →
+last direct child archived ≈ 16–17s (~70% of wall) = child-snapshot creation + **demo volume/manifest readiness**
+(categories A/B, with C as its bottom-up latch) — a smooth staircase at ~one content per 0.5s; (b) root manifest
+leg ≈ 7s spread evenly across four real controller handoffs of 2–4s each. The only smell is category E (~456
+dropped wakes/run on poll cadence), but each pass is cheap post-D.3, the wall is stable, and the trace does **not**
+prove event-count is the dominant cost.
+
+**Decision: stop active latency work here.** Further gains are likely diminishing-return micro-optimizations unless
+a new production-scale trace shows a fresh dominant interval. The biggest block is simulated demo readiness pacing
+(not a controller defect; out of latency-fix scope), and the manifest leg is evenly spread across genuine pipeline
+stages. Per the guardrails, **no** relay debounce (D.1′), membership-skip (D.2), or new cache/APIReader change is
+proposed — none is justified by this trace. Remaining items are **future / low-priority**, not active work:
+the dropped-wake poll fallback and the child-archive staircase can be revisited only if a real-scale trace shows
+them dominating.
+
 ---
 
 ## 9. Application checklist
@@ -512,7 +550,7 @@ from root create), not lost wakes — a separate, lower-priority investigation i
 5. [ARCH 1](#arch-1--snapshot-controller-wake-the-gated-parent-on-child-content-archive) (gated-parent wake) and [ARCH 2](#arch-2--single-snapshotcontent-controller-with-dynamic-snapshot-status-watches-h2) (single content controller) — apply as architecture/correctness; not
    headline latency fixes.
 6. Confirmed optimizations (section 6) — keep; hygiene.
-7. H3 (section 8) — **closed** by Commit D.3 (per-child `Get`s → one `List`/GVK; validated SETS=10 warm). D.2 (membership-skip) and D.1′ (relay debounce) are **no longer recommended** — the premise is gone. **H4 — root manifest leg** (`ChildrenSnapshotReady` → `Ready`) — **closed** by Commit H4.1 (reverse-lookup `List`s routed through cache indexes; `field label not supported` errors and lost-wake tails eliminated; leg now stable event-driven ~9–10s, no restarts). Residual archive-propagation cadence is a lower-priority follow-up. Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
+7. H3 (section 8) — **closed** by Commit D.3 (per-child `Get`s → one `List`/GVK; validated SETS=10 warm). D.2 (membership-skip) and D.1′ (relay debounce) are **no longer recommended** — the premise is gone. **H4 — root manifest leg** (`ChildrenSnapshotReady` → `Ready`) — **closed** by Commit H4.1 (reverse-lookup `List`s routed through cache indexes; `field label not supported` errors and lost-wake tails eliminated; leg now stable event-driven ~9–10s, no restarts). Residual archive-propagation cadence is a lower-priority follow-up. **Active latency work is stopped** (STOP decision, section 8 under H4): no D.1′/D.2/debounce/cache/membership change is planned; reopen only if a production-scale trace shows a fresh dominant interval. Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
 
 ## 10. Tooling (storage-e2e, measurement only)
 
