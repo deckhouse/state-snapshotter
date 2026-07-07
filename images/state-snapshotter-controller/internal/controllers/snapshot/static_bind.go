@@ -255,23 +255,17 @@ func (r *SnapshotReconciler) ensureRestoredDomainSnapshot(
 		}
 	}
 
-	// Re-point the child content's back-reference onto the re-created CR (relaxed-CEL, gated on
-	// status.parentDeleted). Only then does the domain binder's static-bind handshake accept the bind.
-	repointed, err := r.repointContentSnapshotRef(ctx, childContent.Name, storagev1alpha1.SnapshotSubjectRef{
-		APIVersion: gvk.GroupVersion().String(),
-		Kind:       gvk.Kind,
-		Namespace:  nsSnap.Namespace,
-		Name:       name,
-		UID:        domainCR.GetUID(),
-	})
-	if err != nil {
-		return nil, false, err
-	}
+	// Content re-point moved to the domain binder (content-single-writer design §4 Slice 3 / decision #8):
+	// the binder is the creator and sole writer of content.spec, so reconcileGenericStaticBind re-points the
+	// surviving content's snapshotRef onto this re-created CR (relaxed-CEL, gated on status.parentDeleted)
+	// when it observes the mismatch. The orchestrator here only (idempotently) re-creates the CR pointing at
+	// the content via spec.source.snapshotContentName; it no longer writes SnapshotContent.spec. The
+	// domainCR Get above still guarantees the CR exists before we enqueue its child ref.
 	return &storagev1alpha1.SnapshotChildRef{
 		APIVersion: gvk.GroupVersion().String(),
 		Kind:       gvk.Kind,
 		Name:       name,
-	}, created || repointed, nil
+	}, created, nil
 }
 
 // ensureRestoredOrphanVolumeLeaf re-attaches one orphan volume-node leaf on restore (Variant A). It does

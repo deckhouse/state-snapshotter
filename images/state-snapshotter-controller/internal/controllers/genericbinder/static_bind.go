@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -102,15 +103,36 @@ func (r *GenericSnapshotBinderController) reconcileGenericStaticBind(
 	}
 
 	// Anti-spoofing handshake: the content MUST point back at this domain CR (mirrors the core
-	// staticBindRefMatches). A mismatch is a permanent misconfiguration (cross-binding two snapshots to one
-	// content), so surface a terminal Ready=False. Restore does not weaken this: the core re-points the
-	// content's snapshotRef onto THIS CR's identity (relaxed-CEL under parentDeleted) before we bind.
+	// staticBindRefMatches).
+	//
+	// Restore re-point (content-single-writer design §4 Slice 3 / decision #8): the binder is the creator
+	// and the SOLE writer of content.spec, so when the surviving content is in the recycle bin
+	// (status.parentDeleted) it re-points that content's snapshotRef onto THIS re-created CR's identity
+	// here (relaxed-CEL admits a snapshotRef change only under parentDeleted), then binds on the next pass.
+	// The core restore orchestrator (snapshot/static_bind.go) only re-creates the CR; it no longer writes
+	// SnapshotContent.spec, so for a domain (non-root) StaticBind leaf the pre-re-point mismatch is the
+	// EXPECTED first state of every restore — never a terminal fault.
+	//
+	// Therefore a mismatch is always handled non-terminally with a poll requeue: when parentDeleted is not
+	// yet observed the re-point CEL gate is closed, so we surface Ready=False and poll until the recycle-bin
+	// latch is visible (a transient stale-cache read must NOT strand the CR — it is not bound yet, so the
+	// content->snapshot reverse map would not re-enqueue it, and a terminal no-requeue return would wedge
+	// the restore permanently). This poll drives its own recovery without relying on a watch wake-up.
 	if !genericStaticBindRefMatches(content.Spec.SnapshotRef, obj) {
+		repointed, rerr := r.repointContentSnapshotRefToSelf(ctx, content.Name, obj)
+		if rerr != nil {
+			return ctrl.Result{}, rerr
+		}
+		if repointed {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		// Not re-pointed (parentDeleted not yet observed => relaxed-CEL gate closed, or a concurrent write):
+		// surface Ready=False and poll until the recycle-bin latch lands and the re-point can proceed.
 		if err := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonSnapshotContentMisbound,
-			fmt.Sprintf("SnapshotContent %q spec.snapshotRef does not point back at %s %s/%s", contentName, gvk.Kind, obj.GetNamespace(), obj.GetName())); err != nil {
+			fmt.Sprintf("SnapshotContent %q spec.snapshotRef does not yet point back at %s %s/%s (awaiting recycle-bin re-point)", contentName, gvk.Kind, obj.GetNamespace(), obj.GetName())); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: staticBindContentPollInterval}, nil
 	}
 
 	// Bind once: set status.boundSnapshotContentName (idempotent). A static bind never points at the
@@ -133,6 +155,52 @@ func (r *GenericSnapshotBinderController) reconcileGenericStaticBind(
 		return ctrl.Result{RequeueAfter: staticBindContentPollInterval}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// repointContentSnapshotRefToSelf re-points a surviving recycle-bin SnapshotContent's spec.snapshotRef
+// onto this re-created domain CR (restore, content-single-writer design §4 Slice 3 / decision #8). The
+// binder is the sole writer of content.spec; the relaxed-CEL transition rule admits a snapshotRef change
+// only once the content is in the recycle bin (status.parentDeleted), so the write is skipped (changed=
+// false) until that latch is set and retried on a later reconcile. Returns changed=true when it issued the
+// update. Mirrors the removed core snapshot/static_bind.go repointContentSnapshotRef for the domain-child
+// leg (the orphan-leaf leg stays on the snapshot path until Block 3d).
+func (r *GenericSnapshotBinderController) repointContentSnapshotRefToSelf(
+	ctx context.Context,
+	contentName string,
+	obj *unstructured.Unstructured,
+) (bool, error) {
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	want := storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: gvk.GroupVersion().String(),
+		Kind:       gvk.Kind,
+		Namespace:  obj.GetNamespace(),
+		Name:       obj.GetName(),
+		UID:        obj.GetUID(),
+	}
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.SnapshotContent{}
+		if err := r.Get(ctx, client.ObjectKey{Name: contentName}, cur); err != nil {
+			return err
+		}
+		if cur.Spec.SnapshotRef != nil && *cur.Spec.SnapshotRef == want {
+			changed = false
+			return nil
+		}
+		if !cur.Status.ParentDeleted {
+			// Not in the recycle bin yet: the CEL gate would reject the re-point. Skip; retry later.
+			changed = false
+			return nil
+		}
+		refCopy := want
+		cur.Spec.SnapshotRef = &refCopy
+		if err := r.Update(ctx, cur); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	return changed, err
 }
 
 // genericStaticBindRefMatches reports whether a SnapshotContent.spec.snapshotRef points back at the given

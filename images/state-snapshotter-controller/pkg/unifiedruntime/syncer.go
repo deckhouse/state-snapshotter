@@ -179,6 +179,15 @@ func (s *Syncer) Sync(ctx context.Context) error {
 				}
 			}
 			s.snap.MarkDomainCaptureKind(snapGVK)
+		} else {
+			// CSD-derived kind outside the SS-internal dedicated lists (e.g. storage-foundation's
+			// VolumeSnapshot, content-single-writer design §11.5): domain-capture BY DEFINITION. Its
+			// planning controller lives out-of-process (the domain owner's manager), so no in-process
+			// activator/ordering gate applies — mark it domain-capture directly so the generic binder
+			// runs the eager capture-leg init + request lifecycle for it just like the demo domains.
+			// The kind is intentionally NOT added to DedicatedSnapshotControllerKinds (that list is
+			// SS-internal in-process activation ordering).
+			s.snap.MarkDomainCaptureKind(snapGVK)
 		}
 		if err := s.snap.AddWatchForPair(s.mgr, snapGVK, contentGVK); err != nil {
 			s.log.Error(err, "add Snapshot watch failed", "snapshot", snapGVK.String())

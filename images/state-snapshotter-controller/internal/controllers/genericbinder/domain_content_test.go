@@ -171,20 +171,50 @@ func domainTestVCRExists(t *testing.T, cl client.Client) bool {
 	return true
 }
 
-// A Ready data-leg VCR is fully handed off by the binder: dataRefs are enriched + published onto the
-// SnapshotContent, the bound VolumeSnapshotContent is re-owned by the content at deletionPolicy=Retain,
-// the domain status.dataCaptured marker is stamped (clearing volumeCaptureRequestName), and the transient
-// VCR is deleted. This restores the data-leg handoff coverage that moved from demo to the common binder.
-func TestEnsureDomainContentLinks_DataLegHandoff(t *testing.T) {
+// content-single-writer §4 Slice 3 / §11.4: the data-leg publish (enrich + VSC Retain/ownerRef handoff +
+// SnapshotContent.status.data) moved to the aggregator (SnapshotContentController.reconcileDataLegProjection).
+// The binder is now READ-ONLY over the VCR and keeps only the two VCR-lifecycle decisions it always owned:
+// once the aggregator's published status.data covers the VCR targets AND the bound VSC is already owned by
+// the content (durable handoff), the binder latches commonController.dataCaptured and reaps the transient
+// VCR — without requeuing and without touching the domain-owned volumeCaptureRequestName or the content
+// status it no longer writes. This test sets up the post-handoff world the aggregator produces and asserts
+// the binder's latch-and-reap.
+func TestEnsureDomainContentLinks_DataLegLatchAndReapAfterAggregatorHandoff(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)
 	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
+
+	// Aggregator precondition #1: status.data published, covering the VCR target PVC.
 	content := domainTestSnapshotContent()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		Source: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName,
+			Namespace: domainTestNS, UID: types.UID(domainTestPVCUID),
+		},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName,
+		},
+		StorageClassName: "sc-a",
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		AccessModes:      []string{string(corev1.ReadWriteOnce)},
+	}
+
+	// Aggregator precondition #2: the bound VSC is already Retain + owned by the content (durable handoff).
+	ctrlTrue := true
+	vsc := domainTestVSC()
+	_ = unstructured.SetNestedField(vsc.Object, "Retain", "spec", "deletionPolicy")
+	vsc.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "SnapshotContent",
+		Name:       domainTestContent,
+		UID:        types.UID(domainTestConUID),
+		Controller: &ctrlTrue,
+	}})
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestPVC(), content, domainTestReadyVCR(true), domainTestVSC(), demoObj).
+		WithObjects(domainTestPVC(), content, domainTestReadyVCR(true), vsc, demoObj).
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
 
@@ -196,41 +226,16 @@ func TestEnsureDomainContentLinks_DataLegHandoff(t *testing.T) {
 		t.Fatalf("unexpected terminal reason %q (msg=%q)", treason, tmsg)
 	}
 	if requeue {
-		t.Fatalf("handoff complete should not requeue")
+		t.Fatalf("durable handoff should not requeue")
 	}
 
+	// The binder is read-only on the content: it must not have dropped the aggregator-published data.
 	got := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
 		t.Fatalf("get content: %v", err)
 	}
-	if got.Status.Data == nil {
-		t.Fatalf("expected 1 published data binding, got none")
-	}
-	ref := *got.Status.Data
-	if string(ref.Source.UID) != domainTestPVCUID || ref.Artifact.Name != domainTestVSCName {
-		t.Fatalf("unexpected data binding: %#v", ref)
-	}
-	if ref.StorageClassName != "sc-a" || ref.VolumeMode != string(corev1.PersistentVolumeFilesystem) || len(ref.AccessModes) != 1 || ref.AccessModes[0] != string(corev1.ReadWriteOnce) {
-		t.Fatalf("dataRef not enriched with volume metadata: %#v", ref)
-	}
-
-	vsc := &unstructured.Unstructured{}
-	vsc.SetGroupVersionKind(volumeSnapshotContentGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestVSCName}, vsc); err != nil {
-		t.Fatalf("get VSC: %v", err)
-	}
-	policy, _, _ := unstructured.NestedString(vsc.Object, "spec", "deletionPolicy")
-	if policy != "Retain" {
-		t.Fatalf("VSC deletionPolicy not forced to Retain, got %q", policy)
-	}
-	ownedByContent := false
-	for _, o := range vsc.GetOwnerReferences() {
-		if o.Kind == "SnapshotContent" && o.Name == domainTestContent && o.UID == types.UID(domainTestConUID) {
-			ownedByContent = true
-		}
-	}
-	if !ownedByContent {
-		t.Fatalf("VSC not re-owned by content: %#v", vsc.GetOwnerReferences())
+	if got.Status.Data == nil || string(got.Status.Data.Source.UID) != domainTestPVCUID || got.Status.Data.Artifact.Name != domainTestVSCName {
+		t.Fatalf("binder must leave the aggregator-published status.data intact, got %#v", got.Status.Data)
 	}
 
 	fresh := &unstructured.Unstructured{}

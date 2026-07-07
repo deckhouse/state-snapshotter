@@ -77,11 +77,14 @@ func restoreRootContent(rootUID types.UID) *storagev1alpha1.SnapshotContent {
 	}
 }
 
-// TestReconcileStaticBindRestoreTree_DomainRecreateRepointIdempotentRecursion covers the core recycle-bin
+// TestReconcileStaticBindRestoreTree_DomainRecreateIdempotentRecursion covers the core recycle-bin
 // orchestration: walking the durable content tree, re-creating the domain XxxxSnapshot CRs (StaticBind +
-// ownerRef), re-pointing each child content's back-reference, reconstructing the root Snapshot tree, and
-// doing so recursively and idempotently.
-func TestReconcileStaticBindRestoreTree_DomainRecreateRepointIdempotentRecursion(t *testing.T) {
+// ownerRef), reconstructing the root Snapshot tree, and doing so recursively and idempotently. The child
+// content back-reference re-point moved to the domain binder (content-single-writer §4 Slice 3 / decision
+// #8: the binder is the sole writer of content.spec), so the core here MUST leave the child content's
+// snapshotRef untouched — the binder re-points it when it reconciles the re-created StaticBind CR
+// (covered by genericbinder.TestRepointContentSnapshotRefToSelf_*).
+func TestReconcileStaticBindRestoreTree_DomainRecreateIdempotentRecursion(t *testing.T) {
 	ctx := context.Background()
 	scheme := testVolumeCaptureScheme(t)
 	domainGV := schema.GroupVersion{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1"}
@@ -138,7 +141,7 @@ func TestReconcileStaticBindRestoreTree_DomainRecreateRepointIdempotentRecursion
 	childCRName := names.ChildSnapshotName(rootUID, childUID)
 	grandCRName := names.ChildSnapshotName(rootUID, grandUID)
 
-	assertDomainCR := func(name, contentName string) types.UID {
+	assertDomainCR := func(name, contentName string) {
 		t.Helper()
 		cr := &unstructured.Unstructured{}
 		cr.SetGroupVersionKind(domainGVK)
@@ -155,20 +158,19 @@ func TestReconcileStaticBindRestoreTree_DomainRecreateRepointIdempotentRecursion
 		if len(ors) != 1 || ors[0].Kind != "Snapshot" || ors[0].Name != "snap" || ors[0].UID != rootUID {
 			t.Fatalf("%s ownerReferences=%#v, want single Snapshot/snap owner", name, ors)
 		}
-		return cr.GetUID()
 	}
-	childCRUID := assertDomainCR(childCRName, "child-content")
+	assertDomainCR(childCRName, "child-content")
 	assertDomainCR(grandCRName, "grand-content")
 
+	// The core no longer re-points the child content's back-reference (that moved to the binder). It must
+	// be left exactly as it was in the recycle bin (pointing at the ORIGINAL, now-deleted CR); the binder
+	// re-points it to the re-created CR when it reconciles the StaticBind leaf.
 	gotChild := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(ctx, client.ObjectKey{Name: "child-content"}, gotChild); err != nil {
 		t.Fatal(err)
 	}
-	if gotChild.Spec.SnapshotRef.Name != childCRName || gotChild.Spec.SnapshotRef.Kind != domainKind {
-		t.Fatalf("child content snapshotRef not re-pointed: %#v", gotChild.Spec.SnapshotRef)
-	}
-	if gotChild.Spec.SnapshotRef.UID != childCRUID {
-		t.Fatalf("child content snapshotRef.uid=%q, want re-created CR uid %q", gotChild.Spec.SnapshotRef.UID, childCRUID)
+	if gotChild.Spec.SnapshotRef.Name != "old-domain-cr" || gotChild.Spec.SnapshotRef.UID != types.UID("old-domain-uid") {
+		t.Fatalf("core must NOT re-point the child content snapshotRef (binder owns content.spec now), got %#v", gotChild.Spec.SnapshotRef)
 	}
 
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "snap"}, bound); err != nil {

@@ -31,10 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	volumecapturectrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
-	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
@@ -135,74 +133,19 @@ func (r *SnapshotReconciler) reconcileVolumeCapturePublish(
 		return r.reconcileOrphanPVCVolumeSnapshotPublish(ctx, nsSnap, content, targets, allowRequeue)
 	}
 
-	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, content)
-	if err != nil {
-		return r.failCapture(ctx, nsSnap, content, "VolumeCaptureTargetsFailed", fmt.Sprintf("list owned PVC targets: %v", err))
-	}
-	if len(targets) == 0 {
-		return ctrl.Result{}, nil
-	}
-
-	vcrKey := types.NamespacedName{Namespace: nsSnap.Namespace, Name: vcpkg.SnapshotContentVCRName(content.UID)}
-
-	if done, res, err := r.reconcileVolumeCaptureSteadyState(ctx, nsSnap, content, vcrKey, targets); done {
-		return res, err
-	}
-
-	vcr := &unstructured.Unstructured{}
-	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if err := r.Client.Get(ctx, vcrKey, vcr); err != nil {
-		if apierrors.IsNotFound(err) {
-			return requeueVolumeCaptureIf(allowRequeue, "VolumeCaptureRequest missing")
-		}
-		return ctrl.Result{}, err
-	}
-
-	if failed, reason, msg := volumecapturectrl.VolumeCaptureRequestFailed(vcr); failed {
-		// Retain VCR and status.volumeCaptureRequestName for operator debugging (see design docs).
-		return r.failCapture(ctx, nsSnap, content, snapshotpkg.ReasonVolumeCaptureFailed, fmt.Sprintf("%s: %s", reason, msg))
-	}
-
-	if !volumecapturectrl.VolumeCaptureRequestReady(vcr) {
-		return requeueVolumeCaptureIf(allowRequeue, "waiting for VolumeCaptureRequest Ready=True/Completed")
-	}
-
-	vcrRefs, err := volumecapturectrl.ParseVolumeCaptureDataRefs(vcr)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := volumecapturectrl.ValidateDataRefsForPublish(targets, vcrRefs); err != nil {
-		return requeueVolumeCaptureIf(allowRequeue, fmt.Sprintf("invalid VolumeCaptureRequest dataRefs: %v", err))
-	}
-
-	bindings := volumecapturectrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
-	bindings, err = snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.directReader(), bindings)
-	if err != nil {
-		return requeueVolumeCaptureIf(allowRequeue, fmt.Sprintf("enrich volume metadata: %v", err))
-	}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: content.Name}, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); err != nil {
-		return requeueVolumeCaptureIf(allowRequeue, fmt.Sprintf("VolumeSnapshotContent handoff: %v", err))
-	}
-	if err := snapshotcontent.PublishSnapshotContentDataRefs(ctx, r.Client, content.Name, bindings); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	safe, err := volumecapturectrl.VolumeCaptureRequestSafeToDeleteWithHandoff(ctx, r.Client, vcrKey, content.Name)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !safe {
-		return requeueVolumeCaptureIf(allowRequeue, "waiting for VolumeCaptureRequest safe delete after handoff")
-	}
-	if err := r.deleteSnapshotVolumeCaptureRequest(ctx, vcrKey); err != nil {
-		return ctrl.Result{}, err
-	}
+	// Non-residual namespace-root scope is unreachable in practice: every named namespace root is a
+	// residual capture scope (IsResidualRootPVCCaptureScope returns true whenever snap.Name != "" or the
+	// root has a child graph). The domain VCR data leg this branch used to publish — enrich + VSC ownerRef
+	// handoff + SnapshotContent.status.data — moved to the SnapshotContentController aggregator
+	// (reconcileDataLegProjection, content-single-writer design §4 Slice 3), so the namespace domain no
+	// longer writes SnapshotContent.status.data here. The residual/orphan publish above stays on the
+	// snapshot path until the orphan machinery is dismantled (Block 3d, §11.6).
 	return ctrl.Result{}, nil
 }
 
+// requeueVolumeCaptureIf requeues on the 500 ms volume-capture cadence only when the caller permits it
+// (allowRequeue), so the residual/orphan publish path can converge without blocking the manifest leg early
+// in reconcileCaptureN2a. The reason string is retained at call sites for readability/debugging.
 func requeueVolumeCaptureIf(allow bool, _ string) (ctrl.Result, error) {
 	if !allow {
 		return ctrl.Result{}, nil

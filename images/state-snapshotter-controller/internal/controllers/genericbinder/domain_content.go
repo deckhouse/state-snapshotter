@@ -80,6 +80,10 @@ func (r *GenericSnapshotBinderController) ensureDomainContentLinks(
 	// the child content objects + their parent ownerRefs; it no longer publishes the child edge set.
 
 	// Data leg (leaf nodes with a PVC, e.g. demo disk). Absent volumeCaptureRequestName means manifest-only.
+	// content-single-writer §4 Slice 3: the aggregator (SnapshotContentController.reconcileDataLegProjection)
+	// is now the single writer of SnapshotContent.status.data — it enriches, hands off the VSC, and
+	// publishes. The binder keeps the VCR LIFECYCLE it always owned: surface a terminal capture failure
+	// (Ready=False), then latch dataCaptured and reap the VCR once the aggregator's handoff is durable.
 	vcrName := domainCaptureStateString(obj, "volumeCaptureRequestName")
 	dataCaptured := commonControllerLegCaptured(obj, "dataCaptured")
 	if !dataCaptured && vcrName != "" {
@@ -109,14 +113,47 @@ func (r *GenericSnapshotBinderController) ensureDomainContentLinks(
 				requeue = true
 			}
 		}
+	} else if !dataCaptured && vcrName == "" && obj.GetObjectKind().GroupVersionKind().Kind == snapshot.KindVolumeSnapshot {
+		// Native-CSI data leg (design §11.4): a VolumeSnapshot owner has NO VCR — the fork binds it to a VSC
+		// and the aggregator projects status.data from that VSC (Retain + ownerRef handoff done before the
+		// publish). The binder only latches dataCaptured once the content carries data (⇒ the handoff already
+		// succeeded); there is no request to delete. Dormant until the CSD registers the kind (Block 3c).
+		hasData, hErr := r.contentHasData(ctx, contentName)
+		if hErr != nil {
+			return false, "", "", hErr
+		}
+		if hasData {
+			if mErr := r.markCaptureLegCaptured(ctx, obj, "dataCaptured"); mErr != nil {
+				return false, "", "", mErr
+			}
+		} else {
+			requeue = true
+		}
 	}
 
 	return requeue, "", "", nil
 }
 
-// projectDataLegFromVCR reads the domain-created VolumeCaptureRequest, validates its result against its
-// own spec.targets, enriches volume metadata, transfers VolumeSnapshotContent ownership to the
-// SnapshotContent, and publishes dataRefs. Returns done=true once dataRefs cover the VCR targets.
+// contentHasData reports whether the bound SnapshotContent carries a published status.data binding (the
+// aggregator publishes it only after the VSC handoff succeeds, so data-present ⇒ handoff durable).
+func (r *GenericSnapshotBinderController) contentHasData(ctx context.Context, contentName string) (bool, error) {
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		return false, err
+	}
+	return content.Status.Data != nil, nil
+}
+
+// projectDataLegFromVCR observes the domain-created VolumeCaptureRequest to drive the binder's VCR
+// lifecycle. It is READ-ONLY on the SnapshotContent: enrich + VSC ownership handoff + status.data publish
+// moved to the aggregator (SnapshotContentController.reconcileDataLegProjection, content-single-writer §4
+// Slice 3). The binder still owns the two lifecycle decisions it always did:
+//   - surface a terminal capture failure (VCR failed, or a Variant-A >1-artifact domain decomposition
+//     fault) as Ready=False via a non-empty terminalReason;
+//   - report done=true once the aggregator's published status.data covers the VCR targets, so the caller
+//     may latch dataCaptured and reap the VCR.
+//
+// Otherwise it returns done=false (pending) and the caller requeues while the aggregator publishes.
 func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
@@ -144,6 +181,7 @@ func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
 		return false, "", "", cErr
 	}
 	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataList(), expectedTargets) {
+		// The aggregator has published status.data covering the targets: the leg is durable.
 		return true, "", "", nil
 	}
 
@@ -170,28 +208,16 @@ func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
 	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
 	// Variant A: a domain volume leaf owns exactly one PVC, so its content holds ≤1 dataRef. A ready VCR
 	// that returned >1 data artifact for this single logical content cannot be represented (status.dataRef
-	// is singular) and is a domain decomposition fault — fail terminally instead of silently publishing
-	// dataRefs[0] (which would drop the others) or looping forever. Real multi-volume scopes must fan out
-	// into child volume nodes upstream, never a list on one content.
+	// is singular) and is a domain decomposition fault — fail terminally instead of looping forever while
+	// the aggregator declines to publish. Real multi-volume scopes must fan out into child volume nodes
+	// upstream, never a list on one content.
 	if len(bindings) > 1 {
 		return false, snapshot.ReasonVolumeCaptureFailed,
 			fmt.Sprintf("data-leg volume capture returned %d data artifacts for a single SnapshotContent %q; Variant A allows at most one PVC per domain volume node (decompose multiple volumes into child volume nodes)", len(bindings), contentName), nil
 	}
-	bindings, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, bindings)
-	if enrichErr != nil {
-		return false, "", "", enrichErr
-	}
-	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
-	}
-	if handoffErr := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); handoffErr != nil {
-		// Retryable handoff; coverage still holds via the pending VCR until dataRefs are published.
-		return false, "", "", nil
-	}
-	if pubErr := snapshotcontent.PublishSnapshotContentDataRefs(ctx, r.Client, contentName, bindings); pubErr != nil {
-		return false, "", "", pubErr
-	}
-	return true, "", "", nil
+	// Ready + valid + single binding: the aggregator will publish status.data. Wait until it covers the
+	// targets (checked above), then latch on the next pass.
+	return false, "", "", nil
 }
 
 // markCaptureLegCaptured monotonically flips a core-owned capture-leg success latch

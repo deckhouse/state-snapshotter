@@ -364,7 +364,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false)
 	if err != nil {
 		t.Fatalf("reconcile status: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, parent)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, parent, false)
 	if err != nil {
 		t.Fatalf("reconcile status: %v", err)
 	}
@@ -476,4 +476,71 @@ func TestTerminalChildContentFailureClassification(t *testing.T) {
 	if isTerminalChildContentFailure(snapshot.ReasonSubtreeManifestCapturePending) {
 		t.Fatalf("isTerminalChildContentFailure(%q) = true, want false (transient)", snapshot.ReasonSubtreeManifestCapturePending)
 	}
+}
+
+// Premature-Ready gate (content-single-writer §4 Slice 3 / §11.4): reconcileDataLegProjection is the single
+// writer of status.data and publishes it via a SEPARATE status patch, so during a pass where the data leg is
+// still converging (just published, or the VCR/VSC not ready) the in-memory content has an empty
+// status.dataRefs that resolveDataReadiness treats as volume N/A (VolumeReady=True). For a content that HAS
+// an expected data leg this must NOT let Ready escalate to True (and mirrorReadyToOwnerSnapshot propagate it)
+// before the bound VolumeSnapshotContent's readyToUse is validated. reconcileCommonSnapshotContentStatus
+// honours the dataLegPending signal by downgrading the stale-empty volume leg to a non-terminal
+// DataCapturePending and re-deriving Ready; with the signal off the same content is manifest-only and stays
+// Ready=True (N/A). This pins the Bugbot-flagged same-pass premature-Ready regression closed.
+func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
+
+	build := func(name string) (*SnapshotContentController, *unstructured.Unstructured, client.Client) {
+		content := commonContentWithStatus(name, "mcp-ok")
+		cl := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(mcp.DeepCopy(), content).WithStatusSubresource(content).Build()
+		return &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}, content, cl
+	}
+
+	condOf := func(t *testing.T, cl client.Client, name, condType string) *metav1.Condition {
+		t.Helper()
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+		if err := cl.Get(ctx, client.ObjectKey{Name: name}, fresh); err != nil {
+			t.Fatalf("get content: %v", err)
+		}
+		contentLike, err := snapshot.ExtractSnapshotContentLike(fresh)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		return snapshot.GetCondition(contentLike, condType)
+	}
+
+	t.Run("dataLegPending downgrades the stale-empty volume leg and blocks Ready", func(t *testing.T) {
+		r, content, cl := build("dlp-pending")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, true)
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if ready {
+			t.Fatalf("Ready must be False while the data leg is still pending (empty status.data must not read as volume N/A)")
+		}
+		if vol := condOf(t, cl, "dlp-pending", snapshot.ConditionVolumeReady); vol == nil || vol.Status != metav1.ConditionFalse || vol.Reason != snapshot.ReasonDataCapturePending {
+			t.Fatalf("VolumeReady = %#v, want False/%s", vol, snapshot.ReasonDataCapturePending)
+		}
+		if rd := condOf(t, cl, "dlp-pending", snapshot.ConditionReady); rd == nil || rd.Status != metav1.ConditionFalse || rd.Reason != snapshot.ReasonDataCapturePending {
+			t.Fatalf("Ready = %#v, want False/%s", rd, snapshot.ReasonDataCapturePending)
+		}
+	})
+
+	t.Run("no data leg keeps Ready=True (manifest-only, empty dataRefs are N/A)", func(t *testing.T) {
+		r, content, cl := build("dlp-absent")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false)
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if !ready {
+			t.Fatalf("manifest-only content (no data leg) must stay Ready=True")
+		}
+		if vol := condOf(t, cl, "dlp-absent", snapshot.ConditionVolumeReady); vol == nil || vol.Status != metav1.ConditionTrue {
+			t.Fatalf("VolumeReady = %#v, want True (N/A, no data refs)", vol)
+		}
+	})
 }

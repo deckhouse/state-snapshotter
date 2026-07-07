@@ -805,3 +805,33 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   records the as-executed Block 1 deviation — LinkChildVolumeContentRef stays (two append-only edge
   writers) until the §11.6 dismantling (plan Block 3d), so the §3.4 immutability CEL must not land before
   it. Doc-only.
+- **Refactor** (w8-block3, code) Block 3 single-writer data leg -> aggregator + restore re-point -> binder +
+  CSD-implies-domain-capture (design §4 Slice 3 / §11.4/§11.5, INV-CONTENT-WRITER-1). New
+  snapshotcontent/datarefs_projection.go: reconcileDataLegProjection is now the SOLE writer of
+  SnapshotContent.status.data for domain owners — it projects the captured volume artifact from the owning
+  snapshot's VolumeCaptureRequest (VCR domains: captureState.domainSpecificController.volumeCaptureRequestName
+  -> VCR -> VolumeSnapshotContent) or, for a native-CSI kind VolumeSnapshot owner, from its bound VSC
+  (owner.status.boundVolumeSnapshotContentName + status.snapshotSource; dormant until the foundation CSD
+  registers the kind in Block 3c), doing the enrich + VSC Retain/ownerRef handoff + status.data publish that
+  the binder used to do. Wired into SnapshotContentController.Reconcile before the status aggregation; no VCR
+  watch added (uncached APIReader read + the 500 ms self-requeue drive convergence, design §3.2). The binder
+  (genericbinder/domain_content.go) is now READ-ONLY over the VCR: it keeps only the VCR-lifecycle terminal
+  failure surfacing (Ready=False) + the commonController.dataCaptured latch + transient-VCR reaping once the
+  aggregator's status.data covers the targets, and a symmetric dataCaptured latch for the native-CSI
+  VolumeSnapshot branch (fires once content.status.data present). Removed the namespace-domain non-residual
+  data publish in snapshot/volume_capture.go (dead for named roots; residual/orphan publish stays until Block
+  3d). Restore spec.snapshotRef re-point moved off the namespace domain (snapshot/static_bind.go) into the
+  binder (genericbinder/static_bind.go repointContentSnapshotRefToSelf) — the binder is the creator and sole
+  writer of content.spec, re-pointing a recycle-bin (status.parentDeleted) content onto the re-created
+  StaticBind CR under the relaxed-CEL gate. unifiedruntime/syncer.go marks every CSD-derived kind outside the
+  SS-internal dedicated lists as domain-capture by definition. Review fixes: (1) the domain StaticBind
+  re-point mismatch is handled non-terminally with a poll requeue (a not-yet-observed parentDeleted must not
+  terminal-stop a not-yet-bound restore CR, which the content->snapshot reverse map would never re-enqueue);
+  (2) closed a same-pass premature Ready — reconcileDataLegProjection surfaces a dataLegPending signal that
+  reconcileCommonSnapshotContentStatus uses to downgrade the stale-empty volume leg (empty status.dataRefs
+  reads as volume N/A) to DataCapturePending and re-derive Ready, so Ready cannot escalate (and mirror to the
+  owner) before the bound VSC's readyToUse is validated on the next pass. DEVIATION (plan Block 3 scope): the
+  orphan machinery and its content-status writes (orphan_pvc_volume_snapshot.go data + per-orphan MCR/MCP,
+  child-volume-node contents) STAY until Block 3d; INV-CONTENT-WRITER-1 becomes STRICT only then. gofmt +
+  go build + go vet + golangci-lint (--new-from-rev=HEAD: no new findings) + unit tests all green; Bugbot
+  found two issues (restore terminal-stop, premature Ready), both fixed and clean on re-review.

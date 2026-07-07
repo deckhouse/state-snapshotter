@@ -392,7 +392,23 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj)
+	// Single-writer data leg (INV-CONTENT-WRITER-1, content-single-writer design §4 Slice 3 / §11.4): the
+	// aggregator is the ONLY writer of status.data for domain owners. Project it from the owning snapshot's
+	// VolumeCaptureRequest (VCR domains) or its bound VolumeSnapshotContent (native-CSI VolumeSnapshot)
+	// BEFORE fillOwnLegs (in reconcileCommonSnapshotContentStatus below) reads status.dataRefs. Like the
+	// child edges + manifest pointer above, this is a separate optimistic-locked status patch observed on
+	// the next pass; the 500 ms self-requeue while !ready drives convergence.
+	dataRequeue, err := r.reconcileDataLegProjection(ctx, obj, owner, ownerNamespace, ownerFound)
+	if err != nil {
+		logger.Error(err, "Failed to project data leg")
+		return ctrl.Result{}, err
+	}
+
+	// Pass dataRequeue as dataLegPending so the aggregation does NOT compute a premature Ready=True on a
+	// stale-empty status.data for a content whose data leg is still converging (the aggregator published
+	// it via a separate patch this pass, or the VCR/VSC is not ready yet). See
+	// reconcileCommonSnapshotContentStatus.
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
@@ -411,7 +427,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
 	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
 	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
-	if !ready || edgesRequeue || mcpRequeue {
+	if !ready || edgesRequeue || mcpRequeue || dataRequeue {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 
@@ -463,7 +479,7 @@ type commonContentStatusPlan struct {
 // requeuing on !ready, which is what drives the child->parent archive wave to converge via active
 // re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
 // a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
-func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
+func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool) (ready bool, err error) {
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -473,6 +489,27 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, obj)
 	if err != nil {
 		return false, err
+	}
+
+	// Data-leg-pending downgrade (content-single-writer §4 Slice 3 / §11.4, INV-CONTENT-WRITER-1).
+	// reconcileDataLegProjection is the single writer of status.data and it publishes via a SEPARATE
+	// status patch, so on this pass `obj` is stale-empty for a data leg it just published or is still
+	// capturing. resolveDataReadiness reads an empty status.dataRefs as volume N/A (VolumeReady=True),
+	// which — for a content that HAS an expected data leg — would let Ready escalate to True (and
+	// mirrorReadyToOwnerSnapshot propagate it) BEFORE the bound VolumeSnapshotContent's readyToUse is ever
+	// validated. `dataLegPending` (from reconcileDataLegProjection: the owner declares a VCR/native-CSI
+	// data leg that is not yet durably published+covered) forces the volume leg back to a non-terminal
+	// DataCapturePending for this pass and re-derives Ready. It ONLY downgrades a would-be-ready leg — a
+	// manifest-only content (no data leg -> dataLegPending=false) keeps VolumeReady=True (N/A), and a leg
+	// the aggregation already sees as not-ready is left as computed. The next pass re-reads the fresh
+	// status.data and validates readyToUse for real, so this delays the FIRST Ready=True by exactly one
+	// pass instead of racing it.
+	if dataLegPending && plan.volumeReady == metav1.ConditionTrue {
+		plan.volumeReady = metav1.ConditionFalse
+		plan.volumeReason = snapshot.ReasonDataCapturePending
+		plan.volumeMessage = "waiting for the data leg to be published and the volume snapshot artifact to be ready"
+		plan.volumeFailed = false
+		deriveReadyStatus(&plan)
 	}
 
 	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
@@ -572,8 +609,11 @@ func upsertContentCondition(contentLike snapshot.SnapshotContentLike, desired me
 	return true
 }
 
+// ReconcileCommonSnapshotContentStatus is the exported aggregation entry (tests/utility). It passes
+// dataLegPending=false: callers that do not run the data-leg projection this pass get the plain N/A
+// treatment for an empty status.data (the aggregator's own Reconcile threads the real pending signal).
 func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
-	return r.reconcileCommonSnapshotContentStatus(ctx, obj)
+	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false)
 }
 
 // buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumeReady, ChildrenReady, the
@@ -629,6 +669,16 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		return plan, err
 	}
 
+	deriveReadyStatus(&plan)
+	return plan, nil
+}
+
+// deriveReadyStatus computes the aggregate Ready condition (readyStatus/readyReason/readyMessage) from the
+// already-populated legs, applying the single-reason priority order (see buildCommonSnapshotContentStatusPlan
+// doc). It is factored out of buildCommonSnapshotContentStatusPlan so a post-build leg adjustment (e.g. the
+// data-leg-pending downgrade in reconcileCommonSnapshotContentStatus, content-single-writer §4 Slice 3) can
+// re-derive Ready without duplicating the priority ladder.
+func deriveReadyStatus(plan *commonContentStatusPlan) {
 	switch {
 	case plan.manifestsReady != metav1.ConditionTrue && plan.manifestsFailed:
 		plan.readyStatus = metav1.ConditionFalse
@@ -669,8 +719,6 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		plan.readyReason = snapshot.ReasonCompleted
 		plan.readyMessage = "manifests (archived), data, and child content are ready"
 	}
-
-	return plan, nil
 }
 
 // computeSubtreeManifestsPersisted fills the subtreeManifestsPersisted latch on plan. It is a lifelong
