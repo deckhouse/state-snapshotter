@@ -85,19 +85,17 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		// retainContentSpec's spec.snapshotRef is a core Snapshot, so every content here is a namespace-root
-		// content subject to two monotonic, lowest-priority Ready gates that only the (absent) snapshot
-		// reconciler latches: subtreeManifestsPersisted and residualVolumeCapture.phase=Complete. Seed both to
-		// their satisfied values so readiness is driven purely by the ManifestsReady/ChildrenReady legs under
-		// test; without this the gates pin Ready=False forever.
+		// content subject to the monotonic, lowest-priority subtreeManifestsPersisted gate that only the
+		// (absent) snapshot reconciler latches. Seed it to its satisfied value so readiness is driven purely
+		// by the ManifestsReady/ChildrenReady legs under test; without it the gate pins Ready=False forever.
+		// (The orphan-link ChildrenReady gate is vacuously open here: the owning Snapshot is never created, so
+		// it declares no orphan VolumeSnapshot leaves — the former residualVolumeCapture seed is gone.)
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			c := &storagev1alpha1.SnapshotContent{}
 			if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, c); err != nil {
 				return err
 			}
 			c.Status.SubtreeManifestsPersisted = true
-			c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
-				Phase: storagev1alpha1.ResidualVolumeCapturePhaseComplete,
-			}
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 		return name, uid

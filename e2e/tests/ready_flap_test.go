@@ -120,17 +120,14 @@ func snapshotReadyExtract(obj *unstructured.Unstructured) (string, string, bool)
 	return st, fmt.Sprintf("Ready=%s/%s", st, reason), st == "True"
 }
 
-// contentDiagExtract reports a SnapshotContent's Ready and ChildrenReady conditions together with the
-// residual-volume-capture latch phase. It never fires the ready signal (diagnostic recorder only); the
-// phase makes the gate's fail-closed -> Complete transition visible in the printed ledger on a flap.
+// contentDiagExtract reports a SnapshotContent's Ready and ChildrenReady conditions (status + reason). It
+// never fires the ready signal (diagnostic recorder only); the ChildrenReady reason makes the fail-closed
+// orphan-link gate (ChildrenLinkPending -> satisfied) visible in the printed ledger on a flap, replacing
+// the removed residualVolumeCapture.phase latch.
 func contentDiagExtract(obj *unstructured.Unstructured) (string, string, bool) {
 	st, reason, _ := conditionStatus(obj, condReady)
-	childStatus, _, _ := conditionStatus(obj, condChildrenReady)
-	phase, _, _ := unstructured.NestedString(obj.Object, "status", "residualVolumeCapture", "phase")
-	if phase == "" {
-		phase = "<absent>"
-	}
-	desc := fmt.Sprintf("Ready=%s/%s ChildrenReady=%s residual.phase=%s", st, reason, childStatus, phase)
+	childStatus, childReason, _ := conditionStatus(obj, condChildrenReady)
+	desc := fmt.Sprintf("Ready=%s/%s ChildrenReady=%s/%s", st, reason, childStatus, childReason)
 	return st, desc, false
 }
 
@@ -339,7 +336,7 @@ func readyFlapSpecs() {
 
 			// Diagnostic recorder on the cluster-scoped root content (matched by its immutable back-reference
 			// to this Snapshot, since the content name is derived from the Snapshot UID). It records Ready +
-			// ChildrenReady + residualVolumeCapture.phase for the failure ledger and never fires a signal.
+			// ChildrenReady (status/reason) for the failure ledger and never fires a signal.
 			contentRec, contentStop, err := startObjStateRecorder(ctx, snapshotContentGVR, "",
 				rootContentMatch(srcNS, readyFlapRootSnapshot), contentDiagExtract)
 			Expect(err).NotTo(HaveOccurred(), "start SnapshotContent diagnostic recorder")

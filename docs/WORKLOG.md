@@ -505,3 +505,13 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   module). w7-final-wave-1 (collapse to the single content-controller writer — remove the binder Ready mirror
   + content→snapshot watch, relocate the excludedRefs/subtreeManifestsPersisted mirrors) stays deferred to the
   w7-verify integration loop, as it removes the converging fallback and a watch (liveness-sensitive).
+- **Update** (w7-verify, compile-fix) Repaired the deferred residual-referencing tests so the integration
+  package (`-tags integration`) and the separate e2e module both compile again. Dropped the now-removed
+  `c.Status.ResidualVolumeCapture = ...Complete` seed from the three envtest specs
+  (snapshotcontent_ready_contract_test.go, snapshotcontent_mcp_degradation_wakeup_test.go ×2,
+  genericbinder_parent_degradation_content_driven_test.go) — the orphan-link ChildrenReady gate is vacuously
+  open there because the owning Snapshot is never created (unlinkedOrphanChildContents fail-opens on a
+  NotFound owner), so only the surviving subtreeManifestsPersisted latch still needs seeding. Rewrote the
+  e2e ready_flap diagnostic (contentDiagExtract) to print ChildrenReady status/reason (surfacing the
+  ChildrenLinkPending gate) instead of the removed status.residualVolumeCapture.phase. `go vet` green for
+  both modules; envtest/e2e RUN validation still pending in the w7-verify loop.

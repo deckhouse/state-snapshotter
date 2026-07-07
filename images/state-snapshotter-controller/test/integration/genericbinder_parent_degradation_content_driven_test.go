@@ -149,12 +149,10 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		//   - subtreeManifestsPersisted: the monotonic recursive manifest latch. Its declared-vs-linked
 		//     fail-closed check resolves the owning Snapshot's childrenSnapshotRefs, which is absent here, so
 		//     it would pin Ready=False (SubtreeManifestCapturePending) forever.
-		//   - residualVolumeCapture.phase: the residual/orphan-PVC sweep gate. It fires on any content whose
-		//     spec.snapshotRef is a core Snapshot (as retainContentSpec's ref is), and only the snapshot
-		//     reconciler (absent here) ever latches it Complete, so it would pin Ready=False
-		//     (ResidualVolumeCapturePending) forever.
-		// This spec exercises Ready mirror/degradation via child ChildrenReady, not those gates, so we seed
-		// both to their satisfied (monotonic) values; the reconciler then holds them.
+		// The orphan-link ChildrenReady gate is vacuously open here: the owning Snapshot is never created, so
+		// it declares no orphan VolumeSnapshot leaves (the former residualVolumeCapture seed is gone).
+		// This spec exercises Ready mirror/degradation via child ChildrenReady, not that gate, so we seed
+		// subtreeManifestsPersisted to its satisfied (monotonic) value; the reconciler then holds it.
 		parentMCP := "mcp-parent-degrade"
 		childMCP := "mcp-child-degrade"
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -174,9 +172,6 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 			}
 			c.Status.ManifestCheckpointName = childMCP
 			c.Status.SubtreeManifestsPersisted = true
-			c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
-				Phase: storagev1alpha1.ResidualVolumeCapturePhaseComplete,
-			}
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 
