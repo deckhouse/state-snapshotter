@@ -198,6 +198,75 @@ func captureSpecs() {
 			}
 		})
 
+		It("publishes each node's manifestCheckpointName pointing at a Ready ManifestCheckpoint owned by its content (single-writer manifest leg)", func() {
+			// Block 2 (content-single-writer design §3.1/§3.2, INV-CONTENT-WRITER-1): the
+			// SnapshotContentController aggregator is the single writer of status.manifestCheckpointName,
+			// projected from the owning snapshot's ManifestCaptureRequest (MCR -> mcr.status.checkpointName).
+			// For every snapshot node in the tree its bound content must publish a manifestCheckpointName that
+			// points at a ManifestCheckpoint which is Ready=True AND owned (ownerRef) by that SAME content —
+			// the durable ownership handoff that lets the MCP be GC'd with the content. The manifest leg is a
+			// hard Ready gate (empty manifestCheckpointName => ManifestsReady=False/ManifestCapturePending), so
+			// every node that reached Ready above necessarily satisfies this; the spec pins WHO published it
+			// (the aggregator) and the MCP ownership edge. CSI VolumeSnapshot visibility leaves have no backing
+			// content and are skipped.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
+			defer cancel()
+			Expect(captured.rootContent).NotTo(BeEmpty(), "the capture spec must run first and record the root content")
+
+			ns := captured.namespace
+
+			By("Walking the fully materialized snapshot tree (root + descendants)")
+			// The eager-shell read barrier lets the root reach Ready with root ChildrenReady vacuously true
+			// while status.childrenSnapshotRefs is still filling in. Walk under Eventually until the tree has
+			// materialized AND the domain child node is present, otherwise the per-node manifest assertions
+			// below could pass vacuously against a root-only walk. The DemoVirtualMachineSnapshot inventory
+			// guard mirrors the sibling childrenSnapshotRefs spec for this manifest-only tree.
+			var nodes []childRef
+			Eventually(func(g Gomega) {
+				descendants, err := walkSnapshotTree(ctx, ns, captured.rootSnap)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(descendants).NotTo(BeEmpty(), "root Snapshot should have demo child snapshots (tree not materialized yet)")
+				kinds := map[string]int{}
+				for _, n := range descendants {
+					kinds[n.kind]++
+				}
+				g.Expect(kinds["DemoVirtualMachineSnapshot"]).To(BeNumerically(">=", 1), "expected the DemoVirtualMachineSnapshot child in the tree")
+				nodes = append([]childRef{{kind: "Snapshot", name: captured.rootSnap}}, descendants...)
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+
+			By("Asserting each node's content publishes a manifestCheckpointName -> Ready MCP owned by the content")
+			for _, node := range nodes {
+				if node.kind == "VolumeSnapshot" {
+					continue // CSI visibility leaf: no backing content of its own
+				}
+				gvr, ok := gvrForSnapshotKind(node.kind)
+				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+				node := node // capture for the closure
+				Eventually(func(g Gomega) {
+					snap, err := getResource(ctx, gvr, ns, node.name)
+					g.Expect(err).NotTo(HaveOccurred())
+					contentName, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+					g.Expect(contentName).NotTo(BeEmpty(), "node %s/%s must be bound to a content", node.kind, node.name)
+
+					content, err := getResource(ctx, snapshotContentGVR, "", contentName)
+					g.Expect(err).NotTo(HaveOccurred())
+					mcpName, _, _ := unstructured.NestedString(content.Object, "status", "manifestCheckpointName")
+					g.Expect(mcpName).NotTo(BeEmpty(),
+						"content %s (node %s/%s) must publish status.manifestCheckpointName (single-writer manifest leg)", contentName, node.kind, node.name)
+
+					mcp, err := getResource(ctx, manifestCheckpointGVR, "", mcpName)
+					g.Expect(err).NotTo(HaveOccurred(), "ManifestCheckpoint %s referenced by content %s must exist", mcpName, contentName)
+
+					st, reason, found := conditionStatus(mcp, condReady)
+					g.Expect(found).To(BeTrue(), "ManifestCheckpoint %s must carry a Ready condition", mcpName)
+					g.Expect(st).To(Equal("True"), "ManifestCheckpoint %s must be Ready=True (reason=%q)", mcpName, reason)
+
+					g.Expect(ownedBySnapshotContent(mcp, contentName)).To(BeTrue(),
+						"ManifestCheckpoint %s must be owned (ownerRef) by its content %s (ownership handoff)", mcpName, contentName)
+				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}
+		})
+
 		It("populates the demo child snapshot tree (childrenSnapshotRefs) with Ready nodes", func() {
 			// Snapshot creation: bound the tree walk and children readiness by the short captureReadyTO
 			// (fail fast) rather than the restore-path snapshotReadyTO.
@@ -259,6 +328,18 @@ func declaredChildContentNames(ctx context.Context, gvr schema.GroupVersionResou
 		expected[childContent]++
 	}
 	return expected, contentName, nil
+}
+
+// ownedBySnapshotContent reports whether obj carries an ownerReference to the named SnapshotContent. The
+// aggregator re-parents each node's ManifestCheckpoint onto its bound content (the ownership handoff) so the
+// MCP is GC'd together with the content; this verifies that durable ownership edge is present.
+func ownedBySnapshotContent(obj *unstructured.Unstructured, contentName string) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.Kind == "SnapshotContent" && ref.Name == contentName {
+			return true
+		}
+	}
+	return false
 }
 
 // contentChildEdgeNames reads a (cluster-scoped) SnapshotContent's status.childrenSnapshotContentRefs into

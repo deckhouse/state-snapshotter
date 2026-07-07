@@ -777,3 +777,14 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   atomic name-publish + MCP handoff collapses the observation window). gofmt + go build + go vet +
   golangci-lint (no new findings) + unit tests + isolated (3x) and non-isolated make test-integration all green;
   Bugbot found no bugs.
+- **Test** (w8-block2, e2e) Block 2 e2e coverage (design §3.1/§3.2, INV-CONTENT-WRITER-1). Extended
+  e2e/tests/capture_test.go captureSpecs with a spec asserting the single-writer manifest leg end-to-end: for
+  every snapshot node in the manifest-only tree (root + descendants, excluding CSI VolumeSnapshot visibility
+  leaves) its bound content publishes a non-empty status.manifestCheckpointName, the referenced cluster-scoped
+  ManifestCheckpoint is Ready=True, AND that MCP carries an ownerReference back to the SAME content (the durable
+  ownership handoff that lets the MCP be GC'd with the content). Walk runs under Eventually with a non-empty +
+  DemoVirtualMachineSnapshot inventory guard so the per-node assertions can't pass vacuously during the
+  eager-shell childrenSnapshotRefs materialization window (mirrors the sibling childrenSnapshotRefs spec). Added
+  local helper ownedBySnapshotContent (ownerRef predicate); reuses walkSnapshotTree/gvrForSnapshotKind/
+  conditionStatus. gofmt + go vet (e2e module) green; Bugbot found no bugs (flagged the vacuous-walk window on
+  first pass, fixed, clean on re-review). Full run needs a cluster.
