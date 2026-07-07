@@ -9,6 +9,7 @@ git:
     to: /src
     includePaths:
       - api
+      - pkg/snapshotsdk
       - images/{{ $.ImageName }}
       - lib/go
     stageDependencies:
