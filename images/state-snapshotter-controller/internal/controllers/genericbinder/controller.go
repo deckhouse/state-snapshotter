@@ -19,8 +19,6 @@ package genericbinder
 import (
 	"context"
 	"fmt"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"sync"
 	"time"
 
@@ -37,6 +35,7 @@ import (
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -45,9 +44,10 @@ import (
 
 // GenericSnapshotBinderController reconciles registered generic XxxxSnapshot resources.
 //
-// It owns snapshot -> common SnapshotContent binding, writes status.boundSnapshotContentName,
-// and publishes result refs such as SnapshotContent.status.manifestCheckpointName.
-// SnapshotContentController validates those refs and owns the Ready condition.
+// It owns snapshot -> common SnapshotContent binding and writes status.boundSnapshotContentName.
+// SnapshotContentController (the aggregator) is the single writer of SnapshotContent.status result refs
+// (childrenSnapshotContentRefs, manifestCheckpointName, dataRefs), validates them, and owns the Ready
+// condition; the binder no longer projects those refs.
 //
 // Architecture:
 // - Uses dynamic client for low-level get/list operations
@@ -482,57 +482,40 @@ func contentSnapshotRefMatchesSnapshot(content *unstructured.Unstructured, snaps
 		getStr("namespace") == obj.GetNamespace()
 }
 
-// ensureSnapshotContentLinks publishes generic result refs into the bound SnapshotContent.
-// SnapshotContentController must not read live Snapshot or MCR objects; it only validates
-// refs already persisted on SnapshotContent.status.
+// ensureSnapshotContentLinks runs the binder-side (creator) SnapshotContent projection that has NOT moved
+// to the SnapshotContentController aggregator.
 //
-// For generic kinds it publishes only the manifest checkpoint from the snapshot's MCR. For domain
-// capture kinds (see MarkDomainCaptureKind) it additionally projects children + dataRefs, performs the
-// VolumeSnapshotContent ownership handoff, cleans up the domain MCR/VCR after a durable handoff, and
-// stamps the domain-only capture markers (status.manifestCaptured / status.dataCaptured) the domain
-// controller reads to stop re-creating its requests. A non-empty terminalReason is an actionable
-// capture failure to surface as Ready=False.
+// The manifest checkpoint pointer (SnapshotContent.status.manifestCheckpointName) is now projected by the
+// aggregator (reconcileManifestCheckpointNameProjection, content-single-writer design §3.1/§3.2), so the
+// binder no longer reads the MCR to publish it. For domain capture kinds (see MarkDomainCaptureKind) the
+// binder still runs the request lifecycle the domain controller no longer owns: it projects dataRefs,
+// performs the VolumeSnapshotContent ownership handoff, cleans up the domain MCR/VCR after a durable
+// handoff, and stamps the domain-only capture markers
+// (status.captureState.commonController.manifestCaptured / dataCaptured) that suppress request re-creation.
+// A non-empty terminalReason is an actionable capture failure to surface as Ready=False.
 func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
 	ctx context.Context,
 	_ snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
 	contentName string,
 ) (requeue bool, terminalReason string, terminalMessage string, err error) {
+	// The binder only needs the domain MCR name to run the domain request lifecycle (delete-after-handoff +
+	// manifestCaptured latch in ensureDomainContentLinks). The MCP name projection onto the content is the
+	// aggregator's job now.
 	mcrName, _, err := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "manifestCaptureRequestName")
 	if err != nil {
 		return false, "", "", err
 	}
-	// Only chase the MCR while the manifest leg is still in flight. Once commonController.manifestCaptured
-	// is latched, the binder has already published the checkpoint onto the bound SnapshotContent and then
-	// intentionally deleted the MCR (ensureDomainContentLinks). The domain-owned manifestCaptureRequestName
-	// is never cleared, so it keeps pointing at the now-absent MCR: treating that NotFound as requeue=true
-	// would return at Step 4 before the Step 5 Ready mirror on every subsequent reconcile, wedging the
-	// snapshot (and its parent) at Ready=False/ContentMissing whenever the content's Ready=True mirror did
-	// not already land in the narrow window between checkpoint archive and MCR deletion.
-	if mcrName != "" && !commonControllerLegCaptured(obj, "manifestCaptured") {
-		mcr := &ssv1alpha1.ManifestCaptureRequest{}
-		if getErr := r.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: mcrName}, mcr); getErr != nil {
-			if errors.IsNotFound(getErr) {
-				requeue = true
-			} else {
-				return false, "", "", getErr
-			}
-		} else if mcr.Status.CheckpointName == "" {
-			requeue = true
-		} else if pubErr := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcr.Status.CheckpointName); pubErr != nil {
-			return false, "", "", pubErr
-		}
-	}
 
 	if !r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
-		return requeue, "", "", nil
+		return false, "", "", nil
 	}
 
 	domainRequeue, treason, tmsg, derr := r.ensureDomainContentLinks(ctx, obj, contentName, mcrName)
 	if derr != nil {
 		return false, "", "", derr
 	}
-	return requeue || domainRequeue, treason, tmsg, nil
+	return domainRequeue, treason, tmsg, nil
 }
 
 func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(

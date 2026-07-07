@@ -343,15 +343,52 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	// Resolve the owning snapshot ONCE per pass and share it across the single-writer projections below
+	// (child edges + manifest pointer). Both read the same owner status legs (childrenSnapshotRefs and
+	// captureState...manifestCaptureRequestName), so a single APIReader.Get keeps the aggregator's per-pass
+	// owner read at the Block 1 level. A second, redundant Get (one per projection) perturbed the Block 0
+	// eager-shell ObjectKeeper create race enough to wedge the orphan wave (the root content never flipped
+	// Ready, so the domain — woken only by the Ready mirror — went idle before creating the orphan
+	// VolumeSnapshots). See WORKLOG w8-block2.
+	//
+	// Child-volume-node (orphan leaf) contents drive NEITHER projection (both skip them via the same
+	// LabelChildVolumeNode guard until Block 3), so skip the owner resolve entirely for them: never add an
+	// owner Get to the orphan-wave reconcile path — the exact load-sensitive path the single-Get
+	// consolidation above exists to protect. The projections keep their own leaf guards as defense in depth.
+	var (
+		owner          *unstructured.Unstructured
+		ownerNamespace string
+		ownerFound     bool
+	)
+	if obj.GetLabels()[snapshot.LabelChildVolumeNode] != "true" {
+		var ownerErr error
+		owner, ownerNamespace, ownerFound, ownerErr = r.ownerSnapshot(ctx, obj)
+		if ownerErr != nil {
+			logger.Error(ownerErr, "Failed to resolve owning snapshot")
+			return ctrl.Result{}, ownerErr
+		}
+	}
+
 	// Single-writer child edges (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2): the
 	// aggregator is the ONLY writer of status.childrenSnapshotContentRefs. Project them from the owning
 	// snapshot's childrenSnapshotRefs before aggregating status. The edge write is a separate
 	// optimistic-locked status patch (not folded into the condition MergeFrom below); a freshly written
 	// edge set is observed on the next pass, driven by the child-content watch and the 500 ms self-requeue
 	// while !ready.
-	edgesRequeue, err := r.reconcileChildContentEdges(ctx, obj)
+	edgesRequeue, err := r.reconcileChildContentEdges(ctx, obj, owner, ownerNamespace, ownerFound)
 	if err != nil {
 		logger.Error(err, "Failed to project child content edges")
+		return ctrl.Result{}, err
+	}
+
+	// Single-writer manifest pointer (INV-CONTENT-WRITER-1, content-single-writer design §3.1/§3.2): the
+	// aggregator is the ONLY writer of status.manifestCheckpointName. Project it from the owning snapshot's
+	// ManifestCaptureRequest BEFORE fillOwnLegs (in reconcileCommonSnapshotContentStatus below) reads it.
+	// Like the child edges above, this is a separate optimistic-locked status patch observed on the next
+	// pass; the 500 ms self-requeue while !ready drives convergence.
+	mcpRequeue, err := r.reconcileManifestCheckpointNameProjection(ctx, obj, owner, ownerNamespace, ownerFound)
+	if err != nil {
+		logger.Error(err, "Failed to project manifest checkpoint name")
 		return ctrl.Result{}, err
 	}
 
@@ -374,7 +411,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
 	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
 	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
-	if !ready || edgesRequeue {
+	if !ready || edgesRequeue || mcpRequeue {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 
@@ -1176,20 +1213,22 @@ func (r *SnapshotContentController) orphanChildContentNameFromVSLeaf(ctx context
 // declared child snapshot has bound its content. It runs decoupled from the condition MergeFrom in
 // reconcileCommonSnapshotContentStatus (a separate optimistic-locked status patch), matching the previous
 // external publishers; the 500 ms self-requeue while !ready plus the child-content watch drive convergence.
-func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Context, contentObj *unstructured.Unstructured) (requeue bool, err error) {
+func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, err error) {
 	// A child-volume-node content models a single PVC and never declares children (leaf by construction).
 	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
 		return false, nil
-	}
-	childRefs, namespace, ownerFound, err := r.ownerChildrenSnapshotRefs(ctx, contentObj)
-	if err != nil {
-		return false, err
 	}
 	if !ownerFound {
 		// spec.snapshotRef absent (synthetic/legacy) or the owner is not observable yet: nothing to
 		// project this pass (fail-soft, same as the removed publishers' pending path).
 		return false, nil
 	}
+	rawRefs, _, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return false, err
+	}
+	childRefs := snapshotChildRefsFromRaw(rawRefs)
+	namespace := ownerNamespace
 
 	// Steady-state short-circuit (perf, INV-CONTENT-CHILDREN-1). Edges are append-only and 1:1 with the
 	// owner's declared children (each non-leaf child -> its bound child-content edge; each orphan CSI leaf
@@ -1221,12 +1260,80 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 	return requeue, nil
 }
 
-// ownerChildrenSnapshotRefs resolves this content's owning snapshot (spec.snapshotRef) and returns its
-// declared status.childrenSnapshotRefs plus the owner namespace. ownerFound=false when spec.snapshotRef is
-// absent (synthetic/legacy content) or the owner is not observable yet (fail-soft). The declared set is
-// read fresh from the API server (APIReader) for the same reason as declaredNonLeafChildContentNames: it
-// drives an append-only edge write that must never miss a just-declared child.
-func (r *SnapshotContentController) ownerChildrenSnapshotRefs(ctx context.Context, contentObj *unstructured.Unstructured) ([]storagev1alpha1.SnapshotChildRef, string, bool, error) {
+// reconcileManifestCheckpointNameProjection is the aggregator's writer of status.manifestCheckpointName
+// (INV-CONTENT-WRITER-1, content-single-writer design §3.1/§3.2, Block 2). It projects the manifest leg
+// pointer from the owning snapshot's ManifestCaptureRequest so the aggregator — not the binder — is the
+// sole writer of the field that fillOwnLegs then validates (MCP Ready + ownership handoff onto the content).
+//
+// Root and domain capture owners are one code path: the manifest SDK (EnsureManifestCapture) publishes BOTH
+// the root-namespace MCR name and every domain MCR name into the owner's
+// status.captureState.domainSpecificController.manifestCaptureRequestName, which is read here.
+//
+// Scope note (Block 2): ORPHAN child-volume contents keep their manifest pointer published by the snapshot
+// orphan-PVC path (ensureOrphanVolumeChildManifestCheckpoint), whose per-orphan MCR create/delete lifecycle
+// is gated on content.status.manifestCheckpointName; splitting only the publish off that co-located gate
+// across blocks regressed convergence, exactly as with the orphan child EDGE in reconcileChildContentEdges.
+// Both the orphan MCR lifecycle AND its manifest publish move here in Block 3. Orphan contents are skipped
+// by the LabelChildVolumeNode guard below.
+//
+// Latch semantics (mirrors the guard the binder documented at ensureSnapshotContentLinks): once published,
+// the name is a durable pointer that is never re-derived by chasing a now-deleted MCR. The MCR is a
+// core-internal execution handle the binder deletes only AFTER the content durably owns a Ready MCP
+// (ManifestCaptureRequestSafeToDelete gates on content.status.manifestCheckpointName + a Ready MCP owned by
+// the content), so the MCR is guaranteed to still exist when this projection first needs it — there is no
+// publish-vs-delete race. A post-handoff NotFound therefore means "already published, MCR reaped": keep the
+// pointer, do not requeue. A pre-publish NotFound (or an MCR whose CheckpointName the checkpoint controller
+// has not claimed yet) means "not captured yet": requeue (also covered by the !ready self-requeue).
+func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, err error) {
+	// A child-volume-node content's manifest pointer stays on the snapshot orphan-PVC path until Block 3.
+	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
+		return false, nil
+	}
+	if !ownerFound {
+		// spec.snapshotRef absent (synthetic/legacy) or owner not observable yet: nothing to project.
+		return false, nil
+	}
+	namespace := ownerNamespace
+	mcrName, _, err := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "manifestCaptureRequestName")
+	if err != nil {
+		return false, err
+	}
+	if mcrName == "" {
+		// Owner has not requested manifest capture yet (pre-Planned, or an import owner whose manifest is
+		// uploaded rather than captured): nothing to project this pass.
+		return false, nil
+	}
+	published, _, err := unstructured.NestedString(contentObj.Object, "status", "manifestCheckpointName")
+	if err != nil {
+		return false, err
+	}
+	mcr := &ssv1alpha1.ManifestCaptureRequest{}
+	if getErr := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}, mcr); getErr != nil {
+		if errors.IsNotFound(getErr) {
+			// Post-publish: MCR reaped after a durable handoff -> keep the latched pointer, no requeue.
+			// Pre-publish: MCR not created yet -> requeue until it appears.
+			return published == "", nil
+		}
+		return false, getErr
+	}
+	if mcr.Status.CheckpointName == "" {
+		// MCR exists but the checkpoint controller has not claimed the deterministic name yet.
+		return published == "", nil
+	}
+	if published == mcr.Status.CheckpointName {
+		return false, nil
+	}
+	if pubErr := PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentObj.GetName(), mcr.Status.CheckpointName); pubErr != nil {
+		return false, pubErr
+	}
+	return false, nil
+}
+
+// ownerSnapshot resolves this content's owning snapshot via spec.snapshotRef and returns the owner object
+// plus its namespace. found=false when spec.snapshotRef is absent (synthetic/legacy content) or the owner
+// is not observable yet (NotFound, fail-soft). The owner is read fresh from the API server (APIReader) so a
+// just-published status field (childrenSnapshotRefs / manifestCaptureRequestName) is never missed.
+func (r *SnapshotContentController) ownerSnapshot(ctx context.Context, contentObj *unstructured.Unstructured) (*unstructured.Unstructured, string, bool, error) {
 	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
 	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
@@ -1242,16 +1349,12 @@ func (r *SnapshotContentController) ownerChildrenSnapshotRefs(ctx context.Contex
 		}
 		return nil, "", false, err
 	}
-	rawRefs, _, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
-	if err != nil {
-		return nil, "", false, err
-	}
-	return snapshotChildRefsFromRaw(rawRefs), namespace, true, nil
+	return owner, namespace, true, nil
 }
 
 // snapshotChildRefsFromRaw converts the unstructured status.childrenSnapshotRefs slice into typed
 // SnapshotChildRef values (apiVersion/kind/name). Non-map entries are skipped; missing string fields
-// default to empty. Shared by the edge-write projection (ownerChildrenSnapshotRefs) and the orphan-link
+// default to empty. Shared by the edge-write projection (reconcileChildContentEdges) and the orphan-link
 // read barrier (unlinkedOrphanChildContents) so the parse stays in one place.
 func snapshotChildRefsFromRaw(rawRefs []interface{}) []storagev1alpha1.SnapshotChildRef {
 	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(rawRefs))
@@ -1806,6 +1909,14 @@ func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manage
 	obj.SetGroupVersionKind(snapshotGVK)
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent)).
+		// Manifest-leg wake-up (content-single-writer design §3.2, Block 2): the aggregator is the single
+		// writer of status.manifestCheckpointName (reconcileManifestCheckpointNameProjection), which reads
+		// the owning snapshot's ManifestCaptureRequest status.checkpointName. The checkpoint controller
+		// claims that name on the MCR WITHOUT touching the snapshot/content/MCP, so without this watch the
+		// projection would only observe it on the 500 ms self-requeue. This enqueue-only watch makes the
+		// MCR.checkpointName -> content.manifestCheckpointName handoff event-driven (the binder watches the
+		// MCR for the same reason, mcr_watch.go); the self-requeue remains a safety net for missed events.
+		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(r.mapMCRToBoundContent(snapshotGVK))).
 		WithOptions(snapshotContentControllerOptions()).
 		Named(fmt.Sprintf("snapshotcontent-snapshot-%s-%s", snapshotGVK.Group, snapshotGVK.Kind)).
 		Complete(r); err != nil {
@@ -1834,6 +1945,52 @@ func mapSnapshotContentToParentContent(_ context.Context, obj client.Object) []r
 		}
 	}
 	return nil
+}
+
+// mapMCRToBoundContent returns a watch map function that routes a ManifestCaptureRequest change to the
+// SnapshotContent(s) whose owning snapshot (of snapshotGVK, in the MCR's namespace) references it via
+// status.captureState.domainSpecificController.manifestCaptureRequestName — the SAME truth ref the manifest
+// projection reads (reconcileManifestCheckpointNameProjection). The MCR carries no reverse content
+// reference and snapshot GVKs register at runtime (CSD-driven), so a namespaced List+filter resolves the
+// owner for both bootstrap and runtime registration (mirrors the binder's mapMCRToOwningSnapshots). The
+// handler only enqueues; it never writes status. A missing/empty boundSnapshotContentName is skipped (the
+// owning snapshot is not bound yet; the aggregator has nothing to project for it).
+func (r *SnapshotContentController) mapMCRToBoundContent(snapshotGVK schema.GroupVersionKind) func(context.Context, client.Object) []reconcile.Request {
+	listGVK := schema.GroupVersionKind{
+		Group:   snapshotGVK.Group,
+		Version: snapshotGVK.Version,
+		Kind:    snapshotGVK.Kind + "List",
+	}
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		if obj == nil || obj.GetName() == "" {
+			return nil
+		}
+		mcrName := obj.GetName()
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(listGVK)
+		opts := []client.ListOption{}
+		if ns := obj.GetNamespace(); ns != "" {
+			opts = append(opts, client.InNamespace(ns))
+		}
+		if err := r.List(ctx, list, opts...); err != nil {
+			log.FromContext(ctx).V(1).Info("mcr wake-up: failed to list snapshots",
+				"snapshotKind", snapshotGVK.Kind, "mcr", mcrName, "error", err.Error())
+			return nil
+		}
+		var reqs []reconcile.Request
+		for i := range list.Items {
+			name, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "captureState", "domainSpecificController", "manifestCaptureRequestName")
+			if name == "" || name != mcrName {
+				continue
+			}
+			boundContent, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "boundSnapshotContentName")
+			if boundContent == "" {
+				continue
+			}
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Name: boundContent}})
+		}
+		return reqs
+	}
 }
 
 // manifestCheckpointGVK / volumeSnapshotContentGVK are the durable top-level artifacts whose

@@ -82,13 +82,30 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC child volume nodes", Serial, O
 
 		// The root MCR is created only after the orphan wave completes (both child volume nodes linked and
 		// ready); when it exists it carries no PVC manifest — both residual PVCs are excluded up front.
+		//
+		// The root MCR is a TRANSIENT execution handle: under the content-single-writer model the aggregator
+		// publishes the root content's manifestCheckpointName AND performs the ManifestCheckpoint ownership
+		// handoff in a single pass, so the binder GCs the MCR (ManifestCaptureRequestSafeToDelete) within one
+		// poll interval — too fast to reliably observe. So assert the Variant-A invariant on whichever signal
+		// is live: the MCR spec.targets while it still exists, else the durable ManifestCheckpoint the root
+		// content latched (its archived objects must hold no PVC manifest — the durable equivalent).
 		Eventually(func(g Gomega) {
 			mcr, err := pr7GetMCR(ctx, nsName, rootSnap)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "Variant A: residual pvc-a becomes its own child volume node, not in the root MCR")
-			g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeFalse(), "Variant A: residual pvc-b becomes its own child volume node, not in the root MCR")
-			for _, t := range mcr.Spec.Targets {
-				g.Expect(t.Kind).NotTo(Equal("PersistentVolumeClaim"), "root MCR must not carry any PVC manifest under Variant A")
+			if err == nil {
+				g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "Variant A: residual pvc-a becomes its own child volume node, not in the root MCR")
+				g.Expect(pr7MCRHasPVCTarget(mcr, pvcB)).To(BeFalse(), "Variant A: residual pvc-b becomes its own child volume node, not in the root MCR")
+				for _, t := range mcr.Spec.Targets {
+					g.Expect(t.Kind).NotTo(Equal("PersistentVolumeClaim"), "root MCR must not carry any PVC manifest under Variant A")
+				}
+				return
+			}
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "unexpected error reading root MCR: %v", err)
+			// MCR already GC'd after the durable handoff: assert on the root content's ManifestCheckpoint.
+			rootContent := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: rootSnap.Status.BoundSnapshotContentName}, rootContent)).To(Succeed())
+			g.Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty(), "root content must latch manifestCheckpointName once the manifest leg is captured")
+			for _, obj := range integrationArchiveObjectsFromMCP(ctx, rootContent.Status.ManifestCheckpointName) {
+				g.Expect(obj["kind"]).NotTo(Equal("PersistentVolumeClaim"), "root ManifestCheckpoint must not carry any PVC manifest under Variant A")
 			}
 		}, 150*time.Second, 500*time.Millisecond).Should(Succeed())
 
@@ -276,17 +293,36 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC child volume nodes", Serial, O
 		rootKey := types.NamespacedName{Namespace: nsName, Name: rootName}
 		rootSnap := pr7WaitSnapshotBound(ctx, rootKey)
 
+		// Same transient-vs-durable duality as above: assert the ConfigMap-in / PVC-out invariant on the root
+		// MCR while it is still live, else on the durable ManifestCheckpoint the root content latched (the
+		// binder GCs the MCR one poll after the aggregator's atomic name-publish + MCP handoff).
 		Eventually(func(g Gomega) {
 			mcr, err := pr7GetMCR(ctx, nsName, rootSnap)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "Variant A: residual pvc-a becomes its own child volume node, not in the root MCR")
+			if err == nil {
+				g.Expect(pr7MCRHasPVCTarget(mcr, pvcA)).To(BeFalse(), "Variant A: residual pvc-a becomes its own child volume node, not in the root MCR")
+				hasCM := false
+				for _, t := range mcr.Spec.Targets {
+					if t.Kind == "ConfigMap" && t.Name == cmName {
+						hasCM = true
+					}
+				}
+				g.Expect(hasCM).To(BeTrue(), "root MCR must capture the plain ConfigMap manifest")
+				return
+			}
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "unexpected error reading root MCR: %v", err)
+			rootContent := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: rootSnap.Status.BoundSnapshotContentName}, rootContent)).To(Succeed())
+			g.Expect(rootContent.Status.ManifestCheckpointName).NotTo(BeEmpty(), "root content must latch manifestCheckpointName once the manifest leg is captured")
 			hasCM := false
-			for _, t := range mcr.Spec.Targets {
-				if t.Kind == "ConfigMap" && t.Name == cmName {
-					hasCM = true
+			for _, obj := range integrationArchiveObjectsFromMCP(ctx, rootContent.Status.ManifestCheckpointName) {
+				g.Expect(obj["kind"]).NotTo(Equal("PersistentVolumeClaim"), "root ManifestCheckpoint must not carry any PVC manifest under Variant A")
+				if obj["kind"] == "ConfigMap" {
+					if md, ok := obj["metadata"].(map[string]interface{}); ok && md["name"] == cmName {
+						hasCM = true
+					}
 				}
 			}
-			g.Expect(hasCM).To(BeTrue(), "root MCR must capture the plain ConfigMap manifest")
+			g.Expect(hasCM).To(BeTrue(), "root ManifestCheckpoint must capture the plain ConfigMap manifest")
 		}, 120*time.Second, 500*time.Millisecond).Should(Succeed())
 	})
 })

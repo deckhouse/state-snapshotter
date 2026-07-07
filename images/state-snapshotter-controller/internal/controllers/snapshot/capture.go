@@ -22,7 +22,6 @@ import (
 	"fmt"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"io"
 	"net"
 	"sort"
@@ -303,11 +302,18 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	return r.driveRootManifestCheckpointReadiness(ctx, nsSnap, content, mcr.UID)
 }
 
-// driveRootManifestCheckpointReadiness publishes the deterministic ManifestCheckpoint name for the root
-// MCR and drives the Snapshot toward Ready WITHOUT re-listing the namespace. It is the convergence path
-// for both the MCR-gate (existing MCR) and the just-created MCR: the namespace plan is frozen on the MCR,
-// so readiness is mirrored from the bound SnapshotContent (INV-COND4) and the MCR is cleaned up once the
-// capture is persisted (reconcileN2aRootReadyAfterManifestCapture).
+// driveRootManifestCheckpointReadiness drives the Snapshot toward Ready for the root MCR WITHOUT
+// re-listing the namespace. It is the convergence path for both the MCR-gate (existing MCR) and the
+// just-created MCR: the namespace plan is frozen on the MCR, so readiness is mirrored from the bound
+// SnapshotContent (INV-COND4) and the MCR is cleaned up once the capture is persisted
+// (reconcileN2aRootReadyAfterManifestCapture).
+//
+// The deterministic ManifestCheckpoint name is derived locally from the MCR UID only to read the MCP
+// directly here. Publishing it onto SnapshotContent.status.manifestCheckpointName is now the aggregator's
+// job (SnapshotContentController.reconcileManifestCheckpointNameProjection, content-single-writer design
+// §3.1/§3.2, Block 2): this namespace-domain path is NO LONGER a writer of that field (INV-CONTENT-WRITER-1).
+// Eventual consistency holds via the mirror below — the root Snapshot stays ContentBindingPending until the
+// aggregator has published the name and computed ManifestsReady.
 func (r *SnapshotReconciler) driveRootManifestCheckpointReadiness(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -315,9 +321,6 @@ func (r *SnapshotReconciler) driveRootManifestCheckpointReadiness(
 	mcrUID types.UID,
 ) (ctrl.Result, error) {
 	mcpName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcrUID)
-	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
-		return ctrl.Result{}, err
-	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if apierrors.IsNotFound(err) {

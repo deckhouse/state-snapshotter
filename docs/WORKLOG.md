@@ -751,3 +751,29 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   declaredChildContentNames (expected set from the owning snapshot) and contentChildEdgeNames (actual multiset
   from the content), kept in capture_test.go. gofmt + go vet (e2e module) green; Bugbot found no bugs. Full run
   needs a cluster.
+- **Refactor** (w8-block2, code) Block 2 single-writer manifestCheckpointName -> aggregator (design §3.1/§3.2,
+  INV-CONTENT-WRITER-1). Moved status.manifestCheckpointName projection OFF the binder AND the namespace domain
+  into the SnapshotContentController: new reconcileManifestCheckpointNameProjection reads the owning snapshot's
+  status.captureState.domainSpecificController.manifestCaptureRequestName -> MCR -> mcr.status.checkpointName and
+  publishes it (PublishSnapshotContentManifestCheckpointName) before fillOwnLegs reads it. The projection is
+  latch-idempotent: once published, a post-handoff MCR NotFound (the binder reaps the MCR after the durable MCP
+  ownership handoff) keeps the pointer and does not requeue; a pre-publish NotFound/empty checkpointName
+  requeues (also backstopped by the 500 ms !ready self-requeue). Removed the two root/domain writers:
+  genericbinder/controller.go ensureSnapshotContentLinks (kept the mcrName read only to drive the domain
+  request lifecycle) and snapshot/capture.go driveRootManifestCheckpointReadiness (+ its now-unused
+  snapshotcontent import; the local mcpName is still derived to read the MCP directly). Added the aggregator's
+  MCR watch (mapMCRToBoundContent, wired into addSnapshotStatusWatchLocked): enqueue-only, maps MCR ->
+  owning-snapshot-of-GVK (List+filter on the same manifestCaptureRequestName truth ref) ->
+  status.boundSnapshotContentName, making the checkpointName handoff event-driven (mirrors the binder's
+  mcr_watch.go). Consolidated the per-pass owner resolve into ownerSnapshot (shared by both the child-edge and
+  manifest projections; replaces ownerChildrenSnapshotRefs) and SKIP it entirely for child-volume-node leaf
+  contents so no owner Get is added to the load-sensitive orphan-wave reconcile path. DEVIATION from the plan's
+  Block 2 scope: the ORPHAN child-volume-node manifest publish (snapshot/orphan_pvc_volume_snapshot.go
+  ensureOrphanVolumeChildManifestCheckpoint) and the import-owner publishers stay put — the orphan publish is
+  co-located with the per-orphan MCR create/delete lifecycle gated on content.status.manifestCheckpointName
+  (splitting only the publish regresses convergence, same reason Block 1 kept the orphan EDGE), and both move in
+  Block 3/6 respectively. Fixed the N5 PR-7 integration specs to assert the durable ManifestCheckpoint (via the
+  content's manifestCheckpointName) when the now-transient root MCR has already been GC'd (the aggregator's
+  atomic name-publish + MCP handoff collapses the observation window). gofmt + go build + go vet +
+  golangci-lint (no new findings) + unit tests + isolated (3x) and non-isolated make test-integration all green;
+  Bugbot found no bugs.
