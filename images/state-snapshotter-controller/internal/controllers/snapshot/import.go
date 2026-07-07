@@ -107,20 +107,12 @@ func (r *SnapshotReconciler) reconcileImport(ctx context.Context, nsSnap *storag
 		return ctrl.Result{}, err
 	}
 
-	// Content-graph edges from the uploaded namespaced child refs (import twin of the capture graph
-	// publish): resolve each child snapshot to its bound child SnapshotContent and record
-	// childrenSnapshotContentRefs (+ child->parent ownerRef). It only succeeds once the children have
-	// materialized their own content, so requeue until then (bottom-up convergence).
-	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.snapshotReader(), nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !graphPublished {
-		if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); mErr != nil {
-			return ctrl.Result{}, mErr
-		}
-		return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
-	}
+	// Content-graph edges moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1,
+	// content-single-writer design §3.1/§3.2): the aggregator projects childrenSnapshotContentRefs from the
+	// root Snapshot's uploaded status.childrenSnapshotRefs (same code path as capture). The import
+	// orchestrator no longer publishes the edge set; the bound content's mirrored Ready (gated by the
+	// aggregator's ChildrenReady) holds the root pending until its children are linked, so the Ready-poll
+	// below is the convergence driver (bottom-up).
 
 	// Import has no live residual/orphan-PVC capture wave of its own: any reconstructed VS visibility leaves
 	// have no live VolumeSnapshot, so the aggregator's fail-closed orphan-link gate skips them and never

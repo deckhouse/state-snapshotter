@@ -724,3 +724,22 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   under envtest (it was not exercised in Block 0). The durable Retain policy is covered on the real common
   SnapshotContent GVK in the binder unit path; hazard H7 only needs the shell to exist and never wedge deletion,
   which the spec still asserts.
+- **Refactor** (w8-block1, code) Block 1 single-writer child content edges -> aggregator (design §3.1/§3.2,
+  INV-CONTENT-CHILDREN-1). Moved child-edge projection into the SnapshotContentController: new
+  reconcileChildContentEdges runs at the top of Reconcile, resolves the owning snapshot via spec.snapshotRef
+  (ownerChildrenSnapshotRefs), and projects status.childrenSnapshotContentRefs from the owner's
+  status.childrenSnapshotRefs (PublishSnapshotContentChildrenFromSnapshotRefs, append-only, all-or-nothing;
+  requeues via `!ready || edgesRequeue`). A steady-state short-circuit skips the per-child uncached resolution
+  once len(edges) >= len(childRefs) to avoid hammering the apiserver on the 500 ms readiness self-requeue.
+  Removed the external DOMAIN/generic/import edge writers: genericbinder/domain_content.go (+ its now-unused
+  parseChildrenSnapshotRefs), genericbinder/import.go, snapshot/import.go — the binder stays the creator/binder
+  of the child content objects + parent ownerRefs, it no longer writes the edge set. Extracted the shared
+  raw->[]SnapshotChildRef parse into snapshotChildRefsFromRaw (reused by the orphan-link read barrier) and
+  fixed a pre-existing gci import-order finding in snapshotcontent/controller.go. DEVIATION from the plan's
+  Block 1 scope: the ORPHAN volume-node leaf edge (LinkChildVolumeContentRef in
+  snapshot/orphan_pvc_volume_snapshot.go) stays in the snapshot path until Block 3, co-located with orphan
+  content CREATION (EnsureVolumeChildContent) — splitting create/link across controllers regressed orphan-wave
+  convergence in the integration suite. The aggregator already RESOLVES the orphan child name for the
+  ChildrenReady READ barrier, so this is only about WHERE the write lives; both writers are append-only under an
+  optimistic lock. gofmt + go vet + golangci-lint (changed files) + unit tests + two-pass make test-integration
+  all green; Bugbot found no bugs.

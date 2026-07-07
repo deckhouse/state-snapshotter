@@ -142,18 +142,12 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 
 	requeue := false
 
-	// Children projection from the uploaded namespaced child refs (a data leaf has none). Bottom-up:
-	// only resolves once children materialized their own content; poll until then.
-	childRefs := parseChildrenSnapshotRefs(obj)
-	if len(childRefs) > 0 {
-		published, pErr := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.APIReader, obj.GetNamespace(), contentName, childRefs)
-		if pErr != nil {
-			return ctrl.Result{}, pErr
-		}
-		if !published {
-			requeue = true
-		}
-	}
+	// Children projection moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1,
+	// content-single-writer design §3.1/§3.2): the aggregator projects childrenSnapshotContentRefs from the
+	// uploaded status.childrenSnapshotRefs the same way for capture and import (an import owner has no domain
+	// phase, so the "planned" gate is exactly "every uploaded child snapshot has bound its content"). The
+	// binder no longer publishes the child edge set; the content's mirrored Ready (gated by the aggregator's
+	// ChildrenReady) keeps this leaf pending until its children are linked.
 
 	// Data leg: only data-artifact snapshot kinds (CSD spec.requiresDataArtifact) carry a volume data leg
 	// and have a matching DataImport. A structural import node (requiresDataArtifact=false, e.g. a VM

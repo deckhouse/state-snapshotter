@@ -74,18 +74,10 @@ func (r *GenericSnapshotBinderController) ensureDomainContentLinks(
 		}
 	}
 
-	// Children projection (intermediate nodes, e.g. demo VM). A leaf with no children publishes nothing:
-	// SnapshotContentController treats absent childrenSnapshotContentRefs as "no children" (leaf-complete).
-	childRefs := parseChildrenSnapshotRefs(obj)
-	if len(childRefs) > 0 {
-		published, pErr := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.APIReader, ns, contentName, childRefs)
-		if pErr != nil {
-			return false, "", "", pErr
-		}
-		if !published {
-			requeue = true
-		}
-	}
+	// Children projection moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1,
+	// content-single-writer design §3.1/§3.2): status.childrenSnapshotContentRefs is written by the single
+	// aggregator (reconcileChildContentEdges), not by the binder. The binder remains the creator/binder of
+	// the child content objects + their parent ownerRefs; it no longer publishes the child edge set.
 
 	// Data leg (leaf nodes with a PVC, e.g. demo disk). Absent volumeCaptureRequestName means manifest-only.
 	vcrName := domainCaptureStateString(obj, "volumeCaptureRequestName")
@@ -430,33 +422,3 @@ func domainCaptureAtLeastPlanned(obj *unstructured.Unstructured) bool {
 // Ready writer in the SnapshotContentController (ready_mirror.go: ownerDomainCapturePhase /
 // ownerDomainCaptureFailed), not here — wave7 final-wave-1 removed the binder's steady-state Ready mirror.
 // domainCapturePhase / domainCaptureAtLeastPlanned above remain for the Step-1 barrier (isDomainPlanningComplete).
-
-// parseChildrenSnapshotRefs reads status.childrenSnapshotRefs into typed child refs (APIVersion/Kind/Name).
-func parseChildrenSnapshotRefs(obj *unstructured.Unstructured) []storagev1alpha1.SnapshotChildRef {
-	raw, _, err := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotRefs")
-	if err != nil || len(raw) == 0 {
-		return nil
-	}
-	out := make([]storagev1alpha1.SnapshotChildRef, 0, len(raw))
-	for _, item := range raw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		ref := storagev1alpha1.SnapshotChildRef{}
-		if v, ok := m["apiVersion"].(string); ok {
-			ref.APIVersion = v
-		}
-		if v, ok := m["kind"].(string); ok {
-			ref.Kind = v
-		}
-		if v, ok := m["name"].(string); ok {
-			ref.Name = v
-		}
-		if ref.Name == "" {
-			continue
-		}
-		out = append(out, ref)
-	}
-	return out
-}

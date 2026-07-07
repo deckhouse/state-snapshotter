@@ -20,7 +20,6 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +43,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -342,6 +342,19 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			"gvk", obj.GroupVersionKind().String())
 		return ctrl.Result{}, nil
 	}
+
+	// Single-writer child edges (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2): the
+	// aggregator is the ONLY writer of status.childrenSnapshotContentRefs. Project them from the owning
+	// snapshot's childrenSnapshotRefs before aggregating status. The edge write is a separate
+	// optimistic-locked status patch (not folded into the condition MergeFrom below); a freshly written
+	// edge set is observed on the next pass, driven by the child-content watch and the 500 ms self-requeue
+	// while !ready.
+	edgesRequeue, err := r.reconcileChildContentEdges(ctx, obj)
+	if err != nil {
+		logger.Error(err, "Failed to project child content edges")
+		return ctrl.Result{}, err
+	}
+
 	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
@@ -361,7 +374,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
 	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
 	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
-	if !ready {
+	if !ready || edgesRequeue {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 
@@ -1096,15 +1109,7 @@ func (r *SnapshotContentController) unlinkedOrphanChildContents(ctx context.Cont
 		return nil, err
 	}
 	var unlinked []string
-	for _, raw := range rawRefs {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		ref := storagev1alpha1.SnapshotChildRef{}
-		ref.APIVersion, _ = m["apiVersion"].(string)
-		ref.Kind, _ = m["kind"].(string)
-		ref.Name, _ = m["name"].(string)
+	for _, ref := range snapshotChildRefsFromRaw(rawRefs) {
 		if !snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
 			continue
 		}
@@ -1142,6 +1147,126 @@ func (r *SnapshotContentController) orphanChildContentNameFromVSLeaf(ctx context
 		return "", nil
 	}
 	return ChildVolumeContentName(uid), nil
+}
+
+// reconcileChildContentEdges is the aggregator's writer of the DOMAIN/generic/import child edges in
+// status.childrenSnapshotContentRefs (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2). It
+// projects this content's non-leaf child edges from its owning snapshot's status.childrenSnapshotRefs:
+// each domain/generic/import child -> its bound child SnapshotContent name (CSI VolumeSnapshot visibility
+// leaves are skipped; all-or-nothing per pass, requeue until every declared non-leaf child is bound).
+//
+// Scope note (Block 1): only the DOMAIN/generic/import edge writers moved here (off the binder/namespace).
+// The ORPHAN volume-node leaf edges (the residual/orphan-PVC wave) are still linked by the snapshot
+// orphan-PVC path (LinkChildVolumeContentRef in snapshot/orphan_pvc_volume_snapshot.go), because
+// orphan-content CREATION also still lives there (EnsureVolumeChildContent). Splitting create (snapshot
+// path) from link (aggregator) across blocks would make the root's orphan wave wait on a cross-controller
+// create->observe->link hop and regressed orphan-wave convergence in the integration suite; keeping create
+// and link co-located in the snapshot path avoids that. Both the orphan creation AND its edge link move to
+// the binder/aggregator together in Block 3 (the binder becomes the single creator of orphan child
+// contents). Note the aggregator already RESOLVES the orphan child name from the VS leaf (via
+// orphanChildContentNameFromVSLeaf) for the ChildrenReady READ barrier, so the deferral is about WHERE the
+// write lives, not about a missing capability. The two writers co-write the same field safely: both merges
+// are APPEND-ONLY under an optimistic lock, so neither clobbers the other's edges (see
+// PublishSnapshotContentChildrenRefs / LinkChildVolumeContentRef).
+//
+// The write is APPEND-ONLY in this block (the atomic frozen-set write lands in Block 4). It is universal
+// across capture and import: import owners have no domain phase, so the "planned/complete" gate is exactly
+// what PublishSnapshotContentChildrenFromSnapshotRefs enforces internally — an owner that has not planned
+// has an empty childrenSnapshotRefs (nothing is projected), and a planned owner publishes only once every
+// declared child snapshot has bound its content. It runs decoupled from the condition MergeFrom in
+// reconcileCommonSnapshotContentStatus (a separate optimistic-locked status patch), matching the previous
+// external publishers; the 500 ms self-requeue while !ready plus the child-content watch drive convergence.
+func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Context, contentObj *unstructured.Unstructured) (requeue bool, err error) {
+	// A child-volume-node content models a single PVC and never declares children (leaf by construction).
+	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
+		return false, nil
+	}
+	childRefs, namespace, ownerFound, err := r.ownerChildrenSnapshotRefs(ctx, contentObj)
+	if err != nil {
+		return false, err
+	}
+	if !ownerFound {
+		// spec.snapshotRef absent (synthetic/legacy) or the owner is not observable yet: nothing to
+		// project this pass (fail-soft, same as the removed publishers' pending path).
+		return false, nil
+	}
+
+	// Steady-state short-circuit (perf, INV-CONTENT-CHILDREN-1). Edges are append-only and 1:1 with the
+	// owner's declared children (each non-leaf child -> its bound child-content edge; each orphan CSI leaf
+	// -> its child-volume-content edge; deduped by name), and the owner's childrenSnapshotRefs is set-once
+	// at Planned, so the published set can never exceed the declared set. Once it reaches the declared
+	// count the edge set is COMPLETE and stable — there is nothing left to add. Returning here (using only
+	// the in-memory content, no API reads) avoids the per-child uncached resolution
+	// (ResolveChildSnapshotRefToBoundContentName) on every 500 ms readiness self-requeue, which a node keeps
+	// issuing for its whole not-ready lifetime while it waits on the subtree archive latch. Without this an
+	// otherwise-idle steady state hammered the apiserver and starved unrelated reconciles (observed as
+	// envtest client-rate-limiter timeouts under the parallel integration suite).
+	currentEdges, _, _ := unstructured.NestedSlice(contentObj.Object, "status", "childrenSnapshotContentRefs")
+	if len(currentEdges) >= len(childRefs) {
+		return false, nil
+	}
+
+	contentName := contentObj.GetName()
+
+	// Domain/generic/import children (skips VS visibility leaves internally; ensures the parent->child
+	// lifecycle ownerRef; all-or-nothing publish). Orphan leaves are linked by the snapshot path (Block 3
+	// moves them here).
+	published, err := PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.APIReader, namespace, contentName, childRefs)
+	if err != nil {
+		return false, err
+	}
+	if !published {
+		requeue = true
+	}
+	return requeue, nil
+}
+
+// ownerChildrenSnapshotRefs resolves this content's owning snapshot (spec.snapshotRef) and returns its
+// declared status.childrenSnapshotRefs plus the owner namespace. ownerFound=false when spec.snapshotRef is
+// absent (synthetic/legacy content) or the owner is not observable yet (fail-soft). The declared set is
+// read fresh from the API server (APIReader) for the same reason as declaredNonLeafChildContentNames: it
+// drives an append-only edge write that must never miss a just-declared child.
+func (r *SnapshotContentController) ownerChildrenSnapshotRefs(ctx context.Context, contentObj *unstructured.Unstructured) ([]storagev1alpha1.SnapshotChildRef, string, bool, error) {
+	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
+	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
+	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
+	if apiVersion == "" || kind == "" || name == "" {
+		return nil, "", false, nil
+	}
+	owner := &unstructured.Unstructured{}
+	owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(apiVersion, kind))
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, err
+	}
+	rawRefs, _, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return nil, "", false, err
+	}
+	return snapshotChildRefsFromRaw(rawRefs), namespace, true, nil
+}
+
+// snapshotChildRefsFromRaw converts the unstructured status.childrenSnapshotRefs slice into typed
+// SnapshotChildRef values (apiVersion/kind/name). Non-map entries are skipped; missing string fields
+// default to empty. Shared by the edge-write projection (ownerChildrenSnapshotRefs) and the orphan-link
+// read barrier (unlinkedOrphanChildContents) so the parse stays in one place.
+func snapshotChildRefsFromRaw(rawRefs []interface{}) []storagev1alpha1.SnapshotChildRef {
+	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(rawRefs))
+	for _, raw := range rawRefs {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ref := storagev1alpha1.SnapshotChildRef{}
+		ref.APIVersion, _ = m["apiVersion"].(string)
+		ref.Kind, _ = m["kind"].(string)
+		ref.Name, _ = m["name"].(string)
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 // childTerminalLeafInfo distills a terminal child's Ready condition into the original failed leaf's
