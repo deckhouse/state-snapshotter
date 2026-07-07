@@ -743,3 +743,11 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   ChildrenReady READ barrier, so this is only about WHERE the write lives; both writers are append-only under an
   optimistic lock. gofmt + go vet + golangci-lint (changed files) + unit tests + two-pass make test-integration
   all green; Bugbot found no bugs.
+- **Test** (w8-block1, e2e) Block 1 e2e coverage (design §3.1/§3.2, INV-CONTENT-CHILDREN-1). Extended
+  e2e/tests/capture_test.go captureSpecs with a spec asserting single-writer edges: for every snapshot node in
+  the manifest-only tree (root + descendants), its bound content's status.childrenSnapshotContentRefs equals
+  EXACTLY the multiset of bound-content names of its declared NON-LEAF children (childrenSnapshotRefs minus CSI
+  VolumeSnapshot visibility leaves) — no missing edge, no duplicate (counts asserted == 1). Added local helpers
+  declaredChildContentNames (expected set from the owning snapshot) and contentChildEdgeNames (actual multiset
+  from the content), kept in capture_test.go. gofmt + go vet (e2e module) green; Bugbot found no bugs. Full run
+  needs a cluster.

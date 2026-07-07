@@ -18,6 +18,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -25,6 +26,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Source object names for the manifest-only (no-volume-data) capture tree: an ownerless ConfigMap (the
@@ -151,6 +153,51 @@ func captureSpecs() {
 			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 
+		It("writes childrenSnapshotContentRefs equal to the declared children exactly (single-writer edges)", func() {
+			// Block 1 (content-single-writer design §3.1/§3.2, INV-CONTENT-CHILDREN-1): the
+			// SnapshotContentController is the single writer of status.childrenSnapshotContentRefs, projected
+			// from the owning snapshot's status.childrenSnapshotRefs. For every snapshot node in the tree its
+			// bound content's childrenSnapshotContentRefs must equal EXACTLY the set of bound-content names of
+			// its declared NON-LEAF children — no missing edge, no duplicate. CSI VolumeSnapshot visibility
+			// leaves are skipped (they have no backing SnapshotContent; their orphan edge is linked by the
+			// snapshot path until Block 3, and the manifest-only tree has no orphan PVCs anyway).
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
+			defer cancel()
+			Expect(captured.rootContent).NotTo(BeEmpty(), "the capture spec must run first and record the root content")
+
+			ns := captured.namespace
+
+			By("Collecting every snapshot node in the tree (root + descendants)")
+			nodes := []childRef{{kind: "Snapshot", name: captured.rootSnap}}
+			descendants, err := walkSnapshotTree(ctx, ns, captured.rootSnap)
+			Expect(err).NotTo(HaveOccurred())
+			nodes = append(nodes, descendants...)
+
+			By("Asserting each node's content edges equal its declared non-leaf children exactly")
+			for _, node := range nodes {
+				if node.kind == "VolumeSnapshot" {
+					continue // CSI visibility leaf: no backing content of its own
+				}
+				gvr, ok := gvrForSnapshotKind(node.kind)
+				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+				node := node // capture for the closure
+				Eventually(func(g Gomega) {
+					expected, contentName, err := declaredChildContentNames(ctx, gvr, ns, node.name)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(contentName).NotTo(BeEmpty(), "node %s/%s must be bound to a content", node.kind, node.name)
+
+					actual, err := contentChildEdgeNames(ctx, contentName)
+					g.Expect(err).NotTo(HaveOccurred())
+
+					for edge, count := range actual {
+						g.Expect(count).To(Equal(1), "duplicate edge %q in content %s (childrenSnapshotContentRefs must be a set)", edge, contentName)
+					}
+					g.Expect(actual).To(Equal(expected),
+						"content %s childrenSnapshotContentRefs must equal its declared non-leaf children exactly (node %s/%s)", contentName, node.kind, node.name)
+				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}
+		})
+
 		It("populates the demo child snapshot tree (childrenSnapshotRefs) with Ready nodes", func() {
 			// Snapshot creation: bound the tree walk and children readiness by the short captureReadyTO
 			// (fail fast) rather than the restore-path snapshotReadyTO.
@@ -180,4 +227,59 @@ func captureSpecs() {
 			Expect(waitChildrenReady(ctx, captured.namespace, nodes, suiteCfg.captureReadyTO)).To(Succeed())
 		})
 	})
+}
+
+// declaredChildContentNames resolves a snapshot node's bound content name (status.boundSnapshotContentName)
+// and the multiset of bound-content names of its declared NON-LEAF children (status.childrenSnapshotRefs,
+// excluding CSI VolumeSnapshot visibility leaves). It is the "expected" edge set for the aggregator's
+// single-writer projection: each declared non-leaf child snapshot -> its own bound SnapshotContent name.
+func declaredChildContentNames(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) (map[string]int, string, error) {
+	snap, err := getResource(ctx, gvr, ns, name)
+	if err != nil {
+		return nil, "", err
+	}
+	contentName, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+	expected := map[string]int{}
+	for _, ch := range childSnapshotRefs(snap) {
+		if ch.kind == "VolumeSnapshot" {
+			continue // orphan CSI visibility leaf: edge linked by the snapshot path, not a content child here
+		}
+		chGVR, ok := gvrForSnapshotKind(ch.kind)
+		if !ok {
+			return nil, "", fmt.Errorf("unknown child snapshot kind %q (%s)", ch.kind, ch.name)
+		}
+		childSnap, err := getResource(ctx, chGVR, ns, ch.name)
+		if err != nil {
+			return nil, "", fmt.Errorf("get declared child %s %s/%s: %w", ch.kind, ns, ch.name, err)
+		}
+		childContent, _, _ := unstructured.NestedString(childSnap.Object, "status", "boundSnapshotContentName")
+		if childContent == "" {
+			return nil, "", fmt.Errorf("declared child %s %s/%s has no bound content yet", ch.kind, ns, ch.name)
+		}
+		expected[childContent]++
+	}
+	return expected, contentName, nil
+}
+
+// contentChildEdgeNames reads a (cluster-scoped) SnapshotContent's status.childrenSnapshotContentRefs into
+// a multiset of edge names, so a duplicate edge shows up as a count > 1.
+func contentChildEdgeNames(ctx context.Context, contentName string) (map[string]int, error) {
+	content, err := getResource(ctx, snapshotContentGVR, "", contentName)
+	if err != nil {
+		return nil, err
+	}
+	actual := map[string]int{}
+	raw, _, _ := unstructured.NestedSlice(content.Object, "status", "childrenSnapshotContentRefs")
+	for _, r := range raw {
+		m, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		n, _, _ := unstructured.NestedString(m, "name")
+		if n == "" {
+			continue
+		}
+		actual[n]++
+	}
+	return actual, nil
 }
