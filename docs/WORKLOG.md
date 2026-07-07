@@ -835,3 +835,11 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   child-volume-node contents) STAY until Block 3d; INV-CONTENT-WRITER-1 becomes STRICT only then. gofmt +
   go build + go vet + golangci-lint (--new-from-rev=HEAD: no new findings) + unit tests all green; Bugbot
   found two issues (restore terminal-stop, premature Ready), both fixed and clean on re-review.
+- **Test** (w8-block3, e2e) Block 3 e2e data-leg regression (E2E_VOLUME_DATA): extended volumedata_test.go
+  with an It that BFS-walks the captured content tree and asserts every domain data leg landed the
+  aggregator's durable VolumeSnapshotContent handoff — spec.deletionPolicy=Retain (survives the transient
+  VolumeCaptureRequest being reaped) plus an ownerReference back to its SnapshotContent — covering at least
+  the two domain-disk VCR legs (the legacy orphan leaf does the same handoff on the snapshot path until Block
+  3d, so it is asserted too when present). Added volumeSnapshotContentGVR to e2e_shared_test.go. Compile-check
+  only (gofmt + go vet, no cluster at night per the pre-approval); pre-existing pending-VCR observer WIP in
+  both files left intact. Bugbot: no bugs.

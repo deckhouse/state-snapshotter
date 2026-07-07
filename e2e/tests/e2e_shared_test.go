@@ -158,8 +158,21 @@ var (
 	volumeSnapshotGVR = schema.GroupVersionResource{
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots",
 	}
+	// volumeSnapshotContentGVR is the cluster-scoped CSI VolumeSnapshotContent — the durable data
+	// artifact a captured node's SnapshotContent.status.data points at. Block 3 moved the ownership
+	// handoff (deletionPolicy=Retain + ownerRef -> SnapshotContent) onto the aggregator, so the e2e
+	// asserts it via this GVR.
+	volumeSnapshotContentGVR = schema.GroupVersionResource{
+		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents",
+	}
 	volumeRestoreRequestGVR = schema.GroupVersionResource{
 		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests",
+	}
+	// volumeCaptureRequestGVR is the storage-foundation VolumeCaptureRequest a domain snapshot creates to
+	// capture a PVC's data. The namespace-root uses its in-flight spec.target as subtree coverage before
+	// the child's dataRef publishes (pkg/volumecapture pvcUIDsFromPendingVCR).
+	volumeCaptureRequestGVR = schema.GroupVersionResource{
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "volumecapturerequests",
 	}
 	dataExportGVR = schema.GroupVersionResource{
 		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataexports",

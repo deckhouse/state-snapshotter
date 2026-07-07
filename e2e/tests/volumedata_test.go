@@ -19,6 +19,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -405,6 +406,82 @@ func ensureStorageClassVolumeSnapshotClass(ctx context.Context, scName string) e
 	return nil
 }
 
+// pvcHasPublishedDataRef reports whether any SnapshotContent has published a durable data artifact
+// (status.data.artifact -> VolumeSnapshotContent) for the source PVC ns/pvc. Used to detect that the
+// domain child has finished the volume leg, i.e. the pending-VCR coverage window is over.
+func pvcHasPublishedDataRef(ctx context.Context, ns, pvc string) bool {
+	list, err := suiteDyn.Resource(snapshotContentGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false
+	}
+	for i := range list.Items {
+		srcNS, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "source", "namespace")
+		srcName, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "source", "name")
+		artifactKind, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "artifact", "kind")
+		if srcNS == ns && srcName == pvc && artifactKind == "VolumeSnapshotContent" {
+			return true
+		}
+	}
+	return false
+}
+
+// vcrTargetsPVC reports whether an in-flight VolumeCaptureRequest in ns targets the source PVC (its
+// immutable spec.target.name). This is the observable proxy for "a domain child holds a pending VCR for
+// this PVC" that the namespace-root counts as subtree coverage before the child's dataRef publishes.
+func vcrTargetsPVC(ctx context.Context, ns, pvc string) bool {
+	list, err := suiteDyn.Resource(volumeCaptureRequestGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false
+	}
+	for i := range list.Items {
+		targetName, _, _ := unstructured.NestedString(list.Items[i].Object, "spec", "target", "name")
+		if targetName == pvc {
+			return true
+		}
+	}
+	return false
+}
+
+// startPendingVCRWindowObserver samples the live cluster in the background looking for the transient
+// pending-VCR coverage window: a domain VolumeCaptureRequest targeting coveredPVC exists while no
+// SnapshotContent has yet published a dataRef for it. It is best-effort by design — a fast cluster may
+// publish the dataRef between polls, so the observed() result is logged, never asserted. The controller
+// logic itself (pvcUIDsFromPendingVCR / CollectSubtreeCoveredPVCUIDs) is unit-verified deterministically.
+// The caller MUST invoke stop before reading observed().
+func startPendingVCRWindowObserver(ns, coveredPVC string) (stop func(), observed func() bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var seen atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer GinkgoRecover()
+		defer close(done)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// dataRef already published => the window is over (caught it earlier or missed it); stop.
+				if pvcHasPublishedDataRef(ctx, ns, coveredPVC) {
+					return
+				}
+				// VCR in flight AND no dataRef yet => the pending-VCR coverage window is live.
+				if vcrTargetsPVC(ctx, ns, coveredPVC) {
+					seen.Store(true)
+					return
+				}
+			}
+		}
+	}()
+	stop = func() {
+		cancel()
+		<-done
+	}
+	observed = func() bool { return seen.Load() }
+	return stop, observed
+}
+
 // volumeDataSpecs registers the phase-3 full volume-data flow specs (env-gated by E2E_VOLUME_DATA): it
 // provisions a thin, snapshot-capable StorageClass via the storage-e2e helper, captures a real PVC tree
 // with marker bytes, and asserts the data round-trips through a VolumeRestoreRequest restore.
@@ -415,6 +492,10 @@ func volumeDataSpecs() {
 			sc          string
 			bindings    []volBinding
 			rootContent string
+			// vcrWindowObserved records whether the capture spec caught the transient pending-VCR coverage
+			// window (a domain disk VolumeCaptureRequest in flight for vdPVCDisk before its dataRef
+			// published). Best-effort: logged by the exclusion spec, never asserted.
+			vcrWindowObserved bool
 			// per-PVC marker content written into the source volumes, verified after restore.
 			markers = map[string]string{}
 		)
@@ -481,6 +562,13 @@ func volumeDataSpecs() {
 			tl := startCaptureTimeline(srcNS)
 			defer tl.stop()
 
+			// Watch for the transient pending-VCR coverage window BEFORE creating the root: the domain disk
+			// snapshot creates its VolumeCaptureRequest and publishes the dataRef during this capture, so the
+			// observer must be running before the root snapshot kicks the tree off. Result is read by the
+			// exclusion spec (best-effort log; the invariant itself is asserted at steady state there).
+			stopObs, obsResult := startPendingVCRWindowObserver(srcNS, vdPVCDisk)
+			defer func() { stopObs(); vcrWindowObserved = obsResult() }()
+
 			By("Creating the root Snapshot over the PVC tree")
 			Expect(createRootSnapshot(ctx, srcNS, vdRootSnapshotName)).To(Succeed())
 
@@ -497,6 +585,112 @@ func volumeDataSpecs() {
 				GinkgoWriter.Printf("  dataRef: pvc=%s vsc=%s\n", b.pvc, b.vsc)
 			}
 			Expect(bindings).NotTo(BeEmpty(), "expected at least one captured volume data artifact")
+		})
+
+		It("hands off each captured VolumeSnapshotContent to its SnapshotContent (Retain + ownerRef)", func() {
+			// Block 3 regression (content-single-writer design §4 Slice 3 / §11.4): the data leg publish moved
+			// from the binder to the SnapshotContentController aggregator, which is now the single writer of
+			// status.data AND performs the durable VolumeSnapshotContent handoff — deletionPolicy=Retain plus an
+			// ownerReference back to the owning SnapshotContent — so the artifact survives its transient
+			// VolumeCaptureRequest being reaped and is GC-tied to the content. Assert every domain data leg in
+			// the captured tree landed that handoff (the legacy orphan leaf does the same handoff on the snapshot
+			// path until Block 3d, so it is covered here too when present).
+			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
+
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+3*time.Minute)
+			defer cancel()
+
+			By("Waiting for the domain VolumeCaptureRequest data legs to publish dataRefs")
+			_, err := waitContentDataRefs(ctx, rootContent, []string{vdPVCDisk, vdPVCStandalone}, suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred(), "the domain disk snapshots must publish volume dataRefs before the handoff check")
+
+			By("Asserting each published data VolumeSnapshotContent is Retain + owned by its SnapshotContent")
+			Eventually(func(g Gomega) {
+				handedOff := 0
+				queue := []string{rootContent}
+				seen := map[string]bool{}
+				for len(queue) > 0 {
+					name := queue[0]
+					queue = queue[1:]
+					if seen[name] {
+						continue
+					}
+					seen[name] = true
+
+					content, cerr := getResource(ctx, snapshotContentGVR, "", name)
+					g.Expect(cerr).NotTo(HaveOccurred(), "get SnapshotContent %s", name)
+
+					artifactKind, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "kind")
+					vscName, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "name")
+					if artifactKind == "VolumeSnapshotContent" && vscName != "" {
+						vsc, verr := getResource(ctx, volumeSnapshotContentGVR, "", vscName)
+						g.Expect(verr).NotTo(HaveOccurred(), "get VolumeSnapshotContent %s (content %s)", vscName, name)
+
+						policy, _, _ := unstructured.NestedString(vsc.Object, "spec", "deletionPolicy")
+						g.Expect(policy).To(Equal("Retain"),
+							"VolumeSnapshotContent %s must be Retain so it survives VolumeCaptureRequest reaping (content %s)", vscName, name)
+						g.Expect(ownedBySnapshotContent(vsc, name)).To(BeTrue(),
+							"VolumeSnapshotContent %s must carry an ownerReference back to its SnapshotContent %s (aggregator handoff)", vscName, name)
+						handedOff++
+					}
+					queue = append(queue, childContentNames(content)...)
+				}
+				// disk-vm (demo-pvc-disk) and disk-standalone (demo-pvc-standalone) are the two domain
+				// VolumeCaptureRequest data legs that MUST be handed off; the root orphan leaf may add a third.
+				g.Expect(handedOff).To(BeNumerically(">=", 2),
+					"expected at least the two domain-disk data legs to be handed off to their SnapshotContents")
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+		})
+
+		It("excludes domain-VolumeCaptureRequest-covered PVCs from the root own-manifests (subtree coverage)", func() {
+			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
+
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+3*time.Minute)
+			defer cancel()
+
+			By("Waiting for the root manifest leg to be archived (own-manifests become servable)")
+			Expect(waitRootArchived(ctx, srcNS, vdRootSnapshotName, suiteCfg.captureReadyTO)).To(Succeed())
+
+			By("Confirming the domain VolumeCaptureRequest path published dataRefs for the disk PVCs")
+			_, err := waitContentDataRefs(ctx, rootContent, []string{vdPVCDisk, vdPVCStandalone}, suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred(), "the domain disk snapshots must publish volume dataRefs (the VCR path)")
+
+			By("Reading the root own-manifests")
+			objs, err := getRootOwnManifests(ctx, srcNS, vdRootSnapshotName)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Asserting every source PVC is subtree-covered/orphan-captured and excluded from the root own-manifests")
+			// demo-pvc-disk (nested under DemoVirtualDisk/disk-vm) and demo-pvc-standalone (disk-standalone)
+			// are captured by their domain disk snapshots via a VolumeCaptureRequest, so the namespace-root
+			// treats them as subtree-covered; demo-pvc is a root orphan PVC that becomes its own child volume
+			// node. None may appear in the root's own manifest checkpoint.
+			for _, pvc := range []string{vdPVCDisk, vdPVCStandalone, vdPVCRoot} {
+				_, found := findManifest(objs, "PersistentVolumeClaim", pvc)
+				Expect(found).To(BeFalse(), "PVC %s must be excluded from the root own-manifests (domain-VCR-covered or orphan child volume node)", pvc)
+			}
+
+			By("Asserting the root own-manifests carry no PVC manifest at all (Variant A: PVCs are child volume nodes)")
+			for i := range objs {
+				Expect(objs[i].GetKind()).NotTo(Equal("PersistentVolumeClaim"), "root own-manifests must not carry any PVC manifest under Variant A")
+			}
+
+			By("Sanity: an ordinary namespaced object (the demo ConfigMap) IS captured by the root manifest leg")
+			_, hasCM := findManifest(objs, "ConfigMap", vdConfigMapName)
+			Expect(hasCM).To(BeTrue(), "the demo ConfigMap must appear in the root own-manifests (proves the manifest leg is non-empty)")
+
+			// The steady-state exclusion above is only reachable because, during capture, the root counted the
+			// disk PVCs as subtree-covered while the domain disks' VolumeCaptureRequests were still in flight
+			// (before their dataRefs published) — otherwise the root would have stalled on
+			// ErrSubtreeDataRefsPending or double-captured a PVC as its own orphan child volume node. The
+			// controller-level pending-VCR coverage (pvcUIDsFromPendingVCR / CollectSubtreeCoveredPVCUIDs) is
+			// unit-verified by TestCollectSubtreeCoveredPVCUIDs_pendingVCRTargets; the observer started in the
+			// capture spec records whether this run also caught that transient window against the live domain
+			// kind (best-effort — a fast cluster may publish the dataRef between polls, so never fatal).
+			if vcrWindowObserved {
+				GinkgoWriter.Printf("observed the transient pending-VCR coverage window: a domain VolumeCaptureRequest targeted %s before its dataRef published\n", vdPVCDisk)
+			} else {
+				GinkgoWriter.Printf("did not catch the transient pending-VCR window for %s (dataRef likely published between polls); steady-state exclusion still proves domain-VCR subtree coverage\n", vdPVCDisk)
+			}
 		})
 
 		It("serves the generic-PVC VolumeSnapshot connector manifests-download", func() {
