@@ -39,9 +39,13 @@ Two distinct benchmarks — **do not conflate them**:
 CPU is no longer the bottleneck (genericbinder mapper fix; controller mostly idle during fan-out), the
 reverse-watch mapper `List` is gone, the rate limiter is fixed, polling is largely event-driven, and **child-graph
 planning cost is closed** (D.3: per-child `Get`s → one `List`/GVK; worst pass 11.1s → ~0.8–1.1s). The remaining
-SETS=10 tail is **latency-bound** and now concentrated in the **root manifest leg**: after all children are ready
-(`ChildrenSnapshotReady` ~13s) the root Snapshot still takes ~10s to reach `Ready` (`ManifestsArchived`/`Ready`
-~24s). That leg is the **next** open investigation — a new hypothesis, not a child-graph fix.
+SETS=10 tail was **latency-bound** and concentrated in the **root manifest leg**: after all children are ready
+(`ChildrenSnapshotReady` ~13s) the root Snapshot took ~10s to reach `Ready`. That leg (**H4**) is now **closed** by
+Commit H4.1 — the reverse-lookup wakes were dead (unstructured `List`s hit the API server with an unsupported
+field selector) and the leg ran on poll backstops; routing those `List`s through the cache indexes restored
+event-driven wakes, killed the `field label not supported` errors and the 89s lost-wake tail, and left the leg
+stable at ~9–10s. No open latency investigation remains; the residual ~24–25s wall is genuine bottom-up archive
+propagation, tracked as a lower-priority follow-up if further cuts are wanted.
 
 ## 3. Confirmed bottlenecks (real root causes, measurable effect)
 
@@ -311,7 +315,10 @@ State at SETS=10 (pre-D.3): **ROOT Ready ~25s server-side (~29–30s client-meas
 rate limiter, and most polling are **no longer** bottlenecks. The remaining tail is **latency-bound** and, per the
 Commit-D audit below, sat in **repeated root child-graph planning** (H3). H1 is not a distinct hypothesis.
 **After D.3 (see below): wall ~23–24s client-measured** and the child-graph-planning cost is effectively closed;
-the residual tail has moved to the **root manifest leg** (ChildrenSnapshotReady ~13s → Ready ~24s).
+the residual tail then moved to the **root manifest leg** (ChildrenSnapshotReady ~13s → Ready ~24s), which is
+itself **now closed by H4.1** (see H4 below). **No open latency investigation remains**; the residual ~24–25s wall
+is genuine bottom-up archive propagation (child `ManifestsArchived` staircase to ~17–22s), a lower-priority
+follow-up only if further cuts are wanted.
 
 - **H3 — repeated root child-graph planning (CLOSED by Commit D.3; kept for history).** Was the primary open
   bottleneck; the per-pass cost was attributed by the Commit-D instrumentation and then removed by D.3 (per-child
@@ -412,9 +419,9 @@ Fixes, one variable at a time, guided by the numbers:
 Adjacent future work: choose the production manager client QPS/Burst deliberately (50/100 was capacity tuning, not
 proof of low work — see FIX 1 caveat).
 
-### H4 — root manifest leg (`ChildrenSnapshotReady` → `Ready` ≈10s) — NEW open investigation
+### H4 — root manifest leg (`ChildrenSnapshotReady` → `Ready` ≈10s) — CLOSED by H4.1
 
-With H3 closed, this is the **only** remaining SETS=10 latency issue and it is well-localised. After every child
+With H3 closed, this was the **only** remaining SETS=10 latency issue and it is well-localised. After every child
 is ready (`ChildrenSnapshotReady=True` at ~13s), the root Snapshot still takes ~10s to reach `Ready`
 (`ManifestsArchived`/`Ready` at ~24s). New problem statement — **not** a child-graph fix:
 
@@ -458,7 +465,7 @@ sub-intervals (offsets from root create, `lastTransitionTime` second-granularity
   FIX 5's event wakes are effectively dead — only their poll/requeue backstops carry the archive wave. Not caused
   by D.3.
 
-**Fix (H4.1, implemented; measurement pending redeploy).** Route the three enqueue-only reverse-lookup `List`s
+**Fix (H4.1, implemented and validated).** Route the three enqueue-only reverse-lookup `List`s
 through the **manager cache** (`mgr.GetCache()`, exposed as `r.cacheReader` via `reverseLookupReader()`), which
 uses the registered `indexKey*` indexes, instead of `r.Client` (which hits the API server for unstructured). This
 is deliberately **not** a global `Client.Cache.Unstructured=true` flip — that would also change D.3's child-List
@@ -474,6 +481,26 @@ as a control-plane-stall / leader-election-lost incident during a load spike** (
 to the same apiserver at 13:27; leader-election hardening is tracked separately, intentionally **not** in H4.1 so
 it cannot mask the load problem).
 
+**Result (SETS=10 warm, fresh pod `controller-7d5cb5fb85`, 3 measured runs after 1 warm-up).** All acceptance
+signals met:
+
+| signal | before (r1/r2 pre-fix) | after (r1/r2/r3) |
+|---|---|---|
+| `field label not supported` (whole pod window) | 669× / 10× / 6× per run | **0** |
+| controller restarts during runs | 3–5 (leader-election lost) | **0** |
+| `leader election lost` / apiserver-timeout | present (r3 = 89s outlier) | **0** |
+| `error`-level log lines | present | **0** |
+| root Ready wall | ~23–30s, with r3 89s outlier | **23.8 / 24.5 / 24.9s** (tight, no outlier) |
+| `ChildrenSnapshotReady → Ready` leg | ~12–14s | **8.5 / 10.4 / 10.6s** (avg ~9.8s) |
+
+The reverse-lookup `List`s now resolve through the cache indexes: the API-server field-selector rejections are
+gone, event wakes for the manifest leg are live again (FIX 2 / FIX 3 / FIX 5 no longer degraded to poll-only), and
+the lost-wake tail that produced r3's 89s incident did not recur — the three runs are within ~1s of each other.
+The `ChildrenSnapshotReady → Ready` leg improved by ~2–4s and, more importantly, became **stable and event-driven**
+rather than poll-backstopped. Ready correctness unchanged (all subtrees reached Ready on every run). The residual
+~9–10s leg is now genuine bottom-up archive propagation (child-content `ManifestsArchived` staircase up to ~17–22s
+from root create), not lost wakes — a separate, lower-priority investigation if further cuts are wanted.
+
 ---
 
 ## 9. Application checklist
@@ -485,7 +512,7 @@ it cannot mask the load problem).
 5. [ARCH 1](#arch-1--snapshot-controller-wake-the-gated-parent-on-child-content-archive) (gated-parent wake) and [ARCH 2](#arch-2--single-snapshotcontent-controller-with-dynamic-snapshot-status-watches-h2) (single content controller) — apply as architecture/correctness; not
    headline latency fixes.
 6. Confirmed optimizations (section 6) — keep; hygiene.
-7. H3 (section 8) — **closed** by Commit D.3 (per-child `Get`s → one `List`/GVK; validated SETS=10 warm). D.2 (membership-skip) and D.1′ (relay debounce) are **no longer recommended** — the premise is gone. Next open investigation is **H4 — root manifest leg** (`ChildrenSnapshotReady` → `Ready` ≈10s). Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
+7. H3 (section 8) — **closed** by Commit D.3 (per-child `Get`s → one `List`/GVK; validated SETS=10 warm). D.2 (membership-skip) and D.1′ (relay debounce) are **no longer recommended** — the premise is gone. **H4 — root manifest leg** (`ChildrenSnapshotReady` → `Ready`) — **closed** by Commit H4.1 (reverse-lookup `List`s routed through cache indexes; `field label not supported` errors and lost-wake tails eliminated; leg now stable event-driven ~9–10s, no restarts). Residual archive-propagation cadence is a lower-priority follow-up. Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
 
 ## 10. Tooling (storage-e2e, measurement only)
 
