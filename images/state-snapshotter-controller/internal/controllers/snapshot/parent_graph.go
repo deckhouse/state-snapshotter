@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -43,12 +44,61 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
+// childGraphPlanningTimings attributes the internal wall-clock cost of a single
+// reconcileParentOwnedChildGraph pass to its distinct sections. It is a diagnosis-only accumulator
+// (Commit D): the child-graph re-plan is the remaining root-Snapshot latency bottleneck, but the
+// dominant sub-cost (uncached source Lists vs the recursive coverage walk vs per-child readiness Gets)
+// is not yet attributed. The breakdown is logged once per pass (via a deferred log covering every
+// return path, including the hot "priority layer pending" early return that dominates the fan-out
+// phase), so an optimization is chosen from measured cost, not from a guess.
+type childGraphPlanningTimings struct {
+	resolveMappings time.Duration // EligibleResourceSnapshotMappings (CSD list + RESTMapping resolution)
+	listSources     time.Duration // uncached dynamic-client List of every eligible source GVK
+	coverageWalk    time.Duration // coverage.IsCovered + ObservePlannedSnapshot (recursive childrenSnapshotRefs Gets)
+	ensureChildren  time.Duration // ensureParentOwnedChildSnapshot (Get + Create/Patch of each child snapshot)
+	priorityReady   time.Duration // priorityLayerChildrenSnapshotReady (per-child readiness Get)
+	publish         time.Duration // patchSnapshotChildrenRefs* (status.childrenSnapshotRefs + ChildrenSnapshotReady write)
+	listCalls       int           // number of dynamic List calls issued
+	sourceObjects   int           // total source objects returned across all Lists
+}
+
+func (t *childGraphPlanningTimings) total() time.Duration {
+	return t.resolveMappings + t.listSources + t.coverageWalk + t.ensureChildren + t.priorityReady + t.publish
+}
+
+// log emits the per-section attribution for a single planning pass. It fires only above the same
+// 150ms threshold the caller uses for its "child-graph-planning" total, so ordinary cheap passes stay
+// quiet. Section durations sum to total(); the caller's own "child-graph-planning durMs" remains the
+// authoritative wall time (untimed glue such as sorting is the small difference).
+func (t *childGraphPlanningTimings) log(ctx context.Context) {
+	if t.total() < 150*time.Millisecond {
+		return
+	}
+	ctrllog.FromContext(ctx).V(1).Info("child-graph-planning: cost attribution",
+		"section", "child-graph-planning-breakdown",
+		"totalMs", t.total().Milliseconds(),
+		"resolveMappingsMs", t.resolveMappings.Milliseconds(),
+		"listSourcesMs", t.listSources.Milliseconds(),
+		"coverageWalkMs", t.coverageWalk.Milliseconds(),
+		"ensureChildrenMs", t.ensureChildren.Milliseconds(),
+		"priorityReadyMs", t.priorityReady.Milliseconds(),
+		"publishMs", t.publish.Milliseconds(),
+		"listCalls", t.listCalls,
+		"sourceObjects", t.sourceObjects,
+	)
+}
+
 func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 ) (bool, bool, error) {
+	timings := &childGraphPlanningTimings{}
+	defer timings.log(ctx)
+
+	resolveStart := time.Now()
 	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
+	timings.resolveMappings += time.Since(resolveStart)
 	if err != nil {
 		return false, false, err
 	}
@@ -77,12 +127,14 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
+			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector, timings)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
 					sortSnapshotChildRefs(desiredRefs)
+					publishStart := time.Now()
 					changed, perr := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonSourceListForbidden, forbidden.Error())
+					timings.publish += time.Since(publishStart)
 					return changed, false, perr
 				}
 				return false, false, err
@@ -90,13 +142,17 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 			layerRefs = append(layerRefs, refs...)
 		}
 		desiredRefs = append(desiredRefs, layerRefs...)
+		readyStart := time.Now()
 		ready, terminalMessage, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, nsSnap.Namespace, layerRefs)
+		timings.priorityReady += time.Since(readyStart)
 		if err != nil {
 			return false, false, err
 		}
 		if terminalMessage != "" {
 			sortSnapshotChildRefs(desiredRefs)
+			publishStart := time.Now()
 			changed, err := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, terminalMessage)
+			timings.publish += time.Since(publishStart)
 			return changed, false, err
 		}
 		if !ready {
@@ -105,7 +161,9 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 			// diagnosability; never fail by duration. Capture stays gated until the layer is ready.
 			sortSnapshotChildRefs(desiredRefs)
 			message := fmt.Sprintf("waiting for priority %d child snapshots to publish current ChildrenSnapshotReady=True; %s", priority, summarizePendingChildren(pending))
+			publishStart := time.Now()
 			changed, err := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonPriorityLayerPending, message)
+			timings.publish += time.Since(publishStart)
 			return changed, false, err
 		}
 		coverage = newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
@@ -113,7 +171,9 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	}
 	sortSnapshotChildRefs(desiredRefs)
 
+	publishStart := time.Now()
 	statusChanged, err := r.patchSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
+	timings.publish += time.Since(publishStart)
 	if err != nil {
 		return false, false, err
 	}
@@ -128,12 +188,16 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
 	selector labels.Selector,
+	timings *childGraphPlanningTimings,
 ) ([]storagev1alpha1.SnapshotChildRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(mapping.SourceGVK)
 	list.SetKind(mapping.SourceGVK.Kind + "List")
+	listStart := time.Now()
 	resources, err := r.Dynamic.Resource(mapping.SourceGVR).Namespace(nsSnap.Namespace).List(ctx, metav1.ListOptions{})
+	timings.listSources += time.Since(listStart)
+	timings.listCalls++
 	if err != nil {
 		// NotFound: the mapped source kind is not (yet) served by the API; legitimately empty for now.
 		if errors.IsNotFound(err) {
@@ -147,6 +211,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		return nil, err
 	}
 	list.Items = resources.Items
+	timings.sourceObjects += len(list.Items)
 	sort.Slice(list.Items, func(i, j int) bool {
 		a, b := list.Items[i], list.Items[j]
 		if a.GetNamespace() != b.GetNamespace() {
@@ -165,7 +230,9 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		if selector != nil && !selector.Matches(labels.Set(resource.GetLabels())) {
 			continue
 		}
+		coverStart := time.Now()
 		covered, err := coverage.IsCovered(ctx, resource)
+		timings.coverageWalk += time.Since(coverStart)
 		if err != nil {
 			return nil, err
 		}
@@ -173,7 +240,10 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 			continue
 		}
 		childName := snapshotChildSnapshotName(nsSnap.Name, mapping.SourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName(), string(resource.GetUID()))
-		if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource); err != nil {
+		ensureStart := time.Now()
+		err = r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource)
+		timings.ensureChildren += time.Since(ensureStart)
+		if err != nil {
 			return nil, err
 		}
 		ref := storagev1alpha1.SnapshotChildRef{
@@ -182,7 +252,10 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 			Name:       childName,
 		}
 		refs = append(refs, ref)
-		if err := coverage.ObservePlannedSnapshot(ctx, resource, ref, nil); err != nil {
+		observeStart := time.Now()
+		err = coverage.ObservePlannedSnapshot(ctx, resource, ref, nil)
+		timings.coverageWalk += time.Since(observeStart)
+		if err != nil {
 			return nil, err
 		}
 	}

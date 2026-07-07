@@ -91,7 +91,7 @@ func TestEnsureParentOwnedChildGraphLayer_ResourceSelector(t *testing.T) {
 	run := func(t *testing.T, selector labels.Selector) []string {
 		t.Helper()
 		cov := &recordingCoverage{}
-		if _, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov, selector); err != nil {
+		if _, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov, selector, &childGraphPlanningTimings{}); err != nil {
 			t.Fatalf("ensureParentOwnedChildGraphLayer: %v", err)
 		}
 		sort.Strings(cov.checked)

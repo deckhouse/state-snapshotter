@@ -18,7 +18,8 @@ Repos: `state-snapshotter` (controller + demo domain-controller) and `storage-fo
 ## 1. Purpose / scope
 
 The investigation went from ~10 hypotheses to **3 confirmed bottlenecks**, several correct-but-secondary
-optimizations, one architecture/correctness cleanup, 2–3 rejected hypotheses, and 2 still-open latency issues.
+optimizations, one architecture/correctness cleanup, several rejected hypotheses, and **one** still-open latency
+issue (H3 — repeated root child-graph planning; H1 was disproven as a distinct problem and absorbed into H3).
 
 Sections 4–6 are a **re-application guide**: apply by hand on a fresh `main`; section order is the recommended
 application order. Sections 3, 7, 8 are the **classification** (why each change matters, what was disproven, what
@@ -293,28 +294,61 @@ Keep these — they reduce work or are prerequisites — but do not credit them 
 | **Commit C — VSC wake loss dominates leaf latency** | **False** | Dual-path VSC→content wake raised content reconciles (490 → 554/579/613, SETS=10 ×3) with **no** wall-clock improvement (staircase 20→18-19s, observe-lag 6/11→~5/9). Leaves are gated on `ManifestCapturePending`, not on the VSC wake; the cost-cut guard's precondition (manifest latched while volume pending) never holds for a leaf, so it cannot fire. Extra wakes just added load. |
 | **genericbinder reverse `List` is the remaining wall-clock bottleneck** | **False as a wall-clock cause** | pprof confirmed it as a major CPU/alloc hotspot (kept as B3 / FIX 8), but removing it moved wall only 33.5s→29.2s. The residual tail is latency-bound, not CPU-bound. |
 | **Archive latch is the remaining dominant tail** | **No (partially true earlier)** | The event-driven archive latch (C-2) correctly cut last-child→root ~12s→2.4s and is **kept**, but it is not the remaining dominant bottleneck at SETS=10. |
-| **Repeated child-graph planning is the dominant root latency** | **Partially true** | Removing repeated planning (Commit B) gave ~18% wall, but did not eliminate the fan-out tail → not the dominant term. |
+| **Repeated child-graph planning is the dominant root latency** | **Partially true** | Removing repeated planning (Commit B) gave ~18% wall, but did not eliminate the fan-out tail → not the dominant term. (Superseded by H3: the *pending-phase* re-plan, not the single MCR pass, is the remaining cost.) |
+| **H1 leaf staircase is a distinct leaf-side bottleneck (`vscReady → leaf content Ready`)** | **False** | Per-leaf server-side + log trace: once created, a leaf latches fast/constant (MCP created→Ready ~0–1s, content Ready ~1–4s). The staircase is purely *delayed creation*, gated by the repeated root re-plan (H3). No distinct leaf problem. |
+| **"Leaf-skip": skip child-graph planning for leaf snapshot GVKs** | **False (no-op)** | Premised on leaves running planning. `reconcileParentOwnedChildGraph` is registered `For(&storagev1alpha1.Snapshot{})` and runs **only** on the root; demo VM/disk snapshots are reconciled by the separate domain-controller. The "leaf `DemoVirtualDiskSnapshot` spent 10s planning" log lines were the **root** reconcile triggered via the `nss-chw` relay, mislabeled with the relay's inherited logger context (`"snapshot":{"name":"bench-root"}` on every one). Nothing to skip. |
 
 ---
 
 ## 8. Remaining open issues (open investigations)
 
 State at SETS=10: **ROOT Ready ~25s server-side (~29–30s client-measured)**. CPU, mapper `List`, the rate
-limiter, and most polling are **no longer** bottlenecks. The remaining tail is **latency-bound**. Diagnosis has
-already been run (per-object critical-path timing, 3 stable runs, pprof, Commit B/C decomposition, single-clock
-leaf trace); what remains are two open hypotheses, not another diagnostic pass.
+limiter, and most polling are **no longer** bottlenecks. The remaining tail is **latency-bound** and, per the
+Commit-D audit below, sits in **repeated root child-graph planning** — a single open issue (H3). H1 is no longer
+a distinct hypothesis.
 
-- **H1 — leaf staircase (PRIMARY open latency issue).** `vscReady → leaf content Ready` grows ~4→9–11s across the
-  20 leaves. CSI per-volume is flat (~3s) and foundation VCR ≈ 0; the growth is on the state-snapshotter
-  leaf-content side, where leaves sit in `ManifestCapturePending` and the manifest+volume legs latch together at
-  the end. Root cause not yet isolated (suspected: leaf manifest-capture (MCP) readiness pacing + worker
-  contention). Diagnosis-first.
-- **H3 — child-graph planning O(N) (secondary open issue).** `reconcileParentOwnedChildGraph` still costs ~7s on
-  the single MCR-creating pass (Commit B removed only the *repeated* replans). Needs separate profiling.
+- **H3 — repeated root child-graph planning is the remaining bottleneck (PRIMARY open issue). Internal cost
+  distribution is still unresolved.** `reconcileParentOwnedChildGraph` runs **only** on the root unified
+  `Snapshot` (it is registered `For(&storagev1alpha1.Snapshot{})`; demo VM/disk snapshots are reconciled by the
+  separate domain-controller, not by this path). During the pending fan-out phase the root is re-reconciled
+  **~36×/run** (SETS=10) — ~2/3 of those wakes come from the `nss-chw-*` child-watch relays firing on every child
+  snapshot status change — and each pending pass re-runs the **full** O(N) plan (`childGraphReplanSkippable` only
+  skips *after* `ChildrenSnapshotReady=Completed`). Measured passes reached **child-graph-planning ~10s** and
+  root reconcile **~16–17.5s** end-to-end, growing with the child/coverage set. This repeated full re-plan — not
+  any per-leaf step — is what delays child creation and produces the observed leaf-Ready staircase. **What is not
+  yet known:** which sub-section dominates a single pass (uncached source `List`s vs the recursive coverage walk
+  vs per-child readiness `Get`s vs publish) and whether the wall is dominated by *cost per pass*, *number of
+  passes*, or both. Commit D (below) instruments this before any optimization.
+
+> **H1 (leaf staircase) is absorbed by H3 — not a separate problem.** Earlier framing (`vscReady → leaf content
+> Ready` grows ~4→9–11s, suspected leaf-side MCP/worker contention) was disproven by a per-leaf server-side +
+> log trace: once a leaf is *created*, its legs latch fast and roughly constant (MCP created→Ready ~0–1s,
+> content Ready ~1–4s after). The staircase is entirely in **when each leaf is created**, and creation is gated
+> by the repeated root re-plan (H3). There is no leaf-level child-graph planning to fix — see the rejected
+> "leaf-skip" hypothesis in [section 7](#7-rejected-hypotheses-checked--do-not-revisit).
 
 > **H2 is closed** — see [ARCH 2](#arch-2--single-snapshotcontent-controller-with-dynamic-snapshot-status-watches-h2). It was implemented and validated as an architecture/correctness cleanup
 > (duplicate controller removed, single dynamic `Watch` on the primary controller, correctness OK, latency
 > unchanged within noise). It is **not** a remaining latency lever.
+
+### Commit D — instrument `reconcileParentOwnedChildGraph` (diagnosis before optimizing)
+
+**Status: instrumentation applied; measurement pending redeploy.** No optimization is chosen until the per-pass
+cost is attributed. `reconcileParentOwnedChildGraph` now accumulates per-section wall time
+(`childGraphPlanningTimings`) and logs one breakdown per pass (covering the hot "priority layer pending" early
+return that dominates fan-out), at the same 150ms threshold as the caller's total:
+
+`resolveMappings` (CSD list + RESTMapping) · `listSources` (uncached dynamic `List` per eligible source GVK,
+with `listCalls`/`sourceObjects` counts) · `coverageWalk` (`IsCovered`/`ObservePlannedSnapshot` recursive
+`childrenSnapshotRefs` `Get`s) · `ensureChildren` (per-child `Get`+`Create`/`Patch`) · `priorityReady`
+(per-child readiness `Get`) · `publish` (status write). File
+`images/state-snapshotter-controller/internal/controllers/snapshot/parent_graph.go` (diagnosis-only; no
+behaviour, data-model, or status-contract change).
+
+Deferred until the breakdown says which one is worth it (do **not** start these blind — leaf-skip was already a
+disproven guess): **D.1′** debounce/coalesce relay-driven root wakes (changes event-delivery semantics); **D.2**
+skip the re-plan when child *membership* is unchanged (algorithm change, needs invariant proof); **D.3** cached
+`List`s + coverage-checker reuse (removes the ~40k uncached API `GET`s / per-pass `List`s).
 
 Adjacent future work: choose the production manager client QPS/Burst deliberately (50/100 was capacity tuning, not
 proof of low work — see FIX 1 caveat).
@@ -330,7 +364,7 @@ proof of low work — see FIX 1 caveat).
 5. [ARCH 1](#arch-1--snapshot-controller-wake-the-gated-parent-on-child-content-archive) (gated-parent wake) and [ARCH 2](#arch-2--single-snapshotcontent-controller-with-dynamic-snapshot-status-watches-h2) (single content controller) — apply as architecture/correctness; not
    headline latency fixes.
 6. Confirmed optimizations (section 6) — keep; hygiene.
-7. Open issues H1 / H3 (section 8) — open investigation; do not re-apply rejected hypotheses (section 7).
+7. Open issue H3 (section 8) — Commit D instrumentation is applied; attribute per-pass cost before optimizing. Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
 
 ## 10. Tooling (storage-e2e, measurement only)
 
