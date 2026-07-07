@@ -254,27 +254,22 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return r.reconcileGenericStaticBind(ctx, obj, snapshotLike)
 	}
 
-	// Step 1: Barrier - wait until the domain controller reached capture barrier 1 (phase>=Planned:
-	// published child snapshot refs, created MCR/VCR).
-	if !isDomainPlanningComplete(obj) {
-		logger.V(1).Info("Waiting for domain controller to reach capture phase Planned")
-		return ctrl.Result{}, nil
-	}
-	// Declare the applicable core-owned capture legs (commonController.manifestCaptured/dataCaptured=false)
-	// once the domain takes over, so the SDK sees them and can compute CoreCaptureOutcome. Idempotent.
-	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
-		if err := r.eagerInitCaptureLegs(ctx, obj); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
+	// Eager content shell (creator/main, content-single-writer design §9): the SnapshotContent object is
+	// created and BOUND as soon as the snapshot exists, decoupled from the domain phase>=Planned barrier.
+	// This is the deadlock fix. A child's ResolveParentSnapshotContentOwnerRef needs the parent content
+	// BOUND (not just created), and the namespace root's pre-Planned orphan wave needs its children Ready
+	// (which needs their content bound) — both would otherwise wait on a content that was only created at
+	// Planned, forming a cycle (root content <- root Planned <- children Ready <- child content bound <-
+	// root content). Creating + binding eagerly breaks that edge. Only the STATUS projection legs (capture
+	// legs, links, Ready mirror) stay gated on phase>=Planned below; creation + bind do not.
+	//
 	// Idempotency is structural, not condition-based: the steps below (ensure ObjectKeeper/ownerRef,
 	// create SnapshotContent only when status.boundSnapshotContentName is empty, publish result links)
 	// are all idempotent and converge to the consistency/mirror step. No progress/handled marker
 	// condition is needed; status.boundSnapshotContentName is the durable "content created" signal.
 	contentName := snapshotLike.GetStatusContentName()
 
-	// Step 2: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef)
+	// Step 1: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef)
 	var contentOwnerRef *metav1.OwnerReference
 	if snapshot.IsRootSnapshot(obj) {
 		var result ctrl.Result
@@ -314,7 +309,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Step 3: Create SnapshotContent if it doesn't exist
+	// Step 2: Create SnapshotContent if it doesn't exist
 	if contentName == "" {
 		// Generate deterministic name
 		contentName = snapshotbinding.StableContentName(obj.GetName(), obj.GetUID())
@@ -396,6 +391,22 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		// Log both field names for backward compatibility with log parsers
 		logger.Info("Updated Snapshot status.boundSnapshotContentName", "boundSnapshotContentName", contentName, "contentName", contentName)
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Step 3 (projection barrier): the content shell exists + is bound (eager, above). Publish the status
+	// legs / init capture legs / mirror Ready ONLY after the domain reached capture barrier 1
+	// (phase>=Planned: child refs published, MCR/VCR created). Before Planned there is nothing to project;
+	// the eager shell is what breaks the create cycle.
+	if !isDomainPlanningComplete(obj) {
+		logger.V(1).Info("Content shell created+bound; waiting for domain controller to reach capture phase Planned before projecting status legs")
+		return ctrl.Result{}, nil
+	}
+	// Declare the applicable core-owned capture legs (commonController.manifestCaptured/dataCaptured=false)
+	// once the domain takes over, so the SDK sees them and can compute CoreCaptureOutcome. Idempotent.
+	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
+		if err := r.eagerInitCaptureLegs(ctx, obj); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Step 4: Populate SnapshotContent links from MCR/VCR (if present and Ready)

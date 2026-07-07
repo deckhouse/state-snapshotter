@@ -404,10 +404,10 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	}
 }
 
-// Ready must stay False while the ManifestsArchived subtree latch is still Capturing (here: a declared
-// child is not yet linked into childrenSnapshotContentRefs), EVEN THOUGH the live legs (ManifestsReady /
-// VolumeReady / ChildrenReady) are all satisfied. ManifestsArchived is the lowest-priority Ready gate, so
-// the first Ready=True is blocked until the whole subtree's manifests are archived. The resulting !ready is
+// Ready must stay False while the subtree-persist latch is still Capturing (here: a linked, Ready child
+// whose OWN subtree is not yet persisted), EVEN THOUGH the live legs (ManifestsReady / VolumeReady /
+// ChildrenReady) are all satisfied. The subtree-persist gate is the lowest-priority Ready gate, so the
+// first Ready=True is blocked until the whole subtree's manifests are archived. The resulting !ready is
 // what keeps the Reconcile loop requeuing until the archive wave converges.
 func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 	ctx := context.Background()
@@ -415,13 +415,17 @@ func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
 	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
 	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
-	// Own MCP ready and no published child content edges -> own legs + ChildrenReady are True, but the
-	// declared child (child-snap -> child-content) is not yet linked -> archive latch still Capturing -> the
-	// archive gate must hold Ready False.
-	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner")
+	// The declared child IS linked into childrenSnapshotContentRefs and IS Ready (so the ChildrenReady
+	// read barrier is satisfied — see validateCommonContentChildren), but the child's own subtree is not yet
+	// persisted (subtreeManifestsPersisted=false). Own MCP ready + linked+Ready child => own legs and
+	// ChildrenReady are True, yet the subtree-persist latch is still Capturing -> the (lowest-priority)
+	// archive gate must hold Ready=False on SubtreeManifestCapturePending. This isolates the archive gate
+	// from the read barrier.
+	childContent := contentWithReadyCond("child-content", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner", "child-content")
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(mcp, owner, childSnap, parent).
+		WithObjects(mcp, owner, childSnap, childContent, parent).
 		WithStatusSubresource(parent).
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}

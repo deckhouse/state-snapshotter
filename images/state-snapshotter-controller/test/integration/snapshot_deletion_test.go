@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -350,6 +351,130 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 				Namespace: snapshotObj.GetNamespace(),
 			}, snapshotObj)
 			if err == nil {
+				snapshotObj.SetFinalizers([]string{})
+				_ = k8sClient.Update(ctx, snapshotObj)
+			}
+		})
+
+		// Block 0 (eager shell): the content object is created AND bound as soon as the Snapshot exists,
+		// decoupled from the domain phase>=Planned barrier (content-single-writer design §9, the deadlock
+		// fix). A Snapshot deleted BEFORE Planned must still have its content parent-protect finalizer
+		// removed by the binder deletion path — the eager Retain shell lingers (recycle-bin clutter) but
+		// never wedges the Snapshot's deletion (hazard H7).
+		It("creates+binds the content shell before Planned and removes its finalizer on pre-Planned deletion", func() {
+			// PRECONDITION: Snapshot exists but the domain has NOT reached phase=Planned.
+			snapshotObj := &unstructured.Unstructured{}
+			snapshotObj.SetGroupVersionKind(snapshotGVK)
+			snapshotObj.SetName("test-eager-shell-pre-planned")
+			snapshotObj.SetNamespace("default")
+			snapshotObj.Object["spec"] = map[string]interface{}{}
+
+			err := k8sClient.Create(ctx, snapshotObj)
+			Expect(err).NotTo(HaveOccurred())
+
+			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
+				k8sClient,
+				mgr.GetAPIReader(),
+				scheme,
+				testCfg,
+				[]schema.GroupVersionKind{snapshotGVK},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				},
+			}
+
+			// Eager create+bind must complete WITHOUT the domain reaching Planned (before Block 0 the
+			// content did not exist until Planned, and that wait was the deadlock).
+			var contentName string
+			Eventually(func() bool {
+				_, err := snapshotCtrl.Reconcile(ctx, req)
+				if err != nil {
+					return false
+				}
+				freshSnapshot := &unstructured.Unstructured{}
+				freshSnapshot.SetGroupVersionKind(snapshotGVK)
+				if err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, freshSnapshot); err != nil {
+					return false
+				}
+				// Invariant: the binder must not have advanced the domain phase — this proves the shell was
+				// created on the eager (pre-Planned) path, not after a Planned transition.
+				phase, _, _ := unstructured.NestedString(freshSnapshot.Object,
+					"status", "captureState", "domainSpecificController", "phase")
+				Expect(phase).NotTo(Equal(string(storagev1alpha1.SnapshotCapturePhasePlanned)))
+				snapshotLike, err := snapshot.ExtractSnapshotLike(freshSnapshot)
+				if err != nil {
+					return false
+				}
+				contentName = snapshotLike.GetStatusContentName()
+				return contentName != ""
+			}, "10s", "100ms").Should(BeTrue(), "content shell should be created+bound eagerly before Planned")
+
+			// The eager shell is a durable (Retain) empty content object.
+			contentObj := &unstructured.Unstructured{}
+			contentObj.SetGroupVersionKind(contentGVK)
+			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
+			policy, _, _ := unstructured.NestedString(contentObj.Object, "spec", "deletionPolicy")
+			Expect(policy).To(Equal("Retain"), "eager shell must be created with deletionPolicy=Retain")
+
+			// Simulate the content controller having finalized the shell (parent-protect finalizer), so the
+			// deletion path has something to remove — otherwise the Snapshot would wedge on GC.
+			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
+			contentObj.SetFinalizers(append(contentObj.GetFinalizers(), snapshot.FinalizerParentProtect))
+			Expect(k8sClient.Update(ctx, contentObj)).To(Succeed())
+
+			// Keep the Snapshot around after deletion (test finalizer) so the deletion-path reconcile runs.
+			freshSnapshot := &unstructured.Unstructured{}
+			freshSnapshot.SetGroupVersionKind(snapshotGVK)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, freshSnapshot)).To(Succeed())
+			freshSnapshot.SetFinalizers(append(freshSnapshot.GetFinalizers(), "test.finalizer"))
+			Expect(k8sClient.Update(ctx, freshSnapshot)).To(Succeed())
+
+			// ACTION: delete the Snapshot while it is STILL pre-Planned.
+			Expect(k8sClient.Delete(ctx, snapshotObj)).To(Succeed())
+			Eventually(func() bool {
+				fresh := &unstructured.Unstructured{}
+				fresh.SetGroupVersionKind(snapshotGVK)
+				if err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+					Name:      snapshotObj.GetName(),
+					Namespace: snapshotObj.GetNamespace(),
+				}, fresh); err != nil {
+					return apierrors.IsNotFound(err)
+				}
+				return fresh.GetDeletionTimestamp() != nil
+			}, "10s", "100ms").Should(BeTrue(), "Snapshot should have deletionTimestamp set")
+
+			// The binder deletion path must remove the content parent-protect finalizer regardless of phase.
+			Eventually(func() bool {
+				if _, err := snapshotCtrl.Reconcile(ctx, req); err != nil {
+					return false
+				}
+				fresh := &unstructured.Unstructured{}
+				fresh.SetGroupVersionKind(contentGVK)
+				if err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, fresh); err != nil {
+					return false
+				}
+				return !contains(fresh.GetFinalizers(), snapshot.FinalizerParentProtect)
+			}, "10s", "100ms").Should(BeTrue(), "pre-Planned deletion must remove the content finalizer (no wedge)")
+
+			// The Retain shell survives (recycle-bin clutter, not a wedge).
+			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
+
+			// Cleanup: drop the test finalizer so the Snapshot can be GC'd.
+			if err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      snapshotObj.GetName(),
+				Namespace: snapshotObj.GetNamespace(),
+			}, snapshotObj); err == nil {
 				snapshotObj.SetFinalizers([]string{})
 				_ = k8sClient.Update(ctx, snapshotObj)
 			}

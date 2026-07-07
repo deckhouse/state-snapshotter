@@ -569,3 +569,141 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   ownerRef); the mechanism (`pvcUIDsFromPendingVCR`) stays covered deterministically by the unit test
   `TestCollectSubtreeCoveredPVCUIDs_pendingVCRTargets`. Isolated pass green twice; removed obsolete `pr7CreatePVC`
   helper (replaced by `pr7CreateCSIPVC`) and stray debug logging.
+- **Add** (w7-verify, e2e) Added the domain-VolumeCaptureRequest subtree-coverage assertion the integration
+  pending-VCR spec could only cover as a unit test, now against the live demo domain kind. New spec in
+  e2e/tests/volumedata_test.go ("excludes domain-VolumeCaptureRequest-covered PVCs from the root own-manifests")
+  reuses the phase-3 vol-tree and asserts, at steady state, that every source PVC is excluded from the root's
+  own manifest checkpoint (demo-pvc-disk/demo-pvc-standalone are domain-VCR-covered under their DemoVirtualDisk
+  snapshots; demo-pvc is a root orphan child volume node), that the root carries no PersistentVolumeClaim
+  manifest at all (Variant A), and — as a positive control — that the demo ConfigMap IS captured. Also added a
+  best-effort background observer (startPendingVCRWindowObserver + pvcHasPublishedDataRef/vcrTargetsPVC helpers,
+  new volumeCaptureRequestGVR in e2e_shared_test.go) started in the capture spec that records whether the run
+  caught the transient window where a domain disk VolumeCaptureRequest targets demo-pvc-disk before its dataRef
+  publishes; the result is logged (GinkgoWriter), never asserted, since a fast cluster may publish between polls.
+  The transient mechanism (pvcUIDsFromPendingVCR) stays deterministically unit-covered; the new e2e proves the
+  steady-state exclusion it enables. e2e module builds/vets green.
+
+## Wave 8 — Content single-writer (domains content-free)
+
+- **Design** (plan-only, no code) Added docs/content-single-writer-design.md: bring order to who writes
+  SnapshotContent. Two rules — (1) domains, including the in-process namespace domain (SnapshotReconciler,
+  internal/controllers/snapshot/), never write SnapshotContent; they publish only onto their own
+  Snapshot.status (childrenSnapshotRefs/phase/data); (2) status.childrenSnapshotContentRefs has a single
+  writer — the SnapshotContentController aggregator — which projects the owner's childrenSnapshotRefs into
+  child edges (the aggregator already resolves both domain children via declaredNonLeafChildContentNames and
+  orphan volume-node leaves via unlinkedOrphanChildContents, today only to fail-close). Removes the two
+  append-only co-writers (genericbinder PublishSnapshotContentChildrenFromSnapshotRefs + snapshot
+  LinkChildVolumeContentRef) and the optimistic-lock dance they needed. Staged migration: slice 1 child edges
+  → aggregator; slice 2 MCP-name → binder; slice 3 data leg + orphan child-content creation → core (open
+  question: which core controller creates orphan child-volume-node contents). Explicitly NOT the pre-Planned
+  orphan-wave deadlock fix.
+- **Design** (plan-only, no code) Extended docs/content-single-writer-design.md (§3.4 + slice 4) to make
+  status.childrenSnapshotContentRefs immutable (frozen set), strengthening the current no-shrink CEL rule
+  (self.size() >= oldSelf.size()) to set-once immutable. Precondition: the single writer must emit the
+  COMPLETE frozen child set in one atomic write (Late Planned, phase>=Planned) — incremental append would be
+  rejected by an immutable rule, so slice 4 lands AFTER the atomic-write end-state. Recommended CEL Option A
+  "immutable once set": oldSelf.size() == 0 || self == oldSelf (O(n), within apiserver CEL cost budget;
+  decoupled from content-creation timing); Option B strict self == oldSelf requires create-time population.
+  Added INV-CONTENT-CHILDREN-2, envtest CEL acceptance (reject post-set shrink/append/reorder/replace, allow
+  first set), and risks (ordering mandatory; audit for hidden field rewriters in teardown/degradation).
+- **Design** (plan-only, no code) Added §3.5 "Write barrier" to docs/content-single-writer-design.md: the
+  precondition for writing childrenSnapshotContentRefs is stronger than "children declared + phase>=Planned"
+  — the write commits only when (1) childrenSnapshotRefs is complete/frozen (Late-Planned enumeration incl.
+  orphan leaves) AND (2) every declared child has materialized content (domain: boundSnapshotContentName
+  resolvable; orphan: child-volume-node content exists) — the exact pair the aggregator already computes for
+  its fail-closed Ready gate. Decision (2026-07-07): incomplete set = parent stays pending (ChildrenLinkPending),
+  never a partial write and never a timeout; a terminal child failure surfaces via the child's own Ready reason
+  (ChildrenFailed).   Noted content names are deterministic (names.ContentName(uid)) so early write at Planned is
+  possible but rejected (edges must never dangle, doubly so under immutable). Confirmed no cycle (child content
+  needs parent content to EXIST, not the parent's childrenSnapshotContentRefs). Added INV-CONTENT-CHILDREN-3
+  (edges never dangle) and a risk that immutable correctness depends on a genuine Late-Planned enumeration.
+- **Design** (plan-only, no code) Added §8 "Related design" to docs/content-single-writer-design.md capturing
+  the 2026-07-07 discussion: (8.1) proposed subtreePlanned latch (analog of subtreeManifestsPersisted for the
+  planning phase; subtreePlanned(n) = planned(n) AND all descendants planned, computed via direct children;
+  content-write gate uses only the OWN planned leg, wave completion uses the recursive latch; placement
+  snapshot-native vs content-native left open); (8.2) relationship to subtreeManifestsPersisted (three ordered
+  properties planned <= edge-linked <= persisted; subtreePlanned CANNOT replace the persisted latch because the
+  manifest-exclude is persisted-based; but the frozen-set weakens the latch's fail-closed guard role -> possible
+  follow-up to drop the field, undecided); (8.3) verified fact that the manifest-exclude must go through the
+  snapshotcontents/<name>/subtree-manifest-identities API-service endpoint (client sdk.SubtreeManifestIdentities,
+  server BuildSubtreeManifestIdentities), but the ROOT currently reads archives in-reconciler via
+  BuildRootNamespaceManifestCaptureTargets (WithSubresourceREST not wired) — follow-up to migrate the root to
+  the endpoint after the frozen-set. Added §3.5 pointer to §8.1.
+- **Design** (plan-only, no code) Corrected §3.5 and added §8.4 in docs/content-single-writer-design.md after
+  discussion (2026-07-07): distinguished milestone A (content exists/bound — what the write barrier requires)
+  from milestone B (status.data.source.uid published, only after the child's VCR completes +
+  PublishSnapshotContentDataRef). Key correction: an existing edge (A) does NOT imply materialized
+  status.data (B), so the orphan/residual PVC coverage VCR fallback (pvcUIDsFromPendingVCR, spec.targets[].uid)
+  MUST be kept for the A->B window; it can be removed only by strengthening the barrier from A to B (edge only
+  after status.data published — a stronger, separate gate, not adopted). §8.4 documents current orphan coverage
+  (UID-based CollectSubtreeCoveredPVCUIDsFromSnapshot over childrenSnapshotRefs -> boundSnapshotContentName ->
+  status.data.source.uid, gated on allDeclaredDomainChildSnapshotsReady, residual = ns PVCs minus covered) and
+  the deltas under single-writer/frozen-set/subtreePlanned (walk the frozen childrenSnapshotContentRefs instead
+  of re-resolving per child; wave gate may read subtreePlanned but coverage still needs B; fallback stays; fewer
+  races/duplicates). Unchanged: coverage stays PVC-UID based; manifest leg (subtree-manifest-identities) stays
+  separate.
+- **Design** (plan-only, no code) Added §9 "Content creation timing — eager shell" to
+  docs/content-single-writer-design.md after decision (2026-07-07, user chose Option A). Documented today's
+  lazy creation (GenericSnapshotBinderController gated on isDomainPlanningComplete / phase>=Planned; domain
+  child waits parent bound via ResolveParentSnapshotContentOwnerRef; orphan child-volume-node post root-bind)
+  and the creation cycle (root content <- root Planned <- children Ready <- children content <- root content,
+  edges C1 parent-first / C4 create-at-Planned / C5 wave7 orphan gate). Decision: create the SnapshotContent
+  OBJECT as an empty shell eagerly (node exists), decoupled from phase>=Planned — breaks C4, opening the
+  deadlock. Separated three per-node events: shell create (eager) / childrenSnapshotContentRefs frozen-set
+  (late, §3.5) / status.data (late, post-VCR); the phase>=Planned gate moves off shell-create onto edge-write.
+  Immutability stays Option A (set-once from empty; Option B create-time population incompatible with empty
+  shells). Added INV-CONTENT-CREATE-1 (content existence implies nothing about plan/readiness/data), risks
+  (readers keying on existence-as-Planned, empty-shell GC, snapshotRef handshake), and Slice 0 in §4 (eager
+  shell, prerequisite before/with slice 1).
+- **Design** (plan-only, no code) Added §3.6 "ChildrenReady read barrier" to docs/content-single-writer-design.md
+  after constraint (2026-07-07): ChildrenReady must be computed only after the frozen childrenSnapshotContentRefs
+  is committed. Grounded in validateCommonContentChildren (snapshotcontent/controller.go:940-1009), which today
+  returns ChildrenReady=True ("no child content") on empty edges — with eager shells (§9) an early empty parent
+  shell would flip subtrees Ready prematurely. Fix: treat empty edges + non-empty declared child set as
+  ChildrenLinkPending (generalize the orphan-only unlinkedOrphanChildContents gate, controller.go:995-1004, to
+  ALL declared children; leaf = declared-empty stays True). No cycle: §3.5 writes edges once children have
+  content (A), §3.6 then evaluates each linked child's Ready (B/subtree). Added INV-CONTENT-CHILDREN-4, folded
+  the read barrier into Slice 0 (mandatory with eager shells), added a §6 unit test, and updated the
+  "Ready model unchanged" invariant to note this one addition.
+- **Design** (plan-only, no code) Added §8.5 "Orphan PVC list construction — walk content, VCR fallback via
+  xxxSnapshot" to docs/content-single-writer-design.md (proposal 2026-07-07). Target: build residual/orphan PVC
+  list by walking the root content's frozen childrenSnapshotContentRefs subtree (skip IsChildVolumeNodeContent);
+  per node use status.data.source.uid (milestone B); intermediate node contributes nothing (recurse); leaf
+  without data yet -> fallback: resolve content.spec.snapshotRef -> owning xxxSnapshot -> read
+  status.captureState.domainSpecificController.volumeCaptureRequestName -> GET VCR -> ParseVolumeCaptureTargets
+  -> PVC UIDs. Rationale: this is a CORRECTNESS fix, not cosmetics — today's fallback pvcUIDsFromPendingVCR
+  derives the VCR name from the content UID (SnapshotContentVCRName), which matches only content-owned
+  (root/orphan) VCRs; a domain data-leaf's VCR is snapshot-owned (SnapshotOwnedVCRName) with its name published
+  in captureState, so the content-UID lookup misses it. Reading vcrName off the xxxSnapshot mirrors the binder's
+  data-leg projection (domain_content.go:90-104). Noted the walk-source caveat (content-tree walk authoritative
+  only post-frozen-set; snapshot-graph ...FromSnapshot still needed in the Late-Planned window) and cross-linked
+  §8.4 "VCR fallback" bullet to §8.5.
+- **Design** (plan-only, no code) Corrected §8.5 after review (2026-07-07): the "intermediate node (has children)
+  => no data, contributes nothing" step was a heuristic, not an invariant. A node may carry BOTH children and a
+  data leg (now or future). Data-bearing-ness MUST be decided authoritatively from the CSD field
+  spec.requiresDataArtifact (customsnapshotdefinition_types.go:65-69) via the existing accessor
+  GVKRegistry.RequiresDataArtifact(kind) (pkg/snapshot/gvk_registry.go:177-179; already used by binder at
+  controller.go:425 / import.go:162 / domain_content.go:283), keyed by content.spec.snapshotRef.kind. Rewrote
+  the per-node algorithm: (1) not data-bearing -> no covered UID; (2) data-bearing + status.data -> data.source.uid;
+  (3) data-bearing + no data yet -> VCR fallback via xxxSnapshot.captureState.volumeCaptureRequestName; ALWAYS
+  recurse into children regardless. Explicitly flagged that today's coveredPVCUIDsForContent
+  (subtree_covered_pvc.go:144-170) has the `if hasChildren { return nil }` short-circuit that must be dropped.
+  Minor caveat noted: accessor keyed by Kind string; widen to full GVK if a Kind collides across apiVersions.
+- **Refactor** (w8-block0, code) Block 0 eager content shell + ChildrenReady read barrier — the confirmed fix
+  for the pre-Planned orphan-wave demo-tree deadlock (design §9/§9.2 + §3.6). In
+  genericbinder/controller.go moved the SnapshotContent object create AND bind (status.boundSnapshotContentName)
+  ahead of the isDomainPlanningComplete (phase>=Planned) gate: the shell is now created+bound as soon as the
+  Snapshot exists, and the gate moved OFF creation ONTO status projection only (eagerInitCaptureLegs +
+  ensureSnapshotContentLinks + checkConsistencyAndSetReady still require Planned). Eager BIND (not just create)
+  is required to break C1: a child's ResolveParentSnapshotContentOwnerRef needs the parent content bound. Left
+  allDeclaredDomainChildSnapshotsReady untouched (full-Ready gate; relaxed later in Block 5). In
+  snapshotcontent/controller.go generalized the fail-closed orphan-link gate in validateCommonContentChildren to
+  ALL declared non-leaf children: a parent with declared-but-unlinked children reads ChildrenReady=False /
+  ChildrenLinkPending (fail-closed) instead of True-on-empty, so an eager shell cannot flip a subtree Ready
+  before its edge set is frozen. Guarded by status.subtreeManifestsPersisted (skip once latched — the same
+  declared-vs-linked check already proved linkage; also avoids re-gating a recycle-bin content whose owner is
+  gone). Adjusted TestReconcileCommonStatusNotReadyWhileArchivePending to link+Ready the child (isolating the
+  lowest-priority subtree-persist gate from the new read barrier) and added an integration spec
+  (snapshot_deletion_test.go) proving a Snapshot deleted BEFORE Planned gets an eager Retain shell whose
+  parent-protect finalizer is still removed on deletion (no wedge, hazard H7). gofmt + go vet + full controller
+  module tests green.

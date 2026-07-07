@@ -992,6 +992,41 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 			"waiting for child snapshot contents: " + formatReadyProgress(readyCount, total, pendingNames), nil
 	}
 
+	// Read barrier (eager shells, content-single-writer design §3.6): with eager content creation a parent
+	// shell can exist with DECLARED non-leaf children but an empty/partial childrenSnapshotContentRefs edge
+	// set, so total==0 must NOT read as ChildrenReady=True for such a node — that would flip a subtree Ready
+	// before its children are linked. Hold ChildrenReady=False (ChildrenLinkPending, fail-closed) until every
+	// DECLARED non-leaf child is linked into the frozen edge set. This generalizes the orphan-only gate below
+	// to ALL declared children.
+	//
+	// Skip once status.subtreeManifestsPersisted is latched true: that monotonic latch is set only after the
+	// SAME declared-vs-linked check (aggregateChildrenSubtreeManifestsPersisted, on the same
+	// declaredNonLeafChildContentNames source) already proved every declared non-leaf child is linked, so the
+	// read barrier is redundant then. Using the latch as the guard also prevents re-gating a completed subtree
+	// whose owning Snapshot is later gone (recycle-bin): the owner becomes unobservable
+	// (declaredComplete=false), which would otherwise fail-close a content that is already complete. (Ready=True
+	// implies the latch is true, so this subsumes an alreadyReady guard.)
+	if subtreeLatched, _, _ := unstructured.NestedBool(parentContentObj.Object, "status", "subtreeManifestsPersisted"); !subtreeLatched {
+		declared, declaredComplete, derr := r.declaredNonLeafChildContentNames(ctx, parentContentObj)
+		if derr != nil {
+			return false, "", "", derr
+		}
+		if !declaredComplete {
+			return false, snapshot.ReasonChildrenLinkPending,
+				"waiting for declared child snapshot contents to resolve and link", nil
+		}
+		var unlinkedDeclared []string
+		for _, n := range declared {
+			if _, ok := linked[n]; !ok {
+				unlinkedDeclared = append(unlinkedDeclared, n)
+			}
+		}
+		if len(unlinkedDeclared) > 0 {
+			return false, snapshot.ReasonChildrenLinkPending,
+				"waiting for declared child content to be linked: " + strings.Join(unlinkedDeclared, ", "), nil
+		}
+	}
+
 	// Fail-closed orphan-link gate (subsumes the removed residual/orphan-PVC latch): every declared orphan
 	// volume child content must be linked into childrenSnapshotContentRefs before ChildrenReady may be True.
 	unlinkedOrphans, err := r.unlinkedOrphanChildContents(ctx, parentContentObj, linked)
