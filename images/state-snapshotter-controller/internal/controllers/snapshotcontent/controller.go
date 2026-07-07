@@ -91,6 +91,15 @@ type SnapshotContentController struct {
 	activeContentWatchSet  map[string]struct{} // SnapshotContent GVK String()
 	activeSnapshotWatchSet map[string]struct{} // Snapshot GVK String() -> status watch registered with manager
 
+	// cacheReader is the manager cache (indexed informers). The enqueue-only reverse-lookup Lists that resolve
+	// a changed artifact/child to the owning/parent SnapshotContent MUST read through this, not r.Client: the
+	// manager client does not cache unstructured objects by default (Client.Cache.Unstructured=false), so a
+	// client List with client.MatchingFields is sent to the API server as a field selector, which the API
+	// server rejects for custom status fields ("field label not supported") — silently degrading every
+	// manifest-leg wake to the 500ms self-requeue backstop. The cache uses the registered indexKey* indexes.
+	// Set in SetupWithManager / AddWatchForContent; nil in unit tests (which wire an indexed fake as Client).
+	cacheReader client.Reader
+
 	// primaryContentController is the retained handle of the single common-SnapshotContent controller
 	// (For(CommonSnapshotContentGVK)). Snapshot-status wakes are attached to it via Controller.Watch(...)
 	// rather than constructing a second controller-runtime Controller per Snapshot GVK.
@@ -1575,6 +1584,9 @@ func (r *SnapshotContentController) namespacedGVKsSnapshot() []schema.GroupVersi
 func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
+	if r.cacheReader == nil {
+		r.cacheReader = mgr.GetCache()
+	}
 	if r.activeContentWatchSet == nil {
 		r.activeContentWatchSet = make(map[string]struct{})
 	}
@@ -1671,6 +1683,9 @@ func (r *SnapshotContentController) AddSnapshotStatusWatch(mgr ctrl.Manager, sna
 func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
+	// Reverse-lookup Lists must read from the cache (indexed informers), not the client (uncached
+	// unstructured → API-server field selector the server rejects). See reverseLookupReader.
+	r.cacheReader = mgr.GetCache()
 	gvkStrings := make([]string, 0, len(r.SnapshotContentGVKs))
 	for _, gvk := range r.SnapshotContentGVKs {
 		gvkStrings = append(gvkStrings, gvk.String())
@@ -1887,6 +1902,19 @@ func (r *SnapshotContentController) mapManifestCheckpointToContent(ctx context.C
 	return nil
 }
 
+// reverseLookupReader returns the reader for the enqueue-only reverse-lookup Lists (MCP/VSC/child → owning
+// or parent SnapshotContent). It MUST be the manager cache so client.MatchingFields resolves via the
+// registered indexKey* field index instead of an API-server field selector the server rejects for custom
+// status fields ("field label not supported"). Falls back to r.Client when the cache handle is unset (unit
+// tests wire an indexed fake client as Client). These reads only enqueue reconcile.Requests and are fully
+// backstopped by the 500ms self-requeue, so an eventually-consistent cache read is safe here.
+func (r *SnapshotContentController) reverseLookupReader() client.Reader {
+	if r.cacheReader != nil {
+		return r.cacheReader
+	}
+	return r.Client
+}
+
 // lookupContentsByManifestCheckpointName resolves the SnapshotContent(s) whose published
 // status.manifestCheckpointName equals mcpName, via the cache field index. The link is 1:1 (the name is
 // derived from the per-content MCR UID), so this normally returns a single request. Read-only; a List
@@ -1900,7 +1928,7 @@ func (r *SnapshotContentController) lookupContentsByManifestCheckpointName(ctx c
 	for _, gvk := range r.SnapshotContentGVKs {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
-		if err := r.Client.List(ctx, list, client.MatchingFields{indexKeyManifestCheckpointName: mcpName}); err != nil {
+		if err := r.reverseLookupReader().List(ctx, list, client.MatchingFields{indexKeyManifestCheckpointName: mcpName}); err != nil {
 			log.FromContext(ctx).V(1).Info("reverse lookup of SnapshotContent by manifestCheckpointName failed; self-requeue backstops",
 				"manifestCheckpoint", mcpName, "gvk", gvk.String(), "err", err.Error())
 			continue
@@ -1964,7 +1992,7 @@ func (r *SnapshotContentController) lookupContentsByDataRefArtifactName(ctx cont
 	for _, gvk := range r.SnapshotContentGVKs {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
-		if err := r.Client.List(ctx, list, client.MatchingFields{indexKeyDataRefArtifactName: vscName}); err != nil {
+		if err := r.reverseLookupReader().List(ctx, list, client.MatchingFields{indexKeyDataRefArtifactName: vscName}); err != nil {
 			log.FromContext(ctx).V(1).Info("reverse lookup of SnapshotContent by dataRef artifact failed; self-requeue backstops",
 				"volumeSnapshotContent", vscName, "gvk", gvk.String(), "err", err.Error())
 			continue
@@ -2062,7 +2090,7 @@ func (r *SnapshotContentController) mapChildContentToParentContentsByEdge(ctx co
 	for _, gvk := range r.SnapshotContentGVKs {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
-		if err := r.Client.List(ctx, list, client.MatchingFields{indexKeyChildContentName: childName}); err != nil {
+		if err := r.reverseLookupReader().List(ctx, list, client.MatchingFields{indexKeyChildContentName: childName}); err != nil {
 			log.FromContext(ctx).V(1).Info("forward-edge reverse lookup of parent SnapshotContent failed; self-requeue backstops",
 				"childContent", childName, "gvk", gvk.String(), "err", err.Error())
 			continue

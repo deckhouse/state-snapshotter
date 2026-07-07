@@ -420,10 +420,59 @@ is ready (`ChildrenSnapshotReady=True` at ~13s), the root Snapshot still takes ~
 
 > Why, once `ChildrenSnapshotReady=True`, does the root Snapshot take ~10s more to become `Ready`?
 
-Starting questions to answer with evidence before proposing any change (per the investigation-methodology rule):
-what happens between `ChildrenSnapshotReady` and `ManifestsArchived` (root MCR/MCP creation, manifest archival,
-bottom-up latch), whether it is a poll/requeue cadence, a per-child aggregation cost, or content-side maturation,
-and whether it scales with N. Instrument/trace first; do not assume.
+**Diagnosis (server-side trace of 3 warm SETS=10 runs + controller logs; no code change).** The 6 requested
+sub-intervals (offsets from root create, `lastTransitionTime` second-granularity):
+
+| boundary | r1 | r2 | r3 |
+|---|---|---|---|
+| ChildrenSnapshotReady (snap) | 13 | 10 | 12 |
+| root MCP created | 22 | 19 | 87 |
+| root MCP Ready | 23 | 19 | 87 |
+| content ManifestsReady | 24 | 23 | 89 |
+| ManifestsArchived (snap) | 25 | 24 | 89 |
+| Ready (snap) | 26 | 26 | 89 |
+
+- **Dominant interval = `ChildrenSnapshotReady → ManifestsArchived`** (r1 **12s**, r2 **14s**, r3 **77s**), inside
+  which `ChildrenSnapshotReady → root MCP created` is the largest sub-part (~9s warm, ~75s in r3). **Interval 6
+  (`ManifestsArchived → Ready`) ≈ 0–2s** on all runs — the root Ready mirror is not the problem.
+- **Classification: lost wake → self-requeue/poll backstop** (not real capture work, not an expensive reconcile).
+  Controller logs show the manifest-leg reverse watches erroring at runtime and dropping the wake:
+  `field label not supported: .status.childrenSnapshotContentRefs.name` (**669×** in one window),
+  `.status.manifestCheckpointName` (**10×**), `.status.dataRef.artifact.name` (**6×**), each followed by
+  `self-requeue backstops` and `ManifestCheckpoint event resolved to no SnapshotContent … dropping`. The bottom-up
+  archive latch therefore advances on the slow self-requeue cadence, not on events. The child-content
+  `ManifestsArchived=True` staircase confirms it (r1 tail `…19, 24`; r3 stragglers `…76, 78, 89`), and the root
+  subtree latch waits for the slowest child. r3's 77s is the same interval with the lost-wake tail fully exposed.
+- **Root cause (code): the reverse-lookup `List`s read through the manager client, which does not cache
+  unstructured objects, so `client.MatchingFields` is sent to the API server as a field selector it rejects.**
+  The three field indexes (`indexKeyManifestCheckpointName` / `indexKeyChildContentName` /
+  `indexKeyDataRefArtifactName`) **are** registered (`SetupWithManager` runs at startup with
+  `SnapshotContentGVKs = [CommonSnapshotContentGVK]` and an empty `activeContentWatchSet`, so the guard does not
+  skip them — the earlier "guard skips `IndexField`" hypothesis was **disproven**). The real defect is that
+  `manager.Options` sets no `Client.Cache.Unstructured=true`, so controller-runtime's default applies:
+  **unstructured `Get`/`List` bypass the cache and go to the API server.** `Get`-by-name still works (name
+  selectors are supported), but the reverse-lookup `List`s (`snapshotcontent/controller.go` `reverseLookupReader`
+  sites: `lookupContentsByManifestCheckpointName`, `mapVolumeSnapshotContentToContent`,
+  `mapChildContentToParentContentsByEdge`) pass a **custom status field selector** the API server refuses
+  (`field label not supported`). The registered cache indexes are therefore never consulted, and FIX 2 / FIX 3 /
+  FIX 5's event wakes are effectively dead — only their poll/requeue backstops carry the archive wave. Not caused
+  by D.3.
+
+**Fix (H4.1, implemented; measurement pending redeploy).** Route the three enqueue-only reverse-lookup `List`s
+through the **manager cache** (`mgr.GetCache()`, exposed as `r.cacheReader` via `reverseLookupReader()`), which
+uses the registered `indexKey*` indexes, instead of `r.Client` (which hits the API server for unstructured). This
+is deliberately **not** a global `Client.Cache.Unstructured=true` flip — that would also change D.3's child-List
+read semantics (cached/eventually-consistent) and couple two unrelated changes. The reverse lookups only enqueue
+`reconcile.Request`s and are fully backstopped by the 500ms self-requeue, so an eventually-consistent cache read is
+safe by design. Unit tests are unaffected (they wire an indexed fake client as `Client`; `cacheReader` is nil in
+tests and `reverseLookupReader()` falls back to `Client`). No status-contract change; poll/requeue backstops stay.
+Acceptance (SETS=10 warm r1/r2): the three `field label not supported` errors disappear, the reverse-lookup
+uncached API `List`s collapse, the apiserver-timeout count drops, `ChildrenSnapshotReady → ManifestsArchived`
+falls well below the current ~12–14s, and Ready correctness is unchanged. r3-style lost-wake tails should also
+disappear. Validate with the same server-side trace across 3 warm runs; **r3 (89s) is excluded from latency stats
+as a control-plane-stall / leader-election-lost incident during a load spike** (both controllers lost their lease
+to the same apiserver at 13:27; leader-election hardening is tracked separately, intentionally **not** in H4.1 so
+it cannot mask the load problem).
 
 ---
 
