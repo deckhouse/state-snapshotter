@@ -58,8 +58,9 @@ type childGraphPlanningTimings struct {
 	ensureChildren  time.Duration // ensureParentOwnedChildSnapshot (Get + Create/Patch of each child snapshot)
 	priorityReady   time.Duration // priorityLayerChildrenSnapshotReady (per-child readiness Get)
 	publish         time.Duration // patchSnapshotChildrenRefs* (status.childrenSnapshotRefs + ChildrenSnapshotReady write)
-	listCalls       int           // number of dynamic List calls issued
-	sourceObjects   int           // total source objects returned across all Lists
+	listCalls       int           // number of dynamic source List calls issued
+	sourceObjects   int           // total source objects returned across all source Lists
+	childListCalls  int           // number of child snapshot List calls issued via childSnapshotReadCache (D.3: replaces per-child Gets)
 }
 
 func (t *childGraphPlanningTimings) total() time.Duration {
@@ -85,6 +86,7 @@ func (t *childGraphPlanningTimings) log(ctx context.Context) {
 		"publishMs", t.publish.Milliseconds(),
 		"listCalls", t.listCalls,
 		"sourceObjects", t.sourceObjects,
+		"childListCalls", t.childListCalls,
 	)
 }
 
@@ -95,6 +97,9 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 ) (bool, bool, error) {
 	timings := &childGraphPlanningTimings{}
 	defer timings.log(ctx)
+	// D.3: one List per child GVK per pass, served to coverage walk / ensure / readiness, replacing the
+	// per-child Gets that dominated the pass. Same client (r.Client) as those Gets → same source of truth.
+	readCache := newChildSnapshotReadCache(r.Client, nsSnap.Namespace, timings)
 
 	resolveStart := time.Now()
 	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
@@ -118,7 +123,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	}
 
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
-	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
+	coverage := newSnapshotCoverageChecker(readCache, nsSnap.Namespace, nil)
 	for layerStart := 0; layerStart < len(mappings); {
 		priority := mappings[layerStart].Priority
 		layerEnd := layerStart + 1
@@ -127,7 +132,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector, timings)
+			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector, timings, readCache)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
@@ -143,7 +148,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		desiredRefs = append(desiredRefs, layerRefs...)
 		readyStart := time.Now()
-		ready, terminalMessage, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, nsSnap.Namespace, layerRefs)
+		ready, terminalMessage, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, nsSnap.Namespace, layerRefs, readCache)
 		timings.priorityReady += time.Since(readyStart)
 		if err != nil {
 			return false, false, err
@@ -166,7 +171,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 			timings.publish += time.Since(publishStart)
 			return changed, false, err
 		}
-		coverage = newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
+		coverage = newSnapshotCoverageChecker(readCache, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
 		layerStart = layerEnd
 	}
 	sortSnapshotChildRefs(desiredRefs)
@@ -189,6 +194,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	coverage snapshotCoverageChecker,
 	selector labels.Selector,
 	timings *childGraphPlanningTimings,
+	readCache *childSnapshotReadCache,
 ) ([]storagev1alpha1.SnapshotChildRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
 	list := &unstructured.UnstructuredList{}
@@ -241,7 +247,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		}
 		childName := snapshotChildSnapshotName(nsSnap.Name, mapping.SourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName(), string(resource.GetUID()))
 		ensureStart := time.Now()
-		err = r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource)
+		err = r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource, readCache)
 		timings.ensureChildren += time.Since(ensureStart)
 		if err != nil {
 			return nil, err
@@ -274,6 +280,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 	name string,
 	gvk schema.GroupVersionKind,
 	source *unstructured.Unstructured,
+	readCache *childSnapshotReadCache,
 ) error {
 	sourceIdentity, err := controllercommon.SnapshotSourceIdentityFromObject(source)
 	if err != nil {
@@ -282,7 +289,10 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 	key := client.ObjectKey{Namespace: nsSnap.Namespace, Name: name}
 	child := &unstructured.Unstructured{}
 	child.SetGroupVersionKind(gvk)
-	if err := r.Client.Get(ctx, key, child); err != nil {
+	// D.3: existence check served from the per-GVK List cache (same client as the former Get). Create
+	// still goes direct and is the authority on the create/adopt race (a stale "not found" surfaces as an
+	// AlreadyExists on Create exactly as it did with the cached Get).
+	if err := readCache.Get(ctx, key, child); err != nil {
 		if !errors.IsNotFound(err) {
 			return err
 		}
@@ -331,20 +341,98 @@ type sourceListForbiddenError struct {
 
 func (e *sourceListForbiddenError) Error() string { return e.msg }
 
+// childSnapshotReader is the Get-only read surface used by the child-graph planning pass (coverage
+// walk, per-child readiness, ensure existence check). It is satisfied both by the split client and by
+// childSnapshotReadCache, so those reads can be served from one List per GVK instead of a Get per ref
+// without changing any caller logic.
+type childSnapshotReader interface {
+	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
+}
+
+// childSnapshotReadCache (Commit D.3) collapses the many per-child Gets of a single child-graph
+// planning pass into one List per child snapshot GVK. It reads through the SAME client the per-item
+// Gets used (r.Client), so the source of truth is identical — this is purely N Gets → 1 List, not a
+// consistency change; it does not touch any read that was intentionally uncached (APIReader) for
+// correctness. Scope is one planning pass: a fresh cache is built per reconcileParentOwnedChildGraph
+// call, each GVK is listed at most once (lazily, on first access), and a missing object returns an
+// apierrors NotFound so existing IsNotFound branches behave identically.
+type childSnapshotReadCache struct {
+	reader    client.Reader
+	namespace string
+	timings   *childGraphPlanningTimings
+	byGVK     map[schema.GroupVersionKind]map[string]*unstructured.Unstructured
+}
+
+func newChildSnapshotReadCache(reader client.Reader, namespace string, timings *childGraphPlanningTimings) *childSnapshotReadCache {
+	return &childSnapshotReadCache{
+		reader:    reader,
+		namespace: namespace,
+		timings:   timings,
+		byGVK:     make(map[schema.GroupVersionKind]map[string]*unstructured.Unstructured),
+	}
+}
+
+// Get serves a child snapshot read from the per-GVK List cache. obj must be *unstructured.Unstructured
+// with its GVK set (matching how the coverage walk / ensure / readiness callers invoke Get).
+func (c *childSnapshotReadCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return fmt.Errorf("childSnapshotReadCache: unsupported object type %T (want *unstructured.Unstructured)", obj)
+	}
+	// The cache lists a single namespace (the root Snapshot's); the whole run tree is namespace-local to
+	// it. A key in a different namespace is a caller bug, so fail loudly instead of returning a misleading
+	// NotFound sourced from the wrong namespace's list.
+	if key.Namespace != "" && key.Namespace != c.namespace {
+		return fmt.Errorf("childSnapshotReadCache scoped to namespace %q, got key %q", c.namespace, key.String())
+	}
+	gvk := u.GroupVersionKind()
+	items, err := c.itemsForGVK(ctx, gvk)
+	if err != nil {
+		return err
+	}
+	found, ok := items[key.Name]
+	if !ok {
+		return errors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: gvk.Kind}, key.Name)
+	}
+	found.DeepCopyInto(u)
+	return nil
+}
+
+func (c *childSnapshotReadCache) itemsForGVK(ctx context.Context, gvk schema.GroupVersionKind) (map[string]*unstructured.Unstructured, error) {
+	if items, ok := c.byGVK[gvk]; ok {
+		return items, nil
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+	if err := c.reader.List(ctx, list, client.InNamespace(c.namespace)); err != nil {
+		return nil, err
+	}
+	if c.timings != nil {
+		c.timings.childListCalls++
+	}
+	items := make(map[string]*unstructured.Unstructured, len(list.Items))
+	for i := range list.Items {
+		item := list.Items[i]
+		items[item.GetName()] = &item
+	}
+	c.byGVK[gvk] = items
+	return items, nil
+}
+
 type snapshotCoverageChecker interface {
 	IsCovered(ctx context.Context, obj *unstructured.Unstructured) (bool, error)
 	ObservePlannedSnapshot(ctx context.Context, source *unstructured.Unstructured, snapshotRef storagev1alpha1.SnapshotChildRef, contentRef *storagev1alpha1.SnapshotContentChildRef) error
 }
 
 type refBasedSnapshotCoverageChecker struct {
-	reader    client.Reader
+	reader    childSnapshotReader
 	namespace string
 	seen      map[string]struct{}
 	covered   map[string]struct{}
 	roots     []storagev1alpha1.SnapshotChildRef
 }
 
-func newSnapshotCoverageChecker(reader client.Reader, namespace string, roots []storagev1alpha1.SnapshotChildRef) snapshotCoverageChecker {
+func newSnapshotCoverageChecker(reader childSnapshotReader, namespace string, roots []storagev1alpha1.SnapshotChildRef) snapshotCoverageChecker {
 	return &refBasedSnapshotCoverageChecker{
 		reader:    reader,
 		namespace: namespace,
@@ -468,7 +556,7 @@ func coverageObjectKey(identity controllercommon.SnapshotSourceIdentity) string 
 //     thing that turns the layer into ChildrenSnapshotReady=False/GraphPlanningFailed); duration never does;
 //   - pending: human-readable descriptors of the children not yet ready (for the PriorityLayerPending
 //     message). Waiting on these is unbounded by design.
-func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, terminalMessage string, pending []string, err error) {
+func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef, readCache *childSnapshotReadCache) (ready bool, terminalMessage string, pending []string, err error) {
 	for _, ref := range refs {
 		gv, err := schema.ParseGroupVersion(ref.APIVersion)
 		if err != nil {
@@ -477,7 +565,7 @@ func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Cont
 		gvk := gv.WithKind(ref.Kind)
 		child := &unstructured.Unstructured{}
 		child.SetGroupVersionKind(gvk)
-		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, child); err != nil {
+		if err := readCache.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, child); err != nil {
 			if errors.IsNotFound(err) {
 				pending = append(pending, fmt.Sprintf("%s/%s/%s (not created yet)", gvk.String(), namespace, ref.Name))
 				continue

@@ -315,10 +315,10 @@ a distinct hypothesis.
   snapshot status change — and each pending pass re-runs the **full** O(N) plan (`childGraphReplanSkippable` only
   skips *after* `ChildrenSnapshotReady=Completed`). Measured passes reached **child-graph-planning ~10s** and
   root reconcile **~16–17.5s** end-to-end, growing with the child/coverage set. This repeated full re-plan — not
-  any per-leaf step — is what delays child creation and produces the observed leaf-Ready staircase. **What is not
-  yet known:** which sub-section dominates a single pass (uncached source `List`s vs the recursive coverage walk
-  vs per-child readiness `Get`s vs publish) and whether the wall is dominated by *cost per pass*, *number of
-  passes*, or both. Commit D (below) instruments this before any optimization.
+  any per-leaf step — is what delays child creation and produces the observed leaf-Ready staircase. The Commit-D
+  instrumentation (below) has now **attributed the per-pass cost**: it is the **per-child `Get`-heavy sections**
+  (`coverageWalk` + `ensureChildren` + `priorityReady`), **not** the source `List`s; and the wall is inflated by
+  **both** cost-per-pass growth **and** concurrent duplicate re-plans (the relay calls `Reconcile` directly).
 
 > **H1 (leaf staircase) is absorbed by H3 — not a separate problem.** Earlier framing (`vscReady → leaf content
 > Ready` grows ~4→9–11s, suspected leaf-side MCP/worker contention) was disproven by a per-leaf server-side +
@@ -333,22 +333,61 @@ a distinct hypothesis.
 
 ### Commit D — instrument `reconcileParentOwnedChildGraph` (diagnosis before optimizing)
 
-**Status: instrumentation applied; measurement pending redeploy.** No optimization is chosen until the per-pass
-cost is attributed. `reconcileParentOwnedChildGraph` now accumulates per-section wall time
-(`childGraphPlanningTimings`) and logs one breakdown per pass (covering the hot "priority layer pending" early
-return that dominates fan-out), at the same 150ms threshold as the caller's total:
-
-`resolveMappings` (CSD list + RESTMapping) · `listSources` (uncached dynamic `List` per eligible source GVK,
-with `listCalls`/`sourceObjects` counts) · `coverageWalk` (`IsCovered`/`ObservePlannedSnapshot` recursive
-`childrenSnapshotRefs` `Get`s) · `ensureChildren` (per-child `Get`+`Create`/`Patch`) · `priorityReady`
-(per-child readiness `Get`) · `publish` (status write). File
+**Status: instrumentation applied and measured (SETS=10, warm).** `reconcileParentOwnedChildGraph` accumulates
+per-section wall time (`childGraphPlanningTimings`) and logs one breakdown per pass (covering the hot "priority
+layer pending" early return that dominates fan-out), at the same 150ms threshold as the caller's total:
+`resolveMappings` · `listSources` (with `listCalls`/`sourceObjects`) · `coverageWalk`
+(`IsCovered`/`ObservePlannedSnapshot` recursive `childrenSnapshotRefs` `Get`s) · `ensureChildren` (per-child
+`Get`+`Create`/`Patch`) · `priorityReady` (per-child readiness `Get`) · `publish`. File
 `images/state-snapshotter-controller/internal/controllers/snapshot/parent_graph.go` (diagnosis-only; no
 behaviour, data-model, or status-contract change).
 
-Deferred until the breakdown says which one is worth it (do **not** start these blind — leaf-skip was already a
-disproven guess): **D.1′** debounce/coalesce relay-driven root wakes (changes event-delivery semantics); **D.2**
-skip the re-plan when child *membership* is unchanged (algorithm change, needs invariant proof); **D.3** cached
-`List`s + coverage-checker reuse (removes the ~40k uncached API `GET`s / per-pass `List`s).
+**Measured attribution (worst pass, totalMs=11144):** coverageWalk **4501** + ensureChildren **3396** +
+priorityReady **3132** = ~11.0s (99%); listSources **41** (2 List calls / 30 source objects), resolveMappings
+**72**, publish **0**. Across the 6 logged passes: coverageWalk **17.5s**, priorityReady **12.8s**,
+ensureChildren **11.4s**, listSources **0.27s**, resolveMappings **0.18s**, publish **0.05s**.
+
+Conclusions:
+
+- **The cost is per-child `Get`s, not source `List`s.** The earlier "uncached dynamic `List`s / ~40k GET" framing
+  was wrong on attribution: listing sources is ~40ms; the ~seconds are spent in the three sections that do a
+  `Get` (and recursion) **per child** — the recursive coverage walk over `childrenSnapshotRefs`, the per-child
+  ensure `Get`, and the per-child readiness `Get`. A single `List` of children would be far cheaper than N `Get`s.
+- **Both axes are bad.** Cost-per-pass grows with N (coverageWalk 289→4685ms across passes) **and** passes are
+  duplicated concurrently — pairs of passes with near-identical duration fire in the same second (e.g. 4261/4234
+  at 12:10:45; 11134/11144 at 12:10:56) because the `nss-chw` relay calls `r.main.Reconcile` **directly** (not
+  via the workqueue), so concurrent child events spawn concurrent full re-plans of the same root (~42s of planning
+  work packed into ~26s wall).
+
+Fixes, one variable at a time, guided by the numbers:
+
+- **D.3 — collapse per-child `Get`s into one `List` per child GVK (implemented; measurement pending redeploy).**
+  `parent_graph.go` only. A per-pass `childSnapshotReadCache` lazily lists each child snapshot GVK once (via
+  `r.Client` — the **same** client the former per-item `Get`s used, so the source of truth is identical) and
+  serves the coverage walk, the ensure existence check, and the per-child readiness check from that map. No
+  status-contract, membership-skip, debounce, or coverage-invariant change. Guardrail: all three reads were
+  already `r.Client` (cached), **not** intentionally-uncached `APIReader`, so this is purely N `Get`s → 1 `List`.
+  Acceptance (SETS=10 warm): coverageWalk 17.5s / priorityReady 12.8s / ensureChildren 11.4s sums drop sharply;
+  worst child-graph pass 11s → target <3–4s; wall below ~25–30s; Ready correctness unchanged.
+  Pre-deploy risk review (checked in code, not just claimed):
+  - **List-GVK convention** — the cache builds an `UnstructuredList` with `Kind: gvk.Kind+"List"` and lists via
+    `r.Client`. Precedent: `snapshotcontent/controller.go` already does exactly this against the module's snapshot
+    GVKs in production, and the former coverage/ensure/readiness `r.Client.Get`s on the same GVKs worked, so the
+    cache has informers and a RESTMapping. Not a new risk.
+  - **Namespace scope** — the cache lists a single namespace (the root Snapshot's). A `Get` with a differently
+    namespaced key now returns a **hard error**, not a misleading `NotFound` (guard + `TestChildSnapshotReadCache`).
+    Correct today because the whole run tree is namespace-local to the root; the guard prevents a future footgun.
+  - **Stale list within one pass** — the list is taken once per pass, so a child created earlier in the *same*
+    pass by `ensureChildren` is not visible to the later `priorityReady` in that pass. This is **latency-safe**: a
+    freshly-created child has not run its own reconcile, so it is **not** `ChildrenSnapshotReady` regardless of
+    whether the read sees it (`NotFound`) or sees it (present-but-not-ready) — either way the layer stays *pending*
+    and requeues; the next pass (woken by the child event) re-lists fresh. No extra pass is added versus the former
+    post-`Create` `Get`. If, contrary to this reasoning, the wall does **not** drop or grows after deploy, this is
+    the first thing to re-check.
+- **D.2 (next, only if D.3 is insufficient)** — avoid the walk when child *membership* is unchanged (only status
+  changed). Largest remaining lever but an algorithm change needing an invariant proof.
+- **D.1′ (last)** — coalesce/dedupe the concurrent relay-driven root re-plans (removes duplicate passes; changes
+  event-delivery semantics; a debounce can hide a lost event, so it needs the most evidence).
 
 Adjacent future work: choose the production manager client QPS/Burst deliberately (50/100 was capacity tuning, not
 proof of low work — see FIX 1 caveat).
