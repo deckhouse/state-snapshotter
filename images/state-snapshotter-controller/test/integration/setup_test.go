@@ -41,6 +41,7 @@ import (
 	crconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -717,20 +718,31 @@ var _ = BeforeSuite(func() {
 		"snapshotcontents.state-snapshotter.deckhouse.io",
 		"volumesnapshots.snapshot.storage.k8s.io",
 	}
+	// Explicit timeout: the default Gomega Eventually (1s) is too tight for cold envtest CRD
+	// establishment (apiserver just started), which flakes BeforeSuite intermittently.
 	Eventually(func() bool {
+		notReady := []string{}
 		for _, n := range crdNamesWaitEstablished {
 			if !crdEstablished(n) {
-				return false
+				notReady = append(notReady, n)
 			}
 		}
+		if len(notReady) > 0 {
+			fmt.Fprintf(GinkgoWriter, "CRDs not established yet: %v\n", notReady)
+			return false
+		}
 		return true
-	}).Should(BeTrue(), "CRDs should be established")
+	}, 30*time.Second, 1*time.Second).Should(BeTrue(), "CRDs should be established")
 
 	// Create manager
 	mgr, err = ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: "0",
-		LeaderElection:         false,
+		// Disable the metrics server: its default bind is the fixed :8080, which collides across
+		// Ginkgo parallel processes (-procs>1) — each proc runs its own BeforeSuite/manager and the
+		// second onward fails BeforeSuite with "address already in use". "0" disables the listener.
+		Metrics:        metricsserver.Options{BindAddress: "0"},
+		LeaderElection: false,
 		// Several specs and the unified-runtime Syncer both register a controller for the same
 		// test.deckhouse.io/RegistrationTestSnapshot GVK on this single shared manager; without this the
 		// second registration is rejected for a duplicate controller name. Test-only.

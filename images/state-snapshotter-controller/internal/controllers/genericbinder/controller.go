@@ -363,10 +363,31 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		contentObj.SetOwnerReferences([]metav1.OwnerReference{*contentOwnerRef})
 
 		if err := r.Create(ctx, contentObj); err != nil {
-			logger.Error(err, "Failed to create SnapshotContent", "name", contentName)
-			return ctrl.Result{}, err
+			if !errors.IsAlreadyExists(err) {
+				logger.Error(err, "Failed to create SnapshotContent", "name", contentName)
+				return ctrl.Result{}, err
+			}
+			// The deterministic-named content already exists. contentName is UID-derived
+			// (names.ContentName), so a same-named object is this Snapshot's own content that was created
+			// by a previous reconcile which crashed before patching status.boundSnapshotContentName, or a
+			// pre-provisioned root content (e.g. a Delete-policy content). Adopt it instead of wedging on
+			// the non-idempotent Create: verify its snapshotRef points back at THIS Snapshot (anti-spoof;
+			// a foreign match would only be a stale/rogue object under a UID collision), then bind by name.
+			// Spec is immutable, so an existing Delete deletionPolicy is preserved on adoption.
+			existing := &unstructured.Unstructured{}
+			existing.SetGroupVersionKind(contentGVK)
+			if gerr := r.Get(ctx, client.ObjectKey{Name: contentName}, existing); gerr != nil {
+				return ctrl.Result{}, gerr
+			}
+			if !contentSnapshotRefMatchesSnapshot(existing, snapshotGVK, obj) {
+				return ctrl.Result{}, fmt.Errorf(
+					"SnapshotContent %s already exists but its spec.snapshotRef does not point back at Snapshot %s/%s (uid %s); refusing to adopt",
+					contentName, obj.GetNamespace(), obj.GetName(), obj.GetUID())
+			}
+			logger.Info("Adopted pre-existing SnapshotContent", "name", contentName)
+		} else {
+			logger.Info("Created SnapshotContent", "name", contentName, "owner", contentOwnerRef.Kind)
 		}
-		logger.Info("Created SnapshotContent", "name", contentName, "owner", contentOwnerRef.Kind)
 
 		if err := snapshotbinding.PatchUnstructuredBoundContentName(ctx, r.Client, req.NamespacedName, snapshotGVK, contentName); err != nil {
 			logger.Error(err, "Failed to update Snapshot status.boundSnapshotContentName")
@@ -425,6 +446,29 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 
 	logger.Info("Snapshot reconciliation completed (create path)")
 	return ctrl.Result{}, nil
+}
+
+// contentSnapshotRefMatchesSnapshot reports whether an existing SnapshotContent's spec.snapshotRef points
+// back at the given Snapshot. It is the anti-spoof guard for adopting a pre-existing deterministic-named
+// content on the create path (AlreadyExists): a ref UID, when present, must equal the Snapshot UID, and
+// apiVersion/kind/namespace/name must match. An absent/empty ref is treated as non-matching — we never
+// adopt a content that does not claim this Snapshot.
+func contentSnapshotRefMatchesSnapshot(content *unstructured.Unstructured, snapshotGVK schema.GroupVersionKind, obj *unstructured.Unstructured) bool {
+	ref, found, err := unstructured.NestedMap(content.Object, "spec", "snapshotRef")
+	if err != nil || !found || ref == nil {
+		return false
+	}
+	getStr := func(k string) string {
+		v, _ := ref[k].(string)
+		return v
+	}
+	if uid := getStr("uid"); uid != "" && uid != string(obj.GetUID()) {
+		return false
+	}
+	return getStr("apiVersion") == snapshotGVK.GroupVersion().String() &&
+		getStr("kind") == snapshotGVK.Kind &&
+		getStr("name") == obj.GetName() &&
+		getStr("namespace") == obj.GetNamespace()
 }
 
 // ensureSnapshotContentLinks publishes generic result refs into the bound SnapshotContent.

@@ -338,8 +338,12 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish phase=Planned.
-			setSnapshotDomainPlannedCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish phase=Finished (capture barrier 2). Planned alone clears
+			// only barrier 1 (the binder may bind the content); the post-bind Ready mirror
+			// (snapshotcontent.mirrorReadyToOwnerSnapshot) additionally holds a domain-capture Snapshot's
+			// Ready=True until phase=Finished, and this TestSnapshot has no real domain controller to advance
+			// it. Finished still passes the binder's >=Planned barrier.
+			setSnapshotDomainFinishedCurrent(ctx, snapshotObj)
 
 			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			req := ctrl.Request{
@@ -438,11 +442,17 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				g.Expect(meta.IsStatusConditionTrue(fresh.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
 			}, "60s", "200ms").Should(Succeed(), "bound SnapshotContent should become Ready=True")
 
-			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready. Keep
-			// reconciling the binder (there is no reverse Snapshot watch) until the mirror converges, then
-			// assert the Snapshot is Ready=True with the same (Completed) reason as the content.
+			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready. wave7
+			// moved the post-bind Ready mirror out of the binder into the SnapshotContentController
+			// (mirrorReadyToOwnerSnapshot, resolved via content.spec.snapshotRef + the boundSnapshotContentName
+			// writer-switch), so drive the CONTENT controller to run the mirror; the binder reconcile is kept
+			// (it still owns pre-bind / content-missing degradation) but no longer writes the steady-state
+			// Ready. Keep reconciling until the mirror converges, then assert Ready=True with the content's
+			// (Completed) reason.
 			Eventually(func(g Gomega) {
 				_, recErr := snapshotCtrl.Reconcile(ctx, req)
+				g.Expect(recErr).NotTo(HaveOccurred())
+				_, recErr = contentCtrl.Reconcile(ctx, contentReq)
 				g.Expect(recErr).NotTo(HaveOccurred())
 
 				freshSnapshot := &unstructured.Unstructured{}

@@ -547,3 +547,25 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   children (empty/omitted). Belt-and-suspenders for the code-level optimistic-locked append invariant. api +
   controller build/vet + api unit green; CEL runtime enforcement validated only against a real apiserver
   (envtest) in the w7-verify loop.
+- **Refactor** (w7-verify, n5_pr7-csi-simulator) Rewrote the N5 PR-7 integration specs
+  (test/integration/n5_pr7_two_pvc_integration_test.go) for the wave7 orphan-wave model, where a residual/loose
+  namespace PVC is captured as its OWN standalone child volume node (own SnapshotContent + dataRef) instead of
+  being appended to the root aggregator MCR — so the root MCR never carries a PVC manifest. Added a self-contained
+  CSI simulator (test/integration/n5_pr7_csi_simulator.go): installs the cluster-scoped VolumeSnapshotClass +
+  VolumeSnapshotContent CRDs with a ROOT-level `x-kubernetes-preserve-unknown-fields` (the shared BeforeSuite
+  installs only VolumeSnapshot, and a spec/status-only preserve prunes the VolumeSnapshotClass top-level `driver`,
+  breaking orphan class resolution); seeds the shared StorageClass(+volumesnapshotclass annotation)/VSClass and
+  CSI-backed bound PV/PVC fixtures; and runs a fake external-snapshotter reactor (uncached direct client) that
+  binds each orphan VolumeSnapshot the controller creates (creates a bound VSC, patches VS
+  status.readyToUse+boundVSCName). Scoped to a dedicated `isolated` Serial+Ordered `go test` pass (the reactor's
+  VolumeSnapshotContent CRD would perturb !isolated specs that rely on it being absent). Three specs pass green:
+  residual CSI PVCs each become their own child volume node (root MCR carries no PVC); root MCR still captures a
+  plain ConfigMap while excluding the residual CSI PVC; and the DuplicateCoveredPVCUID guard fires on two subtree
+  contents claiming the same PVC UID — the latter needed a real ready VSC behind the colliding dataRef, because
+  wave7 now fails a dataRef whose artifact VSC is missing (ArtifactMissing→ChildrenFailed) before the duplicate
+  guard runs. Marked the pending-VCR-coverage spec Pending: reproducing an in-flight (dataRef-less) VCR on a
+  subtree child at the integration level under wave7 is inherently racy (only a synthetic empty-spec namespace
+  child can carry it, and its own volume-leg readiness races the fixture / collides on the ObjectKeeper lifecycle
+  ownerRef); the mechanism (`pvcUIDsFromPendingVCR`) stays covered deterministically by the unit test
+  `TestCollectSubtreeCoveredPVCUIDs_pendingVCRTargets`. Isolated pass green twice; removed obsolete `pr7CreatePVC`
+  helper (replaced by `pr7CreateCSIPVC`) and stray debug logging.

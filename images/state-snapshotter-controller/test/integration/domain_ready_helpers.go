@@ -45,6 +45,25 @@ func setSnapshotDomainPlannedCurrent(ctx context.Context, obj *unstructured.Unst
 	Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
 }
 
+// injectDomainFinished sets status.captureState.domainSpecificController.phase=Finished on obj (in memory).
+// Finished is capture barrier 2: the domain finished its side (including consistency actions), so the core
+// may finalize the aggregate Ready. The post-bind Ready mirror (snapshotcontent.mirrorReadyToOwnerSnapshot)
+// holds Ready=False on a domain-capture owner until this phase is reached, so any spec that expects the
+// bound content's Ready=True to surface on the Snapshot must advance the phase to Finished (Planned alone
+// only clears barrier 1 for the binder). Use inside blocks that drive their own Status().Update.
+func injectDomainFinished(obj *unstructured.Unstructured) {
+	setDomainPhase(obj, storagev1alpha1.SnapshotCapturePhaseFinished)
+}
+
+// setSnapshotDomainFinishedCurrent publishes phase=Finished and updates the status subresource via
+// k8sClient — capture barrier 2, the signal the post-bind Ready mirror requires before finalizing a
+// domain-capture Snapshot's Ready=True.
+func setSnapshotDomainFinishedCurrent(ctx context.Context, obj *unstructured.Unstructured) {
+	GinkgoHelper()
+	setDomainPhase(obj, storagev1alpha1.SnapshotCapturePhaseFinished)
+	Expect(k8sClient.Status().Update(ctx, obj)).To(Succeed())
+}
+
 // setDomainPhase sets status.captureState.domainSpecificController.phase on obj (in memory only).
 func setDomainPhase(obj *unstructured.Unstructured, phase storagev1alpha1.SnapshotCapturePhase) {
 	Expect(unstructured.SetNestedField(obj.Object, string(phase),

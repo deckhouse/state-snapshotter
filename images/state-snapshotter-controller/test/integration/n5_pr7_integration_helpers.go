@@ -27,7 +27,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -94,27 +93,6 @@ func pr7CreateNamespace(ctx context.Context, labelValue string) *corev1.Namespac
 		g.Expect(fresh.Status.Phase).To(Equal(corev1.NamespaceActive))
 	}).Should(Succeed())
 	return ns
-}
-
-func pr7CreatePVC(ctx context.Context, namespace, name string) *corev1.PersistentVolumeClaim {
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: resource.MustParse("1Gi"),
-				},
-			},
-		},
-	}
-	Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
-	var fresh corev1.PersistentVolumeClaim
-	Eventually(func(g Gomega) {
-		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &fresh)).To(Succeed())
-		g.Expect(fresh.UID).NotTo(BeEmpty())
-	}).Should(Succeed())
-	return &fresh
 }
 
 func pr7PVCDataBinding(pvc *corev1.PersistentVolumeClaim, vscName string) storagev1alpha1.SnapshotDataBinding {

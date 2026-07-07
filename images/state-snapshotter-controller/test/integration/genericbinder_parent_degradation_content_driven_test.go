@@ -89,7 +89,11 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		parent.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
 		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, parent)) })
-		setSnapshotDomainPlannedCurrent(ctx, parent)
+		// phase=Finished (capture barrier 2), not just Planned: the parent has no real domain controller, and
+		// the post-bind Ready mirror holds a domain-capture Snapshot's Ready=False until Finished. The
+		// False/True flips below are driven by the child content's MCP; barrier 2 only gates the True
+		// direction, so a single Finished holds across all phases.
+		setSnapshotDomainFinishedCurrent(ctx, parent)
 
 		parentKey := types.NamespacedName{Namespace: "default", Name: "gen-parent-degrade"}
 		var parentContentName, parentContentUID string

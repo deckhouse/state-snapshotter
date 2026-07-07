@@ -41,9 +41,19 @@ type ManifestCaptureRequestList struct {
 
 // +k8s:deepcopy-gen=true
 type ManifestCaptureRequestSpec struct {
-	// Targets specifies the objects to capture
-	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest
-	Targets []ManifestTarget `json:"targets"`
+	// Targets specifies the objects to capture.
+	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest.
+	//
+	// Optional (may be empty): an MCR with no targets is a valid EMPTY capture. It is produced by the
+	// namespace-root aggregator when a namespace has no allowlisted objects to capture (a single-object
+	// domain snapshot always passes its own source identity, so it never hits this case). The executor
+	// (ManifestCheckpointController) already handles an empty target set end-to-end — it writes a single
+	// empty content chunk and marks the ManifestCheckpoint Ready=Completed — so an empty MCR converges to
+	// an empty, Ready MCP and the owning SnapshotContent becomes ManifestsReady=True. This field is
+	// therefore NOT required: the SDK sends a null/omitted targets for the empty aggregator MCR, and a
+	// required constraint would reject that create with "spec.targets: Required value".
+	// +optional
+	Targets []ManifestTarget `json:"targets,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true

@@ -98,9 +98,12 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 		}).WithTimeout(120 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 		Expect(mcpName).NotTo(BeEmpty())
 
-		// Simulate domain controller: publish phase=Planned + the MCR name under
-		// captureState.domainSpecificController (the domain-written half of captureState).
-		injectDomainPlanned(snapshotObj)
+		// Simulate domain controller: publish phase=Finished + the MCR name under
+		// captureState.domainSpecificController (the domain-written half of captureState). Finished (capture
+		// barrier 2), not just Planned: this TestSnapshot has no real domain controller, and wave7's post-bind
+		// Ready mirror (snapshotcontent.mirrorReadyToOwnerSnapshot) holds a domain-capture Snapshot's Ready=True
+		// until phase=Finished. Finished still clears the binder's >=Planned barrier 1 for the bind step below.
+		injectDomainFinished(snapshotObj)
 		Expect(unstructured.SetNestedField(snapshotObj.Object, mcr.GetName(),
 			"status", "captureState", "domainSpecificController", "manifestCaptureRequestName")).To(Succeed())
 		Expect(k8sClient.Status().Update(ctx, snapshotObj)).To(Succeed())
@@ -199,10 +202,14 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 			g.Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 		}, "30s", "200ms").Should(Succeed(), "MCR should complete only after MCP ownerRef is handed off to SnapshotContent")
 
-		// Snapshot.Ready is an eventual mirror of the bound SnapshotContent.Ready: keep reconciling
-		// (the generic binder polls pending content because there is no reverse Snapshot watch).
+		// Snapshot.Ready is an eventual mirror of the bound SnapshotContent.Ready. wave7 moved the post-bind
+		// Ready mirror out of the binder into the SnapshotContentController (mirrorReadyToOwnerSnapshot), so
+		// drive the CONTENT controller to run the mirror; the binder reconcile is kept (it still owns
+		// pre-bind / content-missing degradation). phase=Finished was published above so barrier 2 is clear.
 		Eventually(func(g Gomega) {
 			_, err := snapshotCtrl.Reconcile(ctx, req)
+			g.Expect(err).NotTo(HaveOccurred())
+			_, err = contentCtrl.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}})
 			g.Expect(err).NotTo(HaveOccurred())
 			freshSnapshot := &unstructured.Unstructured{}
 			freshSnapshot.SetGroupVersionKind(snapshotGVK)
