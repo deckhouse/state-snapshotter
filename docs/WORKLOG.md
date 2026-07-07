@@ -530,6 +530,20 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   for the content-deletion degradation path; relocating the side channels would add regression risk on the
   manifest-exclude pre-gate for no functional gain. Tests: removed genericbinder/barrier2_test.go (binder no
   longer gates Ready); rewrote genericbinder/mirror_test.go to assert the binder co-writes ContentMissing
-  when the bound content is gone and does NOT overwrite Ready when the content is present. Build + gofmt +
+  when the bound content is gone   and does NOT overwrite Ready when the content is present. Build + gofmt +
   full controller-module unit green; integration module `go vet` green. Runtime validation deferred to the
   w7-verify integration loop.
+- **Add** (w7-immutable-children-cel) Enforced the frozen/append-only `childrenSnapshotContentRefs` at the
+  API level. Added a kubebuilder XValidation transition rule on
+  `SnapshotContentStatus.ChildrenSnapshotContentRefs` (api/storage/v1alpha1/snapshotcontent_types.go) and
+  regenerated the SnapshotContent CRD via controller-gen v0.18.0. Rule: `self.size() >= oldSelf.size()`
+  (message: append-only, must not shrink). Chose the O(1) size-monotonic rule over a per-entry
+  `oldSelf.all(x, self.exists(y, y.name == x.name))` no-removal check: the latter is O(n*m) over an
+  unbounded list with an unbounded child name and would blow the apiserver CEL estimated-cost budget (CRD
+  rejected at apply → whole envtest suite fails to start) unless the list and name were artificially capped;
+  since BOTH writers are strictly append-only (PublishSnapshotContentChildrenRefs preserves every existing
+  edge then adds missing ones; LinkChildVolumeContentRef appends; a failed child stays a node, E3), no-shrink
+  is equivalent to no-removal here. Deliberately NOT marked `Required`: a volume leaf legitimately has no
+  children (empty/omitted). Belt-and-suspenders for the code-level optimistic-locked append invariant. api +
+  controller build/vet + api unit green; CEL runtime enforcement validated only against a real apiserver
+  (envtest) in the w7-verify loop.

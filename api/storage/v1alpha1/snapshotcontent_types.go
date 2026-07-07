@@ -159,7 +159,21 @@ type SnapshotContentStatus struct {
 	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
 
 	// ChildrenSnapshotContentRefs lists direct child SnapshotContent objects in the snapshot tree.
+	//
+	// wave7 ("Late Planned"): this field carries the FROZEN expected child set of the node — the set is
+	// complete by the node's phase=Planned (all children, including the orphan/standalone-PVC wave, are
+	// enumerated before content creation), and ChildrenReady is a pure recompute against it (no flap). Both
+	// writers are append-only: the domain publisher (PublishSnapshotContentChildrenRefs) preserves every
+	// existing edge and only adds missing ones, and the volume linker (LinkChildVolumeContentRef) appends;
+	// a failed child stays a node (E3 degradation). The XValidation transition rule enforces this at the API
+	// level (the frozen set must not shrink — a dropped child edge is rejected) as belt-and-suspenders for
+	// the optimistic-locked append writers. An O(1) size-monotonic rule is used deliberately over a per-entry
+	// oldSelf.all/self.exists check: the latter is O(n*m) over an unbounded list with an unbounded child name
+	// and would exceed the apiserver CEL estimated-cost budget (CRD rejected) unless the list and name were
+	// artificially capped; because both writers are strictly append-only, no-shrink is equivalent to
+	// no-removal here. Not marked Required: a volume LEAF legitimately has no children (empty/omitted).
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.size() >= oldSelf.size()",message="childrenSnapshotContentRefs is append-only: it must not shrink (existing child SnapshotContent entries cannot be removed)"
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
 	// Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
