@@ -59,7 +59,7 @@ func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
 	}
 	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(rootNS, childA, childB, c1, c2).Build()
 
-	_, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, cl, rootNS, nil)
+	_, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, cl, rootNS, nil, func(string) bool { return true })
 	if err == nil {
 		t.Fatal("expected duplicate covered PVC error")
 	}

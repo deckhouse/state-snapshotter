@@ -997,3 +997,39 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   the CEL admission test (snapshotcontent_children_frozen envtest); the CEL rejection itself is not duplicated
   on-cluster. Bugbot: no findings. gofmt + go vet + go test -c (full e2e binary) green; live-cluster run
   deferred to the end-of-plan validation pass (compile-only per the overnight pre-approval).
+- **Refactor** (w8-block5) Orphan/residual PVC coverage now decides data-bearing-ness AUTHORITATIVELY from the
+  CSD (snapshot.GVKRegistry.RequiresDataArtifact via a new volumecapture.DataBearingKindFunc predicate keyed on
+  the owning snapshot kind), replacing the shape-of-the-tree heuristic (coveredPVCUIDsForContent dropped the
+  `if hasChildren { return nil }` short-circuit — a kind may legitimately carry BOTH children and a data leg,
+  design §8.5). For the A->B window (a data-bearing node whose status.data is not published yet) coverage now
+  falls back through the OWNING snapshot resolved from content.spec.snapshotRef, not a content-UID-derived VCR:
+  VCR-based domains read status.captureState.domainSpecificController.volumeCaptureRequestName and take that
+  VCR's spec.targets[].uid (new pvcUIDsFromNamedVCR / coveredPVCUIDsFromOwnerFallback), and native-CSI
+  VolumeSnapshots (no VCR) take the owner's status.snapshotSource.uid (§11.7). The predicate is threaded through
+  both coverage walks (subtree_covered_pvc.go content-tree + subtree_covered_pvc_from_snapshot.go snapshot-graph)
+  and all their consumers (ListOwnedPVCTargetsForLogicalContent, listResidualRootOwnedPVCTargets,
+  OwnedPVCManifestTargetsForSnapshot, usecase.BuildRootNamespaceManifestCaptureTargets); the two reconciler call
+  sites source it from the live registry via a new SnapshotReconciler.dataBearingKindFunc() that fails closed
+  (ErrGraphRegistryNotReady -> requeue) exactly like buildSnapshotMachineryGVKs, so an empty registry never
+  under-covers (which would let an already-captured PVC be re-captured). Review cycle (Bugbot HIGH: relaxed
+  phase>=Planned gate opens before coverage is observable) fixed two ways: (1) the snapshot-graph walk now
+  reads the owner fallback DIRECTLY off the child snapshot's own captureState (new coveredPVCUIDsForSnapshotNode
+  + coveredPVCUIDsFromOwnerObject) instead of requiring a bound content first — a Planned-but-not-yet-bound
+  child is now covered via its in-flight VCR name / snapshotSource.uid; (2) a data-bearing node with NO
+  observable coverage yet now returns ErrSubtreeDataRefsPending (previously defined but never returned; both
+  call sites already treat it as a requeue), so the residual wave WAITS for a still-Planning descendant rather
+  than under-covering (the relaxed gate only guarantees DIRECT children are Planned). Re-ran Bugbot: clean.
+  Unit tests: replaced the content-UID VCR coverage test with an owner-VCR-fallback test, added not-data-bearing
+  skip + owner-VCR + snapshotSource + pending tests (modeling aggregator vs data-leaf via distinct kinds),
+  threaded a permissive allKindsDataBearing predicate through the existing dataRefs-path tests. build + vet +
+  gofmt + usecase/snapshot unit suites + full -tags integration test compile all green.
+- **Refactor** (w8-block5) Relaxed the orphan/residual-PVC wave barrier allDeclaredDomainChildSnapshotsReady
+  from full Ready=True to capture barrier 1 (status.captureState.domainSpecificController.phase >= Planned),
+  mirroring weightLayerCaptureReady (childCaptureAtLeastPlanned, no observedGeneration gate — the domain phase is
+  monotonic and spec is immutable). This is what the Block 5 owner-fallback unlocks: coverage no longer needs a
+  child's status.data (milestone B), only its VCR name / snapshotSource which are published by Planned, so the
+  gate can open at Planned. Waiting for full Ready here was the deadlock — a child cannot go Ready until its
+  content subtree closes, which needs the root content, which needs this gate. Updated the childrefs_merge_test.go
+  gate fixtures (domainChildReady/readyVSChild) to stamp the capture phase instead of the Ready condition. A
+  phase=Failed child keeps the gate closed (pending) as before; the terminal is surfaced separately by content
+  aggregation (ChildrenFailed).

@@ -245,7 +245,12 @@ func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 		log.FromContext(ctx).V(1).Info("deferring orphan PVC volume wave until domain children are Ready", "pending", summarizePendingChildren(pending))
 		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
 	}
-	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, nil)
+	dataBearing, dbErr := r.dataBearingKindFunc()
+	if dbErr != nil {
+		// Registry not built yet: requeue (fail-closed, never enumerate residuals with an empty coverage set).
+		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+	}
+	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, nil, dataBearing)
 	if err != nil {
 		key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
 		if stderrors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
@@ -311,7 +316,12 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	} else if !allowed {
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
-	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds)
+	dataBearing, dbErr := r.dataBearingKindFunc()
+	if dbErr != nil {
+		// Registry not built yet (same fail-closed contract as buildSnapshotMachineryGVKs above): requeue.
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds, dataBearing)
 	if err != nil {
 		// Transient subtree/child-graph state (children still binding, descendant MCPs not yet Ready,
 		// registry not built): requeue like ChildrenPending, do NOT fail capture.

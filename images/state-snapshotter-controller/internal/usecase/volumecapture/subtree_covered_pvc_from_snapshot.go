@@ -39,29 +39,33 @@ import (
 // must be computable BEFORE the ROOT SnapshotContent is bound, so coverage cannot start from the root
 // content's childrenSnapshotContentRefs. The Snapshot child graph is populated at planning time (before the
 // root content bind), and every descendant node exposes its OWN already-bound content via
-// status.boundSnapshotContentName. Coverage is read from each descendant node's own content
-// (status.data.source.uid + any in-flight VCR), reusing coveredPVCUIDsForContent so the covered-UID
-// semantics stay identical to the content-tree variant (CollectSubtreeCoveredPVCUIDs).
+// status.boundSnapshotContentName. Coverage is read from each descendant node's own content, reusing
+// coveredPVCUIDsForContent so the covered-UID semantics stay identical to the content-tree variant
+// (CollectSubtreeCoveredPVCUIDs): the data-bearing decision comes AUTHORITATIVELY from the CSD (dataBearing
+// / RequiresDataArtifact keyed on the owning snapshot kind), and a data-bearing node whose status.data is
+// not published yet is covered via the owner fallback (in-flight VCR name / native-CSI snapshotSource.uid,
+// design §8.5/§11.7).
 //
 // Invariants mirrored from the content-tree variant:
 //   - the root itself is excluded (only its descendants count);
 //   - orphan/residual-PVC VolumeSnapshot children are ordinary domain descendants now (content-single-writer
-//     design §11.6): they are recursed into and cover their own PVC UID via their bound content's status.data
-//     like every other data-bearing node — there is no visibility-leaf carve-out (the full coverage rewrite,
-//     CSD RequiresDataArtifact + native-CSI snapshotSource fallback, lands in Block 5);
+//     design §11.6): they are recursed into and cover their own PVC UID like every other data-bearing node —
+//     there is no visibility-leaf carve-out;
 //   - claiming the same PVC UID in two descendants is fail-closed (ErrDuplicateCoveredPVCUID);
-//   - a descendant not yet bound (or whose content has no data yet) contributes no covered UID; callers gate
-//     the residual wave on all domain children being Ready (allDeclaredDomainChildSnapshotsReady) so the
-//     content and its data exist before coverage matters. A referenced child object (or its named bound
-//     content) that cannot be read is a hard error (fail-closed): silently under-covering would let an
-//     already-captured PVC be re-captured by the residual wave. The ONE exception is an absent CSI
-//     VolumeSnapshot child — the residual wave's own deterministically-named (rootUID, pvcUID) output: it
-//     is skipped (not an error) so its PVC re-classifies as residual and the wave recreates it at the same
-//     name; failing closed there would wedge the wave before the recreate path runs.
+//   - a descendant not yet bound (or a manifest-only node) contributes no covered UID. Callers gate the
+//     residual wave on all domain children reaching capture barrier 1 (allDeclaredDomainChildSnapshotsReady,
+//     relaxed to phase>=Planned in Block 5) so each child's VCR/snapshotSource — the owner-fallback inputs —
+//     exists before coverage matters, without waiting for its full status.data (milestone B). A referenced
+//     child object (or its named bound content) that cannot be read is a hard error (fail-closed): silently
+//     under-covering would let an already-captured PVC be re-captured by the residual wave. The ONE exception
+//     is an absent CSI VolumeSnapshot child — the residual wave's own deterministically-named (rootUID,
+//     pvcUID) output: it is skipped (not an error) so its PVC re-classifies as residual and the wave recreates
+//     it at the same name; failing closed there would wedge the wave before the recreate path runs.
 func CollectSubtreeCoveredPVCUIDsFromSnapshot(
 	ctx context.Context,
 	c client.Reader,
 	snap *storagev1alpha1.Snapshot,
+	dataBearing DataBearingKindFunc,
 ) (map[types.UID]struct{}, error) {
 	if snap == nil {
 		return nil, fmt.Errorf("root Snapshot is required")
@@ -76,7 +80,7 @@ func CollectSubtreeCoveredPVCUIDsFromSnapshot(
 
 	// The root's own node is not counted (a namespace root aggregator owns no data, and the content-tree
 	// variant likewise excludes the root); start from the root's direct children.
-	if err := walkSnapshotChildRefsForCoverage(ctx, c, namespace, snap.Status.ChildrenSnapshotRefs, visited, covered, uidOwner); err != nil {
+	if err := walkSnapshotChildRefsForCoverage(ctx, c, namespace, snap.Status.ChildrenSnapshotRefs, visited, covered, uidOwner, dataBearing); err != nil {
 		return nil, err
 	}
 	return covered, nil
@@ -90,6 +94,7 @@ func walkSnapshotChildRefsForCoverage(
 	visited map[string]struct{},
 	covered map[types.UID]struct{},
 	uidOwner map[types.UID]string,
+	dataBearing DataBearingKindFunc,
 ) error {
 	sorted := append([]storagev1alpha1.SnapshotChildRef(nil), refs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
@@ -122,7 +127,7 @@ func walkSnapshotChildRefsForCoverage(
 			return fmt.Errorf("get Snapshot child %q: %w", key, err)
 		}
 
-		if err := addCoverageFromChildBoundContent(ctx, c, namespace, child, key, covered, uidOwner); err != nil {
+		if err := addCoverageFromChildBoundContent(ctx, c, namespace, child, key, covered, uidOwner, dataBearing); err != nil {
 			return err
 		}
 
@@ -130,17 +135,19 @@ func walkSnapshotChildRefsForCoverage(
 		if err != nil {
 			return fmt.Errorf("Snapshot child %q: %w", key, err)
 		}
-		if err := walkSnapshotChildRefsForCoverage(ctx, c, namespace, grandRefs, visited, covered, uidOwner); err != nil {
+		if err := walkSnapshotChildRefsForCoverage(ctx, c, namespace, grandRefs, visited, covered, uidOwner, dataBearing); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// addCoverageFromChildBoundContent reads the covered PVC UIDs of one descendant Snapshot node from its OWN
-// bound SnapshotContent (status.boundSnapshotContentName), reusing coveredPVCUIDsForContent so the covered
-// set is identical to the content-tree walk. An unbound node contributes nothing; a named-but-unreadable
-// bound content is a hard error (fail-closed).
+// addCoverageFromChildBoundContent adds the covered PVC UIDs of one descendant Snapshot node. The
+// data-bearing decision is AUTHORITATIVE from the CSD (dataBearing keyed on the node's OWN kind), not the
+// shape of the subtree: a non-data-bearing aggregate contributes nothing (the walk still recurses into it).
+// A data-bearing node's UID comes from coveredPVCUIDsForSnapshotNode (bound-content status.data, else the
+// owner fallback read straight off the node's captureState), which fails closed with ErrSubtreeDataRefsPending
+// when no coverage is observable yet — so the residual wave waits rather than under-cover.
 func addCoverageFromChildBoundContent(
 	ctx context.Context,
 	c client.Reader,
@@ -149,22 +156,12 @@ func addCoverageFromChildBoundContent(
 	childKey string,
 	covered map[types.UID]struct{},
 	uidOwner map[types.UID]string,
+	dataBearing DataBearingKindFunc,
 ) error {
-	contentName, _, err := unstructured.NestedString(child.Object, "status", "boundSnapshotContentName")
-	if err != nil {
-		return fmt.Errorf("read Snapshot child %q status.boundSnapshotContentName: %w", childKey, err)
-	}
-	if contentName == "" {
+	if dataBearing == nil || !dataBearing(child.GetKind()) {
 		return nil
 	}
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("bound SnapshotContent %q of Snapshot child %q not found: %w", contentName, childKey, err)
-		}
-		return fmt.Errorf("get bound SnapshotContent %q of Snapshot child %q: %w", contentName, childKey, err)
-	}
-	uids, err := coveredPVCUIDsForContent(ctx, c, namespace, content)
+	uids, ownerLabel, err := coveredPVCUIDsForSnapshotNode(ctx, c, namespace, child, childKey)
 	if err != nil {
 		return err
 	}
@@ -174,12 +171,61 @@ func addCoverageFromChildBoundContent(
 		}
 		parsed := types.UID(uid)
 		if prev, dup := uidOwner[parsed]; dup {
-			return fmt.Errorf("%w: %s (SnapshotContent %q and %q)", ErrDuplicateCoveredPVCUID, uid, prev, contentName)
+			return fmt.Errorf("%w: %s (%s and %s)", ErrDuplicateCoveredPVCUID, uid, prev, ownerLabel)
 		}
-		uidOwner[parsed] = contentName
+		uidOwner[parsed] = ownerLabel
 		covered[parsed] = struct{}{}
 	}
 	return nil
+}
+
+// coveredPVCUIDsForSnapshotNode returns the covered PVC UID(s) of a DATA-BEARING snapshot-graph node (the
+// caller already applied the dataBearing gate). Preference: (A) the node's bound SnapshotContent status.data
+// (milestone B); (B) the owner fallback read DIRECTLY off the node's own captureState — the in-flight VCR
+// name / status.snapshotSource.uid, both published by Planned — so coverage is computable at the relaxed
+// phase>=Planned wave gate even before the content is bound (this is the case the previous
+// "boundSnapshotContentName empty -> contribute nothing" short-circuit missed). A data-bearing node with NO
+// observable coverage yet returns ErrSubtreeDataRefsPending (fail-closed: the caller requeues instead of
+// under-covering, which would let the orphan wave double-capture a PVC an in-flight child capture already
+// targets). A named-but-absent bound content is a hard error. ownerLabel identifies the node for the
+// duplicate-UID diagnostic (bound content name when set, else the child key).
+func coveredPVCUIDsForSnapshotNode(
+	ctx context.Context,
+	c client.Reader,
+	namespace string,
+	node *unstructured.Unstructured,
+	nodeKey string,
+) (uids []string, ownerLabel string, err error) {
+	contentName, _, err := unstructured.NestedString(node.Object, "status", "boundSnapshotContentName")
+	if err != nil {
+		return nil, "", fmt.Errorf("read Snapshot child %q status.boundSnapshotContentName: %w", nodeKey, err)
+	}
+	ownerLabel = "Snapshot " + nodeKey
+	if contentName != "" {
+		ownerLabel = "SnapshotContent " + contentName
+		content := &storagev1alpha1.SnapshotContent{}
+		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, "", fmt.Errorf("bound SnapshotContent %q of Snapshot child %q not found: %w", contentName, nodeKey, err)
+			}
+			return nil, "", fmt.Errorf("get bound SnapshotContent %q of Snapshot child %q: %w", contentName, nodeKey, err)
+		}
+		fromData, derr := pvcUIDsFromSnapshotContentDataRefs(content)
+		if derr != nil {
+			return nil, "", derr
+		}
+		if len(fromData) > 0 {
+			return fromData, ownerLabel, nil
+		}
+	}
+	fromOwner, oerr := coveredPVCUIDsFromOwnerObject(ctx, c, namespace, node)
+	if oerr != nil {
+		return nil, "", oerr
+	}
+	if len(fromOwner) > 0 {
+		return fromOwner, ownerLabel, nil
+	}
+	return nil, "", fmt.Errorf("%w: Snapshot child %q (kind %q, no status.data and no in-flight VCR/snapshotSource yet)", ErrSubtreeDataRefsPending, nodeKey, node.GetKind())
 }
 
 // childSnapshotChildRefs extracts status.childrenSnapshotRefs from an unstructured snapshot-like object

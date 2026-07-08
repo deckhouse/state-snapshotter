@@ -64,7 +64,7 @@ func TestListResidualRootOwnedPVCTargets_resourceSelector(t *testing.T) {
 		}
 		cl := fakeclient.NewClientBuilder().WithScheme(testSubtreeScheme(t)).
 			WithObjects(pvcKeep, pvcDrop, pvcNoLabel, rootContent, childContent, snap).Build()
-		got, err := ListOwnedPVCTargetsForLogicalContent(context.Background(), cl, snap, rootContent)
+		got, err := ListOwnedPVCTargetsForLogicalContent(context.Background(), cl, snap, rootContent, allKindsDataBearing)
 		if err != nil {
 			t.Fatalf("ListOwnedPVCTargetsForLogicalContent: %v", err)
 		}

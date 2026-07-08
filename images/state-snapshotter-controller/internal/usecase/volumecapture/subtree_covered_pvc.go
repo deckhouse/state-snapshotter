@@ -24,11 +24,13 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
@@ -38,13 +40,26 @@ var ErrDuplicateCoveredPVCUID = errors.New("duplicate covered PVC UID in snapsho
 // ErrSubtreeDataRefsPending is returned when descendant volume coverage is not yet observable (no dataRefs and no pending VCR targets).
 var ErrSubtreeDataRefsPending = errors.New("subtree data volume coverage pending")
 
-// CollectSubtreeCoveredPVCUIDs returns PVC UIDs already covered by descendant SnapshotContent nodes
-// (status.dataRefs[] and in-flight VCR spec.targets[]). The root content itself is not included.
+// DataBearingKindFunc reports whether a snapshot Kind carries a volume data leg. It is backed by the CSD
+// spec.requiresDataArtifact (via snapshot.GVKRegistry.RequiresDataArtifact); unmarked/unknown kinds read
+// false (manifest-only kinds, built-in pairs). Coverage (Block 5, design §8.5) uses it to decide
+// AUTHORITATIVELY — from the CSD, not the shape of the subtree — whether a node contributes a covered PVC
+// UID: a kind may carry both children and a data leg, so the old "a node with children has no data"
+// (hasChildren) heuristic is gone. It MUST be non-nil in production; passing a permissive
+// func(string) bool { return true } is only for unit tests that assert the dataRefs (A) path.
+type DataBearingKindFunc func(snapshotKind string) bool
+
+// CollectSubtreeCoveredPVCUIDs returns PVC UIDs already covered by descendant SnapshotContent nodes.
+// A descendant contributes its covered PVC UID only when its owning snapshot kind is data-bearing per
+// dataBearing (CSD RequiresDataArtifact); the UID is read from status.data, or, in the A->B window before
+// status.data is published, from the owner fallback (in-flight VCR / native-CSI snapshotSource.uid). The
+// root content itself is not included.
 func CollectSubtreeCoveredPVCUIDs(
 	ctx context.Context,
 	c client.Reader,
 	namespace string,
 	rootContent *storagev1alpha1.SnapshotContent,
+	dataBearing DataBearingKindFunc,
 ) (map[types.UID]struct{}, error) {
 	if rootContent == nil {
 		return nil, fmt.Errorf("root SnapshotContent is required")
@@ -61,9 +76,10 @@ func CollectSubtreeCoveredPVCUIDs(
 		}
 		// Orphan/residual-PVC VolumeSnapshot children are ordinary domain content now (content-single-writer
 		// design §11.6): the aggregator projects their status.data from the bound VSC, so they cover their own
-		// PVC UID here like every other data-bearing node — there is no visibility-leaf carve-out. (The full
-		// coverage rewrite — CSD RequiresDataArtifact + native-CSI snapshotSource fallback — lands in Block 5.)
-		uids, err := coveredPVCUIDsForContent(ctx, c, namespace, content)
+		// PVC UID here like every other data-bearing node — there is no visibility-leaf carve-out. Whether a
+		// node is data-bearing is decided authoritatively by dataBearing (CSD RequiresDataArtifact), not the
+		// shape of the tree (Block 5, design §8.5); the walk still recurses into every child unconditionally.
+		uids, err := coveredPVCUIDsForContent(ctx, c, namespace, content, dataBearing)
 		if err != nil {
 			return err
 		}
@@ -140,7 +156,21 @@ func coveredPVCUIDsForContent(
 	c client.Reader,
 	namespace string,
 	content *storagev1alpha1.SnapshotContent,
+	dataBearing DataBearingKindFunc,
 ) ([]string, error) {
+	// Data-bearing decision is AUTHORITATIVE from the CSD (RequiresDataArtifact via dataBearing), keyed by
+	// the owning snapshot kind (content.spec.snapshotRef.kind) — NOT the shape of the tree (Block 5, design
+	// §8.5). A manifest-only aggregate (RequiresDataArtifact==false) contributes no covered PVC UID; the
+	// caller still recurses into its children unconditionally. A kind may legitimately carry BOTH children
+	// and a data leg, which the old `if hasChildren { return nil }` heuristic wrongly excluded.
+	kind := ""
+	if content.Spec.SnapshotRef != nil {
+		kind = content.Spec.SnapshotRef.Kind
+	}
+	if dataBearing == nil || !dataBearing(kind) {
+		return nil, nil
+	}
+	// A (milestone B of the write model): status.data published — the authoritative covered UID.
 	fromDataRefs, err := pvcUIDsFromSnapshotContentDataRefs(content)
 	if err != nil {
 		return nil, err
@@ -148,18 +178,58 @@ func coveredPVCUIDsForContent(
 	if len(fromDataRefs) > 0 {
 		return fromDataRefs, nil
 	}
-	hasChildren := len(content.Status.ChildrenSnapshotContentRefs) > 0
-	if hasChildren {
-		return nil, nil
+	// A->B window: status.data is not published yet. Fall back via the OWNING snapshot resolved from
+	// content.spec.snapshotRef (design §8.5/§11.7), NOT a content-UID-derived VCR (a domain data-leaf's VCR
+	// is snapshot-owned and its real name is only published on the owner's captureState).
+	ref := content.Spec.SnapshotRef
+	if ref != nil && ref.Name != "" {
+		ownerNS := ref.Namespace
+		if ownerNS == "" {
+			ownerNS = namespace
+		}
+		owner := &unstructured.Unstructured{}
+		owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ownerNS, Name: ref.Name}, owner); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return nil, fmt.Errorf("get owning snapshot %s/%s of SnapshotContent %q: %w", ownerNS, ref.Name, content.Name, err)
+			}
+			// NotFound owner: fall through to the pending signal below (the wave re-evaluates).
+		} else if fromOwner, err := coveredPVCUIDsFromOwnerObject(ctx, c, ownerNS, owner); err != nil {
+			return nil, err
+		} else if len(fromOwner) > 0 {
+			return fromOwner, nil
+		}
 	}
-	fromVCR, err := pvcUIDsFromPendingVCR(ctx, c, namespace, content.UID)
-	if err != nil {
-		return nil, err
+	// Data-bearing node with NO observable coverage yet (no status.data and no in-flight VCR/snapshotSource):
+	// fail closed so the caller requeues instead of under-covering — silently dropping this UID would let the
+	// orphan wave double-capture a PVC an in-flight child capture already targets (INV coverage completeness).
+	return nil, fmt.Errorf("%w: SnapshotContent %q (kind %q, no status.data and owner has no in-flight VCR/snapshotSource yet)", ErrSubtreeDataRefsPending, content.Name, kind)
+}
+
+// coveredPVCUIDsFromOwnerObject reads the covered PVC UID(s) DIRECTLY from an owning xxxSnapshot object in
+// hand (design §8.5/§11.7): the in-flight VCR name on status.captureState.domainSpecificController.
+// volumeCaptureRequestName → that VCR's spec.targets[].uid (VCR-based domains), or status.snapshotSource.uid
+// (native-CSI VolumeSnapshot, no VCR). Both are published by capture barrier 1 (Planned), so coverage is
+// computable at the relaxed phase>=Planned wave gate even before the node's SnapshotContent is bound.
+// Returns nil (no error) when neither signal is present yet; the caller decides pending vs benign.
+func coveredPVCUIDsFromOwnerObject(
+	ctx context.Context,
+	c client.Reader,
+	namespace string,
+	owner *unstructured.Unstructured,
+) ([]string, error) {
+	ownerNS := owner.GetNamespace()
+	if ownerNS == "" {
+		ownerNS = namespace
 	}
-	if len(fromVCR) > 0 {
-		return fromVCR, nil
+	if vcrName, _, _ := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName"); vcrName != "" {
+		return pvcUIDsFromNamedVCR(ctx, c, ownerNS, vcrName)
 	}
-	// Manifest-only leaf (no volume leg yet): contributes no covered PVC UIDs.
+	if owner.GetAPIVersion() == snapshotpkg.CSISnapshotAPIVersion && owner.GetKind() == snapshotpkg.KindVolumeSnapshot {
+		if uid, _, _ := unstructured.NestedString(owner.Object, "status", "snapshotSource", "uid"); uid != "" {
+			return []string{uid}, nil
+		}
+	}
 	return nil, nil
 }
 
@@ -184,7 +254,17 @@ func pvcUIDsFromPendingVCR(ctx context.Context, c client.Reader, namespace strin
 	if contentUID == "" {
 		return nil, nil
 	}
-	name := vcpkg.SnapshotContentVCRName(contentUID)
+	return pvcUIDsFromNamedVCR(ctx, c, namespace, vcpkg.SnapshotContentVCRName(contentUID))
+}
+
+// pvcUIDsFromNamedVCR reads the covered PVC UIDs (spec.targets[].uid) from a VolumeCaptureRequest addressed
+// by an explicit name in namespace. Used by the coverage owner-fallback for a domain data-leaf whose VCR is
+// snapshot-owned (its name comes from the owner's captureState.volumeCaptureRequestName, not the content
+// UID). A missing VCR contributes nothing (the wave re-evaluates); a parse/read error is a hard error.
+func pvcUIDsFromNamedVCR(ctx context.Context, c client.Reader, namespace, name string) ([]string, error) {
+	if name == "" {
+		return nil, nil
+	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, obj); err != nil {

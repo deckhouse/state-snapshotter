@@ -512,20 +512,21 @@ func childCaptureAtLeastPlanned(child *unstructured.Unstructured) bool {
 }
 
 // allDeclaredDomainChildSnapshotsReady reports whether every declared DOMAIN child snapshot of the root
-// (Snapshot.status.childrenSnapshotRefs) has reached full Ready=True. It is the wave barrier for root
-// orphan/residual PVC volume capture: orphan PVCs must be evaluated only after the already-declared domain
-// subtree has finished capturing, so a PVC that a domain child covers is never momentarily seen as orphan.
-// Orphan/residual-PVC VolumeSnapshot children are ordinary domain children now (content-single-writer
-// design §11.6) and participate in this gate like every other child (Block 5 relaxes the gate from
-// full-Ready to phase>=Planned). The root MANIFEST branch is not gated by this. A NotFound or not-yet-Ready
-// child is pending (not a failure); a terminal child failure is surfaced separately by the content
-// aggregation (ChildrenFailed), so here it simply keeps the gate closed. Readiness reuses
-// ClassifyGenericChildSnapshotReady (Ready=True == Completed) for the pending/failed descriptors AND
-// enforces the strict generation contract: a Ready=True is honored only when its observedGeneration ==
-// metadata.generation, so a stale Ready=True from a previous spec generation cannot open the orphan wave
-// while the child re-reconciles (mirrors readyConditionIsCurrentTerminal / conditionSliceHasCurrentTrue;
-// domain child controllers stamp Ready.observedGeneration on every write). A namespace with no declared
-// domain children passes the gate vacuously.
+// (Snapshot.status.childrenSnapshotRefs) has reached capture barrier 1 (status.captureState.
+// domainSpecificController.phase >= Planned, i.e. Planned or Finished). It is the wave barrier for root
+// orphan/residual PVC volume capture: orphan PVCs must be evaluated only once the already-declared domain
+// subtree's coverage is COMPUTABLE, so a PVC that a domain child covers is never momentarily seen as
+// orphan. Block 5 relaxed this from full Ready=True to phase>=Planned: coverage no longer needs the child's
+// status.data (milestone B) because the coverage owner-fallback (design §8.5/§11.7) reads the covered PVC
+// UIDs straight from the child's captureState — the in-flight VolumeCaptureRequest name for VCR domains,
+// or status.snapshotSource.uid for native-CSI VolumeSnapshots — both published by Planned. Waiting for full
+// Ready here was the deadlock: a child cannot go Ready until its content subtree closes, which needs the
+// root content, which needs this gate. The root MANIFEST branch is not gated by this. A NotFound child is
+// pending (not created yet); a child not yet Planned (no phase, phase=Planning) is pending; a terminal
+// child failure (phase=Failed) is NOT surfaced here (the content aggregation reports ChildrenFailed) — it
+// stays pending, keeping the gate closed. No observedGeneration gate: the domain phase is monotonic and the
+// spec is immutable (mirrors weightLayerCaptureReady). A namespace with no declared domain children passes
+// the gate vacuously.
 func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, pending []string, err error) {
 	for _, ref := range refs {
 		gv, perr := schema.ParseGroupVersion(ref.APIVersion)
@@ -542,13 +543,8 @@ func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Co
 			}
 			return false, nil, gerr
 		}
-		if class, msg := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, ref.Name); class != usecase.SnapshotChildReadyClassCompleted {
-			pending = append(pending, msg)
-			continue
-		}
-		// Completed (Ready=True): require the current generation so a stale Ready does not open the gate.
-		if rc := usecase.CurrentReadyCondition(child); rc == nil || rc.ObservedGeneration != child.GetGeneration() {
-			pending = append(pending, fmt.Sprintf("%s/%s/%s (Ready=True but observedGeneration stale/missing; want %d)", gvk.String(), namespace, ref.Name, child.GetGeneration()))
+		if !childCaptureAtLeastPlanned(child) {
+			pending = append(pending, describePendingChildPhase(child, gvk, namespace, ref.Name))
 		}
 	}
 	if len(pending) > 0 {

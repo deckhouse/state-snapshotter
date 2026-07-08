@@ -33,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
@@ -62,6 +63,23 @@ func (r *SnapshotReconciler) buildSnapshotMachineryGVKs() (namespacemanifest.Sna
 		set[gvk] = struct{}{}
 	}
 	return set, nil
+}
+
+// dataBearingKindFunc returns the coverage data-bearing predicate backed by the live GVK registry
+// (CSD spec.requiresDataArtifact via GVKRegistry.RequiresDataArtifact). Coverage keys the decision on
+// the owning snapshot kind — NOT the shape of the subtree (Block 5, design §8.5). Returns
+// snapshotgraphregistry.ErrGraphRegistryNotReady when the registry is not built yet so callers requeue
+// (fail-closed: never under-cover with an empty registry, which would let an already-captured PVC be
+// re-captured as orphan).
+func (r *SnapshotReconciler) dataBearingKindFunc() (volumecaptureuc.DataBearingKindFunc, error) {
+	if r.SnapshotGraphRegistry == nil {
+		return nil, snapshotgraphregistry.ErrGraphRegistryNotReady
+	}
+	reg := r.SnapshotGraphRegistry.Current()
+	if reg == nil {
+		return nil, snapshotgraphregistry.ErrGraphRegistryNotReady
+	}
+	return reg.RequiresDataArtifact, nil
 }
 
 // namespaceCaptureRBACReady reports whether this controller is already authorized to list every resource

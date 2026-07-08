@@ -73,6 +73,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 	rootNS *storagev1alpha1.Snapshot,
 	rootContentName string,
 	snapshotKinds namespacemanifest.SnapshotMachineryGVKs,
+	dataBearing volumecaptureuc.DataBearingKindFunc,
 ) ([]namespacemanifest.ManifestTarget, []schema.GroupVersionResource, error) {
 	if arch == nil {
 		return nil, nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
@@ -98,7 +99,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 		}
 	}
 
-	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, rootContent)
+	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, rootContent, dataBearing)
 	if err != nil {
 		return nil, nil, err
 	}

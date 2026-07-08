@@ -53,11 +53,12 @@ func listResidualRootOwnedPVCTargets(
 	namespace string,
 	snap *storagev1alpha1.Snapshot,
 	_ *storagev1alpha1.SnapshotContent,
+	dataBearing DataBearingKindFunc,
 ) ([]vcpkg.Target, error) {
 	// wave7 content-free coverage: derive the subtree-covered PVC UID set from the Snapshot child graph
 	// (status.childrenSnapshotRefs + each descendant's mirrored status.data), NOT the bound SnapshotContent
 	// tree — so residual/orphan discovery is computable before the root content is bound ("late Planned").
-	covered, err := CollectSubtreeCoveredPVCUIDsFromSnapshot(ctx, c, snap)
+	covered, err := CollectSubtreeCoveredPVCUIDsFromSnapshot(ctx, c, snap, dataBearing)
 	if err != nil {
 		return nil, err
 	}

@@ -131,25 +131,27 @@ func TestWeightLayerCaptureReady(t *testing.T) {
 	})
 }
 
-// domainChildReady builds a bound child snapshot whose Ready condition reflects full readiness (Ready=True)
-// or in-progress capture (Ready=False/Capturing). It is the fixture for the orphan-PVC final-wave gate
-// (allDeclaredDomainChildSnapshotsReady), which keys on full Ready (via ClassifyGenericChildSnapshotReady),
-// not on PlanningReady.
-func domainChildReady(name string, ready bool) *unstructured.Unstructured {
-	cond := metav1.Condition{Type: snapshotpkg.ConditionReady, Status: metav1.ConditionTrue, Reason: snapshotpkg.ReasonCompleted, ObservedGeneration: 1}
-	if !ready {
-		cond = metav1.Condition{Type: snapshotpkg.ConditionReady, Status: metav1.ConditionFalse, Reason: "Capturing", Message: "still capturing", ObservedGeneration: 1}
+// domainChildReady builds a bound child snapshot whose capture phase reflects whether it has reached
+// barrier 1: planned==true sets domainSpecificController.phase=Planned (opens the orphan-PVC final-wave
+// gate), planned==false sets phase=Planning (still pending). Block 5 relaxed the gate
+// (allDeclaredDomainChildSnapshotsReady) from full Ready=True to phase>=Planned, so this fixture keys on
+// the domain capture phase, not the Ready condition.
+func domainChildReady(name string, planned bool) *unstructured.Unstructured {
+	phase := storagev1alpha1.SnapshotCapturePhasePlanned
+	if !planned {
+		phase = storagev1alpha1.SnapshotCapturePhasePlanning
 	}
-	child := demoSnapshotChild(name, []metav1.Condition{cond})
+	child := demoSnapshotChildWithPhase(name, phase)
 	if err := unstructured.SetNestedField(child.Object, "content-"+name, "status", "boundSnapshotContentName"); err != nil {
 		panic(err)
 	}
 	return child
 }
 
-// readyVSChild builds a bound, Ready=True orphan CSI VolumeSnapshot domain child. Under the
-// content-single-writer model an orphan VolumeSnapshot is an ordinary domain child (no longer a skipped
-// "visibility leaf"), so the final-wave gate must treat it exactly like any other domain child.
+// readyVSChild builds a bound orphan CSI VolumeSnapshot domain child at capture barrier 1 (phase=Planned).
+// Under the content-single-writer model an orphan VolumeSnapshot is an ordinary domain child (no longer a
+// skipped "visibility leaf"), so the final-wave gate (relaxed to phase>=Planned in Block 5) must treat it
+// exactly like any other domain child.
 func readyVSChild(name, ns string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": snapshotpkg.CSISnapshotAPIVersion,
@@ -157,12 +159,11 @@ func readyVSChild(name, ns string) *unstructured.Unstructured {
 		"metadata":   map[string]interface{}{"name": name, "namespace": ns, "generation": int64(1)},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "content-" + name,
-			"conditions": []interface{}{map[string]interface{}{
-				"type":               snapshotpkg.ConditionReady,
-				"status":             string(metav1.ConditionTrue),
-				"reason":             snapshotpkg.ReasonCompleted,
-				"observedGeneration": int64(1),
-			}},
+			"captureState": map[string]interface{}{
+				"domainSpecificController": map[string]interface{}{
+					"phase": string(storagev1alpha1.SnapshotCapturePhasePlanned),
+				},
+			},
 		},
 	}}
 }
