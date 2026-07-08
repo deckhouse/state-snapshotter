@@ -126,6 +126,7 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 	It("requeues without finalizing when chunk creation hits a transient error", func() {
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			WithInterceptorFuncs(failChunkCreate(apierrors.NewServiceUnavailable("apiserver blip"), -1)).
 			Build()
@@ -156,6 +157,7 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 	It("resumes chunk creation on a later reconcile after a transient failure", func() {
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			WithInterceptorFuncs(failChunkCreate(apierrors.NewServiceUnavailable("apiserver blip"), 1)).
 			Build()
@@ -188,6 +190,7 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 	It("finalizes the MCR as Failed on a terminal chunk error", func() {
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			WithInterceptorFuncs(failChunkCreate(apierrors.NewBadRequest("permanently malformed chunk"), -1)).
 			Build()
@@ -209,6 +212,7 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 	It("resumes chunk creation when a checkpoint already exists but is still Processing", func() {
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			Build()
 		ctrl := newController(c)

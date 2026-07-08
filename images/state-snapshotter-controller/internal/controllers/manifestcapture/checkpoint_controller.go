@@ -230,15 +230,18 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	// A NotFound here is always from a missing target object and is terminal (see below).
 	objects, err := r.collectTargetObjects(ctx, mcr)
 	if err != nil {
-		// Only a genuinely absent target (NotFound) is terminal: Kubernetes is declarative, so if the
-		// source object does not exist the capture fails fast (Ready=False) and the user recreates the MCR
-		// once the object appears. EVERY other error is transient and is requeued WITHOUT marking the MCR
-		// terminal — most importantly Forbidden, which happens routinely during module rollout while the
-		// dynamic per-domain RBAC (030-domain-rbac) is still propagating to the controller SA. Bricking the
-		// MCR on a transient Forbidden would silently wedge the whole snapshot (ManifestCapturePending) and
-		// require a manual delete/recreate after every deploy. This mirrors the parent-graph planner, which
-		// soft-degrades source-list Forbidden and requeues instead of failing (see sourceListForbiddenError).
-		if !errors.IsNotFound(err) {
+		// Two error classes are terminal here: (1) a genuinely absent target (NotFound) — Kubernetes is
+		// declarative, so if the source object does not exist the capture fails fast (Ready=False) and the
+		// user recreates the MCR once the object appears; and (2) a forbidden cluster-scoped target
+		// (terminalCaptureError from collectTargetObjects) — a namespaced MCR may only capture its own
+		// Namespace, so any other cluster-scoped target is a permanent misuse no retry can fix. EVERY other
+		// error is transient and is requeued WITHOUT marking the MCR terminal — most importantly Forbidden,
+		// which happens routinely during module rollout while the dynamic per-domain RBAC (030-domain-rbac)
+		// is still propagating to the controller SA. Bricking the MCR on a transient Forbidden would silently
+		// wedge the whole snapshot (ManifestCapturePending) and require a manual delete/recreate after every
+		// deploy. This mirrors the parent-graph planner, which soft-degrades source-list Forbidden and
+		// requeues instead of failing (see sourceListForbiddenError).
+		if !errors.IsNotFound(err) && !isTerminalCaptureError(err) {
 			r.Logger.Info("Manifest capture collection failed with a transient error; requeueing without marking the request terminal",
 				"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name), "error", err.Error())
 			return ctrl.Result{}, err
@@ -658,22 +661,45 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		objects = append(objects, *obj)
 	}
 
-	// MCR targets are namespaced in the same namespace as ManifestCaptureRequest.
+	// MCR targets are namespaced in the same namespace as the ManifestCaptureRequest, EXCEPT the namespace's
+	// own Namespace object — the ONLY cluster-scoped target a namespace capture may hold (name must equal
+	// mcr.Namespace). Scope is resolved via the RESTMapper; any other cluster-scoped target is a permanent
+	// misuse of a namespaced MCR and is rejected terminally (see the terminalCaptureError handling in
+	// processCaptureRequest). This is the actor-independent guard: it holds regardless of who created the MCR.
 	for _, target := range mcr.Spec.Targets {
 		gv, err := schema.ParseGroupVersion(target.APIVersion)
 		if err != nil {
 			return nil, fmt.Errorf("invalid apiVersion %s: %w", target.APIVersion, err)
 		}
 
+		gvk := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: target.Kind}
+
 		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   gv.Group,
-			Version: gv.Version,
-			Kind:    target.Kind,
-		})
+		obj.SetGroupVersionKind(gvk)
 		obj.SetName(target.Name)
-		key := client.ObjectKey{Namespace: mcr.Namespace, Name: target.Name}
-		obj.SetNamespace(mcr.Namespace)
+
+		mapping, err := r.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			// The RESTMapper/discovery can lag behind freshly-registered kinds, so a mapping miss is
+			// transient (requeue) rather than terminal — a momentary discovery gap must never wedge the
+			// snapshot. Returning a plain (non-terminalCaptureError) error keeps this on the retry path.
+			return nil, fmt.Errorf("restmapping %s: %w", gvk, err)
+		}
+
+		var key client.ObjectKey
+		if mapping.Scope.Name() == meta.RESTScopeNameRoot {
+			// Cluster-scoped: only the capture's own Namespace is allowed (name == mcr.Namespace).
+			if !(gvk.Group == "" && gvk.Version == "v1" && gvk.Kind == "Namespace" && target.Name == mcr.Namespace) {
+				return nil, terminalCapturef("cluster-scoped target %s/%s is not allowed in a namespace capture (only Namespace %q)", target.APIVersion, target.Kind, mcr.Namespace)
+			}
+			// A cluster-scoped GET keys on name only, and the captured object carries an empty namespace so
+			// the restore sanitizer drops it (metadata.namespace == "") and the dedup uses the _cluster key.
+			key = client.ObjectKey{Name: target.Name}
+			obj.SetNamespace("")
+		} else {
+			key = client.ObjectKey{Namespace: mcr.Namespace, Name: target.Name}
+			obj.SetNamespace(mcr.Namespace)
+		}
 
 		if err := r.Get(ctx, key, obj); err != nil {
 			// Preserve original error for IsNotFound check in caller

@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,6 +84,20 @@ func objectsByKindName(objects []unstructured.Unstructured) map[string]unstructu
 	return result
 }
 
+// testRESTMapper builds a RESTMapper covering the kinds used across the controller tests so
+// collectTargetObjects can resolve each target's scope (the controller-runtime fake client has no
+// RESTMapper by default, so RESTMapping would panic). Namespace and ClusterRole are cluster-scoped; the
+// rest are namespaced.
+func testRESTMapper() meta.RESTMapper {
+	m := meta.NewDefaultRESTMapper(nil)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "Secret"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "Service"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"}, meta.RESTScopeRoot)
+	return m
+}
+
 var _ = Describe("ManifestCaptureRequest TTL", func() {
 	var (
 		baseClient ctrlclient.Client
@@ -105,6 +120,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 
 		baseClient = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
@@ -267,6 +283,67 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			// A non-domain annotation that the legacy cleaner would have stripped must survive raw capture.
 			Expect(svcCaptured.GetAnnotations()).To(HaveKeyWithValue("example.com/keep-me", "raw"))
 		})
+
+		// Scope guard: a namespaced MCR may capture the cluster-scoped Namespace object ONLY when it is its
+		// own namespace (name == mcr.Namespace). Any other cluster-scoped target — including a foreign
+		// Namespace — is a permanent misuse and must fail terminally (terminalCaptureError), never requeue.
+		It("should capture its own Namespace as a cluster-scoped object", func() {
+			ctx := context.Background()
+			Expect(baseClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}})).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-ns-self", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "Namespace", Name: "ns1"}, // name == mcr.Namespace
+					},
+				},
+			}
+
+			objects, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objects).To(HaveLen(1))
+			Expect(objects[0].GetKind()).To(Equal("Namespace"))
+			Expect(objects[0].GetName()).To(Equal("ns1"))
+			// Cluster-scoped: the captured object carries an empty namespace so the restore sanitizer drops it.
+			Expect(objects[0].GetNamespace()).To(Equal(""))
+		})
+
+		It("should terminally reject a foreign Namespace target", func() {
+			ctx := context.Background()
+			Expect(baseClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "other-ns"}})).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-ns-other", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "Namespace", Name: "other-ns"}, // name != mcr.Namespace
+					},
+				},
+			}
+
+			_, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsNotFound(err)).To(BeFalse(), "a forbidden foreign Namespace is not a NotFound")
+			Expect(isTerminalCaptureError(err)).To(BeTrue(), "a forbidden cluster-scoped target must be terminal")
+		})
+
+		It("should terminally reject a non-Namespace cluster-scoped target", func() {
+			ctx := context.Background()
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-clusterrole", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: "cluster-admin"},
+					},
+				},
+			}
+
+			_, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).To(HaveOccurred())
+			Expect(isTerminalCaptureError(err)).To(BeTrue(), "a forbidden cluster-scoped target must be terminal")
+		})
 	})
 
 	// ============================================================================
@@ -285,6 +362,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctx = context.Background()
 			scannerClient = fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithRESTMapper(testRESTMapper()).
 				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 				Build()
 			// Initialize controller for scanner tests
@@ -460,6 +538,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctx = context.Background()
 			restartClient = fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithRESTMapper(testRESTMapper()).
 				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 				Build()
 			// Reuse logger from parent BeforeEach
@@ -541,6 +620,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctx = context.Background()
 			finalizeClient = fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithRESTMapper(testRESTMapper()).
 				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 				Build()
 			ctrl.Client = finalizeClient
@@ -686,6 +766,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 		client = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			Build()
 	})
@@ -915,6 +996,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 
 		client = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
@@ -1462,6 +1544,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 
 		k8sClient = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
@@ -1656,6 +1739,36 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 
+	})
+
+	Describe("terminal cluster-scoped rejection", func() {
+		// A forbidden cluster-scoped target must be classified terminally (Ready=False/Failed) by
+		// processCaptureRequest, exactly like a NotFound target — not requeued forever. This is the
+		// reconcile-level counterpart to the collectTargetObjects scope-guard unit specs.
+		It("fails the MCR terminally when it targets a foreign Namespace", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-foreign-ns", Namespace: "default"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "Namespace", Name: "some-other-ns"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// A terminal error is handled inside processCaptureRequest (finalized to Ready=False/Failed),
+			// so it must NOT surface as a requeue error to the reconcile loop.
+			_, err := reconciler.processCaptureRequest(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, ctrlclient.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
+		})
 	})
 
 	Describe("isTerminal semantics", func() {

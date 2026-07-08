@@ -1204,3 +1204,17 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   context-vs-`Eventually` budget mismatches (the `subtreePlanned` and `dataCaptured` volume specs cancelled
   before their inner waits) and made the root-exclude spec poll the fail-closed endpoint + own-manifests together
   (one-shot reads raced the still-converging tree); final Bugbot pass clean. gofmt + vet + `go test -c` green.
+- **Add** (capture-namespace) The root namespace Snapshot now captures its own `Namespace` object.
+  `BuildRootNamespaceManifestCaptureTargets` (root_capture_run_exclude.go) appends a `v1/Namespace` target named
+  after the target namespace, so the root MCP always holds the Namespace (served verbatim via `/manifests`,
+  dropped by the restore sanitizer as cluster-scoped) and the root MCR is never empty. The capture executor
+  `collectTargetObjects` (checkpoint_controller.go) now resolves each target's scope via the RESTMapper and
+  TERMINALLY rejects (terminalCaptureError → Ready=False/Failed, not requeue) any cluster-scoped target except the
+  Namespace whose name equals `mcr.Namespace`, for which it does a cluster-scoped GET (captured with empty
+  `metadata.namespace`); a RESTMapping miss stays transient (requeue). The MCR webhook `MCRValidate`
+  (mcrValidator.go) now allows a `v1/Namespace` target only when its name equals the MCR namespace, authorized via a
+  cluster-scoped `namespaces get` SubjectAccessReview. Unit tests: executor scope-guard specs (own Namespace
+  accepted; foreign Namespace / other cluster-scoped terminally rejected; namespaced regression) + a Reconcile-level
+  terminal-classification test (all fake clients now carry a RESTMapper); mcrValidator accept/reject specs; a
+  root-target exclude-key invariant test. gofmt + vet + unit suites green (golangci-lint unavailable locally);
+  Bugbot clean on the changed files.

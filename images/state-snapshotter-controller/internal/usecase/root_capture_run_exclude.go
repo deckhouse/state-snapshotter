@@ -93,6 +93,18 @@ func BuildRootNamespaceManifestCaptureTargets(
 		return nil, unreadable, err
 	}
 
+	// Capture the Namespace object itself in the root node's own manifests. It is the only cluster-scoped
+	// target allowed in a namespace snapshot (name == the snapshot's target namespace, enforced by the MCR
+	// webhook and the capture executor). Downstream: /manifests serves it verbatim, while the restore
+	// sanitizer drops cluster-scoped objects (metadata.namespace == "") so it never re-applies. It is never
+	// captured by any descendant node, so it never appears in the subtree exclude set below and survives
+	// FilterManifestTargets. Side effect: the root MCR is never empty (always has at least this target).
+	base = append(base, namespacemanifest.ManifestTarget{
+		APIVersion: "v1",
+		Kind:       "Namespace",
+		Name:       targetNamespace,
+	})
+
 	// A residual/orphan root PVC is captured as its own VolumeSnapshot domain child (content-single-writer
 	// design §11.6): that child owns its own SnapshotContent + ManifestCheckpoint holding the PVC manifest +
 	// its own data leg. The root is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So

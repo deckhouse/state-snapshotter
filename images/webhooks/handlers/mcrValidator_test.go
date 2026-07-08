@@ -183,24 +183,64 @@ func TestMCRValidate_RejectClusterScopedResource(t *testing.T) {
 	}
 }
 
-func TestMCRValidate_RejectsNamespaceTarget(t *testing.T) {
+func TestMCRValidate_AllowsOwnNamespaceTarget(t *testing.T) {
 	ctx := context.Background()
 
 	mockClient := fake.NewSimpleClientset()
-	setDiscoveryResources(mockClient, metav1.APIResource{Name: "namespaces", Kind: "Namespace", Namespaced: false})
+	// The Namespace branch authorizes via a cluster-scoped SubjectAccessReview on `namespaces get`.
+	mockClient.PrependReactor("create", "subjectaccessreviews", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
 	SetKubernetesClient(mockClient)
 	SetDynamicClient(newFakeDynamicClient(map[string]map[string]runtime.Object{}))
 
 	mcr := &storagev1alpha1.ManifestCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mcr-namespace",
+			Name:      "mcr-namespace-self",
 			Namespace: "default",
 		},
 		Spec: storagev1alpha1.ManifestCaptureRequestSpec{
 			Targets: []storagev1alpha1.ManifestTarget{{
 				APIVersion: "v1",
 				Kind:       "Namespace",
-				Name:       "default",
+				Name:       "default", // name == mcr.Namespace
+			}},
+		},
+	}
+	result, err := MCRValidate(ctx, testCreateAdmissionReview(), mcr)
+	if err != nil {
+		t.Fatalf("MCRValidate returned error: %v", err)
+	}
+	if !result.Valid {
+		t.Fatalf("Expected own-namespace Namespace target to be accepted, got: %s", result.Message)
+	}
+}
+
+func TestMCRValidate_RejectsForeignNamespaceTarget(t *testing.T) {
+	ctx := context.Background()
+
+	mockClient := fake.NewSimpleClientset()
+	// Allow the SAR so the rejection is attributable to the name mismatch, not to RBAC.
+	mockClient.PrependReactor("create", "subjectaccessreviews", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+	SetKubernetesClient(mockClient)
+	SetDynamicClient(newFakeDynamicClient(map[string]map[string]runtime.Object{}))
+
+	mcr := &storagev1alpha1.ManifestCaptureRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mcr-namespace-foreign",
+			Namespace: "default",
+		},
+		Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+			Targets: []storagev1alpha1.ManifestTarget{{
+				APIVersion: "v1",
+				Kind:       "Namespace",
+				Name:       "some-other-ns", // name != mcr.Namespace
 			}},
 		},
 	}
@@ -209,10 +249,10 @@ func TestMCRValidate_RejectsNamespaceTarget(t *testing.T) {
 		t.Fatalf("MCRValidate returned error: %v", err)
 	}
 	if result.Valid {
-		t.Fatal("Expected Namespace target to be rejected")
+		t.Fatal("Expected a foreign Namespace target to be rejected")
 	}
-	if !contains(result.Message, "cluster-scoped") {
-		t.Fatalf("Expected cluster-scoped rejection, got: %s", result.Message)
+	if !contains(result.Message, "own namespace") {
+		t.Fatalf("Expected own-namespace rejection, got: %s", result.Message)
 	}
 }
 

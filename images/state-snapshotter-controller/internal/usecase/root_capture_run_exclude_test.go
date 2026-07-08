@@ -94,3 +94,41 @@ func TestFilterManifestTargets_RemovesExcludedKeys(t *testing.T) {
 		t.Fatalf("unexpected filter result: %#v", out)
 	}
 }
+
+// TestRootNamespaceTarget_SurvivesSubtreeExclude documents the injection caveat: BuildRootNamespaceManifest-
+// CaptureTargets appends the namespace's own Namespace object (name == targetNamespace) to the root's base
+// targets. Its FilterManifestTargets dedup key is built with the target namespace (non-empty), while ANY
+// descendant-reported cluster-scoped identity normalizes its empty namespace to the "_cluster" bucket. Since
+// no descendant ever captures the Namespace, its key can never appear in the subtree exclude set — but even
+// if a "_cluster"-bucketed Namespace identity did, the two keys differ and the injected target still
+// survives the filter. (The full builder needs a live dynamic/discovery client and is covered by e2e.)
+func TestRootNamespaceTarget_SurvivesSubtreeExclude(t *testing.T) {
+	const ns = "ns1"
+	nsTarget := namespacemanifest.ManifestTarget{APIVersion: "v1", Kind: "Namespace", Name: ns}
+	base := []namespacemanifest.ManifestTarget{
+		{APIVersion: "v1", Kind: "ConfigMap", Name: "cm1"},
+		nsTarget,
+	}
+
+	// The injected target's dedup key uses the (non-empty) target namespace...
+	injectedKey := namespacemanifest.ManifestTargetDedupKey(ns, nsTarget)
+	// ...while a hypothetical subtree identity for the same Namespace normalizes to "_cluster". They differ.
+	subtreeKey := subtreeIdentityExcludeKey(snapshotsdk.SubtreeManifestIdentity{
+		APIVersion: "v1", Kind: "Namespace", Name: ns,
+	})
+	if injectedKey == subtreeKey {
+		t.Fatalf("injected Namespace dedup key %q must differ from the cluster-bucket subtree key %q", injectedKey, subtreeKey)
+	}
+
+	out := namespacemanifest.FilterManifestTargets(base, map[string]struct{}{subtreeKey: {}}, ns)
+
+	var haveNS bool
+	for _, tgt := range out {
+		if tgt == nsTarget {
+			haveNS = true
+		}
+	}
+	if !haveNS {
+		t.Fatalf("Namespace target must survive the subtree exclude set, got %#v", out)
+	}
+}
