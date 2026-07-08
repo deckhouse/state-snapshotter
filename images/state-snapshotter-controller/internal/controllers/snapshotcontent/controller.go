@@ -41,6 +41,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
@@ -1359,11 +1361,14 @@ func (r *SnapshotContentController) firstMissingManifestCheckpointChunk(ctx cont
 }
 
 func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx context.Context, mcpName string, contentObj *unstructured.Unstructured) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	reconstructed := false
+	contentOwned := false
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
 		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 			return err
 		}
+		reconstructed = mcp.Labels[usecase.ReconstructedManifestCheckpointLabelKey] == "true"
 		ownerRef := metav1.OwnerReference{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 			Kind:       "SnapshotContent",
@@ -1376,12 +1381,52 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 			return fmt.Errorf("ManifestCheckpoint %s: %w", mcpName, err)
 		}
 		if !changed {
+			// Already controller-owned by this SnapshotContent (handoff completed on a prior pass).
+			contentOwned = true
 			return nil
 		}
 		base := mcp.DeepCopy()
 		mcp.OwnerReferences = refs
-		return r.Client.Patch(ctx, mcp, client.MergeFrom(base))
-	})
+		if err := r.Client.Patch(ctx, mcp, client.MergeFrom(base)); err != nil {
+			return err
+		}
+		contentOwned = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Import-MCP durability backstop cleanup (content-single-writer design §10.1): a reconstructed (import)
+	// MCP was born owned by a dedicated import ObjectKeeper (usecase.EnsureReconstructedManifestCheckpointObjectKeeper)
+	// because at upload time the SnapshotContent shell may not yet exist. Now that the MCP is durably owned
+	// by its SnapshotContent, that keeper is redundant; unlike the capture execution OK (GC'd together with
+	// its MCR) nothing else deletes the import keeper — it FollowObjects the still-live snapshot — so remove
+	// it here. Gated on the reconstructed label so a capture MCP's execution OK is never touched, and on the
+	// MCP being content-owned NOW (not only the pass that patched it) so a handoff that completed on a prior
+	// reconcile — or was interrupted by a crash between the handoff patch and this delete — still gets swept
+	// on a later pass (the delete is idempotent: a missing keeper is a no-op).
+	if reconstructed && contentOwned {
+		r.deleteReconstructedManifestCheckpointObjectKeeper(ctx, contentObj)
+	}
+	return nil
+}
+
+// deleteReconstructedManifestCheckpointObjectKeeper best-effort deletes the dedicated import ObjectKeeper
+// that anchored a reconstructed MCP before it was handed off to this SnapshotContent (content-single-writer
+// design §10.1). The keeper name is derived from the owning snapshot UID (content.spec.snapshotRef.uid); a
+// missing UID or an already-deleted keeper is a no-op. Failures are logged, not returned: the ownerRef
+// handoff (the correctness-critical step) already succeeded, so a lingering keeper is benign cruft.
+func (r *SnapshotContentController) deleteReconstructedManifestCheckpointObjectKeeper(ctx context.Context, contentObj *unstructured.Unstructured) {
+	logger := log.FromContext(ctx)
+	snapshotUID, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "uid")
+	if snapshotUID == "" {
+		return
+	}
+	okName := names.ImportManifestCheckpointObjectKeeperName(types.UID(snapshotUID))
+	ok := &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: okName}}
+	if err := r.Client.Delete(ctx, ok); err != nil && !errors.IsNotFound(err) {
+		logger.V(1).Info("failed to delete redundant import ObjectKeeper after MCP handoff; it follows a live snapshot and owns nothing, so this is benign",
+			"objectKeeper", okName, "err", err.Error())
+	}
 }
 
 // selfHealDataArtifactOwnerRefs re-asserts the SnapshotContent ownerRef on every VolumeSnapshotContent

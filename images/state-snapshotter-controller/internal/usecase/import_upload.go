@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
@@ -108,12 +109,21 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict", "target snapshot has no UID yet")
 	}
 
-	// Reconstruct the node's raw ManifestCheckpoint (idempotent, deterministic name keyed to the CR UID).
-	// ownerRefs are intentionally nil here: the ManifestCheckpoint is cluster-scoped and cannot be owned
-	// by the namespaced snapshot CR; the import orchestrator (C5) attaches it to the SnapshotContent it
-	// materializes, which is the durable GC owner.
+	// Import-MCP durability backstop (content-single-writer design §10.1): a cluster-scoped MCP cannot be
+	// owned by the namespaced snapshot CR, and the eager SnapshotContent shell may not exist yet at upload
+	// time, so the reconstructed MCP is anchored by a dedicated ObjectKeeper that FollowObjects the import
+	// snapshot. This makes the MCP + chunks GC-safe from birth: if the snapshot is deleted while the import
+	// is still pending, the keeper (and with it the MCP) cascades away. The aggregator re-parents the MCP
+	// onto its SnapshotContent and removes this keeper once the content materializes.
+	okRef, err := EnsureReconstructedManifestCheckpointObjectKeeper(ctx, s.client, cr, snapshotGVK)
+	if err != nil {
+		return "", NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
+	}
+
+	// Reconstruct the node's raw ManifestCheckpoint (idempotent, deterministic name keyed to the CR UID),
+	// owned by the dedicated import ObjectKeeper (durable GC anchor until the SnapshotContent handoff).
 	checkpointName := ReconstructedManifestCheckpointName(uid, "")
-	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, namespace, nil, manifests); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, namespace, []metav1.OwnerReference{okRef}, manifests); err != nil {
 		return "", classifyReconstructError(err)
 	}
 

@@ -5,16 +5,21 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
@@ -263,6 +268,131 @@ func TestEnsureManifestCheckpointOwnedByContentHandoffFromObjectKeeper(t *testin
 	assertHasOwnerRef(t, fresh.OwnerReferences, storagev1alpha1.SchemeGroupVersion.String(), "SnapshotContent", "content", true)
 	assertHasOwnerRef(t, fresh.OwnerReferences, unrelated.APIVersion, unrelated.Kind, unrelated.Name, false)
 	assertNoOwnerRef(t, fresh.OwnerReferences, controllercommon.DeckhouseAPIVersion, controllercommon.KindObjectKeeper, "ret-mcr")
+}
+
+// TestEnsureManifestCheckpointOwnedByContentDeletesImportObjectKeeper pins content-single-writer design
+// §10.1: after the reconstructed (import) MCP is handed off to its SnapshotContent, the aggregator deletes
+// the dedicated import ObjectKeeper that anchored it (nothing else would — it FollowObjects the still-live
+// import snapshot, not an MCR that gets GC'd).
+func TestEnsureManifestCheckpointOwnedByContentDeletesImportObjectKeeper(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add snapshotter scheme: %v", err)
+	}
+	if err := deckhousev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add deckhouse scheme: %v", err)
+	}
+	const snapUID = "import-snap-uid"
+	importOKName := names.ImportManifestCheckpointObjectKeeperName(types.UID(snapUID))
+	importOK := &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: importOKName}}
+	mcp := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "mcp",
+			Labels: map[string]string{usecase.ReconstructedManifestCheckpointLabelKey: "true"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: controllercommon.DeckhouseAPIVersion, Kind: controllercommon.KindObjectKeeper, Name: importOKName, Controller: boolPtr(true),
+			}},
+		},
+	}
+	content := snapshotContentUnstructuredWithSnapshotRefUID("content", "content-uid", snapUID)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, importOK).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	if err := r.ensureManifestCheckpointOwnedByContent(ctx, "mcp", content); err != nil {
+		t.Fatalf("handoff MCP ownerRef: %v", err)
+	}
+	fresh := &ssv1alpha1.ManifestCheckpoint{}
+	if err := cl.Get(ctx, client.ObjectKey{Name: "mcp"}, fresh); err != nil {
+		t.Fatalf("get MCP: %v", err)
+	}
+	assertHasOwnerRef(t, fresh.OwnerReferences, storagev1alpha1.SchemeGroupVersion.String(), "SnapshotContent", "content", true)
+	assertNoOwnerRef(t, fresh.OwnerReferences, controllercommon.DeckhouseAPIVersion, controllercommon.KindObjectKeeper, importOKName)
+	if err := cl.Get(ctx, client.ObjectKey{Name: importOKName}, &deckhousev1alpha1.ObjectKeeper{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("import ObjectKeeper must be deleted after handoff, got err=%v", err)
+	}
+}
+
+// TestEnsureManifestCheckpointOwnedByContentDeletesImportObjectKeeperAfterPriorHandoff pins the §10.1
+// cleanup robustness fix: even when the ownerRef handoff already completed on a PRIOR reconcile (so this
+// pass patches nothing), a later pass that observes the reconstructed MCP as content-owned still sweeps the
+// now-redundant import ObjectKeeper. This is the crash/upgrade recovery path (the keeper delete may have
+// been skipped or Forbidden earlier).
+func TestEnsureManifestCheckpointOwnedByContentDeletesImportObjectKeeperAfterPriorHandoff(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add snapshotter scheme: %v", err)
+	}
+	if err := deckhousev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add deckhouse scheme: %v", err)
+	}
+	const snapUID = "import-snap-uid"
+	importOKName := names.ImportManifestCheckpointObjectKeeperName(types.UID(snapUID))
+	importOK := &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: importOKName}}
+	// MCP already controller-owned by the SnapshotContent (handoff done on a prior pass); the import OK
+	// object lingers (a previous delete was skipped/Forbidden).
+	mcp := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "mcp",
+			Labels: map[string]string{usecase.ReconstructedManifestCheckpointLabelKey: "true"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "SnapshotContent", Name: "content", UID: "content-uid", Controller: boolPtr(true),
+			}},
+		},
+	}
+	content := snapshotContentUnstructuredWithSnapshotRefUID("content", "content-uid", snapUID)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, importOK).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	if err := r.ensureManifestCheckpointOwnedByContent(ctx, "mcp", content); err != nil {
+		t.Fatalf("re-run handoff: %v", err)
+	}
+	if err := cl.Get(ctx, client.ObjectKey{Name: importOKName}, &deckhousev1alpha1.ObjectKeeper{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("import ObjectKeeper must be swept even when the handoff completed earlier, got err=%v", err)
+	}
+}
+
+// TestEnsureManifestCheckpointOwnedByContentKeepsCaptureExecutionObjectKeeper is the negative counterpart:
+// a capture MCP carries NO reconstructed label, so its execution ObjectKeeper object must survive the
+// handoff (it is GC'd with its MCR, not by the aggregator). The keeper here is deliberately named exactly
+// what the §10.1 cleanup would target, so the test isolates the reconstructed-label gate (not a name miss).
+func TestEnsureManifestCheckpointOwnedByContentKeepsCaptureExecutionObjectKeeper(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add snapshotter scheme: %v", err)
+	}
+	if err := deckhousev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add deckhouse scheme: %v", err)
+	}
+	const snapUID = "capture-snap-uid"
+	execOKName := names.ImportManifestCheckpointObjectKeeperName(types.UID(snapUID))
+	execOK := &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: execOKName}}
+	mcp := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mcp",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: controllercommon.DeckhouseAPIVersion, Kind: controllercommon.KindObjectKeeper, Name: execOKName, Controller: boolPtr(true),
+			}},
+		},
+	}
+	content := snapshotContentUnstructuredWithSnapshotRefUID("content", "content-uid", snapUID)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, execOK).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	if err := r.ensureManifestCheckpointOwnedByContent(ctx, "mcp", content); err != nil {
+		t.Fatalf("handoff MCP ownerRef: %v", err)
+	}
+	if err := cl.Get(ctx, client.ObjectKey{Name: execOKName}, &deckhousev1alpha1.ObjectKeeper{}); err != nil {
+		t.Fatalf("capture execution ObjectKeeper must survive the handoff (reconstructed gate), got err=%v", err)
+	}
+}
+
+func snapshotContentUnstructuredWithSnapshotRefUID(name, uid, snapshotUID string) *unstructured.Unstructured {
+	obj := snapshotContentUnstructuredForOwnerTest(name, uid)
+	_ = unstructured.SetNestedField(obj.Object, snapshotUID, "spec", "snapshotRef", "uid")
+	return obj
 }
 
 func snapshotContentUnstructuredForOwnerTest(name, uid string) *unstructured.Unstructured {

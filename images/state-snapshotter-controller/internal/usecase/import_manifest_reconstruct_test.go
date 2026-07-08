@@ -124,6 +124,114 @@ func TestReconstructManifestCheckpoint_Idempotent(t *testing.T) {
 	}
 }
 
+// TestReconstructManifestCheckpoint_AdoptsReadyUnanchoredCheckpoint pins the §10.1 upgrade-safety path: a
+// checkpoint that is already Ready but UNANCHORED (pre-§10.1 ownerless scheme, or a repeat upload before the
+// aggregator handoff) is adopted onto the passed import ObjectKeeper and its reconstructed label backfilled,
+// so it becomes GC-safe instead of leaving a stray keeper that owns nothing.
+func TestReconstructManifestCheckpoint_AdoptsReadyUnanchoredCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	cl := newReconstructClient(t)
+	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "unanchored")
+
+	// Seed a Ready checkpoint, then strip its reconstructed label to emulate the pre-§10.1 ownerless scheme.
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, sampleManifests(t)); err != nil {
+		t.Fatalf("seed reconstruct: %v", err)
+	}
+	cp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: name}, cp); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	base := cp.DeepCopy()
+	delete(cp.Labels, ReconstructedManifestCheckpointLabelKey)
+	if err := cl.Patch(ctx, cp, client.MergeFrom(base)); err != nil {
+		t.Fatalf("strip label: %v", err)
+	}
+
+	controllerTrue := true
+	okRef := metav1.OwnerReference{APIVersion: "deckhouse.io/v1alpha1", Kind: "ObjectKeeper", Name: "nss-import-ok-x", UID: "ok-uid", Controller: &controllerTrue}
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
+		t.Fatalf("adopt reconstruct: %v", err)
+	}
+
+	if err := cl.Get(ctx, types.NamespacedName{Name: name}, cp); err != nil {
+		t.Fatalf("get after adopt: %v", err)
+	}
+	if ctrlRef := metav1.GetControllerOf(cp); ctrlRef == nil || ctrlRef.Name != "nss-import-ok-x" {
+		t.Fatalf("a Ready unanchored checkpoint must be adopted onto the import ObjectKeeper, got %#v", cp.OwnerReferences)
+	}
+	if cp.Labels[ReconstructedManifestCheckpointLabelKey] != reconstructedManifestCheckpointLabelValue {
+		t.Fatalf("adoption must backfill the reconstructed label, got %v", cp.Labels)
+	}
+}
+
+// TestReconstructManifestCheckpoint_DoesNotReanchorOwnedCheckpoint is the negative counterpart: a Ready
+// checkpoint that already has a controller owner (here the SnapshotContent, i.e. the aggregator handoff
+// already ran) must NOT be re-anchored onto the import ObjectKeeper — that would either add a second
+// controller ref or resurrect a keeper the handoff was meant to retire.
+func TestReconstructManifestCheckpoint_DoesNotReanchorOwnedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	cl := newReconstructClient(t)
+	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "owned")
+	controllerTrue := true
+	contentRef := metav1.OwnerReference{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "SnapshotContent", Name: "content", UID: "content-uid", Controller: &controllerTrue}
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{contentRef}, sampleManifests(t)); err != nil {
+		t.Fatalf("seed reconstruct: %v", err)
+	}
+
+	okRef := metav1.OwnerReference{APIVersion: "deckhouse.io/v1alpha1", Kind: "ObjectKeeper", Name: "nss-import-ok-y", UID: "ok-uid", Controller: &controllerTrue}
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
+		t.Fatalf("re-run: %v", err)
+	}
+
+	cp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: name}, cp); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if ctrlRef := metav1.GetControllerOf(cp); ctrlRef == nil || ctrlRef.Kind != "SnapshotContent" {
+		t.Fatalf("a handed-off checkpoint must keep its SnapshotContent controller owner, got %#v", cp.OwnerReferences)
+	}
+	for _, ref := range cp.OwnerReferences {
+		if ref.Kind == "ObjectKeeper" {
+			t.Fatalf("must not re-anchor a content-owned checkpoint onto the import ObjectKeeper, got %#v", cp.OwnerReferences)
+		}
+	}
+}
+
+// TestReconstructManifestCheckpoint_AnchorsNotReadyResumedCheckpoint pins the resume-path §10.1 anchoring:
+// a pre-existing but NOT-yet-Ready ownerless checkpoint (pre-§10.1 partial create) is anchored onto the
+// passed import ObjectKeeper as it is finished (chunks + Ready status), so it never reaches Ready without a
+// GC backstop.
+func TestReconstructManifestCheckpoint_AnchorsNotReadyResumedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	cl := newReconstructClient(t)
+	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "resume")
+
+	pre := &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if err := cl.Create(ctx, pre); err != nil {
+		t.Fatalf("seed not-ready mcp: %v", err)
+	}
+
+	controllerTrue := true
+	okRef := metav1.OwnerReference{APIVersion: "deckhouse.io/v1alpha1", Kind: "ObjectKeeper", Name: "nss-import-ok-z", UID: "ok-uid", Controller: &controllerTrue}
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
+		t.Fatalf("resume reconstruct: %v", err)
+	}
+
+	cp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: name}, cp); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if ctrlRef := metav1.GetControllerOf(cp); ctrlRef == nil || ctrlRef.Name != "nss-import-ok-z" {
+		t.Fatalf("a resumed not-Ready checkpoint must be anchored onto the import ObjectKeeper, got %#v", cp.OwnerReferences)
+	}
+	if !meta.IsStatusConditionTrue(cp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady) {
+		t.Fatalf("resumed checkpoint must finish Ready, conditions=%v", cp.Status.Conditions)
+	}
+	if cp.Labels[ReconstructedManifestCheckpointLabelKey] != reconstructedManifestCheckpointLabelValue {
+		t.Fatalf("resumed checkpoint must carry the reconstructed label, got %v", cp.Labels)
+	}
+}
+
 func TestReconstructManifestCheckpoint_EmptyObjectsSingleChunk(t *testing.T) {
 	ctx := context.Background()
 	cl := newReconstructClient(t)

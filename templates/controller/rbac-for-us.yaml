@@ -50,12 +50,16 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["create", "get", "delete"]
 
-# ObjectKeeper (cluster-scoped): controller creates/patches spec (drift/TTL/followRef); never deletes.
-# Deletion is Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained content/MCP.
+# ObjectKeeper (cluster-scoped): controller creates/patches spec (drift/TTL/followRef).
+# Deletion is normally the Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained
+# content/MCP. The controller deletes ObjectKeepers in exactly one case: the dedicated import-MCP keeper
+# (names.ImportManifestCheckpointObjectKeeperName) is removed after the reconstructed ManifestCheckpoint is
+# handed off to its SnapshotContent (content-single-writer design §10.1) — that keeper FollowObjects the
+# still-live import snapshot, so nothing else would ever reclaim it.
 # No objectkeepers/status: state-snapshotter does not write ObjectKeeper status.
 - apiGroups: ["deckhouse.io"]
   resources: ["objectkeepers"]
-  verbs: ["get", "list", "watch", "create", "update", "patch"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # Allow controller-runtime to watch namespaces
 - apiGroups: [""]

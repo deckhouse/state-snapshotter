@@ -105,3 +105,12 @@ func VolumeCaptureRequestName(snapshotUID types.UID) string {
 func ObjectKeeperName(objUID types.UID) string {
 	return "nss-ok-" + h16(string(objUID))
 }
+
+// ImportManifestCheckpointObjectKeeperName is the dedicated ObjectKeeper name that anchors the
+// reconstructed (import) ManifestCheckpoint until it is handed off to its SnapshotContent:
+// nss-import-ok-<h16(snapshotUID)>. Keyed by the import snapshot UID but with a DISTINCT prefix from
+// ObjectKeeperName so it never collides with the same snapshot's root ObjectKeeper (which is
+// ObjectKeeperName(snapshotUID), i.e. keyed by the same UID). See content-single-writer design §10.1.
+func ImportManifestCheckpointObjectKeeperName(snapshotUID types.UID) string {
+	return "nss-import-ok-" + h16(string(snapshotUID))
+}

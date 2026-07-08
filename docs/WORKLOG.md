@@ -1041,3 +1041,33 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   (data-bearing coverage reads + owner fallback keep a domain-covered PVC out of the residual wave). Complements
   the existing exclusion spec (PVCs absent from the root own-manifests). Compile-check only (go test -c); live run
   deferred to end-of-plan validation.
+- **Add** (w8-block6a) Import-MCP durability backstop (content-single-writer design §10.1): the reconstructed
+  (import) ManifestCheckpoint was created ownerless at upload time (a cluster-scoped MCP cannot be owned by the
+  namespaced snapshot, and the eager SnapshotContent shell may not exist yet), leaving a crash/delete window that
+  orphaned the MCP + chunks with no sweeper. Fix: at upload the MCP is now born owned by a DEDICATED ObjectKeeper
+  that FollowObjects the import snapshot, so it is GC-safe from birth. New names.ImportManifestCheckpointObjectKeeperName
+  (distinct nss-import-ok- prefix so it never collides with the snapshot's root ObjectKeeper, which is keyed by the
+  same UID) + new usecase.EnsureReconstructedManifestCheckpointObjectKeeper (idempotent create, returns the
+  controller ownerRef). The reconstructed-label key is hoisted to an exported constant
+  (usecase.ReconstructedManifestCheckpointLabelKey). The aggregator's MCP handoff
+  (ensureManifestCheckpointOwnedByContent) now, once it re-parents a RECONSTRUCTED MCP onto its SnapshotContent,
+  deletes the now-redundant import ObjectKeeper (gated on the reconstructed label + the reconcile that actually
+  performed the handoff, so a capture MCP's execution OK — GC'd with its MCR — is never touched). Unit tests:
+  names collision/determinism, EnsureReconstructed... idempotency + FollowObject wiring, upload owns MCP by the
+  import OK + carries the reconstructed label, aggregator deletes the import OK after handoff and KEEPS a
+  capture-execution OK (reconstructed-gate isolation). Also registered deckhouse.io ObjectKeeper in the api
+  connector test scheme (production already registers it in cmd/main.go's api-server fullScheme). build + vet +
+  gofmt + full module unit suite green. Review cycle (Bugbot): (HIGH) the controller ClusterRole had no
+  `delete` verb on objectkeepers (comment even said "never deletes"), so the §10.1 cleanup Delete would be
+  Forbidden and silently swallowed at V(1) — granted `delete` on deckhouse.io/objectkeepers in
+  templates/controller/rbac-for-us.yaml with a scoped comment (import-MCP keeper only). (MEDIUM) cleanup was
+  gated on the reconcile that performed the handoff, so a handoff completed on a prior pass (or interrupted by a
+  crash before the delete) never swept the keeper — re-gated on the MCP being content-owned NOW (idempotent
+  delete, so later passes sweep it). (MEDIUM) ReconstructManifestCheckpoint returned early on an already-Ready
+  MCP without anchoring it, so a repeat upload against a pre-§10.1 ownerless Ready MCP left an import OK that
+  owned nothing — added adoptReadyReconstructedManifestCheckpoint (adopt onto the passed import OK + backfill the
+  reconstructed label ONLY when the MCP has no controller owner, never re-anchoring a handed-off MCP). Re-ran
+  Bugbot: one follow-up MEDIUM (the not-yet-Ready RESUME path — an existing pre-§10.1 ownerless checkpoint
+  finished Ready without anchoring) fixed by generalizing the helper to ensureReconstructedManifestCheckpointAnchored
+  and calling it both on the already-Ready early return AND after the create/resume re-get. Added unit tests for
+  all four (prior-handoff sweep, Ready-unanchored adopt, not-Ready resume anchor, no-reanchor-when-owned).
