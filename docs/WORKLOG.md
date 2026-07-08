@@ -1229,3 +1229,10 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   outlives namespace teardown. Added the local `manifestCaptureRequest` unstructured constructor. Review: explore
   subagent (helper/signature + sibling-convention + webhook-message consistency) clean, nits applied. make build +
   make vet green (full suite needs a cluster).
+- **Update** (capture-namespace docs) Corrected the now-stale `ManifestCaptureRequest` API doc comments to reflect
+  the Namespace exception: `ManifestCaptureRequestSpec.Targets` and `ManifestTarget.Kind`
+  (api/v1alpha1/manifestcapturerequest_types.go) no longer say cluster-scoped targets are flatly disallowed — they
+  now state the single exception (the capture's own `Namespace`, core v1, whose name equals the MCR namespace).
+  Mirrored the wording in the Russian doc-ru CRD and regenerated the CRDs (`bash hack/generate_code.sh`); the only
+  regenerated diff is the two field descriptions in `crds/state-snapshotter.deckhouse.io_manifestcapturerequests.yaml`
+  (no schema/deepcopy churn). gofmt clean.

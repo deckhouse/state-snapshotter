@@ -11,7 +11,9 @@ spec:
                 targets:
                   description: |
                     Список объектов для захвата.
-                    Все цели должны быть namespaced-объектами в том же namespace, что и ManifestCaptureRequest.
+                    Все цели должны быть namespaced-объектами в том же namespace, что и ManifestCaptureRequest,
+                    за единственным исключением: собственный объект Namespace (core v1 Namespace с именем, равным
+                    namespace самого ManifestCaptureRequest) — единственная допустимая cluster-scoped цель.
                   items:
                     properties:
                       apiVersion:
@@ -19,7 +21,9 @@ spec:
                       kind:
                         description: |
                           Kind целевого объекта.
-                          Cluster-scoped ресурсы (Namespace, Node, PersistentVolume, ClusterRole и т. п.) не допускаются.
+                          Cluster-scoped ресурсы (Node, PersistentVolume, ClusterRole и т. п.) не допускаются,
+                          за единственным исключением: core v1 Namespace с именем, равным namespace самого
+                          ManifestCaptureRequest (собственный объект Namespace захвата).
                       name:
                         description: Имя целевого объекта.
             status:

@@ -42,7 +42,9 @@ type ManifestCaptureRequestList struct {
 // +k8s:deepcopy-gen=true
 type ManifestCaptureRequestSpec struct {
 	// Targets specifies the objects to capture.
-	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest.
+	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest, with a
+	// single exception: the capture's own Namespace object (core v1 Namespace whose name equals the
+	// ManifestCaptureRequest namespace) is the only allowed cluster-scoped target.
 	//
 	// Optional (may be empty): an MCR with no targets is a valid EMPTY capture. It is produced by the
 	// namespace-root aggregator when a namespace has no allowlisted objects to capture (a single-object
@@ -61,7 +63,9 @@ type ManifestTarget struct {
 	// APIVersion of the target object
 	APIVersion string `json:"apiVersion"`
 	// Kind of the target object
-	// Cluster-scoped resources (Namespace, Node, PersistentVolume, ClusterRole, etc.) are NOT allowed
+	// Cluster-scoped resources (Node, PersistentVolume, ClusterRole, etc.) are NOT allowed, with a single
+	// exception: the core v1 Namespace whose name equals the ManifestCaptureRequest namespace (the capture's
+	// own Namespace object).
 	Kind string `json:"kind"`
 	// Name of the target object
 	Name string `json:"name"`
