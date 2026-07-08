@@ -49,6 +49,18 @@ decision under H4): the residual ~24–25s wall is genuine, evenly-spread staged
 single interval >50% that a safe local fix could remove. Further cuts are diminishing-return micro-optimizations
 unless a new production-scale trace surfaces a fresh dominant interval.
 
+**Post-STOP API-load / scalability track (separate from wall-clock).** After the latency STOP, an apiserver-audit
+attribution of one SETS=10 tree (~1946 LIST/tree; audit policy logs `list` for the controller SA) found the LIST
+load dominated by repeated full-collection lists of a few planning-input GVKs. Two safe, correctness-neutral
+load cleanups were applied and validated on-cluster: **CSD planning list served from the manager cache** (removes
+~208 apiserver CSD LIST/tree from child-graph planning; section 6) and **H5 pre-MCR sweep single-flight** (SETS=10
+sweeps/root 2→1, SETS=20 3→1; section 8). Neither is a wall-clock fix (SETS=10 Ready stays ~17–19s, no regression;
+0 restarts). The **next open item is child-subtree API-cost** — the remaining ~90% of per-tree GET/LIST: the
+`nss-chw` relay wakes the root on ~every child-snapshot event, and each root pass re-lists sources + child GVKs
+(snapshots ~350–424, demo VM/disk/snapshot ~200–270 each) full-collection. This is a **scalability** question
+(relay storm × repeated full-collection lists), not the stopped wall-clock line — a diagnosis/design step, not a
+started fix.
+
 ## 3. Confirmed bottlenecks (real root causes, measurable effect)
 
 | # | Root cause | Evidence / effect |
