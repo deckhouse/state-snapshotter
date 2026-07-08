@@ -951,3 +951,38 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   generous snapshotReadyTO (multi-controller convergence), NOT the 30s captureReadyTO (pure snapshot creation),
   matching the parallel user-VS pipeline. Re-ran Bugbot: no findings. e2e test binary compiles (go test -c);
   live-cluster run deferred to the end-of-plan validation pass (compile-only per the overnight pre-approval).
+- **Update** (w8-block4) SnapshotContent.status.childrenSnapshotContentRefs is now an IMMUTABLE FROZEN SET
+  (INV-CONTENT-CHILDREN-2, Option A CEL). api/storage/v1alpha1: replaced the append-only transition rule
+  (self.size() >= oldSelf.size()) with oldSelf.size() == 0 || self == oldSelf — the empty->complete first
+  write is the only allowed change; once non-empty the set is immutable (no add, remove, reorder, or replace).
+  Bounded the CEL estimated cost so the apiserver accepts the CRD: +kubebuilder:validation:MaxItems=8192 on
+  the list and MaxLength=253 (DNS-subdomain object-name ceiling) on SnapshotContentChildRef.Name — the O(n)
+  self==oldSelf comparison over an unbounded list/name would blow the cost budget and reject the CRD (this is
+  why the old O(1) size rule capped nothing). This is safe only because the aggregator became the SOLE,
+  all-or-nothing edge writer in Block 3d: PublishSnapshotContentChildrenFromSnapshotRefs publishes the
+  COMPLETE declared-child set in one transition (it early-returns until every declared child is bound), so the
+  field goes empty->complete in a single patch and never grows incrementally. Made the writer frozen-aware
+  (status_publish.go PublishSnapshotContentChildrenRefs): added a guard that HOLDS an already-populated set
+  as-is instead of attempting to grow/replace it — this is a no-op on fresh deployments (every later pass
+  recomputes the identical complete set, incl. the E3-degraded re-publish) and makes the writer upgrade-safe
+  against a legacy partial set carried over from the append-only era (completing it would be CEL-rejected and
+  wedge the reconcile in ChildrenLinkPending). Refreshed the frozen-one-shot semantics comments in
+  controller.go/status_publish.go. Tests: new integration snapshotcontent_children_frozen_test.go pins the
+  admission contract (accepts empty->complete + idempotent identical re-write; rejects shrink/append/reorder/
+  replace), a new writer-level unit test pins the frozen-set hold guard, and the integration seed helper was
+  refactored to a batch mergeChildrenGraphIntoRoot (single atomic complete-set write) since seeding children
+  one-by-one now violates the CEL (n5_pr7 two-PVC updated to seed both children atomically). Review cycle
+  (Bugbot HIGH: frozen CEL wedges partial edge sets) fixed by the writer frozen guard; re-ran Bugbot: no
+  findings. gofmt + build + vet (incl. -tags integration) + snapshotcontent unit suite + isolated
+  frozen-set integration test all green; CRD regenerated (hack/generate_code.sh).
+- **Refactor** (w8-block4, tests) Deferred the two reactor-driven orphan-domain-child specs in
+  n5_pr7_two_pvc_integration_test.go to Block 5 (PIt). They exercise the full residual-PVC -> VolumeSnapshot
+  domain pipeline (orphan wave creates the VS, the storage-foundation VS domain controller adopts+plans it,
+  the binder creates+binds its SnapshotContent, the aggregator projects data+manifest, the root subtree
+  barrier clears), which is not yet closed at the integration level after the Block 3d model rewrite:
+  registering the production CSD (source PVC -> VolumeSnapshot) makes the namespace planner enumerate the
+  residual PVCs and create VolumeSnapshot children as GENERIC shells (no spec.source.persistentVolumeClaimName)
+  the domain reactor cannot adopt, so the orphan content is never created and the root manifest leg hangs.
+  Reconciling the namespace-planner-vs-orphan-wave overlap + domain-capture VolumeSnapshot spec population is
+  exactly Block 5's scope (these specs never passed after the Block 3d rewrite). The duplicate-covered-PVC-UID
+  guard spec in the same suite needs no orphan pipeline and stays active; the isolated suite is green.

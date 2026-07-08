@@ -1111,11 +1111,13 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 // children now, §11.6) -> its bound child SnapshotContent name (all-or-nothing per pass, requeue until
 // every declared child is bound).
 //
-// The write is APPEND-ONLY in this block (the atomic frozen-set write lands in Block 4). It is universal
+// The write is the ATOMIC FROZEN-SET write (Block 4, INV-CONTENT-CHILDREN-2): the field transitions
+// empty -> complete in one transition and is immutable thereafter (Option A CEL). It is universal
 // across capture and import: import owners have no domain phase, so the "planned/complete" gate is exactly
 // what PublishSnapshotContentChildrenFromSnapshotRefs enforces internally — an owner that has not planned
 // has an empty childrenSnapshotRefs (nothing is projected), and a planned owner publishes only once every
-// declared child snapshot has bound its content. It runs decoupled from the condition MergeFrom in
+// declared child snapshot has bound its content (all-or-nothing), which — because the owner's declared set
+// is frozen at Planned — is exactly the complete set. It runs decoupled from the condition MergeFrom in
 // reconcileCommonSnapshotContentStatus (a separate optimistic-locked status patch), matching the previous
 // external publishers; the 500 ms self-requeue while !ready plus the child-content watch drive convergence.
 func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, err error) {
@@ -1131,11 +1133,11 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 	childRefs := snapshotChildRefsFromRaw(rawRefs)
 	namespace := ownerNamespace
 
-	// Steady-state short-circuit (perf, INV-CONTENT-CHILDREN-1). Edges are append-only and 1:1 with the
+	// Steady-state short-circuit (perf, INV-CONTENT-CHILDREN-1/2). Edges are 1:1 with the
 	// owner's declared children (each declared child -> its bound child-content edge, deduped by name), and
 	// the owner's childrenSnapshotRefs is set-once at Planned, so the published set can never exceed the
-	// declared set. Once it reaches the declared
-	// count the edge set is COMPLETE and stable — there is nothing left to add. Returning here (using only
+	// declared set. Once it reaches the declared count the edge set is COMPLETE, frozen, and stable — there
+	// is nothing left to add (and the Option A CEL would reject any change). Returning here (using only
 	// the in-memory content, no API reads) avoids the per-child uncached resolution
 	// (ResolveChildSnapshotRefToBoundContentName) on every 500 ms readiness self-requeue, which a node keeps
 	// issuing for its whole not-ready lifetime while it waits on the subtree archive latch. Without this an

@@ -31,16 +31,25 @@ func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.
 	})
 }
 
-// PublishSnapshotContentChildrenRefs adds the snapshot-derived (domain) child content edges to
+// PublishSnapshotContentChildrenRefs writes the snapshot-derived (domain) child content edges to
 // contentName.status.childrenSnapshotContentRefs.
 //
 // domainRefs is the child set (derived from the owning snapshot's status.childrenSnapshotRefs — orphan/
-// residual-PVC VolumeSnapshot children are ordinary domain children now, §11.6). The merge is APPEND-ONLY
-// (monotonic): every existing edge is preserved and new edges are added on top, deduped by name. This
-// matches the monotonic snapshot-tree model (nodes are added during capture and only removed when the whole
-// content is torn down). The aggregator is the sole edge writer (INV-CONTENT-CHILDREN-1) as of Block 3d;
+// residual-PVC VolumeSnapshot children are ordinary domain children now, §11.6). The caller
+// (PublishSnapshotContentChildrenFromSnapshotRefs) passes the COMPLETE set all-or-nothing, so in normal
+// operation this writes the field ONCE (empty -> complete frozen set) and is a no-op thereafter — the
+// frozen-set immutability CEL (Option A, INV-CONTENT-CHILDREN-2) rejects any later change. The merge
+// preserves existing edges and adds any missing ones, deduped by name: on the single firing that union
+// equals the complete set (existing is a subset), and it keeps an E3-degraded edge (child content deleted)
+// rather than dropping it. The aggregator is the sole edge writer (INV-CONTENT-CHILDREN-1) as of Block 3d;
 // the optimistic lock below is retained as defense in depth. The read is done via reader (the non-cached
 // APIReader) so the preserve set reflects the freshest edges rather than a stale cache.
+//
+// Frozen-set guard: because the field is immutable once non-empty (Option A CEL), this NEVER attempts to
+// grow or replace an already-populated set — that would be rejected by the apiserver and wedge the reconcile
+// with a hard error. Only the empty -> complete first write is patched; a non-empty existing set is held
+// as-is (see the guard below). This makes the writer upgrade-safe against a legacy partial set written under
+// the old append-only rule.
 func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, reader client.Reader, contentName string, domainRefs []storagev1alpha1.SnapshotContentChildRef) error {
 	if contentName == "" {
 		return nil
@@ -78,6 +87,18 @@ func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, re
 		}
 		controllercommon.SortSnapshotContentChildRefs(desired)
 		if controllercommon.SnapshotContentChildRefsEqualIgnoreOrder(content.Status.ChildrenSnapshotContentRefs, desired) {
+			return nil
+		}
+		// Frozen-set guard (Block 4, INV-CONTENT-CHILDREN-2, Option A CEL: oldSelf.size()==0 || self==oldSelf).
+		// Reaching here means desired differs from a NON-EMPTY existing set, i.e. an attempt to grow/replace an
+		// already-populated frozen set. The all-or-nothing caller never produces this on a fresh deployment (the
+		// field goes empty -> complete in one write and every later pass recomputes the identical complete set,
+		// caught by the equality no-op above, incl. the E3-degraded re-publish). The only way to get here is a
+		// LEGACY partial set carried across an upgrade from the append-only era: completing it would be rejected
+		// by the apiserver CEL and turn every reconcile into a hard error, wedging the node in ChildrenLinkPending.
+		// Hold the frozen set as-is instead (no patch) — the invariant says a non-empty set is immutable, so there
+		// is nothing valid to write. Fresh deployments never take this branch.
+		if len(content.Status.ChildrenSnapshotContentRefs) > 0 {
 			return nil
 		}
 		base := content.DeepCopy()

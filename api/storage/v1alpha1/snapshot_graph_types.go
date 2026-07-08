@@ -36,6 +36,11 @@ type SnapshotChildRef struct {
 //
 // +k8s:deepcopy-gen=true
 type SnapshotContentChildRef struct {
+	// Name is the cluster-scoped child SnapshotContent name. MaxLength=253 is the Kubernetes object-name
+	// ceiling (a DNS subdomain), so it constrains nothing real; it is REQUIRED here to bound the CEL
+	// estimated cost of the childrenSnapshotContentRefs frozen-set immutability rule (self == oldSelf), which
+	// otherwise assumes an unbounded per-element string and blows the apiserver cost budget (CRD rejected).
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 }
 
