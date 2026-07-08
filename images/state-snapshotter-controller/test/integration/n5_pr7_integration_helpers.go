@@ -27,6 +27,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -52,6 +53,24 @@ func integrationContentSnapshotRef() *storagev1alpha1.SnapshotSubjectRef {
 		Kind:       "Snapshot",
 		Namespace:  "default",
 		Name:       "integration-test-snapshot",
+	}
+}
+
+// ensureContentOwnerSnapshot idempotently creates the Snapshot referenced by integrationContentSnapshotRef.
+// The SnapshotContent ManifestsArchived gate (a low-priority Ready leg, added in dd82b4d) dereferences the
+// owning Snapshot to validate the declared child graph before it may latch. Since 421c6a1 every test
+// SnapshotContent carries this snapshotRef; a missing owner makes the declared-graph read fail-closed
+// (declaredComplete=false), pinning ManifestsArchived at Capturing and blocking the first Ready=True. An
+// empty-status owner satisfies the gate (no declared children). Left in place for the rest of the suite;
+// only ever referenced as an owner, never listed/counted, so leaking it is harmless and idempotent.
+func ensureContentOwnerSnapshot(ctx context.Context) {
+	ref := integrationContentSnapshotRef()
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.Name, Namespace: ref.Namespace},
+		Spec:       storagev1alpha1.SnapshotSpec{},
+	}
+	if err := k8sClient.Create(ctx, snap); err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
 	}
 }
 
