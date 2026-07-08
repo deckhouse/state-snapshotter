@@ -290,6 +290,16 @@ Keep these — they reduce work or are prerequisites — but do not credit them 
   observe-lag ~4.3s → ~3.1s.
 - **APIReader audit** — cache only the three watched-object mirror reads; keep every correctness-critical uncached
   read (see [Appendix](#11-appendix--apireader-audit)). Hygiene, no regression.
+- **CSD planning list served from the manager cache (hot-LIST attribution outcome):** child-graph planning
+  (`reconcileParentOwnedChildGraph`, `parent_graph.go`) resolved `csdregistry.EligibleResourceSnapshotMappings` via
+  the uncached `APIReader` on **every** planning pass. Audit attribution (SETS=10) measured **~208 apiserver
+  `CustomSnapshotDefinition` LISTs per tree** from this callsite — part of ~1946 audited LISTs/tree, ~71% of which
+  are repeated full-collection lists of six planning-input GVKs (snapshots, CSDs, demo VM/disk sources and their
+  snapshots) driven by the relay waking the root ~200×/tree. The CSD informer is already running (the CSD controller
+  watches `CustomSnapshotDefinition`), so the list now goes through the cached `r.Client`; resolution is unchanged
+  (same `EligibleResourceSnapshotMappings`, same RESTMapper, same fail-closed). Removes the per-pass apiserver CSD
+  list (~208 → ~0 from this callsite). Correctness-neutral load/scalability cleanup, **not** expected to move
+  wall-clock. CSD spec/eligibility changes still reach planning via the informer cache.
 - **Concurrency ceilings + `configMu` race fix** ([FIX 6](#fix-6--concurrency-ceilings--the-one-required-correctness-fix)) — mandatory correctness/prerequisite; no wall-clock move
   on its own (the gate was downstream each time).
 - **MCP→MCR and VSC→VCR watches** ([FIX 2](#fix-2--mcr-controller-watch-manifestcheckpoint), [FIX 5](#fix-5--storage-foundation-vcr-watch-volumesnapshotcontent)) — correct event-driven architecture regardless of
@@ -539,6 +549,89 @@ proposed — none is justified by this trace. Remaining items are **future / low
 the dropped-wake poll fallback and the child-archive staircase can be revisited only if a real-scale trace shows
 them dominating.
 
+### H5 — concurrent pre-MCR namespace-sweep race — VALIDATED (diagnosis); implementation deferred (medium)
+
+**Status: diagnosis validated by measurement; no code written. Correctness-neutral optimization, NOT the dominant
+API-load term — deferred per the leverage criterion (a fix worth <10% of load waits behind any 50–80% lever).**
+
+**Root cause.** The root namespace-manifest capture plan is built by
+`BuildRootNamespaceManifestCaptureTargets` → `BuildManifestCaptureTargets` (`pkg/namespacemanifest/targets.go`):
+one full **discovery enumeration of ~130 namespaced types + a parallel per-type `List` sweep** of the namespace,
+all via the uncached capture *dynamic* client (`snapshot/controller.go` `captureRESTConfig`, QPS 100/200) — so
+every sweep is real apiserver traffic, never cache-served. `capture.go` has an **MCR-gate** (`capture.go:185-201`):
+once the root `ManifestCaptureRequest` exists, subsequent reconciles take the frozen-plan branch
+(`branch=mcr-present`) and do **not** re-list. That gate dedups sweeps **across time (post-creation)** but **not
+across concurrent reconciles in the pre-creation window**: the child-watch relay calls `Reconcile` directly and
+`MaxConcurrentReconciles=8`, so several reconciles of the same root pass the `APIReader.Get(MCR)=NotFound` gate
+before any of them creates the MCR, and each runs the full sweep for identical namespace state (the extra Creates
+land on `AlreadyExists`).
+
+**Evidence (measured, no code change).** Method: count the controller's own DEBUG branch tags
+(`mcr-created` / `subtree-pending` / `mcr-present`) and the `namespace-list-manifest-planning` durMs lines for one
+root, cross-checked against a `rest_client_requests_total` GET delta over the same window (port-forward metrics).
+
+| run | sets | sweeps/root | max concurrent | window span | GET / root (total) | sweep share |
+|---|---|---|---|---|---|---|
+| SETS=1 | 1 | 3 | 3 (08:04:35–36) | ~2.5s | ~1550–1850 | ~40–50% |
+| SETS=10 r1/r2/r3 | 10 | 2 / 2 / 2 | 2 | 2.0–3.1s | 5797–6060 | ~8–9% |
+| SETS=20 | 20 | 3 | 3 | 7.6s | 12760 | ~4% |
+
+The race is **structural and amplifies with fan-out** (longer pre-MCR window → more relay-driven self-reconciles →
+more concurrent sweeps: 2 at SETS=10, 3 at SETS=20), not a single-tree artifact. Redundant sweeps/root = sweeps−1
+(1 at SETS=10, 2 at SETS=20). Each sweep ≈ 250–500 uncached GET and ~1.5–5.5s of planning.
+
+**Why deferred (leverage).** The decisive number is the **API-load attribution**: the sweep is ~500 GET/root, but
+total is ~5800 (SETS=10) → ~12760 (SETS=20) GET/root — i.e. **~90% of per-tree API load is NOT the sweep**; it is
+child-subtree processing (per-disk child snapshots + their contents), which grows linearly with fan-out while the
+sweep does not. A single-flight around capture planning would remove 1–2 redundant full sweeps/root
+(~250–500 GET + ~2–5s duplicated planning + a concurrent-apiserver spike in the pre-MCR window) — a clean, safe,
+semantics-preserving cleanup, but it will **not** flatten the scalability curve on its own.
+
+**Candidate fix (NOT implemented).** Per-`Snapshot`-UID single-flight / in-process lock around the capture-planning
+section so only one concurrent reconcile runs the sweep and the others take the frozen-plan branch. Correctness is
+preserved because the concurrent sweeps demonstrably compute an identical plan for identical pre-MCR state (they
+overlap within a 2–7.6s window over a static namespace). Do **not** cache the plan *result* across time — the
+MCR-gate already provides temporal dedup; the gap is concurrency only.
+
+**Next investigation (higher leverage).** Attribute the remaining ~90% of per-tree GET (child subtree). Build a
+Top-5 API-cost contributor table and check whether the child-subtree reads contain their **own** redundancy (e.g.
+repeated traversals of the same subtree). A redundancy there is a 50–80% lever vs H5's <10% and would take
+priority over writing the H5 single-flight.
+
+### Deferred — registry-derived planning view (architectural cleanup, NOT required)
+
+**Status: Deferred — deliberately not implemented after the cached-CSD planning fix (section 6) already removed the
+hot apiserver LIST.**
+
+**Context.** The original intent for the per-pass CSD-LIST hot spot was to remove it by **extending the registry**:
+compute `EligibleResourceSnapshotMappings` during `Provider` refresh and expose the resolved mappings through
+`LiveReader`, so planning reads a pre-built view. On inspection the maintained registry (`snapshot.GVKRegistry`,
+built in `snapshotgraphregistry/build.go`) carries only `Snapshot GVK ↔ SnapshotContent GVK` + `DataBacked` — it
+does **not** hold the `SourceGVR/SourceGVK/SnapshotGVR/Priority` that `EligibleResourceSnapshotMapping` needs, so
+"just read the registry" was not literally possible without extending its data model. Instead the minimal fix was
+applied: planning lists CSD via the cached `mgr.Client` instead of the uncached `APIReader` (section 6).
+
+**Result.** The hot apiserver LIST is gone without any registry change. Planning still calls
+`EligibleResourceSnapshotMappings(...)` each pass, but now over controller-runtime cache data rather than a direct
+apiserver call.
+
+**Why the registry-based variant is deferred.** After the switch to the cached client the original performance
+problem is solved. The remaining registry-derived variant is an **architectural improvement, not a performance
+fix**. Potential benefits: a single source of truth for the planning view; no cached CSD List during reconcile at
+all; O(1) eligible-mappings read; one shared lifecycle for dynamic watches and the planning snapshot. Cost:
+extend `LiveReader`; change the `Provider` refresh pipeline; maintain an atomically-updated derived mappings
+projection; update `Static` (test reader) and the integration refresh hook (`ReplaceCurrent` does not currently
+recompute mappings); extra unit/integration tests. It also introduces a new desync risk (watches refreshed, CSD
+registry refreshed, but derived mappings forgotten / non-atomically swapped / Static behaves differently).
+
+**Return criteria (implement only if at least one holds):**
+- planning becomes CPU-bound from recomputing mappings per pass;
+- a single immutable registry snapshot is required for planning;
+- strong consistency between registry refresh and the planning view becomes necessary;
+- new derived planning structures appear that are naturally computed once per refresh.
+
+Until one of these applies, the cached-CSD planning fix is considered sufficient.
+
 ---
 
 ## 9. Application checklist
@@ -551,6 +644,14 @@ them dominating.
    headline latency fixes.
 6. Confirmed optimizations (section 6) — keep; hygiene.
 7. H3 (section 8) — **closed** by Commit D.3 (per-child `Get`s → one `List`/GVK; validated SETS=10 warm). D.2 (membership-skip) and D.1′ (relay debounce) are **no longer recommended** — the premise is gone. **H4 — root manifest leg** (`ChildrenSnapshotReady` → `Ready`) — **closed** by Commit H4.1 (reverse-lookup `List`s routed through cache indexes; `field label not supported` errors and lost-wake tails eliminated; leg now stable event-driven ~9–10s, no restarts). Residual archive-propagation cadence is a lower-priority follow-up. **Active latency work is stopped** (STOP decision, section 8 under H4): no D.1′/D.2/debounce/cache/membership change is planned; reopen only if a production-scale trace shows a fresh dominant interval. Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
+8. **H5 — concurrent pre-MCR sweep race** (section 8) — **VALIDATED diagnosis, code deferred (medium).** Real,
+   fan-out-amplifying redundancy (2 sweeps/root at SETS=10, 3 at SETS=20) but only ~8–9% of per-tree API load; the
+   candidate single-flight is correctness-neutral yet not the dominant lever. Do **not** write it before the
+   child-subtree API-cost investigation (~90% of GET) shows whether a larger (50–80%) lever exists there.
+9. **CSD planning list cached** (section 6) — **implemented.** Removes ~208 apiserver CSD LIST/tree from
+   child-graph planning by listing through `mgr.Client` instead of `APIReader`; semantics unchanged. The
+   **registry-derived planning view** (section 8, "Deferred") is deliberately **not** implemented — see its return
+   criteria before revisiting.
 
 ## 10. Tooling (storage-e2e, measurement only)
 
