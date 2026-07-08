@@ -26,10 +26,13 @@ import (
 )
 
 const (
-	// EnvUnifiedBootstrapPairs: unset/empty = use DefaultUnifiedRuntimeBootstrapPairs()
-	// (legacy alias DefaultDesiredUnifiedSnapshotPairs()); literal "empty"/"none"/"csd-only"
-	// = bootstrap-only-from-CSD (empty static list); else semicolon-separated pairs
-	// "group/version/Kind|group/version/Kind" (snapshot side | content side).
+	// EnvUnifiedBootstrapPairs controls the static bootstrap list merged with eligible CSD pairs:
+	//   - unset/empty: the single built-in pair (core Snapshot → SnapshotContent) via
+	//     unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(); domain kinds come only from CSD.
+	//   - literal "empty"/"none"/"csd-only": no static pairs at all (pure CSD-only; even the core
+	//     Snapshot pair is not added statically).
+	//   - else: semicolon-separated pairs "group/version/Kind|group/version/Kind"
+	//     (snapshot side | content side) — dev/test escape hatch only, requires full RBAC on every GVR.
 	EnvUnifiedBootstrapPairs = "STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS"
 )
 
@@ -112,15 +115,17 @@ func parseGVKTriple(s string) (schema.GroupVersionKind, error) {
 }
 
 // EffectiveUnifiedBootstrapPairs returns the static bootstrap slice for merge with eligible CSD.
+// Default is the single built-in pair (core Snapshot → SnapshotContent); domain kinds are added only
+// through eligible CSD. UnifiedBootstrapEmpty ("csd-only") drops even that, leaving a pure CSD source.
 func (o *Options) EffectiveUnifiedBootstrapPairs() []unifiedbootstrap.UnifiedGVKPair {
 	switch o.UnifiedBootstrapMode {
 	case UnifiedBootstrapDefault:
-		return unifiedbootstrap.DefaultUnifiedRuntimeBootstrapPairs()
+		return unifiedbootstrap.DefaultGraphRegistryBuiltInPairs()
 	case UnifiedBootstrapEmpty:
 		return nil
 	case UnifiedBootstrapCustom:
 		return append([]unifiedbootstrap.UnifiedGVKPair(nil), o.UnifiedBootstrapCustomPairs...)
 	default:
-		return unifiedbootstrap.DefaultUnifiedRuntimeBootstrapPairs()
+		return unifiedbootstrap.DefaultGraphRegistryBuiltInPairs()
 	}
 }

@@ -29,7 +29,7 @@ Legacy terms are allowed only in explicitly historical documents. Do not use his
 
 ### 2. Группа `storage.deckhouse.io` (unified «родные» типы)
 
-- Типовые ресурсы модуля: **Snapshot**, **SnapshotContent**, **CustomSnapshotDefinition**, **ManifestCaptureRequest**, **ManifestCheckpoint** и связанные artifact-ресурсы. Bootstrap-набор snapshot/content пар задаётся в `pkg/unifiedbootstrap`, пока CSD не расширяет набор.
+- Типовые ресурсы модуля: **Snapshot**, **SnapshotContent**, **CustomSnapshotDefinition**, **ManifestCaptureRequest**, **ManifestCheckpoint** и связанные artifact-ресурсы. Единственная встроенная snapshot/content пара (`Snapshot`→`SnapshotContent`) задаётся в `pkg/unifiedbootstrap`; все доменные типы добавляются исключительно через eligible CSD.
 - Эта линия — **опорная** для единого контроллера снимков в кластере Deckhouse.
 
 ### 3. Manifest line (MCR / ManifestCheckpoint / capture)
