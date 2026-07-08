@@ -1122,3 +1122,11 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   (superseded by snapshotSource + the aggregator binding) + its content data writes; moved its pure PVC-source test
   to TestImportSnapshotSourceRef_TargetsPVC and BuildImportDataBinding tests to the aggregator package. New aggregator
   tests: import structural-node skip + full DataImport->VSC publish/handoff. build + vet + gofmt + full module suite green.
+- **Add** (w8-block6 e2e) Import round-trip + MCP durability assertions (compile-check). Extended e2e/tests/import_gc_test.go
+  importSpecs (export->import round-trip): after the import root reaches Ready + all content leg conditions, assert (a) the
+  aggregator projected content.status.manifestCheckpointName (content-single-writer §10 single-writer, w8-block6b-1), and (b)
+  the reconstructed ManifestCheckpoint is owned by the SnapshotContent — the durable end-state of the w8-block6a durability
+  handoff (per-CR upload creates the checkpoint GC-safe under a dedicated import ObjectKeeper; the aggregator hands it off to
+  the content and sweeps the redundant keeper), so deleting the content GCs the checkpoint. The existing round-trip already
+  exercises the binder-created import root (w8-block6b-2). e2e/tests compiles (go test -c) + vet + gofmt clean; not run live
+  (compile-check only per the night-run plan).

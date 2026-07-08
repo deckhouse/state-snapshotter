@@ -126,6 +126,30 @@ func importSpecs() {
 
 			By("Asserting the reconstructed SnapshotContent reaches all leg conditions")
 			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
+
+			By("Asserting the aggregator projected the import manifest leg and the reconstructed checkpoint was handed off (MCP durability)")
+			// content-single-writer design §10 (w8-block6b-1): the SnapshotContentController aggregator, not
+			// the import orchestrator, is the single writer of status.manifestCheckpointName for imports.
+			co, err := getResource(ctx, snapshotContentGVR, "", content)
+			Expect(err).NotTo(HaveOccurred())
+			mcpName, _, _ := unstructured.NestedString(co.Object, "status", "manifestCheckpointName")
+			Expect(mcpName).NotTo(BeEmpty(), "aggregator must project status.manifestCheckpointName for the import root")
+
+			// MCP durability (w8-block6a): the per-CR upload creates the reconstructed ManifestCheckpoint
+			// GC-safe under a dedicated import ObjectKeeper (FollowObjects the import Snapshot), and once the
+			// content is bound the aggregator hands the checkpoint off to the SnapshotContent as its controller
+			// owner and sweeps the now-redundant import ObjectKeeper. After Ready the checkpoint must be owned
+			// by the content (the durable end-state), so deleting the content GCs the checkpoint.
+			mcp, err := getResource(ctx, manifestCheckpointGVR, "", mcpName)
+			Expect(err).NotTo(HaveOccurred(), "reconstructed ManifestCheckpoint %s must exist", mcpName)
+			ownedByContent := false
+			for _, o := range mcp.GetOwnerReferences() {
+				if o.Kind == "SnapshotContent" && o.Name == content {
+					ownedByContent = true
+				}
+			}
+			Expect(ownedByContent).To(BeTrue(),
+				"reconstructed ManifestCheckpoint %s must be owned by SnapshotContent %s after the durability handoff", mcpName, content)
 		})
 	})
 }
