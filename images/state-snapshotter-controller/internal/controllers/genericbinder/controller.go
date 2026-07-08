@@ -254,6 +254,22 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return r.reconcileGenericStaticBind(ctx, obj, snapshotLike)
 	}
 
+	// Domain-claim gate (content-single-writer design §11.3/§11.6): for a domain-capture kind, DO NOT
+	// materialize any state (ObjectKeeper, eager SnapshotContent shell) until the domain controller has
+	// CLAIMED the object by writing status.captureState.domainSpecificController. This is what lets a domain
+	// expose only a SUBSET of a registered kind as domain objects: instances the domain skips — a
+	// VolumeSnapshot that is legacy/unlabeled, vetoed, import-mode, or pre-provisioned (§11.3) — are never
+	// claimed, so the binder leaves them entirely untouched (a plain CSI snapshot with no content and no
+	// ObjectKeeper). For domains where every instance is domain-driven (the namespace Snapshot, demo kinds)
+	// the claim is present on the domain's first reconcile, so this only defers the shell to that first
+	// write and never blocks: the claim is independent of the content existing (proven for the root: the
+	// step-3 EnsureChildren claim precedes the step-4 orphan-wave Ready gate), so the eager-shell creation
+	// cycle (§9) stays broken. The binder wakes on the snapshot's own watch when the claim is written.
+	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) && !domainHasClaimed(obj) {
+		logger.V(1).Info("domain-capture snapshot not yet claimed by its domain controller; deferring content shell until captureState.domainSpecificController is written")
+		return ctrl.Result{}, nil
+	}
+
 	// Eager content shell (creator/main, content-single-writer design §9): the SnapshotContent object is
 	// created and BOUND as soon as the snapshot exists, decoupled from the domain phase>=Planned barrier.
 	// This is the deadlock fix. A child's ResolveParentSnapshotContentOwnerRef needs the parent content

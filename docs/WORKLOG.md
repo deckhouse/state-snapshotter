@@ -863,3 +863,20 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   both-nil PVC/VSC as SnapshotValidationError; confirmed pre-existing (committed in HEAD before this block,
   untouched by the Block 3b diff), so it is out of scope here and deferred to the import/restore wiring
   (Block 6).
+- **Add** (w8-block3d, binder domain-claim gate) The generic binder now gates its eager ObjectKeeper +
+  SnapshotContent shell for a domain-capture kind on the domain having CLAIMED the object — i.e. having
+  written any part of status.captureState.domainSpecificController (new domainHasClaimed helper in
+  genericbinder/domain_content.go; gate in controller.go Reconcile, after the import/StaticBind branches and
+  before the eager shell). This lets a domain expose only a SUBSET of a CSD-registered kind as domain
+  objects: the storage-foundation VolumeSnapshot domain (Block 3c) skips legacy/unlabeled, vetoed,
+  import-mode, and pre-provisioned VolumeSnapshots (§11.3), so those are never claimed and the binder leaves
+  them entirely untouched (a plain CSI snapshot, no content, no ObjectKeeper) instead of shelling every
+  VolumeSnapshot in the cluster once the CSD registers the kind. Closes the Block 3c Bugbot HIGH finding
+  ("CSD activates binder without domain gate"), which was dispositioned to the state-snapshotter side per the
+  creator/main split (plan decision #4, design §11.3/§11.6). Deadlock-safe (design §9): the claim is written
+  on the domain's first reconcile independent of the content existing — for the namespace root the step-3
+  EnsureChildren claim precedes the step-4 orphan-wave Ready gate (verified in namespace_capture_run.go) — so
+  it is strictly earlier than the phase>=Planned projection barrier and the eager-shell creation cycle stays
+  broken. Validated: gofmt + go build + genericbinder unit tests + the FULL envtest integration suite
+  (root-lifecycle / demo-tree / orphan deadlock scenarios) all green. First landing of Block 3d; the orphan
+  special-path dismantling (INV-CONTENT-WRITER-1 STRICT) follows.
