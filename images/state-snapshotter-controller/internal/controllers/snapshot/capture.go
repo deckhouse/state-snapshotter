@@ -200,6 +200,21 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, err
 	}
 
+	// H5 single-flight: the MCR does not exist yet, so this reconcile would run the full pre-MCR namespace
+	// sweep. Several reconciles of the SAME root Snapshot can be here at once (the child-watch relay calls
+	// Reconcile directly and MaxConcurrentReconciles>1) and each would sweep identical pre-MCR state, with the
+	// losers' Creates landing on AlreadyExists. Let only one reconcile plan per Snapshot UID; a concurrent
+	// reconcile requeues briefly and, once the leader has created the MCR, takes the mcr-present frozen branch
+	// above (no sweep). This is concurrency dedup only — the MCR-gate still provides temporal dedup, and a
+	// leader that returns without creating the MCR releases the flight (defer) so a later reconcile re-plans.
+	if r.captureSweepFlight != nil && nsSnap.UID != "" {
+		if !r.captureSweepFlight.TryAcquire(nsSnap.UID) {
+			logger.V(1).Info("capture N2a: concurrent pre-MCR sweep already in progress for this Snapshot; requeue", "branch", "sweep-inflight")
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil)
+		}
+		defer r.captureSweepFlight.Release(nsSnap.UID)
+	}
+
 	if r.Discovery == nil {
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Discovery client is nil")
 	}

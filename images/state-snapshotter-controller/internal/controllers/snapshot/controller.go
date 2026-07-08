@@ -72,6 +72,9 @@ type SnapshotReconciler struct {
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
 	Mgr                   ctrl.Manager
 	childWatchMgr         *snapshotDynamicWatchManager
+	// captureSweepFlight single-flights the pre-MCR namespace capture sweep per root Snapshot UID so
+	// concurrent reconciles of the same Snapshot do not each run the identical full sweep (H5).
+	captureSweepFlight *captureSweepSingleflight
 }
 
 // selfSubjectAccessReviewer is the minimal SelfSubjectAccessReview creator used by the capture-RBAC gate
@@ -138,6 +141,7 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		Archive:               usecase.NewArchiveService(mgr.GetAPIReader(), mgr.GetAPIReader(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
+		captureSweepFlight:    newCaptureSweepSingleflight(),
 	}
 	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
 	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
