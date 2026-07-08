@@ -70,6 +70,15 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 //  6. Orphan child-content linking (post-bind): materialize + link each orphan PVC's child volume node.
 //  7. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
 //  8. ConfirmConsistent (barrier 2) once the manifest leg is captured (CoreCaptureOutcome==Captured).
+//
+// PIT freeze (ADR «Late Planned» → «если узел уже Planned — план заморожен, состав не пересчитывается»):
+// steps 1-5 (plan + enumerate + freeze the declared child set) run ONLY before barrier 1
+// (namespaceDomainPrePlanned — phase absent/Planning). Once the node is past Planned the composition is
+// frozen, so this reconciler stops re-planning entirely and drives only the post-bind legs (6-8); a
+// top-level source object added after Planned is deliberately NOT enumerated. This removes the accidental
+// re-plan self-heal — a declared child CR deleted after Planned is NOT recreated and instead surfaces as
+// terminal ChildSnapshotLost (see lost_children.go / detectLostDomainChildrenPrePlanned). Post-Planned
+// convergence is driven by the self-requeuing manifest leg and the child/content watches, not by re-planning.
 func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -80,77 +89,83 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	adapter := NewNamespaceSnapshotAdapter(nsSnap)
 	sdk := r.captureSDK()
 
-	// 1. Publish the captured live source (the Namespace) into status.snapshotSource.
-	if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
-		APIVersion: "v1",
-		Kind:       "Namespace",
-		Name:       nsSnap.Namespace,
-		UID:        ns.UID,
-	}); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// 2. Plan the domain child graph (pure planner: builds ChildSpecs, no creation, no status writes).
-	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	plan, err := r.planNamespaceChildren(ctx, nsSnap, mappings)
-	if err != nil {
-		// A hard planning error (e.g. resourceSelector parse, coverage read): degrade Ready and requeue.
-		// The binder is still gated on phase>=Planned here (MarkPlanned not reached), so it does not touch
-		// Ready — no dual-writer. (A source-list Forbidden is not an error here: planNamespaceChildren folds
-		// it into the non-terminal Forbidden outcome, handled below via the not-AllPlanned requeue.)
-		if perr := r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); perr != nil {
-			return ctrl.Result{}, perr
+	// Steps 1-5 plan and freeze the child set: run them only before barrier 1. Past Planned the set is
+	// frozen (PIT cycle) and re-planning is skipped — see the method doc. On the first pass the node is
+	// still pre-Planned, so this block runs, ends at MarkPlanned, and falls through to the post-bind legs
+	// below in the same reconcile.
+	if namespaceDomainPrePlanned(nsSnap) {
+		// 1. Publish the captured live source (the Namespace) into status.snapshotSource.
+		if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
+			APIVersion: "v1",
+			Kind:       "Namespace",
+			Name:       nsSnap.Namespace,
+			UID:        ns.UID,
+		}); err != nil {
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
-	}
-	if plan.outcome == namespaceChildrenTerminal {
-		// Terminal child-graph failure the content tree cannot express yet (binder still gated pre-Planned):
-		// surface it directly on Ready (matches the bespoke reconcileParentOwnedChildGraph terminal path).
-		if perr := r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, plan.reason, plan.message); perr != nil {
-			return ctrl.Result{}, perr
+
+		// 2. Plan the domain child graph (pure planner: builds ChildSpecs, no creation, no status writes).
+		mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
-	}
+		plan, err := r.planNamespaceChildren(ctx, nsSnap, mappings)
+		if err != nil {
+			// A hard planning error (e.g. resourceSelector parse, coverage read): degrade Ready and requeue.
+			// The binder is still gated on phase>=Planned here (MarkPlanned not reached), so it does not touch
+			// Ready — no dual-writer. (A source-list Forbidden is not an error here: planNamespaceChildren folds
+			// it into the non-terminal Forbidden outcome, handled below via the not-AllPlanned requeue.)
+			if perr := r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{}, err
+		}
+		if plan.outcome == namespaceChildrenTerminal {
+			// Terminal child-graph failure the content tree cannot express yet (binder still gated pre-Planned):
+			// surface it directly on Ready (matches the bespoke reconcileParentOwnedChildGraph terminal path).
+			if perr := r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, plan.reason, plan.message); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{}, nil
+		}
 
-	// 3. Create/adopt the planned children and publish their refs. Publication is ADDITIVE (union): the
-	//    residual/orphan VolumeSnapshot wave (§5) co-writes childrenSnapshotRefs and must be preserved.
-	if err := sdk.EnsureChildren(ctx, adapter, plan.desired, plan.excluded); err != nil {
-		return ctrl.Result{}, err
-	}
-	// A weight layer is still pending (or a mapped source kind is RBAC-forbidden): the graph is not fully
-	// planned. Requeue on the child-graph poll cadence (child watches are the primary wake-up). Unbounded
-	// by design — a child may stay pending for hours; never a deadline.
-	if plan.outcome != namespaceChildrenAllPlanned {
-		logger.V(1).Info("namespace child graph not fully planned; requeue", "reason", plan.reason, "message", plan.message)
-		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
-	}
+		// 3. Create/adopt the planned children and publish their refs. Publication is ADDITIVE (union): the
+		//    residual/orphan VolumeSnapshot wave (§5) co-writes childrenSnapshotRefs and must be preserved.
+		if err := sdk.EnsureChildren(ctx, adapter, plan.desired, plan.excluded); err != nil {
+			return ctrl.Result{}, err
+		}
+		// A weight layer is still pending (or a mapped source kind is RBAC-forbidden): the graph is not fully
+		// planned. Requeue on the child-graph poll cadence (child watches are the primary wake-up). Unbounded
+		// by design — a child may stay pending for hours; never a deadline.
+		if plan.outcome != namespaceChildrenAllPlanned {
+			logger.V(1).Info("namespace child graph not fully planned; requeue", "reason", plan.reason, "message", plan.message)
+			return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+		}
 
-	// 4. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
-	//    the CSI VolumeSnapshots for uncovered PVCs and declare them as REGULAR domain children via the SDK
-	//    EnsureChildren (content-single-writer design §11.6). Each orphan VolumeSnapshot is a standard
-	//    domain snapshot now (adopted + planned by the storage-foundation VolumeSnapshot domain controller,
-	//    §11.2/§11.3): its content shell is created + bound by the generic binder and ALL its content status
-	//    (data, manifestCheckpointName, childrenSnapshotContentRefs, Ready) is projected by the aggregator —
-	//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
-	//    enumeration before MarkPlanned means the FULL child set (domain children + orphan VolumeSnapshots)
-	//    is present when the binder freezes the root SnapshotContent, so no orphan child is missed.
-	if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap, adapter, sdk, plan.excluded); err != nil {
-		return ctrl.Result{}, err
-	} else if res.Requeue || res.RequeueAfter > 0 {
-		return res, nil
-	}
-	// Re-read so the orphan leaves just published on childrenSnapshotRefs are observed downstream.
-	if err := r.snapshotReader().Get(ctx, key, nsSnap); err != nil {
-		return ctrl.Result{}, err
-	}
+		// 4. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
+		//    the CSI VolumeSnapshots for uncovered PVCs and declare them as REGULAR domain children via the SDK
+		//    EnsureChildren (content-single-writer design §11.6). Each orphan VolumeSnapshot is a standard
+		//    domain snapshot now (adopted + planned by the storage-foundation VolumeSnapshot domain controller,
+		//    §11.2/§11.3): its content shell is created + bound by the generic binder and ALL its content status
+		//    (data, manifestCheckpointName, childrenSnapshotContentRefs, Ready) is projected by the aggregator —
+		//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
+		//    enumeration before MarkPlanned means the FULL child set (domain children + orphan VolumeSnapshots)
+		//    is present when the binder freezes the root SnapshotContent, so no orphan child is missed.
+		if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap, adapter, sdk, plan.excluded); err != nil {
+			return ctrl.Result{}, err
+		} else if res.Requeue || res.RequeueAfter > 0 {
+			return res, nil
+		}
+		// Re-read so the orphan leaves just published on childrenSnapshotRefs are observed downstream.
+		if err := r.snapshotReader().Get(ctx, key, nsSnap); err != nil {
+			return ctrl.Result{}, err
+		}
 
-	// 5. Barrier 1 (phase=Planned): unblocks the generic binder to create + bind the root SnapshotContent
-	//    with the full, frozen child set.
-	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
-		return ctrl.Result{}, err
+		// 5. Barrier 1 (phase=Planned): unblocks the generic binder to create + bind the root SnapshotContent
+		//    with the full, frozen child set.
+		if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// 6. The binder owns the SnapshotContent now: wait for it to create + bind before the linking/manifest

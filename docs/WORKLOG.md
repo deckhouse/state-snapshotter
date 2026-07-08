@@ -1293,3 +1293,20 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   precedence + restore-heals-to-Ready + the three pre-Planned planner cases. ADR «Судьба исчезнувших объявленных
   детей» + reason catalog already carry the semantics. gofmt + go vet + tests green; golangci-lint adds no new
   findings.
+- **Refactor** (snapshot, sdk-children-planned-freeze block B) Namespace-root capture no longer re-plans
+  membership after barrier 1. `reconcileNamespaceCapture` now gates its whole plan+enumerate+freeze block
+  (steps 1-5: PublishSnapshotSource, planNamespaceChildren, EnsureChildren, the residual/orphan-PVC wave,
+  MarkPlanned) behind `namespaceDomainPrePlanned` — past Planned the composition is frozen (ADR PIT cycle
+  «если узел уже Planned — план заморожен, состав не пересчитывается») and the reconciler jumps straight to the
+  post-bind legs (6-8: wait-for-bind, manifest-exclude MCR, ConfirmConsistent), which self-requeue and are
+  driven by the child/content watches, so convergence survives the skip. This removes the old accidental
+  re-plan self-heal: a declared child CR deleted after Planned is deliberately NOT recreated and instead
+  surfaces as terminal `ChildSnapshotLost` via block E (`lost_children.go` /
+  `detectLostDomainChildrenPrePlanned`) — one strict window-independent semantics (deleted-after-Planned =
+  lost). New integration spec in `snapshot_capture_plan_drift_test.go` (children-axis mirror of the existing
+  manifest-axis frozen-plan spec): a residual PVC added after the root is captured is never enumerated
+  (childrenSnapshotRefs stays empty, no VolumeSnapshot child) and the root stays Ready=True/Completed; verified
+  to fail without the gate (the orphan wave would flip Ready=False on the classless PVC). Also fixed a stale
+  sibling lifecycle spec (separate commit): the empty-namespace root MCP now correctly holds the captured
+  Namespace object, so the assertion moved from "empty archive" to "exactly the Namespace object". gofmt + go
+  vet + integration specs green; golangci-lint adds no new findings; bugbot clean.
