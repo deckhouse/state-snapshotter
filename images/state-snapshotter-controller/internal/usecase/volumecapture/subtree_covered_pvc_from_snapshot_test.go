@@ -127,24 +127,26 @@ func TestCollectSubtreeCoveredPVCUIDsFromSnapshot_nestedAggregator(t *testing.T)
 	}
 }
 
-func TestCollectSubtreeCoveredPVCUIDsFromSnapshot_skipsVolumeSnapshotVisibilityLeaf(t *testing.T) {
+func TestCollectSubtreeCoveredPVCUIDsFromSnapshot_absentVolumeSnapshotChildSelfHeals(t *testing.T) {
 	t.Parallel()
 	ns := "ns"
-	// A CSI VolumeSnapshot visibility leaf is the residual/orphan wave's own output; it must be skipped
-	// (never Get, never counted) so its own PVC stays in residual scope.
+	// A referenced-but-absent CSI VolumeSnapshot child is the residual wave's OWN deterministically-named
+	// (rootUID, pvcUID) output: the walk SKIPS it (contributes no coverage, no error) so its PVC
+	// re-classifies as residual and the wave recreates it at the same name (idempotent). Failing closed here
+	// would wedge the wave before the recreate path runs. A missing NON-VolumeSnapshot child still fails
+	// closed — see _missingChildFailsClosed.
 	vsLeaf := storagev1alpha1.SnapshotChildRef{
 		APIVersion: snapshotpkg.CSISnapshotAPIVersion,
 		Kind:       snapshotpkg.KindVolumeSnapshot,
 		Name:       "orphan-vs",
 	}
 	root := snapNode(ns, "root", "", vsLeaf)
-	// Note: the VolumeSnapshot object is intentionally absent — a correct walk skips before any Get.
 	covered, err := CollectSubtreeCoveredPVCUIDsFromSnapshot(context.Background(), buildSnapshotSubtreeClient(t, root), root)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("absent orphan VolumeSnapshot child must self-heal (skip), got error: %v", err)
 	}
 	if len(covered) != 0 {
-		t.Fatalf("expected VS visibility leaf skipped (empty covered), got %v", covered)
+		t.Fatalf("absent VolumeSnapshot child must contribute no coverage, got %v", covered)
 	}
 }
 

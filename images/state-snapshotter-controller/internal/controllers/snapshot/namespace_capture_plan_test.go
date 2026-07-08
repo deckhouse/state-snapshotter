@@ -62,7 +62,9 @@ func TestAllDirectDomainChildrenAtLeastPlanned(t *testing.T) {
 	domainRef := func(name string) storagev1alpha1.SnapshotChildRef {
 		return storagev1alpha1.SnapshotChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: name}
 	}
-	// A CSI VolumeSnapshot visibility leaf: must be skipped (no phase, gated by the orphan wave latch).
+	// An orphan CSI VolumeSnapshot: under the content-single-writer model it is an ordinary domain child
+	// (no longer a skipped "visibility leaf"), so it participates in the at-least-Planned gate like any
+	// other child — it must reach Planned/Finished to satisfy the gate.
 	orphanLeaf := storagev1alpha1.SnapshotChildRef{
 		APIVersion: snapshotpkg.CSISnapshotAPIVersion,
 		Kind:       snapshotpkg.KindVolumeSnapshot,
@@ -100,9 +102,18 @@ func TestAllDirectDomainChildrenAtLeastPlanned(t *testing.T) {
 			wantAll: false,
 		},
 		{
-			name:    "orphan VS leaf is skipped (does not block despite no phase)",
+			name:    "orphan VS child with no phase blocks the gate",
 			refs:    []storagev1alpha1.SnapshotChildRef{domainRef("a"), orphanLeaf},
 			phases:  map[string]storagev1alpha1.SnapshotCapturePhase{"a": storagev1alpha1.SnapshotCapturePhasePlanned},
+			wantAll: false,
+		},
+		{
+			name: "orphan VS child at least Planned satisfies the gate",
+			refs: []storagev1alpha1.SnapshotChildRef{domainRef("a"), orphanLeaf},
+			phases: map[string]storagev1alpha1.SnapshotCapturePhase{
+				"a":             storagev1alpha1.SnapshotCapturePhasePlanned,
+				orphanLeaf.Name: storagev1alpha1.SnapshotCapturePhaseFinished,
+			},
 			wantAll: true,
 		},
 	}

@@ -77,8 +77,9 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Conte
 	}
 
 	// Writer switch (creator -> main): only mirror once the owner has adopted THIS content. Pre-bind the
-	// creator/binder owns Snapshot.Ready; a cross-binding (owner bound to a different content) or an owner
-	// kind with no bind model (e.g. a VolumeSnapshot leaf handle) is likewise not ours to write.
+	// creator/binder owns Snapshot.Ready; a cross-binding (owner bound to a different content) is not ours to
+	// write. Every domain owner — including the VolumeSnapshot domain kind (content-single-writer design
+	// §11.6) — carries status.boundSnapshotContentName, so this one writer switch covers them all.
 	bound, _, _ := unstructured.NestedString(owner.Object, "status", "boundSnapshotContentName")
 	if bound != contentObj.GetName() {
 		return nil

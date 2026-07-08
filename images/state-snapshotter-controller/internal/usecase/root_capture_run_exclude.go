@@ -88,7 +88,7 @@ func BuildRootNamespaceManifestCaptureTargets(
 	// a real subtree, descendant content nodes must publish a Ready ManifestCheckpoint before the exclude
 	// set can be computed; otherwise this returns ErrSubtreeManifestCapturePending/...Failed. Computing it
 	// first avoids listing the whole namespace on every requeue while children are still publishing MCPs.
-	hasSubtree := hasNonVisibilityChildSnapshotRefs(rootNS.Status.ChildrenSnapshotRefs) || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0
+	hasSubtree := len(rootNS.Status.ChildrenSnapshotRefs) > 0 || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0
 	var subtreeExcl map[string]struct{}
 	if hasSubtree {
 		var err error
@@ -115,15 +115,15 @@ func BuildRootNamespaceManifestCaptureTargets(
 		return nil, unreadable, err
 	}
 
-	// Variant A: a residual/orphan root PVC is captured as a standalone child volume node (its own
-	// SnapshotContent + its own ManifestCheckpoint holding that PVC's manifest + its own dataRef). The root
-	// is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So the residual root-owned
-	// PVCs (ownedPVC) are excluded from the root MCR UP FRONT — independent of whether their child volume
-	// nodes / per-orphan MCPs already exist — because CSI binding of the orphan VolumeSnapshot is async and
-	// would otherwise race the (near-instant) root manifest leg into double-capturing the PVC manifest on
-	// both the root and the child (co-ownership violation, spec §3.9.2). Every residual root PVC goes
-	// through ensureOrphanPVCVolumeSnapshots → child volume node, so dropping them here never loses a
-	// manifest.
+	// A residual/orphan root PVC is captured as its own VolumeSnapshot domain child (content-single-writer
+	// design §11.6): that child owns its own SnapshotContent + ManifestCheckpoint holding the PVC manifest +
+	// its own data leg. The root is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So
+	// the residual root-owned PVCs (ownedPVC) are excluded from the root MCR UP FRONT — independent of
+	// whether the orphan VolumeSnapshot's content / MCP already exists — because CSI binding of the orphan
+	// VolumeSnapshot is async and would otherwise race the (near-instant) root manifest leg into
+	// double-capturing the PVC manifest on both the root and the child (co-ownership violation, spec §3.9.2).
+	// Every residual root PVC goes through ensureOrphanPVCVolumeSnapshots → VolumeSnapshot child, so dropping
+	// them here never loses a manifest.
 	exclude := make(map[string]struct{}, len(ownedPVC)+len(subtreeExcl))
 	for _, t := range ownedPVC {
 		exclude[namespacemanifest.ManifestTargetDedupKey(targetNamespace, t)] = struct{}{}
@@ -136,18 +136,6 @@ func BuildRootNamespaceManifestCaptureTargets(
 		exclude[k] = struct{}{}
 	}
 	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), unreadable, nil
-}
-
-// hasNonVisibilityChildSnapshotRefs reports whether any child ref is a real domain/subtree child.
-// CSI VolumeSnapshot visibility leaves (orphan-PVC data leg) are excluded.
-func hasNonVisibilityChildSnapshotRefs(refs []storagev1alpha1.SnapshotChildRef) bool {
-	for i := range refs {
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(refs[i]) {
-			continue
-		}
-		return true
-	}
-	return false
 }
 
 func collectRunSubtreeManifestExcludeKeys(
@@ -174,9 +162,6 @@ func collectRunSubtreeManifestExcludeKeys(
 
 	for i := range rootNS.Status.ChildrenSnapshotRefs {
 		ch := rootNS.Status.ChildrenSnapshotRefs[i]
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ch) {
-			continue
-		}
 		resolved, err := ResolveChildSnapshotRefToBoundContentName(ctx, c, ch, rootNS.Namespace)
 		if err != nil {
 			return nil, err

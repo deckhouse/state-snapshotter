@@ -29,7 +29,6 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
-	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
@@ -60,15 +59,10 @@ func CollectSubtreeCoveredPVCUIDs(
 		if content.Name == rootContent.Name {
 			return nil
 		}
-		// Variant A: a child volume node materialized for a root-residual/orphan PVC IS the orphan capture
-		// itself, not a separate subtree owner. Counting it as covered would drop its own PVC from the root
-		// residual target set (double-handling the same PVC), so it must keep the PVC in scope here. The PVC
-		// manifest is still excluded from the root ManifestCheckpoint via the separate MCP subtree-exclude
-		// path (root_capture_run_exclude.go).
-		// Detected by the explicit LabelChildVolumeNode marker (a name-prefix heuristic would be fragile).
-		if snapshotpkg.IsChildVolumeNodeContent(content) {
-			return nil
-		}
+		// Orphan/residual-PVC VolumeSnapshot children are ordinary domain content now (content-single-writer
+		// design §11.6): the aggregator projects their status.data from the bound VSC, so they cover their own
+		// PVC UID here like every other data-bearing node — there is no visibility-leaf carve-out. (The full
+		// coverage rewrite — CSD RequiresDataArtifact + native-CSI snapshotSource fallback — lands in Block 5.)
 		uids, err := coveredPVCUIDsForContent(ctx, c, namespace, content)
 		if err != nil {
 			return err

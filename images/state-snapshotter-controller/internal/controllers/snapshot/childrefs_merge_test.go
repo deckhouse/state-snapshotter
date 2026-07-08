@@ -147,16 +147,36 @@ func domainChildReady(name string, ready bool) *unstructured.Unstructured {
 	return child
 }
 
+// readyVSChild builds a bound, Ready=True orphan CSI VolumeSnapshot domain child. Under the
+// content-single-writer model an orphan VolumeSnapshot is an ordinary domain child (no longer a skipped
+// "visibility leaf"), so the final-wave gate must treat it exactly like any other domain child.
+func readyVSChild(name, ns string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": snapshotpkg.CSISnapshotAPIVersion,
+		"kind":       snapshotpkg.KindVolumeSnapshot,
+		"metadata":   map[string]interface{}{"name": name, "namespace": ns, "generation": int64(1)},
+		"status": map[string]interface{}{
+			"boundSnapshotContentName": "content-" + name,
+			"conditions": []interface{}{map[string]interface{}{
+				"type":               snapshotpkg.ConditionReady,
+				"status":             string(metav1.ConditionTrue),
+				"reason":             snapshotpkg.ReasonCompleted,
+				"observedGeneration": int64(1),
+			}},
+		},
+	}}
+}
+
 func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
 	ctx := context.Background()
 	ns := "ns1"
 	vsLeaf := storagev1alpha1.SnapshotChildRef{APIVersion: snapshotpkg.CSISnapshotAPIVersion, Kind: snapshotpkg.KindVolumeSnapshot, Name: "nss-vs-x"}
 
-	t.Run("no domain children passes vacuously (VS visibility leaf skipped)", func(t *testing.T) {
+	t.Run("declared VolumeSnapshot child not created keeps gate closed", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()}
 		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, []storagev1alpha1.SnapshotChildRef{vsLeaf})
-		if err != nil || !ready || len(pending) != 0 {
-			t.Fatalf("vacuous gate must be open, got ready=%v pending=%v err=%v", ready, pending, err)
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected for uncreated VS domain child, got ready=%v pending=%v err=%v", ready, pending, err)
 		}
 	})
 
@@ -180,13 +200,24 @@ func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
 		}
 	})
 
-	t.Run("all domain children Ready opens gate, VS leaf ignored", func(t *testing.T) {
+	t.Run("all domain children Ready (incl VolumeSnapshot) opens gate", func(t *testing.T) {
 		readyChild := domainChildReady("ready", true)
-		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
+		vsChild := readyVSChild("nss-vs-x", ns)
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild, vsChild).Build()}
 		refs := []storagev1alpha1.SnapshotChildRef{childRef("ready"), vsLeaf}
 		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
 		if err != nil || !ready || len(pending) != 0 {
 			t.Fatalf("open gate expected, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+
+	t.Run("VolumeSnapshot child not yet Ready keeps gate closed", func(t *testing.T) {
+		readyChild := domainChildReady("ready", true)
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
+		refs := []storagev1alpha1.SnapshotChildRef{childRef("ready"), vsLeaf}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected while the VS child is uncreated, got ready=%v pending=%v err=%v", ready, pending, err)
 		}
 	})
 

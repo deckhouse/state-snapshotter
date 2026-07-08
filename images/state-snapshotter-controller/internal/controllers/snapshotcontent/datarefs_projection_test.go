@@ -235,39 +235,3 @@ func TestReconcileDataLegProjection_NativeCSIPublishesFromBoundVSC(t *testing.T)
 	}
 	projAssertPublishedAndHandedOff(t, cl)
 }
-
-// The data-leg projection MUST skip child-volume-node (orphan leaf) contents: their data leg stays on the
-// snapshot orphan-PVC path until the orphan machinery is dismantled (Block 3d). No publish, no requeue.
-func TestReconcileDataLegProjection_SkipsChildVolumeNode(t *testing.T) {
-	ctx := context.Background()
-	scheme := projScheme(t)
-	content := projContentTyped()
-
-	owner := &unstructured.Unstructured{}
-	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
-	owner.SetNamespace(projTestNS)
-	owner.SetName("disk-snap")
-	_ = unstructured.SetNestedField(owner.Object, projTestVCRName, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
-		WithObjects(projSourcePVC(), content, projReadyVCR(), projVSCUnowned()).
-		Build()
-	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
-
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(map[string]string{snapshot.LabelChildVolumeNode: "true"}), owner, projTestNS, true)
-	if err != nil {
-		t.Fatalf("reconcileDataLegProjection: %v", err)
-	}
-	if requeue {
-		t.Fatalf("child-volume-node content must be skipped (no requeue)")
-	}
-	got := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(ctx, client.ObjectKey{Name: projTestContent}, got); err != nil {
-		t.Fatalf("get content: %v", err)
-	}
-	if got.Status.Data != nil {
-		t.Fatalf("child-volume-node content must not have data published by the aggregator, got %#v", got.Status.Data)
-	}
-}

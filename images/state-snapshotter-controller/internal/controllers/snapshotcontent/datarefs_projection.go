@@ -42,16 +42,10 @@ import (
 //   - VCR domains (demo disk, etc.): captureState.domainSpecificController.volumeCaptureRequestName ->
 //     VolumeCaptureRequest -> VolumeSnapshotContent (§4 Slice 3);
 //   - native-CSI kind VolumeSnapshot (§11.4): the fork binds the VS to a VSC directly, so the aggregator
-//     reads owner.status.boundVolumeSnapshotContentName. Dormant until the CSD registers the kind (Block 3c).
+//     reads owner.status.boundVolumeSnapshotContentName. Active once the CSD registers the kind (Block 3c).
 //
 // It is latch-idempotent: once status.data covers the source, it is kept even after the VCR is reaped.
 func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, err error) {
-	// Child-volume-node (orphan leaf) contents keep their data leg on the snapshot orphan-PVC path until
-	// the orphan machinery is dismantled (Block 3d, design §11.6); skip them here — same guard as the
-	// child-edge and manifest projections.
-	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
-		return false, nil
-	}
 	if !ownerFound {
 		// spec.snapshotRef absent (synthetic/legacy) or owner not observable yet: nothing to project.
 		return false, nil
@@ -141,7 +135,7 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 // bound to a VolumeSnapshotContent by the fork's CSI machinery (status.boundVolumeSnapshotContentName), so
 // the aggregator builds the {source PVC, VSC artifact} binding from the owner status and performs the same
 // enrich + Retain/ownerRef handoff + publish as the VCR branch. The source PVC is published by the domain
-// reconciler at adoption (owner.status.snapshotSource). Dormant until the CSD registers the kind (Block 3c).
+// reconciler at adoption (owner.status.snapshotSource). Active once the CSD registers the kind (Block 3c).
 func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx context.Context, contentObj, owner *unstructured.Unstructured, _ string) (requeue bool, err error) {
 	contentName := contentObj.GetName()
 

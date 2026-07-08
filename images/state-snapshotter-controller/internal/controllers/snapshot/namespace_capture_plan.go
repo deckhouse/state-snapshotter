@@ -19,7 +19,6 @@ package snapshot
 import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
@@ -63,18 +62,15 @@ func manifestIdentityKey(apiVersion, kind, name string) string {
 // capture barrier 1 (domainSpecificController.phase >= Planned). It is the "direct domain children
 // planned" half of the root's phase=Finished gate (design §4.2/§6.2).
 //
-// CSI VolumeSnapshot visibility leaves (the orphan/residual PVC wave) are skipped: they have no domain
-// controller and therefore no phase, and are gated by the aggregator's fail-closed orphan-link gate
-// (ChildrenReady=ChildrenLinkPending until each orphan child content is linked), not here. phaseByName
-// maps a child ref Name to its observed capture phase (empty = no phase yet). A root with no domain
-// children passes vacuously.
+// Orphan/residual CSI VolumeSnapshot children are ordinary domain children now (content-single-writer
+// design §11.6): the storage-foundation VolumeSnapshot domain controller runs MarkPlanned on them, so they
+// carry a phase and participate in this gate like every other domain child — there is no visibility-leaf
+// carve-out. phaseByName maps a child ref Name to its observed capture phase (empty = no phase yet). A root
+// with no domain children passes vacuously.
 //
 // Pure function (phases supplied by the caller) so the gate is unit-tested directly (design §9).
 func allDirectDomainChildrenAtLeastPlanned(refs []storagev1alpha1.SnapshotChildRef, phaseByName map[string]storagev1alpha1.SnapshotCapturePhase) bool {
 	for _, ref := range refs {
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
 		switch phaseByName[ref.Name] {
 		case storagev1alpha1.SnapshotCapturePhasePlanned, storagev1alpha1.SnapshotCapturePhaseFinished:
 			continue

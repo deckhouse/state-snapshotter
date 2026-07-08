@@ -11,7 +11,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
-	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.Client, contentName, mcpName string) error {
@@ -35,16 +34,13 @@ func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.
 // PublishSnapshotContentChildrenRefs adds the snapshot-derived (domain) child content edges to
 // contentName.status.childrenSnapshotContentRefs.
 //
-// domainRefs is the DOMAIN child set (derived from the owning snapshot's status.childrenSnapshotRefs).
-// The merge is APPEND-ONLY (monotonic): every existing edge is preserved and new domain edges are added
-// on top, deduped by name. This matches the monotonic snapshot-tree model (nodes are added during
-// capture and only removed when the whole content is torn down) and makes the write commutative with
-// LinkChildVolumeContentRef, which co-writes the child-volume-node (orphan/root-residual PVC) edges:
-// neither writer can clobber the other's edges, so there is no write-war / Ready livelock. Because names
-// are opaque under the unified scheme (api/names), edges are no longer classified by name prefix — the
-// append-only merge preserves both domain and volume-node edges uniformly. The read is done via reader
-// (the non-cached APIReader) so the preserve set reflects edges just written by the other writer rather
-// than a stale cache.
+// domainRefs is the child set (derived from the owning snapshot's status.childrenSnapshotRefs — orphan/
+// residual-PVC VolumeSnapshot children are ordinary domain children now, §11.6). The merge is APPEND-ONLY
+// (monotonic): every existing edge is preserved and new edges are added on top, deduped by name. This
+// matches the monotonic snapshot-tree model (nodes are added during capture and only removed when the whole
+// content is torn down). The aggregator is the sole edge writer (INV-CONTENT-CHILDREN-1) as of Block 3d;
+// the optimistic lock below is retained as defense in depth. The read is done via reader (the non-cached
+// APIReader) so the preserve set reflects the freshest edges rather than a stale cache.
 func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, reader client.Reader, contentName string, domainRefs []storagev1alpha1.SnapshotContentChildRef) error {
 	if contentName == "" {
 		return nil
@@ -86,8 +82,8 @@ func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, re
 		}
 		base := content.DeepCopy()
 		content.Status.ChildrenSnapshotContentRefs = desired
-		// Optimistic lock: childrenSnapshotContentRefs is co-written by LinkChildVolumeContentRef; a
-		// concurrent edit turns into a 409 so RetryOnConflict re-reads the fresh (merged) list instead of
+		// Optimistic lock (defense in depth): the aggregator is the sole edge writer as of Block 3d, but a
+		// concurrent edit still turns into a 409 so RetryOnConflict re-reads the fresh list instead of
 		// blindly replacing it (matches the convention in genericbinder.patchSnapshotConditionFromContent).
 		return c.Status().Patch(ctx, content, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
@@ -120,9 +116,6 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 	}
 	out := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(childSnapshotRefs))
 	for _, childRef := range childSnapshotRefs {
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(childRef) {
-			continue
-		}
 		childContentName, err := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, readClient, childRef, parentNamespace)
 		if err != nil {
 			if errors.Is(err, usecase.ErrRunGraphChildNotBound) ||

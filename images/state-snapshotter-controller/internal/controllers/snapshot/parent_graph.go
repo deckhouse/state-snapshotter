@@ -512,24 +512,22 @@ func childCaptureAtLeastPlanned(child *unstructured.Unstructured) bool {
 }
 
 // allDeclaredDomainChildSnapshotsReady reports whether every declared DOMAIN child snapshot of the root
-// (Snapshot.status.childrenSnapshotRefs, excluding CSI VolumeSnapshot visibility leaves) has reached full
-// Ready=True. It is the wave barrier for root orphan/residual PVC volume capture: orphan PVCs must be
-// evaluated only after the domain subtree has finished capturing, so a PVC that a domain child covers is
-// never momentarily seen as orphan (which previously created an nss-vs-* VolumeSnapshot + child volume
-// node that then got pruned, leaving a dangling, never-archiving node). The root MANIFEST branch is not
-// gated by this. A NotFound or not-yet-Ready child is pending (not a failure); a terminal child failure is
-// surfaced separately by the content aggregation (ChildrenFailed), so here it simply keeps the gate closed.
-// Readiness reuses ClassifyGenericChildSnapshotReady (Ready=True == Completed) for the pending/failed
-// descriptors AND enforces the strict generation contract: a Ready=True is honored only when its
-// observedGeneration == metadata.generation, so a stale Ready=True from a previous spec generation cannot
-// open the orphan wave while the child re-reconciles (mirrors readyConditionIsCurrentTerminal /
-// conditionSliceHasCurrentTrue; domain child controllers stamp Ready.observedGeneration on every write).
-// A namespace with no declared domain children passes the gate vacuously.
+// (Snapshot.status.childrenSnapshotRefs) has reached full Ready=True. It is the wave barrier for root
+// orphan/residual PVC volume capture: orphan PVCs must be evaluated only after the already-declared domain
+// subtree has finished capturing, so a PVC that a domain child covers is never momentarily seen as orphan.
+// Orphan/residual-PVC VolumeSnapshot children are ordinary domain children now (content-single-writer
+// design §11.6) and participate in this gate like every other child (Block 5 relaxes the gate from
+// full-Ready to phase>=Planned). The root MANIFEST branch is not gated by this. A NotFound or not-yet-Ready
+// child is pending (not a failure); a terminal child failure is surfaced separately by the content
+// aggregation (ChildrenFailed), so here it simply keeps the gate closed. Readiness reuses
+// ClassifyGenericChildSnapshotReady (Ready=True == Completed) for the pending/failed descriptors AND
+// enforces the strict generation contract: a Ready=True is honored only when its observedGeneration ==
+// metadata.generation, so a stale Ready=True from a previous spec generation cannot open the orphan wave
+// while the child re-reconciles (mirrors readyConditionIsCurrentTerminal / conditionSliceHasCurrentTrue;
+// domain child controllers stamp Ready.observedGeneration on every write). A namespace with no declared
+// domain children passes the gate vacuously.
 func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, pending []string, err error) {
 	for _, ref := range refs {
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
 		gv, perr := schema.ParseGroupVersion(ref.APIVersion)
 		if perr != nil {
 			return false, nil, perr

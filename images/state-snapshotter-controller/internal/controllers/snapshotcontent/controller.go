@@ -344,29 +344,20 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	// Resolve the owning snapshot ONCE per pass and share it across the single-writer projections below
-	// (child edges + manifest pointer). Both read the same owner status legs (childrenSnapshotRefs and
-	// captureState...manifestCaptureRequestName), so a single APIReader.Get keeps the aggregator's per-pass
-	// owner read at the Block 1 level. A second, redundant Get (one per projection) perturbed the Block 0
-	// eager-shell ObjectKeeper create race enough to wedge the orphan wave (the root content never flipped
-	// Ready, so the domain — woken only by the Ready mirror — went idle before creating the orphan
-	// VolumeSnapshots). See WORKLOG w8-block2.
+	// (child edges + manifest pointer + data leg). All read the same owner status legs (childrenSnapshotRefs
+	// and captureState...manifestCaptureRequestName / boundVolumeSnapshotContentName), so a single
+	// APIReader.Get keeps the aggregator's per-pass owner read at the Block 1 level. A second, redundant Get
+	// (one per projection) perturbed the Block 0 eager-shell ObjectKeeper create race enough to wedge the
+	// orphan wave. See WORKLOG w8-block2.
 	//
-	// Child-volume-node (orphan leaf) contents drive NEITHER projection (both skip them via the same
-	// LabelChildVolumeNode guard until Block 3), so skip the owner resolve entirely for them: never add an
-	// owner Get to the orphan-wave reconcile path — the exact load-sensitive path the single-Get
-	// consolidation above exists to protect. The projections keep their own leaf guards as defense in depth.
-	var (
-		owner          *unstructured.Unstructured
-		ownerNamespace string
-		ownerFound     bool
-	)
-	if obj.GetLabels()[snapshot.LabelChildVolumeNode] != "true" {
-		var ownerErr error
-		owner, ownerNamespace, ownerFound, ownerErr = r.ownerSnapshot(ctx, obj)
-		if ownerErr != nil {
-			logger.Error(ownerErr, "Failed to resolve owning snapshot")
-			return ctrl.Result{}, ownerErr
-		}
+	// Orphan/standalone VolumeSnapshot children are ordinary domain contents now (content-single-writer
+	// design §11.6): their owner (the VolumeSnapshot) carries captureState + boundVolumeSnapshotContentName,
+	// so they drive the same projections as every other content — there is no visibility-leaf owner-resolve
+	// carve-out.
+	owner, ownerNamespace, ownerFound, ownerErr := r.ownerSnapshot(ctx, obj)
+	if ownerErr != nil {
+		logger.Error(ownerErr, "Failed to resolve owning snapshot")
+		return ctrl.Result{}, ownerErr
 	}
 
 	// Single-writer child edges (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2): the
@@ -856,16 +847,6 @@ func (r *SnapshotContentController) aggregateChildrenSubtreeManifestsPersisted(c
 // only occurs for synthetic/legacy objects) the declared set cannot be verified and the function falls
 // back to the published-edges-only view (complete=true, no declared names).
 func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context.Context, contentObj *unstructured.Unstructured) ([]string, bool, error) {
-	// A child-volume-node content (orphan/root-residual single PVC, Variant A) is a LEAF by construction:
-	// it models a single PVC and never declares child snapshots in its owning snapshot, so its declared
-	// non-leaf set is always empty regardless of its spec.snapshotRef. Short-circuiting here also keeps it
-	// robust if the referenced orphan VolumeSnapshot is momentarily unobservable (it is durable now, but
-	// consulting the ref below on a transient miss would hit the NotFound -> declaredComplete=false
-	// fail-close and pin ManifestsArchived=Capturing forever). Treat it as a complete, childless set.
-	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
-		return nil, true, nil
-	}
-
 	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
 	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
@@ -904,9 +885,6 @@ func (r *SnapshotContentController) declaredNonLeafChildContentNames(ctx context
 		ref.APIVersion, _ = m["apiVersion"].(string)
 		ref.Kind, _ = m["kind"].(string)
 		ref.Name, _ = m["name"].(string)
-		if snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
 		// Uncached (APIReader) for the same reason as the owner GET above: resolving each declared child
 		// snapshot to its bound content name is part of building the authoritative declared set; a stale
 		// resolution would weaken the fail-closed declared-vs-linked guard on the one-way archive latch.
@@ -1026,15 +1004,10 @@ func isTerminalChildContentFailure(reason string) bool {
 // message names the failed/pending child and carries its original Ready reason/message so a deeper
 // leaf failure is not lost as the failure climbs the ancestor chain.
 //
-// Orphan-link fail-close (replaces the former residual/orphan-PVC latch gate): on a namespace-root
-// content the orphan/residual-PVC wave publishes CSI VolumeSnapshot visibility leaves into the owning
-// Snapshot's status.childrenSnapshotRefs BEFORE it links the corresponding child-volume-node contents
-// into status.childrenSnapshotContentRefs (linking happens only after the root content binds). Because
-// childrenSnapshotContentRefs carries only LINKED edges, a root whose orphan children are not yet linked
-// would otherwise read ChildrenReady=True prematurely. unlinkedOrphanChildContents recomputes the
-// declared orphan child set from the owner and holds ChildrenReady=False (ChildrenLinkPending,
-// fail-closed) until every declared orphan child content is linked. It is monotonic (gated off once this
-// content's Ready is already True), matching the removed latch gate's "only blocks the FIRST Ready=True".
+// Declared-vs-linked read barrier: orphan/residual-PVC children are ordinary domain children now
+// (content-single-writer design §11.6), so they are covered by the generalized declared-non-leaf gate
+// below (holds ChildrenReady=False/ChildrenLinkPending until every DECLARED child is linked into the
+// frozen edge set) — there is no orphan-specific link gate anymore.
 func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, string, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
@@ -1125,134 +1098,18 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		}
 	}
 
-	// Fail-closed orphan-link gate (subsumes the removed residual/orphan-PVC latch): every declared orphan
-	// volume child content must be linked into childrenSnapshotContentRefs before ChildrenReady may be True.
-	unlinkedOrphans, err := r.unlinkedOrphanChildContents(ctx, parentContentObj, linked)
-	if err != nil {
-		return false, "", "", err
-	}
-	if len(unlinkedOrphans) > 0 {
-		return false, snapshot.ReasonChildrenLinkPending,
-			"waiting for orphan volume child content to be linked: " + strings.Join(unlinkedOrphans, ", "), nil
-	}
-
 	if total == 0 {
 		return true, "", "no child content", nil
 	}
 	return true, "", fmt.Sprintf("%d/%d child content ready", readyCount, total), nil
 }
 
-// unlinkedOrphanChildContents returns the declared orphan (child-volume-node) child content names that are
-// NOT yet present in the parent's linked child edge set (linked). It is the fail-closed declared-vs-linked
-// check that replaces the former residual/orphan-PVC capture latch gate.
-//
-// Scope / monotonicity (returns nil, i.e. "nothing to gate", in all of these cases):
-//   - a child-volume-node content (LabelChildVolumeNode) models a single PVC and has no orphan wave;
-//   - a non-root content (spec.snapshotRef is not a core state-snapshotter.deckhouse.io Snapshot) — only a
-//     namespace-root carries the orphan wave;
-//   - this content's Ready is ALREADY True (upgrade-guard): the gate blocks only the FIRST Ready=True, so a
-//     linked orphan that later degrades does not re-open it (matches the removed monotonic latch gate);
-//   - the owning Snapshot is not observable (NotFound) — nothing to enumerate.
-//
-// For a live-capture namespace-root it reads the owner's declared children fresh (APIReader — the
-// authoritative declared set, same reasoning as declaredNonLeafChildContentNames), keeps only the CSI
-// VolumeSnapshot visibility leaves (the orphan wave), and derives each orphan child content name from the
-// VolumeSnapshot UID. A VolumeSnapshot that does not exist (fresh NotFound) is SKIPPED, not gated: a
-// published leaf in the capture path always has a live VS (it is created before the leaf ref is
-// published), so a missing VS means a reconstructed ref (import/restore) with no live orphan wave.
-func (r *SnapshotContentController) unlinkedOrphanChildContents(ctx context.Context, contentObj *unstructured.Unstructured, linked map[string]struct{}) ([]string, error) {
-	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
-		return nil, nil
-	}
-	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
-	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
-	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
-	if kind != "Snapshot" || apiVersion != storagev1alpha1.SchemeGroupVersion.String() || name == "" {
-		return nil, nil
-	}
-
-	// Upgrade-guard / monotonicity: never re-gate once Ready is already persisted True.
-	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
-	if err != nil {
-		return nil, fmt.Errorf("extract SnapshotContentLike for orphan-link gate: %w", err)
-	}
-	if cur := snapshot.GetCondition(contentLike, snapshot.ConditionReady); cur != nil && cur.Status == metav1.ConditionTrue {
-		return nil, nil
-	}
-
-	owner := &unstructured.Unstructured{}
-	owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(apiVersion, kind))
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	rawRefs, _, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
-	if err != nil {
-		return nil, err
-	}
-	var unlinked []string
-	for _, ref := range snapshotChildRefsFromRaw(rawRefs) {
-		if !snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
-		childName, err := r.orphanChildContentNameFromVSLeaf(ctx, ref, namespace)
-		if err != nil {
-			return nil, err
-		}
-		if childName == "" {
-			// VS not observable (reconstructed import/restore ref, or genuinely gone): nothing to gate on.
-			continue
-		}
-		if _, ok := linked[childName]; !ok {
-			unlinked = append(unlinked, childName)
-		}
-	}
-	return unlinked, nil
-}
-
-// orphanChildContentNameFromVSLeaf resolves the child-volume-node SnapshotContent name for a CSI
-// VolumeSnapshot visibility leaf by reading the VS UID (the content name is derived from it). It returns
-// "" (not an error) when the VolumeSnapshot does not exist, so a reconstructed import/restore leaf ref
-// with no live VS is skipped rather than fail-closed forever. The VS UID is immutable once created, so a
-// cached read is safe; APIReader is used for parity with the fresh owner read above.
-func (r *SnapshotContentController) orphanChildContentNameFromVSLeaf(ctx context.Context, ref storagev1alpha1.SnapshotChildRef, namespace string) (string, error) {
-	vs := &unstructured.Unstructured{}
-	vs.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, vs); err != nil {
-		if errors.IsNotFound(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	uid := vs.GetUID()
-	if uid == "" {
-		return "", nil
-	}
-	return ChildVolumeContentName(uid), nil
-}
-
 // reconcileChildContentEdges is the aggregator's writer of the DOMAIN/generic/import child edges in
 // status.childrenSnapshotContentRefs (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2). It
-// projects this content's non-leaf child edges from its owning snapshot's status.childrenSnapshotRefs:
-// each domain/generic/import child -> its bound child SnapshotContent name (CSI VolumeSnapshot visibility
-// leaves are skipped; all-or-nothing per pass, requeue until every declared non-leaf child is bound).
-//
-// Scope note (Block 1): only the DOMAIN/generic/import edge writers moved here (off the binder/namespace).
-// The ORPHAN volume-node leaf edges (the residual/orphan-PVC wave) are still linked by the snapshot
-// orphan-PVC path (LinkChildVolumeContentRef in snapshot/orphan_pvc_volume_snapshot.go), because
-// orphan-content CREATION also still lives there (EnsureVolumeChildContent). Splitting create (snapshot
-// path) from link (aggregator) across blocks would make the root's orphan wave wait on a cross-controller
-// create->observe->link hop and regressed orphan-wave convergence in the integration suite; keeping create
-// and link co-located in the snapshot path avoids that. Both the orphan creation AND its edge link move to
-// the binder/aggregator together in Block 3 (the binder becomes the single creator of orphan child
-// contents). Note the aggregator already RESOLVES the orphan child name from the VS leaf (via
-// orphanChildContentNameFromVSLeaf) for the ChildrenReady READ barrier, so the deferral is about WHERE the
-// write lives, not about a missing capability. The two writers co-write the same field safely: both merges
-// are APPEND-ONLY under an optimistic lock, so neither clobbers the other's edges (see
-// PublishSnapshotContentChildrenRefs / LinkChildVolumeContentRef).
+// projects this content's child edges from its owning snapshot's status.childrenSnapshotRefs: each declared
+// child (domain/generic/import, incl. orphan/residual-PVC VolumeSnapshot children — all ordinary domain
+// children now, §11.6) -> its bound child SnapshotContent name (all-or-nothing per pass, requeue until
+// every declared child is bound).
 //
 // The write is APPEND-ONLY in this block (the atomic frozen-set write lands in Block 4). It is universal
 // across capture and import: import owners have no domain phase, so the "planned/complete" gate is exactly
@@ -1262,10 +1119,6 @@ func (r *SnapshotContentController) orphanChildContentNameFromVSLeaf(ctx context
 // reconcileCommonSnapshotContentStatus (a separate optimistic-locked status patch), matching the previous
 // external publishers; the 500 ms self-requeue while !ready plus the child-content watch drive convergence.
 func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, err error) {
-	// A child-volume-node content models a single PVC and never declares children (leaf by construction).
-	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
-		return false, nil
-	}
 	if !ownerFound {
 		// spec.snapshotRef absent (synthetic/legacy) or the owner is not observable yet: nothing to
 		// project this pass (fail-soft, same as the removed publishers' pending path).
@@ -1279,9 +1132,9 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 	namespace := ownerNamespace
 
 	// Steady-state short-circuit (perf, INV-CONTENT-CHILDREN-1). Edges are append-only and 1:1 with the
-	// owner's declared children (each non-leaf child -> its bound child-content edge; each orphan CSI leaf
-	// -> its child-volume-content edge; deduped by name), and the owner's childrenSnapshotRefs is set-once
-	// at Planned, so the published set can never exceed the declared set. Once it reaches the declared
+	// owner's declared children (each declared child -> its bound child-content edge, deduped by name), and
+	// the owner's childrenSnapshotRefs is set-once at Planned, so the published set can never exceed the
+	// declared set. Once it reaches the declared
 	// count the edge set is COMPLETE and stable — there is nothing left to add. Returning here (using only
 	// the in-memory content, no API reads) avoids the per-child uncached resolution
 	// (ResolveChildSnapshotRefToBoundContentName) on every 500 ms readiness self-requeue, which a node keeps
@@ -1295,9 +1148,9 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 
 	contentName := contentObj.GetName()
 
-	// Domain/generic/import children (skips VS visibility leaves internally; ensures the parent->child
-	// lifecycle ownerRef; all-or-nothing publish). Orphan leaves are linked by the snapshot path (Block 3
-	// moves them here).
+	// All declared children (domain/generic/import, incl. orphan/residual-PVC VolumeSnapshot children):
+	// resolves each to its bound child content, ensures the parent->child lifecycle ownerRef, all-or-nothing
+	// publish.
 	published, err := PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.APIReader, namespace, contentName, childRefs)
 	if err != nil {
 		return false, err
@@ -1315,14 +1168,10 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 //
 // Root and domain capture owners are one code path: the manifest SDK (EnsureManifestCapture) publishes BOTH
 // the root-namespace MCR name and every domain MCR name into the owner's
-// status.captureState.domainSpecificController.manifestCaptureRequestName, which is read here.
-//
-// Scope note (Block 2): ORPHAN child-volume contents keep their manifest pointer published by the snapshot
-// orphan-PVC path (ensureOrphanVolumeChildManifestCheckpoint), whose per-orphan MCR create/delete lifecycle
-// is gated on content.status.manifestCheckpointName; splitting only the publish off that co-located gate
-// across blocks regressed convergence, exactly as with the orphan child EDGE in reconcileChildContentEdges.
-// Both the orphan MCR lifecycle AND its manifest publish move here in Block 3. Orphan contents are skipped
-// by the LabelChildVolumeNode guard below.
+// status.captureState.domainSpecificController.manifestCaptureRequestName, which is read here. Orphan/
+// residual-PVC VolumeSnapshot children are ordinary domain owners now (content-single-writer design §11.6):
+// their storage-foundation VS domain controller requests the manifest MCR and publishes its name the same
+// way, so this one projection path covers them too — there is no orphan carve-out.
 //
 // Latch semantics (mirrors the guard the binder documented at ensureSnapshotContentLinks): once published,
 // the name is a durable pointer that is never re-derived by chasing a now-deleted MCR. The MCR is a
@@ -1333,10 +1182,6 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 // pointer, do not requeue. A pre-publish NotFound (or an MCR whose CheckpointName the checkpoint controller
 // has not claimed yet) means "not captured yet": requeue (also covered by the !ready self-requeue).
 func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, err error) {
-	// A child-volume-node content's manifest pointer stays on the snapshot orphan-PVC path until Block 3.
-	if contentObj.GetLabels()[snapshot.LabelChildVolumeNode] == "true" {
-		return false, nil
-	}
 	if !ownerFound {
 		// spec.snapshotRef absent (synthetic/legacy) or owner not observable yet: nothing to project.
 		return false, nil

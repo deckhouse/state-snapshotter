@@ -116,11 +116,10 @@ func (r *SnapshotReconciler) reconcileStaticBind(ctx context.Context, nsSnap *st
 // child:
 //   - domain child content -> re-create its XxxxSnapshot CR (StaticBind) and re-point the content's
 //     back-reference at it, then recurse into that child's own children;
-//   - orphan CSI volume-node leaf (LabelChildVolumeNode) -> re-create the CSI VolumeSnapshot handle
-//     (a NEW uid, statically bound to the surviving durable VolumeSnapshotContent), re-point the leaf
-//     content's back-reference at it, and write the INV-ORPHAN4 handle
-//     (VolumeSnapshot.status.boundSnapshotContentName). The durable leaf content itself is NOT re-created
-//     (that would orphan its dataRef -> VolumeSnapshotContent).
+//   - a standalone/orphan CSI VolumeSnapshot child (content.spec.snapshotRef kind VolumeSnapshot) is an
+//     ordinary domain snapshot now (content-single-writer design §11.6) and is SKIPPED here: a CSI
+//     VolumeSnapshot cannot carry spec.mode=StaticBind, so its recycle-bin restore flows through the
+//     unified import model (Block 6), not this static-bind tree.
 //
 // It also reconstructs the root Snapshot's status.childrenSnapshotRefs (the Snapshot-tree the restore
 // resolver walks) from rootContent's direct children, since a StaticBind root runs no capture wave to
@@ -158,16 +157,14 @@ func (r *SnapshotReconciler) reconcileStaticBindRestoreTree(
 				return false, err
 			}
 
-			if snapshotpkg.IsChildVolumeNodeContent(childContent) {
-				// Orphan volume-node leaf: re-create the VolumeSnapshot handle + re-point, keep the content.
-				snapRef, ch, err := r.ensureRestoredOrphanVolumeLeaf(ctx, nsSnap, childContent)
-				if err != nil {
-					return false, err
-				}
-				changed = changed || ch
-				if cur.isRoot && snapRef != nil {
-					rootChildRefs = append(rootChildRefs, *snapRef)
-				}
+			// A standalone/orphan VolumeSnapshot child is an ordinary domain snapshot now (content-single-
+			// writer design §11.6): its recycle-bin restore goes through the unified import model (Block 6),
+			// NOT this static-bind tree — a CSI VolumeSnapshot cannot carry spec.mode=StaticBind /
+			// spec.source.snapshotContentName, so it can neither be re-created as a StaticBind CR here nor be
+			// re-pointed by the generic binder's static-bind path. Skip it: its durable content + Retain
+			// VolumeSnapshotContent survive in the recycle bin and are re-attached via the import path.
+			if ref := childContent.Spec.SnapshotRef; ref != nil &&
+				ref.APIVersion == snapshotpkg.CSISnapshotAPIVersion && ref.Kind == snapshotpkg.KindVolumeSnapshot {
 				continue
 			}
 
@@ -268,127 +265,10 @@ func (r *SnapshotReconciler) ensureRestoredDomainSnapshot(
 	}, created, nil
 }
 
-// ensureRestoredOrphanVolumeLeaf re-attaches one orphan volume-node leaf on restore (Variant A). It does
-// NOT re-create the durable leaf SnapshotContent (which still carries the PVC manifest + the dataRef to
-// the surviving Retain VolumeSnapshotContent); instead it re-creates the namespaced CSI VolumeSnapshot
-// HANDLE that was GC'd with the original Snapshot, statically bound to that surviving VolumeSnapshotContent
-// (spec.source.volumeSnapshotContentName). The re-created handle gets a NEW uid, so the leaf content's
-// back-reference is re-pointed (relaxed-CEL) onto it and the INV-ORPHAN4 handle
-// (VolumeSnapshot.status.boundSnapshotContentName -> leaf content) is (re)written.
-//
-// It returns the Snapshot-tree VolumeSnapshot leaf ref (for the parent's childrenSnapshotRefs) and
-// changed=true when it created the handle, re-pointed the content, or wrote the handle.
-func (r *SnapshotReconciler) ensureRestoredOrphanVolumeLeaf(
-	ctx context.Context,
-	nsSnap *storagev1alpha1.Snapshot,
-	leafContent *storagev1alpha1.SnapshotContent,
-) (*storagev1alpha1.SnapshotChildRef, bool, error) {
-	dataRef := leafContent.Status.Data
-	if dataRef == nil || dataRef.Artifact.Name == "" {
-		return nil, false, fmt.Errorf("orphan child SnapshotContent %q has no data artifact to restore", leafContent.Name)
-	}
-	pvcUID := dataRef.Source.UID
-	vscName := dataRef.Artifact.Name
-	vsName := names.OrphanVolumeSnapshotName(nsSnap.UID, pvcUID)
-	key := client.ObjectKey{Namespace: nsSnap.Namespace, Name: vsName}
-
-	vs := &unstructured.Unstructured{}
-	vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
-	created := false
-	if err := r.Client.Get(ctx, key, vs); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return nil, false, err
-		}
-		desired := &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": snapshotpkg.CSISnapshotAPIVersion,
-			"kind":       snapshotpkg.KindVolumeSnapshot,
-			"metadata": map[string]interface{}{
-				"name":      vsName,
-				"namespace": nsSnap.Namespace,
-				"ownerReferences": []interface{}{
-					ownerRefToMap(volumeSnapshotOwnerReferenceForSnapshot(nsSnap)),
-				},
-			},
-			// Pre-provisioned (static) source: bind to the surviving durable VolumeSnapshotContent rather
-			// than re-snapshotting the (possibly gone) PVC. The CSI snapshot-controller re-binds the
-			// existing VSC and sets status.readyToUse/boundVolumeSnapshotContentName.
-			"spec": map[string]interface{}{
-				"source": map[string]interface{}{
-					"volumeSnapshotContentName": vscName,
-				},
-			},
-		}}
-		desired.SetGroupVersionKind(csiVolumeSnapshotGVK)
-		if cerr := r.Client.Create(ctx, desired); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
-			return nil, false, cerr
-		} else if cerr == nil {
-			created = true
-		}
-		vs = &unstructured.Unstructured{}
-		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
-		if gerr := r.Client.Get(ctx, key, vs); gerr != nil {
-			return nil, false, gerr
-		}
-	}
-
-	// Re-point the leaf content's back-reference onto the re-created handle's NEW uid (relaxed-CEL).
-	repointed, err := r.repointContentSnapshotRef(ctx, leafContent.Name, storagev1alpha1.SnapshotSubjectRef{
-		APIVersion: snapshotpkg.CSISnapshotAPIVersion,
-		Kind:       snapshotpkg.KindVolumeSnapshot,
-		Namespace:  nsSnap.Namespace,
-		Name:       vsName,
-		UID:        vs.GetUID(),
-	})
-	if err != nil {
-		return nil, false, err
-	}
-
-	// (Re)write the INV-ORPHAN4 handle so the resolver can reach the durable leaf content from the VS.
-	bound, err := r.setOrphanVSBoundContent(ctx, key, leafContent.Name)
-	if err != nil {
-		return nil, false, err
-	}
-
-	return &storagev1alpha1.SnapshotChildRef{
-		APIVersion: snapshotpkg.CSISnapshotAPIVersion,
-		Kind:       snapshotpkg.KindVolumeSnapshot,
-		Name:       vsName,
-	}, created || repointed || bound, nil
-}
-
-// setOrphanVSBoundContent writes VolumeSnapshot.status.boundSnapshotContentName -> childContentName
-// (INV-ORPHAN4 handle) under an optimistic-lock merge patch, returning changed=true only when it had to
-// write. It is the restore twin of bindOrphanVSToChildContent (capture path) addressed by VS key.
-func (r *SnapshotReconciler) setOrphanVSBoundContent(ctx context.Context, key client.ObjectKey, childContentName string) (bool, error) {
-	changed := false
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		vs := &unstructured.Unstructured{}
-		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
-		if err := r.Client.Get(ctx, key, vs); err != nil {
-			return err
-		}
-		curName, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
-		if curName == childContentName {
-			changed = false
-			return nil
-		}
-		base := vs.DeepCopy()
-		if err := unstructured.SetNestedField(vs.Object, childContentName, "status", "boundSnapshotContentName"); err != nil {
-			return err
-		}
-		if err := r.Client.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-			return err
-		}
-		changed = true
-		return nil
-	})
-	return changed, err
-}
-
 // ensureRestoredRootSnapshotChildRefs sets the root Snapshot's status.childrenSnapshotRefs to the
-// reconstructed set (domain child CRs + orphan VolumeSnapshot leaves), preserving order-independence and
-// writing only on change. Restore fully owns this Snapshot-tree reconstruction (a StaticBind root runs no
-// capture wave), so the desired set replaces the previous one rather than merging.
+// reconstructed set (domain child CRs), preserving order-independence and writing only on change. Restore
+// fully owns this Snapshot-tree reconstruction (a StaticBind root runs no capture wave), so the desired
+// set replaces the previous one rather than merging.
 func (r *SnapshotReconciler) ensureRestoredRootSnapshotChildRefs(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -409,41 +289,6 @@ func (r *SnapshotReconciler) ensureRestoredRootSnapshotChildRefs(
 		base := cur.DeepCopy()
 		cur.Status.ChildrenSnapshotRefs = desired
 		if err := r.Client.Status().Patch(ctx, cur, client.MergeFrom(base)); err != nil {
-			return err
-		}
-		changed = true
-		return nil
-	})
-	return changed, err
-}
-
-// repointContentSnapshotRef updates content.spec.snapshotRef to want when it differs, gated on the
-// relaxed-CEL precondition (status.parentDeleted): the immutability rule only admits a snapshotRef change
-// once the content is in the recycle bin. Until the bin latch is set the update would be rejected, so we
-// skip and let a later reconcile retry. Returns changed=true when it issued the update.
-func (r *SnapshotReconciler) repointContentSnapshotRef(
-	ctx context.Context,
-	contentName string,
-	want storagev1alpha1.SnapshotSubjectRef,
-) (bool, error) {
-	changed := false
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.SnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, cur); err != nil {
-			return err
-		}
-		if cur.Spec.SnapshotRef != nil && *cur.Spec.SnapshotRef == want {
-			changed = false
-			return nil
-		}
-		if !cur.Status.ParentDeleted {
-			// Not in the recycle bin yet: the CEL gate would reject the re-point. Skip; retry later.
-			changed = false
-			return nil
-		}
-		refCopy := want
-		cur.Spec.SnapshotRef = &refCopy
-		if err := r.Client.Update(ctx, cur); err != nil {
 			return err
 		}
 		changed = true

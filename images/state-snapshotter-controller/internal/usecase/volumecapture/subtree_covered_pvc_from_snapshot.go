@@ -45,16 +45,19 @@ import (
 //
 // Invariants mirrored from the content-tree variant:
 //   - the root itself is excluded (only its descendants count);
-//   - CSI VolumeSnapshot visibility leaves are the residual/orphan wave's OWN output and are skipped — they
-//     cover their own PVC by construction, so counting them would drop that PVC from residual scope
-//     (double-handling); this replaces the content walk's IsChildVolumeNodeContent skip (orphan children
-//     surface as VolumeSnapshot refs in the Snapshot graph, so their content is never reached);
+//   - orphan/residual-PVC VolumeSnapshot children are ordinary domain descendants now (content-single-writer
+//     design §11.6): they are recursed into and cover their own PVC UID via their bound content's status.data
+//     like every other data-bearing node — there is no visibility-leaf carve-out (the full coverage rewrite,
+//     CSD RequiresDataArtifact + native-CSI snapshotSource fallback, lands in Block 5);
 //   - claiming the same PVC UID in two descendants is fail-closed (ErrDuplicateCoveredPVCUID);
 //   - a descendant not yet bound (or whose content has no data yet) contributes no covered UID; callers gate
 //     the residual wave on all domain children being Ready (allDeclaredDomainChildSnapshotsReady) so the
 //     content and its data exist before coverage matters. A referenced child object (or its named bound
 //     content) that cannot be read is a hard error (fail-closed): silently under-covering would let an
-//     already-captured PVC be re-captured by the residual wave.
+//     already-captured PVC be re-captured by the residual wave. The ONE exception is an absent CSI
+//     VolumeSnapshot child — the residual wave's own deterministically-named (rootUID, pvcUID) output: it
+//     is skipped (not an error) so its PVC re-classifies as residual and the wave recreates it at the same
+//     name; failing closed there would wedge the wave before the recreate path runs.
 func CollectSubtreeCoveredPVCUIDsFromSnapshot(
 	ctx context.Context,
 	c client.Reader,
@@ -94,11 +97,6 @@ func walkSnapshotChildRefsForCoverage(
 		if ref.Name == "" {
 			continue
 		}
-		// CSI VolumeSnapshot visibility leaves are the residual/orphan wave's own output — they cover their
-		// OWN PVC by construction, so counting them would drop that PVC from residual scope (double-handling).
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
 		key := ref.APIVersion + "/" + ref.Kind + "/" + ref.Name
 		if _, ok := visited[key]; ok {
 			return fmt.Errorf("Snapshot child graph cycle at %q", key)
@@ -109,6 +107,16 @@ func walkSnapshotChildRefsForCoverage(
 		child.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
 		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, child); err != nil {
 			if apierrors.IsNotFound(err) {
+				// An absent CSI VolumeSnapshot child is the residual/orphan wave's OWN output, named
+				// deterministically by (rootUID, pvcUID): skipping it re-classifies its PVC as residual so
+				// the wave RECREATES it at the same name (idempotent create/adopt) — never a double-capture.
+				// Failing closed here instead would WEDGE the wave, because coverage errors requeue in
+				// ensureOrphanVolumeSnapshotsPrePlanned before the recreate path (EnsureChildren) can run.
+				// Every OTHER kind of missing child stays fail-closed: it is not self-recreating, so silently
+				// under-covering could let an already-captured PVC be re-captured by the residual wave.
+				if ref.APIVersion == snapshotpkg.CSISnapshotAPIVersion && ref.Kind == snapshotpkg.KindVolumeSnapshot {
+					continue
+				}
 				return fmt.Errorf("Snapshot child %q not found: %w", key, err)
 			}
 			return fmt.Errorf("get Snapshot child %q: %w", key, err)
@@ -155,11 +163,6 @@ func addCoverageFromChildBoundContent(
 			return fmt.Errorf("bound SnapshotContent %q of Snapshot child %q not found: %w", contentName, childKey, err)
 		}
 		return fmt.Errorf("get bound SnapshotContent %q of Snapshot child %q: %w", contentName, childKey, err)
-	}
-	// A child volume node IS an orphan capture itself (mirrors the content walk's IsChildVolumeNodeContent
-	// skip); in practice it surfaces as a VolumeSnapshot ref (already skipped), this is belt-and-suspenders.
-	if snapshotpkg.IsChildVolumeNodeContent(content) {
-		return nil
 	}
 	uids, err := coveredPVCUIDsForContent(ctx, c, namespace, content)
 	if err != nil {

@@ -12,7 +12,10 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-func TestPublishSnapshotContentChildrenFromSnapshotRefsSkipsVolumeSnapshotVisibilityLeaf(t *testing.T) {
+// Under the content-single-writer model an orphan CSI VolumeSnapshot is an ordinary domain child (no longer
+// a skipped "visibility leaf"): a brand-new edge to a VolumeSnapshot whose bound SnapshotContent is not
+// visible yet must REQUEUE (ok=false) rather than publish a dangling edge — exactly like any other child.
+func TestPublishSnapshotContentChildrenFromSnapshotRefsRequeuesUnboundVolumeSnapshotChild(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -31,15 +34,15 @@ func TestPublishSnapshotContentChildrenFromSnapshotRefsSkipsVolumeSnapshotVisibi
 	if err != nil {
 		t.Fatalf("publish children: %v", err)
 	}
-	if !ok {
-		t.Fatal("VolumeSnapshot visibility leaf must not block content child publication")
+	if ok {
+		t.Fatal("an unbound VolumeSnapshot child must requeue (ok=false), not publish a dangling edge")
 	}
 	got := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(ctx, client.ObjectKey{Name: parent.Name}, got); err != nil {
 		t.Fatalf("get parent content: %v", err)
 	}
 	if len(got.Status.ChildrenSnapshotContentRefs) != 0 {
-		t.Fatalf("VolumeSnapshot visibility leaf must not become content child, got %#v", got.Status.ChildrenSnapshotContentRefs)
+		t.Fatalf("no child edge must be published while the VolumeSnapshot child is unbound, got %#v", got.Status.ChildrenSnapshotContentRefs)
 	}
 }
 

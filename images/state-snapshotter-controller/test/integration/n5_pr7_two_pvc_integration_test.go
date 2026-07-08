@@ -42,13 +42,15 @@ import (
 // that the shared !isolated suite deliberately omits — several !isolated specs rely on
 // VolumeSnapshotContent being absent. Keep Serial too: even within their own pass they must not interleave.
 //
-// wave7 orphan model: a residual/loose PVC in a namespace-root capture (one not covered by a domain child
-// subtree) is captured as its OWN standalone child volume node (own SnapshotContent + dataRef + own
-// ManifestCheckpoint holding that PVC's manifest), not appended to the root aggregator MCR. The root MCR
-// therefore never carries a PVC manifest. envtest ships no external-snapshotter, so these specs run a fake
-// CSI sidecar (pr7StartFakeExternalSnapshotter) that binds the orphan VolumeSnapshots the controller
-// creates, letting the orphan wave complete end to end.
-var _ = Describe("Integration: N5 PR-7 orphan-PVC child volume nodes", Serial, Ordered, Label("isolated"), func() {
+// content-single-writer orphan model (§11.6): a residual/loose PVC in a namespace-root capture (one not
+// covered by a domain child subtree) is captured as its OWN ordinary domain child — an orphan VolumeSnapshot
+// whose bound SnapshotContent carries the PVC dataRef and its own ManifestCheckpoint holding that PVC's
+// manifest — not appended to the root aggregator MCR. The root MCR therefore never carries a PVC manifest.
+// envtest ships neither the external-snapshotter CSI sidecar nor the storage-foundation VolumeSnapshot
+// domain controller, so these specs run a fake reactor (pr7StartFakeExternalSnapshotter) that plays BOTH
+// (binds the orphan VolumeSnapshots AND claims/plans them as domain children), letting the orphan wave
+// complete end to end.
+var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Ordered, Label("isolated"), func() {
 	BeforeAll(func() {
 		ctx := context.Background()
 		pr7InstallCSIClassAndContentCRDs(ctx)
@@ -109,13 +111,13 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC child volume nodes", Serial, O
 			}
 		}, 150*time.Second, 500*time.Millisecond).Should(Succeed())
 
-		// Each residual PVC is observable as its own child volume node (dedicated SnapshotContent carrying a
-		// single dataRef for that PVC).
+		// Each residual PVC is observable as its own ordinary domain child: an orphan VolumeSnapshot whose
+		// bound SnapshotContent carries a single dataRef for that PVC (content-single-writer model §11.6).
 		Eventually(func(g Gomega) {
 			for _, pvc := range []*corev1.PersistentVolumeClaim{pvcA, pvcB} {
-				found, err := pr7ChildVolumeNodeForPVC(ctx, pvc)
+				found, err := pr7OrphanContentForPVC(ctx, pvc)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(found).To(BeTrue(), "residual PVC %s must have its own child volume node", pvc.Name)
+				g.Expect(found).To(BeTrue(), "residual PVC %s must have its own orphan VolumeSnapshot + SnapshotContent", pvc.Name)
 			}
 		}, 150*time.Second, 500*time.Millisecond).Should(Succeed())
 	})

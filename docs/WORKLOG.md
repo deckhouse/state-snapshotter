@@ -880,3 +880,56 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   broken. Validated: gofmt + go build + genericbinder unit tests + the FULL envtest integration suite
   (root-lifecycle / demo-tree / orphan deadlock scenarios) all green. First landing of Block 3d; the orphan
   special-path dismantling (INV-CONTENT-WRITER-1 STRICT) follows.
+- **Remove** (w8-block3d, orphan special-path dismantling) Deleted the orphan "child volume node" /
+  "VolumeSnapshot visibility leaf" special path so an orphan/residual-PVC VolumeSnapshot is an ORDINARY
+  domain child end to end (content-single-writer design §11.6, INV-CONTENT-WRITER-1 STRICT): its content
+  shell is created + bound by the generic binder and ALL of that content's status (data from the bound VSC,
+  manifestCheckpointName from the VS domain's manifest leg, childrenSnapshotContentRefs, Ready) is projected
+  by the aggregator — the namespace domain writes NO SnapshotContent. Rewrote
+  snapshot/orphan_pvc_volume_snapshot.go to create each residual-PVC CSI VolumeSnapshot (explicit
+  StorageClass→volumesnapshotclass annotation class resolution, validated against the bound PV CSI driver;
+  terminal class failures degrade the Snapshot's own Ready) and declare them via the SDK EnsureChildren
+  (additive childrenSnapshotRefs union, excluded set re-passed). Removed the pre-Planned step-8 orphan
+  child-content linking from namespace_capture_run.go; dropped the visibility-leaf / child-volume-node
+  carve-outs from the aggregator (snapshotcontent/controller.go, datarefs_projection.go, status_publish.go),
+  the plan/parent/child-graph gates (namespace_capture_plan.go, parent_graph.go,
+  child_snapshot_terminal_failures.go), the subtree coverage walks (subtree_covered_pvc*.go), and the root
+  manifest-exclude builder (root_capture_run_exclude.go). Deleted the dead legacy machinery
+  (snapshot/volume_capture.go, snapshotcontent/volume_child_content.go, and the whole reconcileCaptureN2a
+  cluster in snapshot/capture.go) plus the removed leaf helpers/label from pkg/snapshot (visibility_leaf.go
+  renamed → csi_kinds.go, now CSI constants only: IsVolumeSnapshotVisibilityLeaf / IsChildVolumeNodeContent /
+  LabelChildVolumeNode gone). Removed the orphan-volume-leaf restore special case from static_bind.go
+  (orphan/standalone VolumeSnapshot children are SKIPPED by the recycle-bin static-bind walk; their restore
+  flows through the unified import model in Block 6). Test rewrites: deleted obsolete
+  orphan_link_gate_test.go / volume_capture_test.go / volume_child_content coverage, added
+  orphan_pvc_volume_snapshot_test.go (class-resolution terminal/transient cases), and reoriented the
+  visibility-leaf-skip unit tests to the new "VS is an ordinary domain child" semantics (gate closes on an
+  uncreated VS child, coverage recurses into it, content-child publish requeues an unbound VS). Rewired the
+  N5 PR-7 envtest simulator (n5_pr7_csi_simulator.go) to play BOTH missing roles — the external-snapshotter
+  CSI sidecar AND the storage-foundation VolumeSnapshot domain controller (claim + snapshotSource + manifest
+  leg) — so the orphan wave completes as a domain child; observable helper switched from the label-scoped
+  child-volume-node to the orphan VS's bound content dataRef. Validated: gofmt clean, go build ./... +
+  go vet ./... (incl. -tags integration) clean, full module unit suite green. Live envtest/e2e validation of
+  the rewired n5_pr7 simulator is deferred to the end-of-plan validation pass (per the compile-only overnight
+  pre-approval).
+- **Bugfix** (w8-block3d, review cycle) Fixed two Bugbot HIGH findings on the orphan-dismantling diff.
+  (1) orphanPVCVolumeSnapshotSpecMismatch no longer re-validates spec.volumeSnapshotClassName once the
+  pre-existing orphan VolumeSnapshot is already BOUND (status.boundVolumeSnapshotContentName set): a durable
+  snapshot exists, the class has served its only purpose (driver/params at creation), so re-resolving it
+  (e.g. an operator edits the StorageClass storage.deckhouse.io/volumesnapshotclass annotation between
+  reconciles) MUST NOT flip an already-captured snapshot to terminal VolumeCaptureFailed — restores the
+  pre-dismantling validateExistingOrphanPVCVolumeSnapshot semantics; the source PVC stays fail-closed even
+  when bound (misattributing another PVC's data is a real fault). (2) The Snapshot-graph coverage walk
+  (CollectSubtreeCoveredPVCUIDsFromSnapshot / walkSnapshotChildRefsForCoverage) now SKIPS a
+  referenced-but-absent CSI VolumeSnapshot child instead of failing closed: it is the residual wave's own
+  deterministically-named (rootUID, pvcUID) output, so skipping re-classifies its PVC as residual and the
+  wave recreates it at the same name (idempotent) — failing closed wedged the wave, since coverage errors
+  requeue in ensureOrphanVolumeSnapshotsPrePlanned before EnsureChildren could recreate the object. Every
+  other missing child stays fail-closed (not self-recreating). Unit tests added for both (bound-handle class
+  drift tolerated / wrong source still terminal; absent-orphan-VS self-heal). Bugbot MEDIUM (stale orphan
+  refs never pruned) dispositioned by-design: the plan explicitly removed the VS-partition maintenance
+  (reconcileOrphanPVCVolumeSnapshotChildLeaves) in favor of additive EnsureChildren, orphan VS is now an
+  ordinary domain child (same additive-ref property as all domain children), and the residual set is
+  deterministic after the frozen MarkPlanned barrier — the only shrink path is a PVC deleted mid-capture, a
+  general child-lifecycle edge, not orphan-specific. Re-ran Bugbot: no findings. gofmt + build + vet
+  (incl. -tags integration) + full unit suite green.

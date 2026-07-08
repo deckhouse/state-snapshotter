@@ -185,9 +185,6 @@ type ChildSnapshotTerminalFailures struct {
 func SummarizeChildSnapshotTerminalFailures(ctx context.Context, c client.Reader, refs []storagev1alpha1.SnapshotChildRef, parentSnapshotNamespace string) (ChildSnapshotTerminalFailures, error) {
 	var out ChildSnapshotTerminalFailures
 	for _, ref := range refs {
-		if snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
 		if _, err := RefGVK(ref); err != nil {
 			out.HasFailed = true
 			out.Messages = append(out.Messages, err.Error())

@@ -28,7 +28,41 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
+
+// barrier2OwnedContent builds a common SnapshotContent unstructured that points its spec.snapshotRef at the
+// given owning Snapshot and (optionally) carries Ready=True, for the mirror-writer-switch tests.
+func barrier2OwnedContent(t *testing.T, name, ownerNS, ownerName string, readyTrue bool) *unstructured.Unstructured {
+	t.Helper()
+	c := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "Snapshot",
+				Name:       ownerName,
+				Namespace:  ownerNS,
+			},
+		},
+	}
+	if readyTrue {
+		c.Status.Conditions = append(c.Status.Conditions, metav1.Condition{
+			Type:               snapshot.ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             snapshot.ReasonCompleted,
+			Message:            "ready",
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(c)
+	if err != nil {
+		t.Fatalf("to unstructured: %v", err)
+	}
+	obj := &unstructured.Unstructured{Object: raw}
+	obj.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+	return obj
+}
 
 // Barrier 2 in the content-controller post-bind writer: mirrorReadyToOwnerSnapshot finalizes the owning
 // Snapshot's Ready=True ONLY after the domain reported phase=Finished. While the content is Ready=True but
@@ -111,7 +145,7 @@ func TestMirrorReadyToOwnerSnapshot_Barrier2FinishedGate(t *testing.T) {
 				Build()
 			r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-			contentObj := orphanGateContent(t, orphanGateOpts{name: "root", ownerNS: "ns1", ownerName: "owner", readyTrue: true})
+			contentObj := barrier2OwnedContent(t, "root", "ns1", "owner", true)
 			if err := r.mirrorReadyToOwnerSnapshot(ctx, contentObj); err != nil {
 				t.Fatalf("mirrorReadyToOwnerSnapshot: %v", err)
 			}

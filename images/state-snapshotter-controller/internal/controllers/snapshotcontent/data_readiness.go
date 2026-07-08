@@ -34,11 +34,13 @@ const (
 	volumeSnapshotContentAPIVersion = "snapshot.storage.k8s.io/v1"
 )
 
-// Execution requests must not appear in published dataRefs[].artifact.
+// Execution requests must not appear in published dataRefs[].artifact. NOTE: the native-CSI data leg
+// publishes the durable VolumeSnapshotContent (kindVolumeSnapshotContent) as the artifact — never the
+// VolumeSnapshot itself — so the VolumeSnapshot kind is NOT special-cased here (content-single-writer
+// design §11.6); a stray VolumeSnapshot artifact still falls through to the unsupported-kind check below.
 var dataArtifactExecutionRequestKinds = map[string]struct{}{
 	"VolumeCaptureRequest":   {},
 	"ManifestCaptureRequest": {},
-	"VolumeSnapshot":         {},
 	"DataExport":             {},
 	"DataImport":             {},
 }

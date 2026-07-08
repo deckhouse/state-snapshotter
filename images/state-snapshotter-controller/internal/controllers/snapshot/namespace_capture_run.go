@@ -127,12 +127,15 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	}
 
 	// 4. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
-	//    the CSI VolumeSnapshots for uncovered PVCs and publish their visibility leaves onto
-	//    childrenSnapshotRefs. Running the enumeration before MarkPlanned means the FULL child set (domain
-	//    children + orphan VolumeSnapshot leaves) is present when the binder creates + freezes the root
-	//    SnapshotContent, so no orphan child is missed from the frozen childrenSnapshotContentRefs. The
-	//    orphan CHILD-CONTENT linking still runs post-bind (step 8): it needs the bound root content.
-	if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap); err != nil {
+	//    the CSI VolumeSnapshots for uncovered PVCs and declare them as REGULAR domain children via the SDK
+	//    EnsureChildren (content-single-writer design §11.6). Each orphan VolumeSnapshot is a standard
+	//    domain snapshot now (adopted + planned by the storage-foundation VolumeSnapshot domain controller,
+	//    §11.2/§11.3): its content shell is created + bound by the generic binder and ALL its content status
+	//    (data, manifestCheckpointName, childrenSnapshotContentRefs, Ready) is projected by the aggregator —
+	//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
+	//    enumeration before MarkPlanned means the FULL child set (domain children + orphan VolumeSnapshots)
+	//    is present when the binder freezes the root SnapshotContent, so no orphan child is missed.
+	if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap, adapter, sdk, plan.excluded); err != nil {
 		return ctrl.Result{}, err
 	} else if res.Requeue || res.RequeueAfter > 0 {
 		return res, nil
@@ -167,16 +170,12 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		return ctrl.Result{}, err
 	}
 
-	// 8. Orphan child-content linking (post-bind): materialize each ready orphan PVC's standalone child
-	//    volume node (own dataRef + own ManifestCheckpoint) and link it under the now-bound root content.
-	if res, err := r.reconcileVolumeCapturePublish(ctx, nsSnap, content, true); err != nil {
-		return ctrl.Result{}, err
-	} else if res.Requeue || res.RequeueAfter > 0 {
-		return res, nil
-	}
-
-	// Refresh the root so the commonController latch (stamp/binder) and any concurrent SDK/orphan status
-	// writes are observed by the manifest-leg gate and the barrier-2 outcome switch below.
+	// Refresh the root so the commonController latch (stamp/binder) and any concurrent SDK status writes are
+	// observed by the manifest-leg gate and the barrier-2 outcome switch below. The orphan VolumeSnapshots
+	// are ordinary domain children now: the binder creates + binds their content and the aggregator projects
+	// their status (data from the bound VSC, manifestCheckpointName from the VS domain's MCR, Ready mirror),
+	// and their content edges are linked into the root's childrenSnapshotContentRefs by the aggregator — no
+	// snapshot-side orphan content-materialization step remains (content-single-writer design §11.6).
 	if err := r.snapshotReader().Get(ctx, key, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -206,8 +205,12 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 
 // ensureOrphanVolumeSnapshotsPrePlanned runs the root residual/orphan PVC volume wave BEFORE barrier 1
 // (MarkPlanned), CONTENT-FREE of the root SnapshotContent (which does not exist yet). It creates the CSI
-// VolumeSnapshots for uncovered PVCs and publishes their visibility leaves onto childrenSnapshotRefs, so
-// the full child set is enumerated before the binder creates + freezes the root content ("late Planned").
+// VolumeSnapshots for uncovered PVCs and declares them as REGULAR domain children (via the SDK
+// EnsureChildren), so the full child set is enumerated before the binder creates + freezes the root
+// content ("late Planned"). The orphan VolumeSnapshot is a standard domain snapshot from here on: it is
+// adopted + planned by the storage-foundation VolumeSnapshot domain controller, its content is created +
+// bound by the generic binder, and its content status is projected by the aggregator (content-single-
+// writer design §11.6) — the namespace domain writes no SnapshotContent.
 //
 // The wave is gated on all declared domain children being Ready so the subtree-covered PVC UID set (read
 // from each descendant's bound content) is complete — a PVC a domain child covers is never momentarily
@@ -218,11 +221,23 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
+	adapter NamespaceSnapshotAdapter,
+	sdk snapshotsdk.CaptureSDK,
+	excluded []storagev1alpha1.ExcludedObjectRef,
 ) (ctrl.Result, error) {
 	if !volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, nil) {
 		return ctrl.Result{}, nil
 	}
-	ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, nsSnap.Namespace, nsSnap.Status.ChildrenSnapshotRefs)
+	// The gate exists to guarantee the subtree-covered PVC UID set is COMPLETE before residual enumeration,
+	// so a PVC a domain child subtree covers is never momentarily mis-classified as orphan. That set is
+	// derived only from the COVERAGE-PROVIDING domain children — NOT from the orphan wave's own CSI
+	// VolumeSnapshot output (each orphan VS covers only its own already-residual PVC and is re-adopted
+	// idempotently). Gating on the orphan VS children too would (a) needlessly serialize MarkPlanned behind
+	// every orphan becoming fully Ready and (b) let a single stuck orphan VS wedge the whole root capture
+	// pre-Planned. So exclude CSI VolumeSnapshot refs from the readiness gate (they are still enumerated into
+	// coverage by CollectSubtreeCoveredPVCUIDs, which self-heals via re-adoption).
+	coverageChildren := nonOrphanCSIVolumeSnapshotChildRefs(nsSnap.Status.ChildrenSnapshotRefs)
+	ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, nsSnap.Namespace, coverageChildren)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -239,13 +254,28 @@ func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 		// Transient (a child not created/bound yet, PVC list): requeue on the child-graph poll cadence.
 		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
 	}
-	// content==nil: pre-Planned there is no bound root content; ensureOrphanPVCVolumeSnapshots creates the
-	// VolumeSnapshots and publishes childrenSnapshotRefs leaves, routing any terminal orphan-class failure
-	// onto the Snapshot's own Ready (failOrphanCaptureTerminal).
-	if err := r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, nil, targets); err != nil {
+	// ensureOrphanPVCVolumeSnapshots creates the CSI VolumeSnapshots and declares them as regular domain
+	// children (EnsureChildren), routing any terminal VolumeSnapshotClass failure onto the Snapshot's own
+	// Ready (failOrphanCaptureTerminal) — pre-Planned there is no bound root content to carry it.
+	if err := r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, adapter, sdk, excluded, targets); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// nonOrphanCSIVolumeSnapshotChildRefs drops the root's own orphan-wave output (CSI VolumeSnapshot children)
+// from a child-ref slice, leaving only the coverage-providing domain children. Used to gate the residual
+// wave on coverage completeness WITHOUT waiting on (or wedging behind) the orphan VolumeSnapshots the wave
+// itself produces (content-single-writer design §11.6; see ensureOrphanVolumeSnapshotsPrePlanned).
+func nonOrphanCSIVolumeSnapshotChildRefs(refs []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
+	out := make([]storagev1alpha1.SnapshotChildRef, 0, len(refs))
+	for _, ref := range refs {
+		if ref.APIVersion == snapshotpkg.CSISnapshotAPIVersion && ref.Kind == snapshotpkg.KindVolumeSnapshot {
+			continue
+		}
+		out = append(out, ref)
+	}
+	return out
 }
 
 // reconcileNamespaceManifestLeg ensures the root namespace manifest MCR via the SDK, using the proven

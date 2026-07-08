@@ -30,6 +30,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -37,6 +38,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -211,12 +214,22 @@ func pr7CreateCSIPVC(ctx context.Context, namespace, name string) *corev1.Persis
 	return fresh
 }
 
-// pr7StartFakeExternalSnapshotter runs a background reactor that plays the role of the external-snapshotter
-// CSI sidecar for one namespace: for every orphan VolumeSnapshot the controller creates it creates a bound
-// VolumeSnapshotContent (deletionPolicy=Delete on purpose, to exercise the controller's force-Retain
-// handoff) and fills the VS status (readyToUse=true + boundVolumeSnapshotContentName). envtest ships no CSI
-// controller, so without this the orphan VS never binds and the orphan wave never completes. The reactor
-// stops when ctx is cancelled (wire it to a DeferCleanup cancel).
+// pr7StartFakeExternalSnapshotter runs a background reactor that plays, for one namespace, BOTH roles
+// envtest is missing so the orphan wave can complete end to end under the content-single-writer domain
+// model (design §11.6):
+//
+//   - the external-snapshotter CSI sidecar (pr7ReactExternalSnapshotter): for every orphan VolumeSnapshot
+//     the controller creates it creates a bound VolumeSnapshotContent (deletionPolicy=Delete on purpose, to
+//     exercise the controller's force-Retain handoff) and fills the VS status (readyToUse=true +
+//     boundVolumeSnapshotContentName) — the native-CSI DATA leg the aggregator projects.
+//   - the storage-foundation VolumeSnapshot DOMAIN controller (pr7ReactFoundationVSDomain): it CLAIMS each
+//     orphan VS (status.captureState.domainSpecificController — which is what un-gates the generic binder's
+//     eager content shell, see domainHasClaimed), publishes status.snapshotSource (the captured PVC identity
+//     the aggregator's native-CSI data leg reads) and drives the MANIFEST leg to a Ready ManifestCheckpoint
+//     on the bound content. Neither role runs in state-snapshotter's own envtest, so without them the orphan
+//     VS never becomes a Ready domain child and the root capture blocks forever.
+//
+// The reactor stops when ctx is cancelled (wire it to a DeferCleanup cancel).
 func pr7StartFakeExternalSnapshotter(ctx context.Context, namespace string) {
 	GinkgoHelper()
 	go func() {
@@ -229,6 +242,7 @@ func pr7StartFakeExternalSnapshotter(ctx context.Context, namespace string) {
 				return
 			case <-ticker.C:
 				pr7ReactExternalSnapshotter(ctx, namespace)
+				pr7ReactFoundationVSDomain(ctx, namespace)
 			}
 		}
 	}()
@@ -284,17 +298,146 @@ func pr7ReactExternalSnapshotter(ctx context.Context, namespace string) {
 	}
 }
 
-// pr7ChildVolumeNodeForPVC returns whether a child-volume-node SnapshotContent (LabelChildVolumeNode) whose
-// single dataRef targets the given PVC exists. It is the observable proof that a residual PVC was captured
-// as its own standalone child volume node under Variant A.
-func pr7ChildVolumeNodeForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (bool, error) {
+// pr7ReactFoundationVSDomain is one best-effort pass of the fake storage-foundation VolumeSnapshot DOMAIN
+// controller for the namespace: for every orphan VolumeSnapshot the generic binder/root capture created it
+// (a) CLAIMS it and publishes the captured source + a Finished phase, then (b) once the binder has bound the
+// VS to its SnapshotContent, drives that content's MANIFEST leg to a Ready ManifestCheckpoint.
+//
+// Errors are swallowed (the next tick retries) so a transient conflict/cache miss during teardown never
+// fails the spec from inside the goroutine. Faithful shortcut, not a full reconciler: it writes the exact
+// status fields the state-snapshotter aggregator/binder READ under the domain model —
+// status.captureState.domainSpecificController (binder domain-claim gate + barrier-2 Finished),
+// status.snapshotSource (native-CSI data-leg source), and the content's manifestCheckpointName +
+// subtreeManifestsPersisted (same direct-status fixture pattern as pr7PatchSnapshotContent /
+// pr7SeedSubtreeManifestsPersisted). The data leg itself is projected by the live aggregator from the CSI
+// sidecar's boundVolumeSnapshotContentName.
+func pr7ReactFoundationVSDomain(ctx context.Context, namespace string) {
+	dc := pr7EnsureDirectClient()
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(pr7VSListGVK)
+	if err := dc.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return
+	}
+	for i := range list.Items {
+		vs := &list.Items[i]
+		pvcName, _, _ := unstructured.NestedString(vs.Object, "spec", "source", "persistentVolumeClaimName")
+		if pvcName == "" {
+			continue
+		}
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := dc.Get(ctx, client.ObjectKey{Namespace: namespace, Name: pvcName}, pvc); err != nil {
+			continue
+		}
+		pr7ClaimOrphanVS(ctx, dc, vs, pvc)
+
+		boundContent, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
+		if boundContent == "" {
+			continue // binder has not created+bound the content shell yet; retry next tick.
+		}
+		mcpName := "pr7-vsmcp-" + vs.GetName()
+		if err := pr7EnsureReadyMCPForPVC(ctx, dc, mcpName, namespace, pvc); err != nil {
+			continue
+		}
+		_ = pr7SeedContentManifestLeg(ctx, dc, boundContent, mcpName)
+	}
+}
+
+// pr7ClaimOrphanVS writes the domain claim (status.captureState.domainSpecificController, phase=Finished)
+// and the captured source (status.snapshotSource) onto an orphan VolumeSnapshot. The claim is the binder
+// domain-claim gate key (domainHasClaimed) AND the barrier-2 finalize key (phase=Finished); snapshotSource
+// feeds the aggregator's native-CSI data-leg binding.
+func pr7ClaimOrphanVS(ctx context.Context, dc client.Client, vs *unstructured.Unstructured, pvc *corev1.PersistentVolumeClaim) {
+	base := vs.DeepCopy()
+	_ = unstructured.SetNestedField(vs.Object, "Finished", "status", "captureState", "domainSpecificController", "phase")
+	_ = unstructured.SetNestedMap(vs.Object, map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"name":       pvc.Name,
+		"namespace":  pvc.Namespace,
+		"uid":        string(pvc.UID),
+	}, "status", "snapshotSource")
+	_ = dc.Status().Patch(ctx, vs, client.MergeFrom(base))
+}
+
+// pr7EnsureReadyMCPForPVC idempotently installs a Ready ManifestCheckpoint (+ its single content chunk)
+// that archives the given PVC manifest — the residual PVC's manifest lives in its OWN child volume node's
+// ManifestCheckpoint, never in the root aggregator MCP (Variant A). AlreadyExists is tolerated so the
+// reactor can re-run every tick.
+func pr7EnsureReadyMCPForPVC(ctx context.Context, dc client.Client, mcpName, srcNS string, pvc *corev1.PersistentVolumeClaim) error {
+	objects := []map[string]interface{}{{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]interface{}{
+			"name":      pvc.Name,
+			"namespace": pvc.Namespace,
+			"uid":       string(pvc.UID),
+		},
+	}}
+	data, cs := aggregatedManifestsIntegrationEncodeChunk(objects)
+	chName := mcpName + "-chunk-0"
+	ch := &ssv1alpha1.ManifestCheckpointContentChunk{
+		ObjectMeta: metav1.ObjectMeta{Name: chName},
+		Spec: ssv1alpha1.ManifestCheckpointContentChunkSpec{
+			CheckpointName: mcpName, Index: 0, Data: data, Checksum: cs, ObjectsCount: len(objects),
+		},
+	}
+	if err := dc.Create(ctx, ch); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: mcpName},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: srcNS},
+	}
+	if err := dc.Create(ctx, mcp); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	fresh := &ssv1alpha1.ManifestCheckpoint{}
+	if err := dc.Get(ctx, client.ObjectKey{Name: mcpName}, fresh); err != nil {
+		return err
+	}
+	if apimeta.IsStatusConditionTrue(fresh.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady) {
+		return nil
+	}
+	fresh.Status.Chunks = []ssv1alpha1.ChunkInfo{{Name: chName, Index: 0, Checksum: cs, ObjectsCount: len(objects)}}
+	fresh.Status.TotalObjects = len(objects)
+	apimeta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
+		Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
+		Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+	})
+	return dc.Status().Update(ctx, fresh)
+}
+
+// pr7SeedContentManifestLeg latches the orphan VS's bound SnapshotContent onto the Ready ManifestCheckpoint
+// and marks its subtree manifests persisted, mirroring the domain manifest-leg outcome without the transient
+// MCR (same direct-status fixture pattern as pr7PatchSnapshotContent / pr7SeedSubtreeManifestsPersisted).
+// The aggregator leaves manifestCheckpointName untouched when captureState...manifestCaptureRequestName is
+// empty (reconcileManifestCheckpointNameProjection early-returns), so this direct write is stable.
+func pr7SeedContentManifestLeg(ctx context.Context, dc client.Client, contentName, mcpName string) error {
+	sc := &storagev1alpha1.SnapshotContent{}
+	if err := dc.Get(ctx, client.ObjectKey{Name: contentName}, sc); err != nil {
+		return err
+	}
+	if sc.Status.ManifestCheckpointName == mcpName && sc.Status.SubtreeManifestsPersisted {
+		return nil
+	}
+	base := sc.DeepCopy()
+	sc.Status.ManifestCheckpointName = mcpName
+	sc.Status.SubtreeManifestsPersisted = true
+	return dc.Status().Patch(ctx, sc, client.MergeFrom(base))
+}
+
+// pr7OrphanContentForPVC returns whether the orphan VolumeSnapshot domain child for the given residual PVC
+// has a bound SnapshotContent whose single data binding targets that PVC. It is the observable proof that a
+// residual PVC was captured as its own ordinary domain child (VolumeSnapshot + own SnapshotContent + dataRef)
+// under the content-single-writer model — the successor to the old "child volume node" observable.
+func pr7OrphanContentForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (bool, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "state-snapshotter.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    "SnapshotContentList",
 	})
-	if err := k8sClient.List(ctx, list, client.MatchingLabels{snapshotpkg.LabelChildVolumeNode: "true"}); err != nil {
+	if err := k8sClient.List(ctx, list); err != nil {
 		return false, err
 	}
 	for i := range list.Items {
