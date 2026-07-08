@@ -196,7 +196,12 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	rootOK, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
+	// Ensure the root ObjectKeeper for the Snapshot record's own TTL GC. The returned keeper is no longer
+	// consumed here: import content is now created + anchored on the root keeper by the generic binder
+	// (creator, content-single-writer design §10), and the capture/static-bind paths anchor their own
+	// content. This ensure is kept for its side-effect (the Snapshot-following keeper must exist for every
+	// path, including root static-bind, which the binder skips).
+	_, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
 		ctx,
 		r.Client,
 		r.APIReader,
@@ -243,11 +248,12 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Import-mode Snapshots (spec.source.import) are materialized from an uploaded payload
 	// (manifests-and-children-refs-upload) — the controller MUST NOT capture the live namespace. The
-	// import orchestrator reconstructs the SnapshotContent from the uploaded ManifestCheckpoint + child
-	// refs and binds it (the root structural node carries no data leg); it falls back to a non-terminal
-	// pending hold until the upload arrives.
+	// generic binder (creator, content-single-writer design §10) creates + binds the root SnapshotContent
+	// from the uploaded ManifestCheckpoint (owned by the root ObjectKeeper ensured above) and the aggregator
+	// projects its status; this orchestrator only holds a non-terminal ImportPending until the binder binds,
+	// then mirrors the bound content's Ready.
 	if nsSnap.IsImportMode() {
-		return r.reconcileImport(ctx, nsSnap, rootOK)
+		return r.reconcileImport(ctx, nsSnap)
 	}
 
 	// wave5 content-free flip: the root no longer creates/binds its own SnapshotContent nor runs the
@@ -280,18 +286,6 @@ func childGraphCaptureGate(graphChanged, graphReady bool) (ctrl.Result, bool) {
 		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, true
 	}
 	return ctrl.Result{}, false
-}
-
-func (r *SnapshotReconciler) finishReconcileWithExistingContent(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, expectedName string) (ctrl.Result, error) {
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	nsSnap.Status.BoundSnapshotContentName = expectedName
-	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{Requeue: true}, nil
 }
 
 // reconcileDelete removes the Snapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR;
@@ -376,23 +370,4 @@ func (r *SnapshotReconciler) updateSnapshotRemoveFinalizer(ctx context.Context, 
 		}
 		return r.Client.Update(ctx, cur)
 	})
-}
-
-func desiredSnapshotContentSpec(nsSnap *storagev1alpha1.Snapshot) storagev1alpha1.SnapshotContentSpec {
-	return controllercommon.NewSnapshotContentSpec(
-		storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-		controllercommon.SnapshotSubjectRefFromSnapshot(nsSnap),
-	)
-}
-
-func snapshotContentName(ns *storagev1alpha1.Snapshot) string {
-	return snapshotpkg.GenerateSnapshotContentName(ns.Name, string(ns.UID))
-}
-
-// snapshotContentObjectMeta builds metadata for a new SnapshotContent.
-func snapshotContentObjectMeta(nsSnap *storagev1alpha1.Snapshot) metav1.ObjectMeta {
-	return metav1.ObjectMeta{
-		Name:       snapshotContentName(nsSnap),
-		Finalizers: []string{snapshotpkg.FinalizerParentProtect},
-	}
 }

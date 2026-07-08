@@ -76,23 +76,42 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	logger := log.FromContext(ctx)
 	gvk := obj.GetObjectKind().GroupVersionKind()
 
-	// Content owner: an imported leaf is never a root snapshot (d8 sets child->parent ownerRefs), so its
-	// SnapshotContent is owned by the parent's SnapshotContent. Wait until the parent content materializes.
+	// Content owner: a non-root imported leaf's SnapshotContent is owned by the parent's SnapshotContent
+	// (d8 sets child->parent ownerRefs); a ROOT import snapshot's content is owned by the root ObjectKeeper
+	// exactly like the capture root. Resolve the parent ownerRef first; a nil (non-pending) result means
+	// this is a root, which the binder now also creates (content-single-writer design §10, creator=binder).
 	ownerRef, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	isRoot := false
 	if ownerRef == nil {
 		if pending {
 			// Parent content not yet materialized (bottom-up convergence); poll.
 			return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
 		}
-		// No parent ownerRef at all: this is a ROOT generic import snapshot. Roots are materialized by the
-		// namespace Snapshot import orchestrator (snapshot/import.go), not here; a root-capable generic kind
-		// in import mode is out of scope for this binder. Stop instead of requeueing forever.
-		logger.Info("generic import snapshot has no parent ownerRef (root); roots are materialized by the namespace Snapshot orchestrator, skipping",
-			"snapshot", obj.GetName(), "gvk", gvk.String())
-		return ctrl.Result{}, nil
+		if !snapshot.IsRootSnapshot(obj) {
+			// A non-root import leaf with no parent ownerRef and not pending is a misconfiguration (the
+			// child->parent ownerRef never arrived and never will); stop instead of requeueing forever.
+			logger.Info("generic import snapshot has no parent ownerRef and is not a root; skipping",
+				"snapshot", obj.GetName(), "gvk", gvk.String())
+			return ctrl.Result{}, nil
+		}
+		// Root import (content-single-writer design §10): the binder is the creator for import roots too,
+		// not the namespace Snapshot orchestrator. Anchor the root content on the root ObjectKeeper (unified
+		// TTL GC) exactly like the capture root; the orchestrator (reconcileImport) mirrors Ready and the
+		// aggregator projects the manifest leg + children edges. The binder is the creator ONLY for the root
+		// (see the isRoot early-return after create+bind below).
+		isRoot = true
+		objectKeeper, okRes, okErr := controllercommon.EnsureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, obj, gvk)
+		if okErr != nil {
+			return ctrl.Result{}, okErr
+		}
+		if okRes.Requeue || okRes.RequeueAfter > 0 {
+			return okRes, nil
+		}
+		ref := controllercommon.RootObjectKeeperOwnerReference(objectKeeper)
+		ownerRef = &ref
 	}
 
 	contentName := snapshotLike.GetStatusContentName()
@@ -124,6 +143,16 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		return ctrl.Result{}, err
 	} else if changed {
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	if isRoot {
+		// Root import: the binder is ONLY the creator (content object + spec + root ownerRef + bind). The
+		// namespace Snapshot orchestrator (reconcileImport) mirrors the bound content's Ready and the
+		// aggregator projects the manifest leg + children edges — the same division of labor as the capture
+		// root. The leaf-only tail below (MCP-gate wait, DataImport data leg, Ready mirror) does NOT apply to
+		// the structural root (no data leg; Ready is mirrored by the orchestrator, not co-written here), so
+		// return after create+bind to avoid a second writer on the root snapshot's Ready.
+		return ctrl.Result{}, nil
 	}
 
 	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,

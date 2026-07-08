@@ -1084,3 +1084,19 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   aggregator publishes the manifest leg, both feeding content Ready which the snapshots mirror. Unit tests added
   (manifest_projection_import_test.go: import publishes reconstructed name; pending when no checkpoint). Data-leg
   import projection stays in the binders for now (deferred to 6b-2). build + vet + gofmt + full module suite green.
+- **Refactor** (w8-block6b-2) Root import content create+bind → generic binder (content-single-writer design §10,
+  creator=binder): the import root SnapshotContent is now created + bound by the GenericSnapshotBinderController
+  exactly like the capture root, not by the namespace Snapshot orchestrator. reconcileGenericImport gained a root
+  branch — when ResolveParentSnapshotContentOwnerRef yields no parent ownerRef (and !pending) and the object
+  IsRootSnapshot, it anchors the content on the root ObjectKeeper (EnsureRootObjectKeeperWithTTL +
+  RootObjectKeeperOwnerReference) and returns after create+bind+ownerRef-align (isRoot early-return) so the
+  leaf-only tail (MCP-gate wait, DataImport data leg, Ready mirror) never runs on the structural root — avoiding a
+  second writer on the root snapshot's Ready. snapshot/import.go reconcileImport is now content-free: it drops the
+  MCP precondition + Create/bind and only holds ImportPending until boundSnapshotContentName is set by the binder,
+  then mirrors the bound content's Ready (the aggregator projects manifest+children). The content name is
+  identical either way (StableContentName and the old GenerateSnapshotContentName both resolve to
+  names.ContentName(uid)), so no dual-content risk on migration. Removed now-dead helpers desiredImportSnapshotContentSpec
+  + bindImportSnapshotContent (import.go) and finishReconcileWithExistingContent + snapshotContentObjectMeta +
+  snapshotContentName + the already-dead desiredSnapshotContentSpec (controller.go); the reconcileImport rootOK
+  param is dropped (the caller still ensures the root keeper for the Snapshot record's own TTL + root static-bind).
+  build + vet + gofmt + snapshot/genericbinder unit suites green.
