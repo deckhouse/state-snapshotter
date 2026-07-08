@@ -36,8 +36,7 @@ import (
 // (status.captureState.commonController.manifestCaptured), the core-internal monotonic bool that replaced
 // the former ManifestsArchived condition. Returns (value, found).
 func rootManifestCaptured(obj *unstructured.Unstructured) (captured bool, found bool) {
-	v, ok, _ := unstructured.NestedBool(obj.Object, "status", "captureState", "commonController", "manifestCaptured")
-	return v, ok
+	return snapshotCommonControllerLatch(obj, "manifestCaptured")
 }
 
 // Hook-managed capture RBAC identifiers — MUST match hooks/go/040-namespace-capture-rbac and

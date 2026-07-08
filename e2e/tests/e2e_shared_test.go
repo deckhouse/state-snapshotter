@@ -101,6 +101,13 @@ const (
 	subManifestsDownload = "manifests-download"
 	subManifestsRestore  = "manifests-with-data-restoration"
 	subManifestsUpload   = "manifests-and-children-refs-upload"
+	// subManifestsIdentities is the cluster-scoped SnapshotContent subresource returning the flat,
+	// de-duplicated set of object identities captured across a content's ENTIRE subtree (its own
+	// ManifestCheckpoint plus every descendant). Block 7 Part C (content-single-writer design §8.3): the
+	// root manifest-exclude is computed from this endpoint (sdk.SubtreeManifestIdentities) instead of an
+	// in-reconciler archive read. It is fail-closed (HTTP 409 while any subtree MCP is not Ready or an
+	// object is double-captured across nodes).
+	subManifestsIdentities = "subtree-manifest-identities"
 )
 
 // Condition types. Ready is the ONLY user-facing contract condition (from api/storage); the former
@@ -143,6 +150,13 @@ var (
 	}
 	manifestCheckpointGVR = schema.GroupVersionResource{
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcheckpoints",
+	}
+	// manifestCaptureRequestGVR is the transient MCR a domain node creates for its own-scope manifest
+	// capture. Block 7 (main-owned commonController, decision #10): the aggregator latches
+	// commonController.manifestCaptured on the xxxSnapshot then REAPS the MCR in the SAME pass, so at
+	// steady state no MCR remains and none is re-created (latch-before-reap => no churn).
+	manifestCaptureRequestGVR = schema.GroupVersionResource{
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests",
 	}
 	moduleConfigGVR = schema.GroupVersionResource{
 		Group: "deckhouse.io", Version: "v1alpha1", Resource: "moduleconfigs",
@@ -408,7 +422,13 @@ func coreGenericSubPath(ns, resource, name, sub string) string {
 }
 
 func coreContentDownloadPath(name string) string {
-	return fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s", coreSubresGroup, coreSubresVersion, name, subManifestsDownload)
+	return coreContentSubPath(name, subManifestsDownload)
+}
+
+// coreContentSubPath builds a cluster-scoped SnapshotContent subresource path in the core subresources
+// group (e.g. manifests-download, subtree-manifest-identities).
+func coreContentSubPath(name, sub string) string {
+	return fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s", coreSubresGroup, coreSubresVersion, name, sub)
 }
 
 func demoSubPath(ns, resource, name, sub string) string {
@@ -434,6 +454,18 @@ func truncate(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "..."
+}
+
+// snapshotCommonControllerLatch reads a core-owned capture-leg latch
+// status.captureState.commonController.<leg> from an xxxSnapshot object. Block 7 (main-owned
+// commonController, decision #10): every commonController latch — manifestCaptured, dataCaptured,
+// subtreeManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
+// SIDEWAYS onto the xxxSnapshot. It is snapshot-native: the same read against a SnapshotContent returns
+// found=false for these latches (the aggregator never writes them onto its own content). Returns
+// (value, found).
+func snapshotCommonControllerLatch(obj *unstructured.Unstructured, leg string) (value bool, found bool) {
+	v, ok, _ := unstructured.NestedBool(obj.Object, "status", "captureState", "commonController", leg)
+	return v, ok
 }
 
 // --- condition waiters -----------------------------------------------------

@@ -642,6 +642,124 @@ func volumeDataSpecs() {
 			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 		})
 
+		It("latches commonController.dataCaptured on each domain data-leaf xxxSnapshot (main-written) and reaps the VCR with no churn (Block 7 §11.4, decision #10)", func() {
+			// Block 7 (main-owned commonController): the data-leg latch + the VolumeCaptureRequest reap moved
+			// off the binder INTO the aggregator (main). Once the aggregator's published status.data covers a
+			// domain data leaf's VCR targets AND the VSC handoff is durable (Retain + ownerRef, asserted by the
+			// sibling handoff spec), main latches commonController.dataCaptured=true SIDEWAYS onto the leaf
+			// xxxSnapshot and REAPS the VCR in the same pass. Latch-before-reap: the domain SDK re-creates a
+			// missing VCR only while the latch is false, so a VCR that reappears after reap means the latch was
+			// written after the delete (churn).
+			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
+
+			// Budget: this spec chains sequential waits each bounded by captureReadyTO (dataRefs wait, one
+			// per-disk latch Eventually, then the namespace-wide empty-VCR Eventually) plus a 15s no-churn
+			// Consistently. Size the parent ctx to their sum so a large E2E_CAPTURE_READY_TIMEOUT does not
+			// cancel the ctx before the reap/no-churn assertions finish.
+			ctx, cancel := context.WithTimeout(context.Background(), 4*suiteCfg.captureReadyTO+2*time.Minute)
+			defer cancel()
+
+			By("Waiting for the domain VolumeCaptureRequest data legs to publish dataRefs")
+			_, err := waitContentDataRefs(ctx, rootContent, []string{vdPVCDisk, vdPVCStandalone}, suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred(), "the domain disk snapshots must publish volume dataRefs before the latch/reap check")
+
+			By("Collecting the domain disk snapshot nodes (the VCR-backed data leaves)")
+			nodes, err := walkSnapshotTree(ctx, srcNS, vdRootSnapshotName)
+			Expect(err).NotTo(HaveOccurred())
+			var diskNodes []childRef
+			for _, n := range nodes {
+				if n.kind == "DemoVirtualDiskSnapshot" {
+					diskNodes = append(diskNodes, n)
+				}
+			}
+			Expect(diskNodes).NotTo(BeEmpty(), "expected the domain DemoVirtualDiskSnapshot data leaves (disk-vm, disk-standalone)")
+
+			By("Asserting main latched dataCaptured=true on each data leaf's xxxSnapshot and never on its content")
+			for _, node := range diskNodes {
+				node := node
+				Eventually(func(g Gomega) {
+					snap, err := getResource(ctx, demoDiskSnapshotGVR, srcNS, node.name)
+					g.Expect(err).NotTo(HaveOccurred())
+					val, found := snapshotCommonControllerLatch(snap, "dataCaptured")
+					g.Expect(found).To(BeTrue(), "data leaf %s must carry commonController.dataCaptured", node.name)
+					g.Expect(val).To(BeTrue(), "data leaf %s dataCaptured must be latched true (main-written)", node.name)
+
+					contentName, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+					g.Expect(contentName).NotTo(BeEmpty())
+					content, err := getResource(ctx, snapshotContentGVR, "", contentName)
+					g.Expect(err).NotTo(HaveOccurred())
+					_, onContent := snapshotCommonControllerLatch(content, "dataCaptured")
+					g.Expect(onContent).To(BeFalse(), "the latch is snapshot-native: content %s must NOT carry commonController.dataCaptured", contentName)
+				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}
+
+			By("Waiting until every domain VolumeCaptureRequest is reaped (durable VSC handoff done)")
+			Eventually(func(g Gomega) {
+				list, err := suiteDyn.Resource(volumeCaptureRequestGVR).Namespace(srcNS).List(ctx, metav1.ListOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(list.Items).To(BeEmpty(), "main must reap each VCR after latching dataCaptured")
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+
+			By("Asserting no VCR is re-created (latch-before-reap => no churn)")
+			Consistently(func(g Gomega) {
+				list, err := suiteDyn.Resource(volumeCaptureRequestGVR).Namespace(srcNS).List(ctx, metav1.ListOptions{})
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(list.Items).To(BeEmpty(),
+					"a re-created VCR after reap means the dataCaptured latch was written after the delete (latch-after-reap regression / churn)")
+			}).WithTimeout(15 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+		})
+
+		It("latches commonController.subtreePlanned bottom-up and gates the orphan/residual wave — no premature or duplicate root exclude (Block 7 §8.1/§8.4, decision #10)", func() {
+			// Block 7 Part B: subtreePlanned is a main-computed, snapshot-native recursive latch (true once a
+			// node is Planned AND every direct child's subtreePlanned is true). The residual/orphan-PVC wave
+			// now gates on the root's direct children's subtreePlanned (parent_graph.go), so an orphan PVC is
+			// evaluated only after every declared subtree's coverage is fully computable — preventing both a
+			// premature root exclude (under-coverage) and a duplicate orphan capture of a domain-covered PVC.
+			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
+
+			// Budget: the per-node subtreePlanned checks resolve fast (latched during capture), but the final
+			// residual-PVC coverage Eventually waits on the orphan-VS pipeline (a multi-controller convergence,
+			// sized at snapshotReadyTO like the sibling orphan spec). Size the parent ctx to their sum so it
+			// does not cancel before that inner wait completes on a healthy cluster.
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.snapshotReadyTO+4*suiteCfg.captureReadyTO+3*time.Minute)
+			defer cancel()
+
+			By("Asserting every domain snapshot node latched subtreePlanned=true on its xxxSnapshot")
+			nodes := []childRef{{kind: "Snapshot", name: vdRootSnapshotName}}
+			descendants, err := walkSnapshotTree(ctx, srcNS, vdRootSnapshotName)
+			Expect(err).NotTo(HaveOccurred())
+			nodes = append(nodes, descendants...)
+			for _, node := range nodes {
+				if node.kind == "VolumeSnapshot" {
+					continue // native-CSI leaf: the wave gate reads the root's DOMAIN children, not the VS leaf
+				}
+				gvr, ok := gvrForSnapshotKind(node.kind)
+				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+				node := node
+				Eventually(func(g Gomega) {
+					snap, err := getResource(ctx, gvr, srcNS, node.name)
+					g.Expect(err).NotTo(HaveOccurred())
+					val, found := snapshotCommonControllerLatch(snap, "subtreePlanned")
+					g.Expect(found).To(BeTrue(), "node %s/%s must carry commonController.subtreePlanned", node.kind, node.name)
+					g.Expect(val).To(BeTrue(), "node %s/%s subtreePlanned must be latched true", node.kind, node.name)
+				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}
+
+			By("Asserting the residual PVC is captured by EXACTLY ONE data leg (the subtreePlanned gate prevents a premature/duplicate root exclude)")
+			Eventually(func(g Gomega) {
+				bindings, err := walkContentDataRefs(ctx, rootContent)
+				g.Expect(err).NotTo(HaveOccurred())
+				n := 0
+				for _, b := range bindings {
+					if b.pvc == vdPVCRoot {
+						n++
+					}
+				}
+				g.Expect(n).To(Equal(1),
+					"residual PVC %s must be backed by exactly one data leg: 0 => premature root exclude/under-coverage, >1 => the wave double-captured a domain-covered PVC (subtreePlanned gate regression)", vdPVCRoot)
+			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(pollInterval).Should(Succeed())
+		})
+
 		It("captures the orphan PVC as a VolumeSnapshot DOMAIN child (Block 3d: fork+managed labels, MCP leg, Ready mirrored)", func() {
 			// Block 3d (content-single-writer design §11.6): the root residual/orphan PVC (demo-pvc, owned by
 			// no demo CR) is no longer a bespoke "child volume node" the namespace domain writes — it is an

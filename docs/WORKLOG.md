@@ -1190,3 +1190,17 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   empty exclude set). Removed the three `TestStampRootManifestCaptured*` unit tests (behavior now covered by
   snapshotcontent/capture_legs_test.go), updated stale "binder/stamp latches" comments (namespace_capture_run.go,
   snapshot_adapter.go). build + vet + gofmt + full unit suite + non-isolated integration pass green.
+- **Add** (w8-block7 e2e) Block 7 e2e coverage (compile-check only per the night-run grant). `aggregated_api_test.go`:
+  a "Block 7" Context on the shared manifest-only tree with four specs — (1) `subtree-manifest-identities`
+  serves a de-duplicated identity set spanning root + child subtree (design §8.3), (2) subtree-captured objects
+  are excluded from the root own-manifests so nothing is double-captured, (3) main latches
+  `commonController.manifestCaptured=true` on every `xxxSnapshot` node (never on its content) and reaps the MCR
+  with no churn (decision #10), (4) `commonController.subtreePlanned=true` is latched snapshot-native on every
+  node. `volumedata_test.go`: two env-gated specs — `dataCaptured` latch + VCR reap (no churn) on each domain
+  data leaf (§11.4), and `subtreePlanned` bottom-up latching gating the orphan/residual wave so the root exclude
+  is neither premature nor duplicated (§8.1/§8.4). Shared helpers in `e2e_shared_test.go`
+  (`subManifestsIdentities`, `manifestCaptureRequestGVR`, `coreContentSubPath`, `snapshotCommonControllerLatch`);
+  `rootManifestCaptured` now delegates to the shared latch reader. Review: three Bugbot passes — fixed two
+  context-vs-`Eventually` budget mismatches (the `subtreePlanned` and `dataCaptured` volume specs cancelled
+  before their inner waits) and made the root-exclude spec poll the fail-closed endpoint + own-manifests together
+  (one-shot reads raced the still-converging tree); final Bugbot pass clean. gofmt + vet + `go test -c` green.
