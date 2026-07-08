@@ -22,11 +22,12 @@ import (
 	"net/http"
 	"testing"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // subtreeObj builds one captured manifest object with an explicit identity (apiVersion v1).
