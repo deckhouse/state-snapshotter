@@ -1033,3 +1033,11 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   gate fixtures (domainChildReady/readyVSChild) to stamp the capture phase instead of the Ready condition. A
   phase=Failed child keeps the gate closed (pending) as before; the terminal is surfaced separately by content
   aggregation (ChildrenFailed).
+- **Add** (w8-block5 e2e) e2e/tests/volumedata_test.go: new phase-3 spec "captures each source PVC by exactly
+  one data leg" that walks the whole SnapshotContent tree and asserts every source PVC (demo-pvc orphan native-CSI
+  leaf + demo-pvc-disk/demo-pvc-standalone domain-VCR legs) is backed by EXACTLY ONE status.data leg. This is the
+  observable end-to-end form of the Block 5 orphan-coverage rewrite: exactly-once == no under-coverage
+  (fail-closed ErrSubtreeDataRefsPending waits out a still-Planning descendant) AND no duplicate orphan capture
+  (data-bearing coverage reads + owner fallback keep a domain-covered PVC out of the residual wave). Complements
+  the existing exclusion spec (PVCs absent from the root own-manifests). Compile-check only (go test -c); live run
+  deferred to end-of-plan validation.

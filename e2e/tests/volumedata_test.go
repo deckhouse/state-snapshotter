@@ -742,6 +742,47 @@ func volumeDataSpecs() {
 			}
 		})
 
+		It("captures each source PVC by exactly one data leg — no under-coverage or duplicate orphan capture (Block 5: data-bearing subtree coverage)", func() {
+			// Block 5 (content-single-writer design §11.6, orphan coverage rewrite): subtree coverage is now
+			// driven by the domain contract — a node contributes PVC coverage iff its kind RequiresDataArtifact
+			// (CSD/GVKRegistry), replacing the old "if the node has children it is an aggregator, skip it"
+			// heuristic — plus an owner fallback (the in-flight VolumeCaptureRequest name for VCR-backed domains
+			// or the native-CSI snapshotSource.uid) so a Planned-but-not-yet-bound child counts as covered during
+			// the A->B window. A data-bearing node with NO observable coverage yet fails closed
+			// (ErrSubtreeDataRefsPending -> requeue) instead of letting the residual wave race it into a DUPLICATE
+			// orphan VolumeSnapshot for the same PVC. The whole rewrite is observable end to end as a single
+			// invariant: every source PVC in the captured tree is backed by EXACTLY ONE data leg — none missing
+			// (fail-closed-pending prevents under-coverage) and none double-captured (correct coverage reads keep
+			// a domain-covered PVC out of the orphan wave).
+			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
+
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+3*time.Minute)
+			defer cancel()
+
+			wantPVCs := []string{vdPVCRoot, vdPVCDisk, vdPVCStandalone}
+
+			By("Waiting until every source PVC has a published data leg (proves no under-coverage)")
+			bindings, err := waitContentDataRefs(ctx, rootContent, wantPVCs, suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred(), "every source PVC must be covered by a data leg (no under-coverage)")
+
+			By("Counting the data legs backing each source PVC across the whole content tree")
+			perPVC := map[string]int{}
+			for _, b := range bindings {
+				perPVC[b.pvc]++
+			}
+
+			By("Asserting each of the three source PVCs is captured by exactly one data leg (no duplicate orphan capture)")
+			for _, pvc := range wantPVCs {
+				Expect(perPVC[pvc]).To(Equal(1),
+					"source PVC %s must be backed by exactly one data leg (got %d): >1 means the residual wave double-captured a domain-covered PVC (Block 5 fail-closed-pending / owner-fallback regression); 0 means under-coverage", pvc, perPVC[pvc])
+			}
+
+			By("Asserting no source PVC anywhere in the tree carries more than one data leg")
+			for pvc, n := range perPVC {
+				Expect(n).To(BeNumerically("<=", 1), "source PVC %s appears in %d data legs (duplicate subtree coverage)", pvc, n)
+			}
+		})
+
 		It("serves the generic-PVC VolumeSnapshot connector manifests-download", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
