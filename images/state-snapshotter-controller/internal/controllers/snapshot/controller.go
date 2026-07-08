@@ -33,6 +33,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -77,7 +78,11 @@ type SnapshotReconciler struct {
 	// be nil for leaf-only setups.
 	SubresourceREST rest.Interface
 	Mgr             ctrl.Manager
-	childWatchMgr   *snapshotDynamicWatchManager
+	// Recorder emits Events on the root Snapshot for out-of-band diagnostics that must stay OUT of the
+	// core-owned Ready condition (e.g. NamespacePlanUnreadable — a fail-closed unreadable namespace
+	// manifest plan). May be nil in unit tests, in which case Event emission is skipped.
+	Recorder      record.EventRecorder
+	childWatchMgr *snapshotDynamicWatchManager
 }
 
 // coreSubresourceGroupVersion is the core controller's aggregated subresources API group/version. It only
@@ -174,6 +179,7 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		Archive:               usecase.NewArchiveService(mgr.GetAPIReader(), mgr.GetAPIReader(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
+		Recorder:              mgr.GetEventRecorderFor("state-snapshotter-namespace-capture"),
 	}
 	// Options may override SubresourceREST (envtest injects a fake). Otherwise build the in-cluster client
 	// used for the root's manifest-exclude self-call (subtree-manifest-identities).

@@ -1310,3 +1310,18 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   sibling lifecycle spec (separate commit): the empty-namespace root MCP now correctly holds the captured
   Namespace object, so the assertion moved from "empty archive" to "exactly the Namespace object". gofmt + go
   vet + integration specs green; golangci-lint adds no new findings; bugbot clean.
+- **Add** (snapshot/snapshotsdk, sdk-children-planned-freeze block D) Restore observability of the fail-closed
+  unreadable namespace manifest plan (regression from w8-block3d, which silently requeued when
+  `BuildRootNamespaceManifestCaptureTargets` reported unreadable resource types — Forbidden / partial
+  discovery — leaving the GVR list only in controller logs). New SDK capability `CaptureProgress.ReportProgress`
+  writes ONLY `captureState.domainSpecificController.message`, preserving the phase and reason (non-terminal,
+  never touches the core-owned Ready) — the domain-owned diagnostic channel per the ADR status model.
+  `reconcileNamespaceManifestLeg` now publishes the capped unreadable-GVR list (first 10 + count, sorted) via
+  `ReportProgress` AND emits a Warning Event `NamespacePlanUnreadable` on the root Snapshot; both fire only when
+  the set CHANGES (idempotent gate on the published message) so the 500ms fail-closed requeue does not flood.
+  The message is persisted before the Event so a failed status patch cannot spam Events, and a recovered plan
+  clears its own stale diagnostic (sentinel-prefix match) before `EnsureManifestCapture`. The deleted
+  `NamespaceCaptureIncomplete` Ready reason is NOT resurrected (writer discipline: creator pre-bind / main
+  post-bind). Unit tests: message+Event carry the GVR list, Ready not written by the domain, phase preserved,
+  idempotent on unchanged set, clear-on-recovery (own vs foreign message), and the cap/sort formatter. gofmt +
+  go vet + tests green; golangci-lint adds no new findings; bugbot clean.

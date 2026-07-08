@@ -20,11 +20,14 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -378,7 +381,17 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	if len(unreadable) > 0 {
 		// Incomplete plan (Forbidden/partial discovery): fail-closed — do NOT build a partial MCR. The
 		// binder mirrors the bound content's (still-pending) Ready; requeue until the types become readable.
+		// Publish WHICH types are unreadable through observable channels OUTSIDE the Ready writer discipline
+		// (the ns domain must not co-write the core-owned Ready), so the stuck reason is not buried in logs.
+		if err := r.reportUnreadableNamespacePlan(ctx, nsSnap, adapter, sdk, unreadable); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	// Plan is readable: clear any stale unreadable diagnostic this leg published on a prior pass so the
+	// domain message does not keep claiming "incomplete" while capture progresses.
+	if err := r.clearUnreadableNamespacePlanDiagnostic(ctx, nsSnap, adapter, sdk); err != nil {
+		return ctrl.Result{}, err
 	}
 	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: namespaceSDKManifestTargets(targets)}); err != nil {
 		return ctrl.Result{}, err
@@ -387,6 +400,105 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	// capture-leg lifecycle latches commonController.manifestCaptured after the MCP handoff is durable (then
 	// reaps the root MCR). Requeue until that latch flips (which short-circuits above).
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+}
+
+// eventReasonNamespacePlanUnreadable is the Warning Event reason emitted on the root Snapshot when the
+// namespace manifest plan is fail-closed on unreadable resource types (Forbidden / partial discovery).
+const eventReasonNamespacePlanUnreadable = "NamespacePlanUnreadable"
+
+// maxReportedUnreadableGVRs caps how many unreadable resource types are listed verbatim in the diagnostic
+// message/Event (the rest are summarized as a count) so a broad discovery/RBAC gap cannot produce an
+// unbounded status message or Event body.
+const maxReportedUnreadableGVRs = 10
+
+// unreadableNamespacePlanMessagePrefix opens every unreadable-plan diagnostic. It is a stable sentinel so
+// the manifest leg can recognize (and clear) its OWN prior diagnostic once the plan recovers, without
+// clobbering a domain message written by anything else.
+const unreadableNamespacePlanMessagePrefix = "namespace manifest plan is incomplete:"
+
+// reportUnreadableNamespacePlan publishes the fail-closed "namespace manifest plan is incomplete"
+// diagnosis when BuildRootNamespaceManifestCaptureTargets reports unreadable resource types. It is
+// observability ONLY: it never builds a partial MCR (the caller already returned before EnsureManifestCapture)
+// and never writes the core-owned Ready condition (post-wave7 writer discipline — the ns domain must not
+// co-write Ready; the binder still mirrors the bound content's pending Ready). The diagnosis flows through
+// two channels that sit OUTSIDE that discipline:
+//
+//   - the DOMAIN-owned status field captureState.domainSpecificController.message (via the SDK
+//     ReportProgress path, which preserves the phase), so the stuck reason is visible in
+//     `kubectl get snapshot -o yaml` and survives across reconciles;
+//   - a Warning Event (reason NamespacePlanUnreadable) on the root Snapshot.
+//
+// Both fire only when the unreadable set CHANGES versus the already-published domain message, so the 500ms
+// fail-closed requeue does not flood Events or churn the status. (The former Ready=False/NamespaceCaptureIncomplete
+// surface was intentionally removed from the reason catalog; this restores the observability without
+// resurrecting a domain-authored Ready reason.)
+func (r *SnapshotReconciler) reportUnreadableNamespacePlan(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	adapter NamespaceSnapshotAdapter,
+	sdk snapshotsdk.CaptureSDK,
+	unreadable []schema.GroupVersionResource,
+) error {
+	message := formatUnreadableNamespacePlan(unreadable)
+	previous := ""
+	if cs := nsSnap.Status.CaptureState; cs != nil && cs.DomainSpecificController != nil {
+		previous = cs.DomainSpecificController.Message
+	}
+	if previous == message {
+		// Same unreadable set already published: neither re-emit the Event nor re-patch the status.
+		return nil
+	}
+	// Persist to the domain-owned status FIRST, then emit the Event only on success. If the status patch
+	// fails the reconcile errors out with the message still unpublished, so the retry re-enters this path
+	// and re-attempts the patch — but no premature Event was emitted. Once the message is durable the
+	// unchanged-message gate above suppresses any re-emission on subsequent reconciles.
+	if err := sdk.ReportProgress(ctx, adapter, message); err != nil {
+		return err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Event(nsSnap, corev1.EventTypeWarning, eventReasonNamespacePlanUnreadable, message)
+	}
+	return nil
+}
+
+// clearUnreadableNamespacePlanDiagnostic clears the domain message IFF it currently carries this leg's own
+// unreadable-plan diagnostic (matched by the sentinel prefix). It runs on the readable path so a recovered
+// plan (the previously-unreadable types became readable) does not leave a stale "incomplete" message in
+// captureState.domainSpecificController.message while capture actively progresses. It is a no-op when the
+// message is empty or was authored by something else, and is idempotent (ReportProgress does not write an
+// already-empty message).
+func (r *SnapshotReconciler) clearUnreadableNamespacePlanDiagnostic(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	adapter NamespaceSnapshotAdapter,
+	sdk snapshotsdk.CaptureSDK,
+) error {
+	cs := nsSnap.Status.CaptureState
+	if cs == nil || cs.DomainSpecificController == nil {
+		return nil
+	}
+	if !strings.HasPrefix(cs.DomainSpecificController.Message, unreadableNamespacePlanMessagePrefix) {
+		return nil
+	}
+	return sdk.ReportProgress(ctx, adapter, "")
+}
+
+// formatUnreadableNamespacePlan renders the unreadable resource types into a stable, capped human message
+// ("group/version/resource" each, sorted; first maxReportedUnreadableGVRs verbatim, then a "(+N more)" tail).
+func formatUnreadableNamespacePlan(unreadable []schema.GroupVersionResource) string {
+	names := make([]string, 0, len(unreadable))
+	for _, gvr := range unreadable {
+		names = append(names, gvr.String())
+	}
+	sort.Strings(names)
+	shown := names
+	suffix := ""
+	if len(names) > maxReportedUnreadableGVRs {
+		shown = names[:maxReportedUnreadableGVRs]
+		suffix = fmt.Sprintf(" (+%d more)", len(names)-maxReportedUnreadableGVRs)
+	}
+	return fmt.Sprintf("%s %d resource type(s) are not readable (fail-closed, no partial capture): %s%s",
+		unreadableNamespacePlanMessagePrefix, len(unreadable), strings.Join(shown, ", "), suffix)
 }
 
 // manifestLegCaptured reports whether the root's core-owned manifest leg latch

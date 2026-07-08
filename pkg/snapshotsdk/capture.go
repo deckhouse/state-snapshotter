@@ -94,6 +94,20 @@ type CaptureFault interface {
 	Reject(ctx context.Context, t SnapshotAdapter, in FailSpec) error
 }
 
+// CaptureProgress publishes a NON-terminal, domain-owned diagnostic into
+// status.captureState.domainSpecificController.message. It is the observable companion to a fail-closed
+// requeue (a planning leg that is retrying, e.g. an unreadable namespace manifest plan): the message says
+// WHY the leg is stuck, in the domain-owned status field the ADR status model keeps in every phase, so an
+// operator sees it in `kubectl get snapshot -o yaml` instead of only in controller logs.
+type CaptureProgress interface {
+	// ReportProgress writes ONLY the domain message, preserving the current phase and reason — it never
+	// advances/regresses the lifecycle phase and never writes the core-owned Ready condition (so it does
+	// not violate the Ready writer discipline). It is idempotent (no status write when the message is
+	// unchanged); an empty message clears a prior diagnostic. Unlike Fail/Reject this is non-terminal: the
+	// caller keeps requeuing, this only makes the wait observable.
+	ReportProgress(ctx context.Context, t SnapshotAdapter, message string) error
+}
+
 // SourcePublisher publishes the captured live source's full reference into the top-level
 // status.snapshotSource. It is used by import-mode recreation (d8-cli reads it as a single block). Only
 // domain snapshots that capture a live source publish it; a nil/zero source is a no-op.
@@ -124,6 +138,7 @@ type CaptureSDK interface {
 	Planning
 	CaptureBarrier
 	CaptureFault
+	CaptureProgress
 	SourcePublisher
 	ManifestExclude
 }
@@ -419,6 +434,23 @@ func (s *sdk) Reject(ctx context.Context, t SnapshotAdapter, in FailSpec) error 
 		message = in.Cause.Error()
 	}
 	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhaseFailed, string(in.Reason), message)
+}
+
+// ReportProgress patches ONLY status.captureState.domainSpecificController.message, leaving the phase and
+// reason untouched — a non-terminal, observable-only write (see CaptureProgress). It intentionally does
+// NOT go through setPhase (which is the phase-transition path with the monotonic barrier guard): a
+// diagnostic is unordered and must never disturb the lifecycle phase or clear a real failure reason.
+func (s *sdk) ReportProgress(ctx context.Context, t SnapshotAdapter, message string) error {
+	obj := t.Object()
+	return patch.Status(ctx, s.client, obj, func() bool {
+		st := t.GetDomainCaptureState()
+		if st.Message == message {
+			return false
+		}
+		st.Message = message
+		t.SetDomainCaptureState(st)
+		return true
+	})
 }
 
 // setPhase patches status.captureState.domainSpecificController.phase (+ reason/message) via the adapter.
