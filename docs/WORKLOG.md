@@ -1100,3 +1100,25 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   snapshotContentName + the already-dead desiredSnapshotContentSpec (controller.go); the reconcileImport rootOK
   param is dropped (the caller still ensures the root keeper for the Snapshot record's own TTL + root static-bind).
   build + vet + gofmt + snapshot/genericbinder unit suites green.
+- **Refactor** (w8-block6b-3) Import data leg → aggregator single writer (content-single-writer design §10/§11.4):
+  the SnapshotContentController is now the sole writer of status.data for import too, closing the last import
+  writer split. Two paths: (B1) GENERIC import leaf — new reconcileDataLegProjection import branch
+  (usecase.IsUnstructuredImportMode(owner) -> projectContentDataLegFromDataImport) gated on
+  GVKRegistry.RequiresDataArtifact so structural nodes (root/VM) short-circuit; it reverse-looks-up the DataImport
+  (FindDataImportForLeaf), builds the leaf-sourced binding (BuildImportDataBinding, moved from genericbinder into
+  the aggregator package so both the aggregator publish and the binder terminal-precondition share one pure fn),
+  then runs the same enrich + Retain/ownerRef VSC handoff + publish as the capture VCR branch. genericbinder/import.go
+  drops projectDataLegFromDataImport (content write) — it keeps ONLY the two leaf-facing jobs the aggregator cannot
+  do: surface the non-retryable artifact terminal on the leaf (via the moved BuildImportDataBinding) and mirror the
+  aggregator-published content.status.data onto the leaf for d8 export (mirrorLeafDataFromContent, which already
+  reads content.status.data); the now-dead `requeue` latch is removed (the existing !Ready poll drives the export
+  mirror). (B2) native-CSI import VolumeSnapshot — volumesnapshotimport now publishes the recovered orphan PVC as
+  status.snapshotSource (importSnapshotSourceRef + publishVolumeSnapshotSource) instead of writing the content, so
+  the aggregator's existing native-CSI branch (projectContentDataLegFromBoundVSC / volumeSnapshotOwnerSource)
+  builds {source PVC, bound VSC} and publishes — which also FIXES a latent bug: that branch requeued forever on an
+  empty snapshotSource for imports (import VS never reached Ready post-Block-3, masked by compile-only night e2e).
+  The controller still forces Retain, sets the CSI back-ref + legacy bound (readyToUse), recovers the orphan PVC,
+  and mirrors the aggregator-published content.status.data onto the VS (polls until published). Removed importDataBinding
+  (superseded by snapshotSource + the aggregator binding) + its content data writes; moved its pure PVC-source test
+  to TestImportSnapshotSourceRef_TargetsPVC and BuildImportDataBinding tests to the aggregator package. New aggregator
+  tests: import structural-node skip + full DataImport->VSC publish/handoff. build + vet + gofmt + full module suite green.

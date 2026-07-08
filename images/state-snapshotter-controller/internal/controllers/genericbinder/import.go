@@ -18,13 +18,11 @@ package genericbinder
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -169,8 +167,6 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		return ctrl.Result{}, err
 	}
 
-	requeue := false
-
 	// Children projection moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1,
 	// content-single-writer design §3.1/§3.2): the aggregator projects childrenSnapshotContentRefs from the
 	// uploaded status.childrenSnapshotRefs the same way for capture and import (an import owner has no domain
@@ -200,38 +196,34 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
 		}
 
-		done, dtreason, dtmsg, dErr := r.projectDataLegFromDataImport(ctx, obj, contentName, di)
-		if dErr != nil {
-			return ctrl.Result{}, dErr
-		}
-		if dtreason != "" {
-			// Actionable import failure (e.g. unsupported artifact kind) surfaced as Ready=False; the content
-			// stays pending (no dataRef), so the pure content mirror cannot express it — co-write it directly.
+		// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
+		// content-single-writer design §10): the aggregator is the single writer of content.status.data for
+		// import too (projectContentDataLegFromDataImport runs the same DataImport->VSC Retain+ownerRef
+		// handoff + publish). The binder keeps ONLY the two leaf-facing jobs the aggregator cannot: surface a
+		// non-retryable artifact terminal on the leaf, and mirror the aggregator-published content.status.data
+		// onto the leaf's top-level status.data for d8 export.
+		if _, _, dtreason, dtmsg := snapshotcontent.BuildImportDataBinding(di, obj); dtreason != "" {
+			// Actionable import failure (e.g. unsupported artifact kind): the content stays pending (no
+			// dataRef), so the pure content mirror cannot express it — co-write Ready=False directly.
 			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, dtreason, dtmsg); perr != nil {
 				return ctrl.Result{}, perr
 			}
 			return ctrl.Result{}, nil
 		}
-		if !done {
-			requeue = true
-		} else {
-			// Mirror the self-contained data descriptor onto the leaf's top-level status.data for d8 export.
-			// storageClassName is absent from the import content data by design, so take it from
-			// DataImport.spec.storageClassName; source/artifact/size/volumeMode come from the content
-			// status.data (enriched from VSC.restoreSize + DataImport.status.volumeMode).
-			scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-			if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
-				logger.Error(mErr, "Failed to mirror volume data to import leaf status")
-			}
+		// Mirror the aggregator-published content.status.data onto the leaf for d8 export. It is a no-op
+		// until the aggregator publishes; the !Ready poll below drives convergence (a Ready content always
+		// has its data leg published, so a Ready leaf is always mirrored first). storageClassName is absent
+		// from the content data by design, so take it from DataImport.spec.storageClassName;
+		// source/artifact/size/volumeMode come from content.status.data.
+		scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
+		if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
+			logger.Error(mErr, "Failed to mirror volume data to import leaf status")
 		}
 	}
 
-	if requeue {
-		return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
-	}
-
 	// Mirror the bound content's Ready (single-aggregator, INV-COND4). The content->snapshot watch wakes
-	// this leaf on the Ready transition; the requeue is a missed-event fallback.
+	// this leaf on the Ready transition; the requeue is a missed-event fallback while the aggregator is
+	// still converging the manifest/children/data legs.
 	if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
 		logger.Error(err, "Failed to mirror import SnapshotContent Ready")
 	}
@@ -251,105 +243,4 @@ func importSnapshotContentSpec(leaf *unstructured.Unstructured) storagev1alpha1.
 		storagev1alpha1.SnapshotContentDeletionPolicyDelete,
 		controllercommon.SnapshotSubjectRefFromObject(leaf),
 	)
-}
-
-// projectDataLegFromDataImport resolves the (reverse-looked-up) DataImport's produced durable artifact
-// (status.data.artifact), transfers VolumeSnapshotContent ownership to the SnapshotContent (force
-// Retain + ownerRef), and publishes the single dataRef. Returns done=true once the dataRef is published.
-// A non-empty terminalReason is an actionable, non-retryable import failure.
-func (r *GenericSnapshotBinderController) projectDataLegFromDataImport(
-	ctx context.Context,
-	obj *unstructured.Unstructured,
-	contentName string,
-	di *unstructured.Unstructured,
-) (done bool, terminalReason string, terminalMessage string, err error) {
-	binding, ready, treason, tmsg := buildImportDataBinding(di, obj)
-	if treason != "" {
-		return false, treason, tmsg, nil
-	}
-	if !ready {
-		// DataImport has not produced its artifact yet (status.data.artifact empty). Pending.
-		return false, "", "", nil
-	}
-
-	content := &storagev1alpha1.SnapshotContent{}
-	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
-	}
-	// Fast-path: skip re-enriching/re-publishing only when the already-published dataRef matches both the
-	// artifact and the (now source-derived) volumeMode. Comparing volumeMode too lets a content that was
-	// bound before volumeMode propagation existed self-heal instead of staying stuck with an empty mode
-	// that fails restore closed.
-	if content.Status.Data != nil &&
-		content.Status.Data.Artifact == binding.Artifact &&
-		content.Status.Data.VolumeMode == binding.VolumeMode {
-		return true, "", "", nil
-	}
-
-	enriched, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, []storagev1alpha1.SnapshotDataBinding{*binding})
-	if enrichErr != nil {
-		return false, "", "", enrichErr
-	}
-	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
-	}
-	if handoffErr := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, enriched); handoffErr != nil {
-		// Retryable handoff (e.g. VSC not yet visible / conflicted); poll without a terminal condition.
-		return false, "", "", nil
-	}
-	if pubErr := snapshotcontent.PublishSnapshotContentDataRef(ctx, r.Client, contentName, &enriched[0]); pubErr != nil {
-		return false, "", "", pubErr
-	}
-	return true, "", "", nil
-}
-
-// buildImportDataBinding maps a DataImport's produced artifact (status.data.artifact) into the single
-// SnapshotDataBinding for the imported leaf's content. ready=false (binding nil, no terminal reason) means
-// the DataImport has not produced its artifact yet. A non-empty terminalReason is a non-retryable fault.
-//
-// Pure function (no client) so it is unit-tested directly.
-func buildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Unstructured) (binding *storagev1alpha1.SnapshotDataBinding, ready bool, terminalReason string, terminalMessage string) {
-	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "apiVersion")
-	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "kind")
-	name, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "name")
-	// uid is best-effort (DataImport fills it from the VCR artifact uid). When empty, the dataRef
-	// enricher backfills it from the live VolumeSnapshotContent; when present, it is preserved.
-	uid, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "uid")
-	if apiVersion == "" || kind == "" || name == "" {
-		return nil, false, "", ""
-	}
-	if kind != snapshot.KindVolumeSnapshotContent {
-		// PV-backed (Detach) artifacts need the PersistentVolume data-readiness path (follow-up). Fail loud
-		// rather than publishing a dataRef the SnapshotContent readiness cannot validate as Ready.
-		return nil, false, snapshot.ReasonDataArtifactInvalid,
-			fmt.Sprintf("DataImport %s produced a %q data artifact; import dataRef currently supports %s only",
-				di.GetName(), kind, snapshot.KindVolumeSnapshotContent)
-	}
-	leafGVK := leaf.GetObjectKind().GroupVersionKind()
-	// volumeMode is the one piece of source volume metadata that downstream restore strictly requires
-	// (demo restore fails closed on an empty dataRef.volumeMode) and that EnrichDataBindingsWithVolumeMetadata
-	// cannot recover here: the binding targets the leaf snapshot, not a live PVC, so the PVC-based enricher
-	// only fills Size. DataImport republishes the original captured volumeMode into status.volumeMode (it
-	// reads capacity/storageClass/volumeMode from the uploaded manifest to provision its scratch PVC), so it
-	// is the authoritative source on the import side. storageClassName/accessModes/fsType are not exposed by
-	// DataImport and are resolved downstream from the disk spec / defaults.
-	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
-	return &storagev1alpha1.SnapshotDataBinding{
-		// The imported leaf has no live source PVC; use the leaf identity as the binding source so the
-		// data binding is stable/idempotent (size etc. are enriched from VolumeSnapshotContent.status.restoreSize).
-		Source: storagev1alpha1.SnapshotSubjectRef{
-			APIVersion: leafGVK.GroupVersion().String(),
-			Kind:       leafGVK.Kind,
-			Namespace:  leaf.GetNamespace(),
-			Name:       leaf.GetName(),
-			UID:        leaf.GetUID(),
-		},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
-			APIVersion: apiVersion,
-			Kind:       kind,
-			Name:       name,
-			UID:        types.UID(uid),
-		},
-		VolumeMode: volumeMode,
-	}, true, "", ""
 }

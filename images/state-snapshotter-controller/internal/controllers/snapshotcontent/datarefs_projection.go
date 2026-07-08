@@ -26,6 +26,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -53,7 +54,16 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 
 	if owner.GetObjectKind().GroupVersionKind().Kind == snapshot.KindVolumeSnapshot {
 		// Native-CSI data leg (§11.4): the VolumeSnapshot IS the volume capture; project from its bound VSC.
+		// This covers BOTH capture VS (fork binds it) and import VS (the import binder publishes
+		// snapshotSource + boundVolumeSnapshotContentName), so import VS does not take the DataImport branch.
 		return r.projectContentDataLegFromBoundVSC(ctx, contentObj, owner, ownerNamespace)
+	}
+
+	if usecase.IsUnstructuredImportMode(owner) {
+		// Generic import leaf (§10): no live VCR — the volume artifact comes from the reverse-looked-up
+		// DataImport's produced VolumeSnapshotContent. Structural import nodes (root/VM) are not data-bearing
+		// and short-circuit inside.
+		return r.projectContentDataLegFromDataImport(ctx, contentObj, owner)
 	}
 
 	vcrName, _, err := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")

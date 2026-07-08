@@ -24,10 +24,11 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// importDataBinding must target the orphan PVC (not the VolumeSnapshot handle): the restore compiler
-// matches a captured PVC manifest to its dataRef by PVC identity/UID. A VolumeSnapshot-targeted dataRef
-// would never match and the PVC would be emitted data-less (contract violation).
-func TestImportDataBinding_TargetsPVC(t *testing.T) {
+// importSnapshotSourceRef must target the orphan PVC (not the VolumeSnapshot handle): it is published as
+// status.snapshotSource and the aggregator builds the dataRef source from it. The restore compiler matches
+// a captured PVC manifest to its dataRef by PVC identity/UID — a VolumeSnapshot-targeted source would never
+// match and the PVC would be emitted data-less (contract violation).
+func TestImportSnapshotSourceRef_TargetsPVC(t *testing.T) {
 	pvc := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "v1",
 		"kind":       "PersistentVolumeClaim",
@@ -38,25 +39,19 @@ func TestImportDataBinding_TargetsPVC(t *testing.T) {
 		},
 	}}
 
-	b := importDataBinding(pvc, "vsc-artifact")
+	src := importSnapshotSourceRef(pvc)
 
-	if string(b.Source.UID) != "pvc-uid-123" {
-		t.Fatalf("Source.UID must be the PVC uid, got %q", b.Source.UID)
+	if string(src.UID) != "pvc-uid-123" {
+		t.Fatalf("Source.UID must be the PVC uid, got %q", src.UID)
 	}
-	if b.Source.Kind != "PersistentVolumeClaim" {
-		t.Fatalf("Source.Kind must be PersistentVolumeClaim, got %q", b.Source.Kind)
+	if src.Kind != "PersistentVolumeClaim" {
+		t.Fatalf("Source.Kind must be PersistentVolumeClaim, got %q", src.Kind)
 	}
-	if b.Source.APIVersion != "v1" {
-		t.Fatalf("Source.APIVersion must be v1, got %q", b.Source.APIVersion)
+	if src.APIVersion != "v1" {
+		t.Fatalf("Source.APIVersion must be v1, got %q", src.APIVersion)
 	}
-	if b.Source.Name != "bk-pvc" || b.Source.Namespace != "source-ns" {
-		t.Fatalf("Source identity mismatch: %s/%s", b.Source.Namespace, b.Source.Name)
-	}
-	if string(b.Source.UID) != "pvc-uid-123" {
-		t.Fatalf("Source.UID must be the PVC uid, got %q", b.Source.UID)
-	}
-	if b.Artifact.Kind != snapshotpkg.KindVolumeSnapshotContent || b.Artifact.Name != "vsc-artifact" {
-		t.Fatalf("Artifact must point at the durable VSC, got %s/%s", b.Artifact.Kind, b.Artifact.Name)
+	if src.Name != "bk-pvc" || src.Namespace != "source-ns" {
+		t.Fatalf("Source identity mismatch: %s/%s", src.Namespace, src.Name)
 	}
 }
 
