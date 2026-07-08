@@ -21,9 +21,11 @@ properties:
     type: string
     default: ""
     description: |
-      Static bootstrap GVK list before merge with eligible DSC. Empty = built-in default pairs.
-      Literal "empty" (or "none", "dsc-only") = no static bootstrap (DSC-only merge).
-      Custom = semicolon-separated pairs "group/version/Kind|group/version/Kind" (snapshot|content).
+      Static bootstrap GVK list before merge with eligible DSC. Empty/unset = the single built-in pair
+      (core Snapshot -> SnapshotContent); domain kinds are added only via eligible DSC.
+      Literal "empty" (or "none", "dsc-only") = no static pairs at all (pure DSC-only merge).
+      Custom = semicolon-separated pairs "group/version/Kind|group/version/Kind" (snapshot|content);
+      dev/test escape hatch only, requires full RBAC on every listed GVR.
       Maps to env STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
   snapshotRootOkTtl:
     type: string

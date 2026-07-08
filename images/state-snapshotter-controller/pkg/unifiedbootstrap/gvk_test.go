@@ -43,7 +43,7 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 		{Snapshot: snap, SnapshotContent: content},
 		{
 			// Snapshot side intentionally not registered in the mapper, so this pair must be dropped.
-			Snapshot:        schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
+			Snapshot:        schema.GroupVersionKind{Group: "example.deckhouse.io", Version: "v1alpha1", Kind: "ExampleDomainSnapshot"},
 			SnapshotContent: content,
 		},
 	}
@@ -89,7 +89,7 @@ func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T)
 func TestFilterGenericSnapshotGVKPairs_skipsDedicatedKinds(t *testing.T) {
 	// Snapshot (root) and the demo kinds have dedicated reconcilers, so the
 	// generic binder must not watch them. Only a non-dedicated kind survives.
-	genericSnap := schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"}
+	genericSnap := schema.GroupVersionKind{Group: "example.deckhouse.io", Version: "v1alpha1", Kind: "ExampleDomainSnapshot"}
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"},
@@ -114,7 +114,7 @@ func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing
 	// dropped; only the non-dedicated kind's content survives.
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
+		{Group: "example.deckhouse.io", Version: "v1alpha1", Kind: "ExampleDomainSnapshot"},
 	}
 	contentGVKs := []schema.GroupVersionKind{
 		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
@@ -150,19 +150,13 @@ func TestDefaultGraphRegistryBuiltInPairs_containsOnlySnapshot(t *testing.T) {
 	}
 }
 
-func TestDefaultUnifiedRuntimeBootstrapPairs_remainsSeparateFromGraphBuiltIns(t *testing.T) {
-	runtimePairs := DefaultUnifiedRuntimeBootstrapPairs()
-	if len(runtimePairs) <= len(DefaultGraphRegistryBuiltInPairs()) {
-		t.Fatalf("expected unified runtime bootstrap to keep its broader static list, got %v", runtimePairs)
-	}
-	var hasSnapshot bool
-	for _, p := range runtimePairs {
-		if p.Snapshot.Kind == "Snapshot" && p.SnapshotContent.Kind == "SnapshotContent" {
-			hasSnapshot = true
+func TestDefaultGraphRegistryBuiltInPairs_hasNoDomainPairs(t *testing.T) {
+	// The single built-in list must never carry a hardcoded domain kind (e.g. virtualization/demo):
+	// those have no static RBAC contract and would widen the watch surface into forbidden loops.
+	for _, p := range DefaultGraphRegistryBuiltInPairs() {
+		if p.Snapshot.Group != "storage.deckhouse.io" || p.Snapshot.Kind != "Snapshot" {
+			t.Fatalf("built-in pairs must contain only the core Snapshot pair, found domain pair: %v", p)
 		}
-	}
-	if !hasSnapshot {
-		t.Fatalf("expected generic Snapshot/SnapshotContent in unified runtime bootstrap, got %v", runtimePairs)
 	}
 }
 

@@ -3,7 +3,7 @@ properties:
   logLevel:
     description: Уровень логирования модуля.
   unifiedBootstrapPairs:
-    description: Статический bootstrap списка пар GVK до merge с DSC. Пусто — дефолт из кода; empty/none/dsc-only — только DSC; иначе кастомная строка (см. англ. описание в config-values).
+    description: Статический bootstrap списка пар GVK до merge с DSC. Пусто/unset — единственная встроенная пара (core Snapshot → SnapshotContent), доменные типы только через eligible DSC; empty/none/dsc-only — вообще без статических пар (чистый DSC-only); иначе кастомная строка (см. англ. описание в config-values).
   snapshotRootOkTtl:
     description: |
       Окно хранения «корзины»: длительность TTL для корневого ObjectKeeper (FollowObjectWithTTL) у Snapshot и unified XxxxSnapshot.

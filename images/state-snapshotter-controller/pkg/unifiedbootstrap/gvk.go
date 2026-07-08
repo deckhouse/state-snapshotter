@@ -50,34 +50,20 @@ func DefaultSnapshotPair() UnifiedGVKPair {
 	}
 }
 
-// DefaultGraphRegistryBuiltInPairs lists Snapshot↔SnapshotContent pairs that are
-// active in the Snapshot graph registry without a CSD. Domain-specific
-// demo pairs intentionally are not built in: they enter discovery only through
-// eligible CustomSnapshotDefinition resources.
+// DefaultGraphRegistryBuiltInPairs lists the only Snapshot↔SnapshotContent pairs the controller ships
+// with out of the box. It contains just the core namespace-root Snapshot pair (always present in this
+// repo's CRDs, always covered by static controller RBAC). Domain-specific kinds (e.g. virtualization,
+// demo) are intentionally NOT built in: they enter discovery and get watches exclusively through
+// eligible CustomSnapshotDefinition resources (+ the module RBAC hook that sets RBACReady=True).
+//
+// This is the single source of built-in pairs: it seeds both the Snapshot graph registry and the
+// generic unified runtime bootstrap default (see config.EffectiveUnifiedBootstrapPairs). There is no
+// separate, broader "runtime bootstrap" list anymore — a hardcoded domain pair without an RBAC
+// contract would silently widen the watch surface and produce forbidden list/watch loops.
 func DefaultGraphRegistryBuiltInPairs() []UnifiedGVKPair {
 	return []UnifiedGVKPair{
 		DefaultSnapshotPair(),
 	}
-}
-
-// DefaultUnifiedRuntimeBootstrapPairs lists static bootstrap pairs for the
-// generic unified Snapshot/SnapshotContent runtime. This is separate from graph
-// registry built-ins: runtime startup support must not activate domain kinds in
-// Snapshot discovery.
-func DefaultUnifiedRuntimeBootstrapPairs() []UnifiedGVKPair {
-	return []UnifiedGVKPair{
-		DefaultSnapshotPair(),
-		{
-			Snapshot:        schema.GroupVersionKind{Group: "snapshot.internal.virtualization.deckhouse.io", Version: "v1alpha1", Kind: "InternalVirtualizationVirtualMachineSnapshot"},
-			SnapshotContent: CommonSnapshotContentGVK(),
-		},
-	}
-}
-
-// DefaultDesiredUnifiedSnapshotPairs preserves the older function name for the
-// unified runtime bootstrap environment path.
-func DefaultDesiredUnifiedSnapshotPairs() []UnifiedGVKPair {
-	return DefaultUnifiedRuntimeBootstrapPairs()
 }
 
 // ResolveAvailableUnifiedGVKPairs keeps only pairs where both Snapshot and SnapshotContent

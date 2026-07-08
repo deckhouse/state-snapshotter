@@ -84,7 +84,7 @@ func TestBuildLayeredGVKState_EmptyCSDListMergesBootstrap(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = storagev1alpha1.AddToScheme(scheme)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	bootstrap := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
+	bootstrap := unifiedbootstrap.DefaultGraphRegistryBuiltInPairs()
 	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}

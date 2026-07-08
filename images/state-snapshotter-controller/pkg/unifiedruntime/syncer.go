@@ -49,9 +49,9 @@ type Syncer struct {
 	activeSnapshotGVKKeys map[string]struct{}
 }
 
-// NewSyncer builds a syncer. bootstrap must be the static unified-runtime list
-// (same as DefaultUnifiedRuntimeBootstrapPairs / legacy DefaultDesiredUnifiedSnapshotPairs);
-// eligible CSD pairs are merged on each Sync.
+// NewSyncer builds a syncer. bootstrap is the static built-in list from
+// config.EffectiveUnifiedBootstrapPairs (by default just the core Snapshot pair,
+// unifiedbootstrap.DefaultGraphRegistryBuiltInPairs); eligible CSD pairs are merged on each Sync.
 //
 // dedicatedActivators maps a snapshot Kind (e.g. "DemoVirtualDiskSnapshot") to a function that
 // registers its dedicated controller at runtime. It may be nil/empty: then dedicated kinds are only

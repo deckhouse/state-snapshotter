@@ -34,7 +34,7 @@ import (
 // Controller wiring must tolerate missing pairs and succeed; optional pairs register no watches.
 var _ = Describe("Integration T1: unified bootstrap without optional snapshot CRDs", func() {
 	It("filters out missing API types; envtest exposes Snapshot pair when repo CRDs load", func() {
-		pairs := unifiedbootstrap.DefaultDesiredUnifiedSnapshotPairs()
+		pairs := unifiedbootstrap.DefaultGraphRegistryBuiltInPairs()
 		Expect(pairs).NotTo(BeEmpty())
 
 		available := unifiedbootstrap.ResolveAvailableUnifiedPairs(
