@@ -549,10 +549,13 @@ proposed — none is justified by this trace. Remaining items are **future / low
 the dropped-wake poll fallback and the child-archive staircase can be revisited only if a real-scale trace shows
 them dominating.
 
-### H5 — concurrent pre-MCR namespace-sweep race — VALIDATED (diagnosis); implementation deferred (medium)
+### H5 — concurrent pre-MCR namespace-sweep race — CLOSED (single-flight implemented + validated)
 
-**Status: diagnosis validated by measurement; no code written. Correctness-neutral optimization, NOT the dominant
-API-load term — deferred per the leverage criterion (a fix worth <10% of load waits behind any 50–80% lever).**
+**Status: IMPLEMENTED and validated by measurement. A per-`Snapshot`-UID in-process single-flight now gates the
+pre-MCR sweep so only one concurrent reconcile plans; the others requeue and take the frozen `mcr-present` branch.
+Correctness-neutral (concurrency dedup only; the MCR-gate still owns temporal dedup and the plan result is not
+cached across time). Not the dominant API-load term (~8–9% of per-tree GET at fan-out) but a clean, safe cleanup
+that removes the concurrent duplicate sweeps and the `AlreadyExists` Create race.**
 
 **Root cause.** The root namespace-manifest capture plan is built by
 `BuildRootNamespaceManifestCaptureTargets` → `BuildManifestCaptureTargets` (`pkg/namespacemanifest/targets.go`):
@@ -580,23 +583,38 @@ The race is **structural and amplifies with fan-out** (longer pre-MCR window →
 more concurrent sweeps: 2 at SETS=10, 3 at SETS=20), not a single-tree artifact. Redundant sweeps/root = sweeps−1
 (1 at SETS=10, 2 at SETS=20). Each sweep ≈ 250–500 uncached GET and ~1.5–5.5s of planning.
 
-**Why deferred (leverage).** The decisive number is the **API-load attribution**: the sweep is ~500 GET/root, but
-total is ~5800 (SETS=10) → ~12760 (SETS=20) GET/root — i.e. **~90% of per-tree API load is NOT the sweep**; it is
-child-subtree processing (per-disk child snapshots + their contents), which grows linearly with fan-out while the
-sweep does not. A single-flight around capture planning would remove 1–2 redundant full sweeps/root
-(~250–500 GET + ~2–5s duplicated planning + a concurrent-apiserver spike in the pre-MCR window) — a clean, safe,
-semantics-preserving cleanup, but it will **not** flatten the scalability curve on its own.
+**Leverage (why it is a cleanup, not a scalability fix).** The sweep is ~250–500 GET/root, but total is ~5800
+(SETS=10) → ~12760 (SETS=20) GET/root — i.e. **~90% of per-tree API load is NOT the sweep**; it is child-subtree
+processing (per-disk child snapshots + their contents), which grows linearly with fan-out while the sweep does not.
+The single-flight removes the 1–2 redundant full sweeps/root (~250–500 GET each + ~1.5–5.5s duplicated planning +
+the concurrent-apiserver spike in the pre-MCR window) but does **not** flatten the scalability curve on its own.
 
-**Candidate fix (NOT implemented).** Per-`Snapshot`-UID single-flight / in-process lock around the capture-planning
-section so only one concurrent reconcile runs the sweep and the others take the frozen-plan branch. Correctness is
-preserved because the concurrent sweeps demonstrably compute an identical plan for identical pre-MCR state (they
-overlap within a 2–7.6s window over a static namespace). Do **not** cache the plan *result* across time — the
-MCR-gate already provides temporal dedup; the gap is concurrency only.
+**Fix (implemented).** A non-blocking per-`Snapshot`-UID in-process single-flight
+(`snapshot/capture_sweep_singleflight.go`) gates the pre-MCR planning span in `reconcileCaptureN2a`, placed right
+after the MCR-gate `NotFound`. The first reconcile to `TryAcquire(UID)` plans (sweep + MCR create) and releases via
+`defer`; a concurrent reconcile for the same UID does **not** sweep — it logs `branch=sweep-inflight` and requeues
+200ms, then takes the `mcr-present` frozen branch once the leader has created the MCR. Distinct Snapshots key on
+distinct UIDs and still plan in parallel. A leader that returns without creating the MCR (transient) releases the
+flight, so a later reconcile re-plans — the plan result is never cached across time (temporal dedup stays with the
+MCR-gate; the gap closed here is concurrency only). Key is the UID (not name) for generation safety.
+
+**Validation (measured, after deploy).** Fan-out `SETS=10 ×3` + `SETS=20`, counting the
+`namespace-list-manifest-planning` sweep lines, the new `sweep-inflight` deferrals, and the
+`rest_client_requests_total` GET delta.
+
+| run | sets | sweeps/root (before → after) | max concurrent (before → after) | sweep-inflight (deferred) | GETΔ/root | root Ready |
+|---|---|---|---|---|---|---|
+| SETS=10 r1/r2/r3 | 10 | 2 → **1** | 2 → **1** | 1 | 5628 / 5804 / 5724 | 18 / 19 / 17s |
+| SETS=20 | 20 | 3 → **1** | 3 → **1** | 2 | 11709 | 38s |
+
+Redundant sweeps/root → **0** (the `sweep-inflight` count equals the eliminated redundant sweeps: 1 at SETS=10, 2
+at SETS=20). `max concurrent sweeps = 1` ⇒ no concurrent MCR `Create` ⇒ the `AlreadyExists` planning race is gone.
+GETΔ dropped ~by the removed sweep cost (SETS=20 ~12760 → ~11709). Root Ready unchanged within noise; controller
+restarts = 0; no `ListFailed`/incomplete.
 
 **Next investigation (higher leverage).** Attribute the remaining ~90% of per-tree GET (child subtree). Build a
 Top-5 API-cost contributor table and check whether the child-subtree reads contain their **own** redundancy (e.g.
-repeated traversals of the same subtree). A redundancy there is a 50–80% lever vs H5's <10% and would take
-priority over writing the H5 single-flight.
+repeated traversals of the same subtree). A redundancy there is a 50–80% lever vs H5's <10%.
 
 ### Deferred — registry-derived planning view (architectural cleanup, NOT required)
 
@@ -644,10 +662,11 @@ Until one of these applies, the cached-CSD planning fix is considered sufficient
    headline latency fixes.
 6. Confirmed optimizations (section 6) — keep; hygiene.
 7. H3 (section 8) — **closed** by Commit D.3 (per-child `Get`s → one `List`/GVK; validated SETS=10 warm). D.2 (membership-skip) and D.1′ (relay debounce) are **no longer recommended** — the premise is gone. **H4 — root manifest leg** (`ChildrenSnapshotReady` → `Ready`) — **closed** by Commit H4.1 (reverse-lookup `List`s routed through cache indexes; `field label not supported` errors and lost-wake tails eliminated; leg now stable event-driven ~9–10s, no restarts). Residual archive-propagation cadence is a lower-priority follow-up. **Active latency work is stopped** (STOP decision, section 8 under H4): no D.1′/D.2/debounce/cache/membership change is planned; reopen only if a production-scale trace shows a fresh dominant interval. Do not re-apply rejected hypotheses (section 7, incl. leaf-skip / distinct-H1).
-8. **H5 — concurrent pre-MCR sweep race** (section 8) — **VALIDATED diagnosis, code deferred (medium).** Real,
-   fan-out-amplifying redundancy (2 sweeps/root at SETS=10, 3 at SETS=20) but only ~8–9% of per-tree API load; the
-   candidate single-flight is correctness-neutral yet not the dominant lever. Do **not** write it before the
-   child-subtree API-cost investigation (~90% of GET) shows whether a larger (50–80%) lever exists there.
+8. **H5 — concurrent pre-MCR sweep race** (section 8) — **CLOSED (single-flight implemented + validated).**
+   Per-`Snapshot`-UID in-process single-flight around the pre-MCR sweep: SETS=10 sweeps/root 2→1, SETS=20 3→1,
+   redundant sweeps→0, concurrent MCR `AlreadyExists` race gone, Ready unchanged. Correctness-neutral concurrency
+   dedup only (MCR-gate keeps temporal dedup; plan result not cached). ~8–9% of per-tree API load — not the
+   dominant lever; the child-subtree GET (~90%) remains the next, higher-leverage investigation.
 9. **CSD planning list cached** (section 6) — **implemented.** Removes ~208 apiserver CSD LIST/tree from
    child-graph planning by listing through `mgr.Client` instead of `APIReader`; semantics unchanged. The
    **registry-derived planning view** (section 8, "Deferred") is deliberately **not** implemented — see its return
