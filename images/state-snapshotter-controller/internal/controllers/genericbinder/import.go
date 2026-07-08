@@ -126,17 +126,17 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Manifest leg: the reconstructed ManifestCheckpoint (keyed to the leaf UID by the upload endpoint).
-	// Until d8 uploads this node there is nothing to back the content — hold (non-terminal) and poll.
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
+	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// for import too, projecting the reconstructed checkpoint name (keyed to the leaf UID) once the upload
+	// endpoint has created it. The binder no longer publishes it; it only waits for the checkpoint to exist
+	// before proceeding to the data leg (the manifest must be uploaded before the leaf can be Ready anyway).
 	mcpName := usecase.ReconstructedManifestCheckpointName(obj.GetUID(), "")
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if err := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
 		}
-		return ctrl.Result{}, err
-	}
-	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcpName); err != nil {
 		return ctrl.Result{}, err
 	}
 

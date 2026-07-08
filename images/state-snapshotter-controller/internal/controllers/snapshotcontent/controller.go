@@ -1190,6 +1190,14 @@ func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ct
 		// spec.snapshotRef absent (synthetic/legacy) or owner not observable yet: nothing to project.
 		return false, nil
 	}
+	if usecase.IsUnstructuredImportMode(owner) {
+		// Import owners have no MCR: the manifest leg is UPLOADED (a reconstructed ManifestCheckpoint keyed
+		// to the owner UID), not captured. The aggregator is the single writer here too (content-single-writer
+		// design §10), projecting the deterministic reconstructed name once the upload endpoint has created
+		// the checkpoint — the import controllers (root snapshot / generic leaf / VolumeSnapshot) no longer
+		// publish it.
+		return r.projectImportManifestCheckpointName(ctx, contentObj, owner)
+	}
 	namespace := ownerNamespace
 	mcrName, _, err := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "manifestCaptureRequestName")
 	if err != nil {
@@ -1221,6 +1229,37 @@ func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ct
 		return false, nil
 	}
 	if pubErr := PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentObj.GetName(), mcr.Status.CheckpointName); pubErr != nil {
+		return false, pubErr
+	}
+	return false, nil
+}
+
+// projectImportManifestCheckpointName is the import twin of the MCR-based capture projection: it publishes
+// status.manifestCheckpointName from the deterministic reconstructed ManifestCheckpoint name
+// (usecase.ReconstructedManifestCheckpointName keyed to the owner UID) that the manifests-and-children-refs
+// -upload endpoint creates out-of-band. It is the sole writer of the import manifest leg
+// (content-single-writer design §10). Until the checkpoint exists there is nothing to publish: requeue while
+// unpublished (the 500 ms self-requeue also covers it), and once published the pointer is a durable latch —
+// a later NotFound (the checkpoint reaped after the SnapshotContent handoff) keeps the pointer.
+func (r *SnapshotContentController) projectImportManifestCheckpointName(ctx context.Context, contentObj, owner *unstructured.Unstructured) (requeue bool, err error) {
+	published, _, err := unstructured.NestedString(contentObj.Object, "status", "manifestCheckpointName")
+	if err != nil {
+		return false, err
+	}
+	mcpName := usecase.ReconstructedManifestCheckpointName(owner.GetUID(), "")
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if getErr := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); getErr != nil {
+		if errors.IsNotFound(getErr) {
+			// Pre-publish: the upload endpoint has not reconstructed the checkpoint yet -> requeue until it
+			// appears. Post-publish: reaped after the content handoff -> keep the latched pointer, no requeue.
+			return published == "", nil
+		}
+		return false, getErr
+	}
+	if published == mcpName {
+		return false, nil
+	}
+	if pubErr := PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentObj.GetName(), mcpName); pubErr != nil {
 		return false, pubErr
 	}
 	return false, nil

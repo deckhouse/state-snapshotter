@@ -31,7 +31,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
@@ -99,13 +98,12 @@ func (r *SnapshotReconciler) reconcileImport(ctx context.Context, nsSnap *storag
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Manifest leg: point the content at the reconstructed checkpoint. The SnapshotContentController
-	// adopts the (currently ownerless) reconstructed MCP onto the content via ownerRef when it validates
-	// the manifest leg — that is what GCs the checkpoint with the content (the pre-bind cleanup in
-	// reconcileDelete only covers the window before this adoption).
-	if err := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, content.Name, mcpName); err != nil {
-		return ctrl.Result{}, err
-	}
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
+	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// for import too, projecting the reconstructed checkpoint name (keyed to the root Snapshot UID) once the
+	// upload endpoint has created it, and then adopting the (import-ObjectKeeper-owned) MCP onto the content
+	// via ownerRef when it validates the manifest leg (§10.1). The import orchestrator no longer publishes it;
+	// the bound content's mirrored Ready holds the root pending until the aggregator projects the leg.
 
 	// Content-graph edges moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1,
 	// content-single-writer design §3.1/§3.2): the aggregator projects childrenSnapshotContentRefs from the

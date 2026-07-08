@@ -200,8 +200,11 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Manifest leg: the reconstructed ManifestCheckpoint (the PVC manifest), keyed to the VS UID by the
-	// per-CR upload endpoint. Hold until it is uploaded.
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
+	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// (projecting the reconstructed checkpoint name keyed to the VS UID once the per-CR upload endpoint has
+	// created it). This controller no longer publishes it; it still waits for the checkpoint to exist and to
+	// go Ready below, because it recovers the orphan PVC manifest from the checkpoint chunks for the dataRef.
 	mcpName := usecase.ReconstructedManifestCheckpointName(vs.GetUID(), "")
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if mErr := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); mErr != nil {
@@ -209,9 +212,6 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{RequeueAfter: importPollInterval}, nil
 		}
 		return ctrl.Result{}, mErr
-	}
-	if pErr := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcpName); pErr != nil {
-		return ctrl.Result{}, pErr
 	}
 
 	// Reverse-lookup the DataImport that materializes this leaf's data leg: the import marker carries no

@@ -1071,3 +1071,16 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   finished Ready without anchoring) fixed by generalizing the helper to ensureReconstructedManifestCheckpointAnchored
   and calling it both on the already-Ready early return AND after the create/resume re-get. Added unit tests for
   all four (prior-handoff sweep, Ready-unanchored adopt, not-Ready resume anchor, no-reanchor-when-owned).
+- **Refactor** (w8-block6b-1) Import manifest leg → aggregator single writer (content-single-writer design §10):
+  the SnapshotContentController is now the sole writer of status.manifestCheckpointName for import too, not just
+  capture. New reconcileManifestCheckpointNameProjection import branch (usecase.IsUnstructuredImportMode(owner)
+  -> projectImportManifestCheckpointName) projects the deterministic reconstructed checkpoint name
+  (usecase.ReconstructedManifestCheckpointName keyed to the owner UID) once the upload endpoint has created it,
+  with the same durable-latch semantics as the capture MCR branch (pre-publish NotFound requeues; post-handoff
+  NotFound keeps the pointer). Removed the now-duplicate PublishSnapshotContentManifestCheckpointName calls from
+  all three import controllers (snapshot/import.go root, genericbinder/import.go leaf, volumesnapshotimport VS);
+  they still wait for the checkpoint to exist (VS import also for it to go Ready, to recover the orphan PVC for
+  the dataRef) but no longer publish the pointer. No deadlock: the binders publish their data leg and the
+  aggregator publishes the manifest leg, both feeding content Ready which the snapshots mirror. Unit tests added
+  (manifest_projection_import_test.go: import publishes reconstructed name; pending when no checkpoint). Data-leg
+  import projection stays in the binders for now (deferred to 6b-2). build + vet + gofmt + full module suite green.
