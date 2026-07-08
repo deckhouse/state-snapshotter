@@ -102,7 +102,12 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	readCache := newChildSnapshotReadCache(r.Client, nsSnap.Namespace, timings)
 
 	resolveStart := time.Now()
-	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
+	// CSD list served from the manager cache (r.Client), not the uncached APIReader: the CSD informer is
+	// already running (the CSD controller watches CustomSnapshotDefinition), so this per-pass full-collection
+	// List is cache-served instead of hitting the apiserver on every planning pass. Mapping resolution is
+	// unchanged (same csdregistry.EligibleResourceSnapshotMappings); CSDs are near-static during a run and a
+	// spec/eligibility change still propagates to planning through the informer cache.
+	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.Client, r.Mgr.GetRESTMapper())
 	timings.resolveMappings += time.Since(resolveStart)
 	if err != nil {
 		return false, false, err
