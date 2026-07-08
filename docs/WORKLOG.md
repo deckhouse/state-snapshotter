@@ -843,3 +843,23 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   3d, so it is asserted too when present). Added volumeSnapshotContentGVR to e2e_shared_test.go. Compile-check
   only (gofmt + go vet, no cluster at night per the pre-approval); pre-existing pending-VCR observer WIP in
   both files left intact. Bugbot: no bugs.
+- **Add** (w8-block3b, storage-foundation) Extended CSI VolumeSnapshot v1 as a state-snapshotter domain
+  snapshot kind (design §11.1/§11.3). Lands in the storage-foundation repo (branch api-rework, commit
+  39987ed), not state-snapshotter. CRD (crds/snapshot.storage.k8s.io_volumesnapshots.yaml): the stable v1
+  status gains captureState (commonController + domainSpecificController latches/refs), childrenSnapshotRefs,
+  snapshotSource, and conditions — mirroring the reference domain snapshot schema; together with the
+  pre-existing boundSnapshotContentName + conditions this satisfies the CSD CRD contract. The legacy v1beta1
+  version is stripped of every fork field (spec.source.import, status.boundSnapshotContentName, status.data),
+  stays storage=false, and is therefore never treated as a domain object. Fork
+  (images/snapshot-controller/patches/003-volumesnapshot-dataimport-fork.patch): the external-snapshotter
+  client VolumeSnapshotStatus gains the matching CaptureState/ChildrenSnapshotRefs/SnapshotSource/Conditions
+  fields + supporting types + deepcopy so UpdateStatus round-trips the domain-written fields instead of
+  dropping them; syncUnreadySnapshot stamps the storage-foundation.deckhouse.io/processed label (idempotent
+  check-then-set, JSON-pointer-escaped) as the fork-label discriminator that lets the VS domain controller
+  adopt NEW managed VolumeSnapshots while leaving pre-existing legacy ones alone (import VSs never reach this
+  path and are never labeled). Verified: CRD YAML parses with the expected per-version key sets; the
+  regenerated patch applies cleanly on a pristine fork tag and the patched tree builds + vets. Bugbot: 1
+  Medium — the CEL that permits an empty spec.source ("restore intent") while syncSnapshot still rejects
+  both-nil PVC/VSC as SnapshotValidationError; confirmed pre-existing (committed in HEAD before this block,
+  untouched by the Block 3b diff), so it is out of scope here and deferred to the import/restore wiring
+  (Block 6).
