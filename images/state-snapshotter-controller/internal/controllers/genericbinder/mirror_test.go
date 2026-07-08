@@ -99,7 +99,7 @@ func TestCheckConsistencyAndSetReady_DoesNotOverwriteReadyWhenContentPresent(t *
 	content.Status.Conditions = []metav1.Condition{{
 		Type:    snapshot.ConditionReady,
 		Status:  metav1.ConditionTrue,
-		Reason:  snapshot.ReasonReady,
+		Reason:  snapshot.ReasonCompleted,
 		Message: "ready",
 	}}
 	snapObj := newBoundSnapshotUnstructured("root-snap", "root-content")

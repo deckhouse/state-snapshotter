@@ -1236,3 +1236,19 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   Mirrored the wording in the Russian doc-ru CRD and regenerated the CRDs (`bash hack/generate_code.sh`); the only
   regenerated diff is the two field descriptions in `crds/state-snapshotter.deckhouse.io_manifestcapturerequests.yaml`
   (no schema/deepcopy churn). gofmt clean.
+- **Cleanup** (conditions) Pruned dead Ready reasons after a full producer audit (every declared reason grepped
+  for real writers across the repo incl. e2e/sdk/hooks/webhooks): dropped `NoCaptureTargets`, `CapturePlanDrift`
+  (drift detection replaced by the PIT model), `ContentRefMismatch` and `VolumeCaptureTargetsFailed` (its
+  failCapture producers dismantled with w8-block3/3d) from `TerminalReadyReasons` (api) and
+  `ChildSnapshotTerminalReadyReasons` (usecase); removed the never-produced `ChildSnapshotMissing`,
+  `ChildGraphPending` (folded into `ChildrenPending` from day one), `NamespaceCaptureIncomplete` (the
+  unreadable-plan path fail-closed-requeues without writing Ready since w8-block3d) and the `Ready` True-reason
+  (the canonical True reason is `Completed`) from pkg/snapshot. `ArtifactFailed` deliberately KEPT — documented
+  Phase-2 forward declaration (artifact-degradation revalidation). Rewrote the stale exhaustive failCapture
+  catalog comment in ready_patch.go to the live producers (ListFailed / DuplicateCoveredPVCUID /
+  SourceContentNotFound / SnapshotContentMisbound / NamespaceNotFound; the phantom `SubtreeManifestFailed`
+  entry removed) and the capture.go unreadable-plan comment; test fixtures migrated off removed reasons
+  (`ReasonReady` -> `ReasonCompleted` x28, `CapturePlanDrift` -> `VolumeCaptureFailed`). The ADR
+  «Conditions & Reasons» catalog synced the same day (terminal 13 -> 9; non-terminal −2 dead,
+  +`ChildrenLinkPending` +`ContentMissing` which were produced but uncatalogued). Unit tests green across
+  api/usecase/snapshot/genericbinder/snapshotcontent; integration + e2e compile-checked.

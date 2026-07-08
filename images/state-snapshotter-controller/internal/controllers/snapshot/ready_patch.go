@@ -44,13 +44,9 @@ import (
 //   - PRE-BIND / PRE-PUBLISH PLANNING/CAPTURE FAILURES via failCapture(): these all happen before the root
 //     publishes its own truth refs (manifestCheckpointName / dataRefs), so SnapshotContent cannot yet carry
 //     them through ManifestsReady/VolumeReady:
-//   - "ListFailed"                — building capture targets failed (capture.go);
-//   - "CapturePlanDrift"          — plain N2a MCR plan drift, terminal (capture.go);
-//   - "VolumeCaptureTargetsFailed"/"VolumeCaptureFailed" — volume capture planning/exec (volume_capture.go);
-//   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (capture.go);
-//   - "SubtreeManifestFailed"     — PRE-PUBLISH BRIDGE: a descendant MCP is terminally Failed so the root
-//     exclude set / plan cannot be computed and the root MCR/MCP is not created yet. The descendant failure
-//     is also representable via content ChildrenReady once child refs are published (deferred conversion).
+//   - "ListFailed"                — building capture targets failed (namespace_capture_run.go);
+//   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (namespace_capture_run.go);
+//   - "SourceContentNotFound"/"SnapshotContentMisbound" — static-bind resolution (static_bind.go);
 //   - NamespaceNotFound (no namespace, so no content can be produced) — documented exception;
 //   - the child-Snapshot terminal capture-failure bridge below (patchSnapshotChildSnapshotFailedBridge);
 //   - the mirrorSnapshotReadyFromBoundContent fallback to ContentBindingPending (pre-publish pending window).

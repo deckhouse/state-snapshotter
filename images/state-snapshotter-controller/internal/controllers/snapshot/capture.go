@@ -117,7 +117,8 @@ func (r *SnapshotReconciler) namespaceCaptureRBACReady(ctx context.Context, name
 // hiccup (requeue, NOT terminal ListFailed). Discovery lists ALL namespaced types (plus flaky aggregated
 // APIServers), so the window for these errors is large; treating them as terminal would stick the snapshot
 // (failCapture returns no requeue). Forbidden is NOT classified here — it is collected as unreadable and
-// handled as fail-closed transient (ReasonNamespaceCaptureIncomplete) separately.
+// handled fail-closed separately: the planner refuses to build a partial root MCR and requeues until the
+// unreadable types become readable (the bound content's Ready stays pending meanwhile).
 func isTransientCaptureTargetError(err error) bool {
 	if err == nil {
 		return false

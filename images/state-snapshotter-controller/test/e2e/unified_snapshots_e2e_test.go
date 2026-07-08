@@ -277,7 +277,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				contentLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
-				snapshot.ReasonReady,
+				snapshot.ReasonCompleted,
 				"Content is ready",
 			)
 			contentConditions = contentLike.GetStatusConditions()
@@ -491,7 +491,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				contentLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
-				snapshot.ReasonReady,
+				snapshot.ReasonCompleted,
 				"Content is ready",
 			)
 			contentConditions := contentLike.GetStatusConditions()
@@ -763,7 +763,7 @@ var _ = Describe("E2E: Unified Snapshots", func() {
 				contentLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
-				snapshot.ReasonReady,
+				snapshot.ReasonCompleted,
 				"Content is ready",
 			)
 			contentConditions := contentLike.GetStatusConditions()

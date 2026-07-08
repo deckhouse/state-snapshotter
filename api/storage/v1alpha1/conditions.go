@@ -64,19 +64,15 @@ const (
 // canonically in core pkg/snapshot; they are listed here as literals to keep the api module
 // dependency-free. Domain-supplied reasons (e.g. SourceNotFound) are free-form and NOT in this set.
 var TerminalReadyReasons = map[string]struct{}{
-	"ListFailed":                 {},
-	"NoCaptureTargets":           {},
-	"CapturePlanDrift":           {},
-	"ManifestCheckpointFailed":   {},
-	"ContentRefMismatch":         {},
-	"NamespaceNotFound":          {},
-	"VolumeCaptureTargetsFailed": {},
-	"VolumeCaptureFailed":        {},
-	"DuplicateCoveredPVCUID":     {},
-	"ChildrenFailed":             {},
-	ReasonGraphPlanningFailed:    {},
-	ReasonCreateChildFailed:      {},
-	"SnapshotContentMisbound":    {},
+	"ListFailed":               {},
+	"ManifestCheckpointFailed": {},
+	"NamespaceNotFound":        {},
+	"VolumeCaptureFailed":      {},
+	"DuplicateCoveredPVCUID":   {},
+	"ChildrenFailed":           {},
+	ReasonGraphPlanningFailed:  {},
+	ReasonCreateChildFailed:    {},
+	"SnapshotContentMisbound":  {},
 }
 
 // IsReasonTerminal reports whether a Ready=False reason is terminal (unrecoverable for this snapshot;

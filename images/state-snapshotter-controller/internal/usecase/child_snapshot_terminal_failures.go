@@ -48,19 +48,15 @@ import (
 //
 // This set MUST stay in sync with the exhaustive terminal capture-failure reasons documented in
 // ready_patch.go (the pre-bind/pre-publish failCapture writers). In particular the volume-capture
-// terminal reasons (VolumeCaptureTargetsFailed/VolumeCaptureFailed) and DuplicateCoveredPVCUID are
-// carried by a child Snapshot's Ready=False before any child SnapshotContent can represent them, so the
-// child-Snapshot terminal-failure bridge (SummarizeChildSnapshotTerminalFailures) must classify them as
-// Failed — otherwise a domain child whose volume capture failed is misclassified as Pending and the
-// parent holds a stale Ready=True over lost data (INV-FAIL-PROP).
+// terminal reason (VolumeCaptureFailed) and DuplicateCoveredPVCUID are carried by a child Snapshot's
+// Ready=False before any child SnapshotContent can represent them, so the child-Snapshot
+// terminal-failure bridge (SummarizeChildSnapshotTerminalFailures) must classify them as Failed —
+// otherwise a domain child whose volume capture failed is misclassified as Pending and the parent
+// holds a stale Ready=True over lost data (INV-FAIL-PROP).
 var ChildSnapshotTerminalReadyReasons = map[string]struct{}{
 	"ListFailed":                       {},
-	"NoCaptureTargets":                 {},
-	"CapturePlanDrift":                 {},
 	"ManifestCheckpointFailed":         {},
-	"ContentRefMismatch":               {},
 	"NamespaceNotFound":                {},
-	"VolumeCaptureTargetsFailed":       {},
 	snapshot.ReasonVolumeCaptureFailed: {}, // "VolumeCaptureFailed"
 	"DuplicateCoveredPVCUID":           {},
 }

@@ -63,8 +63,7 @@ const (
 
 // Reasons for Ready=False
 const (
-	ReasonContentMissing       = "ContentMissing"
-	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
+	ReasonContentMissing = "ContentMissing"
 	// ReasonArtifactNotReady is an internal/compat reason for "artifact exists but not ready yet".
 	// The data leg surfaces this state on VolumeReady/Ready as ReasonDataCapturePending (progress-aware);
 	// ReasonArtifactNotReady is retained for internal classification and backward compatibility.
@@ -118,13 +117,6 @@ const (
 	// while status.childrenSnapshotRefs is non-empty but the subtree exclude set cannot be computed yet
 	// (no root ManifestCaptureRequest until exclude is complete — distinct from ChildrenPending / ListFailed).
 	ReasonSubtreeManifestCapturePending = "SubtreeManifestCapturePending"
-	// ReasonNamespaceCaptureIncomplete is the non-terminal, fail-closed reason on a root Snapshot when
-	// discovery-based namespace capture planning could not read every namespaced type: a Forbidden list
-	// (RBAC for the transient per-namespace RoleBinding has not propagated yet) or a partial discovery
-	// failure (broken aggregated APIService). The controller does NOT create the root MCR with an
-	// incomplete plan; it degrades Ready and requeues until the missing types become readable. The
-	// message lists the unreadable GVRs.
-	ReasonNamespaceCaptureIncomplete = "NamespaceCaptureIncomplete"
 	// ReasonManifestCapturePending is set while a snapshot controller waits for its own MCR/MCP materialization.
 	ReasonManifestCapturePending = "ManifestCapturePending"
 	// ReasonChildrenFailed is set when any required child has a terminal Ready=False
@@ -143,8 +135,6 @@ const (
 // carries a separate PlanningReady condition: waiting on an earlier weight layer folds into
 // Ready=False/ChildrenPending (with the pending children listed in the message).
 const (
-	// ReasonChildGraphPending is a non-terminal reason while the child graph is still being expanded.
-	ReasonChildGraphPending = "ChildGraphPending"
 	// ReasonListFailed is a terminal reason when listing a mapped source kind fails (in TerminalReadyReasons).
 	ReasonListFailed = "ListFailed"
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
@@ -153,11 +143,6 @@ const (
 	// silently drop coverage). Instead it degrades Ready (non-terminal) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"
-)
-
-// Reasons for Ready=True
-const (
-	ReasonReady = "Ready"
 )
 
 // SetCondition sets a condition on a SnapshotLike or SnapshotContentLike object.
