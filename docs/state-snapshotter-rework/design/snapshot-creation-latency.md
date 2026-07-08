@@ -341,6 +341,7 @@ Keep these — they reduce work or are prerequisites — but do not credit them 
 | **Repeated child-graph planning is the dominant root latency** | **Partially true** | Removing repeated planning (Commit B) gave ~18% wall, but did not eliminate the fan-out tail → not the dominant term. (Superseded by H3: the *pending-phase* re-plan, not the single MCR pass, is the remaining cost.) |
 | **H1 leaf staircase is a distinct leaf-side bottleneck (`vscReady → leaf content Ready`)** | **False** | Per-leaf server-side + log trace: once created, a leaf latches fast/constant (MCP created→Ready ~0–1s, content Ready ~1–4s). The staircase is purely *delayed creation*, gated by the repeated root re-plan (H3). No distinct leaf problem. |
 | **"Leaf-skip": skip child-graph planning for leaf snapshot GVKs** | **False (no-op)** | Premised on leaves running planning. `reconcileParentOwnedChildGraph` is registered `For(&storagev1alpha1.Snapshot{})` and runs **only** on the root; demo VM/disk snapshots are reconciled by the separate domain-controller. The "leaf `DemoVirtualDiskSnapshot` spent 10s planning" log lines were the **root** reconcile triggered via the `nss-chw` relay, mislabeled with the relay's inherited logger context (`"snapshot":{"name":"bench-root"}` on every one). Nothing to skip. |
+| **"Source-skip": skip source re-discovery once `status.childrenSnapshotRefs` is first published** (to cut the ~1060 demo source/snapshot LIST/tree — VM/Disk `r.Dynamic` source lists + VMSnapshot/DiskSnapshot readiness lists, ~1 per GVK per planning pass × ~272 pending-phase passes) | **False (changes semantics)** | Premise "membership is frozen after first publish" is **false**. Proven read-only from code: (1) publication is a **full recompute**, not accumulation — `mergeSnapshotManagedChildRefs` (`parent_graph.go`) drops every `nss-child-*` from the current status and writes the freshly-discovered `desired` each pass; (2) membership is built **incrementally across priority layers** — a pending layer early-returns with `ChildrenSnapshotReady=False/PriorityLayerPending` after publishing only the layers planned so far (`parent_graph.go:168-178`), so the **first publish can be partial** and later passes legally **grow** (next layer's children created/discovered) or **shrink** (source removed, INV-REF-M2) the set; (3) the tests enforce this — `child_graph_replan_skip_test.go` Test 3 requires a **full re-plan** for every non-`True/Completed` state (`False`, `Unknown`, `True`-but-not-`Completed`, missing). The **only** valid freeze point is `ChildrenSnapshotReady=True` + `Reason=Completed` + `ObservedGeneration==Generation`, and that skip **already exists** as `childGraphReplanSkippable` (`controller.go`). Skipping source re-discovery earlier (at first publish, during the pending window) would freeze at layer 0 and never create/discover lower priority-layer children — breaking multi-layer trees. Do not implement. The remaining pending-phase LIST load is a separate, freshness-gated question (readiness reads through the informer cache — prove tolerance first). |
 
 ---
 
@@ -691,9 +692,23 @@ client kind (APIReader, dynamic client, `Client.List`, unstructured `List`) is i
 **is a full-collection traversal being done where an index, a direct reference, or a local cache would serve the
 same source of truth?** Concretely, the open target is the child-subtree enumeration load: the demo source and
 snapshot full-lists (VM/VMSnapshot/DiskSnapshot/Disk ~250–272 LIST/tree each, ~1060/tree combined) plus the
-audit-hidden individual GETs. Diagnosis/design step (read-only attribution first): find which of these are
-full-collection scans replaceable by index/direct-ref, and which are freshness-bound and must stay uncached —
-apply one minimal change only if a single safe callsite dominates.
+audit-hidden individual GETs. Attribution (read-only) already located all four at **one callsite family**:
+child-graph planning, ~1 List per GVK per pass × ~272 planning passes/tree, all in the **pending window** before
+`ChildrenSnapshotReady=True/Completed` (each `nss-chw` relay wake on a child-snapshot status event re-plans).
+
+Two candidate levers were considered; the first is **rejected**:
+
+- **Skip source re-discovery after first publish — REJECTED** (section 7, "Source-skip"): `childrenSnapshotRefs`
+  before `Completed` is not a frozen membership set (full recompute per pass, grows/shrinks across priority
+  layers, first publish can be partial). The only valid freeze is `True/Completed/generation`, already exploited
+  by `childGraphReplanSkippable`. Do not skip earlier.
+- **Serve child-snapshot readiness reads (`childSnapshotReadCache`, VMSnapshot/DiskSnapshot ~542 LIST/tree) from
+  the informer cache** — informers for these GVKs already exist (the relay watches them). This is the **remaining
+  candidate**, but it is **freshness-gated**: it must first be proven that readiness evaluation tolerates cache
+  staleness (no read-after-write requirement in the same reconcile; stale-"not-ready" gets another event/backstop;
+  stale-"ready"-when-API-is-not cannot violate correctness; readiness is monotonic; terminal/failure states still
+  observed). Prove first (same A0-style invariant proof used to reject source-skip), implement only on Case A.
+  The source lists (VM/Disk via `r.Dynamic`) have no informer and are not part of this candidate.
 
 ### Deferred — registry-derived planning view (architectural cleanup, NOT required)
 
