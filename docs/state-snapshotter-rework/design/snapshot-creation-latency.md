@@ -58,12 +58,15 @@ sweeps/root 2→1, SETS=20 3→1; section 8). Neither is a wall-clock fix (SETS=
 0 restarts). A third cleanup then closed the largest single LIST hotspot: **relay reverse-lookup served from a
 `childrenSnapshotRefs` field index** (the `nss-chw` relay's per-child-event full-namespace `SnapshotList` →
 cached indexed lookup; `storage/snapshots` LIST/tree **~440 → ~2**, 0 field-label errors, 0 restarts, root Ready
-~21s; section 8, "Relay reverse-lookup — CLOSED"). The **next open item is the remaining repeated full-collection
-operations** — reframed from "find another APIReader": the five closed load fixes (D.3, H4.1, CSD, H5, relay
-index) are one pattern — *replace search-by-full-traversal with direct addressing (index / direct-ref / cache)* —
-so the client kind is irrelevant and the target is the child-subtree enumeration load (demo VM/disk/snapshot
-full-lists ~250–272 LIST/tree each, ~1060/tree, plus audit-hidden individual GETs). This is a **scalability**
-question, not the stopped wall-clock line — a read-only diagnosis/design step, not a started fix.
+~21s; section 8, "Relay reverse-lookup — CLOSED"). Those five closed load fixes (D.3, H4.1, CSD, H5, relay index)
+are one pattern — *replace search-by-full-traversal with direct addressing (index / direct-ref / cache)*. The
+remaining child-subtree enumeration load (demo VM/disk/snapshot full-lists ~250–272 LIST/tree each, ~1060/tree)
+was then attributed to child-graph planning (~1 List per GVK per pass × ~272 pending-phase passes) and **both**
+remaining candidates were **rejected** after read-only invariant proofs: source-skip (membership is not frozen
+before `ChildrenSnapshotReady=True/Completed`) and `childSnapshotReadCache` via informer cache (the shared per-GVK
+list feeds freshness-bound create/dedup, not just readiness) — see section 7. **The API-load / scalability track
+is now closed**: all obvious hot LIST candidates are fixed or rejected, and the remaining child-snapshot LIST path
+is freshness-bound and intentionally left on the APIReader.
 
 ## 3. Confirmed bottlenecks (real root causes, measurable effect)
 
@@ -341,6 +344,7 @@ Keep these — they reduce work or are prerequisites — but do not credit them 
 | **Repeated child-graph planning is the dominant root latency** | **Partially true** | Removing repeated planning (Commit B) gave ~18% wall, but did not eliminate the fan-out tail → not the dominant term. (Superseded by H3: the *pending-phase* re-plan, not the single MCR pass, is the remaining cost.) |
 | **H1 leaf staircase is a distinct leaf-side bottleneck (`vscReady → leaf content Ready`)** | **False** | Per-leaf server-side + log trace: once created, a leaf latches fast/constant (MCP created→Ready ~0–1s, content Ready ~1–4s). The staircase is purely *delayed creation*, gated by the repeated root re-plan (H3). No distinct leaf problem. |
 | **"Leaf-skip": skip child-graph planning for leaf snapshot GVKs** | **False (no-op)** | Premised on leaves running planning. `reconcileParentOwnedChildGraph` is registered `For(&storagev1alpha1.Snapshot{})` and runs **only** on the root; demo VM/disk snapshots are reconciled by the separate domain-controller. The "leaf `DemoVirtualDiskSnapshot` spent 10s planning" log lines were the **root** reconcile triggered via the `nss-chw` relay, mislabeled with the relay's inherited logger context (`"snapshot":{"name":"bench-root"}` on every one). Nothing to skip. |
+| **`childSnapshotReadCache` via informer cache** (move the ~542 VMSnapshot/DiskSnapshot readiness LIST/tree — the last large child-snapshot LIST candidate — off the uncached `r.Client`) | **False (freshness-bound as implemented)** | `priorityReady`/status reads alone are mostly stale-tolerant (generation-guarded readiness `conditionSliceHasCurrentTrue`; child-watch `nss-chw` wakeups; 30s poll backstop `snapshotChildGraphPollInterval`). But `childSnapshotReadCache` is **one shared per-GVK LIST** feeding **three** planning consumers: (1) coverage/dedup walk, (2) existence-before-create in `ensureParentOwnedChildSnapshot`, (3) `priorityReady` readiness classification. The ~542 LISTs cannot be removed for readiness alone — it is the same list. Moving the shared LIST to informer-cache reads also makes create/dedup decisions stale, which is **not** correctness-neutral: a stale NotFound after a child was created but before the informer observes it (exactly the pending phase, where children are created in bursts) makes `ensureParentOwnedChildSnapshot` call `Create` again; `Create` (`parent_graph.go:326`) does **not** ignore `AlreadyExists`, so it transiently surfaces as `ChildrenSnapshotReady=False/GraphPlanningFailed` and propagates into root `Ready` **flapping** (separately guarded by `ready_flap_test.go`), and skips the found-branch ownerRef re-ensure; the same stale-uncovered view can double-plan an already-created child. **Case B.** A future Case A path is separate correctness work, not a load-only change: make `ensure` idempotent under stale-NotFound/`AlreadyExists` (+ preserve/re-ensure ownerRef on that path); prove coverage-dedup tolerates transient stale-uncovered; prove `ChildrenSnapshotReady` monotonicity within one generation **or** split readiness reads from create/dedup reads. Until those invariants are proven and tested, leave this LIST on the APIReader/uncached `r.Client`. |
 | **"Source-skip": skip source re-discovery once `status.childrenSnapshotRefs` is first published** (to cut the ~1060 demo source/snapshot LIST/tree — VM/Disk `r.Dynamic` source lists + VMSnapshot/DiskSnapshot readiness lists, ~1 per GVK per planning pass × ~272 pending-phase passes) | **False (changes semantics)** | Premise "membership is frozen after first publish" is **false**. Proven read-only from code: (1) publication is a **full recompute**, not accumulation — `mergeSnapshotManagedChildRefs` (`parent_graph.go`) drops every `nss-child-*` from the current status and writes the freshly-discovered `desired` each pass; (2) membership is built **incrementally across priority layers** — a pending layer early-returns with `ChildrenSnapshotReady=False/PriorityLayerPending` after publishing only the layers planned so far (`parent_graph.go:168-178`), so the **first publish can be partial** and later passes legally **grow** (next layer's children created/discovered) or **shrink** (source removed, INV-REF-M2) the set; (3) the tests enforce this — `child_graph_replan_skip_test.go` Test 3 requires a **full re-plan** for every non-`True/Completed` state (`False`, `Unknown`, `True`-but-not-`Completed`, missing). The **only** valid freeze point is `ChildrenSnapshotReady=True` + `Reason=Completed` + `ObservedGeneration==Generation`, and that skip **already exists** as `childGraphReplanSkippable` (`controller.go`). Skipping source re-discovery earlier (at first publish, during the pending window) would freeze at layer 0 and never create/discover lower priority-layer children — breaking multi-layer trees. Do not implement. The remaining pending-phase LIST load is a separate, freshness-gated question (readiness reads through the informer cache — prove tolerance first). |
 
 ---
@@ -703,12 +707,17 @@ Two candidate levers were considered; the first is **rejected**:
   layers, first publish can be partial). The only valid freeze is `True/Completed/generation`, already exploited
   by `childGraphReplanSkippable`. Do not skip earlier.
 - **Serve child-snapshot readiness reads (`childSnapshotReadCache`, VMSnapshot/DiskSnapshot ~542 LIST/tree) from
-  the informer cache** — informers for these GVKs already exist (the relay watches them). This is the **remaining
-  candidate**, but it is **freshness-gated**: it must first be proven that readiness evaluation tolerates cache
-  staleness (no read-after-write requirement in the same reconcile; stale-"not-ready" gets another event/backstop;
-  stale-"ready"-when-API-is-not cannot violate correctness; readiness is monotonic; terminal/failure states still
-  observed). Prove first (same A0-style invariant proof used to reject source-skip), implement only on Case A.
-  The source lists (VM/Disk via `r.Dynamic`) have no informer and are not part of this candidate.
+  the informer cache — REJECTED** (section 7, "`childSnapshotReadCache` via informer cache"). Proven read-only:
+  the ~542 LISTs are one shared per-GVK list feeding coverage/dedup + existence-before-create + readiness, so they
+  cannot be removed for readiness alone; moving the shared list to cache makes create/dedup stale (stale-NotFound →
+  `Create` → `AlreadyExists`, not ignored → `GraphPlanningFailed`/root-`Ready` flap). Case B: freshness-bound as
+  implemented. The source lists (VM/Disk via `r.Dynamic`) have no informer and are not a candidate.
+
+**API-load chapter conclusion.** All obvious hot LIST candidates are either fixed (QPS/Burst, FIX 8, D.3, H4.1,
+CSD planning cache, H5 single-flight, relay reverse-lookup index) or rejected (source-skip; `childSnapshotReadCache`
+via informer cache). The remaining child-snapshot LIST path is **freshness-bound and intentionally left on the
+APIReader/uncached `r.Client`**. This closes the API-load / scalability track: further reduction would require the
+multi-part correctness work listed in the two rejected entries, not a load-only cache swap.
 
 ### Deferred — registry-derived planning view (architectural cleanup, NOT required)
 
