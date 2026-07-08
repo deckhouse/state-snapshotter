@@ -986,3 +986,14 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   Reconciling the namespace-planner-vs-orphan-wave overlap + domain-capture VolumeSnapshot spec population is
   exactly Block 5's scope (these specs never passed after the Block 3d rewrite). The duplicate-covered-PVC-UID
   guard spec in the same suite needs no orphan pipeline and stays active; the isolated suite is green.
+- **Add** (w8-block4, e2e) Frozen-set stability detector to e2e/tests/ready_flap_test.go. On the mixed
+  orphan+domain vol-tree capture, a third watch recorder (opened BEFORE the root content exists, alongside
+  the existing Ready + ChildrenReady recorders) records every distinct value of the root SnapshotContent's
+  status.childrenSnapshotContentRefs via a sorted, order-independent set signature. New assertChildrenRefsFrozen
+  latches the first non-empty set and fails on ANY later differing sample — a grow, a shrink (incl. back to
+  empty), a reorder-as-different-membership, or a replace — proving on-cluster that the sole all-or-nothing
+  writer (the aggregator) publishes the complete child set exactly once (empty -> complete) and never mutates
+  it through the whole Ready convergence (Block 4, INV-CONTENT-CHILDREN-2). This is the runtime counterpart to
+  the CEL admission test (snapshotcontent_children_frozen envtest); the CEL rejection itself is not duplicated
+  on-cluster. Bugbot: no findings. gofmt + go vet + go test -c (full e2e binary) green; live-cluster run
+  deferred to the end-of-plan validation pass (compile-only per the overnight pre-approval).

@@ -19,6 +19,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +130,60 @@ func contentDiagExtract(obj *unstructured.Unstructured) (string, string, bool) {
 	childStatus, childReason, _ := conditionStatus(obj, condChildrenReady)
 	desc := fmt.Sprintf("Ready=%s/%s ChildrenReady=%s/%s", st, reason, childStatus, childReason)
 	return st, desc, false
+}
+
+// contentChildRefsSet reads status.childrenSnapshotContentRefs from a SnapshotContent and returns the
+// deterministic, order-independent set signature (sorted, comma-joined child names; "" when empty/absent).
+// It is the observable for the Block 4 frozen-set detector: every distinct value is one recorded transition.
+func contentChildRefsSet(obj *unstructured.Unstructured) string {
+	refs, _, _ := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotContentRefs")
+	names := make([]string, 0, len(refs))
+	for _, r := range refs {
+		m, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if n, ok := m["name"].(string); ok && n != "" {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
+// contentChildRefsExtract reports a SnapshotContent's status.childrenSnapshotContentRefs set for the frozen
+// detector. status IS the set signature (so the recorder dedups per distinct set and the frozen assertion
+// runs against it); desc prints the members; it never fires the ready signal (diagnostic recorder only).
+func contentChildRefsExtract(obj *unstructured.Unstructured) (string, string, bool) {
+	set := contentChildRefsSet(obj)
+	return set, fmt.Sprintf("childrenSnapshotContentRefs=[%s]", set), false
+}
+
+// assertChildrenRefsFrozen fails the spec if status.childrenSnapshotContentRefs ever changed after it first
+// became non-empty (Block 4, INV-CONTENT-CHILDREN-2: the set is frozen once populated). The ONLY allowed
+// transition is empty -> complete: a first non-empty set latches "frozen"; any later sample that differs
+// from it — a grow, a shrink (including back to empty), a reorder-as-different-membership, or a replace — is
+// a violation. This is the on-cluster counterpart to the CEL admission test: it proves the SOLE writer (the
+// aggregator, all-or-nothing) never even attempts a non-monotonic edge write during a real capture, so the
+// set is published exactly once and stays stable through the whole Ready convergence.
+func assertChildrenRefsFrozen(label string, samples []stateSample) {
+	GinkgoHelper()
+	frozen := ""
+	frozenAt := -1
+	for i, s := range samples {
+		set := s.status
+		if frozen == "" {
+			if set != "" {
+				frozen = set
+				frozenAt = i
+			}
+			continue
+		}
+		if set != frozen {
+			Fail(fmt.Sprintf("%s childrenSnapshotContentRefs changed after freezing: latched [%s] at transition %d, then observed [%s] at transition %d (the complete child set is immutable once written)\n%s",
+				label, frozen, frozenAt, set, i, formatLedger(label, samples)))
+		}
+	}
 }
 
 // rootContentMatch matches the namespace-root SnapshotContent of the given root Snapshot via its immutable
@@ -342,6 +397,15 @@ func readyFlapSpecs() {
 			Expect(err).NotTo(HaveOccurred(), "start SnapshotContent diagnostic recorder")
 			defer contentStop()
 
+			// Block 4 frozen-set detector: record every distinct childrenSnapshotContentRefs value the root
+			// content passes through (empty -> complete is the only legal transition; the aggregator is the
+			// sole, all-or-nothing edge writer). Opened before the content exists so the very first write is
+			// captured, and asserted at the settle step to prove the set never flapped/shrank/grew.
+			childRefsRec, childRefsStop, err := startObjStateRecorder(ctx, snapshotContentGVR, "",
+				rootContentMatch(srcNS, readyFlapRootSnapshot), contentChildRefsExtract)
+			Expect(err).NotTo(HaveOccurred(), "start SnapshotContent childrenSnapshotContentRefs recorder")
+			defer childRefsStop()
+
 			By("Creating the root Snapshot over the mixed PVC tree")
 			Expect(createRootSnapshot(ctx, srcNS, readyFlapRootSnapshot)).To(Succeed())
 
@@ -385,6 +449,11 @@ func readyFlapSpecs() {
 			GinkgoWriter.Printf("%s\n", formatLedger("Snapshot "+srcNS+"/"+readyFlapRootSnapshot, snapLedger))
 			GinkgoWriter.Printf("%s\n", formatLedger("SnapshotContent "+content, contentRec.ledger()))
 			assertReadyMonotonic("Snapshot "+srcNS+"/"+readyFlapRootSnapshot, snapLedger)
+
+			By("Asserting Block 4 frozen set: childrenSnapshotContentRefs was written once and never flapped/shrank")
+			childRefsLedger := childRefsRec.ledger()
+			GinkgoWriter.Printf("%s\n", formatLedger("SnapshotContent "+content+" childrenSnapshotContentRefs", childRefsLedger))
+			assertChildrenRefsFrozen("SnapshotContent "+content, childRefsLedger)
 		})
 	})
 }
