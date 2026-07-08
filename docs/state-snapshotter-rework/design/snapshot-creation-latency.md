@@ -55,11 +55,15 @@ load dominated by repeated full-collection lists of a few planning-input GVKs. T
 load cleanups were applied and validated on-cluster: **CSD planning list served from the manager cache** (removes
 ~208 apiserver CSD LIST/tree from child-graph planning; section 6) and **H5 pre-MCR sweep single-flight** (SETS=10
 sweeps/root 2→1, SETS=20 3→1; section 8). Neither is a wall-clock fix (SETS=10 Ready stays ~17–19s, no regression;
-0 restarts). The **next open item is child-subtree API-cost** — the remaining ~90% of per-tree GET/LIST: the
-`nss-chw` relay wakes the root on ~every child-snapshot event, and each root pass re-lists sources + child GVKs
-(snapshots ~350–424, demo VM/disk/snapshot ~200–270 each) full-collection. This is a **scalability** question
-(relay storm × repeated full-collection lists), not the stopped wall-clock line — a diagnosis/design step, not a
-started fix.
+0 restarts). A third cleanup then closed the largest single LIST hotspot: **relay reverse-lookup served from a
+`childrenSnapshotRefs` field index** (the `nss-chw` relay's per-child-event full-namespace `SnapshotList` →
+cached indexed lookup; `storage/snapshots` LIST/tree **~440 → ~2**, 0 field-label errors, 0 restarts, root Ready
+~21s; section 8, "Relay reverse-lookup — CLOSED"). The **next open item is the remaining repeated full-collection
+operations** — reframed from "find another APIReader": the five closed load fixes (D.3, H4.1, CSD, H5, relay
+index) are one pattern — *replace search-by-full-traversal with direct addressing (index / direct-ref / cache)* —
+so the client kind is irrelevant and the target is the child-subtree enumeration load (demo VM/disk/snapshot
+full-lists ~250–272 LIST/tree each, ~1060/tree, plus audit-hidden individual GETs). This is a **scalability**
+question, not the stopped wall-clock line — a read-only diagnosis/design step, not a started fix.
 
 ## 3. Confirmed bottlenecks (real root causes, measurable effect)
 
@@ -312,6 +316,13 @@ Keep these — they reduce work or are prerequisites — but do not credit them 
   (same `EligibleResourceSnapshotMappings`, same RESTMapper, same fail-closed). Removes the per-pass apiserver CSD
   list (~208 → ~0 from this callsite). Correctness-neutral load/scalability cleanup, **not** expected to move
   wall-clock. CSD spec/eligibility changes still reach planning via the informer cache.
+- **Relay reverse-lookup served from a childrenSnapshotRefs field index (primary relay LIST eliminated):** the
+  `nss-chw` child relay resolved parent Snapshot(s) by a full-namespace `SnapshotList` (APIReader) on every child
+  event — the #1 audited LIST hotspot at **~440 `storage/snapshots` LIST/tree**. Replaced with a cached
+  `Client.List(MatchingFields{status.childrenSnapshotRefs.identity})` + defensive re-match; the child object's own
+  read-after-write `Get` stays on the APIReader. Validated: ~440 → **~2** LIST/tree, 0 `field label not supported`,
+  0 restarts, root Ready ~21s (no regression). Correctness-neutral load/scalability cleanup (see section 8,
+  "Relay reverse-lookup — CLOSED").
 - **Concurrency ceilings + `configMu` race fix** ([FIX 6](#fix-6--concurrency-ceilings--the-one-required-correctness-fix)) — mandatory correctness/prerequisite; no wall-clock move
   on its own (the gate was downstream each time).
 - **MCP→MCR and VSC→VCR watches** ([FIX 2](#fix-2--mcr-controller-watch-manifestcheckpoint), [FIX 5](#fix-5--storage-foundation-vcr-watch-volumesnapshotcontent)) — correct event-driven architecture regardless of
@@ -628,6 +639,62 @@ restarts = 0; no `ListFailed`/incomplete.
 Top-5 API-cost contributor table and check whether the child-subtree reads contain their **own** redundancy (e.g.
 repeated traversals of the same subtree). A redundancy there is a 50–80% lever vs H5's <10%.
 
+### Relay reverse-lookup — CLOSED (childrenSnapshotRefs field index)
+
+**Status: IMPLEMENTED and validated on-cluster. Primary relay reverse-lookup LIST eliminated.** Replaced the
+namespace-wide `SnapshotList` in `findParentsReferencingChildSnapshot` with a cached field-index lookup
+(`status.childrenSnapshotRefs.identity`). Validation: `storage.deckhouse.io/snapshots` LIST/tree dropped from
+**~440 to ~2** with no correctness regression. Correctness-neutral load/scalability cleanup, same class as CSD,
+D.3, FIX 8.
+
+**Root cause.** The largest single audited LIST hotspot (~440 `storage/snapshots` LIST/tree at SETS=10) came from
+the `nss-chw` child-snapshot relay: on **every** child-snapshot status event it looked up the parent Snapshot(s)
+that reference the child in `status.childrenSnapshotRefs` by doing a full `SnapshotList` in the child's namespace
+via the **APIReader** and scanning every Snapshot's `childrenSnapshotRefs` in Go. That is not a freshness read —
+it is a relationship enumeration; the parent set is authored by the Snapshot controller and is unaffected by the
+triggering child write, so it can be served from a cache index. (The relay's own `Get` of the *child object*
+stays on the APIReader for read-after-write; only the parent enumeration moved.)
+
+**Fix (implemented).** A new field index `SnapshotChildrenRefFieldIndex = "status.childrenSnapshotRefs.identity"`
+(`content_watch.go`) indexes each parent by child identity (normalized GVK + `\x00` + name, namespace-less by
+design; registered on the manager indexer in `controller.go`). `findParentsReferencingChildSnapshot`
+(`child_snapshot_watches.go`) now does `Client.List(InNamespace(childNS), MatchingFields{...})` on the cached
+`m.main.Client` with a defensive exact re-match, replacing the APIReader full-namespace `SnapshotList`. Namespace
+isolation comes from `InNamespace` on the namespace-less key (two parents in different namespaces that reference
+the same child name+GVK index under the same key) — covered by a bidirectional unit test. Same reverse-index
+pattern as `SnapshotBoundContentFieldIndex` / `MapSnapshotContentToBoundSnapshots`. On an index-List error the
+lookup returns no parents and logs, matching the previous fail-quiet behaviour; a stale cache can at most delay a
+parent wake to the next cache event / poll backstop, never drop it silently.
+
+**Validation (measured, after deploy).** SETS=10 warm, one tree, apiserver-audit attribution for the controller SA.
+
+| resource (LIST/tree) | before | after |
+|---|---|---|
+| `storage.deckhouse.io/snapshots` | ~440 (#1 hotspot) | **~2** (out of top-15) |
+| total audited LIST/tree | ~1802 | **1352** (−~450, the snapshots delta) |
+| root Ready (server-side) | ~24–25s wall | **21s** (no regression) |
+| `field label not supported` | — | **0** |
+| controller `level=error` / restarts / leader loss | — | **0 / 0 / 0** |
+
+nss relay still wakes the root event-driven (relay reconciles observed, tree reached `Ready`). The residual ~2
+`snapshots` LISTs are occasional cache-miss/resync, not the per-child-event storm. Remaining LIST load is now the
+demo source/snapshot enumerations (VM / VMSnapshot / DiskSnapshot / Disk ~250–272 each, ~1060/tree) — the next
+layer (see below).
+
+### Next open item — remaining repeated full-collection operations
+
+**Reframed (was "find another APIReader").** The five closed load fixes (D.3 `N Get→1 List`; H4.1 dead reverse
+indexes; CSD `APIReader List`→cache; H5 duplicate pre-MCR sweep; relay `SnapshotList`→field index) are one
+pattern, not five accidents: **wherever a "search by full traversal" existed, it was replaced by direct
+addressing (index / direct-ref / cache).** So the next chapter is **not** "hunt for another APIReader" — the
+client kind (APIReader, dynamic client, `Client.List`, unstructured `List`) is irrelevant. The question is:
+**is a full-collection traversal being done where an index, a direct reference, or a local cache would serve the
+same source of truth?** Concretely, the open target is the child-subtree enumeration load: the demo source and
+snapshot full-lists (VM/VMSnapshot/DiskSnapshot/Disk ~250–272 LIST/tree each, ~1060/tree combined) plus the
+audit-hidden individual GETs. Diagnosis/design step (read-only attribution first): find which of these are
+full-collection scans replaceable by index/direct-ref, and which are freshness-bound and must stay uncached —
+apply one minimal change only if a single safe callsite dominates.
+
 ### Deferred — registry-derived planning view (architectural cleanup, NOT required)
 
 **Status: Deferred — deliberately not implemented after the cached-CSD planning fix (section 6) already removed the
@@ -683,6 +750,12 @@ Until one of these applies, the cached-CSD planning fix is considered sufficient
    child-graph planning by listing through `mgr.Client` instead of `APIReader`; semantics unchanged. The
    **registry-derived planning view** (section 8, "Deferred") is deliberately **not** implemented — see its return
    criteria before revisiting.
+10. **Relay reverse-lookup field index** (section 6 / section 8 "Relay reverse-lookup — CLOSED") — **implemented +
+    validated.** `findParentsReferencingChildSnapshot` uses a cached `status.childrenSnapshotRefs.identity` index
+    instead of a per-child-event full-namespace `SnapshotList`: primary relay LIST eliminated (~440 → ~2
+    `storage/snapshots` LIST/tree), 0 field-label errors, 0 restarts, root Ready ~21s. Child freshness `Get` stays
+    on the APIReader. Next open item reframed to **remaining repeated full-collection operations** (child-subtree
+    enumerations), not "another APIReader".
 
 ## 10. Tooling (storage-e2e, measurement only)
 
