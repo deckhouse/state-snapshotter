@@ -1218,3 +1218,14 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   terminal-classification test (all fake clients now carry a RESTMapper); mcrValidator accept/reject specs; a
   root-target exclude-key invariant test. gofmt + vet + unit suites green (golangci-lint unavailable locally);
   Bugbot clean on the changed files.
+- **Add** (capture-namespace e2e) `e2e/tests/namespace_manifest_capture_test.go` (`namespaceManifestCaptureSpecs`,
+  registered in the shared "Phase 1 & 2" Context after `namespaceCaptureReworkSpecs`). One positive spec: a root
+  Snapshot's own-manifests download (manifests-download subresource) now contains the namespace's own `Namespace`
+  object, verbatim and cluster-scoped (`apiVersion=v1`, `metadata.namespace==""`). Three MCR-admission specs create
+  MCRs directly via the cluster-admin `suiteDyn`: a non-Namespace cluster-scoped target (ClusterRole) is rejected
+  ("cluster-scoped"), a foreign `Namespace` target (name != MCR namespace) is rejected ("own namespace"), and the
+  MCR's own `Namespace` target (name == MCR namespace) is accepted (authorized via the cluster-scoped
+  `namespaces get` SAR); the accepted MCR is explicitly deleted in `DeferCleanup` so no cluster-scoped remnant
+  outlives namespace teardown. Added the local `manifestCaptureRequest` unstructured constructor. Review: explore
+  subagent (helper/signature + sibling-convention + webhook-message consistency) clean, nits applied. make build +
+  make vet green (full suite needs a cluster).

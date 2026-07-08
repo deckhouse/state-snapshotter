@@ -82,12 +82,13 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	// container. (gcSpecs still builds its own short-TTL sub-tree — it deletes the root and reconfigures the
 	// module TTL, so it cannot reuse the shared root.)
 	Context("Phase 1 & 2: manifest-only flow (no volume data)", func() {
-		captureSpecs()                // capture_test.go: apply demo source + root Snapshot, assert Ready tree
-		aggregatedApiSpecs()          // aggregated_api_test.go: --raw manifests-download / -with-data-restoration
-		namespaceCaptureReworkSpecs() // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
-		restoreSpecs()                // restore_test.go: manifest-level restore into a fresh namespace
-		importSpecs()                 // import_gc_test.go: export -> import round-trip
-		gcSpecs()                     // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
+		captureSpecs()                  // capture_test.go: apply demo source + root Snapshot, assert Ready tree
+		aggregatedApiSpecs()            // aggregated_api_test.go: --raw manifests-download / -with-data-restoration
+		namespaceCaptureReworkSpecs()   // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
+		namespaceManifestCaptureSpecs() // namespace_manifest_capture_test.go: Namespace object capture + MCR admission
+		restoreSpecs()                  // restore_test.go: manifest-level restore into a fresh namespace
+		importSpecs()                   // import_gc_test.go: export -> import round-trip
+		gcSpecs()                       // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
 	})
 	resourceSelectorSpecs()     // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
 	volumeDataSpecs()           // volumedata_test.go: full volume-data flow (phase 3, env-gated)
