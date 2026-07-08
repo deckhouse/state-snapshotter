@@ -511,22 +511,34 @@ func childCaptureAtLeastPlanned(child *unstructured.Unstructured) bool {
 	}
 }
 
+// childSubtreePlanned reports whether the child's main-computed recursive planning latch
+// status.captureState.commonController.subtreePlanned is present and true — i.e. the child AND its whole
+// subtree finished planning (design §8.1, decision #10). The orphan/residual wave gates on this rather
+// than the child's own phase so a PVC covered by a not-yet-planned GRANDCHILD is never momentarily seen
+// as orphan. nil/false (absent latch) reads as "subtree not planned yet".
+func childSubtreePlanned(child *unstructured.Unstructured) bool {
+	v, found, _ := unstructured.NestedBool(child.Object, "status", "captureState", "commonController", "subtreePlanned")
+	return found && v
+}
+
 // allDeclaredDomainChildSnapshotsReady reports whether every declared DOMAIN child snapshot of the root
 // (Snapshot.status.childrenSnapshotRefs) has reached capture barrier 1 (status.captureState.
 // domainSpecificController.phase >= Planned, i.e. Planned or Finished). It is the wave barrier for root
 // orphan/residual PVC volume capture: orphan PVCs must be evaluated only once the already-declared domain
 // subtree's coverage is COMPUTABLE, so a PVC that a domain child covers is never momentarily seen as
-// orphan. Block 5 relaxed this from full Ready=True to phase>=Planned: coverage no longer needs the child's
-// status.data (milestone B) because the coverage owner-fallback (design §8.5/§11.7) reads the covered PVC
-// UIDs straight from the child's captureState — the in-flight VolumeCaptureRequest name for VCR domains,
-// or status.snapshotSource.uid for native-CSI VolumeSnapshots — both published by Planned. Waiting for full
-// Ready here was the deadlock: a child cannot go Ready until its content subtree closes, which needs the
-// root content, which needs this gate. The root MANIFEST branch is not gated by this. A NotFound child is
-// pending (not created yet); a child not yet Planned (no phase, phase=Planning) is pending; a terminal
-// child failure (phase=Failed) is NOT surfaced here (the content aggregation reports ChildrenFailed) — it
-// stays pending, keeping the gate closed. No observedGeneration gate: the domain phase is monotonic and the
-// spec is immutable (mirrors weightLayerCaptureReady). A namespace with no declared domain children passes
-// the gate vacuously.
+// orphan. Block 5 relaxed this from full Ready=True to phase>=Planned; Block 7b tightens it to the
+// main-computed recursive subtreePlanned latch (design §8.1, decision #10): each DIRECT child must report
+// commonController.subtreePlanned=true, which means the child AND all its descendants finished planning.
+// Direct phase>=Planned was insufficient — a PVC covered by a not-yet-planned GRANDCHILD could momentarily
+// be seen as orphan before that grandchild published its coverage. subtreePlanned needs only planning
+// (not Ready/status.data), so this does not reintroduce the deadlock: coverage still reads the covered PVC
+// UIDs straight from captureState (the in-flight VolumeCaptureRequest name for VCR domains, or
+// status.snapshotSource.uid for native-CSI VolumeSnapshots — both published by Planned). The root MANIFEST
+// branch is not gated by this. A NotFound child is pending (not created yet); a child whose subtree is not
+// yet planned (latch absent/false) is pending; a terminal child failure (phase=Failed) is NOT surfaced here
+// (the content aggregation reports ChildrenFailed) — it stays pending, keeping the gate closed. No
+// observedGeneration gate: the latch is monotonic and the spec is immutable. A namespace with no declared
+// domain children passes the gate vacuously.
 func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, pending []string, err error) {
 	for _, ref := range refs {
 		gv, perr := schema.ParseGroupVersion(ref.APIVersion)
@@ -543,8 +555,8 @@ func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Co
 			}
 			return false, nil, gerr
 		}
-		if !childCaptureAtLeastPlanned(child) {
-			pending = append(pending, describePendingChildPhase(child, gvk, namespace, ref.Name))
+		if !childSubtreePlanned(child) {
+			pending = append(pending, describePendingChildSubtreePlanned(child, gvk, namespace, ref.Name))
 		}
 	}
 	if len(pending) > 0 {
@@ -577,6 +589,18 @@ func describePendingChildPhase(child *unstructured.Unstructured, gvk schema.Grou
 		return fmt.Sprintf("%s/%s/%s (no capture phase yet)", gvk.String(), namespace, name)
 	}
 	return fmt.Sprintf("%s/%s/%s (capture phase=%s)", gvk.String(), namespace, name, phase)
+}
+
+// describePendingChildSubtreePlanned renders a compact descriptor for a child whose recursive planning
+// latch (commonController.subtreePlanned) is not yet set, reporting its own domain phase so a wait that is
+// blocked on a not-yet-planned DESCENDANT (child phase already Planned, subtree latch still absent) is
+// distinguishable from a child that has not started planning itself.
+func describePendingChildSubtreePlanned(child *unstructured.Unstructured, gvk schema.GroupVersionKind, namespace, name string) string {
+	phase := childCapturePhase(child)
+	if phase == "" {
+		return fmt.Sprintf("%s/%s/%s (subtree not planned yet: no capture phase)", gvk.String(), namespace, name)
+	}
+	return fmt.Sprintf("%s/%s/%s (subtree not planned yet: child phase=%s)", gvk.String(), namespace, name, phase)
 }
 
 func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.GroupVersionKind, namespace, name string) (bool, string) {

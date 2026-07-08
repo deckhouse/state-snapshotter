@@ -39,7 +39,8 @@ import (
 // status.childrenSnapshotRefs (via the same), and status.snapshotSource (via Get/SetSnapshotSource). It
 // NEVER writes the Ready condition and NEVER writes the core-owned captureState.commonController — it
 // only reads them (CoreCaptureState, ReadyReason/ReadyMessage). On the root, commonController.manifestCaptured
-// is stamped by the core RBAC latch (ready_patch.go stampRootManifestCaptured), which the SDK only reads.
+// is owned solely by main (the aggregator's capture-leg lifecycle latches it after the MCP handoff and reaps
+// the root MCR — the root is a domain-capture kind; decision #10), which the SDK only reads.
 type NamespaceSnapshotAdapter struct {
 	snap *storagev1alpha1.Snapshot
 }

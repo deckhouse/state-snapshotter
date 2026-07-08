@@ -99,89 +99,10 @@ func TestMirrorSnapshotReadyFromBoundContentFallbackNoContentReady(t *testing.T)
 	}
 }
 
-// stampRootManifestCaptured flips the root Snapshot's captureState.commonController.manifestCaptured leg
-// latch to true once the bound content's subtree manifests are persisted. This is the monotonic latch the
-// capture RBAC hook (040) reads; it replaced the former ManifestsArchived condition mirror.
-func TestStampRootManifestCapturedSetsLatch(t *testing.T) {
-	ctx := context.Background()
-
-	parent := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 4}}
-	cl := readyMirrorScheme(t).WithObjects(parent).WithStatusSubresource(parent).Build()
-	r := &SnapshotReconciler{Client: cl, APIReader: cl}
-
-	key := types.NamespacedName{Namespace: "ns", Name: "root"}
-	if err := r.stampRootManifestCaptured(ctx, key, true); err != nil {
-		t.Fatalf("stamp: %v", err)
-	}
-
-	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
-		t.Fatalf("get parent: %v", err)
-	}
-	cs := fresh.Status.CaptureState
-	if cs == nil || cs.CommonController == nil || cs.CommonController.ManifestCaptured == nil || !*cs.CommonController.ManifestCaptured {
-		t.Fatalf("manifestCaptured latch = %#v, want true", cs)
-	}
-}
-
-// Latch: once manifestCaptured is true it is never downgraded, even if a later stamp reports false (e.g. a
-// transient content read that momentarily lost the subtreeManifestsPersisted signal).
-func TestStampRootManifestCapturedNeverDowngrades(t *testing.T) {
-	ctx := context.Background()
-
-	captured := true
-	parent := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 2},
-		Status: storagev1alpha1.SnapshotStatus{
-			CaptureState: &storagev1alpha1.CaptureStateStatus{
-				CommonController: &storagev1alpha1.CommonControllerCaptureState{ManifestCaptured: &captured},
-			},
-		},
-	}
-	cl := readyMirrorScheme(t).WithObjects(parent).WithStatusSubresource(parent).Build()
-	r := &SnapshotReconciler{Client: cl, APIReader: cl}
-
-	key := types.NamespacedName{Namespace: "ns", Name: "root"}
-	if err := r.stampRootManifestCaptured(ctx, key, false); err != nil {
-		t.Fatalf("stamp: %v", err)
-	}
-
-	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
-		t.Fatalf("get parent: %v", err)
-	}
-	cs := fresh.Status.CaptureState
-	if cs == nil || cs.CommonController == nil || cs.CommonController.ManifestCaptured == nil || !*cs.CommonController.ManifestCaptured {
-		t.Fatalf("latch broken: manifestCaptured = %#v, want still true", cs)
-	}
-}
-
-// Eager-init: stamping captured=false on a fresh root declares the manifest leg (field present, value
-// false) so the SDK/hook can distinguish "not captured yet" from "no such leg".
-func TestStampRootManifestCapturedEagerInitFalse(t *testing.T) {
-	ctx := context.Background()
-
-	parent := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns", Generation: 1}}
-	cl := readyMirrorScheme(t).WithObjects(parent).WithStatusSubresource(parent).Build()
-	r := &SnapshotReconciler{Client: cl, APIReader: cl}
-
-	key := types.NamespacedName{Namespace: "ns", Name: "root"}
-	if err := r.stampRootManifestCaptured(ctx, key, false); err != nil {
-		t.Fatalf("stamp: %v", err)
-	}
-
-	fresh := &storagev1alpha1.Snapshot{}
-	if err := cl.Get(ctx, client.ObjectKey(key), fresh); err != nil {
-		t.Fatalf("get parent: %v", err)
-	}
-	cs := fresh.Status.CaptureState
-	if cs == nil || cs.CommonController == nil || cs.CommonController.ManifestCaptured == nil {
-		t.Fatalf("manifest leg must be declared (field present), got %#v", cs)
-	}
-	if *cs.CommonController.ManifestCaptured {
-		t.Fatalf("eager-init must leave manifestCaptured=false, got true")
-	}
-}
+// The root Snapshot's commonController.manifestCaptured leg latch is owned solely by main (the aggregator's
+// capture-leg lifecycle: eager-init false, monotonic latch true after the MCP handoff, then MCR reap —
+// decision #10). Its behavior is covered in snapshotcontent/capture_legs_test.go; the former
+// SnapshotReconciler-side stampRootManifestCaptured duplicate writer was removed.
 
 // The bridge is the single non-mirror writer: Ready=False/ChildrenFailed.
 func TestPatchSnapshotChildSnapshotFailedBridge(t *testing.T) {

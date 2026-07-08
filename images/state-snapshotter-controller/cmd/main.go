@@ -313,11 +313,12 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
-	// Carry CSD spec.requiresDataArtifact from the merged pairs onto the binder's GVK registry so the
-	// import path knows which snapshot kinds expect a DataImport/data artifact. Built-in/bootstrap pairs
-	// stay false.
+	// Carry CSD spec.requiresDataArtifact from the merged pairs onto BOTH controllers' GVK registries
+	// (they hold separate instances): the binder's import path and main's capture-leg eager-init
+	// (main-owned commonController, decision #10) read the same flag. Built-in/bootstrap pairs stay false.
 	for _, p := range mergedPairs {
 		snapshotController.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
+		contentController.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
 	}
 	for i := range genericSnapshotGVKs {
 		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
@@ -333,6 +334,8 @@ func main() {
 	// created. See unifiedbootstrap.StartupDomainCaptureRootPair. Idempotent w.r.t. a later Sync.
 	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(snapshotGVKs, snapshotContentGVKs); ok {
 		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
+		// Main runs the root's capture-leg lifecycle (latches + MCR reap, decision #10).
+		contentController.MarkDomainCaptureKind(rootSnapGVK)
 		if err := snapshotController.AddWatchForPair(mgr, rootSnapGVK, rootContentGVK); err != nil {
 			log.Error(err, "Failed to setup GenericSnapshotBinderController root Snapshot watch", "snapshotGVK", rootSnapGVK.String(), "snapshotContentGVK", rootContentGVK.String())
 			cancel()

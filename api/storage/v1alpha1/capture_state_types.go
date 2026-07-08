@@ -88,6 +88,19 @@ type CommonControllerCaptureState struct {
 	// carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
 	// +optional
 	SubtreeManifestsPersisted *bool `json:"subtreeManifestsPersisted,omitempty"`
+
+	// SubtreePlanned is a core-computed monotonic recursive latch: true once THIS node reached capture
+	// barrier 1 (domainSpecificController.phase >= Planned) AND every DIRECT child's own SubtreePlanned is
+	// true — i.e. the whole subtree has finished planning (objects + refs published, not necessarily
+	// captured/Ready). It is snapshot-native and main-written (the aggregator computes it by resolving the
+	// owner's direct children from status.childrenSnapshotRefs and reading each child's latch, then writes
+	// it SIDEWAYS onto this snapshot; content has no phase, so this cannot live on the SnapshotContent).
+	// The root's orphan/residual-PVC wave gates on its direct children's SubtreePlanned so an orphan PVC is
+	// evaluated only once every declared subtree's coverage is fully computable (no premature root exclude).
+	// It is NOT a capture leg (not part of CoreCaptureOutcome). Domains only READ it. nil = subtree not
+	// planned yet. Monotonic (nil/false -> true; the spec is immutable, so no recapture flips it back).
+	// +optional
+	SubtreePlanned *bool `json:"subtreePlanned,omitempty"`
 }
 
 // DomainSpecificControllerCaptureState is the domain-written half of captureState: execution-request

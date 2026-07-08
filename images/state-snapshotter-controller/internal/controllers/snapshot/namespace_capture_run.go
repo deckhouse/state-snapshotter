@@ -42,11 +42,13 @@ import (
 
 // captureSDK constructs the in-process capture SDK the namespace root drives — the SAME SDK external/demo
 // domains use ("dogfooding", wave5). Mirrors the demo controllers' capture() helper
-// (snapshotsdk.New(client, apiReader, NewStorageFoundationProvider(client))). The root's manifest-exclude
-// leg is computed in-reconciler from the bound content subtree (BuildRootNamespaceManifestCaptureTargets),
-// so the SDK's optional subresource REST client (WithSubresourceREST) is intentionally NOT wired here.
+// (snapshotsdk.New(client, apiReader, NewStorageFoundationProvider(client))). The root is an aggregator
+// whose manifest leg spans objects its children also capture, so it wires the subresource REST client
+// (WithSubresourceREST) the ManifestExclude capability needs: reconcileNamespaceManifestLeg computes the
+// subtree exclude set via sdk.SubtreeManifestIdentities (the fail-closed subtree-manifest-identities
+// endpoint) instead of an in-reconciler archive read.
 func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
-	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client))
+	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client), snapshotsdk.WithSubresourceREST(r.SubresourceREST))
 }
 
 // reconcileNamespaceCapture drives the namespace-root capture through the snapshotsdk recipe (wave5
@@ -164,31 +166,33 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		return ctrl.Result{}, err
 	}
 
-	// 7. Maintain the RBAC latch (commonController.manifestCaptured mirror of content.subtreeManifestsPersisted).
-	//    The per-namespace capture-RBAC hook (040) reads it to drop the transient wide-read RoleBinding.
-	if err := r.stampRootManifestCaptured(ctx, key, content.Status.SubtreeManifestsPersisted); err != nil {
-		return ctrl.Result{}, err
-	}
+	// The root's commonController.manifestCaptured leg latch (the signal the per-namespace capture-RBAC hook
+	// (040) reads to drop the transient wide-read RoleBinding) is owned solely by main: the aggregator's
+	// capture-leg lifecycle eager-inits it to false and latches it true after the root MCP handoff is durable,
+	// then reaps the root MCR — the namespace-root Snapshot is a domain-capture kind (main.go dogfooding), so
+	// reconcileOwnerCaptureLegs runs for its bound content (main-owned commonController, decision #10). The
+	// root reconciler no longer stamps the latch itself (single-writer per sub-structure).
 
-	// Refresh the root so the commonController latch (stamp/binder) and any concurrent SDK status writes are
-	// observed by the manifest-leg gate and the barrier-2 outcome switch below. The orphan VolumeSnapshots
-	// are ordinary domain children now: the binder creates + binds their content and the aggregator projects
-	// their status (data from the bound VSC, manifestCheckpointName from the VS domain's MCR, Ready mirror),
-	// and their content edges are linked into the root's childrenSnapshotContentRefs by the aggregator — no
-	// snapshot-side orphan content-materialization step remains (content-single-writer design §11.6).
+	// Refresh the root so main's commonController latch and any concurrent SDK status writes are observed by
+	// the manifest-leg gate and the barrier-2 outcome switch below. The orphan VolumeSnapshots are ordinary
+	// domain children now: the binder creates + binds their content and the aggregator projects their status
+	// (data from the bound VSC, manifestCheckpointName from the VS domain's MCR, Ready mirror), and their
+	// content edges are linked into the root's childrenSnapshotContentRefs by the aggregator — no snapshot-side
+	// orphan content-materialization step remains (content-single-writer design §11.6).
 	if err := r.snapshotReader().Get(ctx, key, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 8. Manifest-exclude leg: base namespace allowlist minus the subtree already captured by descendants,
-	//    published via the SDK MCR. The binder chases the published manifestCaptureRequestName -> MCP.
+	// 7. Manifest-exclude leg: base namespace allowlist minus the subtree already captured by descendants,
+	//    published via the SDK MCR. Main chases the published manifestCaptureRequestName -> MCP -> handoff and
+	//    latches commonController.manifestCaptured.
 	if res, err := r.reconcileNamespaceManifestLeg(ctx, nsSnap, content, adapter, sdk); err != nil {
 		return ctrl.Result{}, err
 	} else if res.Requeue || res.RequeueAfter > 0 {
 		return res, nil
 	}
 
-	// 9. Barrier 2: the manifest leg is captured. Confirm consistency (phase=Finished) or surface a
+	// 8. Barrier 2: the manifest leg is captured. Confirm consistency (phase=Finished) or surface a
 	//    terminal capture failure the core latches produced (mirrors the demo VM aggregator switch).
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeFailed:
@@ -283,10 +287,13 @@ func nonOrphanCSIVolumeSnapshotChildRefs(refs []storagev1alpha1.SnapshotChildRef
 	return out
 }
 
-// reconcileNamespaceManifestLeg ensures the root namespace manifest MCR via the SDK, using the proven
-// base-minus-subtree exclude computation (BuildRootNamespaceManifestCaptureTargets, which also enforces
-// the subtree-persisted wave barrier). It returns a non-requeuing result ONLY once the manifest leg is
-// captured (commonController.manifestCaptured latched by the binder), so the caller proceeds to barrier 2.
+// reconcileNamespaceManifestLeg ensures the root namespace manifest MCR via the SDK, using the
+// base-minus-subtree exclude computation: the subtree exclude set comes from the fail-closed
+// subtree-manifest-identities endpoint (sdk.SubtreeManifestIdentities, which enforces the subtree-persisted
+// wave barrier server-side), and BuildRootNamespaceManifestCaptureTargets subtracts it (plus the root's own
+// residual PVCs) from the namespace allowlist base. It returns a non-requeuing result ONLY once the
+// manifest leg is captured (commonController.manifestCaptured latched by main), so the caller proceeds to
+// barrier 2.
 func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -321,24 +328,33 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 		// Registry not built yet (same fail-closed contract as buildSnapshotMachineryGVKs above): requeue.
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
-	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds, dataBearing)
+	// Subtree manifest-exclude set: the union of object identities already captured across the DIRECT
+	// children's bound-content subtrees, computed by the fail-closed subtree-manifest-identities service
+	// endpoint (SDK self-call). While the subtree is not fully persisted (a child has not bound its content,
+	// or a descendant ManifestCheckpoint is not Ready -> 409) it returns ErrSubtreeIdentitiesPending:
+	// requeue, never build a partial exclude — this is the wave barrier the in-reconciler archive read used
+	// to enforce, now owned server-side. A childless root short-circuits to an empty set with no self-call.
+	subtreeExclude, err := sdk.SubtreeManifestIdentities(ctx, adapter)
 	if err != nil {
-		// Transient subtree/child-graph state (children still binding, descendant MCPs not yet Ready,
-		// registry not built): requeue like ChildrenPending, do NOT fail capture.
-		if stderrors.Is(err, usecase.ErrSubtreeManifestCapturePending) ||
-			stderrors.Is(err, volumecaptureuc.ErrSubtreeDataRefsPending) ||
+		if stderrors.Is(err, snapshotsdk.ErrSubtreeIdentitiesPending) {
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds, dataBearing, subtreeExclude)
+	if err != nil {
+		// Transient child-graph state (children still binding, orphan coverage not computable yet): requeue
+		// like ChildrenPending, do NOT fail capture. The subtree readiness barrier is enforced by the
+		// endpoint above; what remains here is the root's own residual/orphan coverage walk.
+		if stderrors.Is(err, volumecaptureuc.ErrSubtreeDataRefsPending) ||
 			stderrors.Is(err, usecase.ErrRunGraphChildNotBound) ||
 			stderrors.Is(err, usecase.ErrRunGraphChildSnapshotNotFound) ||
-			stderrors.Is(err, usecase.ErrRunGraphChildNotReachable) ||
 			stderrors.Is(err, snapshotgraphregistry.ErrGraphRegistryNotReady) ||
 			isTransientCaptureTargetError(err) {
 			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 		}
 		// Terminal capture failures. Surfaced via the same failCapture bridge the bespoke path used (the
 		// root content has no manifestCheckpointName yet, so it cannot express the failure itself).
-		if stderrors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
-			return r.failCapture(ctx, nsSnap, content, "SubtreeManifestFailed", err.Error())
-		}
 		if stderrors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
 			return r.failCapture(ctx, nsSnap, content, "DuplicateCoveredPVCUID", err.Error())
 		}
@@ -352,8 +368,9 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: namespaceSDKManifestTargets(targets)}); err != nil {
 		return ctrl.Result{}, err
 	}
-	// MCR published: the binder chases manifestCaptureRequestName -> MCP -> content ManifestsReady and
-	// mirrors Ready + latches manifestCaptured. Requeue until that latch flips (which short-circuits above).
+	// MCR published: the binder chases manifestCaptureRequestName -> MCP -> content ManifestsReady, and main's
+	// capture-leg lifecycle latches commonController.manifestCaptured after the MCP handoff is durable (then
+	// reaps the root MCR). Requeue until that latch flips (which short-circuits above).
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 }
 

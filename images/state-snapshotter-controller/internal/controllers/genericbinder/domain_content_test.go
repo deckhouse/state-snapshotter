@@ -21,11 +21,9 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -34,10 +32,14 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
-	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
+
+// The domain-capture request lifecycle (capture-leg eager-init, manifestCaptured/dataCaptured latches, the
+// subtreeManifestsPersisted snapshot-mirror, and the MCR/VCR reap) moved to the SnapshotContentController
+// aggregator (main-owned commonController, decision #10); its coverage lives in
+// snapshotcontent/capture_legs_test.go. What remains on the binder is the leaf status.data export mirror
+// (mirrorLeafDataFromContent) and the pure data-binding renderer — covered below.
 
 const (
 	domainTestNS      = "ns1"
@@ -51,7 +53,6 @@ const (
 )
 
 var demoDiskSnapshotGVK = demov1alpha1.SchemeGroupVersion.WithKind("DemoVirtualDiskSnapshot")
-var volumeSnapshotContentGVK = schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"}
 
 func domainTestVCRName() string { return vcpkg.SnapshotOwnedVCRName(types.UID(domainTestSnapUID)) }
 
@@ -73,68 +74,10 @@ func domainTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-var demoVMSnapshotGVK = demov1alpha1.SchemeGroupVersion.WithKind("DemoVirtualMachineSnapshot")
-
-func domainTestPVC() *corev1.PersistentVolumeClaim {
-	sc := "sc-a"
-	mode := corev1.PersistentVolumeFilesystem
-	return &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: domainTestNS, Name: domainTestPVCName, UID: types.UID(domainTestPVCUID)},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			StorageClassName: &sc,
-			VolumeMode:       &mode,
-			// No VolumeName: enrichment skips the bound-PV fsType read (no PV installed in this test).
-		},
-	}
-}
-
 func domainTestSnapshotContent() *storagev1alpha1.SnapshotContent {
 	return &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: domainTestContent, UID: types.UID(domainTestConUID)},
 	}
-}
-
-func domainTestVCRTarget() vcpkg.Target {
-	return vcpkg.Target{
-		UID:        domainTestPVCUID,
-		APIVersion: corev1.SchemeGroupVersion.String(),
-		Kind:       "PersistentVolumeClaim",
-		Name:       domainTestPVCName,
-		Namespace:  domainTestNS,
-	}
-}
-
-// domainTestReadyVCR builds a Ready VolumeCaptureRequest whose dataRefs bind the PVC target to the VSC.
-func domainTestReadyVCR(withDataRefs bool) *unstructured.Unstructured {
-	obj := vcctrl.NewVolumeCaptureRequestObject(domainTestNS, domainTestVCRName(), metav1.OwnerReference{}, []vcpkg.Target{domainTestVCRTarget()})
-	if withDataRefs {
-		_ = unstructured.SetNestedSlice(obj.Object, []interface{}{
-			map[string]interface{}{
-				"type":   vcpkg.ConditionTypeReady,
-				"status": string(metav1.ConditionTrue),
-				"reason": vcpkg.ConditionReasonCompleted,
-			},
-		}, "status", "conditions")
-		// status.data carries only the artifact; the captured PVC identity comes from spec.target
-		// (set by NewVolumeCaptureRequestObject above).
-		_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{
-			"artifact": map[string]interface{}{
-				"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": domainTestVSCName,
-			},
-		}, "status", "data")
-	}
-	return obj
-}
-
-// domainTestVSC builds a VolumeSnapshotContent at deletionPolicy=Delete with no owner (pre-handoff).
-func domainTestVSC() *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(volumeSnapshotContentGVK)
-	obj.SetName(domainTestVSCName)
-	_ = unstructured.SetNestedField(obj.Object, "Delete", "spec", "deletionPolicy")
-	_ = unstructured.SetNestedField(obj.Object, true, "status", "readyToUse")
-	return obj
 }
 
 func domainTestDemoSnapshotUnstructured(t *testing.T, vcrName string) *unstructured.Unstructured {
@@ -156,233 +99,6 @@ func domainTestDemoSnapshotUnstructured(t *testing.T, vcrName string) *unstructu
 	obj := &unstructured.Unstructured{Object: raw}
 	obj.SetGroupVersionKind(demoDiskSnapshotGVK)
 	return obj
-}
-
-func domainTestVCRExists(t *testing.T, cl client.Client) bool {
-	t.Helper()
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: domainTestNS, Name: domainTestVCRName()}, obj); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false
-		}
-		t.Fatalf("get VCR: %v", err)
-	}
-	return true
-}
-
-// content-single-writer §4 Slice 3 / §11.4: the data-leg publish (enrich + VSC Retain/ownerRef handoff +
-// SnapshotContent.status.data) moved to the aggregator (SnapshotContentController.reconcileDataLegProjection).
-// The binder is now READ-ONLY over the VCR and keeps only the two VCR-lifecycle decisions it always owned:
-// once the aggregator's published status.data covers the VCR targets AND the bound VSC is already owned by
-// the content (durable handoff), the binder latches commonController.dataCaptured and reaps the transient
-// VCR — without requeuing and without touching the domain-owned volumeCaptureRequestName or the content
-// status it no longer writes. This test sets up the post-handoff world the aggregator produces and asserts
-// the binder's latch-and-reap.
-func TestEnsureDomainContentLinks_DataLegLatchAndReapAfterAggregatorHandoff(t *testing.T) {
-	ctx := context.Background()
-	scheme := domainTestScheme(t)
-	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
-
-	// Aggregator precondition #1: status.data published, covering the VCR target PVC.
-	content := domainTestSnapshotContent()
-	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
-		Source: storagev1alpha1.SnapshotSubjectRef{
-			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName,
-			Namespace: domainTestNS, UID: types.UID(domainTestPVCUID),
-		},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
-			APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName,
-		},
-		StorageClassName: "sc-a",
-		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
-		AccessModes:      []string{string(corev1.ReadWriteOnce)},
-	}
-
-	// Aggregator precondition #2: the bound VSC is already Retain + owned by the content (durable handoff).
-	ctrlTrue := true
-	vsc := domainTestVSC()
-	_ = unstructured.SetNestedField(vsc.Object, "Retain", "spec", "deletionPolicy")
-	vsc.SetOwnerReferences([]metav1.OwnerReference{{
-		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-		Kind:       "SnapshotContent",
-		Name:       domainTestContent,
-		UID:        types.UID(domainTestConUID),
-		Controller: &ctrlTrue,
-	}})
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestPVC(), content, domainTestReadyVCR(true), vsc, demoObj).
-		Build()
-	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-
-	requeue, treason, tmsg, err := r.ensureDomainContentLinks(ctx, demoObj, domainTestContent, "")
-	if err != nil {
-		t.Fatalf("ensureDomainContentLinks: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("unexpected terminal reason %q (msg=%q)", treason, tmsg)
-	}
-	if requeue {
-		t.Fatalf("durable handoff should not requeue")
-	}
-
-	// The binder is read-only on the content: it must not have dropped the aggregator-published data.
-	got := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
-		t.Fatalf("get content: %v", err)
-	}
-	if got.Status.Data == nil || string(got.Status.Data.Source.UID) != domainTestPVCUID || got.Status.Data.Artifact.Name != domainTestVSCName {
-		t.Fatalf("binder must leave the aggregator-published status.data intact, got %#v", got.Status.Data)
-	}
-
-	fresh := &unstructured.Unstructured{}
-	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
-		t.Fatalf("get demo snapshot: %v", err)
-	}
-	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "dataCaptured"); !captured {
-		t.Fatalf("expected status.captureState.commonController.dataCaptured=true after durable handoff")
-	}
-	// Single-writer discipline: the binder owns commonController (the dataCaptured latch) but must NOT
-	// clear the domain-owned domainSpecificController.volumeCaptureRequestName. Suppression of VCR
-	// re-creation is driven by the latch, not by clearing the name; the domain owns that field.
-	if name, _, _ := unstructured.NestedString(fresh.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName"); name != domainTestVCRName() {
-		t.Fatalf("binder must not touch domain-owned volumeCaptureRequestName, got %q", name)
-	}
-	if domainTestVCRExists(t, cl) {
-		t.Fatalf("expected the transient VCR to be deleted after durable handoff")
-	}
-}
-
-// A not-yet-Ready data-leg VCR must NOT be handed off: the binder requeues and leaves the VCR, the marker,
-// and the content dataRefs untouched (no premature deletion/marker that would mask an incomplete capture).
-func TestEnsureDomainContentLinks_DataLegPendingRequeues(t *testing.T) {
-	ctx := context.Background()
-	scheme := domainTestScheme(t)
-	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestPVC(), domainTestSnapshotContent(), domainTestReadyVCR(false), demoObj).
-		Build()
-	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-
-	requeue, treason, _, err := r.ensureDomainContentLinks(ctx, demoObj, domainTestContent, "")
-	if err != nil {
-		t.Fatalf("ensureDomainContentLinks: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("pending VCR must not be terminal, got reason %q", treason)
-	}
-	if !requeue {
-		t.Fatalf("pending VCR should requeue")
-	}
-
-	got := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
-		t.Fatalf("get content: %v", err)
-	}
-	if got.Status.Data != nil {
-		t.Fatalf("pending VCR must not publish data binding, got %#v", got.Status.Data)
-	}
-	fresh := &unstructured.Unstructured{}
-	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
-		t.Fatalf("get demo snapshot: %v", err)
-	}
-	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "dataCaptured"); captured {
-		t.Fatalf("pending VCR must not set status.captureState.commonController.dataCaptured")
-	}
-	if !domainTestVCRExists(t, cl) {
-		t.Fatalf("pending VCR must not be deleted")
-	}
-}
-
-// A failed data-leg VCR surfaces an actionable terminal VolumeCaptureFailed condition (no marker, no
-// deletion, no endless silent requeue).
-func TestEnsureDomainContentLinks_DataLegFailedIsTerminal(t *testing.T) {
-	ctx := context.Background()
-	scheme := domainTestScheme(t)
-	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
-
-	failedVCR := vcctrl.NewVolumeCaptureRequestObject(domainTestNS, domainTestVCRName(), metav1.OwnerReference{}, []vcpkg.Target{domainTestVCRTarget()})
-	_ = unstructured.SetNestedSlice(failedVCR.Object, []interface{}{
-		map[string]interface{}{
-			"type":    vcpkg.ConditionTypeReady,
-			"status":  string(metav1.ConditionFalse),
-			"reason":  "SnapshotCreationFailed",
-			"message": "csi failed",
-		},
-	}, "status", "conditions")
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestPVC(), domainTestSnapshotContent(), failedVCR, demoObj).
-		Build()
-	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-
-	_, treason, _, err := r.ensureDomainContentLinks(ctx, demoObj, domainTestContent, "")
-	if err != nil {
-		t.Fatalf("ensureDomainContentLinks: %v", err)
-	}
-	if treason != snapshot.ReasonVolumeCaptureFailed {
-		t.Fatalf("expected terminal VolumeCaptureFailed, got %q", treason)
-	}
-	if !domainTestVCRExists(t, cl) {
-		t.Fatalf("failed VCR must not be deleted (operator needs to see it)")
-	}
-}
-
-// Regression: once the manifest leg is captured (commonController.manifestCaptured=true), the binder has
-// already published the checkpoint onto the content and intentionally deleted the MCR. The domain-owned
-// manifestCaptureRequestName still points at the now-absent MCR, so a NotFound MCR lookup MUST NOT set
-// requeue=true — otherwise ensureSnapshotContentLinks returns before the Step 5 Ready mirror on every
-// reconcile and the (manifest-only) snapshot wedges at Ready=False/ContentMissing while its bound content
-// is already Ready=True, cascading the parent into ChildrenPending forever.
-func TestEnsureSnapshotContentLinks_ManifestCapturedMCRDeletedDoesNotRequeue(t *testing.T) {
-	ctx := context.Background()
-	scheme := domainTestScheme(t)
-
-	// Manifest-only demo VM snapshot at phase>=Planned with the manifest leg already latched captured and
-	// its MCR gone (deleted by the binder after the durable checkpoint handoff). No children, no data leg.
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(demoVMSnapshotGVK)
-	obj.SetNamespace(domainTestNS)
-	obj.SetName("vm-snap")
-	obj.SetUID("vm-snap-uid")
-	if err := unstructured.SetNestedField(obj.Object, "Planned", "status", "captureState", "domainSpecificController", "phase"); err != nil {
-		t.Fatalf("set phase: %v", err)
-	}
-	if err := unstructured.SetNestedField(obj.Object, "nss-mcr-gone", "status", "captureState", "domainSpecificController", "manifestCaptureRequestName"); err != nil {
-		t.Fatalf("set mcr name: %v", err)
-	}
-	if err := unstructured.SetNestedField(obj.Object, true, "status", "captureState", "commonController", "manifestCaptured"); err != nil {
-		t.Fatalf("set manifestCaptured: %v", err)
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualMachineSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestSnapshotContent(), obj).
-		Build()
-	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-	r.MarkDomainCaptureKind(demoVMSnapshotGVK)
-
-	requeue, treason, tmsg, err := r.ensureSnapshotContentLinks(ctx, nil, obj, domainTestContent)
-	if err != nil {
-		t.Fatalf("ensureSnapshotContentLinks: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("captured manifest leg must not be terminal, got reason %q (msg=%q)", treason, tmsg)
-	}
-	if requeue {
-		t.Fatalf("captured manifest leg with a GC'd MCR must not requeue (would starve the Ready mirror)")
-	}
 }
 
 // mirrorLeafDataFromContent copies the bound SnapshotContent's self-contained data binding verbatim onto

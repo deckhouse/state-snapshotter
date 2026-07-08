@@ -43,16 +43,23 @@ import (
 // Ready from a cross-controller hop (INV-FAIL-PROP).
 //
 // wave7 final-wave-1: this controller is now the SINGLE post-bind writer of the steady-state Snapshot.Ready
-// (content.Ready verbatim + phase=Failed bubble + barrier-2 phase=Finished gate). The binder no longer
-// re-derives content.Ready. The binder retains only (a) the pre-bind Ready and the content-missing/deleting
-// degradation Ready — a deleted content produces no reconcile here to mirror from, so the binder co-writes
-// ContentMissing, woken by its bound-content watch — and (b) the excludedRefs / subtreeManifestsPersisted
-// side-channel mirrors (not Ready; triggered by the same watch). Keeping (a)/(b) in the binder is why that
-// watch is not removed.
+// (content.Ready verbatim + capture-leg terminal fold + phase=Failed bubble + barrier-2 phase=Finished
+// gate). The binder no longer re-derives content.Ready. The binder retains only (a) the pre-bind Ready and
+// the content-missing/deleting degradation Ready — a deleted content produces no reconcile here to mirror
+// from, so the binder co-writes ContentMissing, woken by its bound-content watch — and (b) the excludedRefs
+// side-channel mirror (not Ready; triggered by the same watch). Keeping (a)/(b) in the binder is why that
+// watch is not removed. The subtreeManifestsPersisted mirror moved to main (capture_legs.go, decision #10).
+//
+// legTermReason/legTermMessage carry a capture-leg terminal observed by reconcileOwnerCaptureLegs in the
+// SAME pass (a failed data-leg VCR, or a Variant-A >1-artifact domain fault; main-owned commonController,
+// decision #10). The bound content itself stays pending in that state (no dataRefs), so the pure content
+// mirror could not express the terminal — folding it here surfaces Ready=False with a terminal reason the
+// domain SDK observes (IsReasonTerminal) to go phase=Failed. Recomputed every pass while the failed VCR
+// exists, so it is stable across mirror passes (unlike a separate co-write this mirror would race).
 //
 // Best-effort: an owner that is gone or not yet bound, or content with no owning Snapshot (bucket
 // content), is a no-op; a transient API error is returned so the content reconcile requeues and retries.
-func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Context, contentObj *unstructured.Unstructured) error {
+func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Context, contentObj *unstructured.Unstructured, legTermReason, legTermMessage string) error {
 	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
 	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
@@ -97,6 +104,14 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Conte
 		status = readyCond.Status
 		reason = readyCond.Reason
 		message = readyCond.Message
+	}
+	// Capture-leg terminal (failed data-leg VCR / Variant-A fault) observed by the same-pass
+	// reconcileOwnerCaptureLegs: the content stays pending in this state, so fold the terminal here. The
+	// domain phase=Failed bubble below still overrides it (the domain's own report is the durable state).
+	if legTermReason != "" {
+		status = metav1.ConditionFalse
+		reason = legTermReason
+		message = legTermMessage
 	}
 	// Bubble a domain-reported terminal failure (captureState.domainSpecificController.phase=Failed) into
 	// the user-facing Ready: a content mirror cannot express a domain planning/consistency failure.

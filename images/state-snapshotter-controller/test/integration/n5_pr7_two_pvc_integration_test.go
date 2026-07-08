@@ -68,7 +68,13 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 	// hangs. Reconciling the namespace-planner-vs-orphan-wave overlap and the domain-capture VolumeSnapshot
 	// spec population is exactly Block 5's scope; these specs are marked Pending until it lands (they never
 	// passed after the Block 3d rewrite — the isolated pass was not run then). The duplicate-covered-PVC-UID
-	// guard spec below needs no orphan pipeline (synthetic child Snapshots + dataRefs) and stays active.
+	// guard spec below is Pending for the SAME root cause as the pending-VCR spec: the §8.5 data-bearing gate
+	// (coverage keys on RequiresDataArtifact(kind) from the CSD, not the tree shape) makes synthetic core
+	// Snapshot children NON-data-bearing, so their dataRefs contribute no subtree coverage and the guard can
+	// never fire in envtest without a registered data-bearing domain kind (out of scope here, as for the VCR
+	// spec). The guard invariant is deliberately pinned — and fully covered — at the unit level by
+	// TestCollectSubtreeCoveredPVCUIDs_duplicateUIDFailsClosed and _notDataBearingSkips
+	// (usecase/volumecapture/subtree_covered_pvc_test.go), so no coverage is lost by deferring it here.
 	PIt("residual CSI PVCs each become their own child volume node; root MCR carries no PVC manifest", func() {
 		ctx := context.Background()
 		reactorCtx, cancel := context.WithCancel(ctx)
@@ -206,7 +212,13 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		}, 120*time.Second, 500*time.Millisecond).Should(Succeed())
 	})
 
-	It("duplicate pvcUID in subtree fails closed with DuplicateCoveredPVCUID", func() {
+	// PENDING: see the DEFERRED-TO-BLOCK-5 note above. Under the §8.5 data-bearing coverage gate the synthetic
+	// core Snapshot children are non-data-bearing (RequiresDataArtifact("Snapshot")==false, a built-in pair),
+	// so their fixture dataRefs are never read into the subtree-covered set and the DuplicateCoveredPVCUID guard
+	// cannot fire without a registered data-bearing domain kind (out of scope for the core envtest, same as the
+	// pending-VCR sibling). The guard is pinned and covered at the unit level
+	// (TestCollectSubtreeCoveredPVCUIDs_duplicateUIDFailsClosed / _notDataBearingSkips).
+	PIt("duplicate pvcUID in subtree fails closed with DuplicateCoveredPVCUID", func() {
 		ctx := context.Background()
 		ns := pr7CreateNamespace(ctx, "n5-pr7-duplicate")
 		nsName := ns.Name

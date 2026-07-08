@@ -101,22 +101,44 @@ So the "single writer" is ~90% present already: the resolution logic lives in th
 ```
 domain (namespace / demo / external)      creator = GenericSnapshotBinderController   main = SnapshotContentController
 ──────────────────────────────────       ──────────────────────────────────────      ──────────────────────────────
-writes ONLY own Snapshot.status:          creates + binds SnapshotContent (EAGER):    SINGLE writer of ALL content status:
-  - childrenSnapshotRefs                     - spec.snapshotRef + deletionPolicy        - conditions / Ready
-  - phase (+ subtreePlanned latch)           - parent/child ownerRef                    - childrenSnapshotContentRefs (single, frozen)
-  - data (mirror)                            - bind (boundSnapshotContentName)          - manifestCheckpointName (MCR→MCP)
-                                             - finalizer                                - data (VCR→data)
-                                           watches all xxxSnapshot (incl. VS, §11)      - subtreeManifestsPersisted / excludedRefs
-never touches SnapshotContent             writes NO content.status                     projects owner childrenSnapshotRefs → child edges
+writes ONLY own Snapshot.status:          creates + binds SnapshotContent (EAGER):    SINGLE writer of ALL derived status:
+  - childrenSnapshotRefs                     - spec.snapshotRef + deletionPolicy        content.status:
+  - phase                                    - parent/child ownerRef                      - conditions / Ready
+  - domainSpecificController                 - bind (boundSnapshotContentName)            - childrenSnapshotContentRefs (frozen)
+    (mcr/vcr names, excludedRefs)            - finalizer                                  - manifestCheckpointName (MCR→MCP)
+  - data (mirror)                          watches all xxxSnapshot (incl. VS, §11)        - data (VCR→data)
+                                           writes NO status (content OR snapshot)       xxxSnapshot.status (sideways):
+never touches SnapshotContent                                                            - commonController latches
+                                                                                           (manifestCaptured / dataCaptured /
+                                                                                            subtreeManifestsPersisted /
+                                                                                            subtreePlanned)
+                                                                                         - reaps MCR/VCR after durable handoff
+                                                                                         - Ready mirror (owner via snapshotRef)
 ```
 
-**Creator/main split (decision 2026-07-07).** The binder is the *creator*: it creates the content
-object, writes `spec`, sets the parent/child ownerRef, binds (`boundSnapshotContentName`), and manages the
-finalizer — and nothing on `status`. The `SnapshotContentController` aggregator is the *main*: it is the
-**sole writer of every `SnapshotContent.status` field**, including the `manifestCheckpointName` (MCR→MCP)
-and `data` (VCR→data) projections that the binder / namespace domain write today. Domains stay content-free
-(rule #1). This supersedes the earlier "binder writes own-node legs" split below (§2.1 documents today's
-code; §3.1–§3.3 and §4 describe the target).
+**Creator/main split (decision 2026-07-07; main-owned `commonController` update 2026-07-08).** The binder
+is the *creator*: it creates the content object, writes `spec`, sets the parent/child ownerRef, binds
+(`boundSnapshotContentName`), and manages the finalizer — and nothing on `status` (neither
+`SnapshotContent.status` nor `xxxSnapshot.status`). The `SnapshotContentController` aggregator is the
+*main*: it is the **sole writer of every `SnapshotContent.status` field**, including the
+`manifestCheckpointName` (MCR→MCP) and `data` (VCR→data) projections that the binder / namespace domain
+write today. **Under the main-owned decision (2026-07-08) the aggregator is ALSO the writer of the
+snapshot's `captureState.commonController` latches** (`manifestCaptured` / `dataCaptured`,
+`subtreeManifestsPersisted`, `subtreePlanned`) — written **sideways onto the `xxxSnapshot`**, exactly as it
+already sideways-writes `Snapshot.Ready` via `patchOwnerReadyFromContent` — **and it performs the MCR/VCR
+reap** (set the leg latch on the snapshot, then delete the transient request, in one pass). This collapses
+today's two-pass handoff (main projects → binder wakes → binder latches+reaps) into a single main pass and
+makes the binder a pure creator. Domains stay content-free (rule #1). This supersedes the earlier "binder
+writes own-node legs" split below (§2.1 documents today's code; §3.1–§3.3 and §4 describe the target).
+
+**Why the latches must be main-written and snapshot-native (suppression timing).** The domain SDK, when it
+finds an MCR/VCR absent, does an **authoritative uncached read** of the leg latch on the snapshot and
+recreates the request only if the latch is `false` (`capture.go:258-260`). The invariant is therefore: the
+latch MUST be set on the `xxxSnapshot` **before** the request is deleted, **by the same actor that deletes
+it**. A "compute on `content.status` + binder mirrors to snapshot" scheme would open a window between main's
+delete and the binder's mirror in which the domain uncached-reads a still-`false` snapshot latch and
+recreates a request main just reaped — churn. Hence main writes the snapshot's `commonController` latch
+**directly** and reaps in the same pass; no content-side latch field, no mirror hop.
 
 ### 3.1 Child-edge single writer (aggregator)
 
@@ -516,7 +538,7 @@ Two consumers, at DIFFERENT levels:
 - **Snapshot / domain wave completion: uses the recursive `subtreePlanned`** — a node learns "my whole
   subtree is planned" by checking only direct children's latch (no subtree walk).
 
-**RESOLVED (2026-07-07): SNAPSHOT-NATIVE.**
+**RESOLVED (2026-07-07): SNAPSHOT-NATIVE. Writer UPDATED (2026-07-08): main-owned.**
 - **Placement / source-of-truth:** the latch lives on the `xxxSnapshot` as
   `captureState.commonController.subtreePlanned` (a core-written field, sibling of
   `subtreeManifestsPersisted`). Domains only **read** it — content-free is preserved (writing your own
@@ -525,14 +547,18 @@ Two consumers, at DIFFERENT levels:
   content edges are frozen (§3.5); a content-native latch (recursing `childrenSnapshotContentRefs`) would
   lag the actual planning and be circular. The `subtreeManifestsPersisted` symmetry does **not** force
   content-native here — that is the manifest-durability axis (content), this is the planning axis (snapshot).
-- **Who computes it:** the **binder** (the only core controller subscribed to every `xxxSnapshot` kind),
-  which already writes the sibling `captureState.commonController.subtreeManifestsPersisted` mirror
-  (`mirrorSubtreeManifestsPersistedFromContent`, `genericbinder/controller.go:771`). It computes
-  `planned(n) ∧ ⋀(direct children) subtreePlanned(c)` by reading each direct child snapshot's
-  phase + latch. ~~CSI VS visibility leaves count as enumerated (no phase of their own).~~ *Superseded by
-  §11: `VolumeSnapshot` children carry their own `captureState.phase` (the foundation domain controller
-  runs `MarkPlanned`) and participate in the recursion like every domain kind.* Child→parent
-  wake-up reuses the existing snapshot-status watch.
+- **Who computes it — `main` (`SnapshotContentController`), UPDATED 2026-07-08.** Originally scoped to the
+  binder; under the **main-owned `commonController`** decision (§2/§3) the entire `commonController`
+  sub-structure — the capture-leg latches, the `subtreeManifestsPersisted` mirror, and `subtreePlanned` —
+  is written by the aggregator **sideways onto the `xxxSnapshot`** (the same sideways-write path it already
+  uses for `Snapshot.Ready`). Main watches every `xxxSnapshot` kind (`AddSnapshotStatusWatch`), so it wakes
+  on child phase/latch changes; it computes `planned(n) ∧ ⋀(direct children) subtreePlanned(c)` by reading
+  each direct child snapshot's `phase` + `subtreePlanned` latch, resolving the direct-child list from the
+  owner's `childrenSnapshotRefs` (NOT the frozen `childrenSnapshotContentRefs` — that would be circular,
+  since the freeze is gated on planning). `VolumeSnapshot` children carry their own `captureState.phase`
+  (the foundation domain controller runs `MarkPlanned`) and participate in the recursion like every domain
+  kind. This makes `subtreePlanned` genuinely **computed by a single writer** (main), not a binder→snapshot
+  mirror; the binder writes nothing on `status`.
 
 ### 8.2 Relationship to `subtreeManifestsPersisted` (do NOT conflate)
 
@@ -918,10 +944,12 @@ skipped with an Event on the object).
   → VSC → projects `content.status.data`, and performs the durability handoff (VSC `deletionPolicy: Retain`
   + ownerRef → content; the `EnsureVolumeSnapshotContentsOwnedByContent` machinery moves under the
   aggregator per Slice 3).
-- **`dataCaptured` latch — binder (writer discipline preserved).** For kind `VolumeSnapshot` the binder marks
-  `captureState.commonController.dataCaptured` once `content.status.data` is published and the VSC is owned
-  by the content — symmetric to the VCR branch in `domain_content.go`. Verified: the binder's reverse
-  content-watch (`content_watch.go`) wakes it on content status changes, so no new watch machinery is needed.
+- **`dataCaptured` latch — main (main-owned `commonController`, 2026-07-08).** For kind `VolumeSnapshot` the
+  aggregator (main) marks `captureState.commonController.dataCaptured` **sideways on the VS** once it has
+  published `content.status.data` and the VSC is owned by the content — **in the same pass** as the data-leg
+  projection + durability handoff. This supersedes the earlier "binder marks it" scoping (§2/§3 main-owned):
+  main already watches the VS (`AddSnapshotStatusWatch`) and the content, so no new watch machinery is
+  needed and the former two-pass main→binder handoff collapses into main's single pass.
 - **CSI errors are transient.** The data leg does **not** go terminal from `VS.status.error` alone — the node
   stays Capturing (CSI retries). Terminality rules for the data leg are explicit: deletion of the VS
   mid-capture (teardown path) or protocol-level rejection only. (Design checkpoint §11.8.)

@@ -22,6 +22,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -67,6 +68,12 @@ var (
 	testCfg                     *config.Options
 	unifiedSyncer               *unifiedruntime.Syncer
 	integrationGraphRegProvider *snapshotgraphregistry.Provider
+	// subtreeIdentitiesServer is the suite-scoped fake aggregated API service backing the root's
+	// manifest-exclude self-call (snapshotcontents/<name>/subtree-manifest-identities). envtest does not
+	// register the core APIService, so the reconciler's SDK cannot reach the real subresource; this
+	// httptest server (backed by the manager client) stands in and its REST client is injected into the
+	// snapshot controller via controllers.WithSnapshotSubresourceREST. Closed in AfterSuite.
+	subtreeIdentitiesServer *httptest.Server
 )
 
 func ptrInt64(v int64) *int64 {
@@ -802,9 +809,30 @@ var _ = BeforeSuite(func() {
 	for _, snapshotGVK := range runtimeSnapGVKs {
 		Expect(contentController.AddSnapshotStatusWatch(mgr, snapshotGVK)).To(Succeed())
 	}
+	// Mirror cmd/main.go: main runs the root's capture-leg lifecycle (latches + MCR reap, decision #10),
+	// so the root pair must be marked domain-capture on the content controller too.
+	if rootSnapGVK, _, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
+		contentController.MarkDomainCaptureKind(rootSnapGVK)
+	}
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
-	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
+	// Stand up the fake subtree-manifest-identities aggregated API service and inject its REST client, so
+	// the root capture's manifest-exclude self-call (sdk.SubtreeManifestIdentities) resolves in envtest
+	// (which registers no core APIService). The server (aggregatedManifestsIntegrationStartServer) reads
+	// live cluster state via k8sClient, so bind the global here — it holds the manager client the whole
+	// suite uses (re-set to the same value after cache sync below).
+	k8sClient = mgr.GetClient()
+	subtreeIdentitiesServer = aggregatedManifestsIntegrationStartServer()
+	subtreeIdentitiesREST, err := rest.RESTClientFor(&rest.Config{
+		Host:    subtreeIdentitiesServer.URL,
+		APIPath: "/apis",
+		ContentConfig: rest.ContentConfig{
+			GroupVersion:         &schema.GroupVersion{Group: "subresources.state-snapshotter.deckhouse.io", Version: "v1alpha1"},
+			NegotiatedSerializer: clientgoscheme.Codecs.WithoutConversion(),
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider, controllers.WithSnapshotSubresourceREST(subtreeIdentitiesREST))).To(Succeed())
 	// Core is demo-free: no dedicated domain-controller activators are wired here. Domain (demo) controller
 	// behavior is covered by the domain module's fake-client unit tests and by e2e; the unified runtime
 	// Syncer is exercised with generic CSD-gated pairs only.
@@ -866,6 +894,9 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
+	if subtreeIdentitiesServer != nil {
+		subtreeIdentitiesServer.Close()
+	}
 	err := testEnv.Stop()
 	Expect(err).NotTo(HaveOccurred())
 })

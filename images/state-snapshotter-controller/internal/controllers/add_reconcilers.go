@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -81,8 +82,19 @@ func NewCustomSnapshotDefinitionReconciler(
 	return csd.NewCustomSnapshotDefinitionReconciler(c, scheme, log, cfg)
 }
 
-func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
-	return snapshotcontroller.AddSnapshotControllerToManager(mgr, cfg, snapshotGraphRegistry)
+// SnapshotControllerOption re-exports snapshotcontroller.Option so callers outside the snapshot package
+// (e.g. the integration harness) can pass wiring overrides without importing the internal package.
+type SnapshotControllerOption = snapshotcontroller.Option
+
+// WithSnapshotSubresourceREST re-exports snapshotcontroller.WithSubresourceREST: it overrides the
+// aggregated-subresource REST client the snapshot reconciler uses for the root manifest-exclude self-call
+// (subtree-manifest-identities). The integration harness injects a client pointed at a fake HTTP server.
+func WithSnapshotSubresourceREST(rc rest.Interface) SnapshotControllerOption {
+	return snapshotcontroller.WithSubresourceREST(rc)
+}
+
+func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader, opts ...SnapshotControllerOption) error {
+	return snapshotcontroller.AddSnapshotControllerToManager(mgr, cfg, snapshotGraphRegistry, opts...)
 }
 
 // AddManifestCheckpointControllerToManager adds the ManifestCheckpoint controller to the manager

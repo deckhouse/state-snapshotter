@@ -34,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -71,11 +70,10 @@ type GenericSnapshotBinderController struct {
 	activeSnapshotWatchSet map[string]struct{} // snapshot GVK String() -> watch registered with manager
 
 	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
-	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase) while this
-	// binder owns all SnapshotContent work for them: children/dataRefs projection, VSC ownership handoff,
-	// MCR/VCR cleanup and the core-owned capture-leg latches
-	// (status.captureState.commonController.manifestCaptured/dataCaptured). Generic (non-domain) kinds keep
-	// the MCP-only projection and are never in this set. Guarded by domainCaptureMu.
+	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase). The binder
+	// uses the set only to gate eager content-shell creation on the domain claim (domainHasClaimed) — the
+	// capture-leg latches, the request reap, and all status projection are main-owned
+	// (SnapshotContentController, decision #10). Guarded by domainCaptureMu.
 	domainCaptureMu   sync.RWMutex
 	domainCaptureGVKs map[string]struct{}
 }
@@ -417,38 +415,16 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		logger.V(1).Info("Content shell created+bound; waiting for domain controller to reach capture phase Planned before projecting status legs")
 		return ctrl.Result{}, nil
 	}
-	// Declare the applicable core-owned capture legs (commonController.manifestCaptured/dataCaptured=false)
-	// once the domain takes over, so the SDK sees them and can compute CoreCaptureOutcome. Idempotent.
-	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
-		if err := r.eagerInitCaptureLegs(ctx, obj); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+	// Main-owned commonController (decision #10): the capture-leg eager-init, the
+	// manifestCaptured/dataCaptured latches, and the MCR/VCR reap moved to the SnapshotContentController
+	// (capture_legs.go) — the binder is a pure creator and writes no captureState. A data-leg terminal
+	// (failed VCR) is surfaced by main's owner Ready mirror, not co-written here.
 
-	// Step 4: Populate SnapshotContent links from MCR/VCR (if present and Ready)
+	// Step 4: mirror the self-contained captured-volume descriptor (source/artifact + volume metadata)
+	// from the bound content's status.data onto the data leaf snapshot's top-level status.data, so d8
+	// reads it namespaced on export. data-artifact leaves only — manifest-only kinds have no data binding.
+	// No-op until the content publishes status.data.
 	if contentName != "" {
-		requeue, terminalReason, terminalMessage, err := r.ensureSnapshotContentLinks(ctx, snapshotLike, obj, contentName)
-		if err != nil {
-			logger.Error(err, "Failed to ensure SnapshotContent links")
-			return ctrl.Result{}, err
-		}
-		if terminalReason != "" {
-			// Actionable capture failure (e.g. data-leg VolumeCaptureRequest failed) surfaced as a
-			// Ready=False on the snapshot. The bound SnapshotContent stays pending (no dataRefs), so the
-			// pure content mirror could not express this terminal reason; the binder co-writes it directly.
-			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, terminalReason, terminalMessage); perr != nil {
-				return ctrl.Result{}, perr
-			}
-			return ctrl.Result{}, nil
-		}
-		if requeue {
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		// Mirror the self-contained captured-volume descriptor (source/artifact + volume metadata) from the
-		// bound content's status.data onto the data leaf snapshot's top-level status.data, so d8 reads it
-		// namespaced on export. data-artifact leaves only — manifest-only kinds have no data binding. No-op
-		// until the content publishes status.data.
 		if r.GVKRegistry.RequiresDataArtifact(obj.GetObjectKind().GroupVersionKind().Kind) {
 			if err := r.mirrorLeafDataFromContent(ctx, obj, contentName, ""); err != nil {
 				logger.Error(err, "Failed to mirror captured volume data to leaf status")
@@ -496,42 +472,6 @@ func contentSnapshotRefMatchesSnapshot(content *unstructured.Unstructured, snaps
 		getStr("kind") == snapshotGVK.Kind &&
 		getStr("name") == obj.GetName() &&
 		getStr("namespace") == obj.GetNamespace()
-}
-
-// ensureSnapshotContentLinks runs the binder-side (creator) SnapshotContent projection that has NOT moved
-// to the SnapshotContentController aggregator.
-//
-// The manifest checkpoint pointer (SnapshotContent.status.manifestCheckpointName) is now projected by the
-// aggregator (reconcileManifestCheckpointNameProjection, content-single-writer design §3.1/§3.2), so the
-// binder no longer reads the MCR to publish it. For domain capture kinds (see MarkDomainCaptureKind) the
-// binder still runs the request lifecycle the domain controller no longer owns: it projects dataRefs,
-// performs the VolumeSnapshotContent ownership handoff, cleans up the domain MCR/VCR after a durable
-// handoff, and stamps the domain-only capture markers
-// (status.captureState.commonController.manifestCaptured / dataCaptured) that suppress request re-creation.
-// A non-empty terminalReason is an actionable capture failure to surface as Ready=False.
-func (r *GenericSnapshotBinderController) ensureSnapshotContentLinks(
-	ctx context.Context,
-	_ snapshot.SnapshotLike,
-	obj *unstructured.Unstructured,
-	contentName string,
-) (requeue bool, terminalReason string, terminalMessage string, err error) {
-	// The binder only needs the domain MCR name to run the domain request lifecycle (delete-after-handoff +
-	// manifestCaptured latch in ensureDomainContentLinks). The MCP name projection onto the content is the
-	// aggregator's job now.
-	mcrName, _, err := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "manifestCaptureRequestName")
-	if err != nil {
-		return false, "", "", err
-	}
-
-	if !r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
-		return false, "", "", nil
-	}
-
-	domainRequeue, treason, tmsg, derr := r.ensureDomainContentLinks(ctx, obj, contentName, mcrName)
-	if derr != nil {
-		return false, "", "", derr
-	}
-	return domainRequeue, treason, tmsg, nil
 }
 
 func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
@@ -773,15 +713,8 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		logger.V(1).Info("Failed to mirror SnapshotContent excludedRefs; will retry", "error", err.Error())
 	}
 
-	// Mirror the bound content's recursive subtreeManifestsPersisted latch onto this domain CR's
-	// core-owned commonController.subtreeManifestsPersisted, so a parent aggregator can read its
-	// children's namespaced mirror as the manifest-exclude pre-gate (see the subtree-manifest-identities
-	// subresource). Domain-capture kinds only (commonController is a capture-mode structure); best-effort.
-	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) {
-		if err := r.mirrorSubtreeManifestsPersistedFromContent(ctx, obj, contentObj); err != nil {
-			logger.V(1).Info("Failed to mirror SnapshotContent subtreeManifestsPersisted; will retry", "error", err.Error())
-		}
-	}
+	// The subtreeManifestsPersisted mirror onto commonController moved to main
+	// (snapshotcontent/capture_legs.go — main-owned commonController, decision #10).
 
 	// Steady-state Ready (content.Ready mirror + phase=Failed bubble + barrier-2 gate) is owned by the
 	// SnapshotContentController's single post-bind writer; the binder does not re-derive it here.
@@ -946,10 +879,9 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// per-poll re-check that previously gated children on the Reconcile RequeueAfter fallback. See
 		// mapParentContentToChildSnapshots.
 		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapParentContentToChildSnapshots(gvk))).
-		// Event-driven capture handoff: when an MCR publishes its checkpoint, wake the owning snapshot so
-		// the binder publishes SnapshotContent.status.manifestCheckpointName immediately instead of on the
-		// next poll. See mapMCRToOwningSnapshots.
-		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(r.mapMCRToOwningSnapshots(gvk))).
+		// No MCR watch: the binder no longer latches/reaps the capture legs (main-owned commonController,
+		// decision #10) — the aggregator carries its own MCR watch (mapMCRToBoundContent) for the
+		// projection + latch + reap lifecycle.
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 	return builder.Complete(r)
 }

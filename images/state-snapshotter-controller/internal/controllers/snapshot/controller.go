@@ -19,7 +19,6 @@ package snapshot
 import (
 	"context"
 	"fmt"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -28,8 +27,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -42,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -67,8 +69,45 @@ type SnapshotReconciler struct {
 	Config                *config.Options
 	Archive               *usecase.ArchiveService
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
-	Mgr                   ctrl.Manager
-	childWatchMgr         *snapshotDynamicWatchManager
+	// SubresourceREST is the aggregated-subresource REST client the capture SDK uses for the root's
+	// manifest-exclude leg (snapshotsdk.SubtreeManifestIdentities -> snapshotcontents/<name>/
+	// subtree-manifest-identities). Built from the manager rest.Config by default; overridable via
+	// WithSubresourceREST for envtest, where the aggregated APIService is not registered and a fake HTTP
+	// server stands in. A childless root never issues the self-call (the SDK short-circuits), so this may
+	// be nil for leaf-only setups.
+	SubresourceREST rest.Interface
+	Mgr             ctrl.Manager
+	childWatchMgr   *snapshotDynamicWatchManager
+}
+
+// coreSubresourceGroupVersion is the core controller's aggregated subresources API group/version. It only
+// satisfies rest.RESTClientFor; the SDK's subtree-manifest-identities request uses AbsPath with the full
+// path, so this GroupVersion never shapes the URL (mirrors domainapi.NewCoreManifestsClient).
+var coreSubresourceGroupVersion = schema.GroupVersion{
+	Group:   "subresources.state-snapshotter.deckhouse.io",
+	Version: "v1alpha1",
+}
+
+// Option customizes AddSnapshotControllerToManager wiring.
+type Option func(*SnapshotReconciler)
+
+// WithSubresourceREST overrides the aggregated-subresource REST client the reconciler wires into the
+// capture SDK (see SnapshotReconciler.SubresourceREST). Tests (envtest) inject a client pointed at a fake
+// subtree-manifest-identities HTTP server; production leaves it unset and the manager rest.Config is used.
+func WithSubresourceREST(rc rest.Interface) Option {
+	return func(r *SnapshotReconciler) { r.SubresourceREST = rc }
+}
+
+// newSnapshotSubresourceRESTClient builds the aggregated-subresource REST client from an in-cluster
+// rest.Config (mirrors domainapi.NewCoreManifestsClient: placeholder GroupVersion/APIPath/serializer, the
+// real path is set via AbsPath by the SDK).
+func newSnapshotSubresourceRESTClient(cfg *rest.Config) (rest.Interface, error) {
+	cfgCopy := rest.CopyConfig(cfg)
+	cfgCopy.APIPath = "/apis"
+	gv := coreSubresourceGroupVersion
+	cfgCopy.GroupVersion = &gv
+	cfgCopy.NegotiatedSerializer = clientgoscheme.Codecs.WithoutConversion()
+	return rest.RESTClientFor(cfgCopy)
 }
 
 // selfSubjectAccessReviewer is the minimal SelfSubjectAccessReview creator used by the capture-RBAC gate
@@ -99,7 +138,7 @@ func (r *SnapshotReconciler) snapshotReader() client.Reader {
 // AddSnapshotControllerToManager registers the Snapshot reconciler.
 // snapshotGraphRegistry provides CSD/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
 // Child snapshot watches are registered dynamically from the live registry (see snapshotDynamicWatchManager).
-func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
+func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader, opts ...Option) error {
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}
@@ -135,6 +174,18 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		Archive:               usecase.NewArchiveService(mgr.GetAPIReader(), mgr.GetAPIReader(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
+	}
+	// Options may override SubresourceREST (envtest injects a fake). Otherwise build the in-cluster client
+	// used for the root's manifest-exclude self-call (subtree-manifest-identities).
+	for _, opt := range opts {
+		opt(r)
+	}
+	if r.SubresourceREST == nil {
+		subresourceREST, err := newSnapshotSubresourceRESTClient(mgr.GetConfig())
+		if err != nil {
+			return fmt.Errorf("snapshot controller: subresource REST client: %w", err)
+		}
+		r.SubresourceREST = subresourceREST
 	}
 	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
 	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {

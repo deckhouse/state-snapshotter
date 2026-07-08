@@ -86,46 +86,6 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 }
 
-// stampRootManifestCaptured maintains the root Snapshot's captureState.commonController.manifestCaptured
-// leg latch — the monotonic signal the per-namespace capture RBAC hook (040) reads to drop the transient
-// wide-read RoleBinding. It replaces the former ManifestsArchived condition mirror.
-//
-// The core eager-initializes the leg to false when capture starts (captured == false: the field's
-// presence declares the leg) and monotonically flips it to true once the bound content's subtree
-// manifests are persisted (SnapshotContent.status.subtreeManifestsPersisted). The root MCR is
-// subtree-gated by the wave barrier, so this reproduces the old ManifestsArchived=True timing. The latch
-// is success-only and never re-opened (a transient content read that momentarily lost the signal must
-// not downgrade it).
-func (r *SnapshotReconciler) stampRootManifestCaptured(
-	ctx context.Context,
-	parentKey types.NamespacedName,
-	captured bool,
-) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.Snapshot{}
-		if err := r.Client.Get(ctx, parentKey, cur); err != nil {
-			return err
-		}
-		// Monotonic: never downgrade a true latch.
-		if cs := cur.Status.CaptureState; cs != nil && cs.CommonController != nil &&
-			cs.CommonController.ManifestCaptured != nil && *cs.CommonController.ManifestCaptured {
-			return nil
-		}
-		if cur.Status.CaptureState == nil {
-			cur.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{}
-		}
-		if cur.Status.CaptureState.CommonController == nil {
-			cur.Status.CaptureState.CommonController = &storagev1alpha1.CommonControllerCaptureState{}
-		}
-		if existing := cur.Status.CaptureState.CommonController.ManifestCaptured; existing != nil && *existing == captured {
-			return nil
-		}
-		v := captured
-		cur.Status.CaptureState.CommonController.ManifestCaptured = &v
-		return r.Client.Status().Update(ctx, cur)
-	})
-}
-
 // mirrorSnapshotReadyFromBoundContent sets the parent Snapshot.Ready to a verbatim mirror of the bound
 // SnapshotContent.Ready (status/reason/message), gen-gated on the Snapshot. This enforces the
 // single-aggregator contract during the pre-capture pending window (the parent cannot build its own

@@ -18,55 +18,48 @@ package usecase
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
-// Run-graph errors for root manifest capture (INV-S0 / INV-E1, E5).
+// Run-graph errors for root manifest capture. ErrRunGraphChildSnapshotNotFound / ErrRunGraphChildNotBound
+// are returned by ResolveChildSnapshotRefToBoundContentName (child_snapshot_resolve.go) — kept here as the
+// shared run-graph error vocabulary — and surface transiently through the orphan-coverage walk while a
+// child is still binding. The subtree manifest-exclude set is no longer computed in-reconciler (see
+// BuildRootNamespaceManifestCaptureTargets): the fail-closed subtree readiness / not-Ready / double-capture
+// signalling now lives in the subtree-manifest-identities service endpoint and surfaces on the SDK side as
+// snapshotsdk.ErrSubtreeIdentitiesPending.
 var (
 	ErrRunGraphChildSnapshotNotFound = errors.New("child snapshot object not found for status.childrenSnapshotRefs entry")
 	ErrRunGraphChildNotBound         = errors.New("child snapshot has empty boundSnapshotContentName")
-	ErrRunGraphChildNotReachable     = errors.New("child snapshot content not reachable from root SnapshotContent via childrenSnapshotContentRefs graph")
-	// ErrSubtreeManifestCapturePending is returned when exclude cannot be computed yet because a descendant
-	// SnapshotContent has no MCP link or the MCP is not Ready (fail-closed: do not create root MCR with an incomplete exclude set).
-	ErrSubtreeManifestCapturePending = errors.New("subtree manifest capture pending for root exclude")
-	// ErrSubtreeManifestCaptureFailed is returned when a descendant ManifestCheckpoint is terminally Failed
-	// (distinct from pending / not Ready yet).
-	ErrSubtreeManifestCaptureFailed = errors.New("subtree manifest capture failed for root exclude")
 )
 
-// BuildRootNamespaceManifestCaptureTargets builds Snapshot own targets for the resolved
-// target namespace: namespace-scoped allowlist targets, then, when the root Snapshot has
-// status.childrenSnapshotRefs, subtracts manifest objects already captured in descendant content-node
-// ManifestCheckpoints reachable only via that ref graph.
-// It does not list unrelated snapshots in the namespace to infer subtree membership (INV-S0).
+// BuildRootNamespaceManifestCaptureTargets builds the root Snapshot's own manifest targets for the resolved
+// target namespace: the namespace-scoped allowlist base MINUS (a) the residual/orphan root-owned PVC
+// manifests (each captured by its own VolumeSnapshot domain child) and (b) the subtree identities already
+// captured by descendant content nodes.
 //
-// Child snapshot refs carry explicit apiVersion/kind/name (strict); subtree traversal reads the common
-// SnapshotContent tree by status.childrenSnapshotContentRefs.
-//
-// When status.childrenSnapshotRefs is empty, behavior matches N2a root capture: full
-// namespace-scoped allowlist without subtree exclude.
-//
-// While childrenSnapshotRefs is non-empty, descendant content nodes reached from the root must publish
-// a Ready ManifestCheckpoint before exclude keys are derived; otherwise ErrSubtreeManifestCapturePending.
+// The subtree exclude set (b) is supplied by the caller via subtreeExclude — the union of object identities
+// returned by the snapshotcontents/<name>/subtree-manifest-identities service endpoint
+// (snapshotsdk.SubtreeManifestIdentities), walked over the DIRECT children's bound content subtrees. That
+// endpoint is FAIL-CLOSED: while any descendant ManifestCheckpoint is not Ready (or a child has not bound
+// its content, or an object is double-captured) it returns 409 -> ErrSubtreeIdentitiesPending on the SDK
+// side, and the caller requeues WITHOUT calling this builder — so a non-empty subtreeExclude here is always
+// a complete, consistent subtree set (the wave barrier the in-reconciler archive read used to enforce is
+// now the endpoint's job). When the root has no children the caller passes an empty subtreeExclude and this
+// degenerates to the full namespace-scoped allowlist minus the residual PVCs.
 func BuildRootNamespaceManifestCaptureTargets(
 	ctx context.Context,
-	arch *ArchiveService,
 	dyn dynamic.Interface,
 	disco discovery.DiscoveryInterface,
 	c client.Reader,
@@ -74,29 +67,13 @@ func BuildRootNamespaceManifestCaptureTargets(
 	rootContentName string,
 	snapshotKinds namespacemanifest.SnapshotMachineryGVKs,
 	dataBearing volumecaptureuc.DataBearingKindFunc,
+	subtreeExclude []snapshotsdk.SubtreeManifestIdentity,
 ) ([]namespacemanifest.ManifestTarget, []schema.GroupVersionResource, error) {
-	if arch == nil {
-		return nil, nil, fmt.Errorf("archive service is required for root capture when childrenSnapshotRefs may be set")
-	}
 	targetNamespace := ResolveSnapshotTargetNamespace(rootNS)
 
 	rootContent := &storagev1alpha1.SnapshotContent{}
 	if err := c.Get(ctx, client.ObjectKey{Name: rootContentName}, rootContent); err != nil {
 		return nil, nil, fmt.Errorf("get root SnapshotContent %q: %w", rootContentName, err)
-	}
-
-	// Subtree readiness pre-check BEFORE the expensive full-namespace discovery listing. While the root has
-	// a real subtree, descendant content nodes must publish a Ready ManifestCheckpoint before the exclude
-	// set can be computed; otherwise this returns ErrSubtreeManifestCapturePending/...Failed. Computing it
-	// first avoids listing the whole namespace on every requeue while children are still publishing MCPs.
-	hasSubtree := len(rootNS.Status.ChildrenSnapshotRefs) > 0 || len(rootContent.Status.ChildrenSnapshotContentRefs) > 0
-	var subtreeExcl map[string]struct{}
-	if hasSubtree {
-		var err error
-		subtreeExcl, err = collectRunSubtreeManifestExcludeKeys(ctx, arch, c, rootNS, rootContentName)
-		if err != nil {
-			return nil, nil, err
-		}
 	}
 
 	ownedPVC, err := volumecaptureuc.OwnedPVCManifestTargetsForSnapshot(ctx, c, rootNS, rootContent, dataBearing)
@@ -125,166 +102,29 @@ func BuildRootNamespaceManifestCaptureTargets(
 	// double-capturing the PVC manifest on both the root and the child (co-ownership violation, spec §3.9.2).
 	// Every residual root PVC goes through ensureOrphanPVCVolumeSnapshots → VolumeSnapshot child, so dropping
 	// them here never loses a manifest.
-	exclude := make(map[string]struct{}, len(ownedPVC)+len(subtreeExcl))
+	exclude := make(map[string]struct{}, len(ownedPVC)+len(subtreeExclude))
 	for _, t := range ownedPVC {
 		exclude[namespacemanifest.ManifestTargetDedupKey(targetNamespace, t)] = struct{}{}
 	}
-	// When the root has a real subtree (domain children or linked child volume nodes), also subtract the
-	// manifest objects already captured in descendant content-node ManifestCheckpoints (E5 / INV-S0). This
-	// covers domain-owned PVC manifests (which never appear in the root residual set) and is the durable
-	// dedup once children publish their MCPs.
-	for k := range subtreeExcl {
-		exclude[k] = struct{}{}
+	// Subtract the manifest objects already captured across descendant content-node subtrees (E5 / INV-S0),
+	// as reported by the subtree-manifest-identities endpoint. This covers domain-owned PVC manifests (which
+	// never appear in the root residual set) and is the durable dedup once children publish their MCPs.
+	for _, id := range subtreeExclude {
+		exclude[subtreeIdentityExcludeKey(id)] = struct{}{}
 	}
 	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), unreadable, nil
 }
 
-func collectRunSubtreeManifestExcludeKeys(
-	ctx context.Context,
-	arch *ArchiveService,
-	c client.Reader,
-	rootNS *storagev1alpha1.Snapshot,
-	rootContentName string,
-) (map[string]struct{}, error) {
-	visited := make(map[string]struct{})
-	exclude := make(map[string]struct{})
-
-	visitContent := func(ctx context.Context, content *storagev1alpha1.SnapshotContent) error {
-		visited[content.Name] = struct{}{}
-		if content.Name == rootContentName {
-			return nil
-		}
-		return appendManifestCheckpointObjectsToExclude(ctx, arch, c, content.Status.ManifestCheckpointName, fmt.Sprintf("SnapshotContent %q", content.Name), exclude)
-	}
-
-	if err := WalkSnapshotContentSubtree(ctx, c, rootContentName, visitContent); err != nil {
-		return nil, err
-	}
-
-	for i := range rootNS.Status.ChildrenSnapshotRefs {
-		ch := rootNS.Status.ChildrenSnapshotRefs[i]
-		resolved, err := ResolveChildSnapshotRefToBoundContentName(ctx, c, ch, rootNS.Namespace)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := visited[resolved]; !ok {
-			return nil, fmt.Errorf("%w: childrenSnapshotRefs %s/%s -> %q not visited from root SnapshotContent %q",
-				ErrRunGraphChildNotReachable, rootNS.Namespace, ch.Name, resolved, rootContentName)
-		}
-		// Wave barrier: the direct child's whole subtree must be ManifestsArchived before the root MCR is
-		// built. See requireContentManifestsArchived.
-		if err := requireContentManifestsArchived(ctx, c, resolved); err != nil {
-			return nil, err
-		}
-	}
-
-	return exclude, nil
-}
-
-// requireContentManifestsArchived is the wave barrier for root manifest capture: a declared direct child
-// of the root snapshot must have its bound SnapshotContent at subtreeManifestsPersisted=true before the
-// root MCR is built. Because the content-node subtreeManifestsPersisted latch is fail-closed against
-// declared-but-unlinked children (see snapshotcontent.aggregateChildrenSubtreeManifestsPersisted), a
-// direct child's true transitively guarantees its ENTIRE subtree persisted its manifests and is fully
-// edge-linked. That makes WalkSnapshotContentSubtree reach every descendant content, so the exclude set
-// is complete and a descendant-captured object can never leak back into the root MCP (the 409
-// duplicate-object race).
-//
-// A child not yet persisted -> ErrSubtreeManifestCapturePending (transient requeue); a child whose bound
-// SnapshotContent has a terminal Ready reason (IsReasonTerminal) -> ErrSubtreeManifestCaptureFailed. The
-// latch itself is success-only (no Failed value); the terminal signal is the Ready reason.
-//
-// The root's OWN subtreeManifestsPersisted is intentionally NOT consulted: it can only become true after
-// the root MCR exists and is processed AND all children persisted, so gating root-MCR creation on it
-// would be circular and deadlock.
-func requireContentManifestsArchived(ctx context.Context, c client.Reader, contentName string) error {
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("%w: direct child SnapshotContent %q not found (subtree not persisted yet)",
-				ErrSubtreeManifestCapturePending, contentName)
-		}
-		return fmt.Errorf("get direct child SnapshotContent %q: %w", contentName, err)
-	}
-	if content.Status.SubtreeManifestsPersisted {
-		return nil
-	}
-	readyCond := meta.FindStatusCondition(content.Status.Conditions, snapshotpkg.ConditionReady)
-	if readyCond != nil && readyCond.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonTerminal(readyCond.Reason) {
-		return fmt.Errorf("%w: direct child SnapshotContent %q: %s",
-			ErrSubtreeManifestCaptureFailed, contentName, readyCond.Message)
-	}
-	return fmt.Errorf("%w: direct child SnapshotContent %q subtreeManifestsPersisted not yet true",
-		ErrSubtreeManifestCapturePending, contentName)
-}
-
-func appendManifestCheckpointObjectsToExclude(
-	ctx context.Context,
-	arch *ArchiveService,
-	c client.Reader,
-	mcpName string,
-	contentDescription string,
-	exclude map[string]struct{},
-) error {
-	if mcpName == "" {
-		return fmt.Errorf("%w: %s has empty manifestCheckpointName (subtree capture not finished)",
-			ErrSubtreeManifestCapturePending, contentDescription)
-	}
-	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := c.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("%w: ManifestCheckpoint %q for %s not found (exclude set would be incomplete)",
-				ErrSubtreeManifestCapturePending, mcpName, contentDescription)
-		}
-		return fmt.Errorf("get ManifestCheckpoint %q: %w", mcpName, err)
-	}
-	readyCond := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
-	if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
-		readyCond.Reason == ssv1alpha1.ManifestCheckpointConditionReasonFailed {
-		return fmt.Errorf("%w: ManifestCheckpoint %q for %s: %s",
-			ErrSubtreeManifestCaptureFailed, mcpName, contentDescription, readyCond.Message)
-	}
-	if readyCond == nil || readyCond.Status != metav1.ConditionTrue {
-		return fmt.Errorf("%w: ManifestCheckpoint %q for %s is not Ready (exclude set would be incomplete)",
-			ErrSubtreeManifestCapturePending, mcpName, contentDescription)
-	}
-	req := &ArchiveRequest{
-		CheckpointName:  mcpName,
-		CheckpointUID:   string(mcp.UID),
-		SourceNamespace: mcp.Spec.SourceNamespace,
-	}
-	raw, _, err := arch.GetArchiveFromCheckpoint(ctx, mcp, req)
-	if err != nil {
-		return fmt.Errorf("read ManifestCheckpoint %q archive: %w", mcpName, err)
-	}
-	var arr []map[string]interface{}
-	if err := json.Unmarshal(raw, &arr); err != nil {
-		return fmt.Errorf("decode ManifestCheckpoint %q JSON: %w", mcpName, err)
-	}
-	for _, obj := range arr {
-		k, err := manifestObjectIdentityKeyFromMap(obj)
-		if err != nil {
-			return fmt.Errorf("ManifestCheckpoint %q: %w", mcpName, err)
-		}
-		exclude[k] = struct{}{}
-	}
-	return nil
-}
-
-func manifestObjectIdentityKeyFromMap(obj map[string]interface{}) (string, error) {
-	apiVersion, _ := obj["apiVersion"].(string)
-	kind, _ := obj["kind"].(string)
-	meta, ok := obj["metadata"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("object missing metadata")
-	}
-	name, _ := meta["name"].(string)
-	ns, _ := meta["namespace"].(string)
-	if apiVersion == "" || kind == "" || name == "" {
-		return "", fmt.Errorf("object missing apiVersion, kind, or metadata.name")
-	}
+// subtreeIdentityExcludeKey renders a subtree-manifest identity to the same dedup key
+// namespacemanifest.ManifestTargetDedupKey / aggregatedObjectIdentityKey use (apiVersion|kind|ns|name, with
+// a cluster-scoped object's empty namespace normalized to "_cluster"), so an identity captured in a
+// descendant subtree matches and drops the corresponding base target for the same object. The identity's
+// uid is intentionally NOT part of the key (a recreated object of the same name is still the same manifest
+// slot for exclude purposes).
+func subtreeIdentityExcludeKey(id snapshotsdk.SubtreeManifestIdentity) string {
+	ns := id.Namespace
 	if ns == "" {
 		ns = "_cluster"
 	}
-	return fmt.Sprintf("%s|%s|%s|%s", apiVersion, kind, ns, name), nil
+	return fmt.Sprintf("%s|%s|%s|%s", id.APIVersion, id.Kind, ns, id.Name)
 }

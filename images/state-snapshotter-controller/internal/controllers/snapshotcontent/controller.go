@@ -91,6 +91,44 @@ type SnapshotContentController struct {
 	watchMu                sync.RWMutex
 	activeContentWatchSet  map[string]struct{} // SnapshotContent GVK String()
 	activeSnapshotWatchSet map[string]struct{} // Snapshot GVK String() -> status watch registered with manager
+
+	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
+	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase). For these
+	// owners main runs the capture-leg lifecycle (main-owned commonController, decision #10): eager-init +
+	// manifestCaptured/dataCaptured latches + subtreeManifestsPersisted mirror, written sideways onto the
+	// xxxSnapshot, and the MCR/VCR reap after a durable handoff (latch-before-reap). Marked by the same
+	// callers that mark the binder (unifiedruntime.Syncer, main.go). Guarded by domainCaptureMu.
+	domainCaptureMu   sync.RWMutex
+	domainCaptureGVKs map[string]struct{}
+}
+
+// MarkDomainCaptureKind records that snapshot GVK is reconciled by a dedicated domain controller for
+// planning, so main runs the capture-leg lifecycle for its contents (see domainCaptureGVKs). Idempotent.
+func (r *SnapshotContentController) MarkDomainCaptureKind(gvk schema.GroupVersionKind) {
+	r.domainCaptureMu.Lock()
+	defer r.domainCaptureMu.Unlock()
+	if r.domainCaptureGVKs == nil {
+		r.domainCaptureGVKs = make(map[string]struct{})
+	}
+	r.domainCaptureGVKs[gvk.String()] = struct{}{}
+}
+
+func (r *SnapshotContentController) isDomainCaptureKind(gvk schema.GroupVersionKind) bool {
+	r.domainCaptureMu.RLock()
+	defer r.domainCaptureMu.RUnlock()
+	_, ok := r.domainCaptureGVKs[gvk.String()]
+	return ok
+}
+
+// MarkRequiresDataArtifact records whether a snapshot Kind carries a volume data leg (CSD
+// spec.requiresDataArtifact) on this controller's GVK registry, so the capture-leg eager-init knows
+// whether to declare commonController.dataCaptured. Mirrors the binder's method (the two controllers
+// hold separate registries); marked by the same callers. Guarded by watchMu (the lock that serializes
+// registry mutations in AddSnapshotStatusWatch).
+func (r *SnapshotContentController) MarkRequiresDataArtifact(snapshotKind string, requiresDataArtifact bool) {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	r.GVKRegistry.MarkRequiresDataArtifact(snapshotKind, requiresDataArtifact)
 }
 
 const defaultSnapshotContentRequeueAfter = 500 * time.Millisecond
@@ -406,12 +444,23 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
 	}
+	// Main-owned capture legs (decision #10): eager-init + latch the owner's commonController legs and
+	// reap the domain MCR/VCR after a durable handoff — latch strictly before the delete, same pass, so
+	// the domain SDK's uncached latch read never observes a reaped request with a false latch (no
+	// re-creation churn). A leg-terminal (failed VCR / Variant-A fault) is folded into the owner Ready
+	// mirror below — the same-pass fold keeps the terminal stable across mirror passes (recomputed while
+	// the failed VCR exists) instead of a separate co-write the mirror would race.
+	legsRequeue, legTermReason, legTermMessage, err := r.reconcileOwnerCaptureLegs(ctx, obj)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile owner capture legs")
+		return ctrl.Result{}, err
+	}
 	// w7-main-split: mirror the just-computed content.Ready onto the owning Snapshot in the SAME pass
 	// (owner resolved from spec.snapshotRef; post-bind writer switch on status.boundSnapshotContentName).
 	// Runs regardless of `ready` so a content.Ready=False (e.g. ManifestCapturePending) is reflected on the
 	// Snapshot too. Removing the cross-controller hop is what closes the staleness window where the binder
 	// re-derived a stale Ready. On a transient API error, requeue and retry.
-	if err := r.mirrorReadyToOwnerSnapshot(ctx, obj); err != nil {
+	if err := r.mirrorReadyToOwnerSnapshot(ctx, obj, legTermReason, legTermMessage); err != nil {
 		logger.Error(err, "Failed to mirror content Ready onto owner Snapshot")
 		return ctrl.Result{}, err
 	}
@@ -420,7 +469,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
 	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
 	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
-	if !ready || edgesRequeue || mcpRequeue || dataRequeue {
+	if !ready || edgesRequeue || mcpRequeue || dataRequeue || legsRequeue {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 

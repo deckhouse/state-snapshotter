@@ -131,11 +131,12 @@ func TestWeightLayerCaptureReady(t *testing.T) {
 	})
 }
 
-// domainChildReady builds a bound child snapshot whose capture phase reflects whether it has reached
-// barrier 1: planned==true sets domainSpecificController.phase=Planned (opens the orphan-PVC final-wave
-// gate), planned==false sets phase=Planning (still pending). Block 5 relaxed the gate
-// (allDeclaredDomainChildSnapshotsReady) from full Ready=True to phase>=Planned, so this fixture keys on
-// the domain capture phase, not the Ready condition.
+// domainChildReady builds a bound child snapshot whose recursive planning latch reflects whether its
+// subtree finished planning: planned==true sets phase=Planned AND the main-computed
+// commonController.subtreePlanned=true (opens the orphan-PVC final-wave gate), planned==false sets
+// phase=Planning with no latch (still pending). Block 5 relaxed the gate from full Ready=True to
+// phase>=Planned; Block 7b tightened it to the recursive subtreePlanned latch, so this fixture keys on
+// that latch (the phase is kept for the pending descriptor).
 func domainChildReady(name string, planned bool) *unstructured.Unstructured {
 	phase := storagev1alpha1.SnapshotCapturePhasePlanned
 	if !planned {
@@ -145,13 +146,18 @@ func domainChildReady(name string, planned bool) *unstructured.Unstructured {
 	if err := unstructured.SetNestedField(child.Object, "content-"+name, "status", "boundSnapshotContentName"); err != nil {
 		panic(err)
 	}
+	if planned {
+		if err := unstructured.SetNestedField(child.Object, true, "status", "captureState", "commonController", "subtreePlanned"); err != nil {
+			panic(err)
+		}
+	}
 	return child
 }
 
-// readyVSChild builds a bound orphan CSI VolumeSnapshot domain child at capture barrier 1 (phase=Planned).
-// Under the content-single-writer model an orphan VolumeSnapshot is an ordinary domain child (no longer a
-// skipped "visibility leaf"), so the final-wave gate (relaxed to phase>=Planned in Block 5) must treat it
-// exactly like any other domain child.
+// readyVSChild builds a bound orphan CSI VolumeSnapshot domain child whose subtree finished planning
+// (phase=Planned + commonController.subtreePlanned=true). Under the content-single-writer model an orphan
+// VolumeSnapshot is an ordinary domain child (no longer a skipped "visibility leaf"), so the final-wave
+// gate (Block 7b: recursive subtreePlanned) must treat it exactly like any other domain child.
 func readyVSChild(name, ns string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": snapshotpkg.CSISnapshotAPIVersion,
@@ -162,6 +168,9 @@ func readyVSChild(name, ns string) *unstructured.Unstructured {
 			"captureState": map[string]interface{}{
 				"domainSpecificController": map[string]interface{}{
 					"phase": string(storagev1alpha1.SnapshotCapturePhasePlanned),
+				},
+				"commonController": map[string]interface{}{
+					"subtreePlanned": true,
 				},
 			},
 		},
@@ -230,6 +239,24 @@ func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
 		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
 		if err != nil || ready || len(pending) != 1 {
 			t.Fatalf("closed gate expected with one pending, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+
+	// Block 7b tightening: a direct child that reached its OWN barrier 1 (phase=Planned) but whose subtree
+	// is not planned yet (main has not latched commonController.subtreePlanned, e.g. a grandchild is still
+	// planning) must keep the gate closed — direct phase>=Planned is no longer sufficient.
+	t.Run("child Planned but subtree not planned keeps gate closed", func(t *testing.T) {
+		child := demoSnapshotChildWithPhase("planned-no-subtree", storagev1alpha1.SnapshotCapturePhasePlanned)
+		if err := unstructured.SetNestedField(child.Object, "content-planned-no-subtree", "status", "boundSnapshotContentName"); err != nil {
+			t.Fatalf("set bound: %v", err)
+		}
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, []storagev1alpha1.SnapshotChildRef{childRef("planned-no-subtree")})
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected while the subtree latch is absent, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+		if !strings.Contains(pending[0], "subtree not planned yet") {
+			t.Fatalf("pending descriptor should explain the missing subtree latch, got %q", pending[0])
 		}
 	})
 }

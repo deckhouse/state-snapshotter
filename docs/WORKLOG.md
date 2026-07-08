@@ -1130,3 +1130,63 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   the content and sweeps the redundant keeper), so deleting the content GCs the checkpoint. The existing round-trip already
   exercises the binder-created import root (w8-block6b-2). e2e/tests compiles (go test -c) + vet + gofmt clean; not run live
   (compile-check only per the night-run plan).
+- **Design** (w8, plan-only, no code) Main-owned `commonController` decision (2026-07-08) — reverses the
+  §8.1 "binder computes subtreePlanned" RESOLVED scoping. The aggregator (`SnapshotContentController` / main)
+  becomes the sole writer of the whole `xxxSnapshot.status.captureState.commonController` sub-structure
+  (`manifestCaptured`/`dataCaptured` latches, `subtreeManifestsPersisted` mirror, `subtreePlanned`), written
+  **sideways** onto the snapshot (same path as the existing `Snapshot.Ready` mirror), and it performs the
+  MCR/VCR **reap** in the same pass; the binder becomes a pure creator (writes nothing on any `status`). Key
+  rationale captured: the leg latches are suppression markers read by the domain via an **authoritative
+  uncached read** when it sees the request absent, so the latch MUST be set on the snapshot **before** the
+  reap **by the reaper** — a "content field + binder mirror" scheme opens a suppression-timing window
+  (domain re-creates a just-reaped request), so the field stays snapshot-native + main-written (not
+  content-native + mirrored). Updated `docs/content-single-writer-design.md` (§2 diagram, §3 split, §8.1
+  writer, §11.4 dataCaptured) and the ADR `2026-06-29-unified-snapshots-overview.md` (component roles,
+  creator role, status model, subtreePlanned section, capture sequence diagram). Code (Block 7 subtreePlanned
+  via main + the latch/reap consolidation, drop the vestigial binder MCR-watch) deferred to a deliberate,
+  live-verified block per the direction change.
+- **Refactor** (w8-block7 Part A) Main-owned `commonController` latch+reap moved off the binder onto the
+  aggregator. The capture-leg lifecycle that lived in `genericbinder` (eager-init of the
+  `commonController.manifestCaptured`/`dataCaptured` legs, the monotonic latches, the
+  `subtreeManifestsPersisted` snapshot-mirror, and the MCR/VCR reap) now lives in
+  `snapshotcontent/capture_legs.go` (`reconcileOwnerCaptureLegs`), wired into the `SnapshotContentController`
+  reconcile loop and folded into the owner Ready mirror (`mirrorReadyToOwnerSnapshot` gained
+  `legTermReason`/`legTermMessage` for the same-pass data-leg terminal). The latch is written sideways on the
+  `xxxSnapshot` **before** the reap by the same actor, closing the suppression-timing window (decision #10).
+  The binder is now a pure creator: dropped `ensureSnapshotContentLinks`/`ensureDomainContentLinks`,
+  `eagerInitCaptureLegs`, `markCaptureLegCaptured`, `mirrorSubtreeManifestsPersistedFromContent`,
+  `deleteManifest/VolumeCaptureRequest`, and the vestigial MCR watch (`mcr_watch.go`); it keeps only the leaf
+  `status.data` export mirror. Tests: removed the now-moved binder tests (`domain_content_test.go` trimmed to
+  the leaf-mirror + binding-map tests, `subtree_mirror_test.go` deleted) and ported their coverage to the new
+  `snapshotcontent/capture_legs_test.go` (manifest/data latch+reap, native-CSI dataCaptured, pending-requeue,
+  failed-terminal, subtree-mirror monotonicity, eager-init, writer-switch/barrier guards); updated the
+  `mirrorReadyToOwnerSnapshot` call site for the new signature. build + vet + gofmt + full controller module
+  suite green.
+- **Bugfix** (w8-block7, tests) Deferred the stale `duplicate pvcUID in subtree fails closed with
+  DuplicateCoveredPVCUID` integration spec (`n5_pr7_two_pvc_integration_test.go`) to `PIt`. Investigation
+  (per direction: "if it's a real prod bug, fix prod until green") proved it is NOT a prod bug: the spec was
+  red on clean HEAD too (verified by stashing all Block 7 work and re-running — identical failure at the same
+  line), so Block 7 did not cause it. Root cause is the §8.5 data-bearing coverage gate:
+  `coveredPVCUIDsForContent` keys coverage on `RequiresDataArtifact(kind)` (CSD authority), and the spec's
+  synthetic children are core `Snapshot` (a built-in pair → not data-bearing), so their fixture `dataRef`s are
+  never read and the guard cannot fire in envtest. This is a DELIBERATE, pinned invariant —
+  `TestCollectSubtreeCoveredPVCUIDs_notDataBearingSkips` asserts a non-data-bearing child contributes nothing
+  EVEN with `status.data` present — so altering prod would break the design, not fix a bug. The guard itself
+  stays fully covered at the unit level by `TestCollectSubtreeCoveredPVCUIDs_duplicateUIDFailsClosed`
+  (data-bearing children). The spec's own sibling (`pending VCR spec.targets…`) was already `PIt` for the
+  identical "needs a registered data-bearing domain kind — out of scope for core envtest" reason; the dup-guard
+  spec was left active by a block5 oversight. Fixed the now-false "stays active" comment and added the deferral
+  rationale inline. Isolated pass green.
+- **Bugfix** (w8-block7 Part A, review) Removed the duplicate root-side writer of
+  `captureState.commonController.manifestCaptured`. Bugbot flagged that the namespace-root Snapshot is a
+  domain-capture kind (main.go dogfooding), so main's `reconcileOwnerCaptureLegs` already eager-inits + latches
+  + reaps the root's manifest leg, yet `SnapshotReconciler.stampRootManifestCaptured` (ready_patch.go, called
+  from namespace_capture_run.go step 7) still wrote the same field — a decision #10 single-writer violation
+  (Part A moved the binder's half to main but left the root reconciler's own stamp). The stamp could pre-latch
+  `manifestCaptured=true` (off `content.subtreeManifestsPersisted`) before main reaped the root MCR, making main
+  skip the reap (latch already true) and leak the transient MCR until the TTL sweeper. Deleted
+  `stampRootManifestCaptured` + its call; main is now the sole latch/reaper (verified safe: `EnsureManifestCapture`
+  always creates the root MCR and publishes `manifestCaptureRequestName`, so main always latches — even for an
+  empty exclude set). Removed the three `TestStampRootManifestCaptured*` unit tests (behavior now covered by
+  snapshotcontent/capture_legs_test.go), updated stale "binder/stamp latches" comments (namespace_capture_run.go,
+  snapshot_adapter.go). build + vet + gofmt + full unit suite + non-isolated integration pass green.

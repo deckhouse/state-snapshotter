@@ -145,7 +145,10 @@ func (s *Syncer) Sync(ctx context.Context) error {
 
 	for i := range state.ResolvedSnapshotGVKs {
 		snapGVK, contentGVK := state.ResolvedSnapshotGVKs[i], state.ResolvedContentGVKs[i]
+		// Both controllers hold separate GVK registries; mark them in lockstep — the binder's import path
+		// and main's capture-leg eager-init (main-owned commonController, decision #10) read the same flag.
 		s.snap.MarkRequiresDataArtifact(snapGVK.Kind, requiresDataArtifactByKind[snapGVK.Kind])
+		s.content.MarkRequiresDataArtifact(snapGVK.Kind, requiresDataArtifactByKind[snapGVK.Kind])
 		if err := s.content.AddSnapshotStatusWatch(s.mgr, snapGVK); err != nil {
 			s.log.Error(err, "add SnapshotContent snapshot status watch failed", "snapshot", snapGVK.String())
 			continue
@@ -178,7 +181,10 @@ func (s *Syncer) Sync(ctx context.Context) error {
 					continue
 				}
 			}
+			// Mark BOTH controllers: the binder gates eager shell creation on the domain claim; main runs
+			// the capture-leg lifecycle (latches + MCR/VCR reap, decision #10) for these kinds.
 			s.snap.MarkDomainCaptureKind(snapGVK)
+			s.content.MarkDomainCaptureKind(snapGVK)
 		} else {
 			// CSD-derived kind outside the SS-internal dedicated lists (e.g. storage-foundation's
 			// VolumeSnapshot, content-single-writer design §11.5): domain-capture BY DEFINITION. Its
@@ -188,6 +194,7 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			// The kind is intentionally NOT added to DedicatedSnapshotControllerKinds (that list is
 			// SS-internal in-process activation ordering).
 			s.snap.MarkDomainCaptureKind(snapGVK)
+			s.content.MarkDomainCaptureKind(snapGVK)
 		}
 		if err := s.snap.AddWatchForPair(s.mgr, snapGVK, contentGVK); err != nil {
 			s.log.Error(err, "add Snapshot watch failed", "snapshot", snapGVK.String())
