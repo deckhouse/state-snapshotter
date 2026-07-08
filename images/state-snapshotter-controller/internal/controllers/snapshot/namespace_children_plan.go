@@ -24,7 +24,10 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
@@ -157,7 +160,89 @@ func (r *SnapshotReconciler) planNamespaceChildren(ctx context.Context, nsSnap *
 		coverage = newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
 		layerStart = layerEnd
 	}
+	// Pre-Planned lost-child gate (Block E, case 4): the whole domain graph is now planned, so desiredRefs
+	// is the COMPLETE set of children whose sources are live. A previously-published domain child that has
+	// left that set (source gone) AND whose CR was also deleted is unrecoverable — surface it as a terminal
+	// ChildSnapshotLost instead of wedging the root forever on a dangling ref.
+	if reason, message, lostErr := r.detectLostDomainChildrenPrePlanned(ctx, nsSnap, desiredRefs); lostErr != nil {
+		return namespaceChildrenPlan{}, lostErr
+	} else if reason != "" {
+		return namespaceChildrenPlan{
+			desired:  desired,
+			excluded: topLevelDrops,
+			outcome:  namespaceChildrenTerminal,
+			reason:   reason,
+			message:  message,
+		}, nil
+	}
 	return namespaceChildrenPlan{desired: desired, excluded: topLevelDrops, outcome: namespaceChildrenAllPlanned}, nil
+}
+
+// namespaceDomainPrePlanned reports whether the root's domain half is still before capture barrier 1
+// (phase absent, or Planning). Past Planned/Finished/Failed the binder/main owns Snapshot.Ready, so the
+// pre-Planned reconciler MUST NOT write Ready (no dual-writer) — the pre-Planned lost-child gate is a
+// no-op there, and a lost declared child is instead surfaced by the main-side owner-mirror folds.
+func namespaceDomainPrePlanned(nsSnap *storagev1alpha1.Snapshot) bool {
+	cs := nsSnap.Status.CaptureState
+	if cs == nil || cs.DomainSpecificController == nil {
+		return true
+	}
+	switch cs.DomainSpecificController.Phase {
+	case storagev1alpha1.SnapshotCapturePhasePlanned,
+		storagev1alpha1.SnapshotCapturePhaseFinished,
+		storagev1alpha1.SnapshotCapturePhaseFailed:
+		return false
+	default:
+		return true
+	}
+}
+
+// detectLostDomainChildrenPrePlanned scans the root's PUBLISHED domain child refs (delete-free/union, so
+// a stale ref lingers after its source vanishes) for one whose source object is gone — the ref is no
+// longer in the freshly-computed desired set — AND whose child CR was also deleted (uncached NotFound).
+// Pre-Planned that is unrecoverable: the re-plan cannot recreate the CR (no source to enumerate) and its
+// UID-derived content name could not relink even if recreated, so the node would otherwise wait forever
+// on a child that never comes back. It returns a terminal ChildSnapshotLost fold for planNamespaceChildren.
+//
+// A ref still in desired (source alive) is skipped — EnsureChildren re-creates a missing CR by its
+// deterministic name (self-heal), so a live source is never a failure. A ref whose CR is still present is
+// skipped — losing its source does not un-capture an already-created child. Orphan CSI VolumeSnapshot
+// children are skipped: they are re-derived from live PVCs by the orphan wave (not planNamespaceChildren),
+// so they are never in desiredRefs and must not be judged against it. Runs only pre-Planned (the caller
+// reaches it only at AllPlanned, and the phase gate keeps it off the binder's Ready post-Planned).
+func (r *SnapshotReconciler) detectLostDomainChildrenPrePlanned(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	desiredRefs []storagev1alpha1.SnapshotChildRef,
+) (reason, message string, err error) {
+	if !namespaceDomainPrePlanned(nsSnap) {
+		return "", "", nil
+	}
+	desiredNames := make(map[string]struct{}, len(desiredRefs))
+	for _, ref := range desiredRefs {
+		desiredNames[ref.Name] = struct{}{}
+	}
+	for _, ref := range nonOrphanCSIVolumeSnapshotChildRefs(nsSnap.Status.ChildrenSnapshotRefs) {
+		if _, wanted := desiredNames[ref.Name]; wanted {
+			continue
+		}
+		gv, gvErr := schema.ParseGroupVersion(ref.APIVersion)
+		if gvErr != nil {
+			return "", "", gvErr
+		}
+		child := &unstructured.Unstructured{}
+		child.SetGroupVersionKind(gv.WithKind(ref.Kind))
+		getErr := r.APIReader.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: ref.Name}, child)
+		if getErr == nil {
+			continue
+		}
+		if !errors.IsNotFound(getErr) {
+			return "", "", getErr
+		}
+		return snapshotpkg.ReasonChildSnapshotLost,
+			fmt.Sprintf("declared child snapshot %s %q is gone and its source object no longer exists; it cannot be re-planned and is unrecoverably lost — a new snapshot is required", ref.Kind, ref.Name), nil
+	}
+	return "", "", nil
 }
 
 // planParentOwnedChildGraphLayer is the build-spec (create-free) counterpart of

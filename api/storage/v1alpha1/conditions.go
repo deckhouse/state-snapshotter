@@ -52,6 +52,24 @@ const (
 	// declared child content edge is present, so a consumer never observes the first Ready=True before the
 	// orphan data is captured and linked. This subsumes the former residual/orphan-PVC capture latch gate.
 	ReasonChildrenLinkPending = "ChildrenLinkPending"
+
+	// ReasonChildSnapshotDeleted: Ready=False (NON-terminal, recoverable) — a declared child snapshot CR
+	// of an already-captured snapshot was deleted while its child SnapshotContent survives in the recycle
+	// bin (the child content is alive, its status.parentDeleted=true, and the parent snapshot is still
+	// alive). The captured data is intact and the namespaced child CR can be restored via StaticBind, after
+	// which the owner Ready mirror self-heals to True. Only the namespaced user surface (d8 download, which
+	// reads namespaced CRs) degrades — the durable SnapshotContent tree stays Ready. Detected and folded
+	// onto the owner mirror by the SnapshotContentController; it is a namespaced-surface degradation, so it
+	// is deliberately NOT in TerminalReadyReasons.
+	ReasonChildSnapshotDeleted = "ChildSnapshotDeleted"
+
+	// ReasonChildSnapshotLost: TERMINAL Ready=False — a declared child snapshot is unrecoverably gone. Its
+	// child SnapshotContent is absent (content names are UID-derived, so a recreated child can never relink
+	// into the immutable frozen childrenSnapshotContentRefs edge set), OR its CR vanished after the node
+	// froze its plan (phase>=Planned) while the capture was still incomplete (a surviving but not-Ready
+	// content cannot resume capture via StaticBind), OR — pre-Planned — a declared child's CR and its source
+	// object both vanished so re-planning cannot recreate it. A new snapshot is required. In TerminalReadyReasons.
+	ReasonChildSnapshotLost = "ChildSnapshotLost"
 )
 
 // TerminalReadyReasons is the canonical set of Ready=False reasons treated as terminal capture failure
@@ -72,6 +90,7 @@ var TerminalReadyReasons = map[string]struct{}{
 	"ChildrenFailed":           {},
 	ReasonGraphPlanningFailed:  {},
 	ReasonCreateChildFailed:    {},
+	ReasonChildSnapshotLost:    {},
 	"SnapshotContentMisbound":  {},
 }
 

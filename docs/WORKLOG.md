@@ -1275,3 +1275,21 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   growth post-Planned/Finished/Failed → `ErrChildrenSetFrozen` with no CR created; excluded-change
   post-Planned rejected; freeze-predicate table test; TOCTOU belt. gofmt + go vet + `go test ./...` green;
   bugbot clean.
+- **Add** (snapshotcontent/snapshot/api, sdk-children-planned-freeze block E) Detect and report a vanished
+  declared child on the owner Ready mirror. Two new canonical reasons in `api/storage` (aliased in core
+  `pkg/snapshot`): `ChildSnapshotDeleted` (NON-terminal, recoverable) and `ChildSnapshotLost` (terminal, added
+  to `TerminalReadyReasons`). Detection lives in MAIN (`snapshotcontent/lost_children.go`) as a fold in
+  `mirrorReadyToOwnerSnapshot`, applied LAST so a terminal Lost overrides even a phase=Finished Ready=True while
+  a non-terminal Deleted only downgrades a would-be Ready=True; the CONTENT Ready stays intact (only the
+  namespaced user surface degrades). Runs only past barrier 1 and is a no-op on a domain phase=Failed or a
+  deleting owner. Frozen-edge mode (childrenSnapshotContentRefs set): a missing child content → Lost; a
+  surviving recycle-bin content whose parent CR was deleted → Deleted if the content is Ready (restorable via
+  StaticBind, self-heals to Ready) else Lost. Declared-ref mode (edges not frozen yet, post-Planned): an absent
+  child CR → Lost. Pre-Planned domain case (case 4) in `namespace_children_plan.go`
+  (`detectLostDomainChildrenPrePlanned`): at AllPlanned a published domain child whose source vanished (left the
+  desired set) AND whose CR was also deleted is surfaced as terminal `ChildSnapshotLost` via the existing
+  pre-Planned terminal outcome (no dual-writer — gated off post-Planned); a live source self-heals, a still-present
+  CR is not lost, orphan CSI VolumeSnapshot children are excluded. Unit tests: full detection matrix + mirror-fold
+  precedence + restore-heals-to-Ready + the three pre-Planned planner cases. ADR «Судьба исчезнувших объявленных
+  детей» + reason catalog already carry the semantics. gofmt + go vet + tests green; golangci-lint adds no new
+  findings.

@@ -37,6 +37,12 @@ const (
 	ReasonCompleted           = storagev1alpha1.ReasonCompleted
 	ReasonCreateChildFailed   = storagev1alpha1.ReasonCreateChildFailed
 	ReasonGraphPlanningFailed = storagev1alpha1.ReasonGraphPlanningFailed
+
+	// ReasonChildSnapshotDeleted (NON-terminal) and ReasonChildSnapshotLost (terminal) are folded onto the
+	// owner Ready mirror by the SnapshotContentController when a declared child snapshot vanishes. Defined
+	// canonically in api/storage; see there for the full recoverable-vs-lost semantics.
+	ReasonChildSnapshotDeleted = storagev1alpha1.ReasonChildSnapshotDeleted
+	ReasonChildSnapshotLost    = storagev1alpha1.ReasonChildSnapshotLost
 )
 
 // IsReasonTerminal reports whether a Ready=False reason is terminal. Re-exported from api/storage so

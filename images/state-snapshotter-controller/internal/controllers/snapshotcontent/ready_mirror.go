@@ -139,6 +139,26 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Conte
 			message = fmt.Sprintf("waiting for domain capture to finish (phase=%s)", phase)
 		}
 	}
+	// Fold a vanished declared child into the owner mirror (main-detected structural degradation; the
+	// content's own Ready stays intact — only the namespaced user surface degrades, because d8 download
+	// reads namespaced CRs). Applied LAST so a terminal ChildSnapshotLost always surfaces, while a
+	// non-terminal ChildSnapshotDeleted only downgrades an owner that would otherwise be genuinely Ready=True
+	// (post-Finished barrier 2) — a still-capturing (ChildrenPending) or already-terminal owner keeps its
+	// reason. Runs only past barrier 1 and no-ops when the domain already reported phase=Failed (above).
+	lostReason, lostMessage, lostErr := r.detectLostDeclaredChildren(ctx, owner, contentObj)
+	if lostErr != nil {
+		return fmt.Errorf("detect lost declared children: %w", lostErr)
+	}
+	switch {
+	case lostReason == snapshot.ReasonChildSnapshotLost:
+		status = metav1.ConditionFalse
+		reason = lostReason
+		message = lostMessage
+	case lostReason == snapshot.ReasonChildSnapshotDeleted && status == metav1.ConditionTrue:
+		status = metav1.ConditionFalse
+		reason = lostReason
+		message = lostMessage
+	}
 	return r.patchOwnerReadyFromContent(ctx, owner, status, reason, message)
 }
 

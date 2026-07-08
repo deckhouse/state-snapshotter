@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -168,6 +169,97 @@ func TestPlanNamespaceChildrenPendingLayer(t *testing.T) {
 	}
 	if len(plan.desired) != 1 {
 		t.Fatalf("pending layer must still build its child spec, got %d", len(plan.desired))
+	}
+}
+
+// planLostFixtureReconciler wires an AllPlanned single-source fixture (source vm-1 with its child present
+// at phase=Planned) and returns the reconciler plus the desired child name, so the lost-child tests can
+// stack extra PUBLISHED refs on nsSnap.Status.ChildrenSnapshotRefs. APIReader is the same fake as Client
+// (the pre-Planned lost gate reads uncached).
+func planLostFixtureReconciler(t *testing.T, extraObjs ...runtime.Object) (*SnapshotReconciler, planTestFixture, string) {
+	t.Helper()
+	f := newPlanTestFixture()
+	src := f.source("vm-1", "uid-vm-1")
+	childName := snapshotChildSnapshotName(types.UID("root-uid"), src.GetUID())
+	plannedChild := demoSnapshotChildWithPhase(childName, storagev1alpha1.SnapshotCapturePhasePlanned)
+	objs := append([]client.Object{}, plannedChild)
+	for _, o := range extraObjs {
+		objs = append(objs, o.(client.Object))
+	}
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(objs...).Build()
+	r := &SnapshotReconciler{Dynamic: f.dynamic(src), Client: cl, APIReader: cl}
+	return r, f, childName
+}
+
+func lostPublishedRef(name string) storagev1alpha1.SnapshotChildRef {
+	return storagev1alpha1.SnapshotChildRef{APIVersion: "demo.test/v1", Kind: "DemoSnapshot", Name: name}
+}
+
+// TestPlanNamespaceChildren_LostDomainChild_Terminal: a published domain child whose source vanished (not
+// in the freshly-planned desired set) AND whose CR was deleted (absent) is surfaced as terminal
+// ChildSnapshotLost pre-Planned (Block E, case 4).
+func TestPlanNamespaceChildren_LostDomainChild_Terminal(t *testing.T) {
+	r, f, childName := planLostFixtureReconciler(t)
+	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
+	nsSnap.Status.ChildrenSnapshotRefs = []storagev1alpha1.SnapshotChildRef{
+		lostPublishedRef(childName),    // still desired + present
+		lostPublishedRef("gone-child"), // source gone, CR absent -> lost
+	}
+
+	plan, err := r.planNamespaceChildren(context.Background(), nsSnap, []csdregistry.EligibleResourceSnapshotMapping{f.mapping})
+	if err != nil {
+		t.Fatalf("planNamespaceChildren: %v", err)
+	}
+	if plan.outcome != namespaceChildrenTerminal {
+		t.Fatalf("want Terminal outcome, got %d", plan.outcome)
+	}
+	if plan.reason != snapshotpkg.ReasonChildSnapshotLost {
+		t.Fatalf("want reason %q, got %q", snapshotpkg.ReasonChildSnapshotLost, plan.reason)
+	}
+}
+
+// TestPlanNamespaceChildren_StaleRefCRPresent_NotLost: a published ref whose source vanished but whose CR
+// still exists is NOT lost (losing the source does not un-capture an already-created child).
+func TestPlanNamespaceChildren_StaleRefCRPresent_NotLost(t *testing.T) {
+	stale := demoSnapshotChild("stale-child", nil)
+	r, f, childName := planLostFixtureReconciler(t, stale)
+	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
+	nsSnap.Status.ChildrenSnapshotRefs = []storagev1alpha1.SnapshotChildRef{
+		lostPublishedRef(childName),
+		lostPublishedRef("stale-child"), // source gone but CR present -> not lost
+	}
+
+	plan, err := r.planNamespaceChildren(context.Background(), nsSnap, []csdregistry.EligibleResourceSnapshotMapping{f.mapping})
+	if err != nil {
+		t.Fatalf("planNamespaceChildren: %v", err)
+	}
+	if plan.outcome != namespaceChildrenAllPlanned {
+		t.Fatalf("want AllPlanned, got %d (reason=%q)", plan.outcome, plan.reason)
+	}
+}
+
+// TestPlanNamespaceChildren_LostChildPostPlanned_GateOff: past barrier 1 (phase=Planned) the pre-Planned
+// gate is off — a lost child is NOT surfaced here (the binder owns Ready post-Planned; the main-side
+// owner-mirror folds report it instead).
+func TestPlanNamespaceChildren_LostChildPostPlanned_GateOff(t *testing.T) {
+	r, f, childName := planLostFixtureReconciler(t)
+	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
+	nsSnap.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{
+		DomainSpecificController: &storagev1alpha1.DomainSpecificControllerCaptureState{
+			Phase: storagev1alpha1.SnapshotCapturePhasePlanned,
+		},
+	}
+	nsSnap.Status.ChildrenSnapshotRefs = []storagev1alpha1.SnapshotChildRef{
+		lostPublishedRef(childName),
+		lostPublishedRef("gone-child"),
+	}
+
+	plan, err := r.planNamespaceChildren(context.Background(), nsSnap, []csdregistry.EligibleResourceSnapshotMapping{f.mapping})
+	if err != nil {
+		t.Fatalf("planNamespaceChildren: %v", err)
+	}
+	if plan.outcome != namespaceChildrenAllPlanned {
+		t.Fatalf("want AllPlanned (gate off post-Planned), got %d (reason=%q)", plan.outcome, plan.reason)
 	}
 }
 
