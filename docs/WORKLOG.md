@@ -1259,3 +1259,19 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   (os.ReadDir over the package dir) that fails if that quoted literal reappears in any non-test source,
   pinning the pure-creator invariant (decision #10 — the binder never touches main-owned
   `captureState.commonController`). gofmt clean; `go test ./internal/controllers/genericbinder/` green.
+- **Add** (snapshotsdk, sdk-children-planned-freeze block A) `EnsureChildren` now enforces the planned-freeze
+  contract: once a node declares barrier 1 (phase>=Planned, incl. the terminal Failed) the declared child set
+  is frozen. A fail-closed pre-check (authoritative apiReader re-read, mirroring `EnsureVolumeCapture`) rejects
+  any GROWTH of the declared set or change of the excluded set with the new typed `ErrChildrenSetFrozen`
+  BEFORE `children.Reconcile` creates/adopts anything, so a rejected call has zero side effects; desired ⊆
+  published with an unchanged excluded set stays an idempotent no-op / ownerRef repair. Added the pure
+  `childrenSetFrozen` predicate (mirrors `phaseCanAdvance`) plus an in-closure TOCTOU belt that drops a racy
+  frozen growth (`patch.Status` closures cannot surface errors). Closes the wedge hazard from the live Block 4
+  immutable `childrenSnapshotContentRefs` CEL — a late edge would otherwise wedge the node at
+  `ChildrenLinkPending`. Fixed the stale delete-free docs (`doc.go`, `internal/children` package + `Reconcile`
+  doc, `EnsureChildren` method doc): a no-longer-desired child's ref STAYS published (union never removes) —
+  only the OBJECT is ownerRef-GC'd — and the lead sentences now read additive/union, not reconcile-to-match.
+  New unit tests (`capture_children_freeze_test.go`): growth pre-Planned OK; same-set post-Planned no-op ×5;
+  growth post-Planned/Finished/Failed → `ErrChildrenSetFrozen` with no CR created; excluded-change
+  post-Planned rejected; freeze-predicate table test; TOCTOU belt. gofmt + go vet + `go test ./...` green;
+  bugbot clean.

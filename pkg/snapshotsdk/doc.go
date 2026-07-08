@@ -31,10 +31,18 @@ limitations under the License.
 // snapshots. The domain expresses intent; the SDK makes the cluster match it, idempotently and
 // crash/restart-safely.
 //
-// SDK v1 is delete-free: EnsureChildren creates/adopts and publishes the desired child refs but never
-// deletes children. A child no longer desired drops out of status.childrenSnapshotRefs and is reclaimed
-// by ownerRef garbage collection (the parent owns each child) or a future cleanup component, not by the
-// SDK. This keeps the contract a pure publication layer with no risk of deleting a foreign object.
+// SDK v1 is delete-free and publication is ADDITIVE (union): EnsureChildren creates/adopts the desired
+// children and unions their refs into status.childrenSnapshotRefs, never removing a ref. A child no longer
+// enumerated by its emitter is therefore NOT dropped from the published set — its ref stays; only the
+// leftover child OBJECT is reclaimed, by ownerRef garbage collection (the parent owns each child, so it is
+// collected when the parent is deleted) or a future cleanup component, not by the SDK. This keeps the
+// contract a pure publication layer with no risk of deleting a foreign object.
+//
+// The declared set is also FROZEN once the node declares barrier 1: at phase>=Planned (and at the terminal
+// Failed) EnsureChildren rejects any attempt to GROW it (or change the excluded set) with
+// ErrChildrenSetFrozen — fail-closed, before any child CR is created. The declared membership is the
+// snapshot's point-in-time composition and mirrors the immutable SnapshotContent.childrenSnapshotContentRefs;
+// the recommended domain reaction to the error is sdk.Fail(GraphPlanningFailed).
 //
 // # Exclude veto
 //
@@ -57,7 +65,7 @@ limitations under the License.
 //	if !valid { return sdk.Reject(ctx, t, FailSpec{Reason: "InvalidSourceRef"}) }
 //	kept, dropped := PartitionExcluded(sourceObjs) // honor the state-snapshotter.deckhouse.io/exclude veto
 //	children, excludedRefs := buildFrom(kept), refsOf(dropped)
-//	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) }
+//	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) } // a post-Planned set growth returns ErrChildrenSetFrozen
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
 //	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
 //	_ = sdk.PublishSnapshotSource(ctx, t, SnapshotSource{...})

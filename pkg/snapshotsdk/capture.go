@@ -18,6 +18,8 @@ package snapshotsdk
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,15 +38,22 @@ import (
 // data-leg volume capture, and its manifest capture. Each method reconciles the cluster toward the desired
 // intent and publishes the resulting names/refs into the snapshot status.
 type Planning interface {
-	// EnsureChildren makes the cluster match the desired set of child snapshots (create/adopt each under
-	// this snapshot) and publishes the resulting refs as status.childrenSnapshotRefs. Publication is
-	// ADDITIVE (wave5): the freshly derived refs are UNIONED into the currently published set, never
-	// replacing it — so refs contributed by a co-writer of the same field that this pass does not itself
-	// enumerate (the namespace root's orphan VolumeSnapshot wave, §6.2) are preserved. It performs
-	// create/adopt + publication only and never deletes children (SDK v1 is delete-free): a nil or empty
-	// desired set therefore publishes NO new refs and leaves the currently published set intact. A child
-	// no longer desired is simply not re-added by its emitter and is left in the cluster for ownerRef GC /
-	// a future cleanup component to reclaim.
+	// EnsureChildren creates/adopts the desired child snapshots (each under this snapshot) and ADDITIVELY
+	// publishes their refs into status.childrenSnapshotRefs — a union, never a replace (wave5): the freshly
+	// derived refs are UNIONED into the currently published set, so refs contributed by a co-writer of the
+	// same field that this pass does not itself enumerate (the namespace root's orphan VolumeSnapshot wave,
+	// §6.2) are preserved. It performs create/adopt + publication only and never deletes children (SDK v1
+	// is delete-free): a nil or empty desired set therefore publishes NO new refs and leaves the currently
+	// published set intact. A child no longer desired is simply not re-added by its emitter and is left in
+	// the cluster for ownerRef GC / a future cleanup component to reclaim.
+	//
+	// The declared set is FROZEN once the node declares barrier 1: at phase>=Planned (and at the terminal
+	// Failed) EnsureChildren rejects any GROWTH of the set (or change of the excluded set) with
+	// ErrChildrenSetFrozen — fail-closed and BEFORE any child CR is created, so a rejected call has no side
+	// effects. An idempotent re-publish of the same set (desired ⊆ published, excluded unchanged) stays a
+	// no-op at any phase. The freeze mirrors the immutable SnapshotContent.childrenSnapshotContentRefs (a
+	// late-added edge would be rejected by that CEL and wedge the node at ChildrenLinkPending); the
+	// recommended domain reaction to the error is sdk.Fail(GraphPlanningFailed).
 	//
 	// excluded is the domain's DIRECT exclusion vetoes at this node — the source objects it dropped (via
 	// the exclude label) while enumerating children, obtained from PartitionExcluded. It is published in
@@ -161,8 +170,47 @@ type sdk struct {
 	subresourceREST rest.Interface
 }
 
+// ErrChildrenSetFrozen is returned by EnsureChildren when a domain tries to GROW the declared child set
+// (or change the excluded set) after the node has frozen its plan (phase>=Planned, including the terminal
+// Failed). The declared child set is the snapshot's point-in-time membership: once barrier 1 (Planned) is
+// declared it is immutable, mirroring the frozen SnapshotContent.status.childrenSnapshotContentRefs. The
+// guard is fail-closed and side-effect-free (it rejects BEFORE any child CR is created), so a violating
+// domain gets a clean error — recommended reaction sdk.Fail(GraphPlanningFailed) — instead of wedging the
+// node in ChildrenLinkPending forever (the immutable content-ref CEL would reject the new edge). Callers
+// match it with errors.Is(err, ErrChildrenSetFrozen).
+var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phase>=Planned): EnsureChildren cannot grow the declared child set")
+
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
 	obj := t.Object()
+
+	// Fail-closed freeze pre-check, run BEFORE children.Reconcile creates/adopts anything. Reconcile
+	// writes to the cluster first and publishes refs later, so a reject AFTER it ran would leave a freshly
+	// created child CR orphaned. The refs the specs WOULD publish are derivable without a cluster write
+	// (GVK + name), and the authoritative phase/published-set come from an uncached re-read (apiReader,
+	// the same TOCTOU-safe pattern as EnsureVolumeCapture) so a stale cache cannot let a post-Planned
+	// growth slip through. desired ⊆ published with an unchanged excluded set is NOT growth: it falls
+	// through to the harmless idempotent no-op / ownerRef repair below.
+	desiredRefs, err := s.childRefsForSpecs(desired)
+	if err != nil {
+		return err
+	}
+	newExcluded := normalizeExcludedRefs(excluded)
+	if err := s.refresh(ctx, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if st := t.GetDomainCaptureState(); childrenSetFrozen(st.Phase) {
+		grew := !children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, children.UnionRefs(st.ChildrenSnapshotRefs, desiredRefs))
+		excludedChanged := !excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded)
+		if grew || excludedChanged {
+			return fmt.Errorf("%w: node %s/%s at phase %q; desired refs %v vs published %v, desired excluded %v vs published %v",
+				ErrChildrenSetFrozen, obj.GetNamespace(), obj.GetName(), st.Phase,
+				desiredRefs, st.ChildrenSnapshotRefs, newExcluded, st.ExcludedRefs)
+		}
+	}
+
 	owner, err := s.ownerRef(t)
 	if err != nil {
 		return err
@@ -175,7 +223,6 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 	if err != nil {
 		return err
 	}
-	newExcluded := normalizeExcludedRefs(excluded)
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
 		// Additive publication: union the freshly planned refs into the currently published set instead
@@ -183,8 +230,17 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 		// FRESH refs — the union therefore preserves refs published by a co-writer of the same field (the
 		// root's orphan VolumeSnapshot wave, §6.2) that this planning pass does not enumerate.
 		mergedRefs := children.UnionRefs(st.ChildrenSnapshotRefs, newRefs)
-		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, mergedRefs) &&
-			excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded) {
+		refsGrew := !children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, mergedRefs)
+		excludedChanged := !excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded)
+		// TOCTOU belt: the node may have advanced into a frozen phase between the pre-check's authoritative
+		// read and this retry re-read. patch.Status cannot surface an error from the closure, so instead of
+		// persisting a frozen-set growth it fail-closed DROPS the write here (the pre-check already returned
+		// ErrChildrenSetFrozen for the non-racing case). A genuine no-op (nothing grew, no excluded change)
+		// short-circuits below regardless of phase, so an idempotent post-Planned re-reconcile is unaffected.
+		if childrenSetFrozen(st.Phase) && (refsGrew || excludedChanged) {
+			return false
+		}
+		if !refsGrew && !excludedChanged {
 			return false
 		}
 		st.ChildrenSnapshotRefs = mergedRefs
@@ -192,6 +248,25 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 		t.SetDomainCaptureState(st)
 		return true
 	})
+}
+
+// childRefsForSpecs derives the SnapshotChildRefs the given specs WOULD publish, without any cluster write
+// — the same (apiVersion, kind, name) derivation children.Reconcile performs — so the freeze pre-check can
+// detect declared-set growth before Reconcile creates/adopts anything.
+func (s *sdk) childRefsForSpecs(desired []ChildSpec) ([]storagev1alpha1.SnapshotChildRef, error) {
+	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(desired))
+	for _, d := range desired {
+		gvk, err := apiutil.GVKForObject(d.Object, s.client.Scheme())
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, storagev1alpha1.SnapshotChildRef{
+			APIVersion: gvk.GroupVersion().String(),
+			Kind:       gvk.Kind,
+			Name:       d.Object.GetName(),
+		})
+	}
+	return refs, nil
 }
 
 func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error {
@@ -395,6 +470,18 @@ func phaseCanAdvance(from, to storagev1alpha1.SnapshotCapturePhase) bool {
 		return true
 	}
 	return phaseRank(to) >= phaseRank(from)
+}
+
+// childrenSetFrozen reports whether the declared child set is frozen at this phase: barrier 1 (Planned)
+// and beyond (Finished), plus the terminal Failed. After the freeze EnsureChildren rejects any growth of
+// the declared set or change of the excluded set (see ErrChildrenSetFrozen). Planned and Finished rank
+// at/above Planned; Failed is terminal (a failed snapshot never re-plans) and, because phaseRank leaves it
+// at 0, is matched explicitly here — the same out-of-band treatment phaseCanAdvance gives it.
+func childrenSetFrozen(p storagev1alpha1.SnapshotCapturePhase) bool {
+	if p == storagev1alpha1.SnapshotCapturePhaseFailed {
+		return true
+	}
+	return phaseRank(p) >= phaseRank(storagev1alpha1.SnapshotCapturePhasePlanned)
 }
 
 func (s *sdk) ownerRef(t SnapshotAdapter) (metav1.OwnerReference, error) {

@@ -16,11 +16,12 @@ limitations under the License.
 
 // Package children reconciles a snapshot's desired set of child snapshot objects: create-or-adopt each
 // desired child and derive its durable SnapshotChildRef. SDK v1 is a publication layer, not a lifecycle
-// owner: it never deletes children. A child no longer desired simply drops out of the published
-// childrenSnapshotRefs and becomes detached from the snapshot graph; reclaiming the leftover object is left
-// to ownerRef garbage collection (the parent owns each child) or a future cleanup component. This keeps the
-// contract delete-free — no List, no orphan diff, no unstructured delete, no risk of removing a foreign
-// object on the strength of a stale status (see design Р23/Р29).
+// owner: it never deletes children, and publication is additive (the caller UNIONs these refs into status,
+// never removing one). A child no longer enumerated by its emitter therefore KEEPS its published
+// childrenSnapshotRefs entry; only the leftover OBJECT is reclaimed — by ownerRef garbage collection (the
+// parent owns each child, so it is collected when the parent is deleted) or a future cleanup component.
+// This keeps the contract delete-free — no List, no orphan diff, no unstructured delete, no risk of
+// removing a foreign object on the strength of a stale status (see design Р23/Р29).
 package children
 
 import (
@@ -37,8 +38,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/ownerref"
 )
 
-// Reconcile makes the cluster match desired (the domain-built child snapshot objects), adopting each child
-// under owner, and returns the resulting, sorted SnapshotChildRefs to publish into status. It performs
+// Reconcile creates/adopts each desired child snapshot object (the domain-built templates) under owner and
+// returns the resulting, sorted SnapshotChildRefs for the caller to UNION into status. It performs
 // create/adopt + ref derivation only and never deletes children (SDK v1 is delete-free; see package doc).
 // A nil/empty desired set therefore yields empty refs without touching any previously created object.
 //
