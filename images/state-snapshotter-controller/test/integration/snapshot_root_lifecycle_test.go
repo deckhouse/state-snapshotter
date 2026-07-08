@@ -113,7 +113,7 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
-	It("reaches Ready with empty MCP when there are no allowlisted namespaced resources", func() {
+	It("reaches Ready capturing only the Namespace object when there are no allowlisted namespaced resources", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -155,8 +155,15 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			contentReady := meta.FindStatusCondition(sc.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(contentReady).NotTo(BeNil())
 			g.Expect(contentReady.Status).To(Equal(metav1.ConditionTrue))
+			// The namespace holds no allowlisted namespaced resources, but a namespace snapshot always
+			// captures the Namespace object itself (the one permitted cluster-scoped target — see
+			// BuildRootNamespaceManifestCaptureTargets), so the root MCP archive holds exactly it.
 			objects := integrationArchiveObjectsFromMCP(ctx, sc.Status.ManifestCheckpointName)
-			g.Expect(objects).To(BeEmpty())
+			g.Expect(objects).To(HaveLen(1))
+			g.Expect(objects[0]["kind"]).To(Equal("Namespace"))
+			md, ok := objects[0]["metadata"].(map[string]interface{})
+			g.Expect(ok).To(BeTrue())
+			g.Expect(md["name"]).To(Equal(nsName))
 		}).WithTimeout(60 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })
