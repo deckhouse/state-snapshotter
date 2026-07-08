@@ -1325,3 +1325,12 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   post-bind). Unit tests: message+Event carry the GVR list, Ready not written by the domain, phase preserved,
   idempotent on unchanged set, clear-on-recovery (own vs foreign message), and the cap/sort formatter. gofmt +
   go vet + tests green; golangci-lint adds no new findings; bugbot clean.
+- **Update** (docs, sdk-children-planned-freeze block C) Sync docs/content-single-writer-design.md §3.4 with
+  the enforced declared-set freeze. Recorded the second (upper) floor of the freeze alongside the existing
+  content-set immutable CEL (lower floor): the SDK `EnsureChildren` fail-closed guard (`ErrChildrenSetFrozen`
+  at phase>=Planned/Failed, before any child CR) and the namespace-domain re-plan skip
+  (`namespaceDomainPrePlanned` gate), with the wedge-hazard rationale and a cross-ref to the ADR «Фриз
+  объявленного набора — enforced (SDK + домен)». Corrected the stale ordering note (Option A CEL is already
+  live on wave7, so the guard closes an already-open wedge window rather than landing before the CEL). Also
+  tightened the ADR SDK bullet to state the excluded-set freeze + typed `ErrChildrenSetFrozen` (matches the
+  implemented semantics). Docs only.

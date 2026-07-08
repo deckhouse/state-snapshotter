@@ -234,6 +234,35 @@ Any such writer would be rejected by the immutable rule and must be removed firs
 Keep the rule O(1)/O(n) for CEL cost; keep `+optional` (a leaf has no children); update the field doc
 comment (§3.3) in the same change.
 
+**Upper floor — freeze the DECLARED set, not only the content set.** The Option A CEL above is the *lower*
+floor: it freezes the durable content edge set (`SnapshotContent.status.childrenSnapshotContentRefs`). By
+itself it is fail-*open* on the way in — nothing stops a domain from GROWING its declared child set
+(`Snapshot.status.childrenSnapshotRefs`) after `phase>=Planned`. That growth is a wedge hazard: the
+aggregator would try to append the new child's edge into the now-immutable content set, the CEL rejects it,
+and the node hangs at `Ready=False/ChildrenLinkPending` forever. So the freeze needs a matching *upper*
+floor on the declared set. Two enforcements (plan `sdk-children-planned-freeze`) provide it:
+
+1. **SDK `EnsureChildren` guard** (`pkg/snapshotsdk/capture.go`). At `phase>=Planned` (and the terminal
+   `Failed`) `EnsureChildren` rejects any GROWTH of the declared set — or change of the excluded set — with
+   the typed `ErrChildrenSetFrozen`, **fail-closed and BEFORE any child CR is created** (side-effect-free
+   reject). An idempotent re-publish of the same set stays a no-op at any phase. Recommended domain reaction:
+   `sdk.Fail(GraphPlanningFailed)`.
+2. **Namespace-domain re-plan skip** (`internal/controllers/snapshot/namespace_capture_run.go`).
+   `reconcileNamespaceCapture` gates its whole plan+enumerate+freeze block (PublishSnapshotSource,
+   `planNamespaceChildren`, `EnsureChildren`, the residual/orphan-PVC wave, `MarkPlanned`) behind
+   `namespaceDomainPrePlanned`; past `Planned` the composition is frozen and re-planning is skipped, so a
+   top-level object added to the namespace after `Planned` is never enumerated into a new child. A declared
+   child deleted after `Planned` is deliberately NOT recreated and instead surfaces as terminal
+   `ChildSnapshotLost` (see the ADR «Судьба исчезнувших объявленных детей»).
+
+Together the two floors make the point-in-time child set immutable from both directions. See the ADR
+«Фриз объявленного набора — enforced (SDK + домен), не только конвенция».
+
+**Ordering (updated).** The original ordering constraint — "land the SDK guard *before* enabling Option A"
+— is obsolete: Option A is **already committed and live** on `wave7`, so the lower floor is enforced while
+the upper floor is added on top. That means the wedge window described above is already open, so the
+upper-floor guard closes an existing hazard and must land as soon as possible (not gated behind the CEL).
+
 ### 3.5 Write barrier — commit only when every child has content
 
 The precondition for writing `childrenSnapshotContentRefs` is **stronger than "children declared + owner
