@@ -56,3 +56,19 @@ If evidence is missing, propose diagnostics — not code.
 15. **Update documentation continuously.** Investigation docs must reflect *today's* understanding: when a
     hypothesis is disproven, remove it from open issues, move it to rejected hypotheses, and update the current
     model — not historical thinking.
+16. **Question the operation, not just the client.** When you find an uncached read (APIReader / full
+    List / per-item Get loop), a local review answers only "given this algorithm, is this client justified?"
+    and almost always says yes (read-after-write, one-way latch, UID barrier, no informer). That is the wrong
+    scope. Ask three questions, in order, before accepting it:
+    (1) *Why this client here?* — freshness/consistency reasons (may be legitimate for reading the object
+    itself).
+    (2) *Is the operation even needed?* — a full enumeration to find related objects is frequently avoidable
+    entirely.
+    (3) *If needed, is there an index or direct reference?* — a full List to find related objects can usually
+    become `Client.List(MatchingFields{...})`, an ownerReference, or a `status.*Ref`, served from cache with
+    no loss of correctness. Crucially, "search for related objects" is NOT a freshness read: replacing a full
+    scan with an indexed cache lookup does not trade freshness for staleness — the parent/relation set is
+    authored elsewhere and unaffected by the triggering write. Keep APIReader for reading the *object under
+    read-after-write*; remove it from *relationship enumeration*. This class of fix (reverse mappers → direct
+    refs; N Get → one List; APIReader List → registry/index) is the safest and largest win, and a prior audit
+    that blessed the APIReader was not wrong — it was scoped to question 1 only.

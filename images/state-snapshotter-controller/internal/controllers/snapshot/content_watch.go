@@ -52,6 +52,47 @@ func registerSnapshotBoundContentFieldIndex(ctx context.Context, indexer client.
 	return nil
 }
 
+// SnapshotChildrenRefFieldIndex is the field index key for Snapshot.status.childrenSnapshotRefs, one entry
+// per child ref (child identity). It powers the reverse lookup "which parent Snapshot(s) reference this
+// child snapshot" from a cache-backed indexed List instead of a full-namespace SnapshotList (see
+// findParentsReferencingChildSnapshot). Mirrors SnapshotBoundContentFieldIndex.
+const SnapshotChildrenRefFieldIndex = "status.childrenSnapshotRefs.identity"
+
+// snapshotChildRefIndexKey builds the stable child-identity key shared by the index extractor and the
+// reverse lookup. It normalizes apiVersion+kind to a GVK so a ref and the live child object that resolve to
+// the same GVK produce the same key regardless of apiVersion string formatting; name is appended with a NUL
+// separator that cannot occur in a GVK string or a resource name. Returns "" for an incomplete identity
+// (matching childSnapshotRefMatchesUnstructuredChild, which requires non-empty apiVersion/kind/name).
+func snapshotChildRefIndexKey(apiVersion, kind, name string) string {
+	if apiVersion == "" || kind == "" || name == "" {
+		return ""
+	}
+	return schema.FromAPIVersionAndKind(apiVersion, kind).String() + "\x00" + name
+}
+
+// snapshotChildrenRefIndexValues is the SnapshotChildrenRefFieldIndex extractor: one identity key per child
+// ref. Shared by the production registration and tests/fake clients so both index identically.
+func snapshotChildrenRefIndexValues(rawObj client.Object) []string {
+	snap, ok := rawObj.(*storagev1alpha1.Snapshot)
+	if !ok {
+		return nil
+	}
+	keys := make([]string, 0, len(snap.Status.ChildrenSnapshotRefs))
+	for _, ref := range snap.Status.ChildrenSnapshotRefs {
+		if k := snapshotChildRefIndexKey(ref.APIVersion, ref.Kind, ref.Name); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func registerSnapshotChildrenRefFieldIndex(ctx context.Context, indexer client.FieldIndexer) error {
+	if err := indexer.IndexField(ctx, &storagev1alpha1.Snapshot{}, SnapshotChildrenRefFieldIndex, snapshotChildrenRefIndexValues); err != nil {
+		return fmt.Errorf("index Snapshot.status.childrenSnapshotRefs: %w", err)
+	}
+	return nil
+}
+
 // MapSnapshotContentToBoundSnapshots enqueues Snapshots whose status.boundSnapshotContentName matches the content.
 func MapSnapshotContentToBoundSnapshots(ctx context.Context, c client.Client, obj client.Object) []reconcile.Request {
 	content, ok := obj.(*storagev1alpha1.SnapshotContent)

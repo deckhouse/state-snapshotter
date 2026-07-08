@@ -62,6 +62,7 @@ func boundContentIndexClient(scheme *runtime.Scheme, objs ...client.Object) clie
 			}
 			return []string{snap.Status.BoundSnapshotContentName}
 		}).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefFieldIndex, snapshotChildrenRefIndexValues).
 		Build()
 }
 

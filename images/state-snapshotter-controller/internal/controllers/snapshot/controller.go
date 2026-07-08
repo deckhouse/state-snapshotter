@@ -147,6 +147,9 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return err
 	}
+	if err := registerSnapshotChildrenRefFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
 	// Status-only SnapshotContent updates must enqueue the bound Snapshot (Ready propagation).
 	passAll := predicate.NewPredicateFuncs(func(client.Object) bool { return true })
 	b := ctrl.NewControllerManagedBy(mgr).
