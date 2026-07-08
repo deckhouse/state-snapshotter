@@ -1252,3 +1252,10 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   «Conditions & Reasons» catalog synced the same day (terminal 13 -> 9; non-terminal −2 dead,
   +`ChildrenLinkPending` +`ContentMissing` which were produced but uncatalogued). Unit tests green across
   api/usecase/snapshot/genericbinder/snapshotcontent; integration + e2e compile-checked.
+- **Refactor** (genericbinder, sdk-children-planned-freeze block 0) Deleted the dead
+  `commonControllerLegCaptured` helper from `domain_content.go` — zero callers remained after the w8-block7
+  move of the capture-leg lifecycle to the aggregator, and it held the package's last quoted
+  `"commonController"` status-key literal. Added `pure_creator_guard_test.go`: a dependency-free grep-guard
+  (os.ReadDir over the package dir) that fails if that quoted literal reappears in any non-test source,
+  pinning the pure-creator invariant (decision #10 — the binder never touches main-owned
+  `captureState.commonController`). gofmt clean; `go test ./internal/controllers/genericbinder/` green.

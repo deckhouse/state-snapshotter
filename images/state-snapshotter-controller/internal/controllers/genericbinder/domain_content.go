@@ -90,13 +90,6 @@ func (r *GenericSnapshotBinderController) mirrorDataToLeaf(
 	})
 }
 
-// commonControllerLegCaptured reports whether the core-written capture-leg success latch
-// status.captureState.commonController.<leg> is present and true.
-func commonControllerLegCaptured(obj *unstructured.Unstructured, leg string) bool {
-	v, found, _ := unstructured.NestedBool(obj.Object, "status", "captureState", "commonController", leg)
-	return found && v
-}
-
 // domainCaptureStateString reads a string field from status.captureState.domainSpecificController
 // (the domain-written half of captureState: MCR/VCR names, phase reason/message).
 func domainCaptureStateString(obj *unstructured.Unstructured, field string) string {
