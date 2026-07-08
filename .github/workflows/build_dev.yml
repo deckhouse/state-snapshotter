@@ -212,12 +212,13 @@ jobs:
   # E2E: gate by input from caller (trivy) so label detection uses the same github.event as the top-level workflow.
   # Uses the unified storage-e2e reusable pipeline (deckhouse/storage-e2e/.github/workflows/e2e-reusable.yml).
   # Disabled by default until CI e2e is enabled from trivy_image_check.yaml (e2e-smoke-test label).
+  # Ref: e2e-reusable.yml is not on storage-e2e@main yet — switch @ndemchuk-reusable-ci → @main after that PR lands.
   run_e2e_smoke_tests:
     if: ${{ inputs.run_e2e_smoke_tests == true }}
     name: Run E2E Smoke Tests
     needs:
       - dev_setup_build
-    uses: deckhouse/storage-e2e/.github/workflows/e2e-reusable.yml@main
+    uses: deckhouse/storage-e2e/.github/workflows/e2e-reusable.yml@ndemchuk-reusable-ci
     secrets: inherit
     with:
       pipeline_mode: create-and-test
@@ -230,4 +231,4 @@ jobs:
       test_suite: TestSnapshotter
       label_filter: ""
       test_timeout: 120m
-      storage_e2e_ref: main
+      storage_e2e_ref: ndemchuk-reusable-ci
