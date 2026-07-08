@@ -933,3 +933,21 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   deterministic after the frozen MarkPlanned barrier — the only shrink path is a PVC deleted mid-capture, a
   general child-lifecycle edge, not orphan-specific. Re-ran Bugbot: no findings. gofmt + build + vet
   (incl. -tags integration) + full unit suite green.
+- **Add** (w8-block3d, e2e) VolumeSnapshot-domain e2e coverage for the content-single-writer orphan dismantling.
+  New e2e/tests/volumesnapshot_domain_test.go (env-gated E2E_VOLUME_DATA, registered in the suite): (a) a
+  USER-created standalone CSI VolumeSnapshot is adopted by the storage-foundation VS domain controller
+  (fork storage-foundation.deckhouse.io/processed label + state-snapshotter.deckhouse.io/managed=true), the
+  core binder creates+binds its state-snapshotter SnapshotContent (status.boundSnapshotContentName), the
+  aggregator projects the manifest leg (manifestCheckpointName -> Ready MCP owned by the content) and the
+  native-CSI data leg (status.data VolumeSnapshotContent, Retain + owned), conditions[Ready] is mirrored back,
+  and the VS connector manifests-download returns the one-node tree incl. the source PVC manifest; (b) a
+  VolumeSnapshot on an exclude-vetoed PVC latches managed=false, stays a plain CSI snapshot (bound
+  boundVolumeSnapshotContentName), and Consistently owns NO ManifestCaptureRequest and gets NO
+  state-snapshotter SnapshotContent. Also added an It to volumedata_test.go asserting the phase-3 root
+  orphan/residual PVC (demo-pvc) is now an ordinary VolumeSnapshot domain child end to end (same adopt ->
+  content -> manifest+data legs -> Ready pipeline), proving INV-CONTENT-WRITER-1 (content created by the binder,
+  not the ns domain). Review cycle (Bugbot HIGH x1 + MEDIUM x1): sized every spec's parent ctx to the sum of
+  its sequential per-step waits (N*perStepTO+buffer idiom) and budgeted the orphan-VS adoption pipeline at the
+  generous snapshotReadyTO (multi-controller convergence), NOT the 30s captureReadyTO (pure snapshot creation),
+  matching the parallel user-VS pipeline. Re-ran Bugbot: no findings. e2e test binary compiles (go test -c);
+  live-cluster run deferred to the end-of-plan validation pass (compile-only per the overnight pre-approval).

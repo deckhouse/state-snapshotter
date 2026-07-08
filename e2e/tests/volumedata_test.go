@@ -642,6 +642,55 @@ func volumeDataSpecs() {
 			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 		})
 
+		It("captures the orphan PVC as a VolumeSnapshot DOMAIN child (Block 3d: fork+managed labels, MCP leg, Ready mirrored)", func() {
+			// Block 3d (content-single-writer design §11.6): the root residual/orphan PVC (demo-pvc, owned by
+			// no demo CR) is no longer a bespoke "child volume node" the namespace domain writes — it is an
+			// ORDINARY CSI VolumeSnapshot domain child. The storage-foundation VS domain controller adopts it
+			// (fork label + managed=true), the core binder creates+binds its SnapshotContent, and the
+			// aggregator projects that content's data (native-CSI VSC, Retain+owned) AND manifest leg
+			// (MCR -> Ready MCP). conditions[Ready] is mirrored back onto the VolumeSnapshot. This also proves
+			// INV-CONTENT-WRITER-1: the content exists + is bound because the BINDER created it, not the ns domain.
+			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
+
+			// The orphan-VS ADOPTION pipeline (domain-controller managed latch -> binder shell -> aggregator
+			// manifest+data legs -> Ready mirror) is a multi-controller convergence, NOT pure snapshot
+			// creation, so every wait is budgeted at the generous snapshotReadyTO — identical to the parallel
+			// user-VS pipeline in volumesnapshot_domain_test.go. captureReadyTO (a few tens of seconds, sized
+			// for copy-on-write LVM/manifest creation) would flake here. Five sequential per-step waits share
+			// one ctx, so size it to their sum (N*perStepTO+buffer idiom, see capture_test.go).
+			ctx, cancel := context.WithTimeout(context.Background(), 5*suiteCfg.snapshotReadyTO+5*time.Minute)
+			defer cancel()
+
+			By("Finding the orphan VolumeSnapshot the residual wave created for " + vdPVCRoot)
+			var orphanVS string
+			Eventually(func(g Gomega) {
+				vs, found, ferr := vsForSourcePVC(ctx, srcNS, vdPVCRoot)
+				g.Expect(ferr).NotTo(HaveOccurred())
+				g.Expect(found).To(BeTrue(), "expected a CSI VolumeSnapshot sourcing the orphan PVC %s", vdPVCRoot)
+				orphanVS = vs.GetName()
+			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(pollInterval).Should(Succeed())
+
+			By("Asserting the domain controller adopted it (fork label + managed=true)")
+			Expect(waitVSManagedLabel(ctx, srcNS, orphanVS, managedTrue, suiteCfg.snapshotReadyTO)).To(Succeed())
+			vs, err := getResource(ctx, volumeSnapshotGVR, srcNS, orphanVS)
+			Expect(err).NotTo(HaveOccurred())
+			_, hasProcessed := vs.GetLabels()[labelForkProcessed]
+			Expect(hasProcessed).To(BeTrue(), "the orphan VolumeSnapshot must carry the fork %s label", labelForkProcessed)
+
+			By("Waiting for the binder-created state-snapshotter SnapshotContent to bind")
+			contentName, err := waitVSBoundStateSnapshotContent(ctx, srcNS, orphanVS, suiteCfg.snapshotReadyTO)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Asserting the aggregator projected the manifest + native-CSI data legs onto that content")
+			Eventually(func(g Gomega) {
+				assertContentManifestLegReady(ctx, g, contentName)
+				assertContentDataRetainOwned(ctx, g, contentName)
+			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(pollInterval).Should(Succeed())
+
+			By("Asserting conditions[Ready] is mirrored onto the orphan VolumeSnapshot")
+			Expect(waitObjectCondition(ctx, volumeSnapshotGVR, srcNS, orphanVS, condReady, "True", suiteCfg.snapshotReadyTO)).To(Succeed())
+		})
+
 		It("excludes domain-VolumeCaptureRequest-covered PVCs from the root own-manifests (subtree coverage)", func() {
 			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
 
