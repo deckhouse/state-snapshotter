@@ -22,7 +22,7 @@ on:
         type: boolean
         required: false
       run_e2e_smoke_tests:
-        description: "Run E2E smoke tests (PR has label e2e-smoke-test)"
+        description: "Run E2E tests (PR has label e2e/run)"
         type: boolean
         required: false
         default: false
@@ -210,25 +210,20 @@ jobs:
           svace_analyze_ssh_private_key: "${{ secrets.SVACE_ANALYZE_SSH_PRIVATE_KEY }}"
 
   # E2E: gate by input from caller (trivy) so label detection uses the same github.event as the top-level workflow.
-  # Uses the unified storage-e2e reusable pipeline (deckhouse/storage-e2e/.github/workflows/e2e-reusable.yml).
-  # Disabled by default until CI e2e is enabled from trivy_image_check.yaml (e2e-smoke-test label).
-  # Ref: e2e-reusable.yml is not on storage-e2e@main yet — switch @ndemchuk-reusable-ci → @main after that PR lands.
+  # Uses the unified storage-e2e reusable pipeline (deckhouse/storage-e2e/.github/workflows/e2e.yml).
+  # Disabled by default until CI e2e is enabled from trivy_image_check.yaml (e2e/run label).
   run_e2e_smoke_tests:
     if: ${{ inputs.run_e2e_smoke_tests == true }}
     name: Run E2E Smoke Tests
     needs:
       - dev_setup_build
-    uses: deckhouse/storage-e2e/.github/workflows/e2e-reusable.yml@ndemchuk-reusable-ci
+    uses: deckhouse/storage-e2e/.github/workflows/e2e.yml@main
     secrets: inherit
     with:
-      pipeline_mode: create-and-test
-      pr_number: ${{ github.event.pull_request.number }}
       module_slug: ${{ vars.MODULE_NAME }}
       module_path: e2e
-      cluster_provider: alwaysCreateNew
       cluster_config: e2e/tests/cluster_config.yml
       test_package: ./tests/
-      test_suite: TestSnapshotter
-      label_filter: ""
-      test_timeout: 120m
-      storage_e2e_ref: ndemchuk-reusable-ci
+      cluster_provider: dvp
+      module_image_tag: pr${{ github.event.pull_request.number }}
+      storage_e2e_ref: main
