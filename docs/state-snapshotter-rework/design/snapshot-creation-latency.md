@@ -839,6 +839,49 @@ not by a fundamental design flaw.
 **after** fixing the QPS default (so only one variable changes at a time). `requeue_after` semantics are touched
 last (they carry correctness), per the agreed order QPS → default → concurrency → requeue.
 
+### Concurrency / data-leg probes — throughput is exhausted as a latency lever (N=20, CLOSED)
+
+**Status: measured and closed.** With `ss/domain` QPS fixed at the 200/400 knee, three further throughput levers
+were probed to test whether the residual N=20 wall (~26s, Phase-A-dominated) is throughput-bound. Two env knobs were
+added and kept as **infrastructure** (defaults unchanged): foundation VCR `MaxConcurrentReconciles`
+(`STORAGE_FOUNDATION_VCR_MAX_CONCURRENT_RECONCILES`, default 4) and foundation client QPS/Burst
+(`STORAGE_FOUNDATION_KUBE_QPS`/`_BURST`, default 50/100).
+
+| lever | range tested | N=20 wall (Ready-offset) | verdict |
+|---|---|---|---|
+| ss/domain client QPS | 50 → 200 → 500 | 38 → **26** → 26 | knee at 200 (real, already applied) |
+| foundation VCR workers | 4 → 8 → 16 | ~26 (flat) | not a lever |
+| foundation client QPS | 50 → 200 | ~26 (flat) | not a lever |
+
+- **No throughput lever moves the N=20 wall below ~26s** once ss/domain QPS is at 200/400. VCR 4→8→16 left Phase A
+  at a 17.4 → 16.1 → 15.9 plateau (≤ noise); foundation QPS 50→200 left the wall unchanged.
+- **Methodology caveat (important, applies to the whole doc): single-run per-phase A/B is noise-dominated at
+  N=20.** Two runs of the *identical* foundation-QPS=200 config gave `A=12.5 / B=13.8` and `A=17.9 / B=4.6` — A and B
+  **anti-correlate** and swing ±5–8s with batch staggering (a tree that starts late has a long A and short B, and
+  vice-versa). Only **total** and **Ready-offset (wall)** are trustworthy from a single run; any A-vs-B split must be
+  averaged over ≥3 runs before it is used for a conclusion. (The QPS-sweep *total* trend 38→26→23 remains valid — it
+  is large and monotonic, well above the swing.)
+- The concurrency/QPS knobs are retained as **env-configurable infrastructure** for production tuning, **not** as a
+  validated latency win; live defaults are unchanged (VCR 4, foundation QPS 50/100).
+
+**Conclusion: throughput is exhausted as a latency lever.** Client QPS (all three clients) and reconcile worker
+counts do not reduce the residual ~26s N=20 wall. The residual is **structural** — staged readiness propagation plus
+the demo-chain 500ms `RequeueAfter` poll cadence (see next). Further QPS/concurrency tuning is diminishing returns.
+The investigation therefore moves from *throughput* to the *architecture of readiness propagation*.
+
+### Next — readiness propagation is poll-paced, not event-driven (demo chain) — OPEN
+
+**Hypothesis (from the throughput-exhausted result + STOP analysis).** The residual Phase-A / wall is paced by the
+`500ms` self-requeue cadence in the demo domain controllers rather than by any throughput limit. The demo VM/Disk/
+snapshot reconcilers advance on `ctrl.Result{RequeueAfter: 500ms}` (`defaultDemoResourceRequeueAfter` /
+`defaultDemoSnapshotRequeueAfter`, `demo/materialization_constants.go`) while waiting for children to become
+Ready/Archived, so each layered wait can add up to ~0.5s of pure poll latency even when the child became ready right
+after the previous reconcile. Across priority layers this compounds into the observed staircase. Target: make the
+demo chain **event-driven** — a child Ready/Archived transition should *wake the waiting parent* (watch + ownerRef or
+a field-index/mapper on the ref field), keeping `RequeueAfter` only as a safety backstop, not the progress
+mechanism. **Do not** merely shrink 500ms → 50ms (that hides the problem and multiplies reconcile churn). Re-measure
+N=20 wall vs the ~26s baseline after the conversion (averaged over ≥3 runs per the caveat above).
+
 ---
 
 ## 9. Application checklist
