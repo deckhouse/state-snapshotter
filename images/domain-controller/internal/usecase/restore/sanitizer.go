@@ -92,6 +92,20 @@ func sanitizeForRestore(obj unstructured.Unstructured, targetNamespace string) (
 	return *out, true
 }
 
+// stripRuntimeMetadata removes server/runtime-managed metadata that blocks `kubectl apply` in a fresh
+// cluster/namespace.
+//
+// Finalizers are DELIBERATELY preserved (they are NOT stripped here): Class-1 machine finalizers (e.g.
+// kubernetes.io/pvc-protection) are re-added by the target cluster's controllers anyway, and Class-3
+// custom finalizers encode user intent that must survive a restore. The only Class-2 "wedge" finalizer
+// (the self-induced transient snapshot.storage.kubernetes.io/pvc-as-source-protection) is already
+// stripped at capture time, so it never reaches this read path. NB (cross-cluster import): a Class-3
+// custom finalizer whose controller is absent in the target cluster leaves the restored object
+// un-deletable without manual intervention — that is the intended intent-preserving semantics.
+//
+// ownerReferences ARE still stripped: a dangling ownerReference (its owner UID does not exist in the
+// target namespace/cluster) makes the API server garbage-collect the restored object immediately — real
+// data loss — so it must not survive.
 func stripRuntimeMetadata(out *unstructured.Unstructured) {
 	for _, f := range []string{
 		"uid",
@@ -102,7 +116,6 @@ func stripRuntimeMetadata(out *unstructured.Unstructured) {
 		"deletionGracePeriodSeconds",
 		"managedFields",
 		"ownerReferences",
-		"finalizers",
 		"selfLink",
 	} {
 		unstructured.RemoveNestedField(out.Object, "metadata", f)

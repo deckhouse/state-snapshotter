@@ -172,8 +172,8 @@
 Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **including `status`** and runtime fields. MCP is the source of truth for import/export: `DataImport`/`DataExport` read original fields (e.g. `status.capacity`, `spec.storageClassName`, `spec.volumeMode`) directly from the stored manifest.
 
 - **Object selection** (`ShouldIncludeNamespaceObject`: dropping controller-owned dependents, control-plane noise, snapshot/own machinery) is a **separate** layer applied on capture; it does **not** mutate object fields.
-- **Field-level sanitization** (stripping `status`, `metadata.managedFields`, `resourceVersion`, `uid`, `creationTimestamp`, etc.) happens **only on the restore read-path** (`internal/usecase/restore`), independent of capture.
-- There are **no** field-level exceptions on capture — see §4.5.1.
+- **Field-level sanitization** (stripping `status`, `metadata.managedFields`, `resourceVersion`, `uid`, `creationTimestamp`, `ownerReferences`, etc.) happens **only on the restore read-path** (`internal/usecase/restore`), independent of capture. The restore path **preserves** `metadata.finalizers` (intent) while stripping `ownerReferences` (dangling owner → immediate GC = data loss).
+- Capture has **exactly one** field-level exception: the self-induced transient protection finalizer `snapshot.storage.kubernetes.io/pvc-as-source-protection` is stripped from `metadata.finalizers` before serialization (denylist `transientCaptureFinalizerDenylist`, `checkpoint_controller.go`), because our own orphan-PVC capture provokes it. Everything else — including `Secret` bytes — is verbatim (see §4.5.1).
 
 #### 4.5.1 Secret handling in ManifestCheckpoint
 
@@ -353,19 +353,21 @@ Snapshot-capture stores manifests **as-is** in `ManifestCheckpoint` (MCP), **inc
 - `sanitizationProfile`
 - `partial`, `warningsCount` (в MVP при fail-closed — см. §9)
 
-### 8.3 Sanitization rules (по умолчанию MVP)
+### 8.3 Sanitization rules (текущий restore-санитайзер)
 
-Удалять/не сохранять в bundle (явный перечень):
+Санитизация выполняется **на restore read-path** (`internal/usecase/restore/sanitizer.go`; идентичная копия — в domain-controller), **не** на capture (capture — verbatim, единственное исключение — транзиентный финализатор, см. §4.5.0). Для оставленных namespaced-объектов санитайзер делает манифест apply-ready.
 
-- `status`
-- `managedFields`
-- `resourceVersion`
-- `uid`
-- `generation`
-- `creationTimestamp`
-- прочие server-side / system поля, не нужные для последующего apply/import (перечень уточнять при реализации, без размытого «и т.п.» в коде и тестах)
+**Удаляются** (явный перечень, соответствует коду):
 
-**Отдельно решить до restore/import (restore-sensitive):** судьба **`ownerReferences`** (стрип / перезапись / сохранение под профиль), **частей `annotations`** (служебные префиксы, ссылки), при необходимости **`finalizers`** в сохранённых объектах — иначе apply в другой namespace или другой кластер даст неожиданные эффекты. В MVP достаточно явно зафиксировать выбранное поведение в коде и в тестах.
+- `status`;
+- `metadata`: `uid`, `resourceVersion`, `generation`, `creationTimestamp`, `deletionTimestamp`, `deletionGracePeriodSeconds`, `managedFields`, `selfLink`;
+- `metadata.ownerReferences` — **снимаются намеренно**: висячий ownerRef (owner-UID отсутствует в целевом namespace/кластере) → apiserver немедленно GC-ит восстановленный объект = потеря данных;
+- restore-ломающие аннотации: `kubectl.kubernetes.io/last-applied-configuration`, `pv.kubernetes.io/bind-completed`, `pv.kubernetes.io/bound-by-controller`, `volume.kubernetes.io/selected-node`;
+- kind-специфика: PVC `spec.volumeName`/`dataSource`/`dataSourceRef`; Service `clusterIP(s)`/`ipFamilies`/`ipFamilyPolicy`/`healthCheckNodePort`/`loadBalancerIP` и `spec.ports[].nodePort`.
+
+**Переписываются:** `metadata.namespace` → `targetNamespace`; `RoleBinding.subjects[].namespace` (ServiceAccount) → `targetNamespace`.
+
+**Сохраняются (НЕ удаляются): `metadata.finalizers`** — политика сохранения intent: Класс 1 (машинные, напр. `kubernetes.io/pvc-protection`) целевой кластер навесит заново; Класс 3 (кастомные) кодируют намерение пользователя; Класс 2 (self-induced wedge `pvc-as-source-protection`) до restore не доходит — срезан на захвате. Cross-cluster import: кастомный финализатор без контроллера в целевом кластере оставит объект неудаляемым без ручного вмешательства — осознанная intent-семантика.
 
 ### 8.4 Versioning
 

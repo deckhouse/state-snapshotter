@@ -70,6 +70,51 @@ type terminalCaptureError struct{ err error }
 func (e *terminalCaptureError) Error() string { return e.err.Error() }
 func (e *terminalCaptureError) Unwrap() error { return e.err }
 
+// transientCaptureFinalizerDenylist lists self-induced, transient "protection" finalizers that the
+// capture pipeline itself provokes and that MUST NOT be archived verbatim. When state-snapshotter
+// snapshots an orphan/standalone PVC it creates a CSI VolumeSnapshot over that PVC; the CSI
+// snapshot-controller then briefly stamps `pvc-as-source-protection` on the source PVC and removes it
+// once the snapshot is ready. That finalizer is therefore an artifact of OUR capture, not part of the
+// user's object: capturing it verbatim makes the archived PVC diverge from the live one (raw-vs-live
+// drift) and could wedge deletion on a cluster without a matching CSI snapshot in flight. Only the
+// PVC-side `*-as-source-protection` needs listing here — the VolumeSnapshot-side `*-bound-protection`
+// never reaches the archive because CSI VolumeSnapshot is excluded from manifest capture
+// (namespacemanifest/targets.go). Kept as our own const; external-snapshotter is not imported for a
+// single string. This is the ONLY field-level exception to verbatim capture.
+var transientCaptureFinalizerDenylist = map[string]struct{}{
+	"snapshot.storage.kubernetes.io/pvc-as-source-protection": {},
+}
+
+// stripTransientCaptureFinalizers removes denylisted self-induced protection finalizers from a
+// normalized object map (metadata.finalizers), in place. It operates on the serialization copy
+// (normalizedMap in createChunks), never the source obj.Object, so capture stays mutation-safe
+// regardless of the object's origin. When the finalizers list becomes empty the key is dropped so the
+// archived object matches a live object that carries no finalizers.
+func stripTransientCaptureFinalizers(normalizedMap map[string]interface{}) {
+	metaField, ok := normalizedMap["metadata"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	raw, ok := metaField["finalizers"].([]interface{})
+	if !ok {
+		return
+	}
+	kept := make([]interface{}, 0, len(raw))
+	for _, f := range raw {
+		if name, ok := f.(string); ok {
+			if _, denied := transientCaptureFinalizerDenylist[name]; denied {
+				continue
+			}
+		}
+		kept = append(kept, f)
+	}
+	if len(kept) == 0 {
+		delete(metaField, "finalizers")
+		return
+	}
+	metaField["finalizers"] = kept
+}
+
 // terminalCapturef builds a terminalCaptureError with a formatted message.
 func terminalCapturef(format string, a ...interface{}) error {
 	return &terminalCaptureError{err: fmt.Errorf(format, a...)}
@@ -833,6 +878,11 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		if normalizedMap, ok := normalized.(map[string]interface{}); ok {
 			normalizedMap["apiVersion"] = obj.GetAPIVersion()
 			normalizedMap["kind"] = obj.GetKind()
+			// Verbatim capture has exactly ONE field-level exception: strip the self-induced,
+			// transient protection finalizers our own capture provoked (see
+			// transientCaptureFinalizerDenylist). Done on the normalized serialization copy, not on
+			// obj.Object, so the source object is never mutated.
+			stripTransientCaptureFinalizers(normalizedMap)
 		}
 
 		jsonObjects = append(jsonObjects, normalized)

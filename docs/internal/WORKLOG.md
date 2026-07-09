@@ -1713,3 +1713,41 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
 - **Verify** Full wave-2 gate pass at HEAD: grep-gates (StaticBind, VolumeReady, parentDeleted,
   sourceNamespace, ProduceArtifact/PopulateVolume/scratchVolumeTemplate, snapshotSource) zero live hits;
   go-lint.sh 15/15 PASSED; unit tests green across all modules; integration + e2e compile.
+
+## Capture/restore finalizer policy + DataExport data-leg read fix
+
+- **Add** capture-time strip of the self-induced transient protection finalizer
+  `snapshot.storage.kubernetes.io/pvc-as-source-protection` (denylist `transientCaptureFinalizerDenylist`
+  + helper `stripTransientCaptureFinalizers` in `manifestcapture/checkpoint_controller.go`). Runs in
+  `createChunks` on the normalized serialization copy (not `obj.Object`), so capture stays verbatim with
+  **exactly one** field-level exception. Our own orphan-PVC capture provokes that finalizer (CSI
+  snapshot-controller stamps it on the source PVC), so archiving it verbatim diverged the stored PVC from
+  the live one (the `backup_download_test.go` raw-vs-live diff) and could wedge deletion on restore. The
+  paired `*-bound-protection` never reaches the archive (CSI VolumeSnapshot excluded from manifest
+  capture). Unit test `checkpoint_finalizer_strip_test.go`: transient stripped, `pvc-protection` + custom
+  finalizer + status/managedFields/uid captured verbatim.
+- **Refactor** (restore read-path) Stopped stripping `metadata.finalizers` in `stripRuntimeMetadata` in
+  **both** sanitizers (`state-snapshotter-controller` and `domain-controller` `internal/usecase/restore`).
+  Finalizers are now preserved (Class-1 machine finalizers get re-added by the target cluster anyway;
+  Class-3 custom finalizers encode user intent; the Class-2 wedge is already stripped at capture).
+  `ownerReferences` are still stripped (dangling owner → immediate GC = data loss). Updated
+  `sanitizer_test.go` (finalizers preserved, ownerReferences stripped) and **added** the first-ever unit
+  test for the domain-controller sanitizer (`sanitizer_test.go`, previously untested).
+- **Fix** (storage-foundation `api-rework`, committed separately, not pushed) DataExport snapshot resolver
+  `data-export/snapshot_resolver.go` read the pre-wave5 `SnapshotContent.status.dataRef` (+ nested
+  `target.namespace`) while state-snapshotter now writes `status.data` (+ nested `source.namespace`), so
+  DataExport hung forever on `TargetNotReady`. Renamed the read paths (`status.data`, `data.source`),
+  error strings, and comments; updated `snapshot_resolver_test.go` set-helpers. Unit `data-export` green.
+- **Update** docs/ADR to the final behavior: overview ADR (`2026-06-29-unified-snapshots-overview.md`,
+  arch repo, staged own file only, not pushed) — verbatim-capture note with the one finalizer exception in
+  «Поток capture», the restore finalizer/ownerReferences policy + cross-cluster-import note in «Restore»,
+  and the download-vs-restore HTTP matrix; restore-compiler draft `2026-06-10-restore-manifests-compiler.md`
+  D3 strip list; `system-spec.md` §0 raw-capture policy; `snapshot-controller.md` §4.5.0 + §8.3
+  (sanitization rules rewritten to match the current sanitizer).
+- **Tail (future, tracked here so it is not lost):** the wave5 `SnapshotContent.status.dataRef` ->
+  `status.data` / nested `target` -> `source` / `DataRefList()` -> `DataList()` doc rename is NOT yet
+  applied to the deep normative body of `docs/internal/state-snapshotter-rework/spec/system-spec.md`
+  (§3.9 and the §1 summary bullets — ~25 interlocking occurrences that must NOT touch the foundation VCR
+  `status.dataRefs[]` contract) nor to `design/volume-node-dual-capture.md`. Deferred deliberately to
+  avoid a half-rename that leaves that section internally inconsistent; to be done as one focused
+  doc-rename pass.
