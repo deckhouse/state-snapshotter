@@ -25,11 +25,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 
+	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
@@ -101,31 +102,48 @@ func buildChildBridgeSource(ns, badSC string) []*unstructured.Unstructured {
 	return []*unstructured.Unstructured{configMap, pvc, disk}
 }
 
-// cloneStorageClassWithBadVSC creates newSC as a copy of the provisioned srcSC (same provisioner and
-// parameters, so PVCs still provision) but annotated to a VolumeSnapshotClass that does not exist. This
-// isolates the terminal-capture injection from the shared, snapshot-capable StorageClass the other
-// volume-data specs depend on.
+// cloneStorageClassWithBadVSC provisions newSC as a functional twin of the base srcSC (same LVM config, so
+// PVCs still provision) but wired to a VolumeSnapshotClass that does not exist, isolating the terminal-
+// capture injection from the shared, snapshot-capable StorageClass the other volume-data specs depend on.
+//
+// The base StorageClass is owned by sds-local-volume (provisioner local.csi.storage.deckhouse.io), whose
+// validating webhook forbids creating/mutating such a StorageClass directly — it must be created through a
+// LocalStorageClass CR (only annotation-only updates to an EXISTING SC are allowed). So this creates a
+// SECOND LocalStorageClass that reuses the base's spec.lvm (same LVGs/thin pool), waits for the controller
+// to materialize the backing StorageClass, then flips its storage.deckhouse.io/volumesnapshotclass
+// annotation to a non-existent class via an annotation-only patch. The controller sets that annotation to
+// its default (an existing VSC) at create time but never reconciles annotations afterwards (hasSCDiff
+// ignores them), so the patch sticks and the domain disk's volume capture fails terminally while the disk
+// itself provisions and reaches Ready.
 func cloneStorageClassWithBadVSC(ctx context.Context, srcSC, newSC, badVSC string) error {
-	cs := suiteClientset
-	src, err := cs.StorageV1().StorageClasses().Get(ctx, srcSC, metav1.GetOptions{})
+	base, err := suiteDyn.Resource(storagekube.LocalStorageClassGVR).Get(ctx, srcSC, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("get source StorageClass %s: %w", srcSC, err)
+		return fmt.Errorf("get base LocalStorageClass %s: %w", srcSC, err)
 	}
-	clone := &storagev1.StorageClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        newSC,
-			Annotations: map[string]string{annStorageClassVSC: badVSC},
-		},
-		Provisioner:          src.Provisioner,
-		Parameters:           src.Parameters,
-		ReclaimPolicy:        src.ReclaimPolicy,
-		MountOptions:         src.MountOptions,
-		AllowVolumeExpansion: src.AllowVolumeExpansion,
-		VolumeBindingMode:    src.VolumeBindingMode,
-		AllowedTopologies:    src.AllowedTopologies,
+	spec, found, err := unstructured.NestedMap(base.Object, "spec")
+	if err != nil || !found {
+		return fmt.Errorf("base LocalStorageClass %s has no spec (found=%v): %w", srcSC, found, err)
 	}
-	if _, err := cs.StorageV1().StorageClasses().Create(ctx, clone, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create bad-VSC StorageClass %s: %w", newSC, err)
+	clone := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": storagekube.LocalStorageClassGVR.GroupVersion().String(),
+		"kind":       "LocalStorageClass",
+		"metadata":   map[string]interface{}{"name": newSC},
+		"spec":       spec,
+	}}
+	if _, err := suiteDyn.Resource(storagekube.LocalStorageClassGVR).Create(ctx, clone, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create clone LocalStorageClass %s: %w", newSC, err)
+	}
+	if err := storagekube.WaitForLocalStorageClassCreated(ctx, suiteRestCfg, newSC, 5*time.Minute); err != nil {
+		return fmt.Errorf("clone LocalStorageClass %s did not reach Created: %w", newSC, err)
+	}
+	if err := storagekube.WaitForStorageClass(ctx, suiteRestCfg, newSC, 2*time.Minute); err != nil {
+		return fmt.Errorf("clone StorageClass %s did not appear: %w", newSC, err)
+	}
+	// Annotation-only update on the existing SC (the only StorageClass mutation the sds-local-volume webhook
+	// permits): point the VolumeSnapshotClass annotation at a class that does not exist.
+	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annStorageClassVSC, badVSC))
+	if _, err := suiteClientset.StorageV1().StorageClasses().Patch(ctx, newSC, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("annotate clone StorageClass %s with %s=%s: %w", newSC, annStorageClassVSC, badVSC, err)
 	}
 	return nil
 }
@@ -224,16 +242,19 @@ func childBridgeFailureSpecs() {
 			})
 			Expect(err).NotTo(HaveOccurred(), "provision base StorageClass")
 
-			By("Cloning it into a StorageClass wired to a non-existent VolumeSnapshotClass (" + badSC + " -> " + cbMissingVSCName + ")")
+			By("Cloning it (via a LocalStorageClass) into a StorageClass wired to a non-existent VolumeSnapshotClass (" + badSC + " -> " + cbMissingVSCName + ")")
 			Expect(cloneStorageClassWithBadVSC(ctx, sc, badSC, cbMissingVSCName)).To(Succeed())
 			DeferCleanup(func() {
 				cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Minute)
 				defer ccancel()
 				if cleanupSkipped() {
-					GinkgoWriter.Printf("%s: keeping StorageClass %q\n", keepReason(), badSC)
+					GinkgoWriter.Printf("%s: keeping LocalStorageClass/StorageClass %q\n", keepReason(), badSC)
 					return
 				}
-				_ = suiteClientset.StorageV1().StorageClasses().Delete(cctx, badSC, metav1.DeleteOptions{})
+				// Delete the LocalStorageClass, which owns the backing StorageClass: the sds-local-volume
+				// controller removes the SC as part of the LSC delete-reconcile. Deleting the SC directly would
+				// be recreated by the controller (and blocked by its webhook for non-controller users).
+				_ = suiteDyn.Resource(storagekube.LocalStorageClassGVR).Delete(cctx, badSC, metav1.DeleteOptions{})
 			})
 
 			By("Creating the source namespace and applying the data-backed disk source on the bad StorageClass")
