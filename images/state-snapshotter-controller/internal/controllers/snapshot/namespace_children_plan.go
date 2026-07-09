@@ -354,6 +354,16 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 // the namespace planner: the native VolumeSnapshot has no spec.sourceRef (it requires
 // spec.source.persistentVolumeClaimName), and PVC volume capture is owned by the root's residual/orphan wave.
 // Group+Kind (not the pinned version) is matched so a future served version still routes to the orphan wave.
+//
+// This guard STAYS load-bearing even after VolumeSnapshot became a built-in pair (BuiltInVolumeSnapshotPair)
+// and its dedicated CustomSnapshotDefinition was removed from storage-foundation — do NOT delete it as dead
+// code:
+//   - Rollout window: core and storage-foundation deploy independently. While an older storage-foundation
+//     still ships the storage-foundation-volumesnapshot CSD, EligibleResourceSnapshotMappings still yields a
+//     PVC->VolumeSnapshot mapping into this planner; only this guard keeps it out of the child graph.
+//   - Permanent defense: CustomSnapshotDefinition admission does not forbid mapping onto a native CSI kind
+//     (no CEL rule / webhook on spec.apiVersion+kind), so any third-party CSD could re-introduce the invalid
+//     native-VolumeSnapshot expansion. The guard fails that closed regardless of who authored the CSD.
 func isNativeCSIVolumeSnapshotMapping(mapping csdregistry.EligibleResourceSnapshotMapping) bool {
 	return mapping.SnapshotGVK.Group == snapshotpkg.CSISnapshotGroup &&
 		mapping.SnapshotGVK.Kind == snapshotpkg.KindVolumeSnapshot

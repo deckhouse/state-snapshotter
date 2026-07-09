@@ -1353,3 +1353,42 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   PVC in `excludedRefs` (same treatment as a vetoed domain source). Unit tests: native VS mapping is not
   expanded (layer + end-to-end plan stays AllPlanned with no children) and a vetoed PVC is still recorded in
   `excludedRefs`. gofmt + go vet + tests green; golangci-lint adds no new findings; bugbot clean.
+
+### Built-in VolumeSnapshot — remove the storage-foundation CSD
+
+- **Refactor** (unifiedbootstrap) `VolumeSnapshot` is now a **built-in** pair
+  (`BuiltInVolumeSnapshotPair`: `snapshot.storage.k8s.io/v1`, common `SnapshotContent`,
+  `RequiresDataArtifact=true`) added to `DefaultGraphRegistryBuiltInPairs()`. Rationale: PVC volume capture
+  is core-built-in behavior (the root's residual/orphan wave creates native CSI VolumeSnapshots), so
+  registering the kind belongs in core, not in a `CustomSnapshotDefinition`. The prior CSD
+  `storage-foundation-volumesnapshot` played 3 roles — (1) kind registration + `RequiresDataArtifact`, now a
+  built-in pair; (2) a `PVC -> VolumeSnapshot` source-mapping that only the generic planner consumed (and
+  which it must SKIP, see the planner guard below) — dead weight, removed; (3) dynamic RBAC, already covered
+  by the controller's static `rbac-for-us.yaml`. The VolumeSnapshot **domain controller stays out-of-process**
+  in storage-foundation.
+- **Add** (main.go / unifiedbootstrap) `StartupBuiltInVolumeSnapshotPair` + a boot-time
+  `MarkDomainCaptureKind` for the built-in VolumeSnapshot. It is NON-dedicated (kept by
+  `FilterGenericSnapshotGVKPairs`, so the binder already watches it at boot) — only the domain-capture MARK
+  was missing. The mark is a **correctness requirement, not a race fix**: `unifiedruntime.Syncer.Sync` runs
+  only on CSD reconciles, so in a zero-CSD cluster it never fires and, without the boot mark, the binder
+  would eagerly create a content shell before storage-foundation's domain claim (dual writer). `Sync`
+  re-asserts the mark idempotently. VolumeSnapshot is intentionally kept OUT of
+  `DedicatedSnapshotControllerKinds` (no in-process reconciler) and `DomainCaptureSnapshotKinds` (strict
+  subset of dedicated).
+- **Keep** (snapshot) The `isNativeCSIVolumeSnapshotMapping` planner guard is retained and its comment
+  reframed: it stays load-bearing during the cross-repo rollout window (old storage-foundation still shipping
+  the CSD) and as permanent defense (CSD admission does not forbid a native CSI kind, so any third-party CSD
+  could reintroduce the invalid expansion). NOT reverted.
+- **Remove** (storage-foundation) Deleted `templates/controller/custom-snapshot-definition.yaml`
+  (`storage-foundation-volumesnapshot`). Verified: the VS domain controller does not reference the CSD and
+  carries its own static RBAC (VS/VSContent/PVC/MCR). **Deploy ordering**: core built-in-VS changes must ship
+  before/with the CSD removal, else old core stops registering the VS kind.
+- **Docs** ADR `2026-06-29-unified-snapshots-overview.md`: built-in kinds are now `Snapshot` + `VolumeSnapshot`;
+  VS domain controller out-of-process; RBAC static; ordering contract (orphan wave after all CSD layers,
+  effective weight = max(CSD.weight)+1, no numeric field). Static RBAC comment in `rbac-for-us.yaml` clarified.
+- **Tests** `gvk_test.go` reworked (`_containsSnapshotAndVolumeSnapshot` + `_hasNoCSDGatedDomainPairs`);
+  `pairs_test.go` adds `BuiltInVolumeSnapshotPair` invariants + `StartupBuiltInVolumeSnapshotPair`;
+  integration `unified_bootstrap_t1` now expects 2 resolved built-in pairs (envtest installs a minimal CSI
+  VolumeSnapshot CRD before the manager). Build + unit + `go vet -tags integration` + gofmt + golangci-lint
+  green. e2e Phase 3b (`resourceSelector over PVC volume data`) fix already landed via the planner guard
+  (`56ecb5f`); this change removes the dead CSD mapping that caused it.

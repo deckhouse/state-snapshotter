@@ -168,12 +168,33 @@ func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKi
 // RBAC, to avoid a cache-sync deadlock), the built-in root is always present and needs no gating, so it
 // is safe to register directly at startup. Registration is idempotent, so a later Sync is a no-op.
 func StartupDomainCaptureRootPair(snapGVKs, contentGVKs []schema.GroupVersionKind) (snap, content schema.GroupVersionKind, ok bool) {
+	return findResolvedPair(DefaultSnapshotPair().Snapshot, snapGVKs, contentGVKs)
+}
+
+// StartupBuiltInVolumeSnapshotPair returns the built-in CSI VolumeSnapshot pair (BuiltInVolumeSnapshotPair)
+// from the resolved parallel slices, if present (ok=false when the CSI VolumeSnapshot CRD is absent, so the
+// pair never resolved). Boot-wiring parallel to StartupDomainCaptureRootPair but for a NON-dedicated kind:
+//
+// FilterGenericSnapshotGVKPairs keeps VolumeSnapshot (it is not a dedicated kind), so the generic binder
+// already watches it at startup via genericSnapshotGVKs — no separate watch registration is needed here.
+// What IS missing at boot is the domain-capture MARK: without it the binder would treat VolumeSnapshot as a
+// fully-generic kind and eagerly create + bind a SnapshotContent shell before the out-of-process
+// storage-foundation VolumeSnapshot domain controller claims the object (a dual content writer). The only
+// compensating mark — unifiedruntime.Syncer.Sync's "CSD-derived kind => domain-capture" else-branch — runs
+// on CSD reconciles, never at pod boot, and would not fire at all in a cluster with zero CSDs. So main must
+// MarkDomainCaptureKind for this pair at boot; the later Sync re-asserts it idempotently.
+func StartupBuiltInVolumeSnapshotPair(snapGVKs, contentGVKs []schema.GroupVersionKind) (snap, content schema.GroupVersionKind, ok bool) {
+	return findResolvedPair(BuiltInVolumeSnapshotPair().Snapshot, snapGVKs, contentGVKs)
+}
+
+// findResolvedPair returns the (snapshot, content) GVKs for target from the parallel resolved slices.
+// ok is false when target is absent or the slices are mismatched.
+func findResolvedPair(target schema.GroupVersionKind, snapGVKs, contentGVKs []schema.GroupVersionKind) (snap, content schema.GroupVersionKind, ok bool) {
 	if len(snapGVKs) != len(contentGVKs) {
 		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, false
 	}
-	root := DefaultSnapshotPair().Snapshot
 	for i := range snapGVKs {
-		if snapGVKs[i] == root {
+		if snapGVKs[i] == target {
 			return snapGVKs[i], contentGVKs[i], true
 		}
 	}

@@ -151,7 +151,10 @@ rules:
   verbs: ["get", "list", "watch", "update", "patch", "delete"]
 
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
-# binder (C5) binds extended VS carrying the spec.source.import marker.
+# binder (C5) binds extended VS carrying the spec.source.import marker. VolumeSnapshot is a BUILT-IN pair
+# (unifiedbootstrap.BuiltInVolumeSnapshotPair) — this static grant is its RBAC source of truth and does NOT
+# depend on any CustomSnapshotDefinition / the dynamic domain-RBAC hook (which grants the out-of-process
+# storage-foundation domain SA, not this controller SA).
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]

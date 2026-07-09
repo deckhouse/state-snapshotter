@@ -30,7 +30,8 @@ type UnifiedGVKPair struct {
 	Snapshot        schema.GroupVersionKind
 	SnapshotContent schema.GroupVersionKind
 	// RequiresDataArtifact marks that the snapshot kind carries a volume data leg (CSD
-	// spec.requiresDataArtifact). Built-in/bootstrap pairs leave it false. It is carried through
+	// spec.requiresDataArtifact, or built-in for the CSI VolumeSnapshot pair). The built-in root Snapshot
+	// pair leaves it false; the built-in VolumeSnapshot pair sets it true. It is carried through
 	// merge/resolve so the generic controller's GVKRegistry learns which snapshot kinds expect a data
 	// artifact.
 	RequiresDataArtifact bool
@@ -50,19 +51,42 @@ func DefaultSnapshotPair() UnifiedGVKPair {
 	}
 }
 
-// DefaultGraphRegistryBuiltInPairs lists the only Snapshot↔SnapshotContent pairs the controller ships
-// with out of the box. It contains just the core namespace-root Snapshot pair (always present in this
-// repo's CRDs, always covered by static controller RBAC). Domain-specific kinds (e.g. virtualization,
-// demo) are intentionally NOT built in: they enter discovery and get watches exclusively through
-// eligible CustomSnapshotDefinition resources (+ the module RBAC hook that sets RBACReady=True).
+// BuiltInVolumeSnapshotPair returns the built-in CSI VolumeSnapshot pair. PVC volume capture is a
+// core-built-in behavior (the root Snapshot's residual/orphan wave creates native CSI VolumeSnapshots for
+// residual PVCs), so the kind is registered in-core rather than via a CustomSnapshotDefinition. Its
+// SnapshotContent is the common storage SnapshotContent, created/bound by the GenericSnapshotBinderController
+// and gated on a domain claim: the actual planning controller (adopt/MCR/MarkPlanned) is the out-of-process
+// storage-foundation VolumeSnapshot domain controller. RequiresDataArtifact is true — a VolumeSnapshot
+// carries a volume data leg (the native VolumeSnapshotContent). The pair enters discovery only when the CSI
+// VolumeSnapshot CRD is installed (RESTMapper gate in ResolveAvailableUnifiedGVKPairs); it is intentionally
+// NOT added to DedicatedSnapshotControllerKinds (no in-process reconciler) nor DomainCaptureSnapshotKinds
+// (that list is a strict subset of the dedicated kinds) — the boot domain-capture MARK is wired explicitly
+// (see StartupBuiltInVolumeSnapshotPair) and re-asserted by unifiedruntime.Syncer.Sync.
+func BuiltInVolumeSnapshotPair() UnifiedGVKPair {
+	return UnifiedGVKPair{
+		Snapshot:             schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"},
+		SnapshotContent:      CommonSnapshotContentGVK(),
+		RequiresDataArtifact: true,
+	}
+}
+
+// DefaultGraphRegistryBuiltInPairs lists the Snapshot↔SnapshotContent pairs the controller ships with out
+// of the box: the core namespace-root Snapshot pair and the CSI VolumeSnapshot pair (both always covered by
+// static controller RBAC). VolumeSnapshot is built in — not a CustomSnapshotDefinition — because PVC volume
+// capture is core behavior (the root's residual/orphan wave), even though its planning domain controller
+// lives out-of-process in storage-foundation. OTHER domain-specific kinds (e.g. virtualization, demo) are
+// intentionally NOT built in: they enter discovery and get watches exclusively through eligible
+// CustomSnapshotDefinition resources (+ the module RBAC hook that sets RBACReady=True).
 //
 // This is the single source of built-in pairs: it seeds both the Snapshot graph registry and the
-// generic unified runtime bootstrap default (see config.EffectiveUnifiedBootstrapPairs). There is no
-// separate, broader "runtime bootstrap" list anymore — a hardcoded domain pair without an RBAC
-// contract would silently widen the watch surface and produce forbidden list/watch loops.
+// generic unified runtime bootstrap default (see config.EffectiveUnifiedBootstrapPairs). A hardcoded pair
+// here is only safe because its RBAC contract is met by the controller's static rbac-for-us.yaml (root
+// Snapshot + PVC/PV/SC/VolumeSnapshot/VolumeSnapshotContent/VolumeSnapshotClass); a domain pair without a
+// static RBAC contract would silently widen the watch surface and produce forbidden list/watch loops.
 func DefaultGraphRegistryBuiltInPairs() []UnifiedGVKPair {
 	return []UnifiedGVKPair{
 		DefaultSnapshotPair(),
+		BuiltInVolumeSnapshotPair(),
 	}
 }
 

@@ -343,6 +343,18 @@ func main() {
 		}
 		log.Info("GenericSnapshotBinderController watching built-in root Snapshot at startup (w7-creator)", "snapshotGVK", rootSnapGVK.String())
 	}
+	// Built-in CSI VolumeSnapshot: mark it domain-capture at boot. Unlike the root it is NOT a dedicated
+	// kind, so FilterGenericSnapshotGVKPairs kept it and the loop above already added its watch — only the
+	// domain-capture MARK is missing. Without it the binder would eagerly create + bind a SnapshotContent
+	// shell before the out-of-process storage-foundation VolumeSnapshot domain controller claims the object
+	// (dual content writer). The compensating unifiedSync.Sync mark runs only on CSD reconciles (never at
+	// boot, and not at all with zero CSDs), so wire it here; a later Sync re-asserts it idempotently. See
+	// unifiedbootstrap.StartupBuiltInVolumeSnapshotPair.
+	if vsSnapGVK, _, ok := unifiedbootstrap.StartupBuiltInVolumeSnapshotPair(snapshotGVKs, snapshotContentGVKs); ok {
+		snapshotController.MarkDomainCaptureKind(vsSnapGVK)
+		contentController.MarkDomainCaptureKind(vsSnapGVK)
+		log.Info("GenericSnapshotBinderController marked built-in VolumeSnapshot domain-capture at startup", "snapshotGVK", vsSnapGVK.String())
+	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
 	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.import marker; owning DataImport
