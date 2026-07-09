@@ -64,6 +64,10 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 			[]schema.GroupVersionKind{commonGVK},
 		)
 		Expect(err).NotTo(HaveOccurred())
+
+		// The contents created here carry integrationContentSnapshotRef; the ManifestsArchived Ready-gate
+		// dereferences that owning Snapshot, so it must exist for a leaf/parent to reach Ready=True.
+		ensureContentOwnerSnapshot(ctx)
 	})
 
 	createContent := func(generateName string) (string, string) {
@@ -83,6 +87,22 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 			uid = string(fresh.UID)
 			g.Expect(uid).NotTo(BeEmpty())
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		// These contents reference a core Snapshot (snapshotRef.kind=Snapshot), so the aggregator treats
+		// them as namespace-root contents and gates the FIRST Ready=True on the residual/orphan-PVC capture
+		// wave (status.residualVolumeCapture.phase=Complete). In production the snapshot reconciler latches
+		// this; here we latch it directly so the Ready contract under test (own legs + children) is what
+		// actually gates Ready, not an unrelated residual wave that never runs in this content-only test.
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			c := &storagev1alpha1.SnapshotContent{}
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, c); err != nil {
+				return err
+			}
+			c.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
+				Phase: storagev1alpha1.ResidualVolumeCapturePhaseComplete,
+			}
+			return k8sClient.Status().Update(ctx, c)
+		})).To(Succeed())
 		return name, uid
 	}
 

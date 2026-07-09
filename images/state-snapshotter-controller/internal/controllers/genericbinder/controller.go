@@ -28,8 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -390,8 +392,9 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	// Step 5: Check consistency and set Ready condition
 	// Only check if SnapshotContent already exists (has been processed by SnapshotContentController)
 	// This avoids checking consistency in a "half-assembled" state where SnapshotContent
-	// might not have finalizer or Ready condition yet. SnapshotContent has no reverse
-	// reference to wake this Snapshot, so pending content is mirrored through polling.
+	// might not have finalizer or Ready condition yet. The bound SnapshotContent change wakes this
+	// Snapshot event-driven via the reverse watch (registerSnapshotWatch -> mapBoundContentToSnapshots),
+	// so the 5s requeue below is only a fallback safety net, not the primary Ready-mirror driver.
 	if snapshotLike.GetStatusContentName() != "" {
 		if err := r.checkConsistencyAndSetReady(ctx, snapshotLike, obj); err != nil {
 			logger.Error(err, "Failed to check consistency after creating SnapshotContent")
@@ -667,7 +670,11 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	contentObj.SetGroupVersionKind(contentGVK)
 	contentKey := client.ObjectKey{Name: contentName}
 
-	if err := r.APIReader.Get(ctx, contentKey, contentObj); err != nil {
+	// Cached read (r.Client, L4-load): SnapshotContent is watched (content_watch enqueues the bound
+	// snapshot on Ready/ManifestsArchived change), so this Ready mirror is event-driven and a stale cache
+	// costs at most one extra reconcile before convergence (INV-RECONCILE-TRUTH backstops). Using the
+	// cache avoids a direct apiserver GET on every mirror pass.
+	if err := r.Client.Get(ctx, contentKey, contentObj); err != nil {
 		if errors.IsNotFound(err) {
 			return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
 		}
@@ -841,6 +848,24 @@ func (r *GenericSnapshotBinderController) snapshotGVKsSnapshot() []schema.GroupV
 	return out
 }
 
+// genericBinderControllerOptions parallelizes reconciles across DISTINCT snapshots so a capture wave
+// (e.g. a VM snapshot + its child disk + a standalone disk) is not serialized through a single worker.
+// controller-runtime still serializes reconciles of the SAME object key, so distinct snapshots are the
+// only thing that runs in parallel here; the binder's cross-object writes are conflict-safe:
+//   - SnapshotContent / Snapshot status writes use optimistic-lock merge patches (MergeFromWithOptimisticLock)
+//     and RetryOnConflict, and children-ref publication preserves the other writer's edges (status_publish.go).
+//   - Create paths are idempotent (Get-then-Create tolerating AlreadyExists).
+//
+// Start conservative at 4; raising to 8 (matching Snapshot/SnapshotContent) should follow only after the
+// L0a trace confirms no conflict-retry pressure. The rate limiter mirrors the other ssc controllers
+// (200ms floor -> 10s ceiling) so a wedged item re-plans tightly without hot-looping.
+func genericBinderControllerOptions() controller.Options {
+	return controller.Options{
+		MaxConcurrentReconciles: 4,
+		RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](200*time.Millisecond, 10*time.Second),
+	}
+}
+
 // registerSnapshotWatch calls builder.Complete. When the manager is already running, this relies on
 // controller-runtime allowing new runnables via Add — behavior is runtime-sensitive; upgrade c-r with care.
 func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager, gvk, contentGVK schema.GroupVersionKind) error {
@@ -860,7 +885,7 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// Reverse wake-up so Snapshot.Ready mirrors the bound SnapshotContent.Ready in both directions
 		// (including Ready=True -> False after the binder stopped polling). Enqueue-only; truth stays on
 		// SnapshotContent. See mapBoundContentToSnapshots.
-		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapBoundContentToSnapshots(gvk))).
+		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(mapBoundContentToSnapshots(gvk))).
 		// Event-driven parent->child unblock: when a PARENT SnapshotContent appears/changes, wake the child
 		// snapshots of this GVK that are waiting to resolve their parent's content ownerRef. Replaces the
 		// per-poll re-check that previously gated children on the Reconcile RequeueAfter fallback. See
@@ -869,7 +894,8 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// Event-driven capture handoff: when an MCR publishes its checkpoint, wake the owning snapshot so
 		// the binder publishes SnapshotContent.status.manifestCheckpointName immediately instead of on the
 		// next poll. See mapMCRToOwningSnapshots.
-		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(r.mapMCRToOwningSnapshots(gvk))).
+		Watches(&ssv1alpha1.ManifestCaptureRequest{}, handler.EnqueueRequestsFromMapFunc(mapMCRToOwningSnapshots(gvk))).
+		WithOptions(genericBinderControllerOptions()).
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
 	return builder.Complete(r)
 }
@@ -880,6 +906,7 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 // matching this exact pair are reverted (see GVKRegistry.RevertSnapshotRegistrationIfExact). If the
 // snapshot GVK was already in the slice (bootstrap), registry is not reverted on failure.
 func (r *GenericSnapshotBinderController) AddWatchForPair(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
+	r.ensureWatchMapStatsReporter(mgr)
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
 	if r.activeSnapshotWatchSet == nil {
@@ -920,6 +947,7 @@ func (r *GenericSnapshotBinderController) AddWatchForPair(mgr ctrl.Manager, snap
 // Registers watches for all registered Snapshot GVKs and their corresponding SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
 func (r *GenericSnapshotBinderController) SetupWithManager(mgr ctrl.Manager) error {
+	r.ensureWatchMapStatsReporter(mgr)
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
 	if r.activeSnapshotWatchSet == nil {

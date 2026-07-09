@@ -4,7 +4,16 @@ alwaysApply: true
 ---
 
 - Controller redeploy gate (MUST):
-  - Before redeploying the controller, create a git commit with the required changes.
+  - Before the controller is redeployed, the required changes MUST be committed AND the commit MUST be pushed
+    to the remote of the current repository.
   - Commit message MUST be minimal plain text, without any additional tags/trailers/labels.
-  - Before redeploying the controller, push the commit to the remote of the current repository.
-  - Do NOT proceed with controller redeploy if commit or push has not been completed.
+  - Do NOT redeploy the controller if commit or push has not been completed.
+
+- Who does what (MUST):
+  - The agent may create the commit when the user asks it to commit.
+  - The agent MUST NOT `git push` unless the user has explicitly asked for a push in this conversation. This
+    rule is a redeploy PRECONDITION, not a standing authorization to push. "Commit" does not imply "push".
+  - Default flow: the agent commits, then STOPS and asks the user to push and redeploy (or asks for explicit
+    permission to push). Only when the user explicitly authorizes a push may the agent run `git push`.
+  - The agent only performs the redeploy itself when the user explicitly asks it to; in that case it must first
+    ensure commit+push are done (asking the user to push, or pushing only with explicit permission).

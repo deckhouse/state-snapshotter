@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
@@ -57,8 +58,17 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind
 	// (creation/projection/Ready mirror) and provides the SnapshotContent -> demo Snapshot wake-up itself.
 	// DemoVirtualDisk resource restore reads SnapshotContent via APIReader only (get RBAC, no informer).
+	//
+	// Default 4; overridable via DOMAIN_CONTROLLER_SNAPSHOT_MAX_CONCURRENT_RECONCILES (read once at start).
+	// Probes whether the domain planning layer serializes the snapshot Phase A (creation -> ChildrenSnapshotReady).
+	maxConcurrent, err := config.ParseMaxConcurrentReconciles(config.EnvSnapshotMaxConcurrentReconciles, 4)
+	if err != nil {
+		return fmt.Errorf("DemoVirtualDiskSnapshot controller: %w", err)
+	}
+	mgr.GetLogger().Info("DemoVirtualDiskSnapshot controller concurrency", "maxConcurrentReconciles", maxConcurrent, "env", config.EnvSnapshotMaxConcurrentReconciles)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Complete(&DemoVirtualDiskSnapshotReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),

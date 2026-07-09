@@ -50,6 +50,16 @@ func childSnapshotRefMatchesUnstructuredChild(ref storagev1alpha1.SnapshotChildR
 //
 // Snapshot-run tree is namespace-local: only Snapshot objects in the child's namespace are
 // considered (no cluster-wide list).
+//
+// The reader MUST be cache-backed: the lookup uses the SnapshotChildrenRefFieldIndex reverse index (each
+// parent's childrenSnapshotRefs indexed by child identity) so it is a cached, indexed List instead of a
+// full-namespace SnapshotList on every child event. This is a load/scalability cleanup, safe because the
+// parent's status.childrenSnapshotRefs is authored by the Snapshot controller and does NOT change as a
+// result of the triggering child status write — so a cache read is current for the membership question
+// (unlike the child object's own freshness read, which the relay keeps on APIReader). A stale cache can at
+// most delay a parent wake until the next cache event / poll backstop; it cannot drop a required wake
+// silently (an index-List error returns no parents and is logged, matching the previous behaviour). The
+// exact match is re-checked defensively after the indexed lookup.
 func findParentsReferencingChildSnapshot(ctx context.Context, c client.Reader, child *unstructured.Unstructured) []reconcile.Request {
 	if child == nil {
 		return nil
@@ -60,10 +70,14 @@ func findParentsReferencingChildSnapshot(ctx context.Context, c client.Reader, c
 		// Relay is for namespaced child snapshot objects; cluster-scoped snapshot kinds are out of scope here.
 		return nil
 	}
+	key := snapshotChildRefIndexKey(child.GetAPIVersion(), child.GetKind(), childName)
+	if key == "" {
+		return nil
+	}
 
 	list := &storagev1alpha1.SnapshotList{}
-	if err := c.List(ctx, list, client.InNamespace(childNS)); err != nil {
-		log.FromContext(ctx).Error(err, "findParentsReferencingChildSnapshot: list Snapshot", "namespace", childNS)
+	if err := c.List(ctx, list, client.InNamespace(childNS), client.MatchingFields{SnapshotChildrenRefFieldIndex: key}); err != nil {
+		log.FromContext(ctx).Error(err, "findParentsReferencingChildSnapshot: indexed list Snapshot", "namespace", childNS)
 		return nil
 	}
 	var out []reconcile.Request

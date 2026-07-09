@@ -20,10 +20,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof handlers on http.DefaultServeMux (gated server below)
 	"os"
 	"os/signal"
 	goruntime "runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -102,6 +106,52 @@ func buildTimeFromVersion(v string) (time.Time, bool) {
 	return t, true
 }
 
+// startPprofServer starts a net/http/pprof debug endpoint ONLY when STATE_SNAPSHOTTER_PPROF_ADDR is set
+// (e.g. ":6060"). It is disabled by default and adds no runtime overhead when off. This is a diagnostics-only
+// hook: it serves runtime profiles and does NOT touch business logic or the controller manager.
+//
+// Optional profilers are gated behind their own env vars because each adds per-event overhead and must stay
+// off in normal operation:
+//
+//	STATE_SNAPSHOTTER_BLOCK_PROFILE_RATE     -> runtime.SetBlockProfileRate(n)      (n>0 enables block profile)
+//	STATE_SNAPSHOTTER_MUTEX_PROFILE_FRACTION -> runtime.SetMutexProfileFraction(n)  (n>0 enables mutex profile)
+//
+// CPU, heap, goroutine and allocs profiles are always available once the endpoint is on.
+func startPprofServer(ctx context.Context, log *logger.Logger) {
+	addr := os.Getenv("STATE_SNAPSHOTTER_PPROF_ADDR")
+	if addr == "" {
+		return
+	}
+
+	if v := os.Getenv("STATE_SNAPSHOTTER_BLOCK_PROFILE_RATE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			goruntime.SetBlockProfileRate(n)
+			log.Info(fmt.Sprintf("[pprof] block profiling enabled rate=%d", n))
+		}
+	}
+	if v := os.Getenv("STATE_SNAPSHOTTER_MUTEX_PROFILE_FRACTION"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			goruntime.SetMutexProfileFraction(n)
+			log.Info(fmt.Sprintf("[pprof] mutex profiling enabled fraction=%d", n))
+		}
+	}
+
+	// nil Handler => http.DefaultServeMux, where net/http/pprof registered /debug/pprof/*.
+	srv := &http.Server{Addr: addr, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		log.Info(fmt.Sprintf("[pprof] debug server listening on %s (net/http/pprof)", addr))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error(err, "[pprof] debug server failed")
+		}
+	}()
+}
+
 func main() {
 	flag.Parse()
 
@@ -161,12 +211,34 @@ func main() {
 	log.Info(fmt.Sprintf("[main] %s = %s", config.LogLevelEnvName, cfgParams.Loglevel))
 	log.Info(fmt.Sprintf("[main] RequeueStorageClassInterval = %d", cfgParams.RequeueStorageClassInterval))
 
+	// Diagnostics-only: gated net/http/pprof endpoint (off unless STATE_SNAPSHOTTER_PPROF_ADDR is set).
+	startPprofServer(ctx, log)
+
 	kConfig, err := kubutils.KubernetesDefaultConfigCreate()
 	if err != nil {
 		log.Error(err, "[main] unable to KubernetesDefaultConfigCreate")
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
+	// Raise the shared manager client rate limit from the client-go default (QPS 5 / Burst 10). That
+	// default throttles every controller sharing mgr.GetClient()/mgr.GetAPIReader() - notably the
+	// SnapshotContent aggregator, whose non-leaf reconciles each do uncached APIReader reads (owning
+	// Snapshot for the declared-child set) plus a status patch. Under a concurrent multi-tree snapshot
+	// burst those requests queue behind the 5 QPS limiter, inflating a single reconcile to 4-15s and
+	// serializing the whole tree-Ready tail regardless of MaxConcurrentReconciles. (The capture path in
+	// the Snapshot controller already copies the config to QPS 100 / Burst 200 for the same reason.)
+	// Defaults 200/400 (QPS→Ready saturation knee; see design/snapshot-creation-latency.md, "QPS/Burst saturation
+	// sweep"); overridable via STATE_SNAPSHOTTER_KUBE_QPS / _BURST (read once at start; changing requires a
+	// pod/rollout restart, not a hot reload).
+	kubeQPS, kubeBurst, rlErr := config.ParseClientRateLimit(config.EnvKubeQPS, config.EnvKubeBurst, 200, 400)
+	if rlErr != nil {
+		log.Error(rlErr, "[main] invalid manager client rate-limit env")
+		cancel()
+		os.Exit(1)
+	}
+	kConfig.QPS = kubeQPS
+	kConfig.Burst = kubeBurst
+	log.Info(fmt.Sprintf("[main] manager client rate limit: QPS=%v Burst=%d", kubeQPS, kubeBurst))
 	log.Info("[main] kubernetes config has been successfully created.")
 
 	// Create scheme for controller manager (includes all CRD types for informers)
@@ -193,7 +265,12 @@ func main() {
 	// Cluster-scoped resources (ManifestCheckpoint, Retainer) are always watched
 	managerOpts := manager.Options{
 		Scheme: scheme,
-		//MetricsBindAddress: cfgParams.MetricsPort,
+		// Built-in controller-runtime metrics (plaintext HTTP on :8080). This is the same value
+		// controller-runtime defaults to when Metrics is unset, made explicit so the scrape target is
+		// obvious: it exports per-controller controller_runtime_reconcile_total / reconcile_time_seconds and
+		// workqueue_adds_total / _depth / _queue_duration_seconds, which measure enqueue and reconcile counts
+		// per Named controller (the mapper-cost-vs-critical-path question) without a profiler.
+		Metrics:                 metricsserver.Options{BindAddress: ":8080"},
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,

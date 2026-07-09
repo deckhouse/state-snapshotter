@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -89,9 +90,47 @@ type SnapshotContentController struct {
 	watchMu                sync.RWMutex
 	activeContentWatchSet  map[string]struct{} // SnapshotContent GVK String()
 	activeSnapshotWatchSet map[string]struct{} // Snapshot GVK String() -> status watch registered with manager
+
+	// cacheReader is the manager cache (indexed informers). The enqueue-only reverse-lookup Lists that resolve
+	// a changed artifact/child to the owning/parent SnapshotContent MUST read through this, not r.Client: the
+	// manager client does not cache unstructured objects by default (Client.Cache.Unstructured=false), so a
+	// client List with client.MatchingFields is sent to the API server as a field selector, which the API
+	// server rejects for custom status fields ("field label not supported") — silently degrading every
+	// manifest-leg wake to the 500ms self-requeue backstop. The cache uses the registered indexKey* indexes.
+	// Set in SetupWithManager / AddWatchForContent; nil in unit tests (which wire an indexed fake as Client).
+	cacheReader client.Reader
+
+	// primaryContentController is the retained handle of the single common-SnapshotContent controller
+	// (For(CommonSnapshotContentGVK)). Snapshot-status wakes are attached to it via Controller.Watch(...)
+	// rather than constructing a second controller-runtime Controller per Snapshot GVK.
+	primaryContentController controller.Controller
 }
 
 const defaultSnapshotContentRequeueAfter = 500 * time.Millisecond
+
+// indexKeyManifestCheckpointName is the cache field-index key on SnapshotContent.status.manifestCheckpointName.
+// It backs the pre-adoption reverse-lookup path of mapManifestCheckpointToContent (L9a): before the MCP is
+// adopted (ownerRef handoff), the only stable MCP→content link is this deterministic 1:1 name.
+const indexKeyManifestCheckpointName = ".status.manifestCheckpointName"
+
+// indexKeyChildContentName is the cache field-index key on SnapshotContent.status.childrenSnapshotContentRefs[].name.
+// It backs the forward-edge reverse-lookup wake-up (C-2): a parent's ManifestsArchived subtree latch aggregates
+// its published child content edges, so when a CHILD content's status changes (ManifestsArchived / Ready / any
+// leg) the parent(s) that reference it by name must be enqueued to re-evaluate immediately — event-driven —
+// instead of waiting for the parent's 500ms self-requeue archive wave. This complements the ownerRef path
+// (mapSnapshotContentToParentContent): the ownerRef child→parent handoff can be set after the child already
+// reached its terminal state, so the ownerRef event is droppable/late; the published-edge index is populated
+// when the parent links the child and is stable through the child's later archive transition.
+const indexKeyChildContentName = ".status.childrenSnapshotContentRefs.name"
+
+// indexKeyDataRefArtifactName is the cache field-index key on SnapshotContent.status.dataRef.artifact.name
+// (only when the artifact is a VolumeSnapshotContent). It backs the dual-path VolumeSnapshotContent wake-up
+// (Commit C): a leaf content latches VolumesReady from its published status.dataRef.artifact (the VSC name),
+// but the VSC is created owned by an execution ObjectKeeper and only reparented to the SnapshotContent at
+// handoff, so the ownerRef-only path drops readyToUse events that flip before adoption. This durable data
+// edge is published when the content links the VSC and is stable across the VSC readyToUse transition, so it
+// lets the readyToUse flip wake the owning content event-driven instead of via the 500ms self-requeue poll.
+const indexKeyDataRefArtifactName = ".status.dataRef.artifact.name"
 
 // snapshotContentControllerOptions tunes every controller instance that drives this reconciler (the
 // per-GVK content controllers and the Snapshot-status wake-up controllers all share r). With the default
@@ -265,6 +304,17 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
 			logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
 			if err := r.Update(ctx, obj); err != nil {
+				// L9c: a 409 here is benign. The same SnapshotContent is reconciled by multiple
+				// controller instances that share this Reconciler (the For-content controller and the
+				// per-snapshot status-watch controllers), so two workers can race on this finalizer
+				// Update. Surfacing the conflict as a Reconciler error backs the item off on the
+				// rate limiter (200ms→10s) for nothing; instead requeue and re-read. AddFinalizer is
+				// idempotent, so whichever writer lands first wins and the next pass is a no-op.
+				if errors.IsConflict(err) {
+					logger.V(1).Info("Finalizer add conflicted with a concurrent update; requeueing (benign)",
+						"finalizer", snapshot.FinalizerParentProtect)
+					return ctrl.Result{Requeue: true}, nil
+				}
 				logger.Error(err, "Failed to add finalizer")
 				return ctrl.Result{}, err
 			}
@@ -415,6 +465,7 @@ type commonContentStatusPlan struct {
 // re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
 // a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
 func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
+	start := time.Now() // L3b trace: per-reconcile wall time (see traceSnapshotContent).
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -461,6 +512,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	}
 
 	if !changed {
+		r.traceSnapshotContent(ctx, obj, plan, "noop", start)
 		return ready, nil
 	}
 	obj.Object["status"] = statusMap
@@ -474,9 +526,51 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	// convert into an extra requeue). Staleness is still safe because the changed-gate above only fires when
 	// the monotonic-cache-derived desired conditions actually differ.
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(base)); err != nil {
+		outcome := "patch-error"
+		if errors.IsConflict(err) {
+			outcome = "conflict"
+		}
+		r.traceSnapshotContent(ctx, obj, plan, outcome, start)
 		return false, err
 	}
+	r.traceSnapshotContent(ctx, obj, plan, "changed", start)
 	return ready, nil
+}
+
+// traceSnapshotContent emits a single structured per-reconcile diagnostic line for the SnapshotContent
+// aggregation. It NEVER changes state or control flow. It is logged at V(1) (debug), not INFO, so it does
+// not spam production at the default verbosity; raise verbosity to rebuild a TREES=N burst timeline
+// (which leg still gates Ready, whether the status patch changed / was a no-op / conflicted, the declared
+// child count, and the reconcile wall time). Used to prove L3b: the long tree-Ready tail was the manager
+// client's default rate limiter (QPS 5 / Burst 10) inflating reconcile durMs, not archive-wave logic.
+func (r *SnapshotContentController) traceSnapshotContent(ctx context.Context, obj *unstructured.Unstructured, plan commonContentStatusPlan, patch string, start time.Time) {
+	childRefs, _, _ := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotContentRefs")
+	log.FromContext(ctx).V(1).Info("snapshotcontent trace",
+		"content", obj.GetName(),
+		"uid", string(obj.GetUID()),
+		"gen", obj.GetGeneration(),
+		"childRefs", len(childRefs),
+		"manifestsReady", condShort(plan.manifestsReady),
+		"volumesReady", condShort(plan.volumesReady),
+		"childrenReady", condShort(plan.childrenReady),
+		"manifestsArchived", condShort(plan.manifestsArchivedStatus),
+		"ready", condShort(plan.readyStatus),
+		"gate", plan.readyReason,
+		"patch", patch,
+		"durMs", time.Since(start).Milliseconds(),
+	)
+}
+
+// condShort renders a condition status as a single greppable character (T/F/U) for the trace line.
+func condShort(s metav1.ConditionStatus) string {
+	switch s {
+	case metav1.ConditionTrue:
+		return "T"
+	case metav1.ConditionFalse:
+		return "F"
+	default:
+		return "U"
+	}
 }
 
 // upsertContentCondition sets desired (type/status/reason/message + observedGeneration) on contentLike
@@ -629,6 +723,25 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 //   - Otherwise it is derived from the current subtree state: own manifest leg failed terminally before
 //     archive OR a child is Failed -> Failed; own ManifestsReady=True AND all children Archived -> True;
 //     else Capturing (transient; includes the fail-closed NamespaceCaptureIncomplete wait).
+//
+// manifestLegAlreadyLatched reports whether this content's manifest leg is already verified ready AND the
+// monotonic ManifestsArchived latch is closed for the current generation. When true, fillOwnLegs skips the
+// expensive per-poll manifest re-validation (cached MCP Get + adoption patch + uncached APIReader chunk
+// GETs): the latch never re-opens, so re-checking cannot change the manifest verdict, and chunk integrity
+// is re-verified on the read/download/archive path rather than on this readiness gate. Requires BOTH
+// ManifestsReady=True and ManifestsArchived=True at the current generation (a generation bump re-validates).
+func manifestLegAlreadyLatched(obj *unstructured.Unstructured) bool {
+	like, err := snapshot.ExtractSnapshotContentLike(obj)
+	if err != nil {
+		return false
+	}
+	gen := obj.GetGeneration()
+	mr := snapshot.GetCondition(like, snapshot.ConditionManifestsReady)
+	ma := snapshot.GetCondition(like, snapshot.ConditionManifestsArchived)
+	return mr != nil && mr.Status == metav1.ConditionTrue && mr.ObservedGeneration == gen &&
+		ma != nil && ma.Status == metav1.ConditionTrue && ma.ObservedGeneration == gen
+}
+
 func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
 	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
 	if err != nil {
@@ -648,7 +761,7 @@ func (r *SnapshotContentController) computeManifestsArchived(ctx context.Context
 		return nil
 	}
 
-	childrenArchived, anyChildFailed, childMessage, err := r.aggregateChildrenManifestsArchived(ctx, obj)
+	childrenArchived, anyChildFailed, childMessage, err := r.aggregateChildrenManifestsArchived(ctx, obj, plan.manifestsReady == metav1.ConditionTrue)
 	if err != nil {
 		return err
 	}
@@ -742,7 +855,12 @@ func (r *SnapshotContentController) computeResidualSweepGate(obj *unstructured.U
 // archived; any unresolved/unbound/unlinked declared child is pending (not a failure). Because the latch
 // is one-way (never re-opens), this declared-vs-linked check is the only way to guarantee True implies a
 // complete, fully linked subtree.
-func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, bool, string, error) {
+//
+// T-cost: ownManifestReady tells the aggregator whether this node's own manifest leg is Ready. The expensive
+// declared-vs-linked walk (uncached owner GET + one uncached resolve per declared child) is deferred until the
+// only pass that could actually latch True (ownManifestReady && every linked child archived); see the gate
+// below for why deferring it is safe.
+func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx context.Context, parentContentObj *unstructured.Unstructured, ownManifestReady bool) (bool, bool, string, error) {
 	rawRefs, _, err := unstructured.NestedSlice(parentContentObj.Object, "status", "childrenSnapshotContentRefs")
 	if err != nil {
 		return false, false, "", err
@@ -791,8 +909,24 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 		pendingNames = append(pendingNames, name)
 	}
 
-	// Fail-closed: every declared non-leaf child must be linked into the published edge set before the
-	// subtree can be considered archived.
+	// T-cost short-circuit: the expensive declared-vs-linked fail-close (uncached owner GET + one uncached
+	// APIReader resolve per declared child) is only ever REQUIRED on the single pass that could latch
+	// ManifestsArchived=True — computeManifestsArchived sets True only when this node's own manifest leg is
+	// Ready AND every linked child is archived. In any other state (own manifest not yet Ready, or a linked
+	// child still pending) the subtree is not archived regardless of the declared set, so skipping the walk
+	// cannot produce a false True latch (the one-way invariant is preserved); it only avoids O(children)
+	// uncached reads on the many convergence-window reconciles that dominate the tail. Terminal child failure
+	// is already detected by the linked-children walk above, independent of this gate.
+	if !ownManifestReady || len(pendingNames) > 0 {
+		if len(pendingNames) > 0 {
+			return false, false, "waiting for child manifests archive: " + formatReadyProgress(archivedCount, total, pendingNames), nil
+		}
+		return false, false, "", nil
+	}
+
+	// Own manifest leg Ready and all linked children archived: run the authoritative declared-vs-linked
+	// fail-close (uncached) before latching True — every declared non-leaf child must be linked into the
+	// published edge set.
 	declaredNames, declaredComplete, err := r.declaredNonLeafChildContentNames(ctx, parentContentObj)
 	if err != nil {
 		return false, false, "", err
@@ -808,10 +942,6 @@ func (r *SnapshotContentController) aggregateChildrenManifestsArchived(ctx conte
 	}
 	if len(unlinked) > 0 {
 		return false, false, "waiting for declared child content to be linked: " + strings.Join(unlinked, ", "), nil
-	}
-
-	if len(pendingNames) > 0 {
-		return false, false, "waiting for child manifests archive: " + formatReadyProgress(archivedCount, total, pendingNames), nil
 	}
 	return true, false, "", nil
 }
@@ -933,28 +1063,41 @@ func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstru
 		return nil
 	}
 
-	mcpReady, mcpFailed, mcpMessage, err := r.validateCommonContentManifestCheckpoint(ctx, obj, mcpName)
-	if err != nil {
-		return err
-	}
-	if mcpFailed {
-		plan.manifestsReady = metav1.ConditionFalse
-		plan.manifestsFailed = true
-		plan.manifestsReason = snapshot.ReasonManifestCheckpointFailed
-		plan.manifestsMessage = mcpMessage
-		return nil
-	}
-	if !mcpReady {
-		plan.manifestsReady = metav1.ConditionFalse
-		plan.manifestsReason = snapshot.ReasonManifestCapturePending
-		plan.manifestsMessage = mcpMessage
-		return nil
-	}
+	if manifestLegAlreadyLatched(obj) {
+		// Cost-cut (Commit C): the manifest leg already reached readiness and the monotonic
+		// ManifestsArchived latch is closed for this generation, so re-validating the ManifestCheckpoint
+		// (cached MCP Get + adoption patch) and re-checking chunk existence (uncached APIReader GETs) on
+		// every 500ms volumes-pending poll cannot change the manifest verdict — the latch never re-opens.
+		// Chunk integrity is defense-in-depth re-verified on the read/download/archive path, not on this
+		// readiness gate, so skipping it here is safe and removes the dominant per-reconcile cost while a
+		// leaf waits on its volume leg. The volume leg below is still evaluated every pass.
+		plan.manifestsReady = metav1.ConditionTrue
+		plan.manifestsReason = snapshot.ReasonCompleted
+		plan.manifestsMessage = "manifest is ready"
+	} else {
+		mcpReady, mcpFailed, mcpMessage, err := r.validateCommonContentManifestCheckpoint(ctx, obj, mcpName)
+		if err != nil {
+			return err
+		}
+		if mcpFailed {
+			plan.manifestsReady = metav1.ConditionFalse
+			plan.manifestsFailed = true
+			plan.manifestsReason = snapshot.ReasonManifestCheckpointFailed
+			plan.manifestsMessage = mcpMessage
+			return nil
+		}
+		if !mcpReady {
+			plan.manifestsReady = metav1.ConditionFalse
+			plan.manifestsReason = snapshot.ReasonManifestCapturePending
+			plan.manifestsMessage = mcpMessage
+			return nil
+		}
 
-	// Manifest leg satisfied.
-	plan.manifestsReady = metav1.ConditionTrue
-	plan.manifestsReason = snapshot.ReasonCompleted
-	plan.manifestsMessage = "manifest is ready"
+		// Manifest leg satisfied.
+		plan.manifestsReady = metav1.ConditionTrue
+		plan.manifestsReason = snapshot.ReasonCompleted
+		plan.manifestsMessage = "manifest is ready"
+	}
 
 	// Volume leg: evaluated only after the manifest leg is Ready (kept sequencing, v1).
 	dataReady, dataReason, dataMessage, err := r.resolveDataReadiness(ctx, obj)
@@ -1441,6 +1584,9 @@ func (r *SnapshotContentController) namespacedGVKsSnapshot() []schema.GroupVersi
 func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapshotGVK, contentGVK schema.GroupVersionKind) error {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
+	if r.cacheReader == nil {
+		r.cacheReader = mgr.GetCache()
+	}
 	if r.activeContentWatchSet == nil {
 		r.activeContentWatchSet = make(map[string]struct{})
 	}
@@ -1497,7 +1643,8 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 		For(obj).
 		WithOptions(snapshotContentControllerOptions()).
 		Named(fmt.Sprintf("snapshotcontent-%s-%s", contentGVK.Group, contentGVK.Kind))
-	if err := builder.Complete(r); err != nil {
+	built, err := builder.Build(r)
+	if err != nil {
 		if needAppendMain {
 			r.SnapshotContentGVKs = r.SnapshotContentGVKs[:len(r.SnapshotContentGVKs)-1]
 		}
@@ -1512,6 +1659,9 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 			r.GVKRegistry.RevertSnapshotRegistrationIfExact(snapshotGVK.Kind, snapshotGVK, contentGVK)
 		}
 		return fmt.Errorf("setup SnapshotContent watch for %s: %w", contentGVK.String(), err)
+	}
+	if contentGVK == unifiedbootstrap.CommonSnapshotContentGVK() {
+		r.primaryContentController = built
 	}
 	r.activeContentWatchSet[key] = struct{}{}
 	return nil
@@ -1533,6 +1683,9 @@ func (r *SnapshotContentController) AddSnapshotStatusWatch(mgr ctrl.Manager, sna
 func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
+	// Reverse-lookup Lists must read from the cache (indexed informers), not the client (uncached
+	// unstructured → API-server field selector the server rejects). See reverseLookupReader.
+	r.cacheReader = mgr.GetCache()
 	gvkStrings := make([]string, 0, len(r.SnapshotContentGVKs))
 	for _, gvk := range r.SnapshotContentGVKs {
 		gvkStrings = append(gvkStrings, gvk.String())
@@ -1549,18 +1702,48 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(gvk)
+		// L9a: index this content GVK by status.manifestCheckpointName so the ManifestCheckpoint
+		// wake-up can reverse-resolve the owning content before adoption (pre-ownerRef). Registered
+		// once per GVK (the activeContentWatchSet guard above makes this body run once).
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyManifestCheckpointName, extractManifestCheckpointNameIndex); err != nil {
+			return fmt.Errorf("failed to register manifestCheckpointName index for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
+		// C-2: index published child content edges so a child status change can reverse-resolve and wake
+		// its parent(s) event-driven (mapChildContentToParentContentsByEdge), removing the archive wave's
+		// dependence on the parent's 500ms self-requeue.
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyChildContentName, extractChildContentNamesIndex); err != nil {
+			return fmt.Errorf("failed to register childrenSnapshotContentRefs index for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
+		// Commit C: index the published VSC data edge (status.dataRef.artifact.name) so a
+		// VolumeSnapshotContent readyToUse flip can reverse-resolve and wake the owning leaf content
+		// event-driven (mapVolumeSnapshotContentToContent) even when the flip preceded the ownerRef handoff.
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), obj.DeepCopy(), indexKeyDataRefArtifactName, extractDataRefArtifactNameIndex); err != nil {
+			return fmt.Errorf("failed to register dataRef artifact name index for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			WithOptions(snapshotContentControllerOptions()).
+			// Dual-path child→parent wake-up: ownerRef handoff (mapSnapshotContentToParentContent) PLUS the
+			// forward-edge reverse-lookup (mapChildContentToParentContentsByEdge). The ownerRef event is
+			// droppable/late (set after the child may already be terminal); the published-edge index closes
+			// that gap so parent archive re-evaluation is event-driven, not 500ms-poll-driven (C-2).
 			Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotContentToParentContent)).
+			Watches(obj, handler.EnqueueRequestsFromMapFunc(r.mapChildContentToParentContentsByEdge)).
 			Named(fmt.Sprintf("snapshotcontent-%s-%s", gvk.Group, gvk.Kind))
 		// Damaged-artifact wake-up (Phase 2a): enqueue the owning SnapshotContent when its durable
 		// MCP/VSC artifacts change. Guarded by RESTMapping so a not-yet-installed CRD (e.g.
 		// VolumeSnapshotContent under envtest) degrades to "no watch" instead of failing startup;
 		// revalidation on the next reconcile still recomputes state (INV-RECONCILE-TRUTH).
 		builder = r.addArtifactWakeUpWatches(builder)
-		if err := builder.Complete(r); err != nil {
+		// Build (== Complete + return the controller handle) so the common-SnapshotContent controller can be
+		// retained for AddSnapshotStatusWatch to attach snapshot-status wakes as additional Watches on THIS
+		// single controller, instead of building a second Controller per Snapshot GVK.
+		built, err := builder.Build(r)
+		if err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
+		}
+		if gvk == unifiedbootstrap.CommonSnapshotContentGVK() {
+			r.primaryContentController = built
 		}
 		r.activeContentWatchSet[key] = struct{}{}
 	}
@@ -1581,7 +1764,18 @@ func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder)
 		}
 		artifactObj := &unstructured.Unstructured{}
 		artifactObj.SetGroupVersionKind(gvk)
-		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapArtifactToOwningSnapshotContent))
+		// Both durable artifacts use a dual-path resolver (ownerRef + pre-adoption reverse-lookup) so a
+		// status flip observed before the ownerRef handoff still wakes the owning content: ManifestCheckpoint
+		// by status.manifestCheckpointName (L9a), VolumeSnapshotContent by status.dataRef.artifact.name
+		// (Commit C). Any other artifact falls back to the ownerRef-only resolver.
+		mapper := mapArtifactToOwningSnapshotContent
+		switch gvk.Kind {
+		case "ManifestCheckpoint":
+			mapper = r.mapManifestCheckpointToContent
+		case kindVolumeSnapshotContent:
+			mapper = r.mapVolumeSnapshotContentToContent
+		}
+		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapper))
 	}
 	return b
 }
@@ -1597,13 +1791,18 @@ func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manage
 	if _, err := r.RESTMapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version); err != nil {
 		return fmt.Errorf("RESTMapping for snapshot status watch %s: %w", snapshotGVK.String(), err)
 	}
+	if r.primaryContentController == nil {
+		return fmt.Errorf("primary SnapshotContent controller not initialized before snapshot status watch %s (SetupWithManager must run first)", snapshotGVK.String())
+	}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(snapshotGVK)
-	if err := ctrl.NewControllerManagedBy(mgr).
-		Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent)).
-		WithOptions(snapshotContentControllerOptions()).
-		Named(fmt.Sprintf("snapshotcontent-snapshot-%s-%s", snapshotGVK.Group, snapshotGVK.Kind)).
-		Complete(r); err != nil {
+	// Attach the snapshot-status wake as an additional event source on the SINGLE primary SnapshotContent
+	// controller. Controller.Watch supports adding sources before OR after Start, so this preserves the
+	// registry-driven / dynamic-CSD activation model while eliminating the former per-GVK second Controller
+	// (which duplicated reconciliation of the same SnapshotContent object and caused 409 write conflicts).
+	// The enqueue mapping (status.boundSnapshotContentName -> bound content) is unchanged.
+	src := source.Kind(mgr.GetCache(), client.Object(obj), handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent))
+	if err := r.primaryContentController.Watch(src); err != nil {
 		return fmt.Errorf("setup SnapshotContent snapshot status watch for %s: %w", snapshotGVK.String(), err)
 	}
 	r.activeSnapshotWatchSet[key] = struct{}{}
@@ -1641,6 +1840,18 @@ func artifactWakeUpGVKs() []schema.GroupVersionKind {
 	}
 }
 
+// ownerRefToContentRequests returns the enqueue request for the SnapshotContent that controller-owns the
+// artifact via ownerRef, or nil if the artifact carries no SnapshotContent ownerRef yet. Read-only; never
+// writes. Tombstone/last-known objects on delete still carry ownerRefs, so routing works.
+func ownerRefToContentRequests(obj client.Object) []reconcile.Request {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
+		}
+	}
+	return nil
+}
+
 // mapArtifactToOwningSnapshotContent routes a durable-artifact event (ManifestCheckpoint /
 // VolumeSnapshotContent) to its owning SnapshotContent by ownerRef only. It NEVER writes conditions or
 // patches status — it only enqueues a reconcile.Request. If the ownerRef chain is missing or broken it
@@ -1650,10 +1861,8 @@ func mapArtifactToOwningSnapshotContent(ctx context.Context, obj client.Object) 
 	if obj == nil {
 		return nil
 	}
-	for _, ref := range obj.GetOwnerReferences() {
-		if ref.APIVersion == storagev1alpha1.SchemeGroupVersion.String() && ref.Kind == "SnapshotContent" && ref.Name != "" {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
-		}
+	if reqs := ownerRefToContentRequests(obj); reqs != nil {
+		return reqs
 	}
 	log.FromContext(ctx).V(1).Info(
 		"artifact event has no owning SnapshotContent ownerRef; dropping (revalidation backstops on next reconcile)",
@@ -1661,4 +1870,242 @@ func mapArtifactToOwningSnapshotContent(ctx context.Context, obj client.Object) 
 		"artifact", obj.GetName(),
 	)
 	return nil
+}
+
+// mapManifestCheckpointToContent is the dual-path artifact resolver for ManifestCheckpoint wake-up. It
+// only enqueues reconciles; it NEVER changes ownership or state.
+//
+//	path 1 (ownerRef): once a SnapshotContent has adopted the MCP (handoff added the SnapshotContent
+//	  ownerRef), route by that ownerRef — same as every other artifact.
+//	path 2 (pre-adoption reverse lookup): before adoption the MCP is controller-owned by the execution
+//	  ObjectKeeper, so path 1 finds nothing. Resolve the owning content by the deterministic 1:1 link
+//	  content.status.manifestCheckpointName == mcp.Name (field index indexKeyManifestCheckpointName).
+//
+// This breaks the wake-up⇄adoption cycle that previously forced the content to discover a Ready MCP only
+// on its 500ms self-requeue. Safety: a stale/missing index entry can only mis-time a wake-up (spurious
+// enqueue → idempotent no-op reconcile, or missed enqueue → the 500ms self-requeue still backstops); it
+// can never produce a wrong owner because adoption logic is untouched.
+func (r *SnapshotContentController) mapManifestCheckpointToContent(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil {
+		return nil
+	}
+	if reqs := ownerRefToContentRequests(obj); reqs != nil {
+		return reqs
+	}
+	if reqs := r.lookupContentsByManifestCheckpointName(ctx, obj.GetName()); len(reqs) > 0 {
+		return reqs
+	}
+	log.FromContext(ctx).V(1).Info(
+		"ManifestCheckpoint event resolved to no SnapshotContent (no ownerRef, no name match); dropping (self-requeue backstops)",
+		"manifestCheckpoint", obj.GetName(),
+	)
+	return nil
+}
+
+// reverseLookupReader returns the reader for the enqueue-only reverse-lookup Lists (MCP/VSC/child → owning
+// or parent SnapshotContent). It MUST be the manager cache so client.MatchingFields resolves via the
+// registered indexKey* field index instead of an API-server field selector the server rejects for custom
+// status fields ("field label not supported"). Falls back to r.Client when the cache handle is unset (unit
+// tests wire an indexed fake client as Client). These reads only enqueue reconcile.Requests and are fully
+// backstopped by the 500ms self-requeue, so an eventually-consistent cache read is safe here.
+func (r *SnapshotContentController) reverseLookupReader() client.Reader {
+	if r.cacheReader != nil {
+		return r.cacheReader
+	}
+	return r.Client
+}
+
+// lookupContentsByManifestCheckpointName resolves the SnapshotContent(s) whose published
+// status.manifestCheckpointName equals mcpName, via the cache field index. The link is 1:1 (the name is
+// derived from the per-content MCR UID), so this normally returns a single request. Read-only; a List
+// error degrades to the self-requeue backstop rather than failing the wake-up.
+func (r *SnapshotContentController) lookupContentsByManifestCheckpointName(ctx context.Context, mcpName string) []reconcile.Request {
+	if mcpName == "" {
+		return nil
+	}
+	var out []reconcile.Request
+	seen := make(map[string]struct{})
+	for _, gvk := range r.SnapshotContentGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+		if err := r.reverseLookupReader().List(ctx, list, client.MatchingFields{indexKeyManifestCheckpointName: mcpName}); err != nil {
+			log.FromContext(ctx).V(1).Info("reverse lookup of SnapshotContent by manifestCheckpointName failed; self-requeue backstops",
+				"manifestCheckpoint", mcpName, "gvk", gvk.String(), "err", err.Error())
+			continue
+		}
+		for i := range list.Items {
+			name := list.Items[i].GetName()
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		}
+	}
+	return out
+}
+
+// mapVolumeSnapshotContentToContent is the dual-path artifact resolver for VolumeSnapshotContent wake-up
+// (Commit C), mirroring mapManifestCheckpointToContent. It only enqueues reconciles; it NEVER changes
+// ownership or state.
+//
+//	path 1 (ownerRef): once the SnapshotContent has adopted the VSC (handoff reparented the ownerRef from
+//	  the execution ObjectKeeper to the SnapshotContent), route by that ownerRef — same as every artifact.
+//	path 2 (data-edge reverse lookup): before/independently of adoption, resolve the owning content by the
+//	  durable published edge content.status.dataRef.artifact.name == vsc.Name (indexKeyDataRefArtifactName).
+//
+// This closes the wake gap where a VSC flips status.readyToUse=true before the ownerRef handoff (the event
+// was previously dropped, forcing the content to discover readiness only on its 500ms self-requeue). Safety:
+// a stale/missing index entry can only mis-time a wake-up (spurious enqueue → idempotent no-op reconcile, or
+// missed enqueue → the 500ms self-requeue still backstops); it can never produce a wrong owner because
+// adoption logic is untouched.
+func (r *SnapshotContentController) mapVolumeSnapshotContentToContent(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil {
+		return nil
+	}
+	if reqs := ownerRefToContentRequests(obj); reqs != nil {
+		return reqs
+	}
+	if reqs := r.lookupContentsByDataRefArtifactName(ctx, obj.GetName()); len(reqs) > 0 {
+		return reqs
+	}
+	log.FromContext(ctx).V(1).Info(
+		"VolumeSnapshotContent event resolved to no SnapshotContent (no ownerRef, no dataRef match); dropping (self-requeue backstops)",
+		"volumeSnapshotContent", obj.GetName(),
+	)
+	return nil
+}
+
+// lookupContentsByDataRefArtifactName resolves the SnapshotContent(s) whose published
+// status.dataRef.artifact.name equals vscName, via the cache field index. The link is 1:1 (a content binds a
+// single VSC data leg), so this normally returns a single request. Read-only; a List error degrades to the
+// self-requeue backstop rather than failing the wake-up.
+func (r *SnapshotContentController) lookupContentsByDataRefArtifactName(ctx context.Context, vscName string) []reconcile.Request {
+	if vscName == "" {
+		return nil
+	}
+	var out []reconcile.Request
+	seen := make(map[string]struct{})
+	for _, gvk := range r.SnapshotContentGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+		if err := r.reverseLookupReader().List(ctx, list, client.MatchingFields{indexKeyDataRefArtifactName: vscName}); err != nil {
+			log.FromContext(ctx).V(1).Info("reverse lookup of SnapshotContent by dataRef artifact failed; self-requeue backstops",
+				"volumeSnapshotContent", vscName, "gvk", gvk.String(), "err", err.Error())
+			continue
+		}
+		for i := range list.Items {
+			name := list.Items[i].GetName()
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		}
+	}
+	return out
+}
+
+// extractDataRefArtifactNameIndex is the field-index extractor for indexKeyDataRefArtifactName: it projects a
+// SnapshotContent's published status.dataRef.artifact.name when that artifact is a VolumeSnapshotContent, so
+// the VSC dual-path wake-up (path 2) can find the owning content by its durable data edge independently of
+// the ownerRef handoff. A non-VSC artifact or an empty/absent name yields no index entry.
+func extractDataRefArtifactNameIndex(obj client.Object) []string {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	kind, _, err := unstructured.NestedString(u.Object, "status", "dataRef", "artifact", "kind")
+	if err != nil || kind != kindVolumeSnapshotContent {
+		return nil
+	}
+	name, found, err := unstructured.NestedString(u.Object, "status", "dataRef", "artifact", "name")
+	if err != nil || !found || name == "" {
+		return nil
+	}
+	return []string{name}
+}
+
+// extractManifestCheckpointNameIndex is the field-index extractor for indexKeyManifestCheckpointName: it
+// projects a SnapshotContent's status.manifestCheckpointName so the MCP reverse-lookup (path 2) can find
+// the owning content before adoption. Empty/absent yields no index entry.
+func extractManifestCheckpointNameIndex(obj client.Object) []string {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	name, found, err := unstructured.NestedString(u.Object, "status", "manifestCheckpointName")
+	if err != nil || !found || name == "" {
+		return nil
+	}
+	return []string{name}
+}
+
+// extractChildContentNamesIndex is the field-index extractor for indexKeyChildContentName: it projects every
+// name in a SnapshotContent's status.childrenSnapshotContentRefs so the forward-edge reverse-lookup (C-2) can
+// find the PARENT content(s) that aggregate a given child. A parent with no published child edges yields no
+// index entry.
+func extractChildContentNamesIndex(obj client.Object) []string {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	refs, found, err := unstructured.NestedSlice(u.Object, "status", "childrenSnapshotContentRefs")
+	if err != nil || !found || len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	for _, raw := range refs {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := m["name"].(string); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// mapChildContentToParentContentsByEdge is the forward-edge reverse-lookup wake-up (C-2). On any
+// SnapshotContent event it enqueues every parent content whose published status.childrenSnapshotContentRefs
+// includes the changed object's name, so a child's ManifestsArchived/Ready/leg transition wakes its parent
+// immediately (event-driven) rather than waiting for the parent's 500ms self-requeue archive wave. It only
+// enqueues reconcile.Requests; it never writes state. A stale/missing index entry can only mis-time a
+// wake-up (spurious enqueue → idempotent no-op reconcile, or missed enqueue → the 500ms self-requeue still
+// backstops); it can never change the aggregation result, which is recomputed from truth on every reconcile.
+func (r *SnapshotContentController) mapChildContentToParentContentsByEdge(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil || obj.GetName() == "" {
+		return nil
+	}
+	childName := obj.GetName()
+	var out []reconcile.Request
+	seen := make(map[string]struct{})
+	for _, gvk := range r.SnapshotContentGVKs {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+		if err := r.reverseLookupReader().List(ctx, list, client.MatchingFields{indexKeyChildContentName: childName}); err != nil {
+			log.FromContext(ctx).V(1).Info("forward-edge reverse lookup of parent SnapshotContent failed; self-requeue backstops",
+				"childContent", childName, "gvk", gvk.String(), "err", err.Error())
+			continue
+		}
+		for i := range list.Items {
+			parentName := list.Items[i].GetName()
+			if parentName == "" || parentName == childName {
+				continue
+			}
+			if _, dup := seen[parentName]; dup {
+				continue
+			}
+			seen[parentName] = struct{}{}
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: parentName}})
+		}
+	}
+	return out
 }

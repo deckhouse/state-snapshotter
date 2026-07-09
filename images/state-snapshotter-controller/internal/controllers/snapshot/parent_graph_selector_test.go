@@ -91,7 +91,11 @@ func TestEnsureParentOwnedChildGraphLayer_ResourceSelector(t *testing.T) {
 	run := func(t *testing.T, selector labels.Selector) []string {
 		t.Helper()
 		cov := &recordingCoverage{}
-		if _, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov, selector); err != nil {
+		timings := &childGraphPlanningTimings{}
+		// recordingCoverage.IsCovered returns covered=true, so ensure (and thus readCache.Get) is never
+		// reached here; the read cache is only threaded to satisfy the signature.
+		readCache := newChildSnapshotReadCache(r.Client, ns, timings)
+		if _, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov, selector, timings, readCache); err != nil {
 			t.Fatalf("ensureParentOwnedChildGraphLayer: %v", err)
 		}
 		sort.Strings(cov.checked)

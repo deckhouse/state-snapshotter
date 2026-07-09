@@ -29,12 +29,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
@@ -45,13 +47,20 @@ type snapshotDynamicWatchManager struct {
 	mgr     ctrl.Manager
 	main    *SnapshotReconciler
 	watched map[string]struct{}
+	// maxConcurrent is the per-GVK relay MaxConcurrentReconciles (STATE_SNAPSHOTTER_RELAY_MAX_CONCURRENT_RECONCILES,
+	// default 1 = controller-runtime default). >1 parallelizes child->parent wake-ups across namespaces.
+	maxConcurrent int
 }
 
-func newSnapshotDynamicWatchManager(mgr ctrl.Manager, main *SnapshotReconciler) *snapshotDynamicWatchManager {
+func newSnapshotDynamicWatchManager(mgr ctrl.Manager, main *SnapshotReconciler, maxConcurrent int) *snapshotDynamicWatchManager {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
 	return &snapshotDynamicWatchManager{
-		mgr:     mgr,
-		main:    main,
-		watched: make(map[string]struct{}),
+		mgr:           mgr,
+		main:          main,
+		watched:       make(map[string]struct{}),
+		maxConcurrent: maxConcurrent,
 	}
 }
 
@@ -93,6 +102,7 @@ func (m *snapshotDynamicWatchManager) ensureWatchLocked(ctx context.Context, gvk
 	if err := ctrl.NewControllerManagedBy(m.mgr).
 		For(obj, builder.WithPredicates(passAll)).
 		Named(name).
+		WithOptions(controller.Options{MaxConcurrentReconciles: m.maxConcurrent}).
 		Complete(relay); err != nil {
 		return fmt.Errorf("register child snapshot watch for %s: %w", gvk.String(), err)
 	}
@@ -143,7 +153,7 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 			// rely only on the content-side ownerRef chain and the 30s polling fallback
 			// (INV-FAIL-PROP: a missing required descendant must wake the parent so Ready is recomputed).
 			logger.Info("nss child relay: child not found; waking referencing parents for deletion-driven recompute")
-			return r.enqueueParentsForDeletedChild(ctx, childReader, req)
+			return r.enqueueParentsForDeletedChild(ctx, req)
 		}
 		logger.Info("nss child relay: get child failed", "error", err.Error())
 		return ctrl.Result{}, err
@@ -151,7 +161,10 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 	logger.Info("nss child relay: child fetched from reader",
 		"apiVersion", u.GetAPIVersion(), "kind", u.GetKind(), "rv", u.GetResourceVersion())
 
-	reqs := findParentsReferencingChildSnapshot(ctx, childReader, u)
+	// Parent lookup uses the cached client + SnapshotChildrenRefFieldIndex (not the APIReader child reader):
+	// the parents' childrenSnapshotRefs are not affected by this child's status write, so a cache read is
+	// current for the membership question and avoids a full-namespace SnapshotList per child event.
+	reqs := findParentsReferencingChildSnapshot(ctx, r.client, u)
 	if len(reqs) == 0 {
 		bound, hasBound, _ := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
 		// Only retry for a genuine create/registration race: a DIRECT child of a unified Snapshot
@@ -173,7 +186,15 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 		logger.Info("nss child relay: no Snapshot parent references this child and it is not a bound unified-Snapshot-owned direct child; not requeuing")
 		return ctrl.Result{}, nil
 	}
-	return r.reconcileParents(ctx, reqs)
+	wake := phaseAWakeSource{source: "relay", childGVK: r.gvk.String(), childName: req.Name}
+	if r.main != nil && r.main.phaseATrace != nil && r.main.phaseATrace.enabled {
+		if conds, _, cerr := unstructured.NestedSlice(u.Object, "status", "conditions"); cerr == nil {
+			if ts, ok := conditionCurrentTrueLastTransition(conds, snapshotpkg.ConditionChildrenSnapshotReady, u.GetGeneration()); ok {
+				wake.childReadyAt = ts
+			}
+		}
+	}
+	return r.reconcileParents(ctx, reqs, wake)
 }
 
 // childHasUnifiedSnapshotControllerOwner reports whether the child object is controller-owned by a
@@ -206,19 +227,21 @@ func childHasUnifiedSnapshotControllerOwner(u *unstructured.Unstructured) bool {
 // (apiVersion, kind, name, namespace) — and reconciles every parent Snapshot that still references it.
 // This makes child-Snapshot deletion an event-driven parent wake-up instead of relying solely on the
 // content-side ownerRef chain and the polling fallback.
-func (r *nssChildSnapshotWatchRelay) enqueueParentsForDeletedChild(ctx context.Context, childReader client.Reader, req ctrl.Request) (ctrl.Result, error) {
+func (r *nssChildSnapshotWatchRelay) enqueueParentsForDeletedChild(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).V(1)
 	if req.Namespace == "" {
 		// Run tree is namespace-local; a cluster-scoped child key cannot match any namespaced parent.
 		return ctrl.Result{}, nil
 	}
 	synthetic := buildSyntheticDeletedChild(r.gvk, req.Namespace, req.Name)
-	reqs := findParentsReferencingChildSnapshot(ctx, childReader, synthetic)
+	// Cached indexed parent lookup (see the reconcile-path note); the child object itself is already gone,
+	// so there is no freshness read to preserve here.
+	reqs := findParentsReferencingChildSnapshot(ctx, r.client, synthetic)
 	if len(reqs) == 0 {
 		logger.Info("nss child relay: deleted child has no referencing parents (already pruned)")
 		return ctrl.Result{}, nil
 	}
-	return r.reconcileParents(ctx, reqs)
+	return r.reconcileParents(ctx, reqs, phaseAWakeSource{source: "relay-delete", childGVK: r.gvk.String(), childName: req.Name})
 }
 
 // buildSyntheticDeletedChild reconstructs the minimal child snapshot identity (apiVersion, kind,
@@ -236,13 +259,21 @@ func buildSyntheticDeletedChild(gvk schema.GroupVersionKind, namespace, name str
 // into a single best result (requeue wins, longest RequeueAfter wins) plus the first error. Returning
 // the error preserves the controller-runtime backoff requeue of the child event so a transient parent
 // failure is retried rather than dropped.
-func (r *nssChildSnapshotWatchRelay) reconcileParents(ctx context.Context, reqs []reconcile.Request) (ctrl.Result, error) {
+func (r *nssChildSnapshotWatchRelay) reconcileParents(ctx context.Context, reqs []reconcile.Request, wake phaseAWakeSource) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).V(1)
 	parentNames := make([]string, 0, len(reqs))
 	for _, pr := range reqs {
 		parentNames = append(parentNames, pr.Namespace+"/"+pr.Name)
 	}
 	logger.Info("nss child relay: enqueuing parent Snapshot reconciles", "parentCount", len(reqs), "parents", parentNames)
+
+	// Carry the relay wake-source into the parent reconcile so the Phase-A trace can attribute the wake to
+	// a child event (this relay) vs the queue/30s backstop. No-op when tracing is disabled (read only in
+	// phaseATracer.entry, itself gated). The relay calls r.main.Reconcile synchronously, so the value
+	// reaches the same reconcile invocation.
+	if wake.source != "" {
+		ctx = contextWithPhaseAWake(ctx, wake)
+	}
 
 	var best ctrl.Result
 	var firstErr error

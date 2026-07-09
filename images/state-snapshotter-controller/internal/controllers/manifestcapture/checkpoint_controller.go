@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,7 +44,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -101,6 +104,43 @@ type ManifestCheckpointController struct {
 	Scheme    *runtime.Scheme
 	Logger    logger.LoggerInterface
 	Config    *config.Options
+
+	// configMu guards the manifest-capture fields of Config (MaxChunkSizeBytes, DefaultTTL,
+	// DefaultTTLStr) that loadConfigFromConfigMap rewrites on every reconcile. With
+	// MaxConcurrentReconciles > 1 multiple reconciles (and the TTL scanner goroutine) would
+	// otherwise read/write these shared fields concurrently. Only these fields are guarded;
+	// other Config fields are set once at startup and never mutated here.
+	configMu sync.RWMutex
+}
+
+// cfgMaxChunkSizeBytes returns the configured max chunk size under the config lock.
+func (r *ManifestCheckpointController) cfgMaxChunkSizeBytes() int64 {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	if r.Config == nil {
+		return 0
+	}
+	return r.Config.MaxChunkSizeBytes
+}
+
+// cfgDefaultTTL returns the configured default TTL under the config lock (0 if unset).
+func (r *ManifestCheckpointController) cfgDefaultTTL() time.Duration {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	if r.Config == nil {
+		return 0
+	}
+	return r.Config.DefaultTTL
+}
+
+// cfgDefaultTTLStr returns the configured default TTL annotation string under the config lock.
+func (r *ManifestCheckpointController) cfgDefaultTTLStr() string {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	if r.Config == nil {
+		return ""
+	}
+	return r.Config.DefaultTTLStr
 }
 
 // NewManifestCheckpointController creates a new ManifestCheckpointController with validated dependencies.
@@ -724,10 +764,12 @@ func (r *ManifestCheckpointController) sortObjects(objects []unstructured.Unstru
 }
 
 func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpointName string, checkpointUID string, objects []unstructured.Unstructured) ([]storagev1alpha1.ChunkInfo, error) {
+	// Snapshot once so concurrent reconciles (MaxConcurrentReconciles > 1) don't race on Config.
+	maxChunkSizeBytes := r.cfgMaxChunkSizeBytes()
 	r.Logger.Info("createChunks: Starting",
 		"checkpoint", checkpointName,
 		"objects", len(objects),
-		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes)
+		"maxChunkSizeBytes", maxChunkSizeBytes)
 
 	createEmptyChunk := func() ([]storagev1alpha1.ChunkInfo, error) {
 		emptyJSON := []byte("[]")
@@ -861,7 +903,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 
 		// If compressed size exceeds limit, finalize current chunk first
 		// Compare gzip bytes size (not base64 string) to match etcd/apiserver object size limits
-		if len(gzipBytes) > int(r.Config.MaxChunkSizeBytes) {
+		if len(gzipBytes) > int(maxChunkSizeBytes) {
 			// If current chunk is not empty, save it
 			if len(currentChunk.objects) > 0 {
 				chunks = append(chunks, currentChunk)
@@ -871,10 +913,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			// Now check if single object exceeds limit
 			singleObjJSON, _ := json.Marshal([]interface{}{obj})
 			singleGzipBytes, err := r.compressToBytes(singleObjJSON)
-			if err == nil && len(singleGzipBytes) > int(r.Config.MaxChunkSizeBytes) {
+			if err == nil && len(singleGzipBytes) > int(maxChunkSizeBytes) {
 				r.Logger.Warning("Object exceeds MaxChunkSizeBytes - storing as-is, may break etcd on large clusters",
 					"compressedSizeBytes", len(singleGzipBytes),
-					"maxSizeBytes", r.Config.MaxChunkSizeBytes)
+					"maxSizeBytes", maxChunkSizeBytes)
 				chunks = append(chunks, chunkData{objects: []interface{}{obj}})
 				continue
 			}
@@ -1121,19 +1163,22 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 				"configMap", configMapName,
 				"namespace", namespace,
 				"note", "ConfigMap is optional - create it via Helm values (controller.config.*) to override defaults",
-				"defaultMaxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-				"defaultTTL", r.Config.DefaultTTL)
+				"defaultMaxChunkSizeBytes", r.cfgMaxChunkSizeBytes(),
+				"defaultTTL", r.cfgDefaultTTL())
 			return nil
 		}
 		return fmt.Errorf("failed to get controller ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
-	// Load config from ConfigMap data (overrides defaults)
+	// Load config from ConfigMap data (overrides defaults). Guarded because loadConfigFromConfigMap
+	// runs on every reconcile and MaxConcurrentReconciles > 1 makes this write concurrent.
+	r.configMu.Lock()
 	r.Config.LoadFromConfigMap(configMap.Data)
+	r.configMu.Unlock()
 	r.Logger.Info("Loaded controller configuration from ConfigMap",
 		"configMap", fmt.Sprintf("%s/%s", namespace, configMapName),
-		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-		"defaultTTL", r.Config.DefaultTTL)
+		"maxChunkSizeBytes", r.cfgMaxChunkSizeBytes(),
+		"defaultTTL", r.cfgDefaultTTL())
 
 	return nil
 }
@@ -1293,10 +1338,27 @@ func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.Man
 	}
 	// Get TTL from configuration (default: 168h)
 	ttlStr := config.DefaultTTLStr
-	if r.Config != nil && r.Config.DefaultTTLStr != "" {
-		ttlStr = r.Config.DefaultTTLStr
+	if s := r.cfgDefaultTTLStr(); s != "" {
+		ttlStr = s
 	}
 	mcr.Annotations[controllercommon.AnnotationKeyTTL] = ttlStr
+}
+
+// mapManifestCheckpointToMCR routes a ManifestCheckpoint event back to the owning ManifestCaptureRequest
+// via spec.manifestCaptureRequestRef. This makes the MCR controller event-driven on the checkpoint's
+// Ready flip and on the SnapshotContent ownerRef handoff, removing the 500ms poll gap in
+// finalizeMCRIfCheckpointHandedOff. The handler only enqueues a request; the reconcile recomputes state
+// from truth refs, so a stale/garbled ref simply yields no enqueue (the self-requeue still converges).
+func mapManifestCheckpointToMCR(_ context.Context, obj client.Object) []reconcile.Request {
+	checkpoint, ok := obj.(*storagev1alpha1.ManifestCheckpoint)
+	if !ok {
+		return nil
+	}
+	ref := checkpoint.Spec.ManifestCaptureRequestRef
+	if ref == nil || ref.Name == "" || ref.Namespace == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}}}
 }
 
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {
@@ -1312,7 +1374,18 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).
+		// Wake the MCR on its ManifestCheckpoint's events (Ready flip and the SnapshotContent ownerRef
+		// handoff) instead of polling at the 500ms self-requeue in finalizeMCRIfCheckpointHandedOff. The
+		// checkpoint is controller-owned by the execution ObjectKeeper, not the MCR, so Owns() cannot route
+		// it; the stable link is checkpoint.spec.manifestCaptureRequestRef (mapManifestCheckpointToMCR).
+		Watches(&storagev1alpha1.ManifestCheckpoint{}, handler.EnqueueRequestsFromMapFunc(mapManifestCheckpointToMCR)).
 		WithOptions(controller.Options{
+			// L2b-ssc: process independent ManifestCaptureRequests in parallel. Each MCR owns its own
+			// UID-scoped ManifestCheckpoint / ObjectKeeper / chunk names (no cross-MCR name collisions)
+			// and controller-runtime still serializes reconciles of the same object, so this is safe.
+			// Kept at 4 (not 8) to bound apiserver load; the shared Config manifest fields are guarded by
+			// configMu. storage-foundation VCR concurrency is unchanged and may become the next bottleneck.
+			MaxConcurrentReconciles: 4,
 			// Bound the per-item retry backoff so transient chunk-creation requeues (apiserver/network
 			// blips) re-run quickly instead of backing off to the controller-runtime default (~16min),
 			// which would stall a snapshot whose capture hit a momentary hiccup. Terminal failures
@@ -1399,8 +1472,8 @@ func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Cont
 	// Get TTL from controller config (this is the ONLY source of TTL timing)
 	// TTL annotation is informational only and is ignored here
 	defaultTTL := config.DefaultTTL
-	if r.Config != nil && r.Config.DefaultTTL > 0 {
-		defaultTTL = r.Config.DefaultTTL
+	if d := r.cfgDefaultTTL(); d > 0 {
+		defaultTTL = d
 	}
 
 	// Guard: if TTL is disabled (<= 0), skip scanning

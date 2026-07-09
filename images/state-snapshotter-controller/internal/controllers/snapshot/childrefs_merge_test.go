@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -39,6 +40,46 @@ func childRef(name string) storagev1alpha1.SnapshotChildRef {
 		APIVersion: "demo.test/v1",
 		Kind:       "DemoSnapshot",
 		Name:       name,
+	}
+}
+
+// TestChildSnapshotReadCache pins the D.3 read-cache contract: one List per GVK serves many reads,
+// a missing object is a proper NotFound (so IsNotFound branches behave as with the former Get), and a
+// cross-namespace key is a hard error (not a misleading NotFound), guarding the single-namespace scope.
+func TestChildSnapshotReadCache(t *testing.T) {
+	ctx := context.Background()
+	gvk := schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "DemoSnapshot"}
+	mk := func(name string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		u.SetNamespace("ns1")
+		u.SetName(name)
+		return u
+	}
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(mk("a"), mk("b")).Build()
+	timings := &childGraphPlanningTimings{}
+	rc := newChildSnapshotReadCache(cl, "ns1", timings)
+
+	get := func(ns, name string) error {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		return rc.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, u)
+	}
+
+	if err := get("ns1", "a"); err != nil {
+		t.Fatalf("Get present object: %v", err)
+	}
+	if err := get("ns1", "b"); err != nil {
+		t.Fatalf("Get second present object: %v", err)
+	}
+	if err := get("ns1", "missing"); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing object must be NotFound, got %v", err)
+	}
+	if timings.childListCalls != 1 {
+		t.Fatalf("want exactly 1 List per GVK across reads, got %d", timings.childListCalls)
+	}
+	if err := get("other-ns", "a"); err == nil || apierrors.IsNotFound(err) {
+		t.Fatalf("cross-namespace key must be a hard error (not NotFound), got %v", err)
 	}
 }
 
@@ -84,7 +125,7 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 
 	t.Run("all graph ready", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready")}, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{}))
 		if err != nil || !ready || terminal != "" || len(pending) != 0 {
 			t.Fatalf("want ready with no terminal/pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -92,7 +133,7 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 
 	t.Run("pending blocks lower priority without terminal message", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(pendingChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")}, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{}))
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending with no terminal message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -108,7 +149,7 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 			"reason": snapshotpkg.ReasonCompleted,
 		}})
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("noobserved")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("noobserved")}, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{}))
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -125,7 +166,7 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 			"observedGeneration": int64(2),
 		}})
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("stale")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("stale")}, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{}))
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -136,7 +177,7 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 
 	t.Run("terminal graph failure returns message", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(failedChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("failed")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("failed")}, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{}))
 		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed graph planning") {
 			t.Fatalf("want terminal failure message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -145,14 +186,14 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 	t.Run("ready-based terminal failure requires current observedGeneration", func(t *testing.T) {
 		staleTerminal := demoSnapshotChildReadyTerminal("ready-stale", 3, 2, "ListFailed")
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(staleTerminal).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-stale")})
+		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-stale")}, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{}))
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("stale terminal Ready must be pending, not terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
 
 		currentTerminal := demoSnapshotChildReadyTerminal("ready-current", 3, 3, "ListFailed")
 		r = &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(currentTerminal).Build()}
-		ready, terminal, pending, err = r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-current")})
+		ready, terminal, pending, err = r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-current")}, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{}))
 		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed") {
 			t.Fatalf("current terminal Ready must be terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
@@ -311,7 +352,7 @@ func TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef(t *testing.T) {
 	source := demoSourceObject("vm-1", "uid-a")
 
 	const childName = "nss-child-vm-1"
-	if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, gvk, source); err != nil {
+	if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, gvk, source, newChildSnapshotReadCache(r.Client, "ns1", &childGraphPlanningTimings{})); err != nil {
 		t.Fatalf("ensureParentOwnedChildSnapshot: %v", err)
 	}
 

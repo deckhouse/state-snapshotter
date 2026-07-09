@@ -212,6 +212,8 @@ func (r *SnapshotReconciler) n2aReturnAfterVolumePublish(
 		return ctrl.Result{}, pubErr
 	}
 	if pubRes.Requeue || pubRes.RequeueAfter > 0 {
+		log.FromContext(ctx).V(1).Info("capture N2a: volume-publish leg overrode requeue (volume-path pacing, not root-manifest)",
+			"branch", "volume-override", "requeue", pubRes.Requeue, "requeueAfterMs", pubRes.RequeueAfter.Milliseconds())
 		return pubRes, nil
 	}
 	return res, nil

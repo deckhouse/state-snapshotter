@@ -19,7 +19,6 @@ package genericbinder
 import (
 	"context"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,8 +27,7 @@ import (
 )
 
 // mapMCRToOwningSnapshots returns a watch map function that, for a ManifestCaptureRequest change, enqueues
-// the snapshot(s) of snapshotGVK in the MCR's namespace whose status.manifestCaptureRequestName references
-// it.
+// the snapshot of snapshotGVK that owns it.
 //
 // Why this watch exists (event-driven handoff): ensureSnapshotContentLinks waits for the MCR to publish
 // status.checkpointName before it can publish SnapshotContent.status.manifestCheckpointName (which in turn
@@ -39,50 +37,28 @@ import (
 // MCR -> owning-snapshot link converge event-driven; the RequeueAfter path remains only as a safety net for
 // missed events.
 //
-// Why List+filter and not a field index / ownerRef hop: the MCR carries no reverse Snapshot reference and
-// binder watches may be registered at runtime via AddWatchForPair (CSD-driven), so a field index cannot be
-// guaranteed before cache start. The snapshot owns the truth ref (status.manifestCaptureRequestName), so a
-// namespaced List+filter resolves the owner for both bootstrap and runtime registration. The handler only
-// enqueues; it never writes status. Mirrors mapBoundContentToSnapshots.
-func (r *GenericSnapshotBinderController) mapMCRToOwningSnapshots(snapshotGVK schema.GroupVersionKind) func(context.Context, client.Object) []reconcile.Request {
-	listGVK := schema.GroupVersionKind{
-		Group:   snapshotGVK.Group,
-		Version: snapshotGVK.Version,
-		Kind:    snapshotGVK.Kind + "List",
-	}
+// Routing is O(1) and index-free: the MCR carries a controller ownerRef to its owning snapshot (set at
+// creation by snapshotsdk.ownerRef for domain kinds and by snapshot.capture for the namespace root). We
+// match the ownerRef of snapshotGVK and enqueue it directly. This replaces the former namespaced
+// List-of-all-snapshots + status.manifestCaptureRequestName filter, which ran a full unstructured List +
+// JSON decode on every MCR event (the SETS=10 hotspot, T-index). The handler only enqueues; a missed event
+// is backstopped by the binder's RequeueAfter (no List fallback — that would reintroduce the hot path).
+func mapMCRToOwningSnapshots(snapshotGVK schema.GroupVersionKind) func(context.Context, client.Object) []reconcile.Request {
+	wantAPIVersion := snapshotGVK.GroupVersion().String()
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		statMCRToOwningSnapshots.invoked.Add(1)
 		if obj == nil || obj.GetName() == "" {
 			return nil
 		}
-		mcrName := obj.GetName()
-		mcrNS := obj.GetNamespace()
-
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(listGVK)
-		opts := []client.ListOption{}
-		if mcrNS != "" {
-			opts = append(opts, client.InNamespace(mcrNS))
-		}
-		if err := r.List(ctx, list, opts...); err != nil {
-			log.FromContext(ctx).V(1).Info("mcr wake-up: failed to list snapshots",
-				"snapshotKind", snapshotGVK.Kind, "mcr", mcrName, "error", err.Error())
-			return nil
-		}
-		var reqs []reconcile.Request
-		for i := range list.Items {
-			name, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "manifestCaptureRequestName")
-			if name == "" || name != mcrName {
+		for _, ref := range obj.GetOwnerReferences() {
+			if ref.Name == "" || ref.Kind != snapshotGVK.Kind || ref.APIVersion != wantAPIVersion {
 				continue
 			}
-			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
-				Namespace: list.Items[i].GetNamespace(),
-				Name:      list.Items[i].GetName(),
-			}})
+			statMCRToOwningSnapshots.enqueued.Add(1)
+			log.FromContext(ctx).V(1).Info("ManifestCaptureRequest change enqueues owning snapshot",
+				"snapshotKind", snapshotGVK.Kind, "mcr", obj.GetName(), "snapshot", ref.Name)
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: ref.Name}}}
 		}
-		if len(reqs) > 0 {
-			log.FromContext(ctx).V(1).Info("ManifestCaptureRequest change enqueues owning snapshot(s)",
-				"snapshotKind", snapshotGVK.Kind, "mcr", mcrName, "count", len(reqs))
-		}
-		return reqs
+		return nil
 	}
 }

@@ -1,0 +1,12 @@
+---
+description: Agent must never push to any git remote; the user does the push
+alwaysApply: true
+---
+
+# Agent must not push
+
+- The agent MUST NOT run `git push` (or any push variant: `--force`, `--force-with-lease`, `push` to any remote, `gh` push, tags push) under any circumstances.
+- The agent MAY stage and create local commits when explicitly asked (see committing rules), but pushing is ALWAYS the user's action.
+- After committing, STOP and tell the user the commit is ready to push. Do not push on their behalf, even if a redeploy/gate normally expects a push.
+- If a workflow (e.g. `controller-redeploy-requires-commit-and-push`) requires the commit to be on the remote before redeploy, the agent commits locally and then asks the user to push; the user performs the push and redeploy.
+- Never request `git_write` permission to push. If a push seems necessary, ask the user to run it.

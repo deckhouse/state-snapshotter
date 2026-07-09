@@ -199,7 +199,16 @@ var _ = Describe("Integration: Snapshot deletion semantics", func() {
 			},
 			Spec: storagev1alpha1.SnapshotContentSpec{
 				DeletionPolicy: storagev1alpha1.SnapshotContentDeletionPolicyDelete,
-				SnapshotRef:    integrationContentSnapshotRef(),
+				// This is snap-del's own namespace-root content, so it must reference its real owner: the
+				// ManifestsArchived Ready-gate dereferences spec.snapshotRef to validate the declared child
+				// graph, and only an existing owner lets the latch (and thus the Snapshot's first Ready=True)
+				// resolve. A placeholder ref to a non-existent Snapshot pins it at Capturing forever.
+				SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+					APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "Snapshot",
+					Namespace:  nsName,
+					Name:       snap.Name,
+				},
 			},
 		})).To(Succeed())
 

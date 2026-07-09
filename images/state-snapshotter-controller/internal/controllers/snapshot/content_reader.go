@@ -44,3 +44,19 @@ func (r *SnapshotReconciler) getSnapshotContentFresh(ctx context.Context, name s
 	}
 	return content, nil
 }
+
+// getSnapshotContentCached reads the bound SnapshotContent via the cached Client (not APIReader). It is
+// for the Ready/ManifestsArchived mirror only: SnapshotContent is watched (its status change re-enqueues
+// the bound Snapshot), so the mirror is event-driven and a stale cache costs at most one extra reconcile
+// before convergence (INV-RECONCILE-TRUTH backstops). This avoids a direct apiserver GET on every mirror
+// pass (L4-load). Read-after-write and safe-to-delete callers must keep getSnapshotContentFresh.
+func (r *SnapshotReconciler) getSnapshotContentCached(ctx context.Context, name string) (*storagev1alpha1.SnapshotContent, error) {
+	if name == "" {
+		return nil, apierrors.NewBadRequest("snapshot content name is required")
+	}
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
+		return nil, err
+	}
+	return content, nil
+}

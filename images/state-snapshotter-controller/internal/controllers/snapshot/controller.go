@@ -72,6 +72,12 @@ type SnapshotReconciler struct {
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
 	Mgr                   ctrl.Manager
 	childWatchMgr         *snapshotDynamicWatchManager
+	// captureSweepFlight single-flights the pre-MCR namespace capture sweep per root Snapshot UID so
+	// concurrent reconciles of the same Snapshot do not each run the identical full sweep (H5).
+	captureSweepFlight *captureSweepSingleflight
+	// phaseATrace is an env-gated, diagnosis-only tracer for the creation -> ChildrenSnapshotReady path
+	// (relay-wake vs 30s backstop, observe-lag). No-op unless STATE_SNAPSHOTTER_PHASE_A_TRACE is set.
+	phaseATrace *phaseATracer
 }
 
 // selfSubjectAccessReviewer is the minimal SelfSubjectAccessReview creator used by the capture-RBAC gate
@@ -110,9 +116,17 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	// rate limiter (QPS 5 / Burst 10) serializes those List calls to ~25s regardless of fan-out, so raise
 	// QPS/Burst on a dedicated rest.Config copy used only by the capture dynamic/discovery clients. This
 	// keeps the single sweep to ~1-2s and does not touch the manager's shared client/informer config.
+	// Defaults 200/400 (QPS→Ready saturation knee; see design/snapshot-creation-latency.md, "QPS/Burst saturation
+	// sweep"); overridable via STATE_SNAPSHOTTER_CAPTURE_QPS / _BURST (read once at start; changing requires a
+	// pod/rollout restart, not a hot reload).
+	captureQPS, captureBurst, rlErr := config.ParseClientRateLimit(config.EnvCaptureQPS, config.EnvCaptureBurst, 200, 400)
+	if rlErr != nil {
+		return fmt.Errorf("snapshot controller: capture client rate limit: %w", rlErr)
+	}
 	captureRESTConfig := rest.CopyConfig(mgr.GetConfig())
-	captureRESTConfig.QPS = 100
-	captureRESTConfig.Burst = 200
+	captureRESTConfig.QPS = captureQPS
+	captureRESTConfig.Burst = captureBurst
+	mgr.GetLogger().Info("snapshot capture client rate limit", "qps", captureQPS, "burst", captureBurst)
 	dyn, err := dynamic.NewForConfig(captureRESTConfig)
 	if err != nil {
 		return fmt.Errorf("snapshot controller: dynamic client: %w", err)
@@ -138,9 +152,24 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		Archive:               usecase.NewArchiveService(mgr.GetAPIReader(), mgr.GetAPIReader(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
+		captureSweepFlight:    newCaptureSweepSingleflight(),
+		phaseATrace:           newPhaseATracerFromEnv(),
 	}
-	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
+	mgr.GetLogger().Info("snapshot Phase-A trace", "enabled", r.phaseATrace.enabled, "env", EnvPhaseATrace)
+	// Child-snapshot watch relay (nss-chw-*) concurrency: default 1 (controller-runtime default, single
+	// goroutine per child GVK). Overridable via STATE_SNAPSHOTTER_RELAY_MAX_CONCURRENT_RECONCILES to probe
+	// whether the child->parent wake relay serializes Phase A (see design/snapshot-creation-latency.md,
+	// "Phase A is serialized on reconcile-worker concurrency"). Read once at start; needs a pod restart.
+	relayMaxConcurrent, rmcErr := config.ParseMaxConcurrentReconciles(config.EnvRelayMaxConcurrentReconciles, 1)
+	if rmcErr != nil {
+		return fmt.Errorf("snapshot controller: %w", rmcErr)
+	}
+	mgr.GetLogger().Info("snapshot child-snapshot relay concurrency", "maxConcurrentReconciles", relayMaxConcurrent, "env", config.EnvRelayMaxConcurrentReconciles)
+	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r, relayMaxConcurrent)
 	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
+	if err := registerSnapshotChildrenRefFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return err
 	}
 	// Status-only SnapshotContent updates must enqueue the bound Snapshot (Ready propagation).
@@ -172,8 +201,20 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	return b.Complete(r)
 }
 
-func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, retErr error) {
 	log.FromContext(ctx).V(1).Info("reconcile Snapshot", "snapshot", req.NamespacedName)
+	// Exit trace: the returned Result governs the requeue cadence of this key (RequeueAfter forgets the
+	// rate limiter and schedules deterministically; Requeue:true / error re-adds rate-limited with growing
+	// backoff). durMs exposes reconcile wall time: a slow pass locks the key and delays servicing of
+	// child-archive / MCP-ready wakes. Logging it makes the root-Snapshot reconcile cadence observable.
+	reconcileStart := time.Now()
+	defer func() {
+		log.FromContext(ctx).V(1).Info("reconcile Snapshot done", "snapshot", req.NamespacedName,
+			"requeue", res.Requeue, "requeueAfterMs", res.RequeueAfter.Milliseconds(), "err", retErr != nil,
+			"durMs", time.Since(reconcileStart).Milliseconds())
+	}()
+	r.phaseATrace.entry(ctx, req.NamespacedName)
+
 	nsSnap := &storagev1alpha1.Snapshot{}
 	if err := r.snapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
 		if errors.IsNotFound(err) {
@@ -312,12 +353,28 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
 		return ctrl.Result{}, err
 	}
-	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
-	if err != nil {
-		if patchErr := r.patchSnapshotChildrenSnapshotReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
+	var graphChanged, graphReady bool
+	if childGraphReplanSkippable(nsSnap) {
+		// Fast path: the parent-owned child graph is already fully planned for this generation, so the
+		// O(N) re-plan (dynamic List of every source kind + full child-tree coverage walk) is redundant.
+		// Proceed straight to the manifest/capture leg using the already-published
+		// status.childrenSnapshotRefs. Terminal child failures after readiness still propagate via the
+		// content-tree mirror (INV-COND4) and the capture pending-path bridge; the point-in-time child
+		// set is frozen at ChildrenSnapshotReady=True, so re-detecting sources is unnecessary.
+		graphChanged, graphReady = false, true
+	} else {
+		graphStart := time.Now()
+		changed, ready, planErr := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
+		if d := time.Since(graphStart); d > 150*time.Millisecond {
+			log.FromContext(ctx).V(1).Info("reconcile Snapshot: section slow", "section", "child-graph-planning", "durMs", d.Milliseconds())
 		}
-		return ctrl.Result{}, err
+		if planErr != nil {
+			if patchErr := r.patchSnapshotChildrenSnapshotReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, planErr.Error()); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{}, planErr
+		}
+		graphChanged, graphReady = changed, ready
 	}
 	if res, block := childGraphCaptureGate(graphChanged, graphReady); block {
 		return res, nil
@@ -337,6 +394,26 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does not
 // stall if a child-kind notification is dropped.
 const snapshotChildGraphPollInterval = 30 * time.Second
+
+// childGraphReplanSkippable reports whether the parent-owned child graph is already fully planned for
+// the current generation, so the O(N) re-plan can be skipped and reconcile can proceed straight to the
+// manifest/capture leg using the already-published status.childrenSnapshotRefs.
+//
+// It requires a *successful* plan, not merely ChildrenSnapshotReady=True: the condition must be True
+// with Reason=Completed (the only reason set by a successful plan via patchSnapshotChildrenRefs) AND
+// current for this generation (ObservedGeneration == metadata.generation). A stale observedGeneration
+// (spec changed) or any non-Completed/True state (pending / GraphPlanningFailed) forces a full re-plan.
+//
+// An empty child graph is a valid success state: a namespace with no snapshottable sources still
+// produces a manifests-only snapshot and reaches ChildrenSnapshotReady=True/Completed with an empty
+// status.childrenSnapshotRefs. Therefore an empty refs slice does NOT block the skip.
+func childGraphReplanSkippable(nsSnap *storagev1alpha1.Snapshot) bool {
+	cond := meta.FindStatusCondition(nsSnap.Status.Conditions, snapshotpkg.ConditionChildrenSnapshotReady)
+	return cond != nil &&
+		cond.Status == metav1.ConditionTrue &&
+		cond.Reason == snapshotpkg.ReasonCompleted &&
+		cond.ObservedGeneration == nsSnap.Generation
+}
 
 // childGraphCaptureGate decides how reconcile proceeds after child-graph planning and reports whether
 // capture must be blocked (block=true means return the result, do not capture):

@@ -53,22 +53,29 @@ func TestFindParentsReferencingChildSnapshot_MatchesGVKAndName(t *testing.T) {
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).Build()
+	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefFieldIndex, snapshotChildrenRefIndexValues).Build()
 	reqs := findParentsReferencingChildSnapshot(ctx, cl, child)
 	if len(reqs) != 1 || reqs[0].Namespace != "ns-a" || reqs[0].Name != "parent" {
 		t.Fatalf("got %+v", reqs)
 	}
 }
 
-// Namespace-local run tree: a Snapshot in another namespace must not be returned because
-// parent lookup is scoped to child namespace only.
+// Namespace-local run tree: a Snapshot in another namespace must not be returned because parent lookup is
+// scoped to the child namespace only. This is the safety proof for the deliberately namespace-LESS index
+// key (GVK+name, no namespace): two parents in different namespaces reference the SAME child name+GVK and
+// therefore index under the SAME key, so isolation must come from the InNamespace(childNS) List filter, not
+// from the key. Asserted in BOTH directions so neither namespace can leak into the other.
 func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing.T) {
 	ctx := context.Background()
 	gvk := schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "DemoSnap"}
-	child := &unstructured.Unstructured{}
-	child.SetGroupVersionKind(gvk)
-	child.SetNamespace("ns-a")
-	child.SetName("snap-1")
+	newChild := func(ns string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		u.SetNamespace(ns)
+		u.SetName("snap-1")
+		return u
+	}
 
 	parentSame := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "root"},
@@ -90,10 +97,14 @@ func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parentSame, parentOther).Build()
-	reqs := findParentsReferencingChildSnapshot(ctx, cl, child)
-	if len(reqs) != 1 || reqs[0].Namespace != "ns-a" || reqs[0].Name != "root" {
-		t.Fatalf("expected only parent in ns-a, got %+v", reqs)
+	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parentSame, parentOther).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefFieldIndex, snapshotChildrenRefIndexValues).Build()
+
+	if reqs := findParentsReferencingChildSnapshot(ctx, cl, newChild("ns-a")); len(reqs) != 1 || reqs[0].Namespace != "ns-a" || reqs[0].Name != "root" {
+		t.Fatalf("child ns-a/snap-1 must wake only ns-a/root, got %+v", reqs)
+	}
+	if reqs := findParentsReferencingChildSnapshot(ctx, cl, newChild("ns-b")); len(reqs) != 1 || reqs[0].Namespace != "ns-b" || reqs[0].Name != "other-root" {
+		t.Fatalf("child ns-b/snap-1 must wake only ns-b/other-root, got %+v", reqs)
 	}
 }
 
@@ -116,7 +127,8 @@ func TestBuildSyntheticDeletedChild_MatchesReferencingParent(t *testing.T) {
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).Build()
+	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefFieldIndex, snapshotChildrenRefIndexValues).Build()
 
 	// Synthetic child built only from GVK + namespace/name (the object itself no longer exists).
 	synthetic := buildSyntheticDeletedChild(gvk, "ns-a", "snap-1")
@@ -153,10 +165,61 @@ func TestFindParentsReferencingChildSnapshot_SameNameDifferentGVKNoFalsePositive
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).Build()
+	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefFieldIndex, snapshotChildrenRefIndexValues).Build()
 	reqs := findParentsReferencingChildSnapshot(ctx, cl, child)
 	if len(reqs) != 0 {
 		t.Fatalf("expected no parent, got %+v", reqs)
+	}
+}
+
+func TestSnapshotChildRefIndexKey(t *testing.T) {
+	// Exact format: normalized GVK string + NUL + name; identical for the ref and a live child of the
+	// same GVK regardless of apiVersion string formatting.
+	want := schema.FromAPIVersionAndKind("demo.test/v1", "DemoSnap").String() + "\x00" + "snap-1"
+	if got := snapshotChildRefIndexKey("demo.test/v1", "DemoSnap", "snap-1"); got != want {
+		t.Fatalf("key=%q want %q", got, want)
+	}
+	// Incomplete identity yields no key (mirrors childSnapshotRefMatchesUnstructuredChild requirements).
+	for _, tc := range []struct{ av, k, n string }{
+		{"", "DemoSnap", "snap-1"},
+		{"demo.test/v1", "", "snap-1"},
+		{"demo.test/v1", "DemoSnap", ""},
+	} {
+		if got := snapshotChildRefIndexKey(tc.av, tc.k, tc.n); got != "" {
+			t.Fatalf("incomplete identity %+v must yield empty key, got %q", tc, got)
+		}
+	}
+}
+
+func TestSnapshotChildrenRefIndexValues(t *testing.T) {
+	// Multiple children (mixed kinds) → one key each; incomplete refs skipped.
+	snap := &storagev1alpha1.Snapshot{
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
+				{APIVersion: "demo.test/v1", Kind: "KindA", Name: "a"},
+				{APIVersion: "demo.test/v1", Kind: "KindB", Name: "b"},
+				{APIVersion: "", Kind: "KindC", Name: "c"}, // incomplete -> skipped
+			},
+		},
+	}
+	keys := snapshotChildrenRefIndexValues(snap)
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys, got %v", keys)
+	}
+	wantA := snapshotChildRefIndexKey("demo.test/v1", "KindA", "a")
+	wantB := snapshotChildRefIndexKey("demo.test/v1", "KindB", "b")
+	if keys[0] != wantA || keys[1] != wantB {
+		t.Fatalf("keys=%v want [%q %q]", keys, wantA, wantB)
+	}
+
+	// Empty children refs → no keys.
+	if got := snapshotChildrenRefIndexValues(&storagev1alpha1.Snapshot{}); len(got) != 0 {
+		t.Fatalf("empty childrenSnapshotRefs must yield no keys, got %v", got)
+	}
+	// Wrong object type → no keys.
+	if got := snapshotChildrenRefIndexValues(&storagev1alpha1.SnapshotContent{}); got != nil {
+		t.Fatalf("non-Snapshot object must yield nil, got %v", got)
 	}
 }
 

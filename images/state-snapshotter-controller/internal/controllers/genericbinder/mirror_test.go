@@ -101,3 +101,77 @@ func TestCheckConsistencyAndSetReadyMirrorsContentReadyVerbatim(t *testing.T) {
 			got.Status, got.Reason, got.Message, want.Status, want.Reason, want.Message)
 	}
 }
+
+// L4-load: the Ready mirror must read the bound SnapshotContent through the cached Client, NOT the
+// uncached APIReader (SnapshotContent is watched, so the mirror is event-driven; the cache read removes a
+// direct apiserver GET on every mirror pass). Split clients pin the routing: the cache holds the content
+// with Ready=True while the APIReader is empty. If the mirror still read the APIReader it would observe
+// NotFound and stamp ContentMissing/False instead of mirroring the cached Ready=True.
+func TestCheckConsistencyAndSetReadyReadsContentFromCacheNotAPIReader(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add storage scheme: %v", err)
+	}
+
+	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+		Type:    snapshot.ConditionReady,
+		Status:  metav1.ConditionTrue,
+		Reason:  snapshot.ReasonCompleted,
+		Message: "manifests (archived), data, and child content are ready",
+	})
+
+	snapGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+	snapObj := &unstructured.Unstructured{}
+	snapObj.SetGroupVersionKind(snapGVK)
+	snapObj.SetName("root-snap")
+	snapObj.SetNamespace("default")
+	if err := unstructured.SetNestedField(snapObj.Object, "root-content", "status", "boundSnapshotContentName"); err != nil {
+		t.Fatalf("set boundSnapshotContentName: %v", err)
+	}
+
+	// Cache holds both the snapshot (patch target) and the content (source of truth).
+	cacheCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(content, snapObj.DeepCopy()).
+		WithStatusSubresource(snapObj).
+		Build()
+	// APIReader is deliberately EMPTY of the content: a read here would be NotFound.
+	apiReaderCl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	reg := snapshot.NewGVKRegistry()
+	if err := reg.RegisterSnapshotContentMapping(
+		"Snapshot", storagev1alpha1.SchemeGroupVersion.String(),
+		"SnapshotContent", storagev1alpha1.SchemeGroupVersion.String(),
+	); err != nil {
+		t.Fatalf("register snapshot/content mapping: %v", err)
+	}
+	r := &GenericSnapshotBinderController{Client: cacheCl, APIReader: apiReaderCl, Scheme: scheme, GVKRegistry: reg}
+
+	snapLike, err := snapshot.ExtractSnapshotLike(snapObj)
+	if err != nil {
+		t.Fatalf("extract snapshot like: %v", err)
+	}
+	if err := r.checkConsistencyAndSetReady(ctx, snapLike, snapObj); err != nil {
+		t.Fatalf("checkConsistencyAndSetReady: %v", err)
+	}
+
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(snapGVK)
+	if err := cacheCl.Get(ctx, client.ObjectKey{Namespace: "default", Name: "root-snap"}, fresh); err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	freshLike, err := snapshot.ExtractSnapshotLike(fresh)
+	if err != nil {
+		t.Fatalf("extract fresh snapshot like: %v", err)
+	}
+	got := snapshot.GetCondition(freshLike, snapshot.ConditionReady)
+	if got == nil {
+		t.Fatalf("snapshot has no Ready condition after mirror")
+	}
+	if got.Status != metav1.ConditionTrue || got.Reason != snapshot.ReasonCompleted {
+		t.Fatalf("mirror did not read content from cache: Ready=%s/%s, want True/%s (a NotFound from the empty APIReader would be ContentMissing/False)",
+			got.Status, got.Reason, snapshot.ReasonCompleted)
+	}
+}

@@ -141,7 +141,11 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: APIReader is nil")
 	}
 
+	keeperStart := time.Now()
 	_, res, err := r.ensureSnapshotRootObjectKeeper(ctx, nsSnap, content)
+	if d := time.Since(keeperStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "root-object-keeper", "durMs", d.Milliseconds())
+	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -158,14 +162,23 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if err := r.mirrorSnapshotManifestsArchivedFromBoundContent(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, content.Name); err != nil {
 		return ctrl.Result{}, err
 	}
+	volStart := time.Now()
 	if err := r.ensureVolumeCaptureLeg(ctx, nsSnap, content); err != nil {
 		return ctrl.Result{}, err
 	}
 	if _, err := r.reconcileVolumeCapturePublish(ctx, nsSnap, content, false); err != nil {
 		return ctrl.Result{}, err
 	}
+	if d := time.Since(volStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "volume-leg", "durMs", d.Milliseconds())
+	}
 
-	if done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content); done {
+	mcpChkStart := time.Now()
+	done, res, err := r.reconcileIfRootManifestCheckpointAlreadyReady(ctx, nsSnap, content)
+	if d := time.Since(mcpChkStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "mcp-already-ready-check", "durMs", d.Milliseconds())
+	}
+	if done {
 		return res, err
 	}
 
@@ -181,9 +194,25 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	existingMCR := &ssv1alpha1.ManifestCaptureRequest{}
 	switch err := r.APIReader.Get(ctx, mcrKey, existingMCR); {
 	case err == nil:
+		logger.V(1).Info("capture N2a: root MCR present, driving readiness", "branch", "mcr-present")
 		return r.driveRootManifestCheckpointReadiness(ctx, nsSnap, content, existingMCR.UID)
 	case !apierrors.IsNotFound(err):
 		return ctrl.Result{}, err
+	}
+
+	// H5 single-flight: the MCR does not exist yet, so this reconcile would run the full pre-MCR namespace
+	// sweep. Several reconciles of the SAME root Snapshot can be here at once (the child-watch relay calls
+	// Reconcile directly and MaxConcurrentReconciles>1) and each would sweep identical pre-MCR state, with the
+	// losers' Creates landing on AlreadyExists. Let only one reconcile plan per Snapshot UID; a concurrent
+	// reconcile requeues briefly and, once the leader has created the MCR, takes the mcr-present frozen branch
+	// above (no sweep). This is concurrency dedup only — the MCR-gate still provides temporal dedup, and a
+	// leader that returns without creating the MCR releases the flight (defer) so a later reconcile re-plans.
+	if r.captureSweepFlight != nil && nsSnap.UID != "" {
+		if !r.captureSweepFlight.TryAcquire(nsSnap.UID) {
+			logger.V(1).Info("capture N2a: concurrent pre-MCR sweep already in progress for this Snapshot; requeue", "branch", "sweep-inflight")
+			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil)
+		}
+		defer r.captureSweepFlight.Release(nsSnap.UID)
 	}
 
 	if r.Discovery == nil {
@@ -201,12 +230,21 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	// hooks/go/040-namespace-capture-rbac hook, so the first list otherwise races RBAC propagation and
 	// hits Forbidden -> NamespaceCaptureIncomplete. A SelfSubjectAccessReview goes through the same
 	// authorizer as the list, so once it allows, the list is guaranteed readable (strictly one list).
-	if allowed, sarErr := r.namespaceCaptureRBACReady(ctx, nsSnap.Namespace); sarErr != nil {
+	sarStart := time.Now()
+	allowed, sarErr := r.namespaceCaptureRBACReady(ctx, nsSnap.Namespace)
+	if d := time.Since(sarStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "rbac-sar", "durMs", d.Milliseconds())
+	}
+	if sarErr != nil {
 		return ctrl.Result{}, sarErr
 	} else if !allowed {
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}
+	planStart := time.Now()
 	targets, unreadable, err := usecase.BuildRootNamespaceManifestCaptureTargets(ctx, r.Archive, r.Dynamic, r.Discovery, r.Client, nsSnap, content.Name, snapshotKinds)
+	if d := time.Since(planStart); d > 150*time.Millisecond {
+		logger.V(1).Info("capture N2a: section slow", "section", "namespace-list-manifest-planning", "durMs", d.Milliseconds())
+	}
 	if err != nil {
 		freshParent := &storagev1alpha1.Snapshot{}
 		if gerr := r.Client.Get(ctx, client.ObjectKey{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, freshParent); gerr != nil {
@@ -249,6 +287,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 			if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, freshParent, content, err); mErr != nil {
 				return ctrl.Result{}, mErr
 			}
+			logger.V(1).Info("capture N2a: root gated on subtree manifests archive; requeue 500ms", "branch", "subtree-pending", "err", err.Error())
 			return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 		}
 		if errors.Is(err, usecase.ErrSubtreeManifestCaptureFailed) {
@@ -299,6 +338,7 @@ func (r *SnapshotReconciler) reconcileCaptureN2a(
 	if res.RequeueAfter > 0 || res.Requeue {
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, nil)
 	}
+	logger.V(1).Info("capture N2a: root MCR planned+created; driving readiness", "branch", "mcr-created", "mcr", mcr.Name)
 	return r.driveRootManifestCheckpointReadiness(ctx, nsSnap, content, mcr.UID)
 }
 
@@ -340,15 +380,21 @@ func (r *SnapshotReconciler) driveRootManifestCheckpointReadiness(
 		if mErr := r.mirrorSnapshotReadyFromBoundContent(ctx, nsSnap, content, nil); mErr != nil {
 			return ctrl.Result{}, mErr
 		}
+		log.FromContext(ctx).V(1).Info("drive root MCP: not Ready yet; requeue 500ms", "branch", "mcp-not-ready", "mcp", mcpName)
 		return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil)
 	}
 
+	log.FromContext(ctx).V(1).Info("drive root MCP: Ready; finalizing root manifest leg", "branch", "mcp-ready", "mcp", mcpName)
 	if readyCond.Reason != ssv1alpha1.ManifestCheckpointConditionReasonCompleted {
 		// Ready=True with unexpected reason — still treat as success if True (defensive).
 		log.FromContext(ctx).Info("ManifestCheckpoint Ready=True with non-Completed reason", "reason", readyCond.Reason, "mcp", mcpName)
 	}
 
+	finStart := time.Now()
 	res, err := r.reconcileN2aRootReadyAfterManifestCapture(ctx, nsSnap, mcpName)
+	if d := time.Since(finStart); d > 150*time.Millisecond {
+		log.FromContext(ctx).V(1).Info("drive root MCP: section slow", "section", "finalize-after-manifest-capture", "durMs", d.Milliseconds())
+	}
 	return r.n2aReturnAfterVolumePublish(ctx, nsSnap, content, res, err)
 }
 
