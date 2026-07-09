@@ -227,8 +227,17 @@ func main() {
 	// burst those requests queue behind the 5 QPS limiter, inflating a single reconcile to 4-15s and
 	// serializing the whole tree-Ready tail regardless of MaxConcurrentReconciles. (The capture path in
 	// the Snapshot controller already copies the config to QPS 100 / Burst 200 for the same reason.)
-	kConfig.QPS = 50
-	kConfig.Burst = 100
+	// Defaults 50/100; overridable via STATE_SNAPSHOTTER_KUBE_QPS / _BURST (read once at start; changing
+	// requires a pod/rollout restart, not a hot reload).
+	kubeQPS, kubeBurst, rlErr := config.ParseClientRateLimit(config.EnvKubeQPS, config.EnvKubeBurst, 50, 100)
+	if rlErr != nil {
+		log.Error(rlErr, "[main] invalid manager client rate-limit env")
+		cancel()
+		os.Exit(1)
+	}
+	kConfig.QPS = kubeQPS
+	kConfig.Burst = kubeBurst
+	log.Info(fmt.Sprintf("[main] manager client rate limit: QPS=%v Burst=%d", kubeQPS, kubeBurst))
 	log.Info("[main] kubernetes config has been successfully created.")
 
 	// Create scheme for controller manager (includes all CRD types for informers)

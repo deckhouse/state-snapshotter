@@ -124,8 +124,17 @@ func main() {
 	// snapshots and capture requests); at the default rate it serializes multi-tree bursts and paces the
 	// whole content-creation staircase upstream of capture. This mirrors the state-snapshotter/foundation
 	// clients. It is NOT a contract: a production domain controller must provision its own concurrency/QPS.
-	kConfig.QPS = 50
-	kConfig.Burst = 100
+	// Defaults 50/100; overridable via DOMAIN_CONTROLLER_KUBE_QPS / _BURST (read once at start; changing
+	// requires a pod/rollout restart, not a hot reload).
+	kubeQPS, kubeBurst, rlErr := config.ParseClientRateLimit(config.EnvKubeQPS, config.EnvKubeBurst, 50, 100)
+	if rlErr != nil {
+		log.Error(rlErr, "[domain-main] invalid manager client rate-limit env")
+		cancel()
+		os.Exit(1)
+	}
+	kConfig.QPS = kubeQPS
+	kConfig.Burst = kubeBurst
+	log.Info(fmt.Sprintf("[domain-main] manager client rate limit: QPS=%v Burst=%d", kubeQPS, kubeBurst))
 	log.Info("[domain-main] kubernetes config has been successfully created.")
 
 	scheme := runtime.NewScheme()
