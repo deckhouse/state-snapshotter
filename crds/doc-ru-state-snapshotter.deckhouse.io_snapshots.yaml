@@ -1,0 +1,7 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            Snapshot запрашивает снимок состояния/конфигурации namespace.

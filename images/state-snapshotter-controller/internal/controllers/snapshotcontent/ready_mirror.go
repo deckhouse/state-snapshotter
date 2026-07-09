@@ -124,7 +124,7 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Conte
 			message = fmsg
 		}
 	}
-	// Barrier 2 (ADR §6.2 — "финализация Ready ТОЛЬКО после доменного phase=Finished"): on a
+	// Barrier 2 (ADR §6.2 — "finalize Ready ONLY after domain phase=Finished"): on a
 	// domain-capture owner, do NOT finalize a mirrored Ready=True until the domain reported
 	// captureState.domainSpecificController.phase=Finished — the domain may still be running consistency
 	// actions (fs freeze/unfreeze, verify) after publishing its objects. While phase is Planning/Planned the

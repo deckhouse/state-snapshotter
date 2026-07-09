@@ -311,8 +311,8 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	} else {
 		// Object is being deleted - handle deletion (Phase 2: Cascade)
-		// Invariant Phase 2: SnapshotContent с DeletionTimestamp →
-		// сначала cascade finalizers → потом GC через ownerRef
+		// Invariant Phase 2: SnapshotContent with DeletionTimestamp →
+		// first cascade finalizers → then GC via ownerRef
 
 		// Step 2.1: Cascade remove finalizers from children
 		// This unlocks GC for children, but does NOT initiate Delete(child-content)

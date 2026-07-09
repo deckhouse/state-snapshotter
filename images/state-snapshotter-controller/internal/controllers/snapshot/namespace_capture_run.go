@@ -74,7 +74,7 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 //  7. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
 //  8. ConfirmConsistent (barrier 2) once the manifest leg is captured (CoreCaptureOutcome==Captured).
 //
-// PIT freeze (ADR «Late Planned» → «если узел уже Planned — план заморожен, состав не пересчитывается»):
+// PIT freeze (ADR "Late Planned" → "once a node is Planned, the plan is frozen and the set is not recomputed"):
 // steps 1-5 (plan + enumerate + freeze the declared child set) run ONLY before barrier 1
 // (namespaceDomainPrePlanned — phase absent/Planning). Once the node is past Planned the composition is
 // frozen, so this reconciler stops re-planning entirely and drives only the post-bind legs (6-8); a

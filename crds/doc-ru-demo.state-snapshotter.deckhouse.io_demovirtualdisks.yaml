@@ -1,0 +1,9 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            DemoVirtualDisk — ресурс данных demo-домена. Доменный контроллер материализует его backing-PVC
+            (пустой только что подготовленный диск либо восстановленный из DemoVirtualDiskSnapshot) и
+            публикует реально выделенную ёмкость в status.

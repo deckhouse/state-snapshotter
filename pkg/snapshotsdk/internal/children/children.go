@@ -21,7 +21,7 @@ limitations under the License.
 // childrenSnapshotRefs entry; only the leftover OBJECT is reclaimed — by ownerRef garbage collection (the
 // parent owns each child, so it is collected when the parent is deleted) or a future cleanup component.
 // This keeps the contract delete-free — no List, no orphan diff, no unstructured delete, no risk of
-// removing a foreign object on the strength of a stale status (see design Р23/Р29).
+// removing a foreign object on the strength of a stale status (see design R23/R29).
 package children
 
 import (

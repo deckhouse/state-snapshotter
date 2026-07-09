@@ -167,7 +167,7 @@ var _ = Describe("Integration: Snapshot frozen capture plan (N2a, point-in-time)
 })
 
 // A namespace snapshot's child set is frozen at the point-in-time barrier (phase>=Planned) — the ADR PIT
-// cycle: "если узел уже Planned — план заморожен, состав не пересчитывается". reconcileNamespaceCapture
+// cycle: "once a node is Planned, the plan is frozen and the set is not recomputed". reconcileNamespaceCapture
 // therefore skips its ENTIRE plan+enumerate+freeze block (steps 1-5: PublishSnapshotSource,
 // planNamespaceChildren, EnsureChildren, the orphan-PVC wave, and MarkPlanned) once the domain is past
 // Planned — they all share the single namespaceDomainPrePlanned gate, so a guard on any one of them guards
