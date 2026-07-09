@@ -1,0 +1,223 @@
+spec:
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'Snapshot requests a namespace state/configuration snapshot (MVP: design snapshot-controller.md).'
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation of an object.
+
+              Servers should convert recognized schemas to the latest internal value, and
+
+              may reject unrecognized values.
+
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+          kind:
+            description: 'Kind is a string value representing the REST resource this object represents.
+
+              Servers may infer this from the endpoint the client submits requests to.
+
+              Cannot be updated.
+
+              In CamelCase.
+
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+          spec:
+            description: 'SnapshotSpec is the capture/import mode selector and is fully immutable after
+              creation. A snapshot
+
+              is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so
+              the spec
+
+              must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec
+              on any
+
+              UPDATE while passing through CREATE; consequently metadata.generation never advances and
+              there is
+
+              no recapture (a new capture requires a new Snapshot). The narrower spec.source rules below
+              are now
+
+              subsumed by this rule but kept for clearer, field-scoped admission messages.'
+            properties:
+              resourceSelector:
+                description: 'ResourceSelector optionally restricts which namespace resources are captured.
+                  It is applied to the
+
+                  dynamic-capture legs: namespace manifests, top-level/standalone domain resources expanded
+                  via
+
+                  CustomSnapshotDefinition, and PVCs (volume data leg). It is layered (ANDed) on top of
+                  the built-in
+
+                  capture exclusions and can only narrow the capture, never force-capture controller/own
+                  machinery.
+
+
+                  Standard Kubernetes label selector: matchLabels and matchExpressions are ANDed together,
+                  so a single
+
+                  selector can both include and exclude - e.g. matchLabels {app: myapp} together with
+                  a NotIn/DoesNotExist
+
+                  matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one
+                  selector.
+
+                  When omitted, all resources are captured (no filtering).
+
+
+                  Ignored for spec.source modes (import / snapshotContentName): those do not list the
+                  live namespace.'
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements. The requirements
+                      are ANDed.
+                    items:
+                      description: 'A label selector requirement is a selector that contains values, a
+                        key, and an operator that
+
+                        relates the key and values.'
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies to.
+                        operator:
+                          description: 'operator represents a key''s relationship to a set of values.
+
+                            Valid operators are In, NotIn, Exists and DoesNotExist.'
+                        values:
+                          description: 'values is an array of string values. If the operator is In or
+                            NotIn,
+
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+
+                            the values array must be empty. This array is replaced during a strategic
+
+                            merge patch.'
+                  matchLabels:
+                    description: 'matchLabels is a map of {key,value} pairs. A single {key,value} in the
+                      matchLabels
+
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+
+                      operator is "In", and the values array contains only "value". The requirements are
+                      ANDed.'
+              snapshotClassName:
+                description: SnapshotClassName optionally selects class/policy (aligned with unified snapshot
+                  model; resolution is N2+).
+              source:
+                description: "Source optionally selects how this Snapshot obtains its content instead\
+                  \ of dynamic capture.\nWhen omitted, the controller performs dynamic namespace capture\
+                  \ (default behaviour).\nWhen set, exactly one member selects the mode (CEL one-of) and\
+                  \ the whole source is immutable:\n  - import: the Snapshot is materialized from an uploaded\
+                  \ payload (manifests-and-children-refs-upload)\n    plus, for data leaves, a DataImport\
+                  \ — the controller does NOT capture the live namespace.\n  - snapshotContentName: CSI-like\
+                  \ static binding to existing pre-provisioned content; the controller\n    does not create\
+                  \ MCR/VCR and validates that the referenced SnapshotContent points back at this\n  \
+                  \  Snapshot via spec.snapshotRef."
+                properties:
+                  import:
+                    description: 'Import, when present, marks this Snapshot as an import target. It is
+                      an empty marker object —
+
+                      its mere presence selects import mode (content is materialized from an uploaded
+                      payload, not
+
+                      captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
+
+                      source members and to allow future import options without another union rewrite.'
+                  snapshotContentName:
+                    description: 'SnapshotContentName binds this Snapshot to an existing cluster-scoped
+                      SnapshotContent
+
+                      (static pre-provisioning, analogous to volumeSnapshotContentName).'
+          status:
+            properties:
+              boundSnapshotContentName:
+                description: 'BoundSnapshotContentName is the cluster-scoped name of the bound snapshot
+                  content object for this root.
+
+                  The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this
+                  field name.'
+              childrenSnapshotRefs:
+                description: 'ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
+
+                  in the N2b run tree. Generic reconcile resolves each child with one Get by ref GVK (no
+                  demo-kind
+
+                  branching and no registry scan for child selection); it is not limited to Snapshot.
+
+                  Child namespace is implicit and always equals parent Snapshot namespace.
+
+                  Populated by domain controllers or merge helpers that own graph edges.'
+                items:
+                  description: 'SnapshotChildRef identifies one child snapshot object in the run tree
+                    (element of
+
+                    status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
+
+                    generic code resolves the object with a single client Get — no registry scan and no
+                    ambiguity.
+
+
+                    Snapshot-run tree is namespace-local to the root Snapshot: the child object MUST live
+
+                    in the same namespace as that parent. Namespace is implicit and always taken from
+                    parent
+
+                    Snapshot namespace. Cross-namespace refs are not part of this model.'
+              conditions:
+                description: Conditions represent the latest observations (Ready, Bound, Failed, etc.).
+                items:
+                  description: Condition contains details for one aspect of the current state of this
+                    API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: 'lastTransitionTime is the last time the condition transitioned from
+                        one status to another.
+
+                        This should be when the underlying condition changed.  If that is not known, then
+                        using the time when the API field changed is acceptable.'
+                    message:
+                      description: 'message is a human readable message indicating details about the transition.
+
+                        This may be an empty string.'
+                    observedGeneration:
+                      description: 'observedGeneration represents the .metadata.generation that the condition
+                        was set based upon.
+
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration
+                        is 9, the condition is out of date
+
+                        with respect to the current state of the instance.'
+                    reason:
+                      description: 'reason contains a programmatic identifier indicating the reason for
+                        the condition''s last transition.
+
+                        Producers of specific condition types may define expected values and meanings
+                        for this field,
+
+                        and whether the values are considered a guaranteed API.
+
+                        The value should be a CamelCase string.
+
+                        This field may not be empty.'
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+              manifestCaptureRequestName:
+                description: 'ManifestCaptureRequestName is the temporary MCR owned by this snapshot while
+                  own-scope capture runs.
+
+                  Snapshot controllers use it as execution state and clear it after the result is published
+                  to SnapshotContent.'
+              observedGeneration:
+                description: ObservedGeneration is the metadata.generation the controller last reconciled
+                  into this status.
+              volumeCaptureRequestName:
+                description: 'VolumeCaptureRequestName is the temporary bulk VCR owned by this snapshot
+                  while the volume leg runs.
+
+                  Cleared after VCR.status.dataRefs[] is published to bound SnapshotContent and artifacts
+                  are handed off.'

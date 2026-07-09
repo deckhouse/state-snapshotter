@@ -140,7 +140,7 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 	// already-published planning intent. A published, non-empty child set that diverges from desired (set
 	// equality on the canonical (apiVersion,kind,name) key, NOT count) is terminal topology drift — fail
 	// closed without creating, deleting, or republishing anything. An empty published set is State 1
-	// (nothing published yet): the set may still converge to newly observed desired (Р25).
+	// (nothing published yet): the set may still converge to newly observed desired (R25).
 	published := t.GetDomainCaptureState().ChildrenSnapshotRefs
 	if len(published) > 0 && !children.RefsEqualIgnoreOrder(published, desiredRefs) {
 		return ErrTopologyDrift

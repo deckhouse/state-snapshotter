@@ -1,5 +1,21 @@
-// Пример замены типизированного ObjectKeeper на dynamic client
-// Это позволяет убрать зависимость от всего Deckhouse модуля
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Example of replacing the typed ObjectKeeper with a dynamic client.
+// This removes the dependency on the whole Deckhouse module.
 
 package examples
 
@@ -15,14 +31,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ObjectKeeperGVR - GroupVersionResource для ObjectKeeper
+// ObjectKeeperGVR is the GroupVersionResource for ObjectKeeper.
 var ObjectKeeperGVR = schema.GroupVersionResource{
 	Group:    "deckhouse.io",
 	Version:  "v1alpha1",
 	Resource: "objectkeepers",
 }
 
-// ObjectKeeperHelper - helper функции для работы с ObjectKeeper через dynamic client
+// ObjectKeeperHelper provides helper functions to work with ObjectKeeper via the dynamic client.
 type ObjectKeeperHelper struct {
 	dyn dynamic.Interface
 }
@@ -31,13 +47,13 @@ func NewObjectKeeperHelper(dyn dynamic.Interface) *ObjectKeeperHelper {
 	return &ObjectKeeperHelper{dyn: dyn}
 }
 
-// CreateOrGetObjectKeeper создает ObjectKeeper или возвращает существующий
+// CreateOrGetObjectKeeper creates an ObjectKeeper or returns the existing one.
 func (h *ObjectKeeperHelper) CreateOrGetObjectKeeper(
 	ctx context.Context,
 	name string,
 	followObjectRef map[string]interface{},
 ) (*unstructured.Unstructured, error) {
-	// Пытаемся получить существующий
+	// Try to get the existing one.
 	existing, err := h.dyn.Resource(ObjectKeeperGVR).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		return existing, nil
@@ -46,7 +62,7 @@ func (h *ObjectKeeperHelper) CreateOrGetObjectKeeper(
 		return nil, fmt.Errorf("failed to get ObjectKeeper: %w", err)
 	}
 
-	// Создаем новый
+	// Create a new one.
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "deckhouse.io/v1alpha1",
@@ -69,7 +85,7 @@ func (h *ObjectKeeperHelper) CreateOrGetObjectKeeper(
 	return created, nil
 }
 
-// NewFollowObjectRef создает map для followObjectRef
+// NewFollowObjectRef builds the map for followObjectRef.
 func NewFollowObjectRef(apiVersion, kind, name, namespace, uid string) map[string]interface{} {
 	ref := map[string]interface{}{
 		"apiVersion": apiVersion,
@@ -83,19 +99,19 @@ func NewFollowObjectRef(apiVersion, kind, name, namespace, uid string) map[strin
 	return ref
 }
 
-// GetObjectKeeperMode получает mode из ObjectKeeper
+// GetObjectKeeperMode reads mode from ObjectKeeper.
 func GetObjectKeeperMode(u *unstructured.Unstructured) string {
 	mode, _, _ := unstructured.NestedString(u.Object, "spec", "mode")
 	return mode
 }
 
-// GetFollowObjectRef получает followObjectRef из ObjectKeeper
+// GetFollowObjectRef reads followObjectRef from ObjectKeeper.
 func GetFollowObjectRef(u *unstructured.Unstructured) (map[string]interface{}, bool) {
 	ref, found, _ := unstructured.NestedMap(u.Object, "spec", "followObjectRef")
 	return ref, found
 }
 
-// Пример использования в контроллере:
+// Example usage in a controller:
 //
 // func (r *ManifestCheckpointController) createObjectKeeper(
 // 	ctx context.Context,
@@ -120,8 +136,8 @@ func GetFollowObjectRef(u *unstructured.Unstructured) (map[string]interface{}, b
 // 	return ok, nil
 // }
 
-// Альтернатива: использовать controller-runtime client с unstructured
-// (если нужна интеграция с существующим кодом)
+// Alternative: use the controller-runtime client with unstructured
+// (when integration with existing code is needed).
 
 func CreateObjectKeeperWithControllerClient(
 	ctx context.Context,
