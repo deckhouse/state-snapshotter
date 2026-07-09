@@ -1,11 +1,14 @@
 # Snapshot-creation latency
 
-Single, self-contained document for the snapshot-creation latency work. It answers three questions:
+Single, self-contained document for the snapshot-creation latency work. It answers four questions:
 
 - **What to apply** — the validated fixes, file-by-file, as a re-application guide (not a patch / cherry-pick).
 - **What was proven** — confirmed root causes, confirmed-but-secondary optimizations, and architecture/correctness
   cleanups.
 - **What did not work** — rejected hypotheses (so nobody re-runs them) and the issues still open.
+- **How to re-find it all after a rework** — [section 12](#12-carry-over-to-a-reworked-main--portable-bottleneck-playbook-tag-walk)
+  is a code-agnostic, grep-able **tag-walk**: the durable *patterns*, anchors, and re-verify recipes to re-apply this
+  whole investigation on a substantially rewritten `main` where the `file:line` anchors above no longer resolve.
 
 Repos: `state-snapshotter` (controller + demo domain-controller) and `storage-foundation` (VCR controller).
 `storage-e2e` is measurement tooling only — see [Tooling](#10-tooling).
@@ -1007,12 +1010,37 @@ persisted MCR/VCR at Phase-A end, so H4 is dominated by **queue-wait for a free 
 work.
 
 **Verdict:** the last Phase-A serializer is domain **disk-snapshot** reconcile throughput (VDS pool = 4), with the
-relay/root layer transition (H3) second but proven non-binding. This is exactly the
-`DOMAIN_CONTROLLER_SNAPSHOT_MAX_CONCURRENT_RECONCILES` lever (already committed). The domain sweep is now
-mechanistically justified with a prediction: 4 → 8 → 16 should shrink H4 and wall **iff** worker-bound; if H4 stays
-flat, it is intrinsic per-reconcile cost and the next step is profiling the disk reconcile itself.
+relay/root layer transition (H3) second but proven non-binding. This maps to the
+`DOMAIN_CONTROLLER_SNAPSHOT_MAX_CONCURRENT_RECONCILES` lever (already committed). A 4 → 8 → 16 sweep would only
+distinguish worker-bound (H4/wall shrink) from intrinsic per-reconcile cost (H4 flat) — it would not explain the
+cause, so it is **optional and not required** (see "Concurrency campaign — CLOSED" below).
 
 ![Phase-A critical-path trace, N=20](phaseA-critpath-N20.png)
+
+### Concurrency campaign — CLOSED (STOP)
+
+Decision: **close the throughput/concurrency optimization campaign.** The evidence is complete enough for a firm
+conclusion:
+
+- **QPS/Burst was the real win** — the client-go rate limiter was the one throughput lever that moved the wall
+  (−32…−38%); production default settled at 200/400 (knee).
+- **Every other throughput knob does NOT move the wall:** foundation VCR workers, foundation QPS, the 500 ms
+  poll/backstop, and relay `nss-chw` concurrency each moved a local sub-metric but left the wall flat. The **relay
+  hypothesis is dropped**.
+- **The remainder is structural**, not a throughput knob: Phase A serializes on the **disk-snapshot layer** (H4 ≈
+  47% of the median path); the VM layer is flat and the relay is non-binding.
+- **The domain VMS/VDS concurrency sweep is NOT required.** Only the CONC=4 baseline was run (3× — reconfirmed H4
+  dominance, `phaseA_total` p50 ≈ 13–20 s, H4 p50 ≈ 7–13 s). A 4 → 8 → 16 sweep would answer only
+  "helped / didn't help"; it would **not explain the cause**, so its expected value is low. The
+  `DOMAIN_CONTROLLER_SNAPSHOT_MAX_CONCURRENT_RECONCILES` env lever stays as committed infrastructure.
+
+**If the goal shifts from "improve the metric" to "understand the nature of the remainder", that is a separate
+task — "Phase A critical-path trace" (deep / ms-level).** The trace above localized the serializer from server-side
+1 s timestamps; a causal explanation needs per-reconcile instrumentation on a single N=20 tree timeline:
+root created → VMS reconcile start/end → VDS reconcile start/end → child Snapshot created → child Ready → relay
+received → parent reconcile start/end → `ChildrenSnapshotReady=True` → MCR/MCP created/ready → `ManifestsArchived=True`.
+Goal: see exactly where the staircase forms — domain controller vs root controller vs layer dependency vs API
+update/read-after-write vs inline reconcile. Not started; open only on explicit request.
 
 ---
 
@@ -1101,3 +1129,75 @@ backstop. This is the whole L4 win — do not extend it beyond these three.
 Conclusion: the only unnecessary uncached reads were the three watched-object mirror reads above (now cached).
 Every other `APIReader` use is a deliberate correctness choice (UID barrier, read-after-write, one-way latch,
 edge-preserve, or informer-less internal objects) and must stay.
+
+---
+
+## 12. Carry-over to a reworked `main` — portable bottleneck playbook (tag-walk)
+
+**Why this section exists.** The rest of the document is a re-application guide keyed to `file:line` / function
+names on the *current* code. When `main` is substantially reworked those anchors rot: files move, functions are
+renamed, controllers are merged/split. This section re-expresses every durable finding as a **code-agnostic
+pattern** you can *walk the new tree by* — each item is a grep-able **tag** with (a) the invariant/bottleneck, (b)
+**durable anchors** that survive a rework (CRD kinds, condition types, env knobs, controller-runtime API surface,
+behavioural signatures — *not* line numbers), (c) how to **detect** it on the new code, (d) the **fix pattern**,
+(e) how to **re-verify**. Work top-to-bottom; the order is the recommended application order.
+
+### 12.0 Durable anchors glossary (these survive a rework — search for these, not line numbers)
+
+- **CRD kinds:** `Snapshot`, `SnapshotContent` (`storage.deckhouse.io`); `DemoVirtualMachineSnapshot`,
+  `DemoVirtualDiskSnapshot` (`demo.state-snapshotter.deckhouse.io`); `ManifestCaptureRequest`, `ManifestCheckpoint`
+  (`state-snapshotter.deckhouse.io`); `VolumeCaptureRequest` (`storage.deckhouse.io`, reconciled by
+  storage-foundation); `VolumeSnapshotContent` (`snapshot.storage.k8s.io`); `ObjectKeeper` (`deckhouse.io`).
+- **Condition types:** `ChildrenSnapshotReady` (Phase A gate), `ManifestsArchived` (Phase B latch), `Ready`
+  (Phase C mirror). **Reasons that are contract:** `Completed` (terminal-success), `PriorityLayerPending`
+  (partial-plan). Readiness is **generation-guarded** (a `True` with `observedGeneration == generation`).
+- **Phases (measure by server-side `lastTransitionTime` vs Snapshot `creationTimestamp`):** A = `creation →
+  ChildrenSnapshotReady`; B = `ChildrenSnapshotReady → ManifestsArchived`; C = `ManifestsArchived → Ready`.
+- **Env knobs (kept as infrastructure):** `STATE_SNAPSHOTTER_KUBE_QPS/_BURST`, `STATE_SNAPSHOTTER_CAPTURE_QPS/_BURST`,
+  `DOMAIN_CONTROLLER_KUBE_QPS/_BURST`, `STORAGE_FOUNDATION_KUBE_QPS/_BURST`,
+  `STORAGE_FOUNDATION_VCR_MAX_CONCURRENT_RECONCILES`, `DOMAIN_CONTROLLER_SNAPSHOT_MAX_CONCURRENT_RECONCILES`,
+  `STATE_SNAPSHOTTER_RELAY_MAX_CONCURRENT_RECONCILES`; diagnostics `STATE_SNAPSHOTTER_PHASE_A_TRACE`,
+  `STATE_SNAPSHOTTER_WATCH_MAP_STATS`.
+- **Metrics:** `controller_runtime_reconcile_total`, `controller_runtime_reconcile_time_seconds_{count,sum}`,
+  `workqueue_*`, `rest_client_requests_total`; apiserver audit `list`/`get` by the controller SA per tree.
+
+### 12.1 Tag-walk (apply in order)
+
+| tag | invariant / bottleneck (durable) | detect on the new code | fix pattern | re-verify |
+|---|---|---|---|---|
+| **`[CO-QPS]`** — the one throughput lever that moved the wall | client-go default (QPS 5 / Burst 10) serializes uncached reads + status patches under a burst, inflating a single reconcile to seconds **regardless of `MaxConcurrentReconciles`**. Production knee = **200/400** (500/1000 = no extra gain). | For each binary: locate the `rest.Config` → `ctrl.NewManager`/`manager.New` handoff; check `Config.QPS`/`Burst` are set **before** it. Grep the env names in 12.0. | Set QPS/Burst from env with a deliberate default (ss + domain **200/400**), fail-fast on invalid, log effective at startup. Capture/dynamic clients too. | reconcile `time_seconds` mean/max collapse; QPS→Ready sweep at N=20 shows the knee; Phase C ≈ 0. |
+| **`[CO-EVENT-WAKE]`** — watches, not poll handshakes | cross-controller handoffs must be **event-driven**; a `RequeueAfter` may only be a *missed-event backstop*, never the primary progress mechanism. | Grep `RequeueAfter(` in every reconciler. For each, ask "is there a `Watch`/`Owns`/mapper that fires on the awaited object's transition?" Known legs: MCR↔`ManifestCheckpoint`, `SnapshotContent` bottom-up `ManifestsArchived` staircase, `VolumeCaptureRequest`↔`VolumeSnapshotContent`. | Add reverse-lookup `Watches(EnqueueRequestsFromMapFunc(...))` (via ownerRef, spec ref, label, or a **field index**); keep the poll only as backstop. | with `STATE_SNAPSHOTTER_PHASE_A_TRACE=1`, `viaBackstop` must be **0** on the critical path; observe-lag small (not ~poll-interval). |
+| **`[CO-DIRECT-REF]`** — never search-by-full-traversal | a reverse lookup must use a **direct reference on the event object** or a **cached field index** — never a full `List`+decode per event, and planning inputs must come from the **manager cache**, not `APIReader`. This one pattern closed 5 load hotspots (relay index, CSD list, genericbinder mappers, D.3, H5). | Grep `.List(` **inside** any `MapFunc`/mapper/relay; grep full-namespace `List` in the child→parent relay; grep `APIReader.*List` in planning. Watch-map load: `STATE_SNAPSHOTTER_WATCH_MAP_STATS`. | replace with `obj.GetOwnerReferences()` / `spec.*Ref` (O(1)) or `Client.List(MatchingFields{...})` on a registered `IndexField`; serve planning lists from the cached client. | apiserver `list`/tree audit drops (e.g. relay `storage/snapshots` ~440→~2); CPU pprof: `List` off the watch path; **0** `field label not supported`. |
+| **`[CO-CONCURRENCY]`** — raise the ceiling, guard shared state | implicit `MaxConcurrentReconciles=1` is a ceiling **after** `[CO-QPS]`; raising it is safe **only** if the reconciler holds no unguarded shared mutable state. | Grep controllers missing `WithOptions(controller.Options{MaxConcurrentReconciles:...})`; grep reconcile-time writes to shared `Config`/maps. | set 4 (start conservative); guard shared config with a mutex + per-reconcile snapshot. | `-race`/integration clean; reconcile throughput up. **Note:** not a wall lever on its own — the gate is usually downstream. |
+| **`[CO-APIREADER]`** — cache only watched-object mirror reads | only an event-driven **mirror read of a watched object** may use the cached client (stale = one extra reconcile). UID-barrier / read-after-write / one-way-latch / edge-preserve / informer-less reads **must stay uncached**. | Grep `APIReader.Get`/`Client.Get`; classify each against the Appendix-11 table. | cache the 3 mirror reads only; leave the rest. | no `Ready` flapping (guard test); no broken UID barrier. |
+| **`[CO-PHASEA-STRUCTURAL]`** — the open remainder | Phase A is a **planning barrier**, and its residual is **structural serialization on the disk-snapshot layer** (domain VDS reconcile throughput), **not** QPS, relay, foundation VCR/QPS, or the 500 ms poll (all disproven). Priority layers are **sequential** (VM 100 → disk 10). | run the critical-path trace (12.2). If the `disk.created → disk.CSReady` gap (H4) dominates and staircases while the VM layer stays flat, the disk layer is the serializer. | **no proven fix** — candidates are domain-snapshot `MaxConcurrentReconciles` (env lever exists) or restructuring the layer dependency; open only under 12.3. | H4 share of the median path; `phaseATotalMs` distribution across N=20. |
+
+### 12.2 Portable measurement toolkit (methodology, not a script path)
+
+- **Phase decomposition (no code):** for a fan-out of N root Snapshots, read each object's `creationTimestamp` +
+  condition `lastTransitionTime` (1 s resolution) and difference them into A/B/C. **Trust only `total` and wall
+  from a single run** — the A-vs-B split is noise-dominated at N=20 (they anti-correlate with batch stagger);
+  average ≥3 runs before splitting.
+- **Critical-path trace (server-side, no code):** every object in namespace `<pfx>-i` belongs to tree `i`, so
+  correlate by namespace; reconstruct the five Phase-A hops (root→VMsnap create, VMsnap reconcile, root→disk
+  create, disk reconcile, root publish) from timestamps. Cross-check with `STATE_SNAPSHOTTER_PHASE_A_TRACE=1`
+  (ms `relayLatencyMs` / `observeLagMs` / `phaseATotalMs`). *(The `phaseA_trace_run.sh` + `phaseA_reconstruct.py`
+  helpers used here are ad-hoc; regenerate from this description — do not depend on their `/tmp` paths.)*
+- **API-load attribution:** apiserver audit `list`/`get` by the controller SA, grouped by resource, per one tree;
+  a hotspot = repeated full-collection lists of a planning-input GVK → `[CO-DIRECT-REF]`.
+- **QPS→Ready sweep:** N=20, sweep QPS/Burst (50/100 → 500/1000), plot total vs QPS; expect a knee at ~200.
+- **Watch-map / CPU:** `STATE_SNAPSHOTTER_WATCH_MAP_STATS` + pprof to catch `List`-in-mapper regressions.
+
+### 12.3 Do-not-revisit + reopen criteria (carry the negatives too)
+
+- **Disproven, do not re-run** (details in section 7): leaf-skip / distinct-H1 leaf staircase; VSC-wake-loss as a
+  leaf cause; genericbinder `List` as a *wall* cause; source-discovery-skip (membership is **not** frozen before
+  `ChildrenSnapshotReady=True/Completed`); `childSnapshotReadCache` via informer cache (the shared per-GVK list
+  feeds freshness-bound create/dedup, and `Create` does **not** tolerate `AlreadyExists` → stale reads flap
+  `Ready`). Preserve these invariants in any rework: **membership recomputes each pass and grows/shrinks across
+  priority layers**; **create/dedup reads must be fresh**; **readiness is generation-guarded**.
+- **Throughput is exhausted as a latency lever** once ss/domain QPS = 200/400: foundation VCR workers, foundation
+  QPS, relay concurrency each move only a sub-metric, never the N=20 wall. Keep them as env infrastructure.
+- **Reopen** the deep Phase-A causal trace (`[CO-PHASEA-STRUCTURAL]`) **only** if (1) a production-scale trace at
+  *realistic* concurrency breaches an SLO, or (2) a decision is taken to actually optimize the disk layer — then
+  the trace pays for itself by pinpointing worker-wait vs API vs layer-dependency **before** a fix is written.
