@@ -48,6 +48,7 @@ const (
 	envNSPrefix             = "E2E_SNAPSHOTTER_NS_PREFIX"
 	envSnapshotReadyTO      = "E2E_SNAPSHOT_READY_TIMEOUT"
 	envCaptureReadyTO       = "E2E_CAPTURE_READY_TIMEOUT"
+	envDataTransferTO       = "E2E_DATA_TRANSFER_TIMEOUT"
 	envModuleReadyTO        = "E2E_MODULE_READY_TIMEOUT"
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
@@ -66,7 +67,13 @@ const (
 	// fast to create (copy-on-write, no data movement), so a short deadline fails fast instead of dragging
 	// on the generous snapshotReadyTO. snapshotReadyTO stays reserved for the restore/data-upload path,
 	// where DataImport actually streams bytes back.
-	defaultCaptureTO         = 30 * time.Second
+	defaultCaptureTO = 30 * time.Second
+	// defaultDataTransferTO bounds each data-plane wait shared by phase-4 DataExport (Ready = snapshot
+	// resolved + download URL served) and phase-5 DataImport (Ready = PVC created + upload URL served,
+	// Completed = bytes streamed + durable artifact produced). A stuck transfer (e.g. a DataImport wedged
+	// at reason="PVCCreated" because the importer never serves an upload URL) MUST fail the spec on this
+	// deadline instead of dragging the whole run for tens of minutes. Override via E2E_DATA_TRANSFER_TIMEOUT.
+	defaultDataTransferTO    = 10 * time.Minute
 	defaultModuleTO          = 15 * time.Minute
 	defaultGCTTL             = "60s"
 	defaultStorageClass      = "e2e-thin"
@@ -118,7 +125,7 @@ const (
 const (
 	condReady          = storagev1alpha1.ConditionReady
 	condManifestsReady = "ManifestsReady"
-	condDataReady    = "DataReady"
+	condDataReady      = "DataReady"
 	condChildrenReady  = "ChildrenReady"
 )
 
@@ -222,6 +229,7 @@ type e2eConfig struct {
 	nsPrefix          string
 	snapshotReadyTO   time.Duration
 	captureReadyTO    time.Duration
+	dataTransferTO    time.Duration
 	moduleReadyTO     time.Duration
 	gcTTL             string
 	volumeData        bool
@@ -276,6 +284,7 @@ func loadConfig() e2eConfig {
 	}
 	cfg.snapshotReadyTO = parseDuration(os.Getenv(envSnapshotReadyTO), defaultSnapshotTO)
 	cfg.captureReadyTO = parseDuration(os.Getenv(envCaptureReadyTO), defaultCaptureTO)
+	cfg.dataTransferTO = parseDuration(os.Getenv(envDataTransferTO), defaultDataTransferTO)
 	cfg.moduleReadyTO = parseDuration(os.Getenv(envModuleReadyTO), defaultModuleTO)
 	return cfg
 }

@@ -1751,3 +1751,39 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   `status.dataRefs[]` contract) nor to `design/volume-node-dual-capture.md`. Deferred deliberately to
   avoid a half-rename that leaves that section internally inconsistent; to be done as one focused
   doc-rename pass.
+
+## Integration suite green — content-driven degradation vs. vanished-declared-children fold
+
+- **Bugfix (test)** `test/integration/genericbinder_parent_degradation_content_driven_test.go` failed
+  deterministically (parent `Snapshot.Ready` stuck `False`/`ChildSnapshotDeleted` instead of mirroring the
+  child content's `Ready=True`). Root cause: the spec fabricates a child `SnapshotContent` whose
+  `spec.snapshotRef` is the default `retainContentSpec()` placeholder (`Snapshot/integration-test-snapshot`,
+  never created). The `detectLostDeclaredChildren` / `childOwningSnapshotExists` fold (feat `c53b390`,
+  landed AFTER the green-suite commit `3c265a0` and never re-verified against this spec) resolves that ref
+  live, reads it as DELETED, and correctly downgrades the parent mirror — masking the ChildrenReady path
+  under test. Fix: point the fabricated child's `spec.snapshotRef` at the already-created parent Snapshot
+  (a pure existence anchor). The child's own projections stay no-ops because that owner declares no
+  `childrenSnapshotRefs` / MCR / VCR, so the seeded child status (childMCP, subtreeManifestsPersisted)
+  survives. Production behavior is intentional and unchanged. Full `make test-integration` green (Pass 1
+  56/56, Pass 2 isolated green).
+- **Update (e2e)** phase-4 DataExport and phase-5 DataImport waits were hardcoded at `15m`, so a wedged
+  data-plane op (e.g. a DataImport stuck at `reason="PVCCreated"` because the importer never serves an
+  upload URL) dragged the whole suite instead of failing. Added a single shared `dataTransferTO` suite knob
+  (`E2E_DATA_TRANSFER_TIMEOUT`, default `10m`) mirroring `snapshotReadyTO`/`captureReadyTO`, covering both
+  data-plane sides: `uploadDataLeaves` bounds both the DataImport Ready and Completed waits by it (phase-5
+  `It` context budgeted `6*dataTransferTO + 3*snapshotReadyTO + 10m`), and `waitDataExportReady` uses it
+  (phase-4 `It` context budgeted `3*dataTransferTO + 15m`). Set a short `E2E_DATA_TRANSFER_TIMEOUT` to fail
+  fast while debugging a stuck importer/exporter.
+- **Bugfix (storage-foundation, cross-repo drift — root cause of the phase-5 import hang)** the phase-5
+  VolumeSnapshot import hung at `DataImport ... Completed= reason="" artifact=false`: upload finished, the
+  importer entered `ensureDataArtifact`, but the VCR it created never reached `Ready=Completed`, so
+  `Completed` was never set. Root cause: `data-manager-controller/.../data-import/volume_capture.go`
+  `buildVolumeCaptureRequest` still emitted the legacy multi-target `spec.targets[]` list, while the VCR API
+  is single-target (`spec.target`, CRD prunes unknown `spec.targets` and the `mode=Snapshot` CEL rule
+  requires `spec.target`) — the reader half (`volumeCaptureArtifact` -> `status.data`) was already migrated
+  in wave1 but the writer half was not. The pruned create yielded a target-less VCR that never captured
+  (log line `Warning: unknown field "spec.targets"` on every attempt). Writer + its own unit test were
+  self-consistent on the old shape, so unit tests stayed green; only the real-API e2e (single-target CRD)
+  exposed it. Fixed the writer to emit singular `spec.target` (namespace omitted — PVC lives in the VCR
+  namespace) and updated `data_import_unit_test.go` to assert the single-target shape and forbid the list.
+  Package `data-import` unit tests green.

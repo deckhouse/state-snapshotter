@@ -683,8 +683,12 @@ func ensureBackupClientRBAC(ctx context.Context, ns string) error {
 	}
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: bkBackupClientSA, Namespace: ns},
+		// The data-exporter authorizes the download via a SubjectAccessReview against the DataExport's
+		// own API group (storage-foundation.deckhouse.io) + the "download" subresource; the granted group
+		// must match dataExportGVR.Group or the SAR denies and the exporter returns 403 (which curl -f
+		// turns into an empty body).
 		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{"state-snapshotter.deckhouse.io"},
+			APIGroups: []string{dataExportGVR.Group},
 			Resources: []string{"dataexports/download"},
 			Verbs:     []string{"create"},
 		}},
@@ -971,8 +975,10 @@ func backupDownloadSpecs() {
 		It("downloads volume bytes via DataExport and matches source checksums", func() {
 			Expect(backup.rootContent).NotTo(BeEmpty(), "capture spec must have populated rootContent")
 
-			// Budget: 3 legs x (15m DataExport Ready + download) + 5m backup-pod start, with headroom.
-			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Minute)
+			// Budget: 3 legs x (dataTransferTO DataExport Ready + download) + 5m backup-pod start, with
+			// headroom. A wedged DataExport fails on its own dataTransferTO deadline rather than dragging
+			// the whole spec to a giant fixed cap.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.dataTransferTO+15*time.Minute)
 			defer cancel()
 
 			By("Checking the extended-VS data surface is available (skip if the fork is absent)")
@@ -1008,7 +1014,7 @@ func backupDownloadSpecs() {
 					}
 				}(target))
 
-				url, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, 15*time.Minute)
+				url, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, suiteCfg.dataTransferTO)
 				Expect(werr).NotTo(HaveOccurred(), "DataExport %s Ready", target.exportName)
 				GinkgoWriter.Printf("  DataExport %s url=%s\n", target.exportName, url)
 

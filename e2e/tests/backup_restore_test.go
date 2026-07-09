@@ -318,8 +318,11 @@ func waitDataImportCompleted(ctx context.Context, ns, name string, timeout time.
 func ensureUploadRBAC(ctx context.Context, importNS, clientSANamespace, clientSAName string) error {
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: bkBackupClientSA, Namespace: importNS},
+		// The data-importer authorizes the upload via a SubjectAccessReview against the DataImport's own
+		// API group (storage-foundation.deckhouse.io) + the "download" subresource; the granted group must
+		// match dataImportGVR.Group or the SAR denies and the importer returns 403 on the PUT.
 		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{"state-snapshotter.deckhouse.io"},
+			APIGroups: []string{dataImportGVR.Group},
 			Resources: []string{"dataimports/download"},
 			Verbs:     []string{"create"},
 		}},
@@ -620,7 +623,7 @@ func collectDataLeaves(nodes []*importNode) []*importNode {
 
 func uploadDataLeaves(ctx context.Context, importNS string, leaves []*importNode) error {
 	for _, leaf := range leaves {
-		url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, 15*time.Minute)
+		url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, suiteCfg.dataTransferTO)
 		if werr != nil {
 			return fmt.Errorf("DataImport %s Ready: %w", leaf.name, werr)
 		}
@@ -628,7 +631,7 @@ func uploadDataLeaves(ctx context.Context, importNS string, leaves []*importNode
 		if err := uploadBlockData(ctx, importNS, url, srcFile); err != nil {
 			return err
 		}
-		if err := waitDataImportCompleted(ctx, importNS, leaf.name, 15*time.Minute); err != nil {
+		if err := waitDataImportCompleted(ctx, importNS, leaf.name, suiteCfg.dataTransferTO); err != nil {
 			return err
 		}
 	}
@@ -919,7 +922,12 @@ func importVariantsSpecs() {
 		})
 
 		It("imports VolumeSnapshot, DemoVirtualDiskSnapshot, DemoVirtualMachineSnapshot, and full ns in parallel", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Minute)
+			// The four variants run in parallel; the longest (full namespace) streams three data leaves
+			// sequentially, each bounded by two dataTransferTO waits (Ready + Completed), then does the
+			// restore-path Snapshot/content/children readiness at snapshotReadyTO. Budget the parent for
+			// that worst-case single-variant path plus setup/upload overhead so a wedged DataImport fails on
+			// its own dataTransferTO deadline rather than dragging on a giant fixed cap.
+			ctx, cancel := context.WithTimeout(context.Background(), 6*suiteCfg.dataTransferTO+3*suiteCfg.snapshotReadyTO+10*time.Minute)
 			defer cancel()
 
 			specs := []importVariantSpec{
