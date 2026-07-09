@@ -127,11 +127,11 @@ Latest manual pre-e2e smoke status: passed on 2026-04-29 with test-only domain R
 
 | ID | Сценарий | Уровень | Статус |
 |----|----------|---------|--------|
-| P1-U1 | content без `manifestCheckpointName` → `ManifestsReady=False`/`ManifestCapturePending`, `VolumeReady=Unknown`/`ManifestCapturePending`, `Ready=False` | unit | ✅ `controller_data_readiness_test.go` / `controller_test.go` |
+| P1-U1 | content без `manifestCheckpointName` → `ManifestsReady=False`/`ManifestCapturePending`, `DataReady=Unknown`/`ManifestCapturePending`, `Ready=False` | unit | ✅ `controller_data_readiness_test.go` / `controller_test.go` |
 | P1-U2 | data pending count → `DataCapturePending`, message `"<ready>/<total> ready"` + capped pending list | unit | ✅ `controller_data_readiness_test.go`, `progress_visibility_test.go` |
 | P1-U3 | children pending count → `ChildrenPending`, message `"<ready>/<total> ready"` | unit | ✅ `controller_test.go` |
 | P1-U4 | terminal child failure → `ChildrenFailed` leaf-chain (`leaf=/reason=/message=`), 3 уровня root→vm→disk | unit | ✅ `progress_visibility_test.go`, `controller_test.go` |
-| P1-U5 | already `Ready=True` content, reconcile видит missing published artifact → `VolumeReady=False`/`ArtifactMissing`/`Ready=False`, kind/name в message (без watch) | unit | ✅ `progress_visibility_test.go` |
+| P1-U5 | already `Ready=True` content, reconcile видит missing published artifact → `DataReady=False`/`ArtifactMissing`/`Ready=False`, kind/name в message (без watch) | unit | ✅ `progress_visibility_test.go` |
 | P1-U6 | Snapshot mirror: pre-bind fallback → `ContentBindingPending`; после bind — verbatim mirror content.Ready | unit | ✅ `ready_mirror_test.go` |
 | P1-I1 | bound Snapshot зеркалит content Ready после status-only обновления content | integration | ✅ `snapshot_content_ready_propagation_test.go` |
 | P1-E1 | e2e: во время создания root `Ready=False` с осмысленным reason/message; на ожидании детей message содержит count; финал `Ready=True/Completed` | e2e | ⬜ gate с Phase 2a live |

@@ -552,7 +552,7 @@ func volumeDataSpecs() {
 			Expect(err).NotTo(HaveOccurred(), "write marker bytes")
 		})
 
-		It("captures the volume data (VolumeReady + dataRef artifacts populated)", func() {
+		It("captures the volume data (DataReady + dataRef artifacts populated)", func() {
 			// Capture (LVM snapshot creation) is fast — bound by captureReadyTO, not the restore-path
 			// snapshotReadyTO. Only the restore/data-upload waits keep the generous budget.
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+5*time.Minute)
@@ -572,7 +572,7 @@ func volumeDataSpecs() {
 			By("Creating the root Snapshot over the PVC tree")
 			Expect(createRootSnapshot(ctx, srcNS, vdRootSnapshotName)).To(Succeed())
 
-			By("Waiting for the Snapshot + bound SnapshotContent (incl. VolumeReady) to become Ready")
+			By("Waiting for the Snapshot + bound SnapshotContent (incl. DataReady) to become Ready")
 			content, err := waitSnapshotReady(ctx, srcNS, vdRootSnapshotName, suiteCfg.captureReadyTO)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())

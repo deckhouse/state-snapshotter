@@ -358,7 +358,7 @@ func TestSelfHealVSCDeletingNotPatched(t *testing.T) {
 
 // --- Propagation: terminal vs pending child classification, with sibling isolation ---
 
-// A leaf VolumeReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
+// A leaf DataReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
 // and only the failed child drives the failure (the ready sibling is untouched).
 func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	ctx := context.Background()
@@ -410,7 +410,7 @@ func TestPropagationVolumeCaptureFailedToChildrenFailed(t *testing.T) {
 	}
 }
 
-// A leaf VolumeReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
+// A leaf DataReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
 // not ChildrenFailed (a transient child must not fail the tree).
 func TestPropagationDataCapturePendingToChildrenPending(t *testing.T) {
 	ctx := context.Background()

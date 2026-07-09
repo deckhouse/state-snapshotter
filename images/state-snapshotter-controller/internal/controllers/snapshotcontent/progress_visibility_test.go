@@ -61,7 +61,7 @@ func commonContentReadyWithMCPAndDataRefs(name, vscName string) *unstructured.Un
 }
 
 // Phase 1 revalidation-without-watch: a SnapshotContent that was Ready=True must, on a later reconcile
-// that observes the published data artifact missing, recompute VolumeReady=False / Ready=False with
+// that observes the published data artifact missing, recompute DataReady=False / Ready=False with
 // reason ArtifactMissing and the artifact kind/name in the message. No watch is involved. The manifest
 // leg stays Ready=True (the failure is on the volume leg only).
 func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {

@@ -234,7 +234,7 @@ status:
 ```text
 SnapshotContent Ready =
   ManifestsReady (MCP Ready)
-∧ VolumeReady   (the single dataRef.artifact is Ready, or no dataRef)
+∧ DataReady   (the single dataRef.artifact is Ready, or no dataRef)
 ∧ ChildrenReady  (∀ child SnapshotContent are Ready)
 ```
 

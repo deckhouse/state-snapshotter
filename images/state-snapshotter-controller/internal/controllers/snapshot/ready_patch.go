@@ -43,7 +43,7 @@ import (
 //
 //   - PRE-BIND / PRE-PUBLISH PLANNING/CAPTURE FAILURES via failCapture(): these all happen before the root
 //     publishes its own truth refs (manifestCheckpointName / dataRefs), so SnapshotContent cannot yet carry
-//     them through ManifestsReady/VolumeReady:
+//     them through ManifestsReady/DataReady:
 //   - "ListFailed"                — building capture targets failed (namespace_capture_run.go);
 //   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (namespace_capture_run.go);
 //   - NamespaceNotFound (no namespace, so no content can be produced) — documented exception;

@@ -150,7 +150,7 @@ func manifestCheckpointWithReady(name string, status metav1.ConditionStatus, rea
 	return mcp
 }
 
-// MCP ready, no data refs, no children -> ManifestsReady=True, VolumeReady=True, Ready=True/Completed.
+// MCP ready, no data refs, no children -> ManifestsReady=True, DataReady=True, Ready=True/Completed.
 func TestContentPlanAllReadyNoChildren(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -201,7 +201,7 @@ func TestContentPlanManifestsPending(t *testing.T) {
 	}
 }
 
-// ManifestsReady=True, VolumeReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildrenPending.
+// ManifestsReady=True, DataReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildrenPending.
 func TestContentPlanChildrenPending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -228,7 +228,7 @@ func TestContentPlanChildrenPending(t *testing.T) {
 	}
 }
 
-// ManifestsReady=True, VolumeReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildrenFailed.
+// ManifestsReady=True, DataReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildrenFailed.
 func TestContentPlanChildrenFailed(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -365,7 +365,7 @@ func TestComputeSubtreeManifestsPersisted_LeafLatchesWithSnapshotRef(t *testing.
 	}
 }
 
-// reconcileCommonSnapshotContentStatus publishes all conditions (ManifestsReady/VolumeReady/ChildrenReady/Ready)
+// reconcileCommonSnapshotContentStatus publishes all conditions (ManifestsReady/DataReady/ChildrenReady/Ready)
 // gen-gated on a real status update.
 func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	ctx := context.Background()
@@ -397,7 +397,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumeReady, snapshot.ConditionChildrenReady, snapshot.ConditionReady} {
+	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionDataReady, snapshot.ConditionChildrenReady, snapshot.ConditionReady} {
 		cond := snapshot.GetCondition(contentLike, ct)
 		if cond == nil {
 			t.Fatalf("condition %s missing", ct)
@@ -421,7 +421,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 }
 
 // Ready must stay False while the subtree-persist latch is still Capturing (here: a linked, Ready child
-// whose OWN subtree is not yet persisted), EVEN THOUGH the live legs (ManifestsReady / VolumeReady /
+// whose OWN subtree is not yet persisted), EVEN THOUGH the live legs (ManifestsReady / DataReady /
 // ChildrenReady) are all satisfied. The subtree-persist gate is the lowest-priority Ready gate, so the
 // first Ready=True is blocked until the whole subtree's manifests are archived. The resulting !ready is
 // what keeps the Reconcile loop requeuing until the archive wave converges.
@@ -498,7 +498,7 @@ func TestTerminalChildContentFailureClassification(t *testing.T) {
 // Premature-Ready gate (content-single-writer §4 Slice 3 / §11.4): reconcileDataLegProjection is the single
 // writer of status.data and publishes it via a SEPARATE status patch, so during a pass where the data leg is
 // still converging (just published, or the VCR/VSC not ready) the in-memory content has an empty
-// status.dataRefs that resolveDataReadiness treats as volume N/A (VolumeReady=True). For a content that HAS
+// status.dataRefs that resolveDataReadiness treats as volume N/A (DataReady=True). For a content that HAS
 // an expected data leg this must NOT let Ready escalate to True (and mirrorReadyToOwnerSnapshot propagate it)
 // before the bound VolumeSnapshotContent's readyToUse is validated. reconcileCommonSnapshotContentStatus
 // honours the dataLegPending signal by downgrading the stale-empty volume leg to a non-terminal
@@ -539,8 +539,8 @@ func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
 		if ready {
 			t.Fatalf("Ready must be False while the data leg is still pending (empty status.data must not read as volume N/A)")
 		}
-		if vol := condOf(t, cl, "dlp-pending", snapshot.ConditionVolumeReady); vol == nil || vol.Status != metav1.ConditionFalse || vol.Reason != snapshot.ReasonDataCapturePending {
-			t.Fatalf("VolumeReady = %#v, want False/%s", vol, snapshot.ReasonDataCapturePending)
+		if vol := condOf(t, cl, "dlp-pending", snapshot.ConditionDataReady); vol == nil || vol.Status != metav1.ConditionFalse || vol.Reason != snapshot.ReasonDataCapturePending {
+			t.Fatalf("DataReady = %#v, want False/%s", vol, snapshot.ReasonDataCapturePending)
 		}
 		if rd := condOf(t, cl, "dlp-pending", snapshot.ConditionReady); rd == nil || rd.Status != metav1.ConditionFalse || rd.Reason != snapshot.ReasonDataCapturePending {
 			t.Fatalf("Ready = %#v, want False/%s", rd, snapshot.ReasonDataCapturePending)
@@ -556,13 +556,13 @@ func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
 		if !ready {
 			t.Fatalf("manifest-only content (no data leg) must stay Ready=True")
 		}
-		if vol := condOf(t, cl, "dlp-absent", snapshot.ConditionVolumeReady); vol == nil || vol.Status != metav1.ConditionTrue {
-			t.Fatalf("VolumeReady = %#v, want True (N/A, no data refs)", vol)
+		if vol := condOf(t, cl, "dlp-absent", snapshot.ConditionDataReady); vol == nil || vol.Status != metav1.ConditionTrue {
+			t.Fatalf("DataReady = %#v, want True (N/A, no data refs)", vol)
 		}
 	})
 
 	// vcr-watch-core-terminal (decision D2): a terminal data-leg reason (failed VCR / Variant-A fault)
-	// makes the CONTENT itself terminal: VolumeReady=False/VolumeCaptureFailed and Ready=False/VolumeCaptureFailed
+	// makes the CONTENT itself terminal: DataReady=False/VolumeCaptureFailed and Ready=False/VolumeCaptureFailed
 	// (terminal beats the pending downgrade). This is what lets the failure propagate up as ChildrenFailed.
 	t.Run("dataLegTerminal makes the content terminal (VolumeCaptureFailed beats pending)", func(t *testing.T) {
 		r, content, cl := build("dlp-terminal")
@@ -573,8 +573,8 @@ func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
 		if ready {
 			t.Fatalf("a terminal data leg must not be Ready")
 		}
-		if vol := condOf(t, cl, "dlp-terminal", snapshot.ConditionVolumeReady); vol == nil || vol.Status != metav1.ConditionFalse || vol.Reason != snapshot.ReasonVolumeCaptureFailed {
-			t.Fatalf("VolumeReady = %#v, want False/%s", vol, snapshot.ReasonVolumeCaptureFailed)
+		if vol := condOf(t, cl, "dlp-terminal", snapshot.ConditionDataReady); vol == nil || vol.Status != metav1.ConditionFalse || vol.Reason != snapshot.ReasonVolumeCaptureFailed {
+			t.Fatalf("DataReady = %#v, want False/%s", vol, snapshot.ReasonVolumeCaptureFailed)
 		}
 		if rd := condOf(t, cl, "dlp-terminal", snapshot.ConditionReady); rd == nil || rd.Status != metav1.ConditionFalse || rd.Reason != snapshot.ReasonVolumeCaptureFailed {
 			t.Fatalf("Ready = %#v, want False/%s", rd, snapshot.ReasonVolumeCaptureFailed)

@@ -46,7 +46,7 @@ import (
 //   - data leg (VCR domains): observe the domain VCR; once the aggregator's published status.data covers
 //     the VCR targets and the VSC handoff is durable, latch commonController.dataCaptured=true and reap
 //     the VCR. A FAILED VCR is NOT surfaced here anymore: core makes the CONTENT terminal in
-//     reconcileDataLegProjection (VolumeReady=VolumeCaptureFailed, decision D2), which the mirror reflects
+//     reconcileDataLegProjection (DataReady=VolumeCaptureFailed, decision D2), which the mirror reflects
 //     onto the owning snapshot and which propagates up the content tree; the leg just does not latch;
 //   - data leg (native-CSI VolumeSnapshot owners, design §11.4): no VCR — latch dataCaptured once the
 //     content carries a published status.data (the projection performs the VSC handoff first);
@@ -270,7 +270,7 @@ func (r *SnapshotContentController) allDirectChildrenSubtreePlanned(ctx context.
 //
 // It no longer surfaces a terminal capture failure (vcr-watch-core-terminal, decision D2): a failed VCR
 // (and the Variant-A >1-artifact fault) is made terminal on the CONTENT itself by reconcileDataLegProjection
-// (VolumeReady=VolumeCaptureFailed), which the mirror reflects onto the owning snapshot and which propagates
+// (DataReady=VolumeCaptureFailed), which the mirror reflects onto the owning snapshot and which propagates
 // up the content tree. On a failed VCR the leg simply stays not-captured (done=false) and never latches.
 func (r *SnapshotContentController) observeOwnerDataLegVCR(
 	ctx context.Context,

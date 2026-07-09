@@ -33,7 +33,7 @@ const (
 // +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Manifests",type=string,JSONPath=`.status.conditions[?(@.type=="ManifestsReady")].status`
-// +kubebuilder:printcolumn:name="Volume",type=string,JSONPath=`.status.conditions[?(@.type=="VolumeReady")].status`
+// +kubebuilder:printcolumn:name="Data",type=string,JSONPath=`.status.conditions[?(@.type=="DataReady")].status`
 // +kubebuilder:printcolumn:name="Children",type=string,JSONPath=`.status.conditions[?(@.type=="ChildrenReady")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

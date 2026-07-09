@@ -466,7 +466,7 @@ func resourceSelectorVolumeDataSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// The dropped PVC's absence is a negative: a single point-in-time read could miss a dataRef that
-			// a broken controller publishes a beat after the kept one. Content is already Ready (VolumeReady
+			// a broken controller publishes a beat after the kept one. Content is already Ready (DataReady
 			// gated above), so assert the dropped PVC stays absent across a short window rather than once.
 			By("Asserting the dropped PVC is captured nowhere (no dataRef), and stays absent")
 			Consistently(func(g Gomega) {

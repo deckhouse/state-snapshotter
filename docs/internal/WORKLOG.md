@@ -1593,3 +1593,15 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
 - **Regen** deepcopy + CRDs (controller-gen). Updated the openapi config-values docs (EN + RU) that
   referenced StaticBind restore. Build + vet + unit tests green across all modules; integration/e2e
   packages compile (`go vet -tags integration`).
+
+### Block B — rename VolumeReady condition to DataReady
+
+- **Rename** the leg condition `VolumeReady` -> `DataReady` (leadership wave-2: "Volume" mislabels a
+  leg that carries a durable data artifact, not a volume). `pkg/snapshot.ConditionVolumeReady` ->
+  `ConditionDataReady` (value `"DataReady"`); the SnapshotContent aggregator writes the renamed type;
+  the SnapshotContent printer column `Volume` -> `Data` (JSONPath `.type=="DataReady"`), CRD regenerated.
+  Formula is now `Ready = ManifestsReady && DataReady && ChildrenReady`. Swept the condition name across
+  controller/usecase/api comments, unit + integration + e2e tests (incl. the e2e `condDataReady` alias),
+  and the living design/spec/ops/testing docs. Internal plan struct fields (`plan.volumeReady`) keep
+  their names — they describe the same data leg and are not part of the contract. Build + vet + unit
+  tests green; integration/e2e compile.

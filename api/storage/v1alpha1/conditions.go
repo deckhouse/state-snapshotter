@@ -19,7 +19,7 @@ package v1alpha1
 // Contract conditions and reasons shared across the snapshot graph boundary (core planner <-> domain
 // snapshot controllers). These are the canonical definitions: core pkg/snapshot aliases them so both
 // sides reference one definition via api/. Core-internal leg conditions
-// (ManifestsReady/VolumeReady/ChildrenReady) and the broader reason taxonomy stay in core pkg/snapshot.
+// (ManifestsReady/DataReady/ChildrenReady) and the broader reason taxonomy stay in core pkg/snapshot.
 //
 // Ready is the ONLY user-facing condition on every snapshot object (root Snapshot, SnapshotContent,
 // domain CR); it is always derived by the core. The former planning/consistency conditions

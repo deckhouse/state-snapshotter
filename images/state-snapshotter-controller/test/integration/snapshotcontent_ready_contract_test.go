@@ -41,7 +41,7 @@ import (
 )
 
 // Ready Contract on the current condition model: SnapshotContent owns Ready, derived from
-// ManifestsReady (its own ManifestCheckpoint) AND VolumeReady (its own data refs) AND ChildrenReady (direct child SnapshotContents).
+// ManifestsReady (its own ManifestCheckpoint) AND DataReady (its own data refs) AND ChildrenReady (direct child SnapshotContents).
 // The controller only manages the common SnapshotContent GVK, so these specs operate on the common type and
 // drive readiness through a real Ready ManifestCheckpoint (never force-writing the content Ready condition).
 var _ = Describe("Integration: SnapshotContentController - Ready Contract", Serial, func() {
@@ -153,7 +153,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 		})).To(Succeed())
 
 		// ChildrenReady gate: parent must stay Ready=False while the child is not Ready, even though the
-		// parent's own ManifestsReady/VolumeReady are satisfied.
+		// parent's own ManifestsReady/DataReady are satisfied.
 		Consistently(func(g Gomega) {
 			reconcile(childName)
 			reconcile(parentName)

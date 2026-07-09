@@ -309,7 +309,7 @@ func childBridgeFailureSpecs() {
 			// child-failure reason ChildrenFailed — deterministic at ANY timing of the child failure relative
 			// to the root's MarkPlanned (vcr-watch-core-terminal). Mechanism: the core is the sole writer of
 			// the terminal — a failed data-leg VCR makes the child's OWN SnapshotContent terminal
-			// (VolumeReady=False/VolumeCaptureFailed), which mirrors onto the child xxxSnapshot's Ready. From
+			// (DataReady=False/VolumeCaptureFailed), which mirrors onto the child xxxSnapshot's Ready. From
 			// there both root paths converge on the same reason:
 			//   - child failure lands while the root is still planning: the weight-layer gate
 			//     (weightLayerCaptureReady -> snapshotChildTerminalFailure) catches the child terminal and the

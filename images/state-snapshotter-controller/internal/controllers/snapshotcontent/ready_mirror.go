@@ -51,7 +51,7 @@ import (
 // watch is not removed. The subtreeManifestsPersisted mirror moved to main (capture_legs.go, decision #10).
 //
 // vcr-watch-core-terminal (decision D2): a failed data-leg VCR (or a Variant-A >1-artifact fault) is now
-// made terminal on the CONTENT itself by reconcileDataLegProjection (VolumeReady=VolumeCaptureFailed), so
+// made terminal on the CONTENT itself by reconcileDataLegProjection (DataReady=VolumeCaptureFailed), so
 // content.Ready already carries the terminal and this mirror reflects it verbatim onto the owning Snapshot
 // — no more special leg-terminal fold here. The content-level terminal also propagates up the content
 // aggregation tree as ChildrenFailed (which the former snapshot-only fold could not do).

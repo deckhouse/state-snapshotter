@@ -380,7 +380,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Step 3: Content status aggregation and Ready condition.
 	// The common state-snapshotter.deckhouse.io/SnapshotContent is the ONLY content carrier in the unified
 	// runtime (every snapshot kind maps to CommonSnapshotContentGVK), and it owns the aggregate
-	// condition model: ManifestsReady + VolumeReady + ChildrenReady + derived Ready
+	// condition model: ManifestsReady + DataReady + ChildrenReady + derived Ready
 	// (INV-COND2). No non-common SnapshotContent GVK is registered, so there is no other writer.
 	if !isCommonSnapshotContentGVK(obj.GroupVersionKind()) {
 		logger.V(1).Info("non-common SnapshotContent GVK is not managed by the unified runtime; skipping",
@@ -444,7 +444,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// stale-empty status.data for a content whose data leg is still converging (the aggregator published
 	// it via a separate patch this pass, or the VCR/VSC is not ready yet). dataTermReason/Message carry a
 	// core-owned terminal data-leg failure (failed VCR / Variant-A fault, decision D2): the aggregation
-	// makes the CONTENT itself terminal (VolumeReady=VolumeCaptureFailed) so it propagates up the
+	// makes the CONTENT itself terminal (DataReady=VolumeCaptureFailed) so it propagates up the
 	// content-aggregation tree as ChildrenFailed. See reconcileCommonSnapshotContentStatus.
 	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataTermReason, dataTermMessage)
 	if err != nil {
@@ -455,7 +455,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// reap the domain MCR/VCR after a durable handoff — latch strictly before the delete, same pass, so
 	// the domain SDK's uncached latch read never observes a reaped request with a false latch (no
 	// re-creation churn). A failed data-leg VCR (or Variant-A fault) is no longer folded here: core makes
-	// the CONTENT terminal (VolumeReady=VolumeCaptureFailed) in reconcileDataLegProjection above, so the
+	// the CONTENT terminal (DataReady=VolumeCaptureFailed) in reconcileDataLegProjection above, so the
 	// mirror below reflects it verbatim onto the owning Snapshot and it also propagates up the content tree.
 	legsRequeue, err := r.reconcileOwnerCaptureLegs(ctx, obj)
 	if err != nil {
@@ -497,9 +497,9 @@ func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
 }
 
 // commonContentStatusPlan is the SnapshotContent aggregation outcome. It carries the own-node legs
-// (ManifestsReady = own MCP; VolumeReady = own data refs; ChildrenReady = child SnapshotContents) and
+// (ManifestsReady = own MCP; DataReady = own data refs; ChildrenReady = child SnapshotContents) and
 // the derived Ready. Ready is the single aggregate on SnapshotContent:
-// Ready = ManifestsReady && VolumeReady && ChildrenReady (INV-COND2).
+// Ready = ManifestsReady && DataReady && ChildrenReady (INV-COND2).
 type commonContentStatusPlan struct {
 	manifestsReady   metav1.ConditionStatus
 	manifestsReason  string
@@ -551,13 +551,13 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	// Data-leg-pending downgrade (content-single-writer §4 Slice 3 / §11.4, INV-CONTENT-WRITER-1).
 	// reconcileDataLegProjection is the single writer of status.data and it publishes via a SEPARATE
 	// status patch, so on this pass `obj` is stale-empty for a data leg it just published or is still
-	// capturing. resolveDataReadiness reads an empty status.dataRefs as volume N/A (VolumeReady=True),
+	// capturing. resolveDataReadiness reads an empty status.dataRefs as volume N/A (DataReady=True),
 	// which — for a content that HAS an expected data leg — would let Ready escalate to True (and
 	// mirrorReadyToOwnerSnapshot propagate it) BEFORE the bound VolumeSnapshotContent's readyToUse is ever
 	// validated. `dataLegPending` (from reconcileDataLegProjection: the owner declares a VCR/native-CSI
 	// data leg that is not yet durably published+covered) forces the volume leg back to a non-terminal
 	// DataCapturePending for this pass and re-derives Ready. It ONLY downgrades a would-be-ready leg — a
-	// manifest-only content (no data leg -> dataLegPending=false) keeps VolumeReady=True (N/A), and a leg
+	// manifest-only content (no data leg -> dataLegPending=false) keeps DataReady=True (N/A), and a leg
 	// the aggregation already sees as not-ready is left as computed. The next pass re-reads the fresh
 	// status.data and validates readyToUse for real, so this delays the FIRST Ready=True by exactly one
 	// pass instead of racing it.
@@ -571,7 +571,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 
 	// Core-owned terminal data-leg failure (vcr-watch-core-terminal, decision D2): a failed VCR (or the
 	// Variant-A >1-artifact fault) surfaced by reconcileDataLegProjection makes the CONTENT itself terminal
-	// (VolumeReady=False/VolumeCaptureFailed, terminal wins over the pending downgrade above). Because the
+	// (DataReady=False/VolumeCaptureFailed, terminal wins over the pending downgrade above). Because the
 	// content is now terminal on its own Ready, validateCommonContentChildren treats it as ChildrenFailed on
 	// the parent content, so the failure propagates up the whole content-aggregation tree — the former hack
 	// folded the leg terminal only into the owning snapshot's Ready and never reached the parent contents.
@@ -602,7 +602,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	gen := obj.GetGeneration()
 	desired := []metav1.Condition{
 		{Type: snapshot.ConditionManifestsReady, Status: plan.manifestsReady, Reason: plan.manifestsReason, Message: plan.manifestsMessage, ObservedGeneration: gen},
-		{Type: snapshot.ConditionVolumeReady, Status: plan.volumeReady, Reason: plan.volumeReason, Message: plan.volumeMessage, ObservedGeneration: gen},
+		{Type: snapshot.ConditionDataReady, Status: plan.volumeReady, Reason: plan.volumeReason, Message: plan.volumeMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionChildrenReady, Status: plan.childrenReady, Reason: plan.childrenReason, Message: plan.childrenMessage, ObservedGeneration: gen},
 		{Type: snapshot.ConditionReady, Status: plan.readyStatus, Reason: plan.readyReason, Message: plan.readyMessage, ObservedGeneration: gen},
 	}
@@ -688,7 +688,7 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "")
 }
 
-// buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumeReady, ChildrenReady, the
+// buildCommonSnapshotContentStatusPlan computes ManifestsReady, DataReady, ChildrenReady, the
 // ManifestsArchived subtree latch, and the derived Ready. Ready priority (single reason when several
 // legs are not satisfied):
 //
@@ -1000,8 +1000,8 @@ func isTerminalDataFailure(reason string) bool {
 }
 
 // fillOwnLegs evaluates this node's own legs into plan: ManifestsReady from the ManifestCheckpoint and
-// VolumeReady from data artifacts. Children are not considered here. Sequencing (v1): the volume leg is
-// only evaluated once the manifest leg is Ready; until then VolumeReady stays at its initial
+// DataReady from data artifacts. Children are not considered here. Sequencing (v1): the volume leg is
+// only evaluated once the manifest leg is Ready; until then DataReady stays at its initial
 // Unknown/ManifestCapturePending (not evaluated yet — not a volume failure). Independent leg evaluation
 // is a future follow-up.
 func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {

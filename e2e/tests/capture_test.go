@@ -60,7 +60,7 @@ var captureTL *captureTimeline
 // child-snapshot node. No DemoVirtualDisk is created: dataless disks are no longer allowed (every
 // DemoVirtualDisk must be PVC-backed per a spec XValidation rule), so this tree never models a disk without
 // data. Generic-object discovery (RBAC/Service/Deployment/etc.) is exercised by the namespace-capture
-// rework specs and deliberately not duplicated here. The result is a pure manifest tree where VolumeReady
+// rework specs and deliberately not duplicated here. The result is a pure manifest tree where DataReady
 // is vacuously true.
 func buildManifestOnlySource(ns string) []*unstructured.Unstructured {
 	configMap := &unstructured.Unstructured{Object: map[string]interface{}{

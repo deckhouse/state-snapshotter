@@ -40,7 +40,7 @@ import (
 //
 // Core is the single writer of the terminal Ready (vcr-watch-core-terminal, decision D2): on a failed
 // data-leg VCR (or the Variant-A >1-artifact fault) it returns a non-empty (termReason, termMessage) so
-// reconcileCommonSnapshotContentStatus makes the CONTENT itself terminal (VolumeReady=VolumeCaptureFailed).
+// reconcileCommonSnapshotContentStatus makes the CONTENT itself terminal (DataReady=VolumeCaptureFailed).
 // The content-level terminal is what propagates up the content-aggregation tree as ChildrenFailed (the
 // former hack folded the leg terminal only into the owning snapshot's Ready, so it never reached the
 // parent contents). Otherwise it returns an empty termReason and only publishes, or requeues while the leg
@@ -91,7 +91,7 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 //
 // Core-owned terminal (vcr-watch-core-terminal, decision D2): a failed VCR and the >1-artifact Variant-A
 // fault are surfaced here as a non-empty (termReason, termMessage). The caller makes the CONTENT terminal
-// (VolumeReady=VolumeCaptureFailed), which propagates up as ChildrenFailed — the former hack only folded
+// (DataReady=VolumeCaptureFailed), which propagates up as ChildrenFailed — the former hack only folded
 // the leg terminal into the owning snapshot's Ready, so it never reached the parent contents.
 func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Context, contentObj *unstructured.Unstructured, namespace, vcrName string) (requeue bool, termReason string, termMessage string, err error) {
 	contentName := contentObj.GetName()

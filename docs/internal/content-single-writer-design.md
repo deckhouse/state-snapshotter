@@ -28,7 +28,7 @@ This is the user's model: *"один реконсайлер, который пр
 - The **coverage-gate relax** (`Ready`→`Planned`, coverage from `VCR.spec.targets[]` / `subtreePlanned`)
   is a *separate* step (§8.5 / Block 5) and is not part of the single-writer refactor. The **eager-shell**
   work (§9) *is* the primary deadlock fix and is in scope.
-- No change to the content **condition/Ready** model (`ManifestsReady`/`VolumeReady`/`ChildrenReady`/
+- No change to the content **condition/Ready** model (`ManifestsReady`/`DataReady`/`ChildrenReady`/
   `Ready`, `subtreeManifestsPersisted`) **except** the §3.6 `ChildrenReady` read barrier that eager shells
   require (empty edges + declared children ⇒ `ChildrenLinkPending`, not `Ready`). Otherwise only *who
   writes which status field* changes.
