@@ -208,7 +208,7 @@ func coveredPVCUIDsForContent(
 
 // coveredPVCUIDsFromOwnerObject reads the covered PVC UID(s) DIRECTLY from an owning xxxSnapshot object in
 // hand (design §8.5/§11.7): the in-flight VCR name on status.captureState.domainSpecificController.
-// volumeCaptureRequestName → that VCR's spec.targets[].uid (VCR-based domains), or status.snapshotSource.uid
+// volumeCaptureRequestName → that VCR's spec.targets[].uid (VCR-based domains), or status.sourceRef.uid
 // (native-CSI VolumeSnapshot, no VCR). Both are published by capture barrier 1 (Planned), so coverage is
 // computable at the relaxed phase>=Planned wave gate even before the node's SnapshotContent is bound.
 // Returns nil (no error) when neither signal is present yet; the caller decides pending vs benign.
@@ -226,7 +226,7 @@ func coveredPVCUIDsFromOwnerObject(
 		return pvcUIDsFromNamedVCR(ctx, c, ownerNS, vcrName)
 	}
 	if owner.GetAPIVersion() == snapshotpkg.CSISnapshotAPIVersion && owner.GetKind() == snapshotpkg.KindVolumeSnapshot {
-		if uid, _, _ := unstructured.NestedString(owner.Object, "status", "snapshotSource", "uid"); uid != "" {
+		if uid, _, _ := unstructured.NestedString(owner.Object, "status", "sourceRef", "uid"); uid != "" {
 			return []string{uid}, nil
 		}
 	}

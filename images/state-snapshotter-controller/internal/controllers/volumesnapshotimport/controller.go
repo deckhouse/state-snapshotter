@@ -252,7 +252,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// The dataRef must target the orphan PVC the leaf carries (recovered from the reconstructed
 	// ManifestCheckpoint), not the VolumeSnapshot — otherwise the restore compiler cannot bind the PVC
 	// to its snapshot and emits a data-less PVC. See importSnapshotSourceRef. The recovered PVC is published
-	// as the VS status.snapshotSource that the aggregator's native-CSI data-leg projection reads.
+	// as the VS status.sourceRef that the aggregator's native-CSI data-leg projection reads.
 	//
 	// Resolve the PVC only once the checkpoint is Ready: ReconstructManifestCheckpoint writes its chunks
 	// and flips Ready in one status update, so a not-yet-Ready (or cache-stale, empty status.chunks)
@@ -292,9 +292,9 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
 	// content-single-writer design §10/§11.4): the aggregator is the single writer of content.status.data.
 	// For a native-CSI VolumeSnapshot it builds the {captured PVC source, bound VSC} binding from
-	// status.snapshotSource + status.boundVolumeSnapshotContentName and performs the enrich +
+	// status.sourceRef + status.boundVolumeSnapshotContentName and performs the enrich +
 	// Retain/ownerRef handoff + publish itself. This controller therefore publishes the recovered orphan PVC
-	// as status.snapshotSource — the import twin of the foundation domain reconciler's capture-time
+	// as status.sourceRef — the import twin of the foundation domain reconciler's capture-time
 	// snapshotSource — instead of writing the content, which fixes the native-CSI branch requeueing forever
 	// on an empty snapshotSource for imports.
 	if sErr := r.publishVolumeSnapshotSource(ctx, req.NamespacedName, pvc); sErr != nil {
@@ -404,7 +404,7 @@ func (r *Controller) setVolumeSnapshotError(ctx context.Context, key client.Obje
 // orphan PVC the leaf carries (recovered from the reconstructed ManifestCheckpoint), NOT the VolumeSnapshot
 // handle: the restore compiler matches a captured PVC manifest to its dataRef by the PVC identity/UID
 // (findDataBindingForPVC), so a VolumeSnapshot-targeted source would never match and the PVC would be
-// emitted data-less (contract violation). It is published as the VS status.snapshotSource, from which the
+// emitted data-less (contract violation). It is published as the VS status.sourceRef, from which the
 // aggregator's native-CSI data-leg projection (volumeSnapshotOwnerSource) builds the {source PVC, bound VSC}
 // binding — mirroring the capture path (the foundation domain reconciler's snapshotSource), keeping both
 // paths' dataRef source identical.
@@ -419,10 +419,10 @@ func importSnapshotSourceRef(pvc *unstructured.Unstructured) storagev1alpha1.Sna
 }
 
 // publishVolumeSnapshotSource writes the recovered orphan-PVC source onto the import VolumeSnapshot's
-// status.snapshotSource under an optimistic-lock merge patch (D4a). The aggregator's native-CSI data-leg
+// status.sourceRef under an optimistic-lock merge patch (D4a). The aggregator's native-CSI data-leg
 // projection reads this (with status.boundVolumeSnapshotContentName) to build + publish content.status.data
 // — the import twin of the foundation domain reconciler's capture-time snapshotSource. The forked
-// snapshot-controller skips import VS, so status.snapshotSource is ours to own. Idempotent: re-reads and
+// snapshot-controller skips import VS, so status.sourceRef is ours to own. Idempotent: re-reads and
 // short-circuits when it already matches the desired ref.
 func (r *Controller) publishVolumeSnapshotSource(ctx context.Context, key client.ObjectKey, pvc *unstructured.Unstructured) error {
 	ref := importSnapshotSourceRef(pvc)
@@ -439,11 +439,11 @@ func (r *Controller) publishVolumeSnapshotSource(ctx context.Context, key client
 		if err := r.Get(ctx, key, vs); err != nil {
 			return err
 		}
-		if cur, found, _ := unstructured.NestedMap(vs.Object, "status", "snapshotSource"); found && reflect.DeepEqual(cur, desired) {
+		if cur, found, _ := unstructured.NestedMap(vs.Object, "status", "sourceRef"); found && reflect.DeepEqual(cur, desired) {
 			return nil
 		}
 		base := vs.DeepCopy()
-		if err := unstructured.SetNestedMap(vs.Object, desired, "status", "snapshotSource"); err != nil {
+		if err := unstructured.SetNestedMap(vs.Object, desired, "status", "sourceRef"); err != nil {
 			return err
 		}
 		return r.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))

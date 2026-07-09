@@ -41,7 +41,7 @@ import (
 // the manifest-capture request (MCR), the data-leg volume-capture request (VCR) and the owned-disk child
 // graph, and publish results into demo.status.captureState.domainSpecificController
 // (manifestCaptureRequestName, volumeCaptureRequestName, phase) plus status.childrenSnapshotRefs and the
-// top-level status.snapshotSource. They never create/own/bind/mirror SnapshotContent;
+// top-level status.sourceRef. They never create/own/bind/mirror SnapshotContent;
 // GenericSnapshotBinderController owns all SnapshotContent work for demo kinds. These unit tests therefore
 // assert only the domain planning side; content creation/projection/Ready mirror is covered by the binder.
 
@@ -147,8 +147,8 @@ func TestDemoVirtualDiskSnapshot_PlansMCRAndChildrenReady(t *testing.T) {
 
 	snap := getDemoDiskSnapshot(t, cl)
 	// The captured live source uid is published (informational) for import-mode recreation.
-	if snap.Status.SnapshotSource == nil || snap.Status.SnapshotSource.UID != "disk-a-uid" {
-		t.Fatalf("expected status.snapshotSource.uid from the live DemoVirtualDisk uid, got %#v", snap.Status.SnapshotSource)
+	if snap.Status.SourceRef == nil || snap.Status.SourceRef.UID != "disk-a-uid" {
+		t.Fatalf("expected status.sourceRef.uid from the live DemoVirtualDisk uid, got %#v", snap.Status.SourceRef)
 	}
 	mcrName := domainMCRName(snap.Status.CaptureState)
 	if mcrName == "" {
@@ -344,8 +344,8 @@ func TestDemoVirtualMachineSnapshot_PlansOwnedDiskChildrenAndMCR(t *testing.T) {
 
 	vmSnap := getDemoVMSnapshot(t, cl)
 	// The captured live source uid is published (informational) for import-mode recreation.
-	if vmSnap.Status.SnapshotSource == nil || vmSnap.Status.SnapshotSource.UID != vmUID {
-		t.Fatalf("expected status.snapshotSource.uid from the live DemoVirtualMachine uid %q, got %#v", vmUID, vmSnap.Status.SnapshotSource)
+	if vmSnap.Status.SourceRef == nil || vmSnap.Status.SourceRef.UID != vmUID {
+		t.Fatalf("expected status.sourceRef.uid from the live DemoVirtualMachine uid %q, got %#v", vmUID, vmSnap.Status.SourceRef)
 	}
 	mcrName := domainMCRName(vmSnap.Status.CaptureState)
 	if mcrName == "" {

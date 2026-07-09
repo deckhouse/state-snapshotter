@@ -65,7 +65,7 @@ type ExcludedObjectRef struct {
 // snapshot captures. It lives on the snapshot spec (spec.sourceRef) and is the generic contract the
 // core planner reads to deduplicate coverage across the run tree. Namespace is implicit: the source
 // object MUST live in the same namespace as the snapshot. It carries no uid; the captured source
-// object ref (including uid) is published separately on the snapshot status (status.snapshotSource).
+// object ref (including uid) is published separately on the snapshot status (status.sourceRef).
 //
 // This is the canonical definition shared across API groups (the demo API group aliases it).
 //

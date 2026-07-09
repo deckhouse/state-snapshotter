@@ -167,7 +167,7 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 // bound to a VolumeSnapshotContent by the fork's CSI machinery (status.boundVolumeSnapshotContentName), so
 // the aggregator builds the {source PVC, VSC artifact} binding from the owner status and performs the same
 // enrich + Retain/ownerRef handoff + publish as the VCR branch. The source PVC is published by the domain
-// reconciler at adoption (owner.status.snapshotSource). Active once the CSD registers the kind (Block 3c).
+// reconciler at adoption (owner.status.sourceRef). Active once the CSD registers the kind (Block 3c).
 func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx context.Context, contentObj, owner *unstructured.Unstructured, _ string) (requeue bool, termReason string, termMessage string, err error) {
 	contentName := contentObj.GetName()
 
@@ -189,7 +189,7 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		},
 	}
 	if binding.Source.Name == "" {
-		// The domain reconciler has not published status.snapshotSource yet: wait.
+		// The domain reconciler has not published status.sourceRef yet: wait.
 		return true, "", "", nil
 	}
 
@@ -244,14 +244,14 @@ func (r *SnapshotContentController) contentHasData(ctx context.Context, contentN
 }
 
 // volumeSnapshotOwnerSource builds the captured PVC source ref from a VolumeSnapshot owner's published
-// status.snapshotSource (design §11.4, written by the foundation domain reconciler at adoption). Absent
+// status.sourceRef (design §11.4, written by the foundation domain reconciler at adoption). Absent
 // fields yield an empty ref, which the caller treats as "source not published yet".
 func volumeSnapshotOwnerSource(owner *unstructured.Unstructured) storagev1alpha1.SnapshotSubjectRef {
-	apiVersion, _, _ := unstructured.NestedString(owner.Object, "status", "snapshotSource", "apiVersion")
-	kind, _, _ := unstructured.NestedString(owner.Object, "status", "snapshotSource", "kind")
-	name, _, _ := unstructured.NestedString(owner.Object, "status", "snapshotSource", "name")
-	namespace, _, _ := unstructured.NestedString(owner.Object, "status", "snapshotSource", "namespace")
-	uid, _, _ := unstructured.NestedString(owner.Object, "status", "snapshotSource", "uid")
+	apiVersion, _, _ := unstructured.NestedString(owner.Object, "status", "sourceRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(owner.Object, "status", "sourceRef", "kind")
+	name, _, _ := unstructured.NestedString(owner.Object, "status", "sourceRef", "name")
+	namespace, _, _ := unstructured.NestedString(owner.Object, "status", "sourceRef", "namespace")
+	uid, _, _ := unstructured.NestedString(owner.Object, "status", "sourceRef", "uid")
 	return storagev1alpha1.SnapshotSubjectRef{
 		APIVersion: apiVersion,
 		Kind:       kind,

@@ -865,7 +865,7 @@ func volumeDataSpecs() {
 			// driven by the domain contract — a node contributes PVC coverage iff its kind RequiresDataArtifact
 			// (CSD/GVKRegistry), replacing the old "if the node has children it is an aggregator, skip it"
 			// heuristic — plus an owner fallback (the in-flight VolumeCaptureRequest name for VCR-backed domains
-			// or the native-CSI snapshotSource.uid) so a Planned-but-not-yet-bound child counts as covered during
+			// or the native-CSI sourceRef.uid) so a Planned-but-not-yet-bound child counts as covered during
 			// the A->B window. A data-bearing node with NO observable coverage yet fails closed
 			// (ErrSubtreeDataRefsPending -> requeue) instead of letting the residual wave race it into a DUPLICATE
 			// orphan VolumeSnapshot for the same PVC. The whole rewrite is observable end to end as a single

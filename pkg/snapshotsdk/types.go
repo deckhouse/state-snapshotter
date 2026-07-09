@@ -74,7 +74,7 @@ const (
 )
 
 // SnapshotSource is the full reference to the captured live source object, published by the SDK into the
-// top-level status.snapshotSource. It is self-contained for import-mode recreation. Re-exported api type.
+// top-level status.sourceRef. It is self-contained for import-mode recreation. Re-exported api type.
 type SnapshotSource = storagev1alpha1.SnapshotSourceObjectRef
 
 // DomainCaptureState is the durable, domain-owned planning result the SDK publishes into snapshot status

@@ -96,7 +96,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	// still pre-Planned, so this block runs, ends at MarkPlanned, and falls through to the post-bind legs
 	// below in the same reconcile.
 	if namespaceDomainPrePlanned(nsSnap) {
-		// 1. Publish the captured live source (the Namespace) into status.snapshotSource.
+		// 1. Publish the captured live source (the Namespace) into status.sourceRef.
 		if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
 			APIVersion: "v1",
 			Kind:       "Namespace",

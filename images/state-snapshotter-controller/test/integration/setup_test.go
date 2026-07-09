@@ -144,7 +144,7 @@ func snapshotStatusCaptureStateSchema() apiextensionsv1.JSONSchemaProps {
 	}
 }
 
-// snapshotSourceStatusSchema is the envtest structural schema for status.snapshotSource (the resolved
+// snapshotSourceStatusSchema is the envtest structural schema for status.sourceRef (the resolved
 // top-level source object ref published by the domain/import controllers).
 func snapshotSourceStatusSchema() apiextensionsv1.JSONSchemaProps {
 	return apiextensionsv1.JSONSchemaProps{
@@ -341,7 +341,7 @@ var _ = BeforeSuite(func() {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"captureState":             snapshotStatusCaptureStateSchema(),
-										"snapshotSource":           snapshotSourceStatusSchema(),
+										"sourceRef":                snapshotSourceStatusSchema(),
 										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
@@ -473,7 +473,7 @@ var _ = BeforeSuite(func() {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"captureState":             snapshotStatusCaptureStateSchema(),
-										"snapshotSource":           snapshotSourceStatusSchema(),
+										"sourceRef":                snapshotSourceStatusSchema(),
 										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
@@ -659,7 +659,7 @@ var _ = BeforeSuite(func() {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
 										"captureState":             snapshotStatusCaptureStateSchema(),
-										"snapshotSource":           snapshotSourceStatusSchema(),
+										"sourceRef":                snapshotSourceStatusSchema(),
 										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",

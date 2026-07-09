@@ -30,7 +30,7 @@ import (
 // free of side effects (no API calls); the SDK owns all reads, writes, and patching.
 //
 // Writer discipline: the SDK writes ONLY status.captureState.domainSpecificController (via
-// Get/SetDomainCaptureState), status.childrenSnapshotRefs (via the same), and status.snapshotSource (via
+// Get/SetDomainCaptureState), status.childrenSnapshotRefs (via the same), and status.sourceRef (via
 // Get/SetSnapshotSource). It NEVER writes the Ready condition and NEVER writes the core-owned
 // captureState.commonController — it only reads them (CoreCaptureState, ReadyReason/ReadyMessage).
 type SnapshotAdapter interface {
@@ -47,7 +47,7 @@ type SnapshotAdapter interface {
 	GetDomainCaptureState() DomainCaptureState
 	SetDomainCaptureState(DomainCaptureState)
 
-	// GetSnapshotSource / SetSnapshotSource bridge the top-level status.snapshotSource (full ref to the
+	// GetSnapshotSource / SetSnapshotSource bridge the top-level status.sourceRef (full ref to the
 	// captured live source object). nil means unset. The SDK publishes it via PublishSnapshotSource.
 	GetSnapshotSource() *SnapshotSource
 	SetSnapshotSource(*SnapshotSource)

@@ -416,9 +416,9 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              snapshotSource:
+              sourceRef:
                 description: |-
-                  SnapshotSource is the full reference to the captured live source object (top-level, written by the
+                  SourceRef is the full reference to the captured live source object (top-level, written by the
                   domain controller via PublishSnapshotSource). Self-contained for import-mode recreation.
                 properties:
                   apiVersion:

@@ -36,7 +36,7 @@ import (
 //
 // Writer discipline (mirrors demo/snapshot_adapter.go): the SDK writes ONLY
 // status.captureState.domainSpecificController (via Get/SetDomainCaptureState), the top-level
-// status.childrenSnapshotRefs (via the same), and status.snapshotSource (via Get/SetSnapshotSource). It
+// status.childrenSnapshotRefs (via the same), and status.sourceRef (via Get/SetSnapshotSource). It
 // NEVER writes the Ready condition and NEVER writes the core-owned captureState.commonController — it
 // only reads them (CoreCaptureState, ReadyReason/ReadyMessage). On the root, commonController.manifestCaptured
 // is owned solely by main (the aggregator's capture-leg lifecycle latches it after the MCP handoff and reaps
@@ -57,7 +57,7 @@ var _ snapshotsdk.SnapshotAdapter = NamespaceSnapshotAdapter{}
 func (a NamespaceSnapshotAdapter) Object() client.Object { return a.snap }
 
 // SourceRef returns the root's logical source identity: the captured Namespace. It is the lightweight
-// SourceRef type (distinct from the full status.snapshotSource ref published via PublishSnapshotSource),
+// SourceRef type (distinct from the full status.sourceRef ref published via PublishSnapshotSource),
 // and is unused on the root — the root has no single-PVC data leg, so EnsureVolumeCapture is never called.
 func (a NamespaceSnapshotAdapter) SourceRef() snapshotsdk.SourceRef {
 	return snapshotsdk.SourceRef{
@@ -96,11 +96,11 @@ func (a NamespaceSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.DomainCap
 }
 
 func (a NamespaceSnapshotAdapter) GetSnapshotSource() *snapshotsdk.SnapshotSource {
-	return a.snap.Status.SnapshotSource
+	return a.snap.Status.SourceRef
 }
 
 func (a NamespaceSnapshotAdapter) SetSnapshotSource(src *snapshotsdk.SnapshotSource) {
-	a.snap.Status.SnapshotSource = src
+	a.snap.Status.SourceRef = src
 }
 
 func (a NamespaceSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState {

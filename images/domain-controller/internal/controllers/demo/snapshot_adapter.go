@@ -30,7 +30,7 @@ import (
 // snapshot is a leaf (no children); its data leg is a single optional PVC.
 //
 // Writer discipline (wave3): the SDK writes ONLY status.captureState.domainSpecificController (via
-// Get/SetDomainCaptureState) and top-level status.snapshotSource (via Get/SetSnapshotSource). It never
+// Get/SetDomainCaptureState) and top-level status.sourceRef (via Get/SetSnapshotSource). It never
 // writes the Ready condition and never writes the core-owned captureState.commonController — it only
 // reads them (CoreCaptureState, ReadyReason/ReadyMessage).
 type demoVirtualDiskSnapshotAdapter struct {
@@ -77,11 +77,11 @@ func (a demoVirtualDiskSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.Dom
 }
 
 func (a demoVirtualDiskSnapshotAdapter) GetSnapshotSource() *snapshotsdk.SnapshotSource {
-	return a.snap.Status.SnapshotSource
+	return a.snap.Status.SourceRef
 }
 
 func (a demoVirtualDiskSnapshotAdapter) SetSnapshotSource(src *snapshotsdk.SnapshotSource) {
-	a.snap.Status.SnapshotSource = src
+	a.snap.Status.SourceRef = src
 }
 
 func (a demoVirtualDiskSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState {
@@ -144,11 +144,11 @@ func (a demoVirtualMachineSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.
 }
 
 func (a demoVirtualMachineSnapshotAdapter) GetSnapshotSource() *snapshotsdk.SnapshotSource {
-	return a.snap.Status.SnapshotSource
+	return a.snap.Status.SourceRef
 }
 
 func (a demoVirtualMachineSnapshotAdapter) SetSnapshotSource(src *snapshotsdk.SnapshotSource) {
-	a.snap.Status.SnapshotSource = src
+	a.snap.Status.SourceRef = src
 }
 
 func (a demoVirtualMachineSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState {

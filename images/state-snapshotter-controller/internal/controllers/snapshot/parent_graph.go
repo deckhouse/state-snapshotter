@@ -535,7 +535,7 @@ func childSubtreePlanned(child *unstructured.Unstructured) bool {
 // be seen as orphan before that grandchild published its coverage. subtreePlanned needs only planning
 // (not Ready/status.data), so this does not reintroduce the deadlock: coverage still reads the covered PVC
 // UIDs straight from captureState (the in-flight VolumeCaptureRequest name for VCR domains, or
-// status.snapshotSource.uid for native-CSI VolumeSnapshots — both published by Planned). The root MANIFEST
+// status.sourceRef.uid for native-CSI VolumeSnapshots — both published by Planned). The root MANIFEST
 // branch is not gated by this. A NotFound child is pending (not created yet); a child whose subtree is not
 // yet planned (latch absent/false) is pending; a terminal child failure (phase=Failed) is NOT surfaced here
 // (the content aggregation reports ChildrenFailed) — it stays pending, keeping the gate closed. No

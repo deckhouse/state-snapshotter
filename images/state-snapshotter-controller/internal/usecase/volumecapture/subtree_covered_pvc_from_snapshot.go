@@ -182,7 +182,7 @@ func addCoverageFromChildBoundContent(
 // coveredPVCUIDsForSnapshotNode returns the covered PVC UID(s) of a DATA-BEARING snapshot-graph node (the
 // caller already applied the dataBearing gate). Preference: (A) the node's bound SnapshotContent status.data
 // (milestone B); (B) the owner fallback read DIRECTLY off the node's own captureState — the in-flight VCR
-// name / status.snapshotSource.uid, both published by Planned — so coverage is computable at the relaxed
+// name / status.sourceRef.uid, both published by Planned — so coverage is computable at the relaxed
 // phase>=Planned wave gate even before the content is bound (this is the case the previous
 // "boundSnapshotContentName empty -> contribute nothing" short-circuit missed). A data-bearing node with NO
 // observable coverage yet returns ErrSubtreeDataRefsPending (fail-closed: the caller requeues instead of

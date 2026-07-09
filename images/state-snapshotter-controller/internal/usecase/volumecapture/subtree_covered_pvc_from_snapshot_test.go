@@ -85,7 +85,7 @@ func withCaptureVCRName(obj *unstructured.Unstructured, vcrName string) *unstruc
 }
 
 func withSnapshotSourceUID(obj *unstructured.Unstructured, uid string) *unstructured.Unstructured {
-	_ = unstructured.SetNestedField(obj.Object, uid, "status", "snapshotSource", "uid")
+	_ = unstructured.SetNestedField(obj.Object, uid, "status", "sourceRef", "uid")
 	return obj
 }
 
@@ -302,7 +302,7 @@ func TestCollectSubtreeCoveredPVCUIDsFromSnapshot_plannedUnboundChildCoveredViaO
 
 func TestCollectSubtreeCoveredPVCUIDsFromSnapshot_volumeSnapshotCoveredViaSnapshotSource(t *testing.T) {
 	t.Parallel()
-	// A native-CSI VolumeSnapshot child (no VCR) is covered via the owner's status.snapshotSource.uid,
+	// A native-CSI VolumeSnapshot child (no VCR) is covered via the owner's status.sourceRef.uid,
 	// published at adoption before Planned (§11.7).
 	vs := withSnapshotSourceUID(snapNodeUnstructured("orphan-vs", snapshotpkg.CSISnapshotAPIVersion, snapshotpkg.KindVolumeSnapshot, ""), "uid-src")
 	root := snapNode("root", "", storagev1alpha1.SnapshotChildRef{

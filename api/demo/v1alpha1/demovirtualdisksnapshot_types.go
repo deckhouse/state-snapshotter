@@ -61,10 +61,10 @@ type DemoVirtualDiskSnapshotStatus struct {
 	// BoundSnapshotContentName is the cluster-scoped SnapshotContent name, once created.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
-	// SnapshotSource is the full reference to the captured live source object (top-level, written by the
+	// SourceRef is the full reference to the captured live source object (top-level, written by the
 	// domain controller via PublishSnapshotSource). Self-contained for import-mode recreation.
 	// +optional
-	SnapshotSource *storagev1alpha1.SnapshotSourceObjectRef `json:"snapshotSource,omitempty"`
+	SourceRef *storagev1alpha1.SnapshotSourceObjectRef `json:"sourceRef,omitempty"`
 
 	// CaptureState collects internal capture signals: commonController (core-written leg latches
 	// manifestCaptured/dataCaptured) and domainSpecificController (domain-written MCR/VCR refs + phase).

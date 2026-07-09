@@ -40,7 +40,7 @@ import (
 //
 // Native-CSI import VolumeSnapshots do NOT come here: they are kind VolumeSnapshot, so
 // reconcileDataLegProjection routes them to projectContentDataLegFromBoundVSC (the import binder publishes
-// the recovered-PVC source onto owner.status.snapshotSource + the imported VSC onto
+// the recovered-PVC source onto owner.status.sourceRef + the imported VSC onto
 // boundVolumeSnapshotContentName, and that native-CSI branch projects the content data uniformly with
 // capture VS).
 //

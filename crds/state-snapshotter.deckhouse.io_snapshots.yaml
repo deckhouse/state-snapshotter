@@ -373,13 +373,14 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              snapshotSource:
+              sourceRef:
                 description: |-
-                  SnapshotSource is the provenance of what this root Snapshot captured. On the namespace-root Snapshot
+                  SourceRef is the provenance of what this root Snapshot captured. On the namespace-root Snapshot
                   it is the captured Namespace (kind=Namespace), written by the in-process namespace-domain via the SDK
                   (PublishSnapshotSource). It is a self-contained provenance block (read by d8-cli without joining spec
                   and a separate uid); it is NOT a restore directive — the import target namespace comes from
-                  spec/targetNamespace, not from this field.
+                  spec/targetNamespace, not from this field. (This is the status-side source reference, present on every
+                  snapshot kind; the optional spec.sourceRef on domain snapshots is a distinct lighter ref.)
                 properties:
                   apiVersion:
                     minLength: 1

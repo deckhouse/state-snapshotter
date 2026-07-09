@@ -25,7 +25,7 @@ import (
 )
 
 // importSnapshotSourceRef must target the orphan PVC (not the VolumeSnapshot handle): it is published as
-// status.snapshotSource and the aggregator builds the dataRef source from it. The restore compiler matches
+// status.sourceRef and the aggregator builds the dataRef source from it. The restore compiler matches
 // a captured PVC manifest to its dataRef by PVC identity/UID — a VolumeSnapshot-targeted source would never
 // match and the PVC would be emitted data-less (contract violation).
 func TestImportSnapshotSourceRef_TargetsPVC(t *testing.T) {

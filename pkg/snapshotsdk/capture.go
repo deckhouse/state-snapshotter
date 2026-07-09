@@ -109,7 +109,7 @@ type CaptureProgress interface {
 }
 
 // SourcePublisher publishes the captured live source's full reference into the top-level
-// status.snapshotSource. It is used by import-mode recreation (d8-cli reads it as a single block). Only
+// status.sourceRef. It is used by import-mode recreation (d8-cli reads it as a single block). Only
 // domain snapshots that capture a live source publish it; a nil/zero source is a no-op.
 type SourcePublisher interface {
 	PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error

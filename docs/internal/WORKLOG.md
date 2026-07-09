@@ -1605,3 +1605,27 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   and the living design/spec/ops/testing docs. Internal plan struct fields (`plan.volumeReady`) keep
   their names — they describe the same data leg and are not part of the contract. Build + vet + unit
   tests green; integration/e2e compile.
+
+### Block C — rename status.snapshotSource to status.sourceRef
+
+- **Rename** the status provenance field `status.snapshotSource` -> `status.sourceRef` on all snapshot
+  kinds (leadership wave-2: the object IS a snapshot, so "snapshot" in the field name is redundant; the
+  user accepted the resulting spec.sourceRef/status.sourceRef pair). Go field
+  `SnapshotStatus.SnapshotSource` -> `SourceRef` (json `sourceRef`) on Snapshot + the two demo snapshot
+  types; the SS domain adapters bridge `.Status.SourceRef`. Swept the unstructured path strings
+  (`["status","sourceRef",...]`) in the native-CSI/import readers/writers (datarefs_projection,
+  subtree_covered_pvc, volumesnapshotimport, import_datarefs_projection, n5 CSI simulator), the envtest
+  structural-schema keys (setup_test.go), comments, and CRDs (regen).
+- **SDK identifiers deliberately unchanged**: `PublishSnapshotSource`, adapter `Get/SetSnapshotSource`,
+  the `snapshotsdk.SnapshotSource` alias, and the api `SnapshotSourceObjectRef` type keep their names —
+  `snapshotsdk.SourceRef` already exists as a DIFFERENT type (the spec-level source identity), so the
+  method names cannot collapse onto it. The methods now read/write the renamed field.
+- **Cross-repo (storage-foundation, committed separately, not pushed)**: the extended CSI VolumeSnapshot
+  is a snapshot-kind, so its `status.snapshotSource` was renamed to `sourceRef` too — the VolumeSnapshot
+  fork type + adapter + hand-maintained deepcopy + hand-curated CRD, AND the forked snapshot-controller
+  patch (`images/snapshot-controller/patches/003-volumesnapshot-dataimport-fork.patch`), whose typed
+  status round-trip would otherwise clobber the new field on every UpdateStatus. `git apply --check`
+  passes against the fox fork.
+- **d8-cli is out of scope** (separate plan): it still reads the cluster snapshot's `status.snapshotSource`
+  (internal/snapshot/source/tree.go) and will need a coordinated update — same follow-up as the DataImport
+  rename. Build + vet + unit tests green in both repos; integration/e2e compile.

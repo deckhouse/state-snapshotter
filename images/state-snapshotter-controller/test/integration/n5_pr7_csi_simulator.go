@@ -224,7 +224,7 @@ func pr7CreateCSIPVC(ctx context.Context, namespace, name string) *corev1.Persis
 //     boundVolumeSnapshotContentName) — the native-CSI DATA leg the aggregator projects.
 //   - the storage-foundation VolumeSnapshot DOMAIN controller (pr7ReactFoundationVSDomain): it CLAIMS each
 //     orphan VS (status.captureState.domainSpecificController — which is what un-gates the generic binder's
-//     eager content shell, see domainHasClaimed), publishes status.snapshotSource (the captured PVC identity
+//     eager content shell, see domainHasClaimed), publishes status.sourceRef (the captured PVC identity
 //     the aggregator's native-CSI data leg reads) and drives the MANIFEST leg to a Ready ManifestCheckpoint
 //     on the bound content. Neither role runs in state-snapshotter's own envtest, so without them the orphan
 //     VS never becomes a Ready domain child and the root capture blocks forever.
@@ -307,7 +307,7 @@ func pr7ReactExternalSnapshotter(ctx context.Context, namespace string) {
 // fails the spec from inside the goroutine. Faithful shortcut, not a full reconciler: it writes the exact
 // status fields the state-snapshotter aggregator/binder READ under the domain model —
 // status.captureState.domainSpecificController (binder domain-claim gate + barrier-2 Finished),
-// status.snapshotSource (native-CSI data-leg source), and the content's manifestCheckpointName +
+// status.sourceRef (native-CSI data-leg source), and the content's manifestCheckpointName +
 // subtreeManifestsPersisted (same direct-status fixture pattern as pr7PatchSnapshotContent /
 // pr7SeedSubtreeManifestsPersisted). The data leg itself is projected by the live aggregator from the CSI
 // sidecar's boundVolumeSnapshotContentName.
@@ -343,7 +343,7 @@ func pr7ReactFoundationVSDomain(ctx context.Context, namespace string) {
 }
 
 // pr7ClaimOrphanVS writes the domain claim (status.captureState.domainSpecificController, phase=Finished)
-// and the captured source (status.snapshotSource) onto an orphan VolumeSnapshot. The claim is the binder
+// and the captured source (status.sourceRef) onto an orphan VolumeSnapshot. The claim is the binder
 // domain-claim gate key (domainHasClaimed) AND the barrier-2 finalize key (phase=Finished); snapshotSource
 // feeds the aggregator's native-CSI data-leg binding.
 func pr7ClaimOrphanVS(ctx context.Context, dc client.Client, vs *unstructured.Unstructured, pvc *corev1.PersistentVolumeClaim) {
@@ -355,7 +355,7 @@ func pr7ClaimOrphanVS(ctx context.Context, dc client.Client, vs *unstructured.Un
 		"name":       pvc.Name,
 		"namespace":  pvc.Namespace,
 		"uid":        string(pvc.UID),
-	}, "status", "snapshotSource")
+	}, "status", "sourceRef")
 	_ = dc.Status().Patch(ctx, vs, client.MergeFrom(base))
 }
 

@@ -116,7 +116,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
 
-	// Publish the captured live source's full reference (top-level status.snapshotSource). d8-cli reads it
+	// Publish the captured live source's full reference (top-level status.sourceRef). d8-cli reads it
 	// as a self-contained block to rebuild the import-mode source. Not part of the readiness formula.
 	if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
 		APIVersion: demov1alpha1.SchemeGroupVersion.String(),

@@ -126,13 +126,14 @@ type SnapshotStatus struct {
 	// The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
-	// SnapshotSource is the provenance of what this root Snapshot captured. On the namespace-root Snapshot
+	// SourceRef is the provenance of what this root Snapshot captured. On the namespace-root Snapshot
 	// it is the captured Namespace (kind=Namespace), written by the in-process namespace-domain via the SDK
 	// (PublishSnapshotSource). It is a self-contained provenance block (read by d8-cli without joining spec
 	// and a separate uid); it is NOT a restore directive — the import target namespace comes from
-	// spec/targetNamespace, not from this field.
+	// spec/targetNamespace, not from this field. (This is the status-side source reference, present on every
+	// snapshot kind; the optional spec.sourceRef on domain snapshots is a distinct lighter ref.)
 	// +optional
-	SnapshotSource *SnapshotSourceObjectRef `json:"snapshotSource,omitempty"`
+	SourceRef *SnapshotSourceObjectRef `json:"sourceRef,omitempty"`
 
 	// CaptureState collects internal capture signals. On the namespace-root Snapshot the core-written
 	// commonController.manifestCaptured is present (read by the RBAC hook); the root ALSO carries
