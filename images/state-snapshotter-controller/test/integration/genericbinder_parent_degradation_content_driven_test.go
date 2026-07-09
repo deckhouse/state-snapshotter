@@ -118,6 +118,15 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		// 2. Child common SnapshotContent owned by the parent content. The SnapshotContent ownerRef is the
 		// wake-up route (mapSnapshotContentToParentContent) used by the manager's content controller; it is
 		// set non-controller so it does not collide with the parent's own controller ownerRef.
+		//
+		// spec.snapshotRef points at the already-created parent Snapshot (an existence anchor, not a real
+		// child-snapshot graph). The vanished-declared-children fold (detectLostDeclaredChildren /
+		// childOwningSnapshotExists, feat c53b390) resolves each frozen child edge's owning child snapshot
+		// live: with the default retainContentSpec() ref (a Snapshot that this fabricated test never creates)
+		// the fold would read it as DELETED and downgrade the parent mirror to Ready=False(ChildSnapshotDeleted),
+		// masking the ChildrenReady degradation this spec exercises. Pointing at a live snapshot keeps the
+		// fold inert; the child's own projections stay no-ops because that owner declares no
+		// childrenSnapshotRefs / MCR / VCR, so the seeded child status below survives.
 		childContentName := parentContentName + "-child"
 		child := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
@@ -130,6 +139,12 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 				}},
 			},
 			Spec: retainContentSpec(),
+		}
+		child.Spec.SnapshotRef = &storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: snapshotGVK.GroupVersion().String(),
+			Kind:       snapshotGVK.Kind,
+			Namespace:  "default",
+			Name:       "gen-parent-degrade",
 		}
 		Expect(k8sClient.Create(ctx, child)).To(Succeed())
 		DeferCleanup(func() {
