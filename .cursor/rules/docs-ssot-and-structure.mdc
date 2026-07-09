@@ -1,5 +1,5 @@
 ---
-description: SSOT, docs/state-snapshotter-rework structure, document boundaries table, naming, development order.
+description: SSOT, docs/internal/state-snapshotter-rework structure, document boundaries table, naming, development order.
 alwaysApply: true
 ---
 
@@ -18,7 +18,7 @@ Each type of information lives in one place; others reference it.
 | testing/ | Test strategy, scenarios, run modes |
 | operations/ | High-level status only; no copy of spec/design |
 
-Do not copy contract across documents. Root: `docs/state-snapshotter-rework/`. Extended ADR drafts live under `snapshot-rework/` at repo root — keep **normative summaries** in sync with `docs/state-snapshotter-rework/spec/system-spec.md`; do not treat `snapshot-rework/` alone as SSOT for implementable contract. When deprecating a doc: mark in README or file header; point to new source.
+Do not copy contract across documents. Root: `docs/internal/state-snapshotter-rework/`. Extended ADR drafts live under `snapshot-rework/` at repo root — keep **normative summaries** in sync with `docs/internal/state-snapshotter-rework/spec/system-spec.md`; do not treat `snapshot-rework/` alone as SSOT for implementable contract. When deprecating a doc: mark in README or file header; point to new source.
 
 ## 2. Document boundaries (explicit)
 
@@ -34,7 +34,7 @@ In docs, separate clearly: **implemented** | **current target** | **planned/futu
 ## 3. Structure
 
 ```
-docs/state-snapshotter-rework/
+docs/internal/state-snapshotter-rework/
   spec/system-spec.md
   architecture/overview.md (diagrams may add system-overview.puml)
   design/implementation-plan.md (and other design notes)

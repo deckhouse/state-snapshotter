@@ -24,6 +24,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovd
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // DemoVirtualDisk is the demo domain data resource. The domain controller materializes its backing PVC
 // (a blank, freshly provisioned disk, or one restored from a DemoVirtualDiskSnapshot) and publishes real
 // allocated capacity in status.

@@ -1,6 +1,6 @@
 # State-snapshotter rework — навигация по документам (D1)
 
-Каталог **`docs/state-snapshotter-rework/`** — точка входа в дорожную карту переработки контроллера, unified snapshots и смежных контрактов. Код контроллера: `images/state-snapshotter-controller/`.
+Каталог **`docs/internal/state-snapshotter-rework/`** — точка входа в дорожную карту переработки контроллера, unified snapshots и смежных контрактов. Код контроллера: `images/state-snapshotter-controller/`.
 
 ---
 
@@ -8,9 +8,9 @@
 
 The current implementation contract is maintained in:
 
-- `docs/state-snapshotter-rework/spec/system-spec.md`
-- `docs/state-snapshotter-rework/testing/pre-e2e-smoke-validation.md`
-- `docs/state-snapshotter-rework/operations/project-status.md`
+- `docs/internal/state-snapshotter-rework/spec/system-spec.md`
+- `docs/internal/state-snapshotter-rework/testing/pre-e2e-smoke-validation.md`
+- `docs/internal/state-snapshotter-rework/operations/project-status.md`
 
 Older ADR/design notes may describe superseded stages of the architecture. When documents disagree, the files above take precedence.
 

@@ -23,6 +23,7 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=mcr
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Checkpoint",type=string,JSONPath=`.status.checkpointName`
 type ManifestCaptureRequest struct {
 	metav1.TypeMeta   `json:",inline"`

@@ -6,6 +6,8 @@ metadata:
   labels:
     heritage: deckhouse
     module: "{{ .Chart.Name }}"
+  annotations:
+    werf.io/deploy-dependency-webhooks: state=ready,kind=Deployment,name=webhooks,namespace=d8-{{ .Chart.Name }}
 webhooks:
   - name: d8-{{ .Chart.Name }}-mcr-validation.deckhouse.io
     rules:

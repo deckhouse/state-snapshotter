@@ -20,7 +20,7 @@ alwaysApply: false
 
 - Job idempotency (MUST):
   - If the controller creates **Jobs** or similar ephemeral resources, identify them by **labels** (and optional owner refs), not by name alone — names may be deterministic but are not the sole contract.
-  - Cleanup selectors MUST be restart-safe (label-based). Any label keys MUST be constants in `pkg/snapshot` or spec (`docs/state-snapshotter-rework/spec/system-spec.md`).
+  - Cleanup selectors MUST be restart-safe (label-based). Any label keys MUST be constants in `pkg/snapshot` or spec (`docs/internal/state-snapshotter-rework/spec/system-spec.md`).
 
 - Shared code placement (SHOULD):
   - Shared helpers go to `helpers.go`.

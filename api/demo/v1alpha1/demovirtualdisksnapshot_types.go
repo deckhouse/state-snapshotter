@@ -25,6 +25,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovdsnap
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // DemoVirtualDiskSnapshot is a minimal demo snapshot node (PR5a). Wires into root Snapshot via children*Refs.
 type DemoVirtualDiskSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`

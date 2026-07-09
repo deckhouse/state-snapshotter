@@ -1,6 +1,6 @@
 # Приведение VolumeSnapshot к паттерну unified-snapshots
 
-> **Модуль `state-snapshotter`:** нормативный контракт и план — [`docs/state-snapshotter-rework/spec/system-spec.md`](../docs/state-snapshotter-rework/spec/system-spec.md), [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md).
+> **Модуль `state-snapshotter`:** нормативный контракт и план — [`docs/internal/state-snapshotter-rework/spec/system-spec.md`](../docs/internal/state-snapshotter-rework/spec/system-spec.md), [`design/implementation-plan.md`](../docs/internal/state-snapshotter-rework/design/implementation-plan.md).
 
 ## 1. Контекст и цель
 

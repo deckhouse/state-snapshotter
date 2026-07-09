@@ -45,7 +45,7 @@
 - Обзор линий продукта и навигация: [`README.md`](../README.md)
 - Runbook (CRD, метрики, stale, рестарт): [`operations/runbook-degraded-and-unified-runtime.md`](../operations/runbook-degraded-and-unified-runtime.md)
 - CSD, RBAC hook, MCR: [`operations/csd-rbac-and-mcr.md`](../operations/csd-rbac-and-mcr.md)
-- Архитектурные паттерны контроллеров: [`docs/architecture/controller-pattern.md`](../../architecture/controller-pattern.md)
+- Архитектурные паттерны контроллеров: [`docs/internal/architecture/controller-pattern.md`](../../architecture/controller-pattern.md)
 - План внедрения и статусы задач: [`design/implementation-plan.md`](../design/implementation-plan.md)
 - Тесты и команды: [`testing/e2e-testing-strategy.md`](../testing/e2e-testing-strategy.md)
 - Прогресс стадий: [`operations/project-status.md`](../operations/project-status.md)

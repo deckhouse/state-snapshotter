@@ -27,4 +27,4 @@ cd images/state-snapshotter-controller && go test -tags integration ./test/integ
 
 If assets are missing, **BeforeSuite fails** with a clear message (no silent skip).
 
-See also `docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`.
+See also `docs/internal/state-snapshotter-rework/testing/e2e-testing-strategy.md`.

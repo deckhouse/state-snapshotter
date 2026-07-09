@@ -1,7 +1,7 @@
 # ADR: модель conditions снапшота (PlanningReady / ManifestsReady / VolumesReady / ChildrenReady / Ready)
 
 - **Дата:** 2026-06-03
-- **Статус:** Accepted — реализовано в PR2a–PR2c. **Update 2026-06-14:** единый `RequestsReady` разнесён на две публичные линии `ManifestsReady` + `VolumesReady` (см. §2.2); формула и инварианты обновлены ниже. Нормативные выдержки — в `docs/state-snapshotter-rework/spec/system-spec.md` §3.8 / §3.9.7 (INV-COND1..6, INV-FAIL1). Этот документ — long-form запись решения (почему), не текущая спецификация.
+- **Статус:** Accepted — реализовано в PR2a–PR2c. **Update 2026-06-14:** единый `RequestsReady` разнесён на две публичные линии `ManifestsReady` + `VolumesReady` (см. §2.2); формула и инварианты обновлены ниже. Нормативные выдержки — в `docs/internal/state-snapshotter-rework/spec/system-spec.md` §3.8 / §3.9.7 (INV-COND1..6, INV-FAIL1). Этот документ — long-form запись решения (почему), не текущая спецификация.
 - **Область:** `storage.deckhouse.io/v1alpha1` `Snapshot` / `SnapshotContent`, domain `XxxxSnapshot` (demo VM/Disk), `GenericSnapshotBinderController`, `SnapshotContentController`.
 
 > Канон для кода и тестов — `spec/system-spec.md`; этот ADR держим в синхроне с ним (cross-doc-consistency). Предыстория (какой набор conditions был до этой модели) — в Appendix A.
@@ -134,7 +134,7 @@ manifestsFailed > volumesFailed > childrenFailed > manifestsPending > volumesPen
 
 ### 6.1. Progress / degradation visibility
 
-Дизайн: [`docs/state-snapshotter-rework/design/status-propagation-and-visibility.md`](../docs/state-snapshotter-rework/design/status-propagation-and-visibility.md). Одна модель, фазы: **Phase 1** — progress-aware `Ready=False` (богатые reason/message, счётчики прогресса, leaf-chain в `ChildrenFailed`, mirror на `Snapshot`); **Phase 2a** — MCP/VSC wake-up/revalidation watches для деградации артефактов после `Ready=True`. Pending и degradation используют один и тот же pipeline и таксономию reason'ов.
+Дизайн: [`docs/internal/state-snapshotter-rework/design/status-propagation-and-visibility.md`](../docs/internal/state-snapshotter-rework/design/status-propagation-and-visibility.md). Одна модель, фазы: **Phase 1** — progress-aware `Ready=False` (богатые reason/message, счётчики прогресса, leaf-chain в `ChildrenFailed`, mirror на `Snapshot`); **Phase 2a** — MCP/VSC wake-up/revalidation watches для деградации артефактов после `Ready=True`. Pending и degradation используют один и тот же pipeline и таксономию reason'ов.
 
 - **Pending reasons:** `ManifestCapturePending`, `DataCapturePending` (наружу для not-ready data; `ArtifactNotReady` остаётся внутренним/compat), `ChildrenPending`, `ResidualVolumeCapturePending` (только namespace-root, fail-closed gate первого `Ready=True` до латча `residualVolumeCapture.phase==Complete`, §2.3), `ContentBindingPending` (только pre-bind на `Snapshot`).
 - **Failed reasons:** `ManifestCheckpointFailed`, `ArtifactMissing`, `DataArtifactInvalid`/`DataArtifactNotSupported`, `ArtifactFailed` (deferred — не используется в Phase 2a), `ChildrenFailed`.

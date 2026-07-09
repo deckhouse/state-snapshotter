@@ -255,7 +255,7 @@ message: "<what is wrong>"
 4. **Документация:**
    - Обновить CRD комментарии (если есть)
    - Обновить README с примерами состояний
-   - Обновить `docs/architecture/controller-pattern.md`
+   - Обновить `docs/internal/architecture/controller-pattern.md`
 
 ### Желательно
 
@@ -457,7 +457,7 @@ func (r *ManifestCheckpointController) finalizeMCR(
 
 ## Связанные документы
 
-- `docs/architecture/controller-pattern.md` — общий паттерн контроллеров
+- `docs/internal/architecture/controller-pattern.md` — общий паттерн контроллеров
 - `api/v1alpha1/conditions.go` — определение констант conditions
 
 ---

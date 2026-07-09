@@ -1,6 +1,6 @@
 ## Универсальный паттерн XxxxSnapshot / XxxxSnapshotContent
 
-> **Модуль `state-snapshotter`:** для кода и тестов см. [`docs/state-snapshotter-rework/spec/system-spec.md`](../docs/state-snapshotter-rework/spec/system-spec.md) и [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md).
+> **Модуль `state-snapshotter`:** для кода и тестов см. [`docs/internal/state-snapshotter-rework/spec/system-spec.md`](../docs/internal/state-snapshotter-rework/spec/system-spec.md) и [`design/implementation-plan.md`](../docs/internal/state-snapshotter-rework/design/implementation-plan.md).
 >
 > **Диаграмма:** связи namespace/cluster, **ownerRef (GC)** vs **логика/status**, ObjectKeeper, дочерние снимки и жизненный цикл content — PNG [`unified-snapshot-detailed.png`](unified-snapshot-detailed.png), исходник draw.io [`unified-snapshot-detailed.drawio`](unified-snapshot-detailed.drawio).
 

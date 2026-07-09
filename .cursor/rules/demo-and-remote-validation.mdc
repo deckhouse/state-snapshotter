@@ -1,12 +1,12 @@
 ---
 description: E2E strategy must support remote validation, env prep, demo YAML generation; preserve diagnostic scenarios.
 alwaysApply: false
-globs: docs/state-snapshotter-rework/testing/**/*.md,images/state-snapshotter-controller/test/**/*
+globs: docs/internal/state-snapshotter-rework/testing/**/*.md,images/state-snapshotter-controller/test/**/*
 ---
 
 # Demo and remote validation
 
-The e2e strategy (`docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`) MUST support:
+The e2e strategy (`docs/internal/state-snapshotter-rework/testing/e2e-testing-strategy.md`) MUST support:
 
 1. **Automated remote validation** — tests run on remote cluster (runner/node), not locally for validation.
 2. **Environment preparation** for demo (prerequisites: MinIO/S3, controller namespace, storage class, etc.).

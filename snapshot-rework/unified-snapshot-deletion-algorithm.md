@@ -15,7 +15,7 @@
 - `YyyySnapshot.ownerRef` → `XxxxSnapshot` (если дочерние snapshot'ы создаются с ownerRef)
 - `YyyySnapshotContent.ownerRef` → `XxxxSnapshotContent`
 - Артефакты (`ManifestCheckpoint`, `VolumeSnapshotContent`).`ownerRef` → соответствующий `*SnapshotContent`
-- **Root retained content** (`XxxxSnapshotContent`, `NamespaceSnapshotContent`): **`ownerRef` → root `ObjectKeeper`** (TTL-якорь); OK следует за root snapshot (`FollowObjectWithTTL`), **без** `ObjectKeeper.ownerReferences` на content — см. design [`namespace-snapshot-controller.md`](../docs/state-snapshotter-rework/design/namespace-snapshot-controller.md) §4.3 для namespace-flow.
+- **Root retained content** (`XxxxSnapshotContent`, `NamespaceSnapshotContent`): **`ownerRef` → root `ObjectKeeper`** (TTL-якорь); OK следует за root snapshot (`FollowObjectWithTTL`), **без** `ObjectKeeper.ownerReferences` на content — см. design [`namespace-snapshot-controller.md`](../docs/internal/state-snapshotter-rework/design/namespace-snapshot-controller.md) §4.3 для namespace-flow.
 
 ### Финалайзеры должны сниматься только контроллерами
 

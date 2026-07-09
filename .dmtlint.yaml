@@ -9,6 +9,8 @@ linters-settings:
           name: d8:state-snapshotter:controller
         - kind: ClusterRole
           name: d8:state-snapshotter:webhooks
+        - kind: ClusterRole
+          name: d8:state-snapshotter:capture-namespace
   no-cyrillic:
     exclude-rules:
       directories:

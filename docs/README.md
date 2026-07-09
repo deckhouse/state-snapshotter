@@ -33,7 +33,7 @@ See the **[User Guide](USER_GUIDE.md)** for how the `Snapshot` resource works: w
 
 ### Contributor docs (roadmap & spec)
 
-Internal design roadmap, normative excerpts, test matrix, and high-level status live under **[`docs/state-snapshotter-rework/`](state-snapshotter-rework/)** (same layout as shared Deckhouse Cursor rules). Long-form ADR drafts remain in **`snapshot-rework/`** at the repository root.
+Internal design roadmap, normative excerpts, test matrix, and high-level status live under **[`docs/internal/state-snapshotter-rework/`](internal/state-snapshotter-rework/)** (same layout as shared Deckhouse Cursor rules). Long-form ADR drafts remain in **`snapshot-rework/`** at the repository root.
 
 ### Why you should NOT disable it
 

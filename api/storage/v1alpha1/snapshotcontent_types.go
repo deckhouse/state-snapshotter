@@ -30,6 +30,7 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=stsnapct
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Manifests",type=string,JSONPath=`.status.conditions[?(@.type=="ManifestsReady")].status`
 // +kubebuilder:printcolumn:name="Volume",type=string,JSONPath=`.status.conditions[?(@.type=="VolumeReady")].status`

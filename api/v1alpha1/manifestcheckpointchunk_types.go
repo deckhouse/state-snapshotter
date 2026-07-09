@@ -22,6 +22,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mcpchunk
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Checkpoint",type=string,JSONPath=`.spec.checkpointName`
 // +kubebuilder:printcolumn:name="Index",type=integer,JSONPath=`.spec.index`
 // +kubebuilder:printcolumn:name="Objects",type=integer,JSONPath=`.spec.objectsCount`

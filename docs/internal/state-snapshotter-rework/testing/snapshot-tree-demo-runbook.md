@@ -28,7 +28,7 @@ restore, opt. каскадный GC по TTL. Детали/контракт/вн
 ## 1. Переменные и preflight
 
 ```bash
-cd /path/to/state-snapshotter/docs/state-snapshotter-rework/testing/snapshot-tree-demo
+cd /path/to/state-snapshotter/docs/internal/state-snapshotter-rework/testing/snapshot-tree-demo
 export MANIFEST_DIR="$(pwd)"
 export DEMO_NS=snapshot-demo-tree SNAP=demo-tree CSD_NAME=demo-live-vm-disk
 export STORAGE_CLASS=local-thin MOD_NS=d8-state-snapshotter

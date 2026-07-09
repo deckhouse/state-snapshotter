@@ -25,6 +25,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovmsnap
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // DemoVirtualMachineSnapshot is an intermediate demo snapshot node (PR5b) under root Snapshot; disk snapshots may attach here.
 type DemoVirtualMachineSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`

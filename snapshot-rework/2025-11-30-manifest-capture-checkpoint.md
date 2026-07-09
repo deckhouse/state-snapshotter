@@ -1,6 +1,6 @@
 ## ManifestCaptureRequest / ManifestCheckpoint — инфраструктура для сохранения манифестов объектов
 
-> **Модуль `state-snapshotter`:** MCR/MC и unified registry — разные треки; нормативные выдержки — [`docs/state-snapshotter-rework/spec/system-spec.md`](../docs/state-snapshotter-rework/spec/system-spec.md), план — [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md).
+> **Модуль `state-snapshotter`:** MCR/MC и unified registry — разные треки; нормативные выдержки — [`docs/internal/state-snapshotter-rework/spec/system-spec.md`](../docs/internal/state-snapshotter-rework/spec/system-spec.md), план — [`design/implementation-plan.md`](../docs/internal/state-snapshotter-rework/design/implementation-plan.md).
 
 # 1. Контекст и проблема
 

@@ -1,8 +1,8 @@
 # Architecture overview (pointer)
 
-Диаграммы и подробные описания паттернов контроллеров этого модуля находятся в корневом каталоге **[`docs/architecture/`](../../architecture/)** (например `controller-pattern.md`, `ready-condition-*.md`).
+Диаграммы и подробные описания паттернов контроллеров этого модуля находятся в корневом каталоге **[`docs/internal/architecture/`](../../architecture/)** (например `controller-pattern.md`, `ready-condition-*.md`).
 
-При добавлении PlantUML-обзора всего модуля можно разместить файл `system-overview.puml` **здесь** рядом с этим README, чтобы соответствовать структуре `docs/state-snapshotter-rework/architecture/` из правил репозитория.
+При добавлении PlantUML-обзора всего модуля можно разместить файл `system-overview.puml` **здесь** рядом с этим README, чтобы соответствовать структуре `docs/internal/state-snapshotter-rework/architecture/` из правил репозитория.
 
 **Навигация по rework-докам:** [`../README.md`](../README.md) (CSI / `state-snapshotter.deckhouse.io` / manifest / unified), runbook и CSD — в [`../operations/`](../operations/).
 

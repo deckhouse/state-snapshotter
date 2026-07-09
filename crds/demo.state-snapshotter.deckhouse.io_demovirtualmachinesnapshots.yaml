@@ -4,6 +4,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
   name: demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io
 spec:
   group: demo.state-snapshotter.deckhouse.io

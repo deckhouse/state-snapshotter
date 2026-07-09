@@ -53,7 +53,7 @@ golangci-lint run --build-tags ce ./...
 
 ## Controller redeploy & remote e2e (SSOT)
 
-- **Where tests live:** integration + envtest-based e2e under `images/state-snapshotter-controller/test/` (there is no top-level `tests/e2e-go`). Orchestration and when to use cluster smoke: `docs/state-snapshotter-rework/testing/e2e-testing-strategy.md`.
+- **Where tests live:** integration + envtest-based e2e under `images/state-snapshotter-controller/test/` (there is no top-level `tests/e2e-go`). Orchestration and when to use cluster smoke: `docs/internal/state-snapshotter-rework/testing/e2e-testing-strategy.md`.
 - **Before redeploy:** (1) unit tests `cd images/state-snapshotter-controller && go test ./pkg/... ./internal/...`; (2) linter `./go-lint.sh` with CI `GO_BUILD_TAGS`; (3) **if controller code changed: commit AND push first** (below), then redeploy and wait for rollout success.
 - **After redeploy:** integration/e2e or cluster smoke as required by the strategy doc / CI.
 - **Kubeconfig:** standard dev location (`~/.kube/config` / `KUBECONFIG`) — but for e2e nested-cluster debugging use the persistent tunnel below.
@@ -87,13 +87,13 @@ Any change relying on this must preserve and document the snapshot-controller de
 
 ## Delivery gating (MUST)
 
-- Implement strictly within the currently agreed stage model in `docs/state-snapshotter-rework/operations/project-status.md`. Each change declares its stage. Do NOT pull features from a later stage.
+- Implement strictly within the currently agreed stage model in `docs/internal/state-snapshotter-rework/operations/project-status.md`. Each change declares its stage. Do NOT pull features from a later stage.
 - After codegen (if API touched) and before moving to the next stage, run & pass the full test plan for the current stage.
 - Regression guarantee: on Stage N, all tests from stages 0..N must pass. Fix regressions in the same change set — no "fix later".
 
 ## Docs: SSOT & boundaries (MUST)
 
-Single source of truth per information type; others reference it. Root: `docs/state-snapshotter-rework/`.
+Single source of truth per information type; others reference it. Root: `docs/internal/state-snapshotter-rework/`.
 
 | Type | Responsibility |
 |------|----------------|
@@ -113,7 +113,7 @@ Single source of truth per information type; others reference it. Root: `docs/st
 
 ## Operations status (MUST)
 
-- Update `docs/state-snapshotter-rework/operations/project-status.md` only when a change is **critical** to plan/status — not for minor/cosmetic changes.
+- Update `docs/internal/state-snapshotter-rework/operations/project-status.md` only when a change is **critical** to plan/status — not for minor/cosmetic changes.
 - Keep it **high-level only**: stage status table, short implemented summary, in progress, planned, blockers/rollout dependencies. Do NOT put there: full state machine, long rollout steps, file-level TODOs, or spec/design/testing copy — those belong in `spec/` `design/` `testing/` `adr/`.
 
 ## E2E cluster access — persistent tunnel (127.0.0.1:6445)

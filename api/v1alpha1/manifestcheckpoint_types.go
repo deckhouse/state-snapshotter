@@ -23,6 +23,7 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mcp
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Objects",type=integer,JSONPath=`.status.totalObjects`
 // +kubebuilder:printcolumn:name="Size",type=string,JSONPath=`.status.totalSizeBytes`
 type ManifestCheckpoint struct {
