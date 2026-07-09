@@ -939,9 +939,16 @@ is pure **serialization** — 20 simultaneously-created roots drain through conc
 each per-child-GVK relay controller (`nss-chw-*`, `dynamic_watch.go`) runs at the controller-runtime **default of 1**
 (no `WithOptions`), funnelling every namespace's child-snapshot events through a single goroutine per GVK.
 
-**Next (per branch b):** sweep domain VMS/VDS `MaxConcurrentReconciles` (env-configurable, 4 → 8 → 16) with 3–5 runs
-per point, and evaluate raising the `nss-chw-*` relay concurrency above 1. Judge on `phaseATotalMs` distribution and
-wall, not single-run A/B.
+**Next (per branch b), cheapest-first:**
+1. **Relay `nss-chw-*` concurrency** (the concrete suspect at default 1) — now env-configurable via
+   `STATE_SNAPSHOTTER_RELAY_MAX_CONCURRENT_RECONCILES` (default 1 = no behaviour change). Sweep 1 → 4 → 8 and
+   re-measure. This is the cheapest test; if wall/`phaseATotalMs` drops sharply the relay funnel was the ceiling,
+   if not the hypothesis is dropped.
+2. Domain VMS/VDS `MaxConcurrentReconciles` (env-configurable, 4 → 8 → 16) if the relay bump did little.
+3. Root `Snapshot` controller concurrency if neither moved it.
+
+Judge on `phaseATotalMs` distribution and wall (≥3 runs per point), not single-run A/B. The staircase proves a
+serializing bottleneck **exists**; *where* it sits is the hypothesis these sweeps isolate.
 
 ---
 

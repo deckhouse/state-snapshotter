@@ -29,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -46,13 +47,20 @@ type snapshotDynamicWatchManager struct {
 	mgr     ctrl.Manager
 	main    *SnapshotReconciler
 	watched map[string]struct{}
+	// maxConcurrent is the per-GVK relay MaxConcurrentReconciles (STATE_SNAPSHOTTER_RELAY_MAX_CONCURRENT_RECONCILES,
+	// default 1 = controller-runtime default). >1 parallelizes child->parent wake-ups across namespaces.
+	maxConcurrent int
 }
 
-func newSnapshotDynamicWatchManager(mgr ctrl.Manager, main *SnapshotReconciler) *snapshotDynamicWatchManager {
+func newSnapshotDynamicWatchManager(mgr ctrl.Manager, main *SnapshotReconciler, maxConcurrent int) *snapshotDynamicWatchManager {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
 	return &snapshotDynamicWatchManager{
-		mgr:     mgr,
-		main:    main,
-		watched: make(map[string]struct{}),
+		mgr:           mgr,
+		main:          main,
+		watched:       make(map[string]struct{}),
+		maxConcurrent: maxConcurrent,
 	}
 }
 
@@ -94,6 +102,7 @@ func (m *snapshotDynamicWatchManager) ensureWatchLocked(ctx context.Context, gvk
 	if err := ctrl.NewControllerManagedBy(m.mgr).
 		For(obj, builder.WithPredicates(passAll)).
 		Named(name).
+		WithOptions(controller.Options{MaxConcurrentReconciles: m.maxConcurrent}).
 		Complete(relay); err != nil {
 		return fmt.Errorf("register child snapshot watch for %s: %w", gvk.String(), err)
 	}

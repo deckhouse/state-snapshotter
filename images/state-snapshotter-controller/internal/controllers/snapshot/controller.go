@@ -156,7 +156,16 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		phaseATrace:           newPhaseATracerFromEnv(),
 	}
 	mgr.GetLogger().Info("snapshot Phase-A trace", "enabled", r.phaseATrace.enabled, "env", EnvPhaseATrace)
-	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
+	// Child-snapshot watch relay (nss-chw-*) concurrency: default 1 (controller-runtime default, single
+	// goroutine per child GVK). Overridable via STATE_SNAPSHOTTER_RELAY_MAX_CONCURRENT_RECONCILES to probe
+	// whether the child->parent wake relay serializes Phase A (see design/snapshot-creation-latency.md,
+	// "Phase A is serialized on reconcile-worker concurrency"). Read once at start; needs a pod restart.
+	relayMaxConcurrent, rmcErr := config.ParseMaxConcurrentReconciles(config.EnvRelayMaxConcurrentReconciles, 1)
+	if rmcErr != nil {
+		return fmt.Errorf("snapshot controller: %w", rmcErr)
+	}
+	mgr.GetLogger().Info("snapshot child-snapshot relay concurrency", "maxConcurrentReconciles", relayMaxConcurrent, "env", config.EnvRelayMaxConcurrentReconciles)
+	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r, relayMaxConcurrent)
 	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return err
 	}
