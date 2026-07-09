@@ -903,6 +903,21 @@ by the 30s poll (and measure inter-priority-layer wake latency) — this decides
 *genuine reconcile work → domain `MaxConcurrentReconciles` with proper ≥3-run statistics*. **Do not** blanket-shrink
 500ms → 50ms anywhere (hides the problem, multiplies reconcile churn).
 
+**Instrumentation added (diagnosis-only, off by default).** Env `STATE_SNAPSHOTTER_PHASE_A_TRACE=1` turns on
+`phaseA-trace` Info logs in the Snapshot controller (`internal/controllers/snapshot/phase_a_trace.go`); no behaviour
+change when unset. Events and key fields:
+- `root-reconcile-entry`: `wakeSource` (`relay` | `relay-delete` | `queue`), `gapSincePrevMs`, `viaBackstop`
+  (true when a `queue` wake lands ~30s after the previous reconcile = the child-graph poll fired, not a child
+  event), and `relayLatencyMs` (child `ChildrenSnapshotReady=True` lastTransitionTime → parent reconcile) on relay
+  wakes;
+- `layer-ready`: per priority layer, `priority`, `layerSize`, `observeLagMs` (now − newest child ready in the layer);
+- `root-children-ready`: `phaseATotalMs` (creationTimestamp → `ChildrenSnapshotReady=True`, the robust per-root
+  number), `finalObserveLagMs`, `layers`.
+
+Decision rule for the N=20 harvest: if roots/layers wake via `viaBackstop=true` or `relayLatencyMs`/`observeLagMs`
+are large (seconds) → fix the relay/index/watch; if relay latency is small but Phase A is still large → the shared
+reconcile queue is the ceiling → domain VMS/VDS `MaxConcurrentReconciles` sweep with 3–5 runs per point.
+
 ---
 
 ## 9. Application checklist

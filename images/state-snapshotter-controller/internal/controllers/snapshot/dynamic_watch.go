@@ -35,6 +35,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
@@ -176,7 +177,15 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 		logger.Info("nss child relay: no Snapshot parent references this child and it is not a bound unified-Snapshot-owned direct child; not requeuing")
 		return ctrl.Result{}, nil
 	}
-	return r.reconcileParents(ctx, reqs)
+	wake := phaseAWakeSource{source: "relay", childGVK: r.gvk.String(), childName: req.Name}
+	if r.main != nil && r.main.phaseATrace != nil && r.main.phaseATrace.enabled {
+		if conds, _, cerr := unstructured.NestedSlice(u.Object, "status", "conditions"); cerr == nil {
+			if ts, ok := conditionCurrentTrueLastTransition(conds, snapshotpkg.ConditionChildrenSnapshotReady, u.GetGeneration()); ok {
+				wake.childReadyAt = ts
+			}
+		}
+	}
+	return r.reconcileParents(ctx, reqs, wake)
 }
 
 // childHasUnifiedSnapshotControllerOwner reports whether the child object is controller-owned by a
@@ -223,7 +232,7 @@ func (r *nssChildSnapshotWatchRelay) enqueueParentsForDeletedChild(ctx context.C
 		logger.Info("nss child relay: deleted child has no referencing parents (already pruned)")
 		return ctrl.Result{}, nil
 	}
-	return r.reconcileParents(ctx, reqs)
+	return r.reconcileParents(ctx, reqs, phaseAWakeSource{source: "relay-delete", childGVK: r.gvk.String(), childName: req.Name})
 }
 
 // buildSyntheticDeletedChild reconstructs the minimal child snapshot identity (apiVersion, kind,
@@ -241,13 +250,21 @@ func buildSyntheticDeletedChild(gvk schema.GroupVersionKind, namespace, name str
 // into a single best result (requeue wins, longest RequeueAfter wins) plus the first error. Returning
 // the error preserves the controller-runtime backoff requeue of the child event so a transient parent
 // failure is retried rather than dropped.
-func (r *nssChildSnapshotWatchRelay) reconcileParents(ctx context.Context, reqs []reconcile.Request) (ctrl.Result, error) {
+func (r *nssChildSnapshotWatchRelay) reconcileParents(ctx context.Context, reqs []reconcile.Request, wake phaseAWakeSource) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).V(1)
 	parentNames := make([]string, 0, len(reqs))
 	for _, pr := range reqs {
 		parentNames = append(parentNames, pr.Namespace+"/"+pr.Name)
 	}
 	logger.Info("nss child relay: enqueuing parent Snapshot reconciles", "parentCount", len(reqs), "parents", parentNames)
+
+	// Carry the relay wake-source into the parent reconcile so the Phase-A trace can attribute the wake to
+	// a child event (this relay) vs the queue/30s backstop. No-op when tracing is disabled (read only in
+	// phaseATracer.entry, itself gated). The relay calls r.main.Reconcile synchronously, so the value
+	// reaches the same reconcile invocation.
+	if wake.source != "" {
+		ctx = contextWithPhaseAWake(ctx, wake)
+	}
 
 	var best ctrl.Result
 	var firstErr error

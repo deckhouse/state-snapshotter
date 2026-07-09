@@ -75,6 +75,9 @@ type SnapshotReconciler struct {
 	// captureSweepFlight single-flights the pre-MCR namespace capture sweep per root Snapshot UID so
 	// concurrent reconciles of the same Snapshot do not each run the identical full sweep (H5).
 	captureSweepFlight *captureSweepSingleflight
+	// phaseATrace is an env-gated, diagnosis-only tracer for the creation -> ChildrenSnapshotReady path
+	// (relay-wake vs 30s backstop, observe-lag). No-op unless STATE_SNAPSHOTTER_PHASE_A_TRACE is set.
+	phaseATrace *phaseATracer
 }
 
 // selfSubjectAccessReviewer is the minimal SelfSubjectAccessReview creator used by the capture-RBAC gate
@@ -150,7 +153,9 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
 		captureSweepFlight:    newCaptureSweepSingleflight(),
+		phaseATrace:           newPhaseATracerFromEnv(),
 	}
+	mgr.GetLogger().Info("snapshot Phase-A trace", "enabled", r.phaseATrace.enabled, "env", EnvPhaseATrace)
 	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
 	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return err
@@ -199,6 +204,8 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 			"requeue", res.Requeue, "requeueAfterMs", res.RequeueAfter.Milliseconds(), "err", retErr != nil,
 			"durMs", time.Since(reconcileStart).Milliseconds())
 	}()
+	r.phaseATrace.entry(ctx, req.NamespacedName)
+
 	nsSnap := &storagev1alpha1.Snapshot{}
 	if err := r.snapshotReader().Get(ctx, req.NamespacedName, nsSnap); err != nil {
 		if errors.IsNotFound(err) {

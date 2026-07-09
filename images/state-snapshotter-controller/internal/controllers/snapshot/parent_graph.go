@@ -128,6 +128,11 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	}
 
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
+	// Phase-A trace bookkeeping (no-op unless STATE_SNAPSHOTTER_PHASE_A_TRACE is set): the newest child
+	// ChildrenSnapshotReady=True lastTransitionTime across ready layers, and the count of layers that
+	// passed, used to attribute the root's observe-lag at completion.
+	var lastLayerMaxReadyAt time.Time
+	readyLayers := 0
 	coverage := newSnapshotCoverageChecker(readCache, nsSnap.Namespace, nil)
 	for layerStart := 0; layerStart < len(mappings); {
 		priority := mappings[layerStart].Priority
@@ -176,6 +181,14 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 			timings.publish += time.Since(publishStart)
 			return changed, false, err
 		}
+		if r.phaseATrace != nil && r.phaseATrace.enabled {
+			maxTS := r.layerMaxChildrenReadyTransition(ctx, nsSnap.Namespace, layerRefs, readCache)
+			r.phaseATrace.layerReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, priority, len(layerRefs), maxTS)
+			if maxTS.After(lastLayerMaxReadyAt) {
+				lastLayerMaxReadyAt = maxTS
+			}
+			readyLayers++
+		}
 		coverage = newSnapshotCoverageChecker(readCache, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
 		layerStart = layerEnd
 	}
@@ -187,6 +200,8 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	if err != nil {
 		return false, false, err
 	}
+
+	r.phaseATrace.rootReady(ctx, nsSnap, readyLayers, lastLayerMaxReadyAt)
 
 	_ = content
 	return statusChanged, true, nil
