@@ -869,18 +869,39 @@ counts do not reduce the residual ~26s N=20 wall. The residual is **structural**
 the demo-chain 500ms `RequeueAfter` poll cadence (see next). Further QPS/concurrency tuning is diminishing returns.
 The investigation therefore moves from *throughput* to the *architecture of readiness propagation*.
 
-### Next — readiness propagation is poll-paced, not event-driven (demo chain) — OPEN
+### Next — readiness-propagation poll audit (read-only): Phase A is already event-driven — OPEN
 
-**Hypothesis (from the throughput-exhausted result + STOP analysis).** The residual Phase-A / wall is paced by the
-`500ms` self-requeue cadence in the demo domain controllers rather than by any throughput limit. The demo VM/Disk/
-snapshot reconcilers advance on `ctrl.Result{RequeueAfter: 500ms}` (`defaultDemoResourceRequeueAfter` /
-`defaultDemoSnapshotRequeueAfter`, `demo/materialization_constants.go`) while waiting for children to become
-Ready/Archived, so each layered wait can add up to ~0.5s of pure poll latency even when the child became ready right
-after the previous reconcile. Across priority layers this compounds into the observed staircase. Target: make the
-demo chain **event-driven** — a child Ready/Archived transition should *wake the waiting parent* (watch + ownerRef or
-a field-index/mapper on the ref field), keeping `RequeueAfter` only as a safety backstop, not the progress
-mechanism. **Do not** merely shrink 500ms → 50ms (that hides the problem and multiplies reconcile churn). Re-measure
-N=20 wall vs the ~26s baseline after the conversion (averaged over ≥3 runs per the caveat above).
+**Hypothesis tested.** The residual Phase-A / wall is paced by a `500ms` self-requeue cadence in the demo/domain
+controllers waiting for children to become Ready/Archived.
+
+**Read-only finding — the premise does not hold for Phase A.** A full audit of every `RequeueAfter` on the create
+path shows the demo/domain chain and the root child-graph barrier (= Phase A, `creation → ChildrenSnapshotReady`)
+are **already event-driven**, with polls used only as missed-event backstops:
+
+| callsite | interval | phase | role |
+|---|---|---|---|
+| `snapshot/controller.go` `snapshotChildGraphPollInterval` | **30s** | **A** | missed-event **backstop** only; primary wake is the per-GVK child watch relay |
+| `snapshot/dynamic_watch.go` (`nss-chw-*`) + `child_snapshot_watches.go` | event | **A** | per-child-snapshot-GVK watch (allow-all predicate, status-only updates fire) → reverse field-index (`SnapshotChildrenRefFieldIndex`) → enqueue parent |
+| `demo/virtualmachinesnapshot_controller.go` | event | **A** | watches child `DemoVirtualDiskSnapshot`; `MarkPlanningReady` in one pass (does **not** wait for child readiness) |
+| `demo/virtualdisksnapshot_controller.go:135` `defaultDemoSnapshotRequeueAfter` | 500ms | **A** | **not hot path** — fires only when the source PVC is absent (never on a Ready stand); happy path is one-shot plan → `MarkPlanningReady` |
+| `demo/virtualmachine_controller.go`, `virtualdisk_controller.go` `defaultDemoResourceRequeueAfter` | 500ms | stand-setup | source VM/Disk lifecycle (stand readiness, **before** any snapshot) — not on snapshot Phase A |
+| `snapshotcontent/controller.go` `defaultSnapshotContentRequeueAfter` | 500ms | **B** | **the real poll cadence** — bottom-up `ManifestsArchived` staircase; every not-ready node self-requeues 500ms (already has partial content/MCP/artifact watches, 500ms is the backstop) |
+| `snapshot/volume_capture.go` `requeueVolumeCaptureIf` | 500ms | **B** | volume data leg (VolumeSnapshot/VCR pending, safe-delete-after-handoff) |
+| `snapshot/ready_patch.go:87` | 500ms | C | terminal child-failed Ready bridge (rare) |
+
+**Conclusion.** There is **no 500ms poll on the Phase-A critical path** — Phase A is event-driven with a 30s
+missed-event backstop, and the demo controllers are event-driven single-pass planners. Converting a "demo 500ms
+poll" would therefore **not** move the dominant Phase-A term. The only genuine 500ms staircase is in the
+`SnapshotContent` controller (Phase B, bottom-up archive), which is the *smaller* term (~5.8s vs A's ~17.4s at N=20)
+and was already found partly QPS-bound.
+
+**Open question re-framed.** Since Phase A is already event-driven yet still ~17s at N=20, the residual is either
+(a) the 30s child-graph backstop landing on the critical path when a relay wake is missed/lagged (would also explain
+the large single-run A/B variance), or (b) genuine reconcile-throughput on a shared workqueue at N × (VMs+disks). The
+cheap next diagnostic is to instrument, per root, whether `ChildrenSnapshotReady=True` is driven by a relay wake or
+by the 30s poll (and measure inter-priority-layer wake latency) — this decides between *fix a laggy relay* and
+*genuine reconcile work → domain `MaxConcurrentReconciles` with proper ≥3-run statistics*. **Do not** blanket-shrink
+500ms → 50ms anywhere (hides the problem, multiplies reconcile churn).
 
 ---
 
