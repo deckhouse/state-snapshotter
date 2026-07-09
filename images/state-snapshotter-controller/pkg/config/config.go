@@ -49,9 +49,9 @@ const (
 	//
 	// Production default: 30 days (720h). This is the "recycle bin" retention window (wave4B) — how long the
 	// durable cluster-scoped SnapshotContent tree survives after its namespaced Snapshot is deleted, during
-	// which the snapshot can be restored via StaticBind. Override per install with the snapshotRootOkTtl
+	// which the captured data remains recoverable. Override per install with the snapshotRootOkTtl
 	// module parameter (env STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL). Keep this comfortably long: retained
-	// root content disappears once the window elapses, so a short value silently shrinks the restore window.
+	// root content disappears once the window elapses, so a short value silently shrinks the recovery window.
 	DefaultSnapshotRootOKTTL = 30 * 24 * time.Hour // 720h
 	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try EnvSnapshotRootOKTTLAlt, then default.
 	EnvSnapshotRootOKTTL = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"

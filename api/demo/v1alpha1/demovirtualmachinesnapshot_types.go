@@ -36,16 +36,14 @@ type DemoVirtualMachineSnapshot struct {
 }
 
 // DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot. spec.mode
-// selects the content source: Capture (sourceRef), Import (no source), or StaticBind (source.snapshotContentName).
+// selects the content source: Capture (sourceRef) or Import (no source).
 // +k8s:deepcopy-gen=true
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 // +kubebuilder:validation:XValidation:rule="self.mode == 'Capture' ? has(self.sourceRef) : !has(self.sourceRef)",message="spec.sourceRef is required in Capture mode and forbidden otherwise"
-// +kubebuilder:validation:XValidation:rule="self.mode == 'StaticBind' ? (has(self.source) && has(self.source.snapshotContentName)) : (!has(self.source) || !has(self.source.snapshotContentName))",message="spec.source.snapshotContentName is required when mode is StaticBind and forbidden otherwise"
 type DemoVirtualMachineSnapshotSpec struct {
-	// Mode selects how this VM snapshot obtains its content (Capture|Import|StaticBind), immutable.
+	// Mode selects how this VM snapshot obtains its content (Capture|Import), immutable.
 	// Capture: capture the live source VM (spec.sourceRef) and plan children. Import: materialize from an
-	// uploaded payload plus child refs (no live capture). StaticBind: bind an existing SnapshotContent
-	// (spec.source.snapshotContentName) — restore from the retained-content "bin" (wave4B).
+	// uploaded payload plus child refs (no live capture).
 	// +kubebuilder:default=Capture
 	// +optional
 	Mode storagev1alpha1.SnapshotMode `json:"mode,omitempty"`
@@ -55,10 +53,6 @@ type DemoVirtualMachineSnapshotSpec struct {
 	// mode and forbidden otherwise.
 	// +optional
 	SourceRef *SnapshotSourceRef `json:"sourceRef,omitempty"`
-
-	// Source carries mode-specific source parameters. Required (snapshotContentName) only in StaticBind mode.
-	// +optional
-	Source *storagev1alpha1.SnapshotSource `json:"source,omitempty"`
 }
 
 // DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.
@@ -105,12 +99,6 @@ type DemoVirtualMachineSnapshotStatus struct {
 // children planning (parity with Snapshot.IsImportMode).
 func (s *DemoVirtualMachineSnapshot) IsImportMode() bool {
 	return s != nil && s.Spec.Mode == storagev1alpha1.SnapshotModeImport
-}
-
-// IsStaticBind reports whether this VM snapshot statically binds to pre-provisioned content
-// (spec.mode == StaticBind).
-func (s *DemoVirtualMachineSnapshot) IsStaticBind() bool {
-	return s != nil && s.Spec.Mode == storagev1alpha1.SnapshotModeStaticBind
 }
 
 // +kubebuilder:object:root=true

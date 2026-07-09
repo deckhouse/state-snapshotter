@@ -192,7 +192,7 @@ func captureRBACHookSpecs() {
 			assertResourceGone(ctx, roleBindingGVR, ns, captureRoleBindingName, suiteCfg.captureReadyTO)
 		})
 
-		It("does not create a capture RoleBinding for import- or static-bind snapshots", func() {
+		It("does not create a capture RoleBinding for import snapshots", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
@@ -206,20 +206,7 @@ func captureRBACHookSpecs() {
 				"metadata":   map[string]interface{}{"name": "e1-import", "namespace": ns},
 				"spec":       map[string]interface{}{"mode": "Import"},
 			}}
-			staticSnap := &unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
-				"kind":       "Snapshot",
-				"metadata":   map[string]interface{}{"name": "e1-static", "namespace": ns},
-				// mode: StaticBind is required for spec.source.snapshotContentName — the spec-level CEL rule
-				// requires the two to co-occur (snapshotContentName is forbidden in the default Capture mode).
-				"spec": map[string]interface{}{
-					"mode":   "StaticBind",
-					"source": map[string]interface{}{"snapshotContentName": "no-such-content"},
-				},
-			}}
 			_, err := suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, importSnap, metav1.CreateOptions{})
-			Expect(err).NotTo(HaveOccurred())
-			_, err = suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, staticSnap, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Asserting no capture RoleBinding ever appears in the namespace")

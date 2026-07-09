@@ -46,7 +46,7 @@ const (
 // CaptureStateStatus is the umbrella for internal capture signals on a snapshot object. It has two
 // sub-structures split strictly by writer, so each is patched independently by exactly one controller
 // (nobody replaces the whole captureState): commonController is written by the core, domainSpecificController
-// by the domain (via the SDK). It is present only in Capture mode (absent on Import/StaticBind).
+// by the domain (via the SDK). It is present only in Capture mode (absent on Import).
 // +k8s:deepcopy-gen=true
 type CaptureStateStatus struct {
 	// CommonController holds the core-written capture-leg success latches. Single writer: core.
@@ -134,7 +134,7 @@ type DomainSpecificControllerCaptureState struct {
 	//
 	// Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
 	// distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
-	// (e.g. a disk) never enumerates children, so it always writes []. Absent in Import/StaticBind
+	// (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
 	// (no live capture happens).
 	// +optional
 	// +listType=atomic

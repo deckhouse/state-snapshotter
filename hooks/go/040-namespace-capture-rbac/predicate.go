@@ -31,7 +31,7 @@ import (
 // re-grant broad read rights. The latch flips once the bound SnapshotContent reports the subtree
 // manifests persisted, and is monotonic (never flips back), so the grant is dropped for good.
 //
-//   - import / static-bind snapshots never capture the live namespace -> false.
+//   - import snapshots never capture the live namespace -> false.
 //   - manifestCaptured=true: the subtree's manifests are captured; reading the namespace is no longer
 //     needed (immune to later Ready degradation or a child disappearing — the point of the latch).
 //   - Ready=False with a terminal reason (IsReasonTerminal): manifests can never be captured for this
@@ -42,7 +42,7 @@ func needsCaptureRBAC(snap *storagev1alpha1.Snapshot) bool {
 	if snap == nil {
 		return false
 	}
-	if snap.IsImportMode() || snap.IsStaticBind() {
+	if snap.IsImportMode() {
 		return false
 	}
 	if cs := snap.Status.CaptureState; cs != nil && cs.CommonController != nil &&

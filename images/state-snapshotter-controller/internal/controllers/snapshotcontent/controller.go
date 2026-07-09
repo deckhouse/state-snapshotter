@@ -1201,8 +1201,8 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 // the edge set on that partial view would permanently strand a later-declared child (e.g. the orphan
 // VolumeSnapshot) as unlinked -> ChildrenLinkPending forever. The ownerChildSetFrozen gate enforces this:
 // a Capture owner is projected only once its phase is Planned/Finished (or terminal Failed), mirroring the
-// SDK childrenSetFrozen semantics; Import/StaticBind owners have no capture phase and write
-// childrenSnapshotRefs atomically, so they are frozen from the start and always project. Past the gate the
+// SDK childrenSetFrozen semantics; Import owners have no capture phase and write childrenSnapshotRefs
+// atomically, so they are frozen from the start and always project. Past the gate the
 // all-or-nothing publish still waits until every declared child snapshot has bound its content — which,
 // because the declared set is frozen, is exactly the complete set. It runs decoupled from the condition
 // MergeFrom in reconcileCommonSnapshotContentStatus (a separate optimistic-locked status patch), matching
@@ -1225,8 +1225,8 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 	// A Capture owner publishes childrenSnapshotRefs incrementally while planning and only freezes the set at
 	// Planned; projecting before then would freeze an INCOMPLETE edge set (Option A CEL makes it immutable
 	// once non-empty), permanently stranding a later-declared child (e.g. the orphan/residual VolumeSnapshot)
-	// as unlinked -> ChildrenLinkPending forever. Requeue until the owner freezes; Import/StaticBind owners
-	// have no capture phase, so ownerChildSetFrozen returns true for them and preserves today's behavior.
+	// as unlinked -> ChildrenLinkPending forever. Requeue until the owner freezes; Import owners have no
+	// capture phase, so ownerChildSetFrozen returns true for them and preserves today's behavior.
 	if !ownerChildSetFrozen(owner) {
 		return true, nil
 	}
@@ -1268,14 +1268,11 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 // Capture owners publish childrenSnapshotRefs INCREMENTALLY while planning (domain children first, then the
 // residual/orphan VolumeSnapshot wave) and only freeze the declared set at barrier 1 (phase >= Planned);
 // Failed is terminal (a failed snapshot never re-plans). This mirrors the SDK childrenSetFrozen semantics
-// (pkg/snapshotsdk: Planned/Finished/Failed are frozen). Import/StaticBind owners have no capture phase —
-// their childrenSnapshotRefs is written atomically (import upload / static restore) — so their set is frozen
+// (pkg/snapshotsdk: Planned/Finished/Failed are frozen). Import owners have no capture phase —
+// their childrenSnapshotRefs is written atomically (import upload) — so their set is frozen
 // from the start and they always project.
 func ownerChildSetFrozen(owner *unstructured.Unstructured) bool {
 	if usecase.IsUnstructuredImportMode(owner) {
-		return true
-	}
-	if mode, _, _ := unstructured.NestedString(owner.Object, "spec", "mode"); mode == string(storagev1alpha1.SnapshotModeStaticBind) {
 		return true
 	}
 	phase, _, _ := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "phase")

@@ -39,12 +39,14 @@ const (
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // SnapshotContent holds the result of a snapshot (shared carrier for multiple snapshot root kinds).
 //
-// The spec is immutable EXCEPT for the snapshotRef back-reference, which the recycle-bin restore path
-// (wave4B) re-points onto a freshly re-created snapshot subject. That single carve-out is gated on the
-// recycle-bin latch status.parentDeleted: while the owning Snapshot is alive the ref is frozen (the
-// anti-spoofing handshake), and it becomes re-pointable only after the parent was deleted and this
-// cluster-scoped content survives in the TTL bin. deletionPolicy stays immutable in all cases. The rules
-// live on the root object (not the spec field) so CEL can read both self.spec and self.status.
+// The spec is immutable EXCEPT for the snapshotRef back-reference, which may be re-pointed onto a freshly
+// re-created snapshot subject when recovering a content from the recycle bin. That single carve-out is
+// gated on the recycle-bin latch status.parentDeleted: while the owning Snapshot is alive the ref is
+// frozen (the anti-spoofing handshake), and it becomes re-pointable only after the parent was deleted and
+// this cluster-scoped content survives in the TTL bin. It is the escape hatch that keeps recovery possible
+// (the automated restore flow is not yet defined; recovery is done by manual intervention).
+// deletionPolicy stays immutable in all cases. The rules live on the root object (not the spec field) so
+// CEL can read both self.spec and self.status.
 // +kubebuilder:validation:XValidation:rule="self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status) && has(self.status.parentDeleted) && self.status.parentDeleted)",message="SnapshotContent spec.snapshotRef is immutable until the parent Snapshot is deleted (recycle-bin restore)"
 // +kubebuilder:validation:XValidation:rule="has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy) && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)",message="SnapshotContent spec.deletionPolicy is immutable"
 type SnapshotContent struct {
@@ -71,13 +73,13 @@ type SnapshotContentSpec struct {
 	// SnapshotRef is the required back-reference to the snapshot subject that owns this content, mirroring
 	// VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time by whichever controller binds
 	// the content via the snapshot's status.boundSnapshotContentName (a core Snapshot, a domain XXXSnapshot,
-	// or a CSI VolumeSnapshot for orphan volume nodes), and it is the anti-spoofing handshake: a consumer
-	// (static bind / restore) accepts a content only when this ref points back at the very snapshot that
-	// referenced it, so a user cannot attach a foreign content by pointing status.boundSnapshotContentName
-	// at it. It is immutable while the owning Snapshot is alive; the recycle-bin restore path (wave4B)
-	// re-points it onto a freshly re-created subject only once status.parentDeleted latched true (see the
-	// object-level XValidation rules). The anti-spoofing check is not weakened by this: restore proceeds by
-	// re-pointing the ref onto the new subject's identity, not by bypassing the handshake.
+	// or a CSI VolumeSnapshot for orphan volume nodes), and it is the anti-spoofing handshake: the restore
+	// path accepts a content only when this ref points back at the very snapshot that referenced it, so a
+	// user cannot attach a foreign content by pointing status.boundSnapshotContentName at it. It is
+	// immutable while the owning Snapshot is alive; it may be re-pointed onto a freshly re-created subject
+	// only once status.parentDeleted latched true (see the object-level XValidation rules). The
+	// anti-spoofing check is not weakened by this: recovery proceeds by re-pointing the ref onto the new
+	// subject's identity, not by bypassing the handshake.
 	// +kubebuilder:validation:Required
 	SnapshotRef *SnapshotSubjectRef `json:"snapshotRef"`
 }

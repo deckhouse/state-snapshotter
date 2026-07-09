@@ -244,8 +244,8 @@ func (r *Resolver) resolveOrphanVolumeChildNode(ctx context.Context, namespace, 
 	}
 	// Anti-spoofing handshake: the bound child content must point its spec.snapshotRef back at this very
 	// VolumeSnapshot handle. status.boundSnapshotContentName alone is not trustworthy (a status writer
-	// could aim it at a foreign content); requiring the reverse reference closes that gap, mirroring CSI
-	// VolumeSnapshot<->VolumeSnapshotContent and the core static-bind handshake.
+	// could aim it at a foreign content); requiring the reverse reference closes that gap, mirroring the
+	// CSI VolumeSnapshot<->VolumeSnapshotContent back-binding handshake.
 	if err := verifyOrphanContentSnapshotRef(childContent, namespace, vsName, vsUID, childContentName); err != nil {
 		return nil, err
 	}

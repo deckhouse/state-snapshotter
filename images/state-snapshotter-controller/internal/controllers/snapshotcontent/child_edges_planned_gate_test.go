@@ -57,8 +57,8 @@ func ownerWithMode(mode storagev1alpha1.SnapshotMode) *unstructured.Unstructured
 }
 
 // TestOwnerChildSetFrozen pins the gate decision: a Capture owner's declared child set is frozen only at
-// phase >= Planned (Planned/Finished) or terminal Failed; Import/StaticBind owners (no capture phase) are
-// frozen from the start because they write childrenSnapshotRefs atomically.
+// phase >= Planned (Planned/Finished) or terminal Failed; Import owners (no capture phase) are frozen
+// from the start because they write childrenSnapshotRefs atomically.
 func TestOwnerChildSetFrozen(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -71,7 +71,6 @@ func TestOwnerChildSetFrozen(t *testing.T) {
 		{"capture Finished", captureOwnerWithPhase(t, string(storagev1alpha1.SnapshotCapturePhaseFinished)), true},
 		{"capture Failed", captureOwnerWithPhase(t, string(storagev1alpha1.SnapshotCapturePhaseFailed)), true},
 		{"import mode (no phase)", ownerWithMode(storagev1alpha1.SnapshotModeImport), true},
-		{"static bind mode (no phase)", ownerWithMode(storagev1alpha1.SnapshotModeStaticBind), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,6 +29,12 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
+
+// readyCond returns the Ready condition from a status condition slice (nil if absent).
+func readyCond(t *testing.T, conds []metav1.Condition) *metav1.Condition {
+	t.Helper()
+	return meta.FindStatusCondition(conds, snapshotpkg.ConditionReady)
+}
 
 func importSnapshot() *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{

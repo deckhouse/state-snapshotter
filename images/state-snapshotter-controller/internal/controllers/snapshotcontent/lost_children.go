@@ -50,9 +50,9 @@ import (
 //     content, so inspect the child SnapshotContents directly. A missing child content is Lost (terminal:
 //     content names are UID-derived, a recreated child cannot relink into the immutable frozen edge set).
 //     A surviving child content whose owning child CR is currently ABSENT (checked live via the content's
-//     own spec.snapshotRef, NOT the monotonic status.parentDeleted latch, so a StaticBind restore heals it)
-//     is ChildSnapshotDeleted when that content is Ready (capture complete, restorable from the recycle bin
-//     via StaticBind) and ChildSnapshotLost when it is not (an incomplete capture cannot be resumed).
+//     own spec.snapshotRef, NOT the monotonic status.parentDeleted latch, so a manual restore of the child
+//     CR heals it) is ChildSnapshotDeleted when that content is Ready (capture complete, its data survives
+//     in the recycle bin) and ChildSnapshotLost when it is not (an incomplete capture cannot be resumed).
 //
 //   - not frozen yet (edges empty, still linking post-Planned): inspect the declared child CRs on the
 //     owner's status.childrenSnapshotRefs. A declared child CR absent (uncached) is Lost — it was created
@@ -117,27 +117,27 @@ func (r *SnapshotContentController) detectLostFromFrozenEdges(
 			return "", "", existsErr
 		}
 		if crPresent {
-			// The child CR is alive (or was restored via StaticBind): this edge is healthy. Checking the
+			// The child CR is alive (or was manually restored): this edge is healthy. Checking the
 			// CR live — instead of the monotonic status.parentDeleted latch — is what lets a restore
 			// self-heal the owner mirror back to Ready.
 			continue
 		}
 		// The child CR was deleted while its content survives in the recycle bin.
 		if meta.IsStatusConditionTrue(child.Status.Conditions, snapshot.ConditionReady) {
-			// Capture complete: restorable from the bin via StaticBind (non-terminal). Remember and keep
+			// Capture complete: the data survives in the recycle bin (non-terminal). Remember and keep
 			// scanning — a terminal Lost elsewhere in the set wins.
 			if deletedChild == "" {
 				deletedChild = name
 			}
 			continue
 		}
-		// Surviving but not-Ready content: an incomplete capture cannot resume via StaticBind — terminal.
+		// Surviving but not-Ready content: an incomplete capture cannot resume — terminal.
 		return snapshot.ReasonChildSnapshotLost,
 			fmt.Sprintf("child snapshot for SnapshotContent %q was deleted mid-capture (its content is not Ready and cannot resume); the child is unrecoverably lost — a new snapshot is required", name), nil
 	}
 	if deletedChild != "" {
 		return snapshot.ReasonChildSnapshotDeleted,
-			fmt.Sprintf("declared child snapshot for SnapshotContent %q was deleted but its captured content survives in the recycle bin; restore the child by re-creating the child Snapshot with spec.source.snapshotContentName=%q (StaticBind) and the snapshot recovers", deletedChild, deletedChild), nil
+			fmt.Sprintf("declared child snapshot for SnapshotContent %q was deleted; its captured content still survives in the recycle bin (the data is intact), but the namespaced child snapshot is gone", deletedChild), nil
 	}
 	return "", "", nil
 }
@@ -189,7 +189,7 @@ func (r *SnapshotContentController) detectLostFromDeclaredRefs(
 // childOwningSnapshotExists reports whether the child SnapshotContent's owning child snapshot CR (resolved
 // live via the content's own spec.snapshotRef) currently exists. It is the authoritative "is the child CR
 // present?" signal for the frozen-edge fold: unlike the monotonic status.parentDeleted latch it flips back
-// to true after a StaticBind restore recreates the (deterministically-named) child CR, so the owner mirror
+// to true after a manual restore recreates the (deterministically-named) child CR, so the owner mirror
 // self-heals. A content with no resolvable snapshotRef is treated as present (fail-open — never a false
 // terminal). Namespace comes from the ref (child snapshots are namespaced); the CR is read UNCACHED.
 func (r *SnapshotContentController) childOwningSnapshotExists(ctx context.Context, child *storagev1alpha1.SnapshotContent) (bool, error) {

@@ -255,9 +255,8 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Ensure the root ObjectKeeper for the Snapshot record's own TTL GC. The returned keeper is no longer
 	// consumed here: import content is now created + anchored on the root keeper by the generic binder
-	// (creator, content-single-writer design §10), and the capture/static-bind paths anchor their own
-	// content. This ensure is kept for its side-effect (the Snapshot-following keeper must exist for every
-	// path, including root static-bind, which the binder skips).
+	// (creator, content-single-writer design §10), and the capture path anchors its own content. This
+	// ensure is kept for its side-effect (the Snapshot-following keeper must exist for every path).
 	_, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
 		ctx,
 		r.Client,
@@ -289,18 +288,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
-	}
-
-	// CSI-like static (pre-provisioning) bind: when spec.source.snapshotContentName is set the
-	// Snapshot binds to existing pre-provisioned content (created by the import path) instead of
-	// running dynamic capture. This MUST be handled before the capture path below. The root reconciler
-	// owns the root static-bind (the generic binder skips root static-bind — see
-	// genericbinder/static_bind.go reconcileGenericStaticBind root-skip).
-	// The root ObjectKeeper ensured above is intentionally kept for static-bind Snapshots too: it
-	// TTL-cleans the Snapshot record itself (its cascade to retained content is simply a no-op here,
-	// since the pre-provisioned content is owned via the import path, not re-owned on this path).
-	if nsSnap.IsStaticBind() {
-		return r.reconcileStaticBind(ctx, nsSnap)
 	}
 
 	// Import-mode Snapshots (spec.source.import) are materialized from an uploaded payload

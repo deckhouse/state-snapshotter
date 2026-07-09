@@ -212,7 +212,7 @@ func (r *SnapshotContentController) patchOwnerReadyFromContent(
 }
 
 // ownerDomainCapturePhase reads status.captureState.domainSpecificController.phase off the owning Snapshot.
-// It is "" when the owner is not a domain-capture kind (import/static-bind/leaf handle), which the callers
+// It is "" when the owner is not a domain-capture kind (import/leaf handle), which the callers
 // use to skip the domain barriers for non-domain owners.
 func ownerDomainCapturePhase(obj *unstructured.Unstructured) string {
 	phase, _, _ := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", "phase")

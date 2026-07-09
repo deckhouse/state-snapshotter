@@ -56,7 +56,7 @@ spec:
             type: object
           spec:
             description: |-
-              SnapshotSpec is the capture/import/static-bind mode selector and is fully immutable after creation. A
+              SnapshotSpec is the capture/import mode selector and is fully immutable after creation. A
               snapshot is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the
               spec must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
               UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
@@ -69,13 +69,9 @@ spec:
                     - Capture (default): dynamic namespace capture from the live cluster.
                     - Import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
                       plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
-                    - StaticBind: CSI-like static binding to an existing pre-provisioned SnapshotContent; the controller
-                      does not create MCR/VCR and validates that spec.source.snapshotContentName points back at this
-                      Snapshot via SnapshotContent.spec.snapshotRef.
                 enum:
                 - Capture
                 - Import
-                - StaticBind
                 type: string
               resourceSelector:
                 description: |-
@@ -89,7 +85,7 @@ spec:
                   matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
                   When omitted, all resources are captured (no filtering).
 
-                  Ignored for non-Capture modes (Import / StaticBind): those do not list the live namespace.
+                  Ignored for non-Capture modes (Import): those do not list the live namespace.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -134,26 +130,10 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-              source:
-                description: |-
-                  Source carries mode-specific source parameters. In StaticBind mode source.snapshotContentName is
-                  required (and forbidden in every other mode); Capture and Import take no source parameters.
-                properties:
-                  snapshotContentName:
-                    description: |-
-                      SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-                      (static pre-provisioning, analogous to volumeSnapshotContentName). Required when mode is StaticBind.
-                    minLength: 1
-                    type: string
-                type: object
             type: object
             x-kubernetes-validations:
             - message: spec is immutable
               rule: self == oldSelf
-            - message: spec.source.snapshotContentName is required when mode is StaticBind
-                and forbidden otherwise
-              rule: 'self.mode == ''StaticBind'' ? (has(self.source) && has(self.source.snapshotContentName))
-                : (!has(self.source) || !has(self.source.snapshotContentName))'
           status:
             properties:
               boundSnapshotContentName:
@@ -223,7 +203,7 @@ spec:
 
                           Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
                           distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
-                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import/StaticBind
+                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
                           (no live capture happens).
                         items:
                           description: |-
@@ -366,9 +346,8 @@ spec:
                 description: |-
                   ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate
                   (the whole-subtree set of source objects vetoed out of this snapshot). It is written ONLY by the
-                  core, exactly as it mirrors Ready from the bound content; on StaticBind-restore it is repopulated
-                  from the surviving content. It is a user-facing audit view — the durable truth lives on the
-                  cluster-scoped SnapshotContent (which outlives this namespaced object).
+                  core, exactly as it mirrors Ready from the bound content. It is a user-facing audit view — the
+                  durable truth lives on the cluster-scoped SnapshotContent (which outlives this namespaced object).
                 items:
                   description: |-
                     ExcludedObjectRef identifies one source object excluded from a snapshot (element of

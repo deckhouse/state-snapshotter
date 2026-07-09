@@ -105,15 +105,6 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
-	// StaticBind mode (recycle-bin restore, wave4B): this VM snapshot binds to a pre-provisioned, surviving
-	// SnapshotContent (spec.source.snapshotContentName) instead of capturing. The domain controller does NO
-	// capture planning (no source-VM lookup, no children planning, no MCR); the core validates the
-	// back-binding and mirrors Ready/excludedRefs from the existing content, and re-creates the surviving
-	// child subtree as StaticBind. Domain planning is trivially complete for a static-bind node.
-	if s.IsStaticBind() {
-		return ctrl.Result{}, nil
-	}
-
 	adapter := demoVirtualMachineSnapshotAdapter{snap: s}
 	sdk := r.capture()
 

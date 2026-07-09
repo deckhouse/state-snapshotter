@@ -67,11 +67,6 @@ func TestNeedsCaptureRBAC(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "static bind never captures live namespace",
-			snap: &storagev1alpha1.Snapshot{Spec: storagev1alpha1.SnapshotSpec{Mode: storagev1alpha1.SnapshotModeStaticBind}},
-			want: false,
-		},
-		{
 			name: "no captureState yet -> grant (capture about to start)",
 			snap: &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Namespace: "ns"}},
 			want: true,

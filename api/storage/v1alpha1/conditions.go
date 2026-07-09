@@ -55,20 +55,21 @@ const (
 
 	// ReasonChildSnapshotDeleted: Ready=False (NON-terminal, recoverable) — a declared child snapshot CR
 	// of an already-captured snapshot was deleted while its child SnapshotContent survives in the recycle
-	// bin (the child content is alive, its status.parentDeleted=true, and the parent snapshot is still
-	// alive). The captured data is intact and the namespaced child CR can be restored via StaticBind, after
-	// which the owner Ready mirror self-heals to True. Only the namespaced user surface (d8 download, which
-	// reads namespaced CRs) degrades — the durable SnapshotContent tree stays Ready. Detected and folded
-	// onto the owner mirror by the SnapshotContentController; it is a namespaced-surface degradation, so it
-	// is deliberately NOT in TerminalReadyReasons.
+	// bin (the child content is alive, its status.parentDeleted=true, and the parent snapshot is
+	// still alive). The captured data is intact — only the namespaced user surface (d8 download, which
+	// reads namespaced CRs) degrades, while the durable SnapshotContent tree stays Ready. The message names
+	// the deleted child and notes its content survives; the automated restore path is not yet defined
+	// (recovery is possible by manual intervention). Detected and folded onto the owner mirror by the
+	// SnapshotContentController; because it is a namespaced-surface degradation it is deliberately NOT in
+	// TerminalReadyReasons.
 	ReasonChildSnapshotDeleted = "ChildSnapshotDeleted"
 
 	// ReasonChildSnapshotLost: TERMINAL Ready=False — a declared child snapshot is unrecoverably gone. Its
 	// child SnapshotContent is absent (content names are UID-derived, so a recreated child can never relink
 	// into the immutable frozen childrenSnapshotContentRefs edge set), OR its CR vanished after the node
 	// froze its plan (phase>=Planned) while the capture was still incomplete (a surviving but not-Ready
-	// content cannot resume capture via StaticBind), OR — pre-Planned — a declared child's CR and its source
-	// object both vanished so re-planning cannot recreate it. A new snapshot is required. In TerminalReadyReasons.
+	// content cannot resume capture), OR — pre-Planned — a declared child's CR and its source object both
+	// vanished so re-planning cannot recreate it. A new snapshot is required. In TerminalReadyReasons.
 	ReasonChildSnapshotLost = "ChildSnapshotLost"
 )
 
@@ -77,10 +78,10 @@ const (
 // wave-barrier, the namespace-capture RBAC hook, the domain SDK (CoreCaptureOutcome), and tests.
 //
 // It includes the manifest-phase terminals (ManifestCheckpointFailed, ChildrenFailed,
-// GraphPlanningFailed, CreateChildFailed, SnapshotContentMisbound) — a manifest-phase failure surfaces
-// on the root Ready as one of these, NOT via a latch condition. The reason string values are defined
-// canonically in core pkg/snapshot; they are listed here as literals to keep the api module
-// dependency-free. Domain-supplied reasons (e.g. SourceNotFound) are free-form and NOT in this set.
+// GraphPlanningFailed, CreateChildFailed) — a manifest-phase failure surfaces on the root Ready as one
+// of these, NOT via a latch condition. The reason string values are defined canonically in core
+// pkg/snapshot; they are listed here as literals to keep the api module dependency-free. Domain-supplied
+// reasons (e.g. SourceNotFound) are free-form and NOT in this set.
 var TerminalReadyReasons = map[string]struct{}{
 	"ListFailed":               {},
 	"ManifestCheckpointFailed": {},
@@ -91,7 +92,6 @@ var TerminalReadyReasons = map[string]struct{}{
 	ReasonGraphPlanningFailed:  {},
 	ReasonCreateChildFailed:    {},
 	ReasonChildSnapshotLost:    {},
-	"SnapshotContentMisbound":  {},
 }
 
 // IsReasonTerminal reports whether a Ready=False reason is terminal (unrecoverable for this snapshot;

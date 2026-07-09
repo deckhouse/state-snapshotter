@@ -46,7 +46,6 @@ import (
 //     them through ManifestsReady/VolumeReady:
 //   - "ListFailed"                — building capture targets failed (namespace_capture_run.go);
 //   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (namespace_capture_run.go);
-//   - "SourceContentNotFound"/"SnapshotContentMisbound" — static-bind resolution (static_bind.go);
 //   - NamespaceNotFound (no namespace, so no content can be produced) — documented exception;
 //   - the child-Snapshot terminal capture-failure bridge below (patchSnapshotChildSnapshotFailedBridge);
 //   - the mirrorSnapshotReadyFromBoundContent fallback to ContentBindingPending (pre-publish pending window).

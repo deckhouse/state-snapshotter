@@ -21,9 +21,6 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -91,40 +88,4 @@ func TestPlanDemoVirtualMachineChildren_ExcludeVeto(t *testing.T) {
 			t.Fatalf("excluded[0] = %+v, want DemoVirtualDisk/disk-vm", got)
 		}
 	})
-}
-
-// A StaticBind VM snapshot must NOT run capture: the domain reconciler no-ops (the core binds it to a
-// surviving SnapshotContent). No child snapshots are created and no domain capture phase is stamped.
-func TestDemoVirtualMachineSnapshot_StaticBindSkipsCapture(t *testing.T) {
-	ctx := context.Background()
-	vmSnap := &demov1alpha1.DemoVirtualMachineSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: matNS, Name: "vmsnap-sb"},
-		Spec: demov1alpha1.DemoVirtualMachineSnapshotSpec{
-			Mode: storagev1alpha1.SnapshotModeStaticBind,
-		},
-	}
-	cl := newMaterializationFakeClient(t, vmSnap)
-	r := &DemoVirtualMachineSnapshotReconciler{Client: cl, APIReader: cl, Config: &config.Options{}}
-
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vmSnap)}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-
-	fresh := &demov1alpha1.DemoVirtualMachineSnapshot{}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: matNS, Name: "vmsnap-sb"}, fresh); err != nil {
-		t.Fatalf("get vmsnap: %v", err)
-	}
-	// No live capture ran: the domain phase is never stamped in StaticBind mode.
-	if fresh.Status.CaptureState != nil && fresh.Status.CaptureState.DomainSpecificController != nil &&
-		fresh.Status.CaptureState.DomainSpecificController.Phase != "" {
-		t.Fatalf("StaticBind must not stamp a domain phase, got %q",
-			fresh.Status.CaptureState.DomainSpecificController.Phase)
-	}
-	children := &demov1alpha1.DemoVirtualDiskSnapshotList{}
-	if err := cl.List(ctx, children, client.InNamespace(matNS)); err != nil {
-		t.Fatalf("list disk snapshots: %v", err)
-	}
-	if len(children.Items) != 0 {
-		t.Fatalf("StaticBind must not create child snapshots, got %d", len(children.Items))
-	}
 }

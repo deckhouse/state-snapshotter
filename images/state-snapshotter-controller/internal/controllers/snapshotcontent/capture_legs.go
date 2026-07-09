@@ -81,7 +81,7 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 	}
 	ownerGVK := gv.WithKind(kind)
 	if !r.isDomainCaptureKind(ownerGVK) {
-		// Non-domain owners (import/static-bind handles, generic kinds) have no core-owned capture legs.
+		// Non-domain owners (import handles, generic kinds) have no core-owned capture legs.
 		return false, nil
 	}
 

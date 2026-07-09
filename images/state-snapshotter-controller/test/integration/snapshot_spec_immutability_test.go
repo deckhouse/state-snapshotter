@@ -24,6 +24,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,17 +37,21 @@ import (
 var _ = Describe("Integration: Snapshot spec immutability", func() {
 	It("rejects any spec change while allowing status updates", func() {
 		ctx := context.Background()
-		ns := newStaticBindNamespace(ctx, "ss-snap-immutable-")
+		nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "ss-snap-immutable-"}}
+		Expect(k8sClient.Create(ctx, nsObj)).To(Succeed())
+		ns := nsObj.Name
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
+		})
 		const snapName = "immutable-snap"
 
-		// Static-bind source keeps the snapshot from kicking off live capture; the referenced content
-		// never exists, so the controller just waits non-terminally — irrelevant to admission checks.
+		// A plain Capture-mode snapshot with a resourceSelector; admission checks below are independent of
+		// the capture actually progressing.
 		snap := &storagev1alpha1.Snapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: snapName, Namespace: ns},
 			Spec: storagev1alpha1.SnapshotSpec{
 				ResourceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "a"}},
-				Mode:             storagev1alpha1.SnapshotModeStaticBind,
-				Source:           &storagev1alpha1.SnapshotSource{SnapshotContentName: "no-such-content-" + ns},
+				Mode:             storagev1alpha1.SnapshotModeCapture,
 			},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
@@ -67,16 +72,10 @@ var _ = Describe("Integration: Snapshot spec immutability", func() {
 		selectorPatch.Spec.ResourceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "b"}}
 		Expect(k8sClient.Update(ctx, selectorPatch)).NotTo(Succeed())
 
-		By("rejecting a spec.source change")
+		By("rejecting a spec.mode change")
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: snapName}, snap)).To(Succeed())
-		sourcePatch := snap.DeepCopy()
-		sourcePatch.Spec.Source = &storagev1alpha1.SnapshotSource{SnapshotContentName: "other-content-" + ns}
-		Expect(k8sClient.Update(ctx, sourcePatch)).NotTo(Succeed())
-
-		By("rejecting removal of spec.source (mode switch to dynamic capture)")
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: snapName}, snap)).To(Succeed())
-		removePatch := snap.DeepCopy()
-		removePatch.Spec.Source = nil
-		Expect(k8sClient.Update(ctx, removePatch)).NotTo(Succeed())
+		modePatch := snap.DeepCopy()
+		modePatch.Spec.Mode = storagev1alpha1.SnapshotModeImport
+		Expect(k8sClient.Update(ctx, modePatch)).NotTo(Succeed())
 	})
 })

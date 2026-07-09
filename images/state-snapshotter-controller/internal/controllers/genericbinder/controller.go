@@ -243,15 +243,6 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return r.reconcileGenericImport(ctx, obj, snapshotLike)
 	}
 
-	// StaticBind branch (wave4B recycle-bin restore): a StaticBind domain leaf binds to an existing,
-	// surviving SnapshotContent (spec.source.snapshotContentName) that the core restore orchestrator
-	// re-attached to this freshly re-created CR. Like import, it has no domain capture planning, so it
-	// bypasses the Step-1 barrier and materializes nothing — it only validates the handshake, binds, and
-	// mirrors the bound content's Ready + excludedRefs.
-	if snapshotIsStaticBind(obj) {
-		return r.reconcileGenericStaticBind(ctx, obj, snapshotLike)
-	}
-
 	// Domain-claim gate (content-single-writer design §11.3/§11.6): for a domain-capture kind, DO NOT
 	// materialize any state (ObjectKeeper, eager SnapshotContent shell) until the domain controller has
 	// CLAIMED the object by writing status.captureState.domainSpecificController. This is what lets a domain

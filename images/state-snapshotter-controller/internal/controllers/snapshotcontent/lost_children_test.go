@@ -85,7 +85,7 @@ func lostFrozenContent(t *testing.T, childContentNames ...string) *unstructured.
 
 // childCRName is the deterministic owning-CR name lostChildContent wires into a child content's
 // spec.snapshotRef. Seed a Snapshot with this name (lostChildSnapshotCR) to simulate the child CR being
-// present — or alive again after a StaticBind restore; omit it to simulate the child CR being deleted.
+// present — or alive again after a manual restore; omit it to simulate the child CR being deleted.
 func childCRName(contentName string) string { return contentName + "-cr" }
 
 // lostChildContent builds a child SnapshotContent whose spec.snapshotRef points at its owning child CR
@@ -215,7 +215,7 @@ func TestDetectLostDeclaredChildren(t *testing.T) {
 			t.Fatalf("reason = %q, want %q", reason, snapshot.ReasonChildSnapshotDeleted)
 		}
 		if msg == "" {
-			t.Fatalf("expected a non-empty message with StaticBind instructions")
+			t.Fatalf("expected a non-empty message naming the deleted child and its surviving content")
 		}
 	})
 
@@ -326,7 +326,7 @@ func TestMirrorReadyToOwnerSnapshot_LostChildrenFold(t *testing.T) {
 
 	t.Run("restored child self-heals the mirror back to Ready", func(t *testing.T) {
 		owner := lostOwnerSnapshot(t, finished)
-		// Content Ready + its owning child CR present again (restored via StaticBind) -> healthy.
+		// Content Ready + its owning child CR present again (manually restored) -> healthy.
 		r := newLostChildrenController(t, owner, lostChildContent("child-1", true), lostChildSnapshotCR(childCRName("child-1")))
 		content := lostFrozenContent(t, "child-1")
 		if err := r.mirrorReadyToOwnerSnapshot(ctx, content); err != nil {

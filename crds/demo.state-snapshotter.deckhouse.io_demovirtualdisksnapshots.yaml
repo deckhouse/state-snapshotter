@@ -44,31 +44,18 @@ spec:
           spec:
             description: |-
               DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot. spec.mode selects
-              the content source: Capture (sourceRef), Import (no source), or StaticBind (source.snapshotContentName).
+              the content source: Capture (sourceRef) or Import (no source).
             properties:
               mode:
                 default: Capture
                 description: |-
-                  Mode selects how this disk snapshot obtains its content (Capture|Import|StaticBind), immutable.
+                  Mode selects how this disk snapshot obtains its content (Capture|Import), immutable.
                   Capture: capture the live source disk (spec.sourceRef). Import: materialize from an uploaded payload
-                  plus the matching DataImport (no live capture). StaticBind: bind an existing SnapshotContent
-                  (spec.source.snapshotContentName) — used for restore from the retained-content "bin" (wave4B).
+                  plus the matching DataImport (no live capture).
                 enum:
                 - Capture
                 - Import
-                - StaticBind
                 type: string
-              source:
-                description: Source carries mode-specific source parameters. Required
-                  (snapshotContentName) only in StaticBind mode.
-                properties:
-                  snapshotContentName:
-                    description: |-
-                      SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-                      (static pre-provisioning, analogous to volumeSnapshotContentName). Required when mode is StaticBind.
-                    minLength: 1
-                    type: string
-                type: object
               sourceRef:
                 description: |-
                   SourceRef identifies the DemoVirtualDisk captured by this snapshot in Capture mode. It is the
@@ -95,10 +82,6 @@ spec:
               rule: self == oldSelf
             - message: spec.sourceRef is required in Capture mode and forbidden otherwise
               rule: 'self.mode == ''Capture'' ? has(self.sourceRef) : !has(self.sourceRef)'
-            - message: spec.source.snapshotContentName is required when mode is StaticBind
-                and forbidden otherwise
-              rule: 'self.mode == ''StaticBind'' ? (has(self.source) && has(self.source.snapshotContentName))
-                : (!has(self.source) || !has(self.source.snapshotContentName))'
           status:
             description: DemoVirtualDiskSnapshotStatus defines the observed state
               of DemoVirtualDiskSnapshot.
@@ -166,7 +149,7 @@ spec:
 
                           Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
                           distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
-                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import/StaticBind
+                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
                           (no live capture happens).
                         items:
                           description: |-

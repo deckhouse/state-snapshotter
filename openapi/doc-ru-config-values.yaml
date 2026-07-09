@@ -7,5 +7,5 @@ properties:
   snapshotRootOkTtl:
     description: |
       Окно хранения «корзины»: длительность TTL для корневого ObjectKeeper (FollowObjectWithTTL) у Snapshot и unified XxxxSnapshot.
-      Это то, сколько живёт долговечное дерево SnapshotContent после удаления namespaced-объекта Snapshot — в течение этого окна снимок можно восстановить через StaticBind.
+      Это то, сколько живёт долговечное дерево SnapshotContent после удаления namespaced-объекта Snapshot — в течение этого окна захваченные данные остаются восстановимыми.
       Пусто — в Pod не передаётся env, в контроллере действует встроенный дефолт 30 дней (720h). Иначе строка длительности Go.

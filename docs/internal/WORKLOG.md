@@ -1566,3 +1566,30 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   a top-of-doc SUPERSEDED note to `docs/internal/wave5-namespace-domain-design.md` covering its inline
   `residualVolumeCapture.phase=Complete` / `orphanWaveComplete(...)` / "latch preserved" mentions.
   Overview ADR already describes the latch as removed/redundant (no change). Historical reasoning kept.
+
+### Block A — remove StaticBind mode
+
+- **Remove** the `StaticBind` snapshot mode entirely (leadership wave-2 decision: the automated
+  recycle-bin restore flow is deferred/TBD; manual recovery stays possible via the retained
+  cluster-scoped content). `spec.mode` enum reduced to `Capture|Import` on `Snapshot` and the demo
+  snapshot types; dropped `Snapshot.spec.source` + the `SnapshotSource` struct (its only field,
+  `snapshotContentName`, was StaticBind-only) and the mode/source co-occurrence CEL. The spec-immutable
+  CEL (`self == oldSelf`) is kept. Removed `IsStaticBind()` on all three snapshot types.
+- **Delete** the two StaticBind reconcilers `internal/controllers/snapshot/static_bind.go` and
+  `internal/controllers/genericbinder/static_bind.go` (incl. the recycle-bin content-snapshotRef
+  re-point), their dispatch branches, and the `IsStaticBind` no-op branches in the two demo controllers.
+  `ownerChildSetFrozen` loses its dead StaticBind branch (Import still short-circuits to frozen).
+- **Remove** the StaticBind-only Ready reasons `SourceContentNotFound` (non-terminal) and
+  `SnapshotContentMisbound` (terminal); dropped `SnapshotContentMisbound` from `TerminalReadyReasons`
+  and the failCapture exhaustive-catalog comment.
+- **Keep** the recycle-bin storage machinery (Retain, ObjectKeeper, `parentDeleted` latch, GC) and the
+  `SnapshotContent.spec.snapshotRef` immutable-until-`parentDeleted` CEL as the manual-recovery escape
+  hatch. `ChildSnapshotDeleted` stays (non-terminal); its message no longer instructs "restore via
+  StaticBind" — it now states the child was deleted but its content survives in the recycle bin.
+- **Tests** Deleted the dedicated StaticBind unit/integration suites; rewrote the spec-immutability
+  integration test to a Capture-mode snapshot (rejects resourceSelector + mode changes); dropped the
+  StaticBind cases from the demo exclude test, the RBAC predicate test, the child-edges gate table, and
+  the e2e RBAC no-trigger test; moved the shared `readyCond` helper into `import_pending_test.go`.
+- **Regen** deepcopy + CRDs (controller-gen). Updated the openapi config-values docs (EN + RU) that
+  referenced StaticBind restore. Build + vet + unit tests green across all modules; integration/e2e
+  packages compile (`go vet -tags integration`).
